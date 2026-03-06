@@ -10,7 +10,7 @@ Whenever making changes or fixes to any part of the codebase, **always automatic
 
 ## Architecture Summary
 - **Frontend**: Electron + React + TypeScript + Tailwind (panel/)
-- **Backend**: Python `vllm_mlx` package (FastAPI, MLX, mlx-lm/mlx-vlm)
+- **Backend**: Python `vmlx_engine` package (FastAPI, MLX, mlx-lm/mlx-vlm)
 - **Engines**: SimpleEngine (direct mlx-lm wrapper), BatchedEngine (continuous batching via EngineCore)
 
 ## When Adding a New Model Family
@@ -36,7 +36,7 @@ Whenever making changes or fixes to any part of the codebase, **always automatic
 - [ ] Add specific variant config (priority 5) and catch-all family config (priority 10+)
 
 ### 3. Tool Parser (if unique format)
-- [ ] Create `{model}_tool_parser.py` in `vllm_mlx/tool_parsers/`
+- [ ] Create `{model}_tool_parser.py` in `vmlx_engine/tool_parsers/`
 - [ ] Implement `extract_tool_calls()` — handle parameter type conversion
 - [ ] Implement `extract_tool_calls_streaming()` — marker detect → accumulate → parse
 - [ ] Set `SUPPORTS_NATIVE_TOOL_FORMAT = True` if chat template handles role="tool" natively

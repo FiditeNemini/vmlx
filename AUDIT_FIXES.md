@@ -1,4 +1,4 @@
-# vllm-mlx Comprehensive Audit — Fix Log
+# vmlx-engine Comprehensive Audit — Fix Log
 
 **Date:** 2026-03-03 — 2026-03-04
 **Scope:** All tiers (CRITICAL, HIGH, MEDIUM, LOW) — ~180 issues identified, ~82 fixes applied
@@ -39,7 +39,7 @@
 ### Phase 2: Coherency Audit (8 fixes)
 
 **S5-C1: __init__.py — Broken platform import (CRITICAL)**
-- Fixed `from vllm_mlx.platform import MLXPlatform` → `from vllm_mlx.mlx_platform import MLXPlatform`
+- Fixed `from vmlx_engine.platform import MLXPlatform` → `from vmlx_engine.mlx_platform import MLXPlatform`
 
 **S5-C2: __init__.py + server.py — Stale version strings**
 - Fixed `__version__` from `"0.2.7"` to `"0.2.8"` (matching pyproject.toml)
@@ -59,8 +59,8 @@
 - Added `request.model = _resolve_model_name()` to `create_completion()` (consistent with chat/responses endpoints)
 
 **S5-C7: test_platform.py — Wrong module imports**
-- Fixed all `from vllm_mlx.platform` → `from vllm_mlx.mlx_platform`
-- Fixed plugin path assertion to `"vllm_mlx.mlx_platform.MLXPlatform"`
+- Fixed all `from vmlx_engine.platform` → `from vmlx_engine.mlx_platform`
+- Fixed plugin path assertion to `"vmlx_engine.mlx_platform.MLXPlatform"`
 
 ### Phase 3: Dead Code Removal
 
@@ -82,7 +82,7 @@
 
 - Removed tests for deleted methods: `TestMultimodalProcessorBatch` class (test_mllm_continuous_batching.py)
 - Removed tests for deleted models: `AudioTranscriptionRequest`/`AudioSeparationRequest` tests (test_api_models.py, test_audio.py, test_tool_format.py)
-- Updated test_platform.py imports from `vllm_mlx.platform` to `vllm_mlx.mlx_platform`
+- Updated test_platform.py imports from `vmlx_engine.platform` to `vmlx_engine.mlx_platform`
 - **Result: 1350 passed, 5 skipped, 0 failed** (excluding pre-existing async test framework issues)
 
 ### Files Modified in Session 5
@@ -380,7 +380,7 @@ All ~60 prior fixes verified correct by 3 independent deep-tracing agents coveri
 
 **Problem:** Returned class path pointed to wrong module.
 
-**Fix:** Changed to `vllm_mlx.mlx_platform.MLXPlatform`.
+**Fix:** Changed to `vmlx_engine.mlx_platform.MLXPlatform`.
 
 ---
 

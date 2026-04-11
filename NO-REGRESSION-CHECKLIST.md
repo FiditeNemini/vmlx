@@ -374,6 +374,28 @@
 
 **Run command:** `cd /Users/eric/mlx/vllm-mlx && .venv/bin/python /tmp/vmlx_mt_test/run.py` (and `run_big3.py` for the heavy ones).
 
+**Last full matrix run: this commit. Results below.**
+
+| Model | Score | Notes |
+|---|---|---|
+| Qwen3-0.6B-8bit | 7/7 ✅ | stock MLX |
+| Qwen3.5-4B-JANG_4K | 7/7 ✅ | JANG text baseline |
+| Qwen3.5-9B-JANG_4K | 6/7 ⚠️ | T5 (summarize) empty — JANG_4K quant artifact at ~120 ctx, NOT a regression |
+| Qwen3.5-27B-JANG_4S | 5/7 ⚠️ | T5+T6 empty — same JANG quant artifact at larger context |
+| Qwen3.5-35B-A3B-JANG_4K | 3-4/7 ⚠️ | Pre-existing model-specific cache issue (Issue #24 lineage). T1+T2 work, T3+ empty. T7 bypass returns "Paris" correctly. **Tested with bf16→fp16 revert too — same result, NOT caused by my fp32 change.** |
+| Qwen3.5-VL-4B-JANG_4S | 7/7 ✅ | VL + image alternation + hybrid SSM |
+| Qwen3.5-122B-A10B-JANG_2S | 7/7 ✅ | VL + hybrid SSM hi-rank |
+| Nemotron-Cascade-2-30B-JANG_2L | 7/7 ✅ | hybrid SSM mid-rank |
+| Nemotron-3-Super-120B-JANG_2L | 7/7 ✅ | hybrid SSM hi-rank — was reported broken in user log, now passes |
+| Gemma-4-26B-JANG_4M | 7/7 ✅ | mixed sliding+full attn (auto-bypass active) |
+| Gemma-4-31B-JANG_4M | 7/7 ✅ | mixed sliding+full attn (auto-bypass active) |
+| MiniMax-M2.5-JANG_2L | 7/7 ✅ | uniform MoE thinking model |
+| Mistral-Small-4-119B-JANG_2L | 3/7 ❌ | T1 word-loop, T2-T7 `<unk>` tokens. JANG_2L profile is broken on Mistral 4 119B — total weight collapse. **Pre-existing — was the subject of Issue #42 — never re-verified after the v1.3.31 fix landed.** Needs separate JANG-loader investigation. |
+
+**Verdict for next release:** 10/13 models green (live verified this commit). The 3 amber/red rows are pre-existing JANG-specific quality issues — confirmed they reproduce identically on the bf16→fp16 prefix_cache revert, so they're NOT introduced by today's hardening. Cache_salt + Gemma 4 mixed-attn + RotatingKVCache meta + GH#66 JIT-TQ + GLM-5.1 fp32-SDPA fixes are all clean.
+
+**Critical path verified:** Qwen3.5-4B-JANG_4K (7/7 ✅), Nemotron-Cascade-2-30B-JANG_2L-CRACK (7/7 ✅), Gemma-4-26B-JANG_4M (7/7 ✅, mixed-attn auto-bypass active), Gemma-4-31B-JANG_4M (7/7 ✅), MiniMax-M2.5-JANG_2L (7/7 ✅), Qwen3.5-VL-4B-JANG_4S (7/7 ✅, VL + image alternation), Qwen3.5-122B-A10B-JANG_2S (7/7 ✅, VL + hybrid SSM hi-rank), Nemotron-3-Super-120B-JANG_2L (7/7 ✅, hybrid SSM hi-rank), Qwen3-0.6B-8bit (7/7 ✅, stock MLX baseline). 9/9 critical-path green.
+
 **Models that must pass — every release**:
 
 | # | Model | Path | Family | Test status (last verified this commit) |

@@ -757,14 +757,16 @@ class MLLMScheduler:
             and getattr(self.config, "kv_cache_quantization_explicit", False) is False
             and self.config.kv_cache_quantization != "none"
         ):
+            # Default-ON TurboQuant KV for mixed-SWA (gemma): the RotatingKVCache
+            # sliding/full metadata is preserved through prefix/paged/L2, and q4
+            # stored-cache quantization is parity-verified coherent (multi-turn +
+            # long-context recall). Keep auto q4/q8 active instead of disabling.
             logger.info(
-                "Mixed-SWA VLM cache detected — disabling auto q4/q8 stored-cache "
-                "quantization (was: %s). Native KVCache/RotatingKVCache prefix, "
-                "paged, and block-L2 cache remain active; explicit q4/q8 is a "
-                "diagnostic override until family-specific semantic parity is proven.",
+                "Mixed-SWA VLM cache detected — keeping auto %s TurboQuant KV "
+                "stored-cache quantization active (RotatingKVCache metadata "
+                "preserved; gemma SWA q4 parity verified).",
                 self.config.kv_cache_quantization,
             )
-            self.config.kv_cache_quantization = "none"
         if self.config.kv_cache_quantization != "none":
             if self.config.enable_prefix_cache:
                 bits = 4 if self.config.kv_cache_quantization == "q4" else 8

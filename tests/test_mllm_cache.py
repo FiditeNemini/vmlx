@@ -581,6 +581,7 @@ class TestMLXMultimodalLMCache:
             [{"role": "user", "content": "hi"}],
             [],
             [],
+            [],
         )
         mllm._apply_chat_template = lambda _messages, _enable_thinking, **_kwargs: "prompt"
         mllm._prepare_images = lambda _images: []

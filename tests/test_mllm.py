@@ -525,7 +525,7 @@ class TestExtractMultimodalMessages:
             }
         ]
 
-        chat_msgs, images, videos = MLXMultimodalLM._extract_multimodal_messages(messages)
+        chat_msgs, images, videos, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
         assert len(videos) == 1
         assert videos[0] == "https://example.com/video.mp4"
         assert chat_msgs[0]["content"][0]["type"] == "video"
@@ -545,7 +545,7 @@ class TestExtractMultimodalMessages:
             }
         ]
 
-        _, _, videos = MLXMultimodalLM._extract_multimodal_messages(messages)
+        _, _, videos, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
         assert len(videos) == 1
         assert videos[0] == "/path/to/video.mp4"
 
@@ -563,7 +563,7 @@ class TestExtractMultimodalMessages:
             }
         ]
 
-        _, _, videos = MLXMultimodalLM._extract_multimodal_messages(messages)
+        _, _, videos, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
         assert len(videos) == 1
 
     def test_mixed_image_and_video_url(self):
@@ -581,7 +581,7 @@ class TestExtractMultimodalMessages:
             }
         ]
 
-        _, images, videos = MLXMultimodalLM._extract_multimodal_messages(messages)
+        _, images, videos, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
         assert len(images) == 1
         assert len(videos) == 1
 
@@ -596,7 +596,7 @@ class TestExtractMultimodalMessages:
             {"role": "assistant", "content": "The answer is 4."},
         ]
 
-        chat_msgs, _, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
+        chat_msgs, _, _, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
         roles = [m["role"] for m in chat_msgs]
         assert "tool" in roles
 
@@ -616,7 +616,7 @@ class TestExtractMultimodalMessages:
             {"role": "assistant", "content": "", "tool_calls": tool_calls},
         ]
 
-        chat_msgs, _, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
+        chat_msgs, _, _, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
         assistant_msg = [m for m in chat_msgs if m["role"] == "assistant"][0]
         assert "tool_calls" in assistant_msg
         assert assistant_msg["tool_calls"][0]["id"] == "call_123"
@@ -645,7 +645,7 @@ class TestExtractMultimodalMessages:
             }
         ]
 
-        chat_msgs, images, _videos = MLXMultimodalLM._extract_multimodal_messages(messages)
+        chat_msgs, images, _videos, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
         assert len(images) == 1
         assert images[0] == "https://example.com/img.jpg"
         assistant_msg = chat_msgs[0]
@@ -671,7 +671,7 @@ class TestExtractMultimodalMessages:
             }
         ]
 
-        chat_msgs, images, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
+        chat_msgs, images, _, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
         assert len(images) == 1
         assistant_msg = chat_msgs[0]
         assert "tool_calls" in assistant_msg
@@ -698,7 +698,7 @@ class TestExtractMultimodalMessages:
             }
         ]
 
-        chat_msgs, images, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
+        chat_msgs, images, _, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
         assert len(images) == 1
         user_msg = chat_msgs[0]
         assert user_msg["role"] == "user"

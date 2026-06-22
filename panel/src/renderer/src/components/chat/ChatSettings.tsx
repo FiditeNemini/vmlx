@@ -696,8 +696,9 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                     <input
                       type="text"
                       value={overrides.workingDirectory ?? ''}
-                      readOnly
-                      placeholder="Select a project directory..."
+                      onChange={e => update('workingDirectory', e.target.value)}
+                      spellCheck={false}
+                      placeholder="Type a path or use Browse..."
                       className="flex-1 px-3 py-1.5 bg-background border border-input rounded text-sm font-mono truncate focus:outline-none"
                     />
                     <button

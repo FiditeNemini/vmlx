@@ -338,7 +338,17 @@ class Gemma4ToolParser(ToolParser):
             '<|tool_response>', '<tool_response|>',
             '<|tool>', '<tool|>',
             '<|channel>', '<channel|>',
+            # Gemma 4 quote/escape token + media placeholders — never valid in
+            # user-visible content; 2-bit bundles leak these alongside tool calls.
+            '<|"|>',
+            '<audio|>', '<|audio>', '<audio>',
+            '<image|>', '<|image>', '<image>',
         ]
         for token in tokens_to_strip:
             text = text.replace(token, '')
+        # Strip malformed/residual bare tool-call markup the model sometimes
+        # echoes OUTSIDE the <|tool_call>...<tool_call|> wrapper (observed:
+        # "loader:list_files{path:/tmp}" leaking into content on 2-bit gemma).
+        # Only the tool-call prefixes call:/loader:/declaration: are targeted.
+        text = re.sub(r'(?:call|loader|declaration):\w+\{[^{}]*\}', '', text)
         return text.strip()

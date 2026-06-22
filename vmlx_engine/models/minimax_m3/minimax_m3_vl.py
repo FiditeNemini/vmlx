@@ -105,45 +105,53 @@ def preprocess_image(pil_img, patch_size=14, temporal_patch_size=2, merge_size=2
     return pixel_values, grid_thw
 
 
-# ── 3D-RoPE (h,w spatial; t=1 for images) ──
+# ── 3D-RoPE (T,H,W spatial) — port of upstream MiniMaxM3VL3DRotaryEmbedding ──
+# The vision tower rotates each patch by its (T,H,W) grid position. 2*(head_dim//2)
+# rotary dims are split EVENLY across the three axes (axis_dim each, rounded to a
+# multiple of 2); head dims past 3*axis_dim pass through UNROTATED. The earlier
+# 2-axis (H,W) version placed H/W in the wrong head-dim slots with the wrong
+# frequencies, scrambling spatial structure while preserving per-patch content.
 def rotate_half(x):
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2:]
     return mx.concatenate([-x2, x1], axis=-1)
 
 
-def apply_rope_vision(t, freqs):
-    cos = mx.expand_dims(mx.tile(mx.expand_dims(mx.cos(freqs), 1), (1, 1, 2)), 0)
-    sin = mx.expand_dims(mx.tile(mx.expand_dims(mx.sin(freqs), 1), (1, 1, 2)), 0)
-    return (t * cos) + (rotate_half(t) * sin)
+def apply_rope_vision(t, cos, sin):
+    # Only the first rot_dim (=3*axis_dim) head dims carry 3D RoPE; the tail
+    # passes through untouched (upstream apply_rotary_pos_emb_vision).
+    rot_dim = cos.shape[-1]
+    cos = mx.expand_dims(mx.expand_dims(cos, 0), 2)  # (1, N, 1, rot_dim)
+    sin = mx.expand_dims(mx.expand_dims(sin, 0), 2)
+    t_rot, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+    t_rot = (t_rot * cos) + (rotate_half(t_rot) * sin)
+    return mx.concatenate([t_rot, t_pass], axis=-1)
 
 
-class VisionRoPE(nn.Module):
-    def __init__(self, dim, theta=10000.0):
-        super().__init__()
-        self.dim, self.theta = dim, theta
-
-    def __call__(self, seqlen):
-        inv = 1.0 / (self.theta ** (mx.arange(0, self.dim, 2, dtype=mx.float32) / self.dim))
-        seq = mx.arange(int(seqlen), dtype=inv.dtype)
-        return mx.outer(seq, inv)
+def _vision_axis_dim(head_dim):
+    rope_dims = 2 * (head_dim // 2)
+    return 2 * ((rope_dims // 3) // 2)
 
 
-def rot_pos_emb(grid_thw, merge_size, rope):
-    pos_ids = []
+def rot_pos_emb(grid_thw, merge_size, head_dim, theta=10000.0):
+    """3D (T,H,W) vision RoPE. Returns (cos, sin) of shape (N, 3*axis_dim)."""
+    axis_dim = _vision_axis_dim(head_dim)
+    m = merge_size
+    coords = []
     for t, h, w in grid_thw.tolist():
-        hp = mx.repeat(mx.expand_dims(mx.arange(h), 1), w, axis=1)
-        hp = hp.reshape(h // merge_size, merge_size, w // merge_size, merge_size)
-        hp = mx.transpose(hp, (0, 2, 1, 3)).flatten()
-        wp = mx.repeat(mx.expand_dims(mx.arange(w), 0), h, axis=0)
-        wp = wp.reshape(h // merge_size, merge_size, w // merge_size, merge_size)
-        wp = mx.transpose(wp, (0, 2, 1, 3)).flatten()
-        pos_ids.append(mx.tile(mx.stack([hp, wp], axis=-1), (t, 1)))
-    pos_ids = mx.concatenate(pos_ids, axis=0)
-    max_grid = int(mx.max(grid_thw[:, 1:]))
-    full = rope(max_grid)
-    emb = full[pos_ids]
-    return emb.reshape(pos_ids.shape[0], -1)
+        hi = mx.repeat(mx.expand_dims(mx.arange(h), 1), w, axis=1)
+        hi = hi.reshape(h // m, m, w // m, m)
+        hi = mx.transpose(hi, (0, 2, 1, 3)).flatten()
+        wi = mx.repeat(mx.expand_dims(mx.arange(w), 0), h, axis=0)
+        wi = wi.reshape(h // m, m, w // m, m)
+        wi = mx.transpose(wi, (0, 2, 1, 3)).flatten()
+        ti = mx.repeat(mx.arange(t), h * w)  # repeat_interleave: t frames
+        coords.append(mx.stack([ti, mx.tile(hi, (t,)), mx.tile(wi, (t,))], axis=-1))
+    coords = mx.concatenate(coords, axis=0).astype(mx.float32)  # (N, 3)
+    inv_freq = 1.0 / (theta ** (mx.arange(0, axis_dim, 2, dtype=mx.float32) / axis_dim))
+    freqs = mx.concatenate([coords[:, i:i + 1] * inv_freq for i in range(3)], axis=-1)
+    emb = mx.concatenate([freqs, freqs], axis=-1)  # (N, 3*axis_dim)
+    return mx.cos(emb), mx.sin(emb)
 
 
 # ── CLIP-style encoder layer (LayerNorm, separate q/k/v/out, gelu mlp) ──
@@ -160,11 +168,12 @@ class M3VisionAttention(nn.Module):
 
     def __call__(self, x, cu_seqlens, rope_emb):
         L = x.shape[0]
+        cos, sin = rope_emb
         q = self.q_proj(x).reshape(L, self.num_heads, self.head_dim)
         k = self.k_proj(x).reshape(L, self.num_heads, self.head_dim)
         v = self.v_proj(x).reshape(L, self.num_heads, self.head_dim)
-        q = apply_rope_vision(mx.expand_dims(q, 0), rope_emb)[0]
-        k = apply_rope_vision(mx.expand_dims(k, 0), rope_emb)[0]
+        q = apply_rope_vision(mx.expand_dims(q, 0), cos, sin)[0]
+        k = apply_rope_vision(mx.expand_dims(k, 0), cos, sin)[0]
         q = mx.expand_dims(q.transpose(1, 0, 2), 0)  # [1,H,L,d]
         k = mx.expand_dims(k.transpose(1, 0, 2), 0)
         v = mx.expand_dims(v.transpose(1, 0, 2), 0)
@@ -228,13 +237,13 @@ class MiniMaxM3VisionModel(nn.Module):
         self.embeddings = _Embeddings(vc)
         self.pre_layrnorm = nn.LayerNorm(dim, eps=vc.get("layer_norm_eps", 1e-5))
         self.encoder = _Encoder(vc)
-        head_dim = dim // self.num_heads
-        self.rope = VisionRoPE(head_dim // 2, theta=vc.get("rope_theta", 10000.0))
+        self.head_dim = dim // self.num_heads
+        self.rope_theta = vc.get("rope_theta", 10000.0)
 
     def __call__(self, pixel_values, grid_thw):
         x = self.embeddings(pixel_values)                  # [N, dim]
         x = self.pre_layrnorm(x)
-        rope_emb = rot_pos_emb(grid_thw, self.merge_size, self.rope)
+        rope_emb = rot_pos_emb(grid_thw, self.merge_size, self.head_dim, self.rope_theta)
         # full attention per image: cu_seqlens at image boundaries
         cu = [0]
         for t, h, w in grid_thw.tolist():

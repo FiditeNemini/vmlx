@@ -9021,6 +9021,10 @@ async def create_anthropic_message(
             cleaned.append(msg)
         messages_dump = cleaned
 
+    # Force usage accounting so message_delta reports real input/output tokens
+    # (Anthropic clients otherwise log zero tokens).
+    from .api.models import StreamOptions as _StreamOptions
+    chat_req.stream_options = _StreamOptions(include_usage=True)
     if anthropic_req.stream:
         # Streaming: adapt Chat Completions SSE to Anthropic SSE
         adapter = AnthropicStreamAdapter(model=resolved_name)
@@ -9634,9 +9638,12 @@ async def ollama_chat(fastapi_request: Request):
 
     openai_req = ollama_chat_to_openai(body)
 
-    from .api.models import ChatCompletionRequest
+    from .api.models import ChatCompletionRequest, StreamOptions
 
     chat_req = ChatCompletionRequest(**openai_req)
+    # Force usage accounting so the Ollama done-line carries eval_count /
+    # prompt_eval_count / tok-s (the streaming path otherwise reports 0).
+    chat_req.stream_options = StreamOptions(include_usage=True)
     _log_multimodal_request_shape(
         "/api/chat",
         _model_path or _model_name or chat_req.model,
@@ -15092,23 +15099,22 @@ async def stream_chat_completion(
                 if tool_call_buffering:
                     # Suppress content during tool call buffering, but emit
                     # usage-only chunks so the client TPS counter stays alive.
-                    if include_usage:
-                        buf_chunk = ChatCompletionChunk(
-                            id=response_id,
-                            created=_created_ts,
-                            model=request.model,
-                            choices=[
-                                ChatCompletionChunkChoice(
-                                    delta=ChatCompletionChunkDelta(content=None),
-                                    finish_reason=None,
-                                )
-                            ],
-                            usage=get_usage(output),
-                            tool_call_generating=True,
-                        )
-                        if not tool_call_buffering_notified:
-                            tool_call_buffering_notified = True
-                        yield f"data: {_dump_sse_json(buf_chunk)}\n\n"
+                    buf_chunk = ChatCompletionChunk(
+                        id=response_id,
+                        created=_created_ts,
+                        model=request.model,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                delta=ChatCompletionChunkDelta(content=None),
+                                finish_reason=None,
+                            )
+                        ],
+                        usage=get_usage(output) if include_usage else None,
+                        tool_call_generating=True,
+                    )
+                    if not tool_call_buffering_notified:
+                        tool_call_buffering_notified = True
+                    yield f"data: {_dump_sse_json(buf_chunk)}\n\n"
                     continue
 
                 # Include usage in every chunk when include_usage is on (for real-time metrics)
@@ -15230,23 +15236,22 @@ async def stream_chat_completion(
 
                 if tool_call_buffering:
                     # Suppress content but emit usage-only chunks for TPS tracking
-                    if include_usage:
-                        buf_chunk = ChatCompletionChunk(
-                            id=response_id,
-                            created=_created_ts,
-                            model=request.model,
-                            choices=[
-                                ChatCompletionChunkChoice(
-                                    delta=ChatCompletionChunkDelta(content=None),
-                                    finish_reason=None,
-                                )
-                            ],
-                            usage=get_usage(output),
-                            tool_call_generating=True,
-                        )
-                        if not tool_call_buffering_notified:
-                            tool_call_buffering_notified = True
-                        yield f"data: {_dump_sse_json(buf_chunk)}\n\n"
+                    buf_chunk = ChatCompletionChunk(
+                        id=response_id,
+                        created=_created_ts,
+                        model=request.model,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                delta=ChatCompletionChunkDelta(content=None),
+                                finish_reason=None,
+                            )
+                        ],
+                        usage=get_usage(output) if include_usage else None,
+                        tool_call_generating=True,
+                    )
+                    if not tool_call_buffering_notified:
+                        tool_call_buffering_notified = True
+                    yield f"data: {_dump_sse_json(buf_chunk)}\n\n"
                     continue
 
                 # Same leading-whitespace guard as the reasoning-parser path.
@@ -15331,6 +15336,8 @@ async def stream_chat_completion(
             },
         }
         yield f"data: {json.dumps(error_data)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
     except VLMImagePrefillBudgetError as e:
         if hasattr(engine, "abort_request"):
             await engine.abort_request(response_id)
@@ -15344,6 +15351,8 @@ async def stream_chat_completion(
             },
         }
         yield f"data: {json.dumps(error_data)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
     except UnsupportedMediaModalityError as e:
         if hasattr(engine, "abort_request"):
             await engine.abort_request(response_id)
@@ -15357,6 +15366,8 @@ async def stream_chat_completion(
             },
         }
         yield f"data: {json.dumps(error_data)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
     except Exception as e:
         # On any error, abort the request and emit an error SSE event
         # so the client knows what happened instead of a silent EOF.
@@ -15561,7 +15572,7 @@ async def stream_chat_completion(
                         )
                     ],
                 )
-            yield f"data: {_dump_sse_json(flush_chunk)}\n\n"
+                yield f"data: {_dump_sse_json(flush_chunk)}\n\n"
 
     if (
         not content_was_emitted

@@ -491,9 +491,31 @@ class AnthropicStreamAdapter:
         self._input_tokens = 0
         self._output_tokens = 0
         self._finish_reason: str | None = None
+        self._errored = False
 
     def _sse(self, event_type: str, data: dict) -> str:
         return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=True)}\n\n"
+
+    # Placeholder base64 signature so strict Anthropic clients (Claude Code,
+    # Anthropic SDK) accept thinking blocks on replay. vMLX does not verify
+    # signatures on input, so a constant placeholder round-trips safely.
+    _THINKING_SIGNATURE = "dm1seA=="
+
+    def _close_thinking(self, events: list[str]) -> None:
+        """Close an open thinking block, emitting the required signature_delta first."""
+        if not self._thinking_block_open:
+            return
+        events.append(self._sse("content_block_delta", {
+            "type": "content_block_delta",
+            "index": self._content_index,
+            "delta": {"type": "signature_delta", "signature": self._THINKING_SIGNATURE},
+        }))
+        events.append(self._sse("content_block_stop", {
+            "type": "content_block_stop",
+            "index": self._content_index,
+        }))
+        self._content_index += 1
+        self._thinking_block_open = False
 
     def process_chunk(self, chunk_line: str) -> list[str]:
         """Process a single SSE line from Chat Completions stream.
@@ -513,6 +535,22 @@ class AnthropicStreamAdapter:
         try:
             chunk = json.loads(data_str)
         except json.JSONDecodeError:
+            return events
+
+        # Surface mid-stream engine errors as an Anthropic error event instead
+        # of silently ending the stream (harnesses cannot recover from silent EOF).
+        if isinstance(chunk, dict) and chunk.get("error"):
+            err = chunk["error"]
+            if isinstance(err, dict):
+                etype = err.get("type", "api_error")
+                emsg = err.get("message", str(err))
+            else:
+                etype, emsg = "api_error", str(err)
+            events.append(self._sse("error", {
+                "type": "error",
+                "error": {"type": etype, "message": emsg},
+            }))
+            self._errored = True
             return events
 
         # Emit message_start on first chunk
@@ -576,12 +614,7 @@ class AnthropicStreamAdapter:
         if text:
             # Close any open non-text blocks when transitioning to text
             if self._thinking_block_open and not self._text_block_open:
-                events.append(self._sse("content_block_stop", {
-                    "type": "content_block_stop",
-                    "index": self._content_index,
-                }))
-                self._content_index += 1
-                self._thinking_block_open = False
+                self._close_thinking(events)
 
             if self._tool_block_open and not self._text_block_open:
                 events.append(self._sse("content_block_stop", {
@@ -613,12 +646,7 @@ class AnthropicStreamAdapter:
             if tc.get("id"):
                 # Close any open blocks before starting tool block
                 if self._thinking_block_open:
-                    events.append(self._sse("content_block_stop", {
-                        "type": "content_block_stop",
-                        "index": self._content_index,
-                    }))
-                    self._content_index += 1
-                    self._thinking_block_open = False
+                    self._close_thinking(events)
 
                 if self._tool_block_open:
                     events.append(self._sse("content_block_stop", {
@@ -671,8 +699,13 @@ class AnthropicStreamAdapter:
             return []
         events = []
 
-        # Determine stop reason from Chat Completions finish_reason
-        if self._tool_block_open:
+        # If an error event was already emitted, end without a normal terminal.
+        if self._errored:
+            return events
+
+        # Determine stop reason from Chat Completions finish_reason. Tool calls
+        # must map to tool_use even if the tool block was already closed.
+        if self._finish_reason == "tool_calls" or self._tool_block_open:
             stop_reason = "tool_use"
         elif self._finish_reason == "length":
             stop_reason = "max_tokens"
@@ -680,13 +713,7 @@ class AnthropicStreamAdapter:
             stop_reason = "end_turn"
 
         # Close any open blocks
-        if self._thinking_block_open:
-            events.append(self._sse("content_block_stop", {
-                "type": "content_block_stop",
-                "index": self._content_index,
-            }))
-            self._content_index += 1
-            self._thinking_block_open = False
+        self._close_thinking(events)
 
         if self._text_block_open:
             events.append(self._sse("content_block_stop", {

@@ -186,6 +186,7 @@ export class ProcessManager extends EventEmitter {
         ...process.env,
         PYTHONDONTWRITEBYTECODE: '1',
         PYTHONNOUSERSITE: '1',
+        PYTHONSAFEPATH: '1',
         PYTHONPATH: '',
       },
     })

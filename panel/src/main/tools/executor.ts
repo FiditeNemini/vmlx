@@ -529,7 +529,7 @@ async function runCommand(command: string, workingDir: string): Promise<ToolResu
   return new Promise((resolve) => {
     let stdout = '', stderr = ''
     let killReason = ''
-    const proc = spawn('/bin/sh', ['-c', command], {
+    const proc = spawn('/bin/bash', ['-c', command], {
       cwd: workingDir,
       env: { ...process.env },
       stdio: ['ignore', 'pipe', 'pipe']
@@ -1239,7 +1239,7 @@ function spawnProcess(command: string, workingDir: string): ToolResult {
 
   const id = `proc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 
-  const proc = spawn('/bin/sh', ['-c', command], {
+  const proc = spawn('/bin/bash', ['-c', command], {
     cwd: workingDir,
     env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe']

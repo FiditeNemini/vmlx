@@ -4269,6 +4269,13 @@ def load_jang_vlm_model(
     weight_format = jang_cfg.get("weight_format")
     if not fmt and weight_format in JANG_WEIGHT_FORMAT_VALUES:
         fmt = weight_format
+    if not fmt and weight_format in JANG_FORMAT_VALUES:
+        # Legacy format-envelope value ("jang"/"jjqf"/"mxq") stamped into
+        # weight_format by a v2 writer. Route through the JANG-native loader
+        # (it reads per-projection bits/group_size from the quantization block);
+        # the generic affine path would apply wrong defaults and corrupt MoE
+        # expert gather_qmm shapes.
+        fmt = weight_format
     if not fmt and (
         str(jang_cfg.get("profile") or "").upper().startswith("JANGTQ")
         or str(jang_cfg.get("tq_layout") or "").lower()
@@ -4336,6 +4343,13 @@ def load_jang_model(
     fmt = jang_cfg.get("format")
     weight_format = jang_cfg.get("weight_format")
     if not fmt and weight_format in JANG_WEIGHT_FORMAT_VALUES:
+        fmt = weight_format
+    if not fmt and weight_format in JANG_FORMAT_VALUES:
+        # Legacy format-envelope value ("jang"/"jjqf"/"mxq") stamped into
+        # weight_format by a v2 writer. Route through the JANG-native loader
+        # (it reads per-projection bits/group_size from the quantization block);
+        # the generic affine path would apply wrong defaults and corrupt MoE
+        # expert gather_qmm shapes.
         fmt = weight_format
     if not fmt and (
         str(jang_cfg.get("profile") or "").upper().startswith("JANGTQ")
@@ -5654,7 +5668,11 @@ def _post_load_quantization_overrides(
         return None
     text_config = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
     model_type = str(config.get("model_type") or text_config.get("model_type") or "")
-    if model_type in {"deepseek_v4", "mimo_v2"}:
+    if model_type in {"deepseek_v4", "mimo_v2", "zaya", "zaya1_vl"}:
+        # ZAYA config.json carries accurate per-module entries (experts bits=4/gs=32,
+        # attention bits=8/gs=32) that match the stored tensor shapes; without them
+        # the shape heuristic mis-resolves the ambiguous switch_mlp experts to
+        # bits=2/gs=64 (gather_qmm shape error / empty output).
         return quantization
     return None
 

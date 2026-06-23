@@ -12158,6 +12158,74 @@ async def create_chat_completion(
         if reasoning_text:
             reasoning_text = clean_output_text(reasoning_text)
 
+    # Reasoning-runaway backstop (non-streaming chat completions): mirror the
+    # streaming bounded thinking-off answer pass. Degraded reasoners
+    # (qwen3.5/3.6 MXFP4-CRACK, gemma4, MiniMax-M3) can fill the thinking
+    # block without closing it, leaving content empty; re-run thinking-off
+    # (coherent for these families) so non-streaming clients still get an
+    # answer. No-op for healthy reasoners (only fires on reasoning + no
+    # content) and for non-reasoning models (reasoning_text is None).
+    _ns_thinking_off = (
+        chat_kwargs.get("enable_thinking") is False
+        or getattr(request, "enable_thinking", None) is False
+        or (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is False
+    )
+    if (
+        not content_for_parsing
+        and reasoning_text
+        and not _ns_thinking_off
+        and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
+    ):
+        try:
+            from .model_config_registry import get_model_config_registry as _ns_mcr
+            _ns_family = getattr(
+                _ns_mcr().lookup(_model_path or _model_name or request.model),
+                "family_name", None,
+            )
+        except Exception:
+            _ns_family = None
+        _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
+        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4") or _ns_is_m3:
+            _ns_budget = max(32, int(chat_kwargs.get("max_tokens") or 256))
+            logger.info(
+                "%s non-stream chat produced no visible content; running "
+                "bounded thinking-off answer pass (reasoning_chars=%d, "
+                "answer_budget=%d)",
+                _ns_family, len(reasoning_text or ""), _ns_budget,
+            )
+            _ns_kwargs = dict(chat_kwargs)
+            _ns_kwargs["enable_thinking"] = False
+            _ns_kwargs["max_tokens"] = _ns_budget
+            _ns_ct = dict(_ns_kwargs.get("chat_template_kwargs") or {})
+            if _ns_is_m3:
+                _ns_ct["thinking_mode"] = "disabled"
+            _ns_ct.pop("enable_thinking", None)
+            _ns_kwargs["chat_template_kwargs"] = _ns_ct
+            _ns_kwargs.pop("tools", None)
+            _ns_kwargs.pop("_vmlx_tools_present", None)
+            _ns_kwargs.pop("_vmlx_template_tools", None)
+            try:
+                _ns_out = await _await_chat_with_disconnect_abort(
+                    engine,
+                    messages=list(messages) + [
+                        {"role": "assistant", "content": "", "reasoning_content": reasoning_text}
+                    ],
+                    chat_kwargs=_ns_kwargs,
+                    timeout=timeout,
+                    fastapi_request=fastapi_request,
+                    request_id=f"{response_id}:visible-answer",
+                    endpoint="Chat Completions visible answer pass (non-stream)",
+                )
+                _ns_text = clean_output_text(getattr(_ns_out, "text", "") or "")
+                if _ns_text:
+                    content_for_parsing = _ns_text
+                    try:
+                        output.completion_tokens += int(getattr(_ns_out, "completion_tokens", 0) or 0)
+                    except Exception:
+                        pass
+            except Exception as _nse:
+                logger.error("non-stream chat visible answer pass failed: %s", _nse)
+
     _cc_parse_text = _strip_think_for_tool_parse(content_for_parsing)
 
     # Parse tool calls from output using configured parser (skip when tool_choice="none")
@@ -14228,6 +14296,69 @@ async def create_response(
         if reasoning_text:
             reasoning_text = clean_output_text(reasoning_text)
 
+    # Reasoning-runaway backstop (non-streaming responses): mirror the
+    # streaming bounded thinking-off answer pass for degraded reasoners.
+    _ns_thinking_off = (
+        chat_kwargs.get("enable_thinking") is False
+        or getattr(request, "enable_thinking", None) is False
+        or (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is False
+    )
+    if (
+        not content_for_parsing
+        and reasoning_text
+        and not _ns_thinking_off
+        and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
+    ):
+        try:
+            from .model_config_registry import get_model_config_registry as _ns_mcr
+            _ns_family = getattr(
+                _ns_mcr().lookup(_model_path or _model_name or request.model),
+                "family_name", None,
+            )
+        except Exception:
+            _ns_family = None
+        _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
+        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4") or _ns_is_m3:
+            _ns_budget = max(32, int(chat_kwargs.get("max_tokens") or 256))
+            logger.info(
+                "%s non-stream responses produced no visible content; running "
+                "bounded thinking-off answer pass (reasoning_chars=%d, "
+                "answer_budget=%d)",
+                _ns_family, len(reasoning_text or ""), _ns_budget,
+            )
+            _ns_kwargs = dict(chat_kwargs)
+            _ns_kwargs["enable_thinking"] = False
+            _ns_kwargs["max_tokens"] = _ns_budget
+            _ns_ct = dict(_ns_kwargs.get("chat_template_kwargs") or {})
+            if _ns_is_m3:
+                _ns_ct["thinking_mode"] = "disabled"
+            _ns_ct.pop("enable_thinking", None)
+            _ns_kwargs["chat_template_kwargs"] = _ns_ct
+            _ns_kwargs.pop("tools", None)
+            _ns_kwargs.pop("_vmlx_tools_present", None)
+            _ns_kwargs.pop("_vmlx_template_tools", None)
+            try:
+                _ns_out = await _await_chat_with_disconnect_abort(
+                    engine,
+                    messages=list(messages) + [
+                        {"role": "assistant", "content": "", "reasoning_content": reasoning_text}
+                    ],
+                    chat_kwargs=_ns_kwargs,
+                    timeout=timeout,
+                    fastapi_request=fastapi_request,
+                    request_id=f"{response_id}:visible-answer",
+                    endpoint="Responses visible answer pass (non-stream)",
+                )
+                _ns_text = clean_output_text(getattr(_ns_out, "text", "") or "")
+                if _ns_text:
+                    content_for_parsing = _ns_text
+                    try:
+                        output.completion_tokens += int(getattr(_ns_out, "completion_tokens", 0) or 0)
+                    except Exception:
+                        pass
+            except Exception as _nse:
+                logger.error("non-stream responses visible answer pass failed: %s", _nse)
+
     parse_text = _strip_think_for_tool_parse(content_for_parsing)
 
     # Parse tool calls (skip when tool_choice="none")
@@ -14935,6 +15066,35 @@ async def stream_chat_completion(
             reasoning_only_answer_budget = max(32, _requested_output_budget)
             reasoning_only_answer_enabled = True
             reasoning_only_answer_family = "Gemma4"
+            _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
+            if _requested_thinking_budget is not None:
+                _requested_thinking_budget = max(1, int(_requested_thinking_budget))
+                kwargs = dict(kwargs)
+                kwargs["max_tokens"] = min(
+                    _requested_output_budget,
+                    _requested_thinking_budget,
+                )
+        except Exception:
+            reasoning_only_answer_budget = None
+            reasoning_only_answer_enabled = False
+            reasoning_only_answer_family = ""
+    if (
+        not reasoning_only_answer_enabled
+        and _family_name in ("qwen3_5", "qwen3_5_moe")
+        and _effective_thinking is not False
+        and not _stream_tools_available
+    ):
+        # Degraded qwen3.5/3.6 quants (e.g. MXFP4-CRACK) can run their thinking
+        # block away without ever closing </think>, yielding empty content. Arm
+        # the bounded thinking-off answer pass so a runaway reasoner still emits
+        # a visible answer. No-op for healthy reasoners (only fires when the turn
+        # produced reasoning but no content). thinking-off is coherent for this
+        # family, so the answer pass is reliable.
+        try:
+            _requested_output_budget = int(kwargs.get("max_tokens") or 256)
+            reasoning_only_answer_budget = max(32, _requested_output_budget)
+            reasoning_only_answer_enabled = True
+            reasoning_only_answer_family = "Qwen3.5"
             _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
             if _requested_thinking_budget is not None:
                 _requested_thinking_budget = max(1, int(_requested_thinking_budget))
@@ -16161,6 +16321,35 @@ async def stream_responses_api(
                 _requested_thinking_budget = max(1, int(_requested_thinking_budget))
                 kwargs = dict(kwargs)
                 kwargs["max_tokens"] = min(_requested_output_budget, _requested_thinking_budget)
+        except Exception:
+            reasoning_only_answer_budget = None
+            reasoning_only_answer_enabled = False
+            reasoning_only_answer_family = ""
+    if (
+        not reasoning_only_answer_enabled
+        and _family_name in ("qwen3_5", "qwen3_5_moe")
+        and _effective_thinking is not False
+        and not _stream_tools_available
+    ):
+        # Degraded qwen3.5/3.6 quants (e.g. MXFP4-CRACK) can run their thinking
+        # block away without ever closing </think>, yielding empty content. Arm
+        # the bounded thinking-off answer pass so a runaway reasoner still emits
+        # a visible answer. No-op for healthy reasoners (only fires when the turn
+        # produced reasoning but no content). thinking-off is coherent for this
+        # family, so the answer pass is reliable.
+        try:
+            _requested_output_budget = int(kwargs.get("max_tokens") or 256)
+            reasoning_only_answer_budget = max(32, _requested_output_budget)
+            reasoning_only_answer_enabled = True
+            reasoning_only_answer_family = "Qwen3.5"
+            _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
+            if _requested_thinking_budget is not None:
+                _requested_thinking_budget = max(1, int(_requested_thinking_budget))
+                kwargs = dict(kwargs)
+                kwargs["max_tokens"] = min(
+                    _requested_output_budget,
+                    _requested_thinking_budget,
+                )
         except Exception:
             reasoning_only_answer_budget = None
             reasoning_only_answer_enabled = False

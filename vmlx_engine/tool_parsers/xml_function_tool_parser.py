@@ -43,6 +43,17 @@ class XMLFunctionToolParser(ToolParser):
         r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>",
         re.DOTALL,
     )
+    # Ornith-1.0 (qwen3.5 + Gemma vocab frankenmerge) emits a malformed
+    # variant of the template-specified `<parameter=K>V</parameter>` format:
+    #   <arg_key>K</arg_key>
+    #   <value>V</value>
+    # sometimes followed by a spurious extra `</arg_key>`. Accept this pair
+    # as a fallback when the standard pattern matches nothing in the body.
+    # Engine tolerance for a model-quality merge artifact.
+    ORNITH_ARG_KEY_VALUE_PATTERN = re.compile(
+        r"<arg_key>\s*(.*?)\s*</arg_key>\s*<value>\s*(.*?)\s*</value>",
+        re.DOTALL,
+    )
     INVOKE_PATTERN = re.compile(
         r"<invoke>\s*(.*?)\s*</invoke>",
         re.DOTALL,
@@ -91,18 +102,40 @@ class XMLFunctionToolParser(ToolParser):
                 names.add(fn["name"])
         return names
 
+    # Relaxed function pattern: Ornith-1.0 may emit `<function=name>` without
+    # the matching `</function>` close. Body extends to the next `</tool_call>`
+    # or end-of-string. Only used as fallback when the strict pattern misses.
+    RELAXED_FUNCTION_PATTERN = re.compile(
+        r"<function=([^>]+)>\s*(.*?)\s*(?=</function>|</tool_call>|$)",
+        re.DOTALL,
+    )
+
+    @classmethod
+    def _extract_arguments_from_body(cls, body: str) -> dict[str, Any]:
+        """Extract args trying strict `<parameter=K>V</parameter>` first, then
+        the Ornith `<arg_key>K</arg_key><value>V</value>` fallback."""
+        arguments: dict[str, Any] = {}
+        for param_name, param_value in cls.PARAM_PATTERN.findall(body):
+            arguments[param_name.strip()] = cls._coerce_value(param_value)
+        if not arguments:
+            for k, v in cls.ORNITH_ARG_KEY_VALUE_PATTERN.findall(body):
+                arguments[k.strip()] = cls._coerce_value(v)
+        return arguments
+
     @classmethod
     def _parse_functions(
         cls, text: str, *, allowed_names: set[str] | None = None
     ) -> list[dict[str, Any]]:
         tool_calls: list[dict[str, Any]] = []
-        for func_name, body in cls.FUNCTION_PATTERN.findall(text):
+        matches = list(cls.FUNCTION_PATTERN.findall(text))
+        if not matches:
+            # Fallback: Ornith-1.0 may emit `<function=name>` without `</function>`.
+            matches = list(cls.RELAXED_FUNCTION_PATTERN.findall(text))
+        for func_name, body in matches:
             name = func_name.strip()
             if allowed_names is not None and name not in allowed_names:
                 continue
-            arguments: dict[str, Any] = {}
-            for param_name, param_value in cls.PARAM_PATTERN.findall(body):
-                arguments[param_name.strip()] = cls._coerce_value(param_value)
+            arguments = cls._extract_arguments_from_body(body)
             tool_calls.append(
                 {
                     "id": generate_tool_id(),

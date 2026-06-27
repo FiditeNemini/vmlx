@@ -5677,6 +5677,62 @@ def _post_load_quantization_overrides(
     return None
 
 
+_JANG_NORM_SHIFT_SUFFIXES = (
+    ".input_layernorm.weight",
+    ".post_attention_layernorm.weight",
+    ".self_attn.q_norm.weight",
+    ".self_attn.k_norm.weight",
+)
+
+
+def _jang_is_shift_norm(key: str) -> bool:
+    if "vision_tower" in key or "visual" in key:
+        return False
+    if key.endswith(_JANG_NORM_SHIFT_SUFFIXES):
+        return True
+    return key.endswith("model.norm.weight")
+
+
+def _jang_needs_norm_shift(flat: dict) -> bool:
+    # Un-shifted (JANG) qwen3.5 norms center near 0; baked (MXFP/standard) near 1.
+    for key, val in flat.items():
+        if key.endswith(".input_layernorm.weight") and "vision" not in key:
+            try:
+                return float(mx.mean(val)) < 0.5
+            except Exception:
+                return False
+    return False
+
+
+def apply_jang_norm_shift(model) -> int:
+    """Add +1.0 to qwen3.5 (Gemma-style) language RMSNorm weights that JANG stores
+    un-shifted. Auto-detects, so it is a no-op for MXFP/already-shifted/standard
+    RMSNorm bundles. Mirrors the vmlx-swift runtime shift; without it qwen3.5
+    JANG_4M/6M bundles (e.g. Ornith-1.0) emit only garbage."""
+    from mlx.utils import tree_flatten, tree_unflatten
+
+    try:
+        flat = dict(tree_flatten(model.parameters()))
+    except Exception:
+        return 0
+    if not _jang_needs_norm_shift(flat):
+        return 0
+    patched = 0
+    for key, val in flat.items():
+        if _jang_is_shift_norm(key):
+            flat[key] = val + 1.0
+            patched += 1
+    if patched:
+        try:
+            model.update(tree_unflatten(list(flat.items())))
+            mx.eval(model.parameters())
+        except Exception as exc:
+            logger.warning("apply_jang_norm_shift failed: %s", exc)
+            return 0
+        logger.info("Applied JANG +1 scale_shift to %d qwen3.5 language norms", patched)
+    return patched
+
+
 def _fix_quantized_bits(model, quantization_overrides: dict | None = None):
     """Fix per-layer bits AND group_size for JANG mixed-precision models.
 
@@ -5826,6 +5882,8 @@ def _fix_quantized_bits(model, quantization_overrides: dict | None = None):
                         module.bits = actual_bits
         except Exception:
             pass
+
+    apply_jang_norm_shift(model)
 
 
 def _build_vlm_processor(model_path: Path, eos_token_id=None):

@@ -1591,6 +1591,15 @@ export class SessionManager extends EventEmitter {
     if (freshDetectedFamily === 'minimax_m3') {
       spawnEnv.VMLX_M3_VL = '1'
     }
+    // Qwen3.5/3.6 hybrid affine-JANG VLM (e.g. Ornith-1.0): the engine routes
+    // these text-only by default because the legacy mlx_vlm qwen3_5 M-RoPE path
+    // corrupts logits. The engine's qwen35_vl patch suite (_patch_attention_text_rope
+    // + GatedDelta) fixes it but is gated behind VMLX_QWEN_VL=1. Scope to the
+    // qwen3.5 hybrid families; for non-VL bundles (no media in config) the
+    // engine's _has_media check makes the override a no-op.
+    if (freshDetectedFamily === 'qwen3_5' || freshDetectedFamily === 'qwen3_5_moe') {
+      spawnEnv.VMLX_QWEN_VL = '1'
+    }
     delete spawnEnv.JANGTQ_TOPK_OVERRIDE
     // Acceleration policy is internal and defaults to auto in the engine.
     // Do not let stale/debug parent env values force packaged app sessions

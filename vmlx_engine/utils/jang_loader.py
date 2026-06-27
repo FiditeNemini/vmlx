@@ -3246,11 +3246,13 @@ def _load_jang_v2_vlm(
         or "mxtq_bits" in jang_cfg
         or "mxtq_bits" in _quant
     )
-    if _is_qwen_hybrid and _has_media and not _is_mxtq and not _native_mtp_vl_ready:
+    _qwen_vl_force = os.environ.get("VMLX_QWEN_VL", "").strip().lower() in {"1", "true", "yes", "on"}
+    if _is_qwen_hybrid and _has_media and not _is_mxtq and not _native_mtp_vl_ready and not _qwen_vl_force:
         logger.warning(
             "  Qwen3.5/3.6 affine-JANG VLM is routed text-only: current "
             "mlx_vlm qwen3_5 M-RoPE text path corrupts logits. MXTQ/JANGTQ "
-            "Qwen VLM remains on the native VLM loader. See "
+            "Qwen VLM remains on the native VLM loader. Set VMLX_QWEN_VL=1 "
+            "to override (e.g. Ornith-1.0 affine bundles). See "
             "docs/AUDIT-QWEN-AFFINE-JANG-VLM.md."
         )
         globals()["_LAST_LOAD_VLM_FALLBACK"] = True
@@ -3265,6 +3267,22 @@ def _load_jang_v2_vlm(
             "  Qwen3.5/3.6 native-MTP VL artifact detected by tensor metadata; "
             "using the real mlx-vlm loader with vMLX MTP/VL runtime adapters."
         )
+    elif _is_qwen_hybrid and _has_media and not _is_mxtq and _qwen_vl_force:
+        logger.info(
+            "  Qwen3.5/3.6 affine-JANG VLM: VMLX_QWEN_VL=1 override active — "
+            "loading via real mlx-vlm VLM loader (text-only fallback bypassed)."
+        )
+        # VMLX_QWEN_VL force-apply: the patch suite includes _patch_attention_text_rope
+        # which is the actual M-RoPE fix the gate was guarding against. Idempotent.
+        try:
+            from ..patches.mlx_vlm_mtp import apply_mlx_vlm_mtp_patch
+            if apply_mlx_vlm_mtp_patch():
+                logger.info(
+                    "  VMLX_QWEN_VL: applied mlx_vlm qwen35_vl patch suite "
+                    "(M-RoPE / text RoPE / GatedDeltaNet fixes)."
+                )
+        except Exception as _vlpe:
+            logger.warning("VMLX_QWEN_VL patch apply failed: %s", _vlpe)
 
     def _is_gemma4_unified_text_runtime_config(_cfg: dict) -> bool:
         return (
@@ -3341,6 +3359,9 @@ def _load_jang_v2_vlm(
         logger.info(f"Kimi K2.6 JANGTQ VLM loaded in {elapsed:.1f}s (fast path)")
         return _kimi_model, _kimi_processor
 
+    # Ornith (qwen3_5 + Gemma vocab) stamps custom sub-component model_types
+    # the upstream mlx_vlm qwen3_5 loader rejects. Normalize before dispatch.
+    _normalize_ornith_subcomponent_types(config)
     model_class, _ = get_model_and_args(config=config)
 
     config.setdefault("text_config", {})
@@ -4574,6 +4595,7 @@ def _load_jang_v1_vlm(
         fallback_bits=[2, 4, 6, 8],
         context="legacy JANG v1 VLM",
     )
+    _normalize_ornith_subcomponent_types(config)
     model_class, _ = get_model_and_args(config=config)
 
     config.setdefault("text_config", {})
@@ -5884,6 +5906,30 @@ def _fix_quantized_bits(model, quantization_overrides: dict | None = None):
             pass
 
     apply_jang_norm_shift(model)
+
+
+def _normalize_ornith_subcomponent_types(config: dict) -> None:
+    """Map Ornith-style sub-component model_types (qwen3_5_vision/qwen3_5_text/
+    qwen3_5_moe_text) to the names mlx_vlm's qwen3_5 VLM loader accepts.
+    mlx_vlm/models/qwen3_vl/vision.py only allows {qwen3_vl, qwen3_5, qwen3_5_moe}
+    for the vision tower. Idempotent: no-op if the names are already canonical."""
+    if not isinstance(config, dict):
+        return
+    top = str(config.get("model_type") or "").lower()
+    if top not in ("qwen3_5", "qwen3_5_moe"):
+        return
+    vc = config.get("vision_config")
+    if isinstance(vc, dict):
+        vmt = str(vc.get("model_type") or "").lower()
+        if vmt in ("qwen3_5_vision", "qwen3_5_moe_vision", "qwen3_vision"):
+            vc["model_type"] = "qwen3_5_moe" if top == "qwen3_5_moe" else "qwen3_5"
+    tc = config.get("text_config")
+    if isinstance(tc, dict):
+        tmt = str(tc.get("model_type") or "").lower()
+        if tmt == "qwen3_5_text":
+            tc["model_type"] = "qwen3_5"
+        elif tmt == "qwen3_5_moe_text":
+            tc["model_type"] = "qwen3_5_moe"
 
 
 def _build_vlm_processor(model_path: Path, eos_token_id=None):

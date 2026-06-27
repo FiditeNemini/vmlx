@@ -139,6 +139,7 @@ from .logprobs import (
 from .mlx_memory import clear_mlx_memory_cache
 from .reasoning.gptoss_parser import GptOssReasoningParser
 from .tool_parsers import ToolParserManager
+from .tool_parsers.abstract_tool_parser import generate_tool_id
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15257,8 +15258,40 @@ async def stream_chat_completion(
                             tool_call_buffering = True
 
                 if tool_call_buffering:
-                    # Suppress content during tool call buffering, but emit
-                    # usage-only chunks so the client TPS counter stays alive.
+                    # #219: On the FIRST buffering tick emit a proper OpenAI
+                    # streaming tool_calls START delta so strict clients
+                    # (OpenCode, AI SDK) see tool-call activity immediately
+                    # instead of an opaque sequence of empty deltas. Then keep
+                    # the connection alive with spec-clean empty deltas (no
+                    # vMLX-only `tool_call_generating` field on the wire).
+                    if not tool_call_buffering_notified:
+                        tool_call_buffering_notified = True
+                        start_chunk = {
+                            "id": response_id,
+                            "object": "chat.completion.chunk",
+                            "created": _created_ts,
+                            "model": request.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": generate_tool_id(),
+                                                "type": "function",
+                                                "function": {"name": "", "arguments": ""},
+                                            }
+                                        ],
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(start_chunk, ensure_ascii=True)}\n\n"
+                    # Subsequent ticks: spec-clean empty delta (carries usage
+                    # if include_usage). No `tool_call_generating` field.
                     buf_chunk = ChatCompletionChunk(
                         id=response_id,
                         created=_created_ts,
@@ -15270,10 +15303,7 @@ async def stream_chat_completion(
                             )
                         ],
                         usage=get_usage(output) if include_usage else None,
-                        tool_call_generating=True,
                     )
-                    if not tool_call_buffering_notified:
-                        tool_call_buffering_notified = True
                     yield f"data: {_dump_sse_json(buf_chunk)}\n\n"
                     continue
 
@@ -15395,7 +15425,35 @@ async def stream_chat_completion(
                     )
 
                 if tool_call_buffering:
-                    # Suppress content but emit usage-only chunks for TPS tracking
+                    # #219: same fix as the reasoning-parser branch — emit a
+                    # proper OpenAI streaming tool_calls START delta on the
+                    # first buffering tick + keep subsequent chunks spec-clean.
+                    if not tool_call_buffering_notified:
+                        tool_call_buffering_notified = True
+                        start_chunk = {
+                            "id": response_id,
+                            "object": "chat.completion.chunk",
+                            "created": _created_ts,
+                            "model": request.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": generate_tool_id(),
+                                                "type": "function",
+                                                "function": {"name": "", "arguments": ""},
+                                            }
+                                        ],
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(start_chunk, ensure_ascii=True)}\n\n"
                     buf_chunk = ChatCompletionChunk(
                         id=response_id,
                         created=_created_ts,
@@ -15407,10 +15465,7 @@ async def stream_chat_completion(
                             )
                         ],
                         usage=get_usage(output) if include_usage else None,
-                        tool_call_generating=True,
                     )
-                    if not tool_call_buffering_notified:
-                        tool_call_buffering_notified = True
                     yield f"data: {_dump_sse_json(buf_chunk)}\n\n"
                     continue
 

@@ -5516,12 +5516,22 @@ def _pre_fix_bits_from_shard(model, shard_weights, block_size):
                 valid.append((in_dim, actual_bits, try_bs))
 
             if ".switch_mlp." in mod_path and valid:
-                # Stacked routed-expert tensors can be shape-ambiguous:
-                # (E, 2048, 256) with 32 scale groups can mean bogus
-                # 4-bit/g64 over 2048 columns or real 2-bit/g128 over 4096
-                # columns. MiMo V2 JANG_2L uses the full-width layout, so
-                # choose the widest valid input interpretation for switch_mlp.
-                valid.sort(reverse=True)
+                # pre_fix_bits switch_mlp config-trust: if the module's
+                # CURRENT bits/group_size are in the valid set (config
+                # initialized the module correctly), keep them. Without this,
+                # the MiMo-stacked reverse-sort below flips clean MXFP4
+                # bundles (Ornith-1.0 35B-MXFP*) from bits=4 gs=32 to
+                # bits=2 gs=64 before _fix_quantized_bits runs.
+                _cur = (module.bits, module.group_size)
+                if any((b, g) == _cur for _in, b, g in valid):
+                    valid = [(in_d, b, g) for in_d, b, g in valid if (b, g) == _cur]
+                else:
+                    # Stacked routed-expert tensors can be shape-ambiguous:
+                    # (E, 2048, 256) with 32 scale groups can mean bogus
+                    # 4-bit/g64 over 2048 columns or real 2-bit/g128 over 4096
+                    # columns. MiMo V2 JANG_2L uses the full-width layout, so
+                    # choose the widest valid input interpretation for switch_mlp.
+                    valid.sort(reverse=True)
 
             for _in_dim, actual_bits, try_bs in valid:
                 changed = False
@@ -5636,10 +5646,18 @@ def _pre_fix_bits_from_metadata(model, shape_map, block_size):
                 valid.append((in_dim, actual_bits, try_bs))
 
             if ".switch_mlp." in mod_path and valid:
-                # See `_pre_fix_bits_from_shard`: stacked MiMo/JANG routed
-                # experts need the widest valid interpretation, not the first
-                # block-size candidate.
-                valid.sort(reverse=True)
+                # pre_fix_metadata switch_mlp config-trust: keep current bits/
+                # gs if they're a valid candidate (clean MXFP bundles already
+                # initialized correctly). Without this, the reverse-sort below
+                # flips Ornith-1.0 35B-MXFP* from bits=4 gs=32 to bits=2 gs=64.
+                _cur = (module.bits, module.group_size)
+                if any((b, g) == _cur for _in, b, g in valid):
+                    valid = [(in_d, b, g) for in_d, b, g in valid if (b, g) == _cur]
+                else:
+                    # See `_pre_fix_bits_from_shard`: stacked MiMo/JANG routed
+                    # experts need the widest valid interpretation, not the first
+                    # block-size candidate.
+                    valid.sort(reverse=True)
 
             for _in_dim, actual_bits, try_bs in valid:
                 changed = False
@@ -5882,10 +5900,20 @@ def _fix_quantized_bits(model, quantization_overrides: dict | None = None):
                     valid.append((in_dim, try_bits, try_gs))
 
             if ".switch_mlp." in name_lower and valid:
-                # Stacked MiMo routed experts are ambiguous under first-valid
-                # probing. Prefer the full input width so gather_qmm sees the
-                # same K dimension as the activation tensor.
-                valid.sort(reverse=True)
+                # switch_mlp config-trust: if the module's CURRENT bits/gs are
+                # in the valid set (i.e. the bundle config initialized the
+                # module correctly), keep them. Without this, models with a
+                # clean top-level bits=4 gs=32 (Ornith-1.0 35B-MXFP*) get
+                # flipped to bits=2 gs=64 by the MiMo "prefer largest in_dim"
+                # rule below and crash with a gather_qmm shape mismatch.
+                _cur = (module.bits, module.group_size)
+                if any((b, g) == _cur for _in, b, g in valid):
+                    valid = [(in_d, b, g) for in_d, b, g in valid if (b, g) == _cur]
+                else:
+                    # Stacked MiMo routed experts are ambiguous under first-
+                    # valid probing. Prefer the full input width so gather_qmm
+                    # sees the same K dimension as the activation tensor.
+                    valid.sort(reverse=True)
 
             for _in_dim, try_bits, try_gs in valid:
                 if try_bits != module.bits:

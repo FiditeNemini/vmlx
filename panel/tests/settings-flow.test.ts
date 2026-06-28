@@ -2341,7 +2341,7 @@ describe('Default IP and New Settings', () => {
     it('session manager migrates the exact stale continuous-cache default tuple', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         expect(source).toContain('function applyCacheStackStartupDefaultMigration')
-        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 5')
+        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 6')
         expect(source).toContain('function markCacheStackStartupDefaultsCurrent')
         expect(source).toContain('config.cacheStackStartupDefaultsVersion = CACHE_STACK_STARTUP_DEFAULTS_VERSION')
         expect(source).toContain('config.continuousBatching === true')
@@ -2422,7 +2422,7 @@ describe('Default IP and New Settings', () => {
         expect(existingBlock).toContain('markCacheStackStartupDefaultsCurrent(merged)')
     })
 
-    it('fresh minimal session configs get visible paged-off SSD-prefix cache defaults', () => {
+    it('fresh minimal session configs get visible paged-on + block-disk cache defaults (Phase-2)', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const start = source.indexOf('function applyMissingCacheStackStartupDefaults')
         const end = source.indexOf('function isZayaCacheStackMigrationTarget', start)
@@ -2431,9 +2431,13 @@ describe('Default IP and New Settings', () => {
         expect(helper).toContain("setConfigValue(mutable, 'enablePrefixCache'")
         expect(helper).toContain("setConfigValue(mutable, 'usePagedCache', defaultUsePagedCache)")
         expect(helper).toContain("setConfigValue(mutable, 'enableDiskCache', defaultEnableDiskCache)")
+        expect(helper).toContain("setConfigValue(mutable, 'enableBlockDiskCache', defaultEnableBlockDiskCache)")
         expect(helper).toContain("setConfigValue(mutable, 'kvCacheQuantization', 'auto')")
-        expect(helper).toContain('detectedUsePagedCache = detected.usePagedCache === true')
-        expect(helper).toContain('const defaultEnableDiskCache = dsv4Active ? false : true')
+        // Phase-2 (2026-06-27): generic default flipped from paged-off → paged-on
+        // after RAM-soak proved no leak. SSD path is paged-coupled, so paged-on
+        // unlocks the block-disk-cache prefix-hit benefit.
+        expect(helper).toContain('const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : true')
+        expect(helper).toContain('const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : true')
     })
 
     it('adopted running sessions apply bundle generation defaults before saving config', () => {

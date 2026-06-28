@@ -1237,29 +1237,33 @@ def _install_dsv4_instant_load_patch() -> None:
 def _install_dsv4_memory_defaults() -> None:
     """Set DSV4-specific MLX/JANG runtime defaults before hydration.
 
-    The generic JANGTQ loader uses a 70% wired-limit default, which is fine for
-    many MoEs but too aggressive for DSV4-Flash on 128 GB Macs: the final model
-    is about 79 GB and the streaming stacker still needs page-cache and temporary
-    graph headroom while converting per-expert tensors. The directly validated
-    working point on the target machine is ~72 GB, which is about 52% of 128 GiB
-    expressed as decimal GB. Keep explicit caller/user overrides intact.
+    Per Eric directive 2026-06-27: honor the user's `iogpu.wired_limit_mb`
+    sysctl as authoritative. Pass the OS-reported `max_recommended_working_set_size`
+    (which already reflects sysctl) to `jang_tools.load_jangtq` via
+    `JANGTQ_WIRED_LIMIT_GB`, overriding jang_tools' hardcoded 70% default so the
+    user gets the full RAM they explicitly authorized. The prior 52%-of-RAM
+    DSV4 cap silently clipped wired limit below user policy and forced paging.
+    Explicit caller/user-set JANGTQ_WIRED_LIMIT_GB still wins.
     """
     if "JANGTQ_WIRED_LIMIT_GB" not in os.environ:
         try:
             if sys.platform == "darwin":
-                import psutil
+                import mlx.core as mx
+                from ..utils.memory_limits import get_effective_metal_working_set_bytes
 
-                total_gb = psutil.virtual_memory().total / 1e9
-                target_gb = int(total_gb * 0.52)
-                target_gb = max(48, min(target_gb, 160))
-                os.environ["JANGTQ_WIRED_LIMIT_GB"] = str(target_gb)
-                print(
-                    "  [dsv4] JANGTQ_WIRED_LIMIT_GB defaulted to "
-                    f"{target_gb} GB (~52% of {total_gb:.0f} GB RAM)",
-                    flush=True,
-                )
+                _active, max_ws_bytes = get_effective_metal_working_set_bytes(mx)
+                if max_ws_bytes > 0:
+                    target_gb = int(max_ws_bytes / 1e9)
+                    os.environ["JANGTQ_WIRED_LIMIT_GB"] = str(target_gb)
+                    print(
+                        "  [dsv4] JANGTQ_WIRED_LIMIT_GB defaulted to "
+                        f"{target_gb} GB (from OS sysctl iogpu.wired_limit_mb)",
+                        flush=True,
+                    )
         except Exception:
-            # Non-fatal: jang_tools.load_jangtq has its own fallback.
+            # Non-fatal: jang_tools.load_jangtq has its own fallback (still
+            # subject to its internal 70% cap, but the user can raise sysctl
+            # or set JANGTQ_WIRED_LIMIT_GB explicitly).
             pass
     # DSV4 decode builds large transient MLX graph/cache allocations. Leaving
     # MLX's process cache uncapped lets two short chat turns retain ~30 GB of

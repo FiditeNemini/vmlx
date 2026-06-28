@@ -401,6 +401,22 @@ def openai_chat_chunk_to_ollama_ndjson(sse_line: str, model: str) -> str | None:
     done = False
     done_reason = None
 
+    # Bug 5 relay: upstream Chat Completions sometimes emits a chunk shaped
+    # {choices:[], warnings:["..."]} carrying engine diagnostics that explain
+    # why the response is empty (dropped tool call, reasoning-only truncation,
+    # etc.). Ollama clients have no native warnings field, so surface the
+    # diagnostic prose as a content chunk so the user sees the explanation
+    # instead of an empty response.
+    warnings = chunk.get("warnings")
+    if not choices and isinstance(warnings, list) and warnings:
+        notice_text = "\n\n[vMLX notice] " + "; ".join(str(w) for w in warnings if w)
+        return json.dumps({
+            "model": model,
+            "created_at": _now_iso(),
+            "message": {"role": "assistant", "content": notice_text},
+            "done": False,
+        }) + "\n"
+
     # Usage-only chunk (choices empty, usage present) — emit as done with metrics
     if not choices and usage:
         return json.dumps({

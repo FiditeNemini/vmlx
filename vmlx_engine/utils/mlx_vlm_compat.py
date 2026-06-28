@@ -44,7 +44,16 @@ def apply() -> None:
     _patch_qwen3_vl_grid_thw()
     _patch_qwen35_patch_embed_layout()
     _patch_prompt_cache_rank3_trim()
-    _patch_qwen35_language_mrope_none_delta()
+    # MRoPE none-delta patch (Eric perf-regression suspect 2026-06-27):
+    # monkey-patches qwen3_5/qwen3_5_moe LanguageModel.__call__ to add a
+    # get_rope_index fallback when rope_deltas is None. If self._rope_deltas
+    # isn't primed during prefill, the patched __call__ calls get_rope_index
+    # PER DECODE STEP — catastrophic for text-only Ornith 397B
+    # (10 tok/s observed vs 20-30 tok/s expected). Gate with
+    # VMLX_DISABLE_QWEN35_MROPE_PATCH=1 to A/B test or disable in production.
+    import os as _os
+    if _os.environ.get("VMLX_DISABLE_QWEN35_MROPE_PATCH", "0") != "1":
+        _patch_qwen35_language_mrope_none_delta()
 
 
 class _Rank3KVTrimView:

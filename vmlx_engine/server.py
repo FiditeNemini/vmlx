@@ -41,6 +41,7 @@ The server provides:
 import argparse
 import atexit
 import asyncio
+import contextvars
 import base64
 import functools
 import json
@@ -3994,10 +3995,14 @@ async def check_memory_pressure(request: Request):
     responses, messages, api/chat, api/generate). Returns 503 with
     Retry-After=5 so well-behaved clients back off and retry.
 
-    Skipped entirely when VMLX_MEMORY_PRESSURE_GUARD=0. The threshold
-    defaults to 97% used — catastrophic territory, not a normal load.
+    DEFAULT OFF (Eric directive 2026-06-27): users who explicitly raise
+    `iogpu.wired_limit_mb` (e.g. to load a 397B-class model that uses
+    ~95% of physical RAM) hit this gate after the first inference because
+    mmap'd weights count toward `psutil.virtual_memory().percent`. The
+    user has already authorized that RAM use via sysctl. Opt-in via
+    VMLX_MEMORY_PRESSURE_GUARD=1 if you actually need this safety net.
     """
-    if os.environ.get("VMLX_MEMORY_PRESSURE_GUARD", "1") == "0":
+    if os.environ.get("VMLX_MEMORY_PRESSURE_GUARD", "0") == "0":
         return
     try:
         import psutil
@@ -4240,6 +4245,43 @@ def get_engine() -> BaseEngine:
     return _engine
 
 
+_TOOL_CALL_DROP_DIAGNOSTICS: contextvars.ContextVar[list[str] | None] = (
+    contextvars.ContextVar("vmlx_tool_call_drop_diagnostics", default=None)
+)
+
+
+def _begin_tool_call_drop_capture() -> None:
+    """Start a fresh per-request capture of dropped-tool-call diagnostics.
+
+    Call once per request before any _parse_tool_calls_with_parser invocation.
+    Streaming handlers read accumulated diagnostics via _take_tool_call_drop_diagnostics
+    when emitting the terminal warnings array so the client sees WHY a parsed
+    tool call did not surface (missing required args, unavailable name, etc.)
+    instead of receiving an empty response with no signal.
+    """
+    _TOOL_CALL_DROP_DIAGNOSTICS.set([])
+
+
+def _record_tool_call_drop(diagnostic: str) -> None:
+    """Append a human-readable diagnostic for a dropped tool call."""
+    bucket = _TOOL_CALL_DROP_DIAGNOSTICS.get()
+    if bucket is None:
+        # Capture not started for this request (non-streaming JSON paths don't
+        # need it — they surface warnings differently). No-op rather than
+        # raising; the logger.warning above this call still fires.
+        return
+    bucket.append(diagnostic)
+
+
+def _take_tool_call_drop_diagnostics() -> list[str]:
+    """Return accumulated diagnostics and reset the capture bucket."""
+    bucket = _TOOL_CALL_DROP_DIAGNOSTICS.get()
+    if not bucket:
+        return []
+    _TOOL_CALL_DROP_DIAGNOSTICS.set([])
+    return bucket
+
+
 def _parse_tool_calls_with_parser(
     output_text: str, request: ChatCompletionRequest | ResponsesRequest | None = None
 ) -> tuple[str, list | None]:
@@ -4375,6 +4417,12 @@ def _parse_tool_calls_with_parser(
                         name,
                         ", ".join(missing),
                     )
+                    _record_tool_call_drop(
+                        f"A tool call to '{name}' was dropped because the "
+                        f"model did not provide required argument(s): "
+                        f"{', '.join(missing)}. Try a clearer prompt, raise "
+                        f"max_tokens, or disable thinking for this turn."
+                    )
                     continue
                 filtered.append(tc)
             else:
@@ -4387,6 +4435,11 @@ def _parse_tool_calls_with_parser(
                     "available tools=%s",
                     name,
                     sorted(allowed),
+                )
+                _record_tool_call_drop(
+                    f"A tool call to '{name}' was dropped because it is not "
+                    f"in the request's tools list. Available tools: "
+                    f"{sorted(allowed)}."
                 )
         return filtered or None
 
@@ -15020,6 +15073,12 @@ async def stream_chat_completion(
     content_was_emitted = False  # Whether any content chunk was actually sent
     reasoning_was_streamed = False  # Whether any reasoning_content chunk was sent
 
+    # Start per-request capture of dropped-tool-call diagnostics so that, when
+    # the parser drops a parsed call (missing required args, unavailable name),
+    # the stream's terminal warnings array carries an explanation back to the
+    # client instead of returning an empty response with no signal (Bug 5).
+    _begin_tool_call_drop_capture()
+
     # Tool call buffering: when we detect a tool call marker in the stream,
     # we stop emitting content and buffer the rest. At end of stream, we parse
     # the buffer for tool calls and emit them as proper tool_calls chunks.
@@ -16004,6 +16063,15 @@ async def stream_chat_completion(
             reasoning=accumulated_reasoning,
             tool_calls=None,
         )
+    # Bug 5: surface dropped-tool-call diagnostics to the client even when no
+    # reasoning-only warning fired. A parser-dropped call leaves the stream
+    # without a tool_calls delta; without this hook the client sees an empty
+    # response with no signal as to why.
+    _dropped_tc_diagnostics = _take_tool_call_drop_diagnostics()
+    if _dropped_tc_diagnostics and not tool_calls_emitted:
+        if _stream_chat_warnings is None:
+            _stream_chat_warnings = []
+        _stream_chat_warnings.extend(_dropped_tc_diagnostics)
     if _stream_chat_warnings:
         warning_chunk = ChatCompletionChunk(
             id=response_id,
@@ -16013,6 +16081,28 @@ async def stream_chat_completion(
             warnings=_stream_chat_warnings,
         )
         yield f"data: {_dump_sse_json(warning_chunk)}\n\n"
+        # Strict OpenAI clients (langchain, harnesses) wait for a chunk with
+        # non-null finish_reason before closing the stream. The warning chunk
+        # above carries choices=[] so it has no finish_reason; without an
+        # additional terminal chunk the client hangs until timeout. Emit a
+        # finish chunk with finish_reason="length" (best matches the situation:
+        # reasoning ran the budget without producing visible content or tool
+        # calls). The chat-completion finalizer below would normally do this
+        # for content/tool paths but only when content_was_emitted or
+        # tool_calls_emitted is true.
+        if not content_was_emitted and not tool_calls_emitted:
+            warning_finish_chunk = ChatCompletionChunk(
+                id=response_id,
+                created=_created_ts,
+                model=request.model,
+                choices=[
+                    ChatCompletionChunkChoice(
+                        delta=ChatCompletionChunkDelta(),
+                        finish_reason="length",
+                    )
+                ],
+            )
+            yield f"data: {_dump_sse_json(warning_finish_chunk)}\n\n"
 
     # Safeguard: if model generated zero tokens (empty stream), finish the stream
     # without injecting diagnostic prose as assistant output. The warning belongs
@@ -16214,6 +16304,9 @@ async def stream_responses_api(
             "part": {"type": "output_text", "text": "", "annotations": []},
         },
     )
+
+    # Bug 5 (Responses API): start dropped-tool-call diagnostic capture
+    _begin_tool_call_drop_capture()
 
     _suppress_tools = getattr(request, "tool_choice", None) == "none"
     _request_has_tools = bool(getattr(request, "tools", None))
@@ -17470,9 +17563,13 @@ async def stream_responses_api(
     _stream_chain_warnings = _chain_warnings_for_previous_response_id(
         getattr(request, "previous_response_id", None)
     )
+    # Bug 5: surface dropped-tool-call diagnostics on the Responses API too
+    # (same root cause + same UX gap as the Chat Completions stream).
+    _dropped_tc_diagnostics = _take_tool_call_drop_diagnostics()
     _stream_warnings = _merge_responses_warnings(
         _stream_chain_warnings,
         _current_response_warnings_for_reasoning_only(_stream_reasoning_only),
+        _dropped_tc_diagnostics or None,
     )
 
     completed_response = {

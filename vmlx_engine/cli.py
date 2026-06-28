@@ -923,6 +923,46 @@ def serve_command(args):
                     logger.warning(f"Failed to auto-configure reasoning parser '{_mc.reasoning_parser}': {e}")
             if getattr(_mc, "think_in_template", False):
                 _registry_thinking_model = True
+
+            # Default JIT (mx.compile) ON for JANG affine models per Eric directive
+            # 2026-06-27: 397B JANG_1L observed at ~10 tok/s without JIT vs expected
+            # 20+; 9B affine at 90 tok/s shows compile-eligible decode path is
+            # healthy at this family. JANG affine layouts (format: affine/jang/jjqf/mxq)
+            # use MLX native QuantizedLinear post-load — fully compile-traceable.
+            # DSV4/M3 stay hard-disabled above (path-dependent caches break tracing).
+            if not getattr(args, "enable_jit", False):
+                try:
+                    from pathlib import Path as _Path
+                    _jang_cfg_path = _Path(args.model) / "jang_config.json"
+                    if _jang_cfg_path.is_file():
+                        import json as _json
+                        _jcfg = _json.loads(_jang_cfg_path.read_text())
+                        _fmt = str(_jcfg.get("format", "")).lower()
+                        _is_affine = _fmt in {"affine", "jang", "jjqf", "mxq"}
+                        # Family-level exclusions (already hard-disabled JIT above
+                        # for DSV4/M3, but be defensive: never default-on for them).
+                        _excluded_family = _mc.family_name in {
+                            "deepseek_v4", "minimax_m3", "minimax_m3_vl",
+                        }
+                        if _is_affine and not _excluded_family:
+                            args.enable_jit = True
+                            logger.info(
+                                "JANG affine model detected (format=%s, family=%s) — "
+                                "defaulting --enable-jit ON for mx.compile decode speedup. "
+                                "Disable with explicit --enable-jit=0 or env "
+                                "VMLX_DISABLE_JANG_AFFINE_JIT_DEFAULT=1.",
+                                _fmt, _mc.family_name,
+                            )
+                            if os.environ.get(
+                                "VMLX_DISABLE_JANG_AFFINE_JIT_DEFAULT", "0"
+                            ) == "1":
+                                args.enable_jit = False
+                                logger.info(
+                                    "  ...VMLX_DISABLE_JANG_AFFINE_JIT_DEFAULT=1, "
+                                    "leaving JIT off."
+                                )
+                except Exception as _jit_e:
+                    logger.debug(f"JANG-affine JIT auto-default skipped: {_jit_e}")
     except Exception as e:
         logger.debug(f"Registry auto-apply skipped: {e}")
 
@@ -2110,9 +2150,48 @@ def _check_no_duplicate_mlx():
         pass
 
 
+def _install_jangtq_wired_limit_from_sysctl() -> None:
+    """Pre-populate JANGTQ_WIRED_LIMIT_GB from OS sysctl iogpu.wired_limit_mb.
+
+    Per Eric directive 2026-06-27: the user's `iogpu.wired_limit_mb` sysctl
+    is authoritative. The external `jang_tools.load_jangtq` package has a
+    hardcoded 70%-of-RAM default that silently clips wired limit below user
+    policy on machines where the user has explicitly raised sysctl. Set
+    JANGTQ_WIRED_LIMIT_GB to the OS-reported max_recommended_working_set_size
+    (in GB) BEFORE any JANGTQ loader runs so all paths (DSV4, M2.7, M3, Kimi,
+    Gemma, Ornith, Zaya, etc.) get the user's full authorized RAM.
+
+    Explicit user-set JANGTQ_WIRED_LIMIT_GB wins. No-op on non-Darwin or if
+    MLX is unavailable.
+    """
+    if "JANGTQ_WIRED_LIMIT_GB" in os.environ:
+        return
+    if sys.platform != "darwin":
+        return
+    try:
+        import mlx.core as mx
+        from .utils.memory_limits import get_effective_metal_working_set_bytes
+        _active, max_ws_bytes = get_effective_metal_working_set_bytes(mx)
+        if max_ws_bytes > 0:
+            target_gb = int(max_ws_bytes / 1e9)
+            os.environ["JANGTQ_WIRED_LIMIT_GB"] = str(target_gb)
+            print(
+                f"  JANGTQ_WIRED_LIMIT_GB defaulted to {target_gb} GB "
+                f"(from OS sysctl iogpu.wired_limit_mb; overrides external "
+                f"jang_tools 70% default)",
+                flush=True,
+            )
+    except Exception:
+        # Non-fatal: jang_tools.load_jangtq has its own internal default
+        # (70% of RAM). User can also set JANGTQ_WIRED_LIMIT_GB explicitly
+        # or raise iogpu.wired_limit_mb via sysctl.
+        pass
+
+
 def main():
     _check_macos_compat()
     _check_no_duplicate_mlx()
+    _install_jangtq_wired_limit_from_sysctl()
     parser = argparse.ArgumentParser(
         description="vmlx-engine: Apple Silicon MLX backend for vLLM",
         formatter_class=argparse.RawDescriptionHelpFormatter,

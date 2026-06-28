@@ -1198,37 +1198,45 @@ def _set_wired_limit_for_model(weight_files):
                 target = max_ws
         except Exception:
             pass
-        # The OS wired limit is only an upper bound; setting MLX all the way to
-        # that bound on 128GB-class Macs can still SIGKILL or Metal-OOM during
-        # first command-buffer materialization because WindowServer, Python,
-        # mmap metadata, filesystem cache, and transient Metal scratch need
-        # real headroom. Keep a physical-RAM reserve by default, while allowing
-        # developers to tune it for diagnostics.
+        # Authoritative upper bound: the OS sysctl iogpu.wired_limit_mb
+        # (already enforced via max_ws above) is the user's explicit policy.
+        # We do NOT impose an additional "physical-RAM reserve" by default
+        # because that silently clips wired limits below what the user has
+        # explicitly authorized — e.g. a user who sets sysctl=120GB on a 128GB
+        # box wants 120GB available, not 108GB after a hidden ~20GB reserve.
+        # Opt-in safety reserve via VMLX_METAL_WIRED_RESERVE_GB (off by default,
+        # 0 = no reserve). Set to a positive value if your system actually
+        # SIGKILLs during first command-buffer materialization.
         try:
             total_ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-            reserve_fraction = float(
-                os.environ.get(
-                    "VMLX_METAL_WIRED_RESERVE_FRACTION",
-                    os.environ.get(
-                        "VMLINUX_METAL_WIRED_RESERVE_FRACTION",
-                        os.environ.get("VMLINUX_METAL_WIRED_RESERVE_PCT", "0.16"),
-                    ),
-                )
+            reserve_gb = float(os.environ.get(
+                "VMLX_METAL_WIRED_RESERVE_GB",
+                os.environ.get("VMLINUX_METAL_WIRED_RESERVE_GB", "0"),
+            ))
+            # Legacy fraction env (deprecated): honor only if explicitly set,
+            # otherwise stay at the opt-in default of 0 reserve.
+            _frac_env = (
+                os.environ.get("VMLX_METAL_WIRED_RESERVE_FRACTION")
+                or os.environ.get("VMLINUX_METAL_WIRED_RESERVE_FRACTION")
+                or os.environ.get("VMLINUX_METAL_WIRED_RESERVE_PCT")
             )
-            if reserve_fraction > 1:
-                reserve_fraction = reserve_fraction / 100.0
-            reserve_fraction = min(max(reserve_fraction, 0.05), 0.50)
-            reserve_gb = float(os.environ.get("VMLX_METAL_WIRED_RESERVE_GB", os.environ.get("VMLINUX_METAL_WIRED_RESERVE_GB", "16")))
-            reserve = max(int(total_ram * reserve_fraction), int(reserve_gb * 1024 * 1024 * 1024))
-            ram_capped_target = max(0, total_ram - reserve)
-            if ram_capped_target and target > ram_capped_target:
-                logger.info(
-                    "  Wired limit target %.0f GB capped to %.0f GB to leave %.0f GB system/Metal headroom",
-                    target / 1e9,
-                    ram_capped_target / 1e9,
-                    reserve / 1e9,
-                )
-                target = ram_capped_target
+            if reserve_gb > 0 or _frac_env:
+                reserve = int(reserve_gb * 1024 * 1024 * 1024)
+                if _frac_env:
+                    try:
+                        frac = float(_frac_env)
+                        if frac > 1: frac /= 100.0
+                        frac = min(max(frac, 0.0), 0.50)
+                        reserve = max(reserve, int(total_ram * frac))
+                    except (TypeError, ValueError):
+                        pass
+                ram_capped_target = max(0, total_ram - reserve)
+                if ram_capped_target and target > ram_capped_target:
+                    logger.info(
+                        "  Wired limit target %.0f GB capped to %.0f GB by opt-in reserve %.0f GB",
+                        target / 1e9, ram_capped_target / 1e9, reserve / 1e9,
+                    )
+                    target = ram_capped_target
         except Exception:
             pass
         if hasattr(mx, "set_wired_limit"):

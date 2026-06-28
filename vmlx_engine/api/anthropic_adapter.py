@@ -537,6 +537,69 @@ class AnthropicStreamAdapter:
         except json.JSONDecodeError:
             return events
 
+        # Bug 5 relay: upstream Chat Completions sometimes emits a chunk shaped
+        # {choices:[], warnings:["..."]} carrying engine diagnostics (dropped
+        # tool call, reasoning-only truncation, etc.). Anthropic has no native
+        # warnings field, so surface the diagnostic as a text_delta in a fresh
+        # text content block so the user sees the explanation instead of an
+        # empty response. Must come BEFORE the regular choices-extraction
+        # branch since a warnings chunk has choices=[].
+        if isinstance(chunk, dict) and chunk.get("warnings") and not chunk.get("choices"):
+            warnings_list = chunk["warnings"]
+            if isinstance(warnings_list, list) and warnings_list:
+                notice_text = "\n\n[vMLX notice] " + "; ".join(
+                    str(w) for w in warnings_list if w
+                )
+                # Ensure message_start fired first so the block index sequence is valid.
+                if not self._started:
+                    self._started = True
+                    events.append(self._sse("message_start", {
+                        "type": "message_start",
+                        "message": {
+                            "id": self.msg_id,
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [],
+                            "model": self.model,
+                            "stop_reason": None,
+                            "stop_sequence": None,
+                            "usage": {"input_tokens": 0, "output_tokens": 0},
+                        },
+                    }))
+                # Close any open non-text blocks before opening the notice block.
+                self._close_thinking(events)
+                if self._tool_block_open:
+                    events.append(self._sse("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": self._content_index,
+                    }))
+                    self._content_index += 1
+                    self._tool_block_open = False
+                if self._text_block_open:
+                    events.append(self._sse("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": self._content_index,
+                    }))
+                    self._content_index += 1
+                    self._text_block_open = False
+                # Open a fresh text block for the notice + emit + close.
+                events.append(self._sse("content_block_start", {
+                    "type": "content_block_start",
+                    "index": self._content_index,
+                    "content_block": {"type": "text", "text": ""},
+                }))
+                events.append(self._sse("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": self._content_index,
+                    "delta": {"type": "text_delta", "text": notice_text},
+                }))
+                events.append(self._sse("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": self._content_index,
+                }))
+                self._content_index += 1
+            return events
+
         # Surface mid-stream engine errors as an Anthropic error event instead
         # of silently ending the stream (harnesses cannot recover from silent EOF).
         if isinstance(chunk, dict) and chunk.get("error"):

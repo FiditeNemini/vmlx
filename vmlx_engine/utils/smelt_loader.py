@@ -782,6 +782,18 @@ def smelt_load(
     except Exception as exc:
         _apply_jang_norm_shift = None
         logger.debug("Could not import JANG norm shift helper: %s", exc)
+    # Apply mlx_vlm compat patches BEFORE jang_tools loader instantiates any
+    # VLM class. Smelt bypasses the MLLM engine startup path (which normally
+    # calls mlx_vlm_compat.apply()), so JANG VL bundles like Ornith-*-JANG_*
+    # would crash inside upstream mlx_vlm/qwen3_vl/vision.py with
+    # "Unsupported model type: qwen3_5_moe_vision" — the vision_config
+    # model_type isn't in mlx_vlm's hardcoded allowlist. Our compat module
+    # patches the VisionModel init to accept the sibling *_vision strings.
+    try:
+        from ..utils.mlx_vlm_compat import apply as _apply_mlx_vlm_compat
+        _apply_mlx_vlm_compat()
+    except Exception as exc:
+        logger.debug("Could not apply mlx_vlm compat patches: %s", exc)
 
     # Gemma 4 (model_type=gemma4, text_config.model_type=gemma4_text):
     # jang_tools text-only loader does NOT sanitize Gemma 4's SwitchGLU +

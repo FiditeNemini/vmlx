@@ -43,6 +43,7 @@ def apply() -> None:
     _applied = True
     _patch_qwen3_vl_grid_thw()
     _patch_qwen35_patch_embed_layout()
+    _patch_qwen3_vl_vision_model_type_allowlist()
     _patch_prompt_cache_rank3_trim()
     # MRoPE none-delta patch (Eric perf-regression suspect 2026-06-27):
     # monkey-patches qwen3_5/qwen3_5_moe LanguageModel.__call__ to add a
@@ -409,3 +410,65 @@ def _patch_qwen35_patch_embed_layout() -> None:
         Model.sanitize = sanitize  # type: ignore[assignment]
 
     _logger.debug("mlx_vlm_compat: patched Qwen3.5/3.6 patch_embed layout")
+
+
+def _patch_qwen3_vl_vision_model_type_allowlist() -> None:
+    """Allow additional Qwen3.5/3.6 VL vision `model_type` strings.
+
+    Upstream mlx_vlm/models/qwen3_vl/vision.py VisionModel.__init__ hard-codes
+    a check `if self.model_type not in ["qwen3_vl", "qwen3_5", "qwen3_5_moe"]`
+    and raises `ValueError: Unsupported model type: qwen3_5_moe_vision`. But
+    JANG-authored Ornith bundles stamp `vision_config.model_type` as
+    `qwen3_5_moe_vision` (the granular vision-tower type, distinct from the
+    text-side type), which trips the check and blocks every VL load path —
+    including Smelt (which routes through `jang_tools.loader._load_jang_v2_vlm`
+    even for text-only sessions, before force_text_only routing kicks in).
+
+    Patch: wrap VisionModel.__init__ so `qwen3_5_moe_vision` (and any future
+    `*_vision` sibling) are treated as `qwen3_5_moe` at model-type-check time,
+    while preserving the original `self.model_type` string for anything
+    downstream that inspects it.
+
+    Idempotent. No-op if mlx_vlm not installed or the check has been changed.
+    """
+    try:
+        import importlib
+        vision_mod = importlib.import_module("mlx_vlm.models.qwen3_vl.vision")
+    except Exception as exc:
+        _logger.debug("mlx_vlm_compat: qwen3_vl vision module unavailable: %s", exc)
+        return
+
+    VisionModel = getattr(vision_mod, "VisionModel", None)
+    if VisionModel is None:
+        return
+    original_init = getattr(VisionModel, "__init__", None)
+    if original_init is None or getattr(original_init, "_vmlx_vision_allowlist_patched", False):
+        return
+
+    # Broader set: text-side + explicit vision-side variants seen in JANG bundles.
+    _ALLOWED = {"qwen3_vl", "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_vision", "qwen3_5_vision"}
+
+    def patched_init(self, config, _original=original_init):
+        # If the config's model_type is a *_vision sibling of an allowed root,
+        # temporarily normalize so the upstream check passes, then restore.
+        raw = getattr(config, "model_type", None)
+        stashed = None
+        try:
+            if isinstance(raw, str) and raw in _ALLOWED and raw not in ("qwen3_vl", "qwen3_5", "qwen3_5_moe"):
+                # rewrite to the closest supported root
+                normalized = "qwen3_5_moe" if "moe" in raw else "qwen3_5"
+                stashed = raw
+                config.model_type = normalized
+            _original(self, config)
+        finally:
+            if stashed is not None:
+                # restore original model_type on both the config and self so
+                # downstream code that keys on the exact string still works.
+                config.model_type = stashed
+                self.model_type = stashed
+
+    patched_init._vmlx_vision_allowlist_patched = True  # type: ignore[attr-defined]
+    VisionModel.__init__ = patched_init  # type: ignore[assignment]
+    _logger.debug(
+        "mlx_vlm_compat: patched qwen3_vl VisionModel allowlist (adds qwen3_5_moe_vision, qwen3_5_vision)"
+    )

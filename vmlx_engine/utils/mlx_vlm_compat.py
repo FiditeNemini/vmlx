@@ -41,6 +41,21 @@ def apply() -> None:
     """Apply all mlx_vlm compat patches (idempotent)."""
     global _applied
     _applied = True
+    # Register vMLX-owned Qwen 3.5/3.5-MoE VLM runtime FIRST — this replaces
+    # mlx_vlm.models.qwen3_5{,_moe} in sys.modules with our vendor whose
+    # quant_predicate keeps router gates as float nn.Linear (upstream forces
+    # them to bits=8/gs=64, which crashes JANG affine bundles that ship gate
+    # weights as float16 without .scales — "weight matrix should be uint32").
+    # Must run BEFORE any patches or loader logic that touches those modules.
+    try:
+        from ..models.qwen3_5_family import register_qwen3_5_family_runtime
+        register_qwen3_5_family_runtime()
+    except Exception as _exc:
+        _logger.warning(
+            "mlx_vlm_compat: qwen3_5_family vendor registration failed (%s) — "
+            "Ornith / JANG-affine Qwen 3.5 MoE bundles may crash on decode",
+            _exc,
+        )
     _patch_qwen3_vl_grid_thw()
     _patch_qwen35_patch_embed_layout()
     _patch_qwen3_vl_vision_model_type_allowlist()

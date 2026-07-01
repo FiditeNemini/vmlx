@@ -15085,6 +15085,12 @@ async def stream_chat_completion(
     tool_call_buffering = False  # Are we currently buffering for tool calls?
     tool_call_buffering_notified = False  # Have we sent the buffering signal?
     tool_calls_emitted = False  # Were actual tool calls parsed and emitted?
+    # #219 follow-up: the START tool_calls delta emitted at first buffer tick
+    # generates its own random id. Cache it here so the final tool_calls data
+    # delta reuses the same id — per OpenAI SDK spec, all streaming deltas for
+    # the same tool_call MUST share the same id, otherwise SDK clients treat
+    # them as two separate tool_calls and fail to reconcile the arguments.
+    _stream_tool_call_start_id: str | None = None
     _suppress_tools = getattr(request, "tool_choice", None) == "none"
     # Auto-enable tool call detection when client sends tools in request (#46),
     # even if server wasn't started with --enable-auto-tool-choice
@@ -15325,6 +15331,8 @@ async def stream_chat_completion(
                     # vMLX-only `tool_call_generating` field on the wire).
                     if not tool_call_buffering_notified:
                         tool_call_buffering_notified = True
+                        if _stream_tool_call_start_id is None:
+                            _stream_tool_call_start_id = generate_tool_id()
                         start_chunk = {
                             "id": response_id,
                             "object": "chat.completion.chunk",
@@ -15338,7 +15346,7 @@ async def stream_chat_completion(
                                         "tool_calls": [
                                             {
                                                 "index": 0,
-                                                "id": generate_tool_id(),
+                                                "id": _stream_tool_call_start_id,
                                                 "type": "function",
                                                 "function": {"name": "", "arguments": ""},
                                             }
@@ -15489,6 +15497,8 @@ async def stream_chat_completion(
                     # first buffering tick + keep subsequent chunks spec-clean.
                     if not tool_call_buffering_notified:
                         tool_call_buffering_notified = True
+                        if _stream_tool_call_start_id is None:
+                            _stream_tool_call_start_id = generate_tool_id()
                         start_chunk = {
                             "id": response_id,
                             "object": "chat.completion.chunk",
@@ -15502,7 +15512,7 @@ async def stream_chat_completion(
                                         "tool_calls": [
                                             {
                                                 "index": 0,
-                                                "id": generate_tool_id(),
+                                                "id": _stream_tool_call_start_id,
                                                 "type": "function",
                                                 "function": {"name": "", "arguments": ""},
                                             }
@@ -15740,10 +15750,17 @@ async def stream_chat_completion(
             # Chunk 1: tool_calls data with finish_reason=null
             # Chunk 2: empty delta with finish_reason="tool_calls"
             # This split is required for CLI clients (Claude Code, OpenCode, etc.)
+            #
+            # #219 follow-up: if a START tool_calls delta was already emitted
+            # (empty name/arguments) with a specific id, the FIRST tool_call
+            # here MUST reuse that same id — OpenAI SDKs match START + arg
+            # deltas by id, and a mismatch causes them to treat the arg delta
+            # as a NEW tool_call (which fails because there's no matching START).
+            # Subsequent tool_calls (multi-call turns) keep their parser ids.
             tc_deltas = [
                 {
                     "index": i,
-                    "id": tc.id,
+                    "id": _stream_tool_call_start_id if (i == 0 and _stream_tool_call_start_id is not None) else tc.id,
                     "type": "function",
                     "function": {
                         "name": tc.function.name,

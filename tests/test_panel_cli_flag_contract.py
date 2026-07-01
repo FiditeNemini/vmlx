@@ -394,20 +394,84 @@ def test_large_model_low_memory_preflight_blocks_before_engine_spawn() -> None:
     assert preflight_index < kill_port_index < system_spawn_index
 
 
-def test_jang_loader_wired_limit_keeps_physical_ram_headroom() -> None:
+def test_jang_loader_wired_limit_honors_sysctl_by_default() -> None:
+    """Per Eric directive 2026-06-27: default = honor OS sysctl iogpu.wired_limit_mb
+    fully, no artificial reserve cap. Reserve is opt-in via VMLX_METAL_WIRED_RESERVE_GB."""
+
     source = (ROOT / "vmlx_engine" / "utils" / "jang_loader.py").read_text(
         encoding="utf-8"
     )
 
-    assert "VMLINUX_METAL_WIRED_RESERVE_FRACTION" in source
-    assert "VMLX_METAL_WIRED_RESERVE_FRACTION" in source
+    # Env-var reserve remains available as opt-in
+    assert "VMLX_METAL_WIRED_RESERVE_GB" in source
     assert "VMLINUX_METAL_WIRED_RESERVE_GB" in source
+    # Legacy fraction env still honored (deprecated but not removed)
+    assert "VMLX_METAL_WIRED_RESERVE_FRACTION" in source
+    assert "VMLINUX_METAL_WIRED_RESERVE_FRACTION" in source
+    # Ram cap logic conditionally applied only when reserve_gb > 0 or fraction env set
     assert "ram_capped_target" in source
-    assert "capped to %.0f GB to leave %.0f GB system/Metal headroom" in source
+    # New wording after Eric directive removed the mandatory reserve
+    assert "opt-in reserve" in source
+    assert "Authoritative upper bound: the OS sysctl iogpu.wired_limit_mb" in source
 
 
-def test_jang_loader_wired_limit_caps_rich_128gb_case(monkeypatch) -> None:
-    """A 128GiB Mac with sysctl at 128000MiB must not pass the full cap to MLX."""
+def test_jang_loader_wired_limit_default_honors_full_sysctl(monkeypatch) -> None:
+    """Default (no reserve env set): wired limit = full OS max_ws value from sysctl,
+    not clipped by a hidden reserve."""
+
+    from vmlx_engine.utils import jang_loader
+
+    class FakeStat:
+        st_size = 113_000_000_000
+
+    class FakeWeight:
+        def stat(self):
+            return FakeStat()
+
+    class FakeMx:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_wired_limit(self, target: int) -> None:
+            self.targets.append(target)
+
+    fake_mx = FakeMx()
+    total_ram = 128 * 1024**3
+    page_size = 4096
+    phys_pages = total_ram // page_size
+    os_max_ws = 134_000_000_000  # what sysctl iogpu.wired_limit_mb reports via MLX
+
+    monkeypatch.delenv("VMLX_METAL_WIRED_RESERVE_FRACTION", raising=False)
+    monkeypatch.delenv("VMLINUX_METAL_WIRED_RESERVE_FRACTION", raising=False)
+    monkeypatch.delenv("VMLINUX_METAL_WIRED_RESERVE_PCT", raising=False)
+    monkeypatch.delenv("VMLX_METAL_WIRED_RESERVE_GB", raising=False)
+    monkeypatch.delenv("VMLINUX_METAL_WIRED_RESERVE_GB", raising=False)
+    monkeypatch.setattr(jang_loader, "mx", fake_mx)
+    monkeypatch.setattr(
+        jang_loader,
+        "get_effective_metal_working_set_bytes",
+        lambda _mx: (0, os_max_ws),
+    )
+    monkeypatch.setattr(
+        jang_loader.os,
+        "sysconf",
+        lambda name: page_size if name == "SC_PAGE_SIZE" else phys_pages,
+    )
+
+    jang_loader._set_wired_limit_for_model([FakeWeight()])
+
+    assert fake_mx.targets, "expected MLX wired limit to be set"
+    # Default behavior: no reserve → target = min(model+headroom, os_max_ws)
+    # model=113 GB + max(16 GB, 30% * 113 GB) = 113 + 33.9 = 146.9 GB target
+    # OS cap = 134 GB → clipped to 134 GB (sysctl-honoring, no additional reserve)
+    assert fake_mx.targets[0] == os_max_ws, (
+        f"default should honor full OS sysctl {os_max_ws}, got {fake_mx.targets[0]}"
+    )
+    assert fake_mx.targets[0] > FakeStat.st_size
+
+
+def test_jang_loader_wired_limit_opt_in_reserve_still_works(monkeypatch) -> None:
+    """When user sets VMLX_METAL_WIRED_RESERVE_GB explicitly, reserve applies."""
 
     from vmlx_engine.utils import jang_loader
 
@@ -433,8 +497,9 @@ def test_jang_loader_wired_limit_caps_rich_128gb_case(monkeypatch) -> None:
     monkeypatch.delenv("VMLX_METAL_WIRED_RESERVE_FRACTION", raising=False)
     monkeypatch.delenv("VMLINUX_METAL_WIRED_RESERVE_FRACTION", raising=False)
     monkeypatch.delenv("VMLINUX_METAL_WIRED_RESERVE_PCT", raising=False)
-    monkeypatch.delenv("VMLX_METAL_WIRED_RESERVE_GB", raising=False)
     monkeypatch.delenv("VMLINUX_METAL_WIRED_RESERVE_GB", raising=False)
+    # OPT IN to 16 GB reserve (the previously-mandatory floor)
+    monkeypatch.setenv("VMLX_METAL_WIRED_RESERVE_GB", "16")
     monkeypatch.setattr(jang_loader, "mx", fake_mx)
     monkeypatch.setattr(
         jang_loader,
@@ -450,9 +515,8 @@ def test_jang_loader_wired_limit_caps_rich_128gb_case(monkeypatch) -> None:
     jang_loader._set_wired_limit_for_model([FakeWeight()])
 
     assert fake_mx.targets, "expected MLX wired limit to be set"
-    expected_cap = total_ram - int(total_ram * 0.16)
+    expected_cap = total_ram - 16 * 1024**3
     assert fake_mx.targets[0] <= expected_cap
-    assert fake_mx.targets[0] < 120_000_000_000
     assert fake_mx.targets[0] > FakeStat.st_size
 
 

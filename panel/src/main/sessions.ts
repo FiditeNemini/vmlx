@@ -568,7 +568,7 @@ function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   return changed
 }
 
-const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 6
+const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 7
 
 function markCacheStackStartupDefaultsCurrent(config: Partial<ServerConfig>): boolean {
   if (config.cacheStackStartupDefaultsVersion === CACHE_STACK_STARTUP_DEFAULTS_VERSION) return false
@@ -699,8 +699,8 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     config.enableBlockDiskCache === true &&
     config.kvCacheQuantization === 'auto'
   // Phase-1 v3-v5 fingerprint: generic forced to paged-OFF + legacy disk_cache.
-  // Phase-2 restores paged-ON + block-disk so the SSD prefix hit (live-proven
-  // iter 29) is available by default.
+  // Phase-2 v6 flipped to paged-ON. Phase-3 v7 (Eric 2026-06-30) flips back to
+  // paged-OFF as the safe default — see feedback_paged_cache_default_off_2026_06_30.
   const stalePhase1GenericPagedOff =
     !zayaCacheMigrationTarget &&
     !isM3MigrateTarget &&
@@ -709,6 +709,16 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     config.usePagedCache === false &&
     config.enableDiskCache === true &&
     config.enableBlockDiskCache === false
+  // Phase-2 v6 fingerprint: paged-ON + block-disk-ON. Phase-3 v7 migration
+  // resets these back to OFF for non-structural families.
+  const stalePhase2GenericPagedOn =
+    !zayaCacheMigrationTarget &&
+    !isM3MigrateTarget &&
+    config.continuousBatching === true &&
+    config.enablePrefixCache === true &&
+    config.usePagedCache === true &&
+    config.enableBlockDiskCache === true &&
+    config.enableDiskCache === false
   const staleExplicitNoneCacheCodecDefaults =
     zayaCacheMigrationTarget &&
     config.continuousBatching === true &&
@@ -727,6 +737,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     !staleExplicitNoneCacheCodecDefaults &&
     !staleV2GenericPagedOn &&
     !stalePhase1GenericPagedOff &&
+    !stalePhase2GenericPagedOn &&
     !staleM3PagedOn &&
     !staleM3BlockDiskOn
   ) return false
@@ -747,16 +758,19 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     config.enableBlockDiskCache = true
     config.blockDiskCacheMaxGb = 10
   } else {
-    // Generic / Gemma-SWA / MoE / hybrid: paged RAM block pool ON by default with
-    // block-disk-cache (L2) as the persistent SSD layer. SSD path is paged-coupled
-    // (engine emits warning + disables block-disk-cache when paged is off), so
-    // paged-on is required to unlock the SSD prefix-hit benefit (live-proven across
-    // engine restart iter 29 with cache_detail="paged+ssm+disk", disk_hit=true).
-    // RAM-safe per iter-29 soak: 30-turn mixed mode +5.4% RSS, plateaued by turn 11.
-    config.usePagedCache = true
+    // Generic / Gemma-SWA / MoE / hybrid: paged cache OFF by default
+    // (Eric directive 2026-06-30 v7, supersedes 2026-06-27 v6 which was ON).
+    // Paged-off is the safe default; users who want the SSD prefix-hit
+    // benefit toggle paged ON in the UI. The toggle must actually reach the
+    // engine argv — verify --use-paged-cache appears when checkbox toggled.
+    // SSD block-disk-cache is paged-coupled so it defaults off with paged off.
+    // Structural families (DSV4/ZAYA CCA/hybrid SSM SWA subtype) still route
+    // through cacheTypeRequiresPaged/cacheSubtypeRequiresPaged at spawn time
+    // and stay paged-required — that's a runtime constraint, not a default.
+    config.usePagedCache = false
     config.maxCacheBlocks = config.maxCacheBlocks ?? 1000
     config.enableDiskCache = false
-    config.enableBlockDiskCache = true
+    config.enableBlockDiskCache = false
     config.blockDiskCacheMaxGb = config.blockDiskCacheMaxGb ?? 10
   }
   markCacheStackStartupDefaultsCurrent(config)

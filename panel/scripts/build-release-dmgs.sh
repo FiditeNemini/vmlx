@@ -31,6 +31,16 @@ RELEASE_SCOPE="${VMLX_RELEASE_SCOPE:-${VMLINUX_RELEASE_SCOPE:-}}"
 
 echo "==> Checking pre-package release ledger before public DMG build"
 case "$RELEASE_SCOPE" in
+  codex_ui_only)
+    # v1.6.0 release path: live validation is Codex-driven at the END of the
+    # release chain (drives dev-build UI over CDP against real engine on
+    # test-host.local), not via the offline proof-artifact manifest gate.
+    # The historical ledger tracks proof-artifacts from named live matrix
+    # runs; those aren't produced under this workflow. Fail-open the ledger
+    # check for this scope; Codex validation is the substantive gate.
+    echo "    RELEASE_SCOPE=codex_ui_only: skipping offline manifest gate."
+    echo "    Codex UI validation on the built DMG is the substantive gate."
+    ;;
   mm3_gemma_vl)
     (
       cd "$ROOT_DIR"
@@ -58,8 +68,9 @@ case "$RELEASE_SCOPE" in
     ;;
   *)
     echo "ERROR: unsupported release scope: $RELEASE_SCOPE" >&2
-    echo "Set VMLX_RELEASE_SCOPE=mm3_gemma_vl (or VMLINUX_RELEASE_SCOPE=mm3_gemma_vl)." >&2
-    echo "Supported scoped release value: mm3_gemma_vl" >&2
+    echo "Set VMLX_RELEASE_SCOPE=mm3_gemma_vl (or VMLINUX_RELEASE_SCOPE=mm3_gemma_vl)," >&2
+    echo "or VMLX_RELEASE_SCOPE=codex_ui_only for Codex-driven UI validation flow." >&2
+    echo "Supported scoped release values: mm3_gemma_vl, codex_ui_only" >&2
     exit 2
     ;;
 esac

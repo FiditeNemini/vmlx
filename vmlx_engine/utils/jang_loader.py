@@ -1446,6 +1446,22 @@ def _ensure_jang_family_runtime_supported(path: Path, config: dict | None) -> No
     """
     model_types = _config_model_types(config)
 
+    if "openpangu_v2" in model_types:
+        # vMLX-owned vendored runtime (no upstream mlx-lm/jang_tools package).
+        # Registering here covers every load path, not just the CLI entry.
+        try:
+            from vmlx_engine.models.openpangu_v2.register import (
+                register_openpangu_v2_runtime,
+            )
+
+            register_openpangu_v2_runtime()
+        except Exception as exc:
+            raise RuntimeError(
+                f"openPangu-2.0 (openpangu_v2) bundle at {path} requires the "
+                f"vendored vmlx_engine/models/openpangu_v2 runtime, but "
+                f"registration failed: {exc}"
+            ) from exc
+
     if "hy_v3" in model_types:
         _import_required_jang_runtime(
             "jang_tools.hy3",

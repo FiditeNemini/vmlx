@@ -3263,12 +3263,19 @@ def _engine_prompt_starts_in_reasoning(
     test_msgs = [{"role": "user", "content": "__test__"}]
     if not hasattr(tokenizer, "apply_chat_template"):
         return False
+    _seed_kwargs = {"enable_thinking": bool(enable_thinking)}
+    if str(family_name or "").lower() == "openpangu_v2":
+        # openPangu's template keys on `thinking` and silently ignores
+        # enable_thinking (jinja swallows unknown kwargs — no TypeError).
+        # Render the seed probe with the SAME native kwarg the real prompt
+        # gets, or thinking-off requests are misclassified as reasoning.
+        _seed_kwargs["thinking"] = bool(enable_thinking)
     try:
         rendered = tokenizer.apply_chat_template(
             test_msgs,
-            enable_thinking=bool(enable_thinking),
             add_generation_prompt=True,
             tokenize=False,
+            **_seed_kwargs,
         )
     except TypeError:
         rendered = tokenizer.apply_chat_template(
@@ -5094,6 +5101,40 @@ def _normalize_minimax_m3_thinking_mode(ct_kwargs: dict, request, model_key: str
     else:
         ct_kwargs["thinking_mode"] = "adaptive"
     ct_kwargs.pop("enable_thinking", None)
+
+
+def _normalize_openpangu_thinking(ct_kwargs: dict, request, model_key: str) -> None:
+    """Map the public thinking toggle onto openPangu-2.0's template vocabulary.
+
+    openPangu's chat_template branches on ``thinking`` (bool, default True →
+    the generation prompt opens ``<think>``; False → the template pre-closes
+    the rail with ``</think>``). It ignores ``enable_thinking`` entirely, so
+    without this mapping "reasoning off" silently keeps the rail open and the
+    whole answer lands in reasoning_content. Scoped to openpangu_v2 only.
+    A native ``thinking`` bool already present in ct_kwargs is respected and
+    reflected back into ``enable_thinking`` so the parser-seed / backstop
+    logic sees the same toggle.
+    """
+    try:
+        from .model_config_registry import get_model_config_registry
+        _mc = get_model_config_registry().lookup(_registry_model_key(model_key))
+        _fam = str(getattr(_mc, "family_name", "") or "")
+    except Exception:
+        _fam = ""
+    if _fam != "openpangu_v2":
+        return
+    _rt = getattr(request, "enable_thinking", None)
+    if _rt is None and isinstance(ct_kwargs.get("enable_thinking"), bool):
+        _rt = ct_kwargs["enable_thinking"]
+    if _rt is None and isinstance(ct_kwargs.get("thinking"), bool):
+        _rt = ct_kwargs["thinking"]
+    if _rt is False:
+        ct_kwargs["thinking"] = False
+        ct_kwargs["enable_thinking"] = False
+    elif _rt is True:
+        ct_kwargs["thinking"] = True
+        ct_kwargs["enable_thinking"] = True
+    # None → leave undefined: template default (thinking on) decides.
 
 
 def _get_raw_model_from_engine():
@@ -9050,6 +9091,8 @@ async def create_anthropic_message(
 
     _normalize_minimax_m3_thinking_mode(
         _ct_kwargs, chat_req, _model_path or _model_name or chat_req.model)
+    _normalize_openpangu_thinking(
+        _ct_kwargs, chat_req, _model_path or _model_name or chat_req.model)
     # Forward extra chat_template_kwargs to engine (exclude enable_thinking, already handled)
     if _ct_kwargs:
         extra_ct = {k: v for k, v in _ct_kwargs.items() if k != "enable_thinking"}
@@ -11915,6 +11958,8 @@ async def create_chat_completion(
 
     _normalize_minimax_m3_thinking_mode(
         _ct_kwargs, request, _model_path or _model_name or request.model)
+    _normalize_openpangu_thinking(
+        _ct_kwargs, request, _model_path or _model_name or request.model)
     # Forward extra chat_template_kwargs to engine (exclude enable_thinking, already handled)
     if _ct_kwargs:
         extra_ct = {k: v for k, v in _ct_kwargs.items() if k != "enable_thinking"}
@@ -12239,7 +12284,7 @@ async def create_chat_completion(
         except Exception:
             _ns_family = None
         _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
-        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4") or _ns_is_m3:
+        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4", "openpangu_v2") or _ns_is_m3:
             _ns_budget = max(32, int(chat_kwargs.get("max_tokens") or 256))
             logger.info(
                 "%s non-stream chat produced no visible content; running "
@@ -12253,6 +12298,8 @@ async def create_chat_completion(
             _ns_ct = dict(_ns_kwargs.get("chat_template_kwargs") or {})
             if _ns_is_m3:
                 _ns_ct["thinking_mode"] = "disabled"
+            if _ns_family == "openpangu_v2":
+                _ns_ct["thinking"] = False
             _ns_ct.pop("enable_thinking", None)
             _ns_kwargs["chat_template_kwargs"] = _ns_ct
             _ns_kwargs.pop("tools", None)
@@ -13941,6 +13988,8 @@ async def create_response(
 
     _normalize_minimax_m3_thinking_mode(
         _ct_kwargs, request, _model_path or _model_name or request.model)
+    _normalize_openpangu_thinking(
+        _ct_kwargs, request, _model_path or _model_name or request.model)
     # Forward extra chat_template_kwargs to engine (exclude enable_thinking, already handled)
     if _ct_kwargs:
         extra_ct = {k: v for k, v in _ct_kwargs.items() if k != "enable_thinking"}
@@ -14372,7 +14421,7 @@ async def create_response(
         except Exception:
             _ns_family = None
         _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
-        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4") or _ns_is_m3:
+        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4", "openpangu_v2") or _ns_is_m3:
             _ns_budget = max(32, int(chat_kwargs.get("max_tokens") or 256))
             logger.info(
                 "%s non-stream responses produced no visible content; running "
@@ -14386,6 +14435,8 @@ async def create_response(
             _ns_ct = dict(_ns_kwargs.get("chat_template_kwargs") or {})
             if _ns_is_m3:
                 _ns_ct["thinking_mode"] = "disabled"
+            if _ns_family == "openpangu_v2":
+                _ns_ct["thinking"] = False
             _ns_ct.pop("enable_thinking", None)
             _ns_kwargs["chat_template_kwargs"] = _ns_ct
             _ns_kwargs.pop("tools", None)
@@ -15146,7 +15197,7 @@ async def stream_chat_completion(
             reasoning_only_answer_family = ""
     if (
         not reasoning_only_answer_enabled
-        and _family_name in ("qwen3_5", "qwen3_5_moe")
+        and _family_name in ("qwen3_5", "qwen3_5_moe", "openpangu_v2")
         and _effective_thinking is not False
         and not _stream_tools_available
     ):
@@ -15160,7 +15211,9 @@ async def stream_chat_completion(
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
             reasoning_only_answer_budget = max(32, _requested_output_budget)
             reasoning_only_answer_enabled = True
-            reasoning_only_answer_family = "Qwen3.5"
+            reasoning_only_answer_family = (
+                "openPangu" if _family_name == "openpangu_v2" else "Qwen3.5"
+            )
             _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
             if _requested_thinking_budget is not None:
                 _requested_thinking_budget = max(1, int(_requested_thinking_budget))
@@ -15961,6 +16014,8 @@ async def stream_chat_completion(
         answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
         if _answer_family == "MiniMax-M3":
             answer_ct_kwargs["thinking_mode"] = "disabled"
+        elif _answer_family == "openPangu":
+            answer_ct_kwargs["thinking"] = False
         answer_ct_kwargs.pop("enable_thinking", None)
         answer_kwargs["chat_template_kwargs"] = answer_ct_kwargs
         answer_kwargs.pop("tools", None)
@@ -16492,7 +16547,7 @@ async def stream_responses_api(
             reasoning_only_answer_family = ""
     if (
         not reasoning_only_answer_enabled
-        and _family_name in ("qwen3_5", "qwen3_5_moe")
+        and _family_name in ("qwen3_5", "qwen3_5_moe", "openpangu_v2")
         and _effective_thinking is not False
         and not _stream_tools_available
     ):
@@ -16506,7 +16561,9 @@ async def stream_responses_api(
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
             reasoning_only_answer_budget = max(32, _requested_output_budget)
             reasoning_only_answer_enabled = True
-            reasoning_only_answer_family = "Qwen3.5"
+            reasoning_only_answer_family = (
+                "openPangu" if _family_name == "openpangu_v2" else "Qwen3.5"
+            )
             _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
             if _requested_thinking_budget is not None:
                 _requested_thinking_budget = max(1, int(_requested_thinking_budget))
@@ -17325,6 +17382,8 @@ async def stream_responses_api(
             answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
             if _answer_family == "MiniMax-M3":
                 answer_ct_kwargs["thinking_mode"] = "disabled"
+            elif _answer_family == "openPangu":
+                answer_ct_kwargs["thinking"] = False
             answer_ct_kwargs.pop("enable_thinking", None)
             answer_kwargs["chat_template_kwargs"] = answer_ct_kwargs
             answer_kwargs.pop("tools", None)

@@ -136,8 +136,13 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
     }
   }, [initialModelPath, filterTypeProp])
 
-  // Cleanup on unmount
+  // Cleanup on unmount. The effect body must re-arm mountedRef: under React 18
+  // StrictMode (dev) effects run mount -> cleanup -> mount on the same instance,
+  // so without this the cleanup leaves mountedRef=false forever and handleLaunch
+  // silently bails right after sessions:create — the launch UI then stalls at
+  // "Creating session..." even though the session row was created.
   useEffect(() => {
+    mountedRef.current = true
     return () => {
       mountedRef.current = false
       if (launchTimerRef.current) clearTimeout(launchTimerRef.current)

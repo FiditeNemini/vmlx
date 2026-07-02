@@ -870,6 +870,15 @@ function applyJangCapabilities(
       next.isMultimodal = false
       next.forceTextOnly = true
     }
+  } else if (next.family === 'openpangu_v2') {
+    // The converter stamps tool_parser="qwen", but openPangu emits a JSON
+    // LIST inside <|tool_call_start|>/<|tool_call_end|> (token ids
+    // 148903/148904) which the qwen parser never matches (live-proven
+    // tool_calls=None on JANG_2L). The panel passes --tool-call-parser
+    // explicitly, so the stale stamp must be neutralized here too — mirror
+    // of the engine-side model_config_registry exception.
+    next.toolParser = 'openpangu'
+    next.enableAutoToolChoice = caps.supports_tools !== false
   } else if (typeof caps.tool_parser === 'string') {
     next.toolParser = caps.tool_parser === 'none' ? undefined : caps.tool_parser
     if (next.toolParser && caps.supports_tools !== false) {

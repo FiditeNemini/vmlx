@@ -255,3 +255,235 @@ class TestOpenPanguToolParserStreaming:
 
         assert "<|tool_call_start|>" in server._TOOL_CALL_MARKERS
         assert "<|tool_call_end|>" in server._TOOL_CALL_MARKERS
+
+
+class TestOpenPanguStreamEarlyStop:
+    """Early-stop-after-complete-tool-call convention (live bug 2026-07-02).
+
+    Degraded 2-bit openPangu keeps narrating after <|tool_call_end|> instead
+    of emitting EOS: the stream ran to max_tokens and the final chunk carried
+    finish_reason="length" even though a complete call was parsed. The parser
+    opts into ToolParser.STREAM_STOPS_AFTER_COMPLETE_CALL so the server aborts
+    generation after a short grace window and finishes the stream with the
+    #46 tool_calls chunks (finish_reason="tool_calls").
+    """
+
+    COMPLETE_BLOCK = (
+        '<|tool_call_start|>\n'
+        '[{"name": "get_weather", "arguments": {"location": "Paris"}}]\n'
+        '<|tool_call_end|>'
+    )
+
+    # ── Parser-side contract ────────────────────────────────────────────
+
+    def test_openpangu_opts_into_stream_early_stop(self, parser):
+        assert OpenPanguToolParser.STREAM_STOPS_AFTER_COMPLETE_CALL is True
+
+    def test_default_parsers_do_not_opt_in(self):
+        """Families that may legitimately continue after tool calls must keep
+        the default: the server never early-stops them."""
+        from vmlx_engine.tool_parsers.abstract_tool_parser import ToolParser
+        from vmlx_engine.tool_parsers.hermes_tool_parser import HermesToolParser
+        from vmlx_engine.tool_parsers.qwen_tool_parser import QwenToolParser
+
+        assert ToolParser.STREAM_STOPS_AFTER_COMPLETE_CALL is False
+        assert QwenToolParser.STREAM_STOPS_AFTER_COMPLETE_CALL is False
+        assert HermesToolParser.STREAM_STOPS_AFTER_COMPLETE_CALL is False
+        # Default implementations: never complete, truncate is a no-op.
+        base = QwenToolParser(tokenizer=None)
+        assert base.stream_tool_calls_complete(self.COMPLETE_BLOCK) is False
+        assert base.stream_tool_call_stop_truncate("abc") == "abc"
+
+    def test_stream_complete_true_after_closed_block(self, parser):
+        assert parser.stream_tool_calls_complete(self.COMPLETE_BLOCK) is True
+        assert (
+            parser.stream_tool_calls_complete(
+                "thinking...\n" + self.COMPLETE_BLOCK + " and now I ramble"
+            )
+            is True
+        )
+
+    def test_stream_complete_false_without_end_tag(self, parser):
+        assert parser.stream_tool_calls_complete("no call here") is False
+        assert (
+            parser.stream_tool_calls_complete(
+                '<|tool_call_start|>\n[{"name": "get_weather",'
+            )
+            is False
+        )
+
+    def test_stream_complete_false_when_new_block_opens(self, parser):
+        """A second block opening after the last close resets the grace
+        window — a multi-block turn is never cut short."""
+        text = self.COMPLETE_BLOCK + "\n<|tool_call_start|>\n[{"
+        assert parser.stream_tool_calls_complete(text) is False
+        # Partial START tag split across a token boundary also holds it open.
+        text = self.COMPLETE_BLOCK + "\n<|tool_call_st"
+        assert parser.stream_tool_calls_complete(text) is False
+
+    def test_stream_complete_false_for_unparseable_payload(self, parser):
+        text = "<|tool_call_start|>\nnot json\n<|tool_call_end|>"
+        assert parser.stream_tool_calls_complete(text) is False
+
+    def test_stream_truncate_drops_post_call_rambling(self, parser):
+        text = "pre " + self.COMPLETE_BLOCK + " post-call rambling"
+        assert (
+            parser.stream_tool_call_stop_truncate(text)
+            == "pre " + self.COMPLETE_BLOCK
+        )
+        assert parser.stream_tool_call_stop_truncate("no tags") == "no tags"
+
+    # ── Server-side resolution ──────────────────────────────────────────
+
+    def test_server_early_stop_parser_resolution(self, monkeypatch):
+        from vmlx_engine import server
+
+        monkeypatch.setattr(server, "_tool_call_parser", "openpangu")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        resolved = server._stream_tool_call_early_stop_parser(None)
+        assert isinstance(resolved, OpenPanguToolParser)
+
+        # Non-opt-in parser: no early stop.
+        monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+        assert server._stream_tool_call_early_stop_parser(None) is None
+
+        # Explicitly disabled parser: never early stop.
+        monkeypatch.setattr(server, "_tool_call_parser", "openpangu")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", True)
+        assert server._stream_tool_call_early_stop_parser(None) is None
+
+    # ── End-to-end streaming regression ─────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_stream_stops_with_finish_reason_tool_calls(self, monkeypatch):
+        """Regression for the live bug: a complete tool call arrives
+        mid-stream, the model keeps talking — the stream must abort
+        generation, end with finish_reason="tool_calls" (#46 contract:
+        tool_calls data chunk then empty-delta finish chunk + [DONE]), and
+        leak none of the post-call rambling."""
+        from types import SimpleNamespace
+
+        from vmlx_engine import server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+        from vmlx_engine.engine.base import GenerationOutput
+
+        ramble = [" RAMBLE"] * 40  # far past the grace window
+        deltas = (
+            ["I will check. ", "<|tool_call_start|>"]
+            + ['[{"name": "get_weather", "arguments": {"location": "Paris"}}]']
+            + ["<|tool_call_end|>"]
+            + ramble
+        )
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            def __init__(self):
+                self.aborted: list[str] = []
+                self.chunks_consumed = 0
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = ""
+                for i, d in enumerate(deltas):
+                    text += d
+                    self.chunks_consumed += 1
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=d,
+                        tokens=[i],
+                        prompt_tokens=10,
+                        completion_tokens=i + 1,
+                        finished=(i == len(deltas) - 1),
+                        finish_reason="length" if i == len(deltas) - 1 else None,
+                    )
+
+            async def abort_request(self, request_id):
+                self.aborted.append(request_id)
+                return True
+
+        engine = _Engine()
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "openPangu-2.0-Flash-JANG_2L")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", "openpangu")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+
+        request = ChatCompletionRequest(
+            model="openPangu-2.0-Flash-JANG_2L",
+            messages=[Message(role="user", content="weather in Paris?")],
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"location": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        )
+
+        lines = []
+        async for line in server.stream_chat_completion(
+            engine,
+            [m.model_dump(exclude_none=True) for m in request.messages],
+            request,
+            fastapi_request=None,
+        ):
+            lines.append(line)
+
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in lines
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+
+        # Generation was actually stopped: engine aborted, stream not drained.
+        assert engine.aborted, "engine.abort_request must be called"
+        assert engine.chunks_consumed < len(deltas), (
+            "stream must stop before max_tokens ramble is drained "
+            f"(consumed {engine.chunks_consumed}/{len(deltas)})"
+        )
+
+        # #46 contract: tool_calls data chunk with finish_reason=null, then
+        # empty-delta finish chunk with finish_reason="tool_calls".
+        tc_chunks = [
+            c
+            for c in chunks
+            if c.get("choices")
+            and c["choices"][0].get("delta", {}).get("tool_calls")
+        ]
+        assert tc_chunks, "tool_calls delta must be emitted"
+        data_chunk = tc_chunks[-1]
+        tc = data_chunk["choices"][0]["delta"]["tool_calls"][0]
+        assert tc["function"]["name"] == "get_weather"
+        assert json.loads(tc["function"]["arguments"]) == {"location": "Paris"}
+        assert data_chunk["choices"][0]["finish_reason"] is None
+        # #219: the final data delta reuses the START delta's id.
+        start_chunk = tc_chunks[0]
+        assert (
+            tc["id"] == start_chunk["choices"][0]["delta"]["tool_calls"][0]["id"]
+        )
+
+        finish_reasons = [
+            c["choices"][0].get("finish_reason")
+            for c in chunks
+            if c.get("choices") and c["choices"][0].get("finish_reason")
+        ]
+        assert finish_reasons == ["tool_calls"], (
+            f"stream must finish with tool_calls only, got {finish_reasons}"
+        )
+
+        # No post-call rambling leaks as visible content.
+        contents = "".join(
+            c["choices"][0]["delta"].get("content") or ""
+            for c in chunks
+            if c.get("choices")
+        )
+        assert "RAMBLE" not in contents
+        assert lines[-1].strip() == "data: [DONE]"

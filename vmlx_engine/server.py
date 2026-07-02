@@ -2905,6 +2905,13 @@ _TOOL_CALL_MARKERS = [
     "```tool_code",  # Gemma 3 / 3n function-call code block (Google docs format)
 ]
 
+# Grace window (engine chunks carrying new text ≈ tokens) after the active
+# tool parser reports a complete tool-call turn mid-stream before the server
+# aborts generation. Gives the model room to stop on its own (EOS) or open
+# another tool-call block (which resets the window). Only parsers that opt in
+# via ToolParser.STREAM_STOPS_AFTER_COMPLETE_CALL are ever early-stopped.
+_STREAM_TOOL_CALL_STOP_GRACE_CHUNKS = 8
+
 _TOOL_MARKUP_RESIDUE_PATTERNS = []
 _TOOL_MARKUP_STRIP_TO_EOL_MARKERS = {
     "<tool_call",
@@ -4713,6 +4720,52 @@ def _parse_tool_calls_with_parser(
     except Exception as e:
         logger.warning(f"Tool parser error: {e}")
         return _generic_parse_filtered(output_text)
+
+
+def _stream_tool_call_early_stop_parser(
+    request: ChatCompletionRequest | ResponsesRequest | None,
+):
+    """
+    Return a tool parser instance that opts into stopping the stream after a
+    complete tool-call turn (ToolParser.STREAM_STOPS_AFTER_COMPLETE_CALL), or
+    None when the active parser does not opt in / no parser is active.
+
+    Resolution mirrors _parse_tool_calls_with_parser (CLI-configured parser,
+    else registry auto-detect when the request carries tools) so the parser
+    that decides "the turn is complete" is the same one that will extract the
+    calls post-stream.
+    """
+    if _tool_call_parser_disabled_explicitly:
+        return None
+    active_parser = _tool_call_parser
+    if not active_parser and request and getattr(request, "tools", None):
+        try:
+            from .model_config_registry import get_model_config_registry
+
+            registry = get_model_config_registry()
+            active_parser = registry.get_tool_parser(
+                _model_path or _model_name or getattr(request, "model", "") or ""
+            )
+        except Exception:
+            return None
+    if not active_parser:
+        return None
+    try:
+        parser_cls = ToolParserManager.get_tool_parser(active_parser)
+    except KeyError:
+        return None
+    if not getattr(parser_cls, "STREAM_STOPS_AFTER_COMPLETE_CALL", False):
+        return None
+    try:
+        tokenizer = None
+        if _engine is not None and hasattr(_engine, "_tokenizer"):
+            tokenizer = _engine._tokenizer
+        return parser_cls(tokenizer)
+    except Exception as e:
+        logger.warning(
+            f"Failed to initialize early-stop tool parser '{active_parser}': {e}"
+        )
+        return None
 
 
 def _clean_suppressed_tool_markup_for_display(
@@ -15148,6 +15201,15 @@ async def stream_chat_completion(
     _request_has_tools = bool(getattr(request, "tools", None))
     _stream_tools_available = bool(kwargs.get("tools")) or _request_has_tools
     tool_call_active = _stream_tools_available and not _suppress_tools
+    # Early-stop after a complete tool-call turn (opt-in per tool parser via
+    # STREAM_STOPS_AFTER_COMPLETE_CALL). Live-proven need: degraded 2-bit
+    # openPangu keeps narrating after <|tool_call_end|> instead of emitting
+    # EOS, so the stream runs to max_tokens and ends with
+    # finish_reason="length" even though a complete call was produced.
+    _tc_stop_parser = (
+        _stream_tool_call_early_stop_parser(request) if tool_call_active else None
+    )
+    _tc_stop_complete_chunks = 0
     m3_reasoning_only_answer_budget: int | None = None
     m3_reasoning_only_answer_enabled = False
     reasoning_only_answer_budget: int | None = None
@@ -15283,6 +15345,63 @@ async def stream_chat_completion(
 
             # Always accumulate full text (needed for both reasoning and tool call parsing)
             accumulated_text += delta_text if delta_text else ""
+
+            # Stop generation once the tool-call turn is complete (opt-in per
+            # parser). When the active parser declares the turn closed and the
+            # model keeps generating past the grace window instead of emitting
+            # EOS, abort the engine request and break; the post-stream
+            # extraction below then emits the #46 tool_calls data + finish
+            # chunks (finish_reason="tool_calls") exactly as if the model had
+            # stopped on its own.
+            if (
+                _tc_stop_parser is not None
+                and tool_call_buffering
+                and delta_text
+                and not output.finished
+            ):
+                if _tc_stop_parser.stream_tool_calls_complete(accumulated_text):
+                    _tc_stop_complete_chunks += 1
+                    if _tc_stop_complete_chunks > _STREAM_TOOL_CALL_STOP_GRACE_CHUNKS:
+                        logger.info(
+                            "Stream %s: complete tool call parsed but model kept "
+                            "generating %d chunks past it — stopping generation "
+                            "(parser=%s)",
+                            response_id,
+                            _tc_stop_complete_chunks,
+                            type(_tc_stop_parser).__name__,
+                        )
+                        if hasattr(engine, "abort_request"):
+                            await engine.abort_request(response_id)
+                        # Drop the post-call rambling so it neither leaks to
+                        # the client as content nor steers the post-stream
+                        # parse to the wrong channel.
+                        accumulated_text = _tc_stop_parser.stream_tool_call_stop_truncate(
+                            accumulated_text
+                        )
+                        if _tc_stop_parser.stream_tool_calls_complete(
+                            accumulated_content
+                        ):
+                            accumulated_content = (
+                                _tc_stop_parser.stream_tool_call_stop_truncate(
+                                    accumulated_content
+                                )
+                            )
+                        elif _tc_stop_parser.stream_tool_calls_complete(
+                            accumulated_reasoning
+                        ):
+                            # Call arrived mid-reasoning: any accumulated
+                            # content came AFTER the call (post-</think>
+                            # rambling, never streamed while buffering) and
+                            # must not shadow the reasoning-channel parse.
+                            accumulated_reasoning = (
+                                _tc_stop_parser.stream_tool_call_stop_truncate(
+                                    accumulated_reasoning
+                                )
+                            )
+                            accumulated_content = ""
+                        break
+                else:
+                    _tc_stop_complete_chunks = 0
 
             # Use reasoning parser if enabled
             if request_parser and delta_text:
@@ -16385,6 +16504,12 @@ async def stream_responses_api(
     _stream_tools_available = bool(kwargs.get("tools")) or _request_has_tools
     tool_call_active = _stream_tools_available and not _suppress_tools
     tool_call_buffering = False
+    # Early-stop after a complete tool-call turn (opt-in per tool parser via
+    # STREAM_STOPS_AFTER_COMPLETE_CALL) — mirrors stream_chat_completion.
+    _tc_stop_parser = (
+        _stream_tool_call_early_stop_parser(request) if tool_call_active else None
+    )
+    _tc_stop_complete_chunks = 0
 
     full_text = ""
     streamed_text = ""  # Text already sent as deltas (before tool call marker)
@@ -16800,6 +16925,63 @@ async def stream_responses_api(
 
             if delta_text:
                 full_text += delta_text
+
+                # Stop generation once the tool-call turn is complete (opt-in
+                # per parser) — mirrors stream_chat_completion. The
+                # post-stream parse below then emits the function_call output
+                # items exactly as if the model had stopped on its own.
+                if (
+                    _tc_stop_parser is not None
+                    and tool_call_buffering
+                    and not output.finished
+                ):
+                    if _tc_stop_parser.stream_tool_calls_complete(full_text):
+                        _tc_stop_complete_chunks += 1
+                        if (
+                            _tc_stop_complete_chunks
+                            > _STREAM_TOOL_CALL_STOP_GRACE_CHUNKS
+                        ):
+                            logger.info(
+                                "Responses stream %s: complete tool call parsed "
+                                "but model kept generating %d chunks past it — "
+                                "stopping generation (parser=%s)",
+                                response_id,
+                                _tc_stop_complete_chunks,
+                                type(_tc_stop_parser).__name__,
+                            )
+                            if hasattr(engine, "abort_request"):
+                                await engine.abort_request(response_id)
+                            # Drop the post-call rambling so it neither leaks
+                            # to the client nor steers the post-stream parse
+                            # to the wrong channel.
+                            full_text = (
+                                _tc_stop_parser.stream_tool_call_stop_truncate(
+                                    full_text
+                                )
+                            )
+                            if _tc_stop_parser.stream_tool_calls_complete(
+                                accumulated_content
+                            ):
+                                accumulated_content = (
+                                    _tc_stop_parser.stream_tool_call_stop_truncate(
+                                        accumulated_content
+                                    )
+                                )
+                            elif _tc_stop_parser.stream_tool_calls_complete(
+                                accumulated_reasoning
+                            ):
+                                # Call arrived mid-reasoning: accumulated
+                                # content came AFTER the call and was never
+                                # streamed while buffering — drop it.
+                                accumulated_reasoning = (
+                                    _tc_stop_parser.stream_tool_call_stop_truncate(
+                                        accumulated_reasoning
+                                    )
+                                )
+                                accumulated_content = ""
+                            break
+                    else:
+                        _tc_stop_complete_chunks = 0
 
                 # Use reasoning parser if enabled
                 if request_parser:

@@ -57,6 +57,15 @@ class OpenPanguToolParser(ToolParser):
     # into the <|tool_call_start|> list), so no text-format conversion needed.
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
+    # openPangu's format is a single JSON LIST between <|tool_call_start|> and
+    # <|tool_call_end|> — multiple calls form one list ("多个调用组成一个列表"),
+    # so a closed tag pair IS the end of the tool-call turn by format contract.
+    # Degraded 2-bit bundles keep narrating after <|tool_call_end|> instead of
+    # emitting EOS (live-proven on openPangu-2.0-Flash-JANG_2L: stream ran to
+    # max_tokens, finish_reason="length"); let the server stop generation once
+    # the turn is complete.
+    STREAM_STOPS_AFTER_COMPLETE_CALL = True
+
     START_TAG = "<|tool_call_start|>"
     END_TAG = "<|tool_call_end|>"
 
@@ -200,3 +209,37 @@ class OpenPanguToolParser(ToolParser):
 
         # Still accumulating tool call content — suppress output
         return None
+
+    def stream_tool_calls_complete(self, buffered_text: str) -> bool:
+        """
+        True when the buffered stream contains a fully closed tool-call turn.
+
+        Complete means: at least one <|tool_call_start|>...<|tool_call_end|>
+        block whose JSON list parses into a real call, and no NEW block is
+        opening after the last <|tool_call_end|> (a complete or partial
+        <|tool_call_start|> in the tail resets the server's grace window so a
+        non-canonical multi-block turn is not cut short).
+        """
+        if self.END_TAG not in buffered_text:
+            return False
+        tail = buffered_text[
+            buffered_text.rfind(self.END_TAG) + len(self.END_TAG) :
+        ]
+        if self.START_TAG in tail:
+            return False
+        # Partial START_TAG at the end of the tail (split across a token
+        # boundary) — treat as "a new block may be opening".
+        for n in range(len(self.START_TAG) - 1, 0, -1):
+            if tail.endswith(self.START_TAG[:n]):
+                return False
+        for match in self.TOOL_CALL_PATTERN.finditer(buffered_text):
+            if self._tool_calls_from_payload(match.group(1)):
+                return True
+        return False
+
+    def stream_tool_call_stop_truncate(self, buffered_text: str) -> str:
+        """Drop everything after the last <|tool_call_end|> (post-call rambling)."""
+        idx = buffered_text.rfind(self.END_TAG)
+        if idx < 0:
+            return buffered_text
+        return buffered_text[: idx + len(self.END_TAG)]

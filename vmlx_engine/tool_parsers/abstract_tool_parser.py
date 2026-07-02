@@ -74,6 +74,48 @@ class ToolParser(ABC):
         """
         return cls.SUPPORTS_NATIVE_TOOL_FORMAT
 
+    # Streaming early-stop convention (opt-in per parser family).
+    #
+    # Most tool-calling models emit EOS right after their tool-call block, so
+    # the server's streaming loop simply buffers until the model stops and
+    # parses the buffer at end of stream. Some models (live-proven: degraded
+    # 2-bit openPangu-2.0 JANG bundles) keep narrating after the closing
+    # tool-call tag instead of stopping, burning the rest of max_tokens and
+    # ending the stream with finish_reason="length" even though complete tool
+    # calls were produced.
+    #
+    # A parser whose FORMAT makes "the tool-call turn is over" detectable
+    # mid-stream can set STREAM_STOPS_AFTER_COMPLETE_CALL = True and implement
+    # stream_tool_calls_complete(). The server then aborts generation after a
+    # short grace window once the turn is complete, and the normal post-stream
+    # extraction emits the tool_calls chunks with finish_reason="tool_calls"
+    # (#46 contract). Parsers whose models legitimately continue after tool
+    # calls (interleaved content, sequential call blocks without a terminal
+    # marker) MUST keep the default False — the server never early-stops them.
+    STREAM_STOPS_AFTER_COMPLETE_CALL: bool = False
+
+    def stream_tool_calls_complete(self, buffered_text: str) -> bool:
+        """
+        Return True when ``buffered_text`` contains a fully closed tool-call
+        turn (at least one complete, parseable tool call and no tool-call
+        block still open at the end of the text).
+
+        Only consulted when STREAM_STOPS_AFTER_COMPLETE_CALL is True. The
+        default implementation never requests an early stop.
+        """
+        return False
+
+    def stream_tool_call_stop_truncate(self, buffered_text: str) -> str:
+        """
+        Truncate ``buffered_text`` just past the last complete tool-call block.
+
+        Called by the server when it early-stops generation after
+        stream_tool_calls_complete() held through the grace window, so that
+        post-call rambling (the reason the stop was needed) never reaches the
+        tool parser as content or leaks to the client. Default: no-op.
+        """
+        return buffered_text
+
     @staticmethod
     def strip_think_tags(text: str) -> str:
         """

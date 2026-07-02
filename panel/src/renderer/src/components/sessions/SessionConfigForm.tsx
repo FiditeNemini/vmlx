@@ -214,6 +214,7 @@ export const MODEL_FAMILY_OVERRIDE_NAMES: string[] = [
   'nemotron', 'nemotron_h', 'cohere', 'granite', 'granitemoehybrid', 'lfm2',
   'minimax', 'kimi', 'kimi_k25', 'ling', 'zaya', 'zaya1_vl', 'mimo_v2',
   'hy_v3', 'step', 'step_vl', 'step3p7', 'hermes', 'mamba', 'jamba',
+  'openpangu_v2',
 ]
 
 function normalizeDetectedFamilyName(family?: string): string | undefined {
@@ -1742,6 +1743,11 @@ const TOOL_PARSER_OPTIONS: ParserOption[] = [
       'Qwen3-MoE (22B/57B)', 'Qwen3-VL (2B/32B/72B)', 'QwQ-32B',
       'Qwen2.5 (0.5B\u201372B)', 'Qwen2.5-Coder (0.5B\u201332B)',
       'Qwen2.5-VL (3B\u201372B)', 'Qwen2 (0.5B\u201372B)', 'Qwen2-VL (2B\u201372B)',
+    ]
+  },
+  {
+    value: 'openpangu', label: 'openPangu — openPangu-2.0-Flash', format: '<|tool_call_start|>[{"name":"fn","arguments":{...}}]<|tool_call_end|>', models: [
+      'openPangu-2.0-Flash (92B MoE, 6B active)',
     ]
   },
   {

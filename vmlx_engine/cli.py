@@ -995,6 +995,10 @@ def serve_command(args):
                         # for DSV4/M3, but be defensive: never default-on for them).
                         _excluded_family = _mc.family_name in {
                             "deepseek_v4", "minimax_m3", "minimax_m3_vl",
+                            # openpangu_v2: dynamic DSA top-k + growing conv
+                            # states — same mx.compile hazard class as M3 MSA
+                            # (autodetect block above also forces JIT off).
+                            "openpangu_v2",
                         }
                         if _is_affine and not _excluded_family:
                             args.enable_jit = True

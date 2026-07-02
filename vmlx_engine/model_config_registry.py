@@ -676,6 +676,15 @@ class ModelConfigRegistry:
                 base_supports_thinking is not False or preserve_template_metadata_when_no_thinking
             ):
                 updates["think_in_template"] = tin
+            if base.family_name == "openpangu_v2":
+                # The converter stamps the coarse cache_type="hybrid", but the
+                # vendored runtime's cache contract is kv/openpangu_v2_composite
+                # (path-dependent conv states + mixed DSA/SWA windows — NOT an
+                # SSM hybrid). Letting "hybrid" through misroutes the scheduler
+                # into SSM handling (truncate_hybrid_cache / companion state)
+                # and the panel into paged-required. Registry entry wins.
+                ct = None
+                cst = None
             if ct:
                 updates["cache_type"] = ct
             if cst:

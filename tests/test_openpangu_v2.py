@@ -77,6 +77,24 @@ def test_registry_resolves_openpangu_family(tmp_path):
     (model_dir / "config.json").write_text(
         json.dumps({"model_type": "openpangu_v2", "hidden_size": 2560})
     )
+    # The converter stamps the coarse cache_type="hybrid"; the registry entry's
+    # kv/openpangu_v2_composite contract must WIN (hybrid would misroute the
+    # scheduler into SSM handling). Found live on the first server launch.
+    (model_dir / "jang_config.json").write_text(
+        json.dumps(
+            {
+                "capabilities": {
+                    "family": "openpangu_v2",
+                    "cache_type": "hybrid",
+                    "reasoning_parser": "deepseek_r1",
+                    "tool_parser": "qwen",
+                    "think_in_template": True,
+                    "supports_thinking": True,
+                    "modality": "text",
+                }
+            }
+        )
+    )
     mc = get_model_config_registry().lookup(str(model_dir))
     assert mc is not None
     assert mc.family_name == "openpangu_v2"

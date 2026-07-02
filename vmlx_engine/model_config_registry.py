@@ -652,6 +652,21 @@ class ModelConfigRegistry:
                 updates["supports_thinking"] = False
             elif isinstance(sth, bool):
                 updates["supports_thinking"] = sth
+            if base.family_name == "openpangu_v2":
+                # The converter stamps the coarse cache_type="hybrid", but the
+                # vendored runtime's cache contract is kv/openpangu_v2_composite
+                # (path-dependent conv states + mixed DSA/SWA windows — NOT an
+                # SSM hybrid). Letting "hybrid" through misroutes the scheduler
+                # into SSM handling (truncate_hybrid_cache / companion state)
+                # and the panel into paged-required. Registry entry wins.
+                ct = None
+                cst = None
+                # The converter also stamps tool_parser="qwen", but openPangu
+                # emits a JSON LIST inside <|tool_call_start|>/<|tool_call_end|>
+                # (token ids 148903/148904) which the qwen parser never
+                # matches (live-proven tool_calls=None on JANG_2L). Neutralize
+                # the stale stamp so the registry's "openpangu" parser wins.
+                tp = None
             if (
                 rp is not None
                 and not (
@@ -676,15 +691,6 @@ class ModelConfigRegistry:
                 base_supports_thinking is not False or preserve_template_metadata_when_no_thinking
             ):
                 updates["think_in_template"] = tin
-            if base.family_name == "openpangu_v2":
-                # The converter stamps the coarse cache_type="hybrid", but the
-                # vendored runtime's cache contract is kv/openpangu_v2_composite
-                # (path-dependent conv states + mixed DSA/SWA windows — NOT an
-                # SSM hybrid). Letting "hybrid" through misroutes the scheduler
-                # into SSM handling (truncate_hybrid_cache / companion state)
-                # and the panel into paged-required. Registry entry wins.
-                ct = None
-                cst = None
             if ct:
                 updates["cache_type"] = ct
             if cst:

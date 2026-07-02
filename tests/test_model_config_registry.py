@@ -1876,6 +1876,13 @@ class TestModelConfigComprehensiveChecks:
         # Liquid LFM2 emits Python-call-list tool calls between
         # <|tool_call_start|> and <|tool_call_end|>.
         "lfm2",
+        # openPangu-2.0 emits a JSON LIST of {"name", "arguments"} objects
+        # between the same <|tool_call_start|>/<|tool_call_end|> special
+        # tokens (ids 148903/148904). The converter-stamped "qwen" parser
+        # never matches that format (live-proven tool_calls=None), so the
+        # family has a dedicated parser.
+        # See vmlx_engine/tool_parsers/openpangu_tool_parser.py
+        "openpangu",
     }
     VALID_CACHE_TYPES = {"kv", "mamba", "hybrid"}
 

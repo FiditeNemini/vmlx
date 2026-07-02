@@ -678,6 +678,10 @@ def register_all(registry=None):
     # typed lane lands (Phase 2). EOS: <|message_end|> (148902, chat-turn
     # terminator, generation_config eos) + <|pangu_text_end|> (148900,
     # tokenizer eos). generation_config sampling: temp=1.0, top_p=0.8.
+    # tool_parser is "openpangu" ON PURPOSE — the converter stamps "qwen",
+    # but openPangu emits a JSON LIST inside <|tool_call_start|>/<|tool_call_end|>
+    # (token ids 148903/148904), which the qwen parser never matches
+    # (live-proven tool_calls=None). The registry neutralizes the stale stamp.
     _register(
         ModelConfig(
             family_name="openpangu_v2",
@@ -688,7 +692,7 @@ def register_all(registry=None):
                 "<|message_end|>",
                 "<|pangu_text_end|>",
             ],
-            tool_parser="qwen",
+            tool_parser="openpangu",
             reasoning_parser="deepseek_r1",
             think_in_template=True,
             supports_thinking=True,

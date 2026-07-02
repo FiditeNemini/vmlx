@@ -77,9 +77,11 @@ def test_registry_resolves_openpangu_family(tmp_path):
     (model_dir / "config.json").write_text(
         json.dumps({"model_type": "openpangu_v2", "hidden_size": 2560})
     )
-    # The converter stamps the coarse cache_type="hybrid"; the registry entry's
-    # kv/openpangu_v2_composite contract must WIN (hybrid would misroute the
-    # scheduler into SSM handling). Found live on the first server launch.
+    # The converter stamps the coarse cache_type="hybrid" AND tool_parser="qwen";
+    # the registry entry's kv/openpangu_v2_composite + "openpangu" contract must
+    # WIN (hybrid would misroute the scheduler into SSM handling; the qwen
+    # parser never matches the <|tool_call_start|> JSON-list format —
+    # live-proven tool_calls=None). Found live on the first server launch.
     (model_dir / "jang_config.json").write_text(
         json.dumps(
             {
@@ -101,7 +103,7 @@ def test_registry_resolves_openpangu_family(tmp_path):
     assert mc.cache_type == "kv"
     assert mc.cache_subtype == "openpangu_v2_composite"
     assert mc.reasoning_parser == "deepseek_r1"
-    assert mc.tool_parser == "qwen"
+    assert mc.tool_parser == "openpangu"
     assert "<|message_end|>" in mc.eos_tokens
 
 

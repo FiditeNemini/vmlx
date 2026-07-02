@@ -21,6 +21,7 @@ Available parsers:
 - glm47/glm4: GLM-4.7 and GLM-4.7-Flash models
 - minimax/minimax_m2: MiniMax M2/M2.5 models (XML invoke/parameter format)
 - zaya_xml/zaya/zyphra: ZAYA/Zyphra XML tool-call format
+- openpangu/openpangu_v2: openPangu-2.0 (<|tool_call_start|> JSON-list format)
 - xml_function: Generic <tool_call><function=...><parameter=...> format
 - lfm2/liquid: Liquid LFM2 Python-call-list format
 
@@ -59,6 +60,7 @@ from .lfm2_tool_parser import Lfm2ToolParser
 from .llama_tool_parser import LlamaToolParser
 from .mistral_tool_parser import MistralToolParser
 from .nemotron_tool_parser import NemotronToolParser
+from .openpangu_tool_parser import OpenPanguToolParser  # openPangu-2.0 (JSON list in <|tool_call_start|>)
 from .qwen_tool_parser import QwenToolParser
 from .xlam_tool_parser import xLAMToolParser
 from .step3p5_tool_parser import Step3p5ToolParser
@@ -93,6 +95,7 @@ __all__ = [
     "Step3p5ToolParser",
     "MiniMaxToolParser",
     "MiniMaxM3ToolParser",
+    "OpenPanguToolParser",
     "Gemma4ToolParser",
     "Gemma3ToolParser",
     "ZayaToolParser",

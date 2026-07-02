@@ -2775,6 +2775,8 @@ Examples:
             # Family-specific XML tool formats.
             "zaya_xml",
             "hunyuan",
+            # openPangu-2.0 JSON-list-in-special-token format.
+            "openpangu",
             # Aliases (map to same parsers)
             "generic",
             "qwen3",
@@ -2796,6 +2798,7 @@ Examples:
             "gemma4",
             "hy_v3",
             "tencent",
+            "openpangu_v2",
         ],
         help="Which format to use for parsing tool calls from model output. Must match your "
              "model's training format. Common choices: 'qwen' for Qwen models, 'llama' for "

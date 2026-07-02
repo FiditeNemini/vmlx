@@ -730,6 +730,42 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.usePagedCache).toBe(false)
   })
 
+  it('autodetects openPangu-2.0-Flash (openpangu_v2) with openpangu tool parser and kv/composite cache despite the stamped hybrid/qwen sidecar', () => {
+    // Mirrors the live JANG_2L jang_config stamp: the converter writes the
+    // coarse cache_type="hybrid" and tool_parser="qwen"; both are stale for
+    // this family (engine d1a588487 + openpangu parser) and must be
+    // neutralized so paged cache is NOT forced and the panel passes
+    // --tool-call-parser openpangu. Regression: without the registerFamily
+    // entry, detection fell through to generic — openpangu startup defaults
+    // (timeout 900, JIT off) never fired and the chat thinking toggle stayed
+    // disabled (2026-07-02 live UI matrix).
+    const dir = makeModelDir(
+      { model_type: 'openpangu_v2' },
+      {
+        capabilities: {
+          family: 'openpangu_v2',
+          reasoning_parser: 'deepseek_r1',
+          tool_parser: 'qwen',
+          supports_tools: true,
+          supports_thinking: true,
+          think_in_template: true,
+          cache_type: 'hybrid',
+          modality: 'text',
+        },
+      },
+    )
+    const detected = detectModelConfigFromDir(dir)
+    expect(detected.family).toBe('openpangu_v2')
+    expect(detected.toolParser).toBe('openpangu')
+    expect(detected.reasoningParser).toBe('deepseek_r1')
+    expect(detected.supportsThinking).toBe(true)
+    expect(detected.thinkInTemplate).toBe(true)
+    expect(detected.cacheType).toBe('kv')
+    expect(detected.cacheSubtype).toBe('openpangu_v2_composite')
+    expect(detected.usePagedCache).toBe(false)
+    expect(detected.isMultimodal).toBe(false)
+  })
+
   it('resolves minimax_m3 family even when only the inner text model_type is minimax_m3', () => {
     const dir = makeModelDir(
       { model_type: 'minimax_m3' },

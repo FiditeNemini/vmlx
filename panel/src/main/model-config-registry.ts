@@ -213,6 +213,20 @@ registerFamily('minimax', { cacheType: 'kv', toolParser: 'minimax', reasoningPar
 // a first-class M3 cache. The paged block-disk lane is not the default M3 path.
 registerFamily('minimax_m3', { cacheType: 'kv', toolParser: 'minimax_m3', reasoningParser: 'minimax_m3', enableAutoToolChoice: true, isMultimodal: true, usePagedCache: false, description: 'MiniMax-M3 (sparse MSA + Lightning-Indexer, VL)', priority: 5 })
 
+// openPangu-2.0-Flash: 92B MoE (6B active) MLA + DSA/SWA hybrid + 3 stateful
+// causal convs + mHC hyper-connections. Mirrors the engine registry entry
+// (vmlx_engine/model_configs.py): cache_type kv + openpangu_v2_composite
+// subtype ON PURPOSE (converter's coarse "hybrid" stamp would misroute into
+// SSM hybrid handling), tool parser "openpangu" (converter stamps "qwen"
+// which never matches the <|tool_call_start|> JSON-list format — see
+// applyJangCapabilities neutralization below), deepseek_r1 reasoning with
+// thinking in-template. Paged OFF: conv state is path-dependent, the typed
+// prefix/paged lane is Phase-2. Without this entry family detection fell
+// through to generic — openpangu startup defaults (timeout 900, JIT off) in
+// sessions.ts never fired and the chat thinking toggle stayed disabled
+// (live UI matrix finding, 2026-07-02).
+registerFamily('openpangu_v2', { cacheType: 'kv', cacheSubtype: 'openpangu_v2_composite', toolParser: 'openpangu', reasoningParser: 'deepseek_r1', supportsThinking: true, thinkInTemplate: true, usePagedCache: false, enableAutoToolChoice: true, isMultimodal: false, description: 'openPangu-2.0-Flash (MLA + DSA/SWA + mHC MoE)', priority: 20 })
+
 // Ling / Bailing hybrid: MLA softmax layers plus linear-attention/SSM-style
 // companion state. Eric directive 2026-05-11: treat Ling chat output as plain
 // content. Keep DeepSeek tool parsing, but do not advertise a reasoning parser
@@ -379,6 +393,7 @@ const MODEL_TYPE_TO_FAMILY: Record<string, string> = {
   'minimax_m2': 'minimax',
   'minimax_m2_5': 'minimax',
   'minimax_m3': 'minimax_m3',
+  'openpangu_v2': 'openpangu_v2',
   'minimax_m3_vl': 'minimax_m3',
   // ── Jamba / Mamba / SSM ──
   'jamba': 'jamba',
@@ -944,7 +959,13 @@ function applyJangCapabilities(
       next.thinkInTemplate = caps.think_in_template
     }
   }
-  if (typeof caps.cache_type === 'string') {
+  // openPangu-2.0-Flash: the converter stamps the coarse cache_type="hybrid",
+  // which would misroute the conv-state + mixed DSA/SWA composite cache into
+  // the SSM hybrid handling and force paged ON. The registry contract
+  // (kv + openpangu_v2_composite, paged OFF) wins — mirror of the engine-side
+  // stamp neutralization in vmlx_engine/model_config_registry (d1a588487).
+  const stampCacheNeutralized = next.family === 'openpangu_v2'
+  if (!stampCacheNeutralized && typeof caps.cache_type === 'string') {
     const cacheType = caps.cache_type
     if (cacheType === 'kv' || cacheType === 'mamba' || cacheType === 'hybrid' || cacheType === 'rotating_kv') {
       next.cacheType = cacheType
@@ -953,7 +974,7 @@ function applyJangCapabilities(
       }
     }
   }
-  if (typeof caps.cache_subtype === 'string' && caps.cache_subtype.length > 0) {
+  if (!stampCacheNeutralized && typeof caps.cache_subtype === 'string' && caps.cache_subtype.length > 0) {
     next.cacheSubtype = caps.cache_subtype
   }
   if (zayaTypedCca) {

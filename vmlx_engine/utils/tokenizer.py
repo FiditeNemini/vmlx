@@ -492,6 +492,23 @@ def _patch_mlx_lm_tokenizer_load() -> None:
     _orig_load = _tu.load
 
     def _patched_load(model_path, tokenizer_config_extra=None, eos_token_ids=None):
+        # Bundles that ship a custom tokenizer class (openPangu-2.0:
+        # OpenPanguV2Tokenizer via tokenization_openpangu_v2.py) need
+        # trust_remote_code, which mlx_lm's AutoTokenizer call doesn't pass.
+        # Same trust policy as jang_loader's own AutoTokenizer call; scoped
+        # to known custom classes so generic loads stay unchanged.
+        try:
+            import json as _trc_json
+            from pathlib import Path as _trc_Path
+
+            _tc_path = _trc_Path(str(model_path)) / "tokenizer_config.json"
+            if _tc_path.is_file():
+                _tc = _trc_json.loads(_tc_path.read_text())
+                if str(_tc.get("tokenizer_class", "")) in {"OpenPanguV2Tokenizer"}:
+                    tokenizer_config_extra = dict(tokenizer_config_extra or {})
+                    tokenizer_config_extra.setdefault("trust_remote_code", True)
+        except Exception:
+            pass
         wrapper = _orig_load(
             model_path,
             tokenizer_config_extra=tokenizer_config_extra,

@@ -5686,7 +5686,11 @@ class Scheduler:
                             ]
                     uids = self.batch_generator.insert(
                         [tokens_to_process],
-                        max_tokens=[request.sampling_params.max_tokens],
+                        # Remaining budget, not the full cap: a cache-error
+                        # reschedule re-enters here after clearing output_token_ids,
+                        # and must not restart a fresh max_tokens (see
+                        # Request.remaining_output_budget).
+                        max_tokens=[request.remaining_output_budget],
                         caches=[cache_to_use] if cache_to_use else None,
                         **insert_kwargs,
                     )
@@ -5725,7 +5729,10 @@ class Scheduler:
                                 ]
                         uids = self.batch_generator.insert(
                             [tokens_to_process],
-                            max_tokens=[request.sampling_params.max_tokens],
+                            # Remaining budget, not the full cap (see the
+                            # cached-insert site above and
+                            # Request.remaining_output_budget).
+                            max_tokens=[request.remaining_output_budget],
                             caches=None,
                             **insert_kwargs,
                         )
@@ -7358,8 +7365,27 @@ class Scheduler:
         """Move running requests back to waiting queue for retry."""
         count = len(self.running)
         for request_id, request in list(self.running.items()):
+            # A restart on a request that has ALREADY streamed tokens is
+            # noteworthy: those tokens are delivered to the client and cannot be
+            # recalled, so the re-run must continue under the ORIGINAL budget
+            # (total_output_tokens survives this reset; remaining_output_budget
+            # shrinks the re-insert cap accordingly). Surface it loudly.
+            request.recovery_restarts += 1
+            if request.num_output_tokens > 0:
+                logger.warning(
+                    "Cache-error reschedule of request %s after %d emitted "
+                    "tokens (lifetime %d, restart #%d) — continuing under the "
+                    "original max_tokens=%d via remaining budget %d",
+                    request_id,
+                    request.num_output_tokens,
+                    request.total_output_tokens,
+                    request.recovery_restarts,
+                    request.sampling_params.max_tokens,
+                    request.remaining_output_budget,
+                )
             # Reset request state — must clear ALL generation state so the
-            # retried request starts from scratch with correct token budget
+            # retried request starts from scratch with correct token budget.
+            # NOTE: total_output_tokens is intentionally NOT reset here.
             request.status = RequestStatus.WAITING
             request.batch_uid = None
             request.prompt_cache = None

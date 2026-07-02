@@ -16129,7 +16129,16 @@ async def stream_chat_completion(
         ]
         answer_kwargs = dict(kwargs)
         answer_kwargs["enable_thinking"] = False
-        answer_kwargs["max_tokens"] = int(_answer_budget or 256)
+        # Draw the bounded answer pass from the turn's REMAINING output budget,
+        # not a fresh full one. The reasoning pass already spent
+        # completion_tokens against the same resolved max_tokens; a fresh
+        # _answer_budget here doubled total output past the cap (openPangu:
+        # 4096 reasoning + 4096 answer = 8192 > the 4096 the client asked for).
+        # max(1, …) keeps a valid insert; if reasoning consumed the whole
+        # budget the turn correctly ends length-capped with no answer pass room.
+        answer_kwargs["max_tokens"] = max(
+            1, int(_answer_budget or 256) - int(completion_tokens or 0)
+        )
         answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
         if _answer_family == "MiniMax-M3":
             answer_ct_kwargs["thinking_mode"] = "disabled"
@@ -17560,7 +17569,14 @@ async def stream_responses_api(
             ]
             answer_kwargs = dict(kwargs)
             answer_kwargs["enable_thinking"] = False
-            answer_kwargs["max_tokens"] = int(_answer_budget or 256)
+            # Draw the bounded answer pass from the turn's REMAINING output
+            # budget, not a fresh full one (see the Chat Completions site): the
+            # reasoning pass already spent completion_tokens against the same
+            # resolved max_tokens, so a fresh _answer_budget doubled total
+            # output past the client's cap. max(1, …) keeps a valid insert.
+            answer_kwargs["max_tokens"] = max(
+                1, int(_answer_budget or 256) - int(completion_tokens or 0)
+            )
             answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
             if _answer_family == "MiniMax-M3":
                 answer_ct_kwargs["thinking_mode"] = "disabled"

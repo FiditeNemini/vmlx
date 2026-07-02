@@ -111,6 +111,19 @@ class Request:
     output_logprobs: List[dict] = field(default_factory=list)
     output_text: str = ""
 
+    # Lifetime output-token count that is NEVER reset — unlike
+    # output_token_ids, which _reschedule_running_requests() zeroes when a
+    # cache-error recovery restarts the request from prefill. Enforcing the
+    # resolved max_tokens against this cumulative count (via
+    # remaining_output_budget on re-insert) prevents a recoverable cache error
+    # from granting a request repeated fresh budgets — the structural path that
+    # could stream past its cap on an un-ending request.
+    total_output_tokens: int = 0
+    # Number of cache-error reschedules this request has survived. Used only for
+    # loud observability (a restart on a request that already emitted tokens is
+    # noteworthy); the budget accounting above is what actually bounds output.
+    recovery_restarts: int = 0
+
     # For BatchGenerator integration
     batch_uid: Optional[int] = None  # UID assigned by BatchGenerator
 
@@ -186,6 +199,21 @@ class Request:
         """Maximum output tokens for this request."""
         return self.sampling_params.max_tokens
 
+    @property
+    def remaining_output_budget(self) -> int:
+        """Output-token budget still allowed under the resolved max_tokens.
+
+        Equals max_tokens for a fresh request (total_output_tokens == 0) and
+        shrinks by every token already emitted across any cache-error restarts,
+        so a generator re-insert after _reschedule_running_requests() cannot
+        exceed the request's original cap. Floored at 1 because an insert needs
+        a positive budget; when the lifetime total has already reached
+        max_tokens the generator's per-insert length check fires immediately.
+        """
+        return max(
+            1, self.sampling_params.max_tokens - self.total_output_tokens
+        )
+
     def is_finished(self) -> bool:
         """Check if request has finished."""
         return RequestStatus.is_finished(self.status)
@@ -200,6 +228,9 @@ class Request:
         """Append a generated token to the output."""
         self.output_token_ids.append(token_id)
         self.num_computed_tokens += 1
+        # Lifetime counter, never cleared on reschedule — see
+        # remaining_output_budget.
+        self.total_output_tokens += 1
 
     def set_finished(self, status: RequestStatus, reason: Optional[str] = None) -> None:
         """Mark the request as finished."""

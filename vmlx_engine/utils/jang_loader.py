@@ -5711,11 +5711,32 @@ def _post_load_quantization_overrides(
     """
     if not isinstance(config, dict):
         return None
+    text_config = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
+    model_type = str(config.get("model_type") or text_config.get("model_type") or "")
+    if model_type == "openpangu_v2" and isinstance(jang_cfg, dict):
+        # openPangu-2.0 ships exact per-tensor bits/group_size in the JANG
+        # sidecar (quantization.tensor_quantization_manifest, 684 entries) —
+        # config.json has no quantization block at all. The mHC phi tensors
+        # are shape-ambiguous (2-bit/gs128 packs to the same [24,640]+[24,80]
+        # as 8-bit/gs32) and the shape walk mis-infers them — the Swift port
+        # hit exactly this. The manifest is authoritative; trust it wholesale.
+        manifest = (jang_cfg.get("quantization") or {}).get(
+            "tensor_quantization_manifest"
+        )
+        if isinstance(manifest, dict) and manifest:
+            overrides = {
+                name: {"bits": entry["bits"], "group_size": entry["group_size"]}
+                for name, entry in manifest.items()
+                if isinstance(entry, dict)
+                and "bits" in entry
+                and "group_size" in entry
+            }
+            if overrides:
+                return overrides
+        return None
     quantization = config.get("quantization")
     if not isinstance(quantization, dict):
         return None
-    text_config = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
-    model_type = str(config.get("model_type") or text_config.get("model_type") or "")
     if model_type in {"deepseek_v4", "mimo_v2", "zaya", "zaya1_vl"}:
         # ZAYA config.json carries accurate per-module entries (experts bits=4/gs=32,
         # attention bits=8/gs=32) that match the stored tensor shapes; without them

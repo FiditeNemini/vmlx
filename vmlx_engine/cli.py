@@ -506,6 +506,58 @@ def serve_command(args):
     except Exception as _m3reg_e:
         logger.debug("minimax_m3 runtime registration skipped: %s", _m3reg_e)
 
+    # Install the vendored openPangu-2.0-Flash runtime under
+    # mlx_lm.models.openpangu_v2 so the text loader can resolve
+    # model_type=openpangu_v2. Idempotent; harmless for other models.
+    try:
+        from .models.openpangu_v2.register import register_openpangu_v2_runtime
+        register_openpangu_v2_runtime()
+    except Exception as _opv2reg_e:
+        logger.debug("openpangu_v2 runtime registration skipped: %s", _opv2reg_e)
+
+    # -- openPangu-2.0-Flash auto-settings TRANSPARENCY log + policy --
+    # Mirrors the M3 block below: on an openpangu_v2 bundle, force-disable JIT
+    # (the DSA lightning-indexer top-k selection is input-dependent/dynamic —
+    # the same class of mx.compile hazard that corrupted M3's MSA cache) and
+    # log the exact auto-resolved settings. TQ-KV is auto-skipped by the MLA
+    # detector (kv_lora_rank=512); kv_cache_quantization is cleared here too
+    # so the prefix-store lane never re-quantizes the conv-state-coupled KV.
+    try:
+        import json as _op_json, os as _op_os
+        _op_cfgp = _op_os.path.join(getattr(args, "model", "") or "", "config.json")
+        if _op_os.path.isfile(_op_cfgp):
+            _op_c = _op_json.load(open(_op_cfgp))
+            if str(_op_c.get("model_type", "")).lower() == "openpangu_v2":
+                _op_jit_forced_off = bool(getattr(args, "enable_jit", False))
+                if _op_jit_forced_off:
+                    args.enable_jit = False
+                    logger.warning(
+                        "openPangu-2.0 detected — ignoring --enable-jit. The DSA "
+                        "indexer top-k selection and mHC Sinkhorn are dynamic per "
+                        "step and untraceable by mx.compile; staying on the "
+                        "uncompiled scheduler path."
+                    )
+                if not getattr(args, "kv_cache_quantization_explicit", False):
+                    args.kv_cache_quantization = "none"
+                if getattr(args, "is_mllm", False):
+                    args.is_mllm = False
+                    logger.warning(
+                        "openPangu-2.0 is text-only; ignoring --is-mllm."
+                    )
+                logger.info(
+                    "openPangu-2.0 AUTODETECTED (openpangu_v2) -> auto-settings: "
+                    "paged_cache=%s, tq_kv=SKIP(MLA kv_lora_rank), prefix_store="
+                    "path-dependent-skip (conv states, Phase-2 typed lane), "
+                    "mtp=detection-only(depth 3), tool_parser=%s, "
+                    "reasoning_parser=%s, jit=%s",
+                    "OFF" if not getattr(args, "use_paged_cache", False) else "ON(!)",
+                    getattr(args, "tool_call_parser", None) or "qwen(auto)",
+                    getattr(args, "reasoning_parser", None) or "deepseek_r1(auto)",
+                    "OFF(forced)" if _op_jit_forced_off else "off",
+                )
+    except Exception:
+        pass
+
     # -- MiniMax-M3 auto-settings TRANSPARENCY log (no-confusion guarantee) --
     # On an M3 bundle, log the EXACT auto-resolved settings so what is applied is
     # never ambiguous. Read-only, exception-guarded. paged_cache shows ON(!) if it

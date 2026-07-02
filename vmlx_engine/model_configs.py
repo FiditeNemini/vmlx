@@ -664,6 +664,38 @@ def register_all(registry=None):
         )
     )
 
+    # ── openPangu-2.0-Flash (openpangu_v2) ── 92B MoE (6B active), 512K ctx.
+    # MLA + 3 stateful causal convs + 128 attention sinks + DSA/SWA hybrid 1:2
+    # + mHC 4-stream hyper-connections + sandwich norm + MTP depth 3 (dropped
+    # at runtime, detection-only). Vendored runtime under
+    # vmlx_engine/models/openpangu_v2/ (registered as mlx_lm.models.openpangu_v2).
+    # cache_type is "kv" + a dedicated subtype ON PURPOSE — the converter stamps
+    # the coarse "hybrid", but that would misroute this family into the SSM
+    # hybrid scheduler handling (truncate_hybrid_cache / SSM companion), which
+    # does not match the conv-state + mixed DSA/SWA cache. The path-dependent
+    # conv state makes OpenPanguV2LayerCache is_trimmable()=False and
+    # detect_cache_type()=UNKNOWN, so prefix/paged stores skip safely until a
+    # typed lane lands (Phase 2). EOS: <|message_end|> (148902, chat-turn
+    # terminator, generation_config eos) + <|pangu_text_end|> (148900,
+    # tokenizer eos). generation_config sampling: temp=1.0, top_p=0.8.
+    _register(
+        ModelConfig(
+            family_name="openpangu_v2",
+            model_types=["openpangu_v2"],
+            cache_type="kv",
+            cache_subtype="openpangu_v2_composite",
+            eos_tokens=[
+                "<|message_end|>",
+                "<|pangu_text_end|>",
+            ],
+            tool_parser="qwen",
+            reasoning_parser="deepseek_r1",
+            think_in_template=True,
+            supports_thinking=True,
+            priority=20,
+        )
+    )
+
     # ── Ling-2.6-flash / Bailing-V2.5 (bailing_hybrid model_type) ──
     # Hybrid MLA + Lightning-Attn-2 (Gated Linear Attention). Layer
     # dispatch is controlled by `layer_group_size` (default 8 for

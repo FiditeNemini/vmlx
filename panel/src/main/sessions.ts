@@ -96,6 +96,8 @@ const DSV4_PAGED_CACHE_BLOCK_SIZE = 256
 const GENERIC_DEFAULT_TIMEOUT_SECONDS = 300
 const DSV4_DEFAULT_TIMEOUT_SECONDS = 900
 const MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900
+// openPangu-2.0-Flash: 92B MoE, typically 2-3 bit JANG — slow prefill/decode.
+const OPENPANGU_V2_DEFAULT_TIMEOUT_SECONDS = 900
 
 function effectiveSessionTimeoutSeconds(config: Partial<ServerConfig>, family?: string): number {
   const configured = config.timeout
@@ -106,6 +108,9 @@ function effectiveSessionTimeoutSeconds(config: Partial<ServerConfig>, family?: 
   }
   if (normalizedFamily === 'minimax_m3' && (configured == null || configured === GENERIC_DEFAULT_TIMEOUT_SECONDS)) {
     return MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS
+  }
+  if (normalizedFamily === 'openpangu_v2' && (configured == null || configured === GENERIC_DEFAULT_TIMEOUT_SECONDS)) {
+    return OPENPANGU_V2_DEFAULT_TIMEOUT_SECONDS
   }
   return configured != null && configured > 0 ? configured : GENERIC_DEFAULT_TIMEOUT_SECONDS
 }
@@ -183,6 +188,39 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
       // Keep MiniMax-M3 output length model-owned by default. Do not silently
       // force a larger --max-tokens cap; explicit user values are preserved and
       // legacy generic caps are scrubbed back to model-owned below.
+      if (config.maxTokens != null && LEGACY_GENERIC_MAX_OUTPUT_TOKENS.has(Number(config.maxTokens))) {
+        config.maxTokens = 0
+        changed = true
+      }
+      if (config.enablePrefixCache !== true) {
+        config.enablePrefixCache = true
+        changed = true
+      }
+      if (config.usePagedCache !== false) {
+        config.usePagedCache = false
+        changed = true
+      }
+      if (config.enableDiskCache !== true) {
+        config.enableDiskCache = true
+        changed = true
+      }
+      if (config.enableBlockDiskCache !== false) {
+        config.enableBlockDiskCache = false
+        changed = true
+      }
+      if (config.enableJit !== false) {
+        config.enableJit = false
+        changed = true
+      }
+    } else if (detectedFamily === 'openpangu_v2') {
+      // openPangu-2.0-Flash: path-dependent conv-state cache — warm prefix/
+      // paged reuse is engine-skipped until the typed lane lands, so keep the
+      // v7 generic paged-off defaults; JIT off (dynamic DSA top-k selection,
+      // same mx.compile hazard class as M3 MSA — engine cli also force-ignores).
+      if (config.timeout == null || config.timeout === GENERIC_DEFAULT_TIMEOUT_SECONDS) {
+        config.timeout = OPENPANGU_V2_DEFAULT_TIMEOUT_SECONDS
+        changed = true
+      }
       if (config.maxTokens != null && LEGACY_GENERIC_MAX_OUTPUT_TOKENS.has(Number(config.maxTokens))) {
         config.maxTokens = 0
         changed = true

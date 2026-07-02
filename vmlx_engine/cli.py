@@ -550,7 +550,18 @@ def serve_command(args):
                     "path-dependent-skip (conv states, Phase-2 typed lane), "
                     "mtp=detection-only(depth 3), tool_parser=%s, "
                     "reasoning_parser=%s, jit=%s",
-                    "OFF" if not getattr(args, "use_paged_cache", False) else "ON(!)",
+                    # OpenPanguV2LayerCache is neither plain-KV nor SSM: the
+                    # scheduler's class-based hybrid detection routes it to the
+                    # paged BACKEND on purpose (memory-aware cache must never
+                    # truncate conv-state caches), while warm record stores
+                    # still skip (detect_cache_type=UNKNOWN). Say so instead of
+                    # claiming OFF and having the scheduler "auto-switch" a
+                    # line later — the two logs looked contradictory live.
+                    (
+                        "structural-auto(paged backend; warm stores skip)"
+                        if not getattr(args, "use_paged_cache", False)
+                        else "ON(explicit)"
+                    ),
                     getattr(args, "tool_call_parser", None) or "qwen(auto)",
                     getattr(args, "reasoning_parser", None) or "deepseek_r1(auto)",
                     "OFF(forced)" if _op_jit_forced_off else "off",

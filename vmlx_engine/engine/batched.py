@@ -277,6 +277,8 @@ class BatchedEngine(BaseEngine):
             raise RuntimeError("MLLM instance is not loaded")
         call_kwargs = dict(kwargs)
         call_kwargs.pop("request_id", None)
+        # Server-side gating flag (see generate/stream_generate) — not a model kwarg.
+        call_kwargs.pop("_model_owned_max_tokens", None)
         call_kwargs["top_p"] = top_p
         if tools:
             call_kwargs["tools"] = convert_tools_for_template(tools)
@@ -1639,6 +1641,11 @@ class BatchedEngine(BaseEngine):
         bypass_prefix_cache = bool(kwargs.pop("_bypass_prefix_cache", False))
         request_id = kwargs.pop("request_id", None)
         max_prompt_tokens = int(kwargs.pop("max_prompt_tokens", 0) or 0)
+        # True when the client sent no output cap and no explicit CLI/session
+        # override exists (max_tokens is bundle/engine "model-owned"). Threaded
+        # into SamplingParams so the scheduler can arm the per-family
+        # thinking-budget backstop for unbounded reasoning turns.
+        model_owned_max_tokens = bool(kwargs.pop("_model_owned_max_tokens", False))
 
         if self._is_mllm and self._mllm_scheduler:
             # Use MLLM scheduler for all requests (text-only and multimodal)
@@ -1707,6 +1714,7 @@ class BatchedEngine(BaseEngine):
             stop=stop or [],
             logprobs=bool(kwargs.get("logprobs", False)),
             top_logprobs=int(kwargs.get("top_logprobs", 0) or 0),
+            model_owned_max_tokens=model_owned_max_tokens,
         )
 
         _m3vl_extra = {}
@@ -1782,6 +1790,11 @@ class BatchedEngine(BaseEngine):
         # collide with downstream positional arguments.
         bypass_prefix_cache = bool(kwargs.pop("_bypass_prefix_cache", False))
         max_prompt_tokens = int(kwargs.pop("max_prompt_tokens", 0) or 0)
+        # True when the client sent no output cap and no explicit CLI/session
+        # override exists (max_tokens is bundle/engine "model-owned"). Threaded
+        # into SamplingParams so the scheduler can arm the per-family
+        # thinking-budget backstop for unbounded reasoning turns.
+        model_owned_max_tokens = bool(kwargs.pop("_model_owned_max_tokens", False))
 
         if self._is_mllm and self._mllm_scheduler:
             # Use MLLM scheduler for all requests (text-only and multimodal)
@@ -1846,6 +1859,7 @@ class BatchedEngine(BaseEngine):
             stop=stop or [],
             logprobs=bool(kwargs.get("logprobs", False)),
             top_logprobs=int(kwargs.get("top_logprobs", 0) or 0),
+            model_owned_max_tokens=model_owned_max_tokens,
         )
 
         _m3vl_extra = {}

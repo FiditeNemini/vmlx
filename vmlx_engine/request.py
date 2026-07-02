@@ -66,6 +66,14 @@ class SamplingParams:
     stop_token_ids: Optional[List[int]] = None
     logprobs: bool = False
     top_logprobs: int = 0
+    # True when the CLIENT did not set an output cap (no request max_tokens /
+    # max_output_tokens and no explicit CLI/session --max-tokens override), so
+    # max_tokens above came from the bundle default or engine fallback
+    # ("model-owned"). The scheduler arms the per-family thinking-budget
+    # backstop (force-inject close-think token) only for model-owned turns —
+    # explicit client caps are always honored untouched. Threaded from
+    # server._max_tokens_is_model_owned() via kwargs "_model_owned_max_tokens".
+    model_owned_max_tokens: bool = False
 
     def __post_init__(self):
         if self.stop is None:

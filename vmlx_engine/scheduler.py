@@ -88,6 +88,25 @@ CACHE_CORRUPTION_PATTERNS = [
     "Allocation failed",
 ]
 
+# Families whose reasoning rail gets the in-stream thinking-budget backstop:
+# once a MODEL-OWNED turn (client sent no max_tokens) generates more than the
+# budget without emitting the close-think token, the scheduler force-injects
+# it via a logits processor so generation transitions to the visible answer.
+# Generalized from the proven MiniMax-M3 mechanism (commit b5af37d23); M3
+# itself now uses the first-pass-budget + post-stream answer pass instead, so
+# it is intentionally NOT listed here. Adding a family is a one-line change;
+# tags MUST encode to single token ids (checked at arm time). Env override:
+# VMLX_THINK_BUDGET (0 disables).
+THINK_BUDGET_FAMILIES: Dict[str, Dict[str, Any]] = {
+    # openPangu-2.0 (live-proven runaway: 50-90+ min unbounded reasoning turn
+    # in the 2026-07-02 UI soak — docs/OPENPANGU-V2-CAMPAIGN.md).
+    "openpangu_v2": {
+        "open_tag": "<think>",
+        "close_tag": "</think>",
+        "default_budget": 8192,
+    },
+}
+
 
 def _rebuild_meta_state_after_truncation(
     cls_name: str,
@@ -2710,6 +2729,183 @@ class Scheduler:
 
         return _wrapped
 
+    def _think_budget_family_spec(self) -> Optional[Dict[str, Any]]:
+        """Return the THINK_BUDGET_FAMILIES spec for the loaded model, else None.
+
+        Family is resolved once per scheduler via the server's model-config
+        registry (lazy import to dodge the circular server<->scheduler import,
+        same pattern the M3 backstop used for its reasoning-parser gate).
+        """
+        if getattr(self, "_think_budget_spec_resolved", False):
+            return self._think_budget_spec
+        self._think_budget_spec_resolved = True
+        self._think_budget_spec = None
+        try:
+            from . import server as _server  # lazy: dodge circular import
+
+            family = str(_server._model_family_for_defaults("") or "").lower()
+            spec = THINK_BUDGET_FAMILIES.get(family)
+            if spec is None:
+                return None
+            self._think_budget_spec = dict(spec, family=family)
+        except Exception:
+            self._think_budget_spec = None
+        return self._think_budget_spec
+
+    def _think_budget_token_ids(
+        self, spec: Dict[str, Any]
+    ) -> Optional[Tuple[int, int]]:
+        """Encode the family's (open, close) think tags to single token ids.
+
+        The backstop can only force ONE token per step, so both tags must be
+        single special tokens in the tokenizer (true for DeepSeek-R1-style
+        <think>/</think> vocabularies, incl. openPangu). If not, disable
+        loudly — a multi-token force would inject garbage.
+        """
+        cached = getattr(self, "_think_budget_token_ids_cache", None)
+        if cached is not None:
+            return cached if cached != () else None
+        self._think_budget_token_ids_cache = ()
+        tok = self._actual_tokenizer or self.tokenizer
+        if tok is None:
+            return None
+
+        def _single_id(tag: str) -> Optional[int]:
+            try:
+                ids = tok.encode(tag, add_special_tokens=False)
+            except TypeError:
+                ids = tok.encode(tag)
+            if ids and len(ids) == 1:
+                return int(ids[0])
+            return None
+
+        open_id = _single_id(str(spec.get("open_tag") or ""))
+        close_id = _single_id(str(spec.get("close_tag") or ""))
+        if open_id is None or close_id is None:
+            logger.warning(
+                "Thinking-budget backstop DISABLED for family=%s: tags %r/%r "
+                "do not encode to single token ids (open=%s close=%s) — "
+                "cannot force-inject the close-think token.",
+                spec.get("family"),
+                spec.get("open_tag"),
+                spec.get("close_tag"),
+                open_id,
+                close_id,
+            )
+            return None
+        self._think_budget_token_ids_cache = (open_id, close_id)
+        logger.debug(
+            "Thinking-budget backstop armed for family=%s: OPEN=%d CLOSE=%d",
+            spec.get("family"),
+            open_id,
+            close_id,
+        )
+        return (open_id, close_id)
+
+    def _thinking_budget_processor(
+        self,
+        request: Request,
+        prompt_tokens: List[int],
+    ) -> Optional[Callable[[Any, Any], Any]]:
+        """Force-close a runaway reasoning rail after a thinking-token budget.
+
+        Generalized from the proven MiniMax-M3 mechanism (b5af37d23): once an
+        in-thinking trace exceeds the budget without emitting the family's
+        close-think token, mask the logits to force it, pushing the model into
+        its visible answer. Enforcement is IN-STREAM (per decode step, token
+        counting owned by this closure) — it terminates runaway reasoning even
+        when downstream length accounting fails, which is exactly the
+        openPangu live failure (unbounded 50-90+ min reasoning turn with
+        model-owned max_tokens; post-stream backstops can never fire if the
+        stream never ends).
+
+        Gates:
+        - family must be listed in THINK_BUDGET_FAMILIES (openpangu_v2 only
+          for now; other families are a one-line table addition),
+        - the request's max_tokens must be model-owned (client sent no cap);
+          explicit client caps are honored untouched,
+        - thinking must not be pre-closed in the prompt (thinking-off turns).
+
+        Budget: VMLX_THINK_BUDGET env override, else the family default
+        (openpangu: 8192), scaled down to half the output budget (floor 96)
+        so the forced close always leaves room for the answer.
+        """
+        sp = getattr(request, "sampling_params", None)
+        if not bool(getattr(sp, "model_owned_max_tokens", False)):
+            return None
+        spec = self._think_budget_family_spec()
+        if spec is None:
+            return None
+        ids = self._think_budget_token_ids(spec)
+        if ids is None:
+            return None
+        OPEN, CLOSE = ids
+        try:
+            budget = int(
+                os.environ.get("VMLX_THINK_BUDGET", "")
+                or int(spec.get("default_budget") or 8192)
+            )
+        except Exception:
+            budget = int(spec.get("default_budget") or 8192)
+        if budget <= 0:
+            return None  # explicit opt-out via VMLX_THINK_BUDGET=0
+        max_out = int(getattr(sp, "max_tokens", 0) or 0)
+        if max_out > 0:
+            budget = min(budget, max(96, max_out // 2))
+        tail = [int(t) for t in (prompt_tokens[-6:] if prompt_tokens else [])]
+        has_open = OPEN in tail
+        has_close = CLOSE in tail
+        if has_close and not has_open:
+            return None  # thinking-off: rail pre-closed in the prompt
+        family = spec.get("family")
+        import mlx.core as mx
+
+        st = {"opened": bool(has_open), "closed": False, "scanned": 0, "fired": False}
+
+        def _proc(tokens, logits):
+            if st["closed"]:
+                return logits
+            try:
+                n = len(tokens)
+                if n > st["scanned"]:
+                    new_t = tokens[st["scanned"] :]
+                    arr = new_t.tolist() if hasattr(new_t, "tolist") else list(new_t)
+                    for t in arr:
+                        ti = int(t)
+                        if ti == OPEN:
+                            st["opened"] = True
+                        elif ti == CLOSE:
+                            st["closed"] = True
+                    st["scanned"] = n
+            except Exception:
+                return logits
+            if st["closed"] or not st["opened"]:
+                return logits
+            if n >= budget:
+                if not st["fired"]:
+                    st["fired"] = True
+                    logger.warning(
+                        "THINK-BUDGET CEILING FIRED: family=%s model-owned turn "
+                        "passed %d thinking tokens without closing the "
+                        "reasoning rail — force-injecting close-think token "
+                        "id=%d (budget=%d, VMLX_THINK_BUDGET overrides)",
+                        family,
+                        n,
+                        CLOSE,
+                        budget,
+                    )
+                vocab = logits.shape[-1]
+                onehot = mx.arange(vocab) == CLOSE
+                forced = mx.where(
+                    onehot,
+                    mx.array(0.0, dtype=logits.dtype),
+                    mx.array(-1e9, dtype=logits.dtype),
+                )
+                return mx.broadcast_to(forced, logits.shape)
+            return logits
+
+        return _proc
+
     def _request_logits_processors(
         self,
         request: Request,
@@ -2717,22 +2913,32 @@ class Scheduler:
     ) -> Optional[List[Callable[[Any, Any], Any]]]:
         """Build BatchGenerator processors with generate_step-compatible context."""
 
-        rep = request.sampling_params.repetition_penalty
-        if not rep or rep == 1.0:
-            return None
-
-        from mlx_lm.sample_utils import make_logits_processors
-
-        rep_context_size = 512 if self._long_repetition_context else 20
-        processors = make_logits_processors(
-            repetition_penalty=rep,
-            repetition_context_size=rep_context_size,
-        )
         skip_prefix_tokens = max(len(tokens_to_process) - 1, 0)
-        return [
-            self._wrap_generated_only_logits_processor(p, skip_prefix_tokens)
-            for p in processors
-        ]
+        processors: List[Callable[[Any, Any], Any]] = []
+
+        rep = request.sampling_params.repetition_penalty
+        if rep and rep != 1.0:
+            from mlx_lm.sample_utils import make_logits_processors
+
+            rep_context_size = 512 if self._long_repetition_context else 20
+            rep_procs = make_logits_processors(
+                repetition_penalty=rep,
+                repetition_context_size=rep_context_size,
+            )
+            processors.extend(
+                self._wrap_generated_only_logits_processor(p, skip_prefix_tokens)
+                for p in rep_procs
+            )
+
+        # Per-family thinking-budget backstop (hard in-stream guarantee against
+        # runaway reasoning on model-owned turns). openpangu_v2 only for now.
+        tb = self._thinking_budget_processor(request, list(tokens_to_process))
+        if tb is not None:
+            processors.append(
+                self._wrap_generated_only_logits_processor(tb, skip_prefix_tokens)
+            )
+
+        return processors or None
 
     def _ensure_batch_generator(self, sampling_params: SamplingParams) -> bool:
         """Ensure BatchGenerator exists with compatible settings."""

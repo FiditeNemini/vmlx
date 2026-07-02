@@ -1439,6 +1439,46 @@ def _resolve_max_tokens(request_value: int | None, model_name: str = "") -> int:
     )
 
 
+# Absolute outer wall for MODEL-OWNED turns (client sent no output cap): a
+# streaming turn that reaches this many generated tokens is force-terminated
+# with finish_reason="length" by the server stream loop itself, independent of
+# scheduler/generator length accounting. Exists because the 2026-07-02
+# openPangu UI soak produced a 50-90+ minute unbounded reasoning decode
+# (50k+ tokens) even though the engine-resolved max_tokens was 4096 — the
+# post-stream backstops can never fire if the stream never ends. Env override:
+# VMLX_MODEL_OWNED_MAX_TOKENS (0 disables).
+_MODEL_OWNED_MAX_TOKENS_DEFAULT = 32768
+
+
+def _model_owned_output_ceiling() -> int:
+    """Return the model-owned-turn absolute token ceiling (0 = disabled)."""
+    try:
+        raw = os.environ.get("VMLX_MODEL_OWNED_MAX_TOKENS")
+        if raw is None or str(raw).strip() == "":
+            return _MODEL_OWNED_MAX_TOKENS_DEFAULT
+        return max(0, int(raw))
+    except Exception:
+        return _MODEL_OWNED_MAX_TOKENS_DEFAULT
+
+
+def _max_tokens_is_model_owned(request_value: int | None) -> bool:
+    """True when the effective max_tokens is model-owned (no client cap).
+
+    Model-owned = the client sent no positive max_tokens/max_output_tokens
+    AND no explicit CLI/session --max-tokens override exists, so
+    _resolve_max_tokens() fell through to the bundle max_new_tokens or the
+    engine fallback. Only these turns get the thinking-budget backstop and
+    the absolute unbounded-turn ceiling; explicit client caps are honored
+    untouched (live-proven working: max_tokens=64 stopped at 35).
+    """
+    try:
+        if request_value is not None and int(request_value) > 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return not _default_max_tokens_explicit
+
+
 @dataclass(frozen=True)
 class _DSV4ThinkingDecision:
     enable_thinking: bool
@@ -11855,6 +11895,11 @@ async def create_chat_completion(
         "top_p": _resolve_top_p(request.top_p, request.model),
         "max_prompt_tokens": _chat_max_prompt_tokens,
     }
+    if _max_tokens_is_model_owned(_request_max_tokens):
+        # No client output cap → arm the unbounded-turn protections: the
+        # scheduler's per-family thinking-budget backstop (close-think token
+        # injection) and the stream loop's absolute model-owned token ceiling.
+        chat_kwargs["_model_owned_max_tokens"] = True
     if response_format:
         chat_kwargs["_vmlx_response_format"] = (
             response_format.model_dump(exclude_none=True, by_alias=True)
@@ -12348,6 +12393,8 @@ async def create_chat_completion(
             _ns_kwargs = dict(chat_kwargs)
             _ns_kwargs["enable_thinking"] = False
             _ns_kwargs["max_tokens"] = _ns_budget
+            # Explicit bounded max_tokens above — no longer model-owned.
+            _ns_kwargs.pop("_model_owned_max_tokens", None)
             _ns_ct = dict(_ns_kwargs.get("chat_template_kwargs") or {})
             if _ns_is_m3:
                 _ns_ct["thinking_mode"] = "disabled"
@@ -13894,6 +13941,10 @@ async def create_response(
         "top_p": _resolve_top_p(request.top_p, request.model),
         "max_prompt_tokens": _responses_max_prompt_tokens,
     }
+    if _max_tokens_is_model_owned(request.max_output_tokens):
+        # No client output cap → arm the unbounded-turn protections (see the
+        # Chat Completions handler for the mirror site).
+        chat_kwargs["_model_owned_max_tokens"] = True
     _response_text_format = None
     if request.text and isinstance(request.text, dict):
         _response_text_format = request.text
@@ -14485,6 +14536,8 @@ async def create_response(
             _ns_kwargs = dict(chat_kwargs)
             _ns_kwargs["enable_thinking"] = False
             _ns_kwargs["max_tokens"] = _ns_budget
+            # Explicit bounded max_tokens above — no longer model-owned.
+            _ns_kwargs.pop("_model_owned_max_tokens", None)
             _ns_ct = dict(_ns_kwargs.get("chat_template_kwargs") or {})
             if _ns_is_m3:
                 _ns_ct["thinking_mode"] = "disabled"
@@ -15297,6 +15350,22 @@ async def stream_chat_completion(
     last_output = None
     stream_logprob_offset = 0
 
+    # ABSOLUTE MODEL-OWNED TURN CEILING (in-stream outer wall). Armed only
+    # when the client sent no output cap (_model_owned_max_tokens flag from
+    # the handler). Counts tokens in THIS loop — independent of scheduler /
+    # generator length accounting, because the 2026-07-02 openPangu runaway
+    # decoded 50k+ tokens even though the engine-resolved max_tokens was 4096
+    # (post-stream backstops can never fire if the stream never ends).
+    # _model_owned_outputs_seen is a per-chunk fallback counter in case a
+    # broken path stops updating output.completion_tokens.
+    _model_owned_ceiling = (
+        _model_owned_output_ceiling()
+        if kwargs.get("_model_owned_max_tokens")
+        else 0
+    )
+    _model_owned_outputs_seen = 0
+    _model_owned_ceiling_fired = False
+
     # Use per-request timeout if provided, otherwise server default
     _stream_timeout = (
         request.timeout if request.timeout is not None else _default_timeout
@@ -15333,6 +15402,51 @@ async def stream_chat_completion(
             _detail = getattr(output, "cache_detail", "") or None
             if _detail is not None:
                 cache_detail = _detail
+
+            # Absolute model-owned turn ceiling (outer wall) — force-end a
+            # stream that outran every inner bound. finish_reason="length";
+            # if the turn was reasoning-only the post-stream bounded
+            # thinking-off answer pass below still runs and emits a visible
+            # answer.
+            if _model_owned_ceiling > 0 and not output.finished:
+                _model_owned_outputs_seen += 1
+                if (
+                    max(completion_tokens, _model_owned_outputs_seen)
+                    >= _model_owned_ceiling
+                ):
+                    _model_owned_ceiling_fired = True
+                    logger.error(
+                        "MODEL-OWNED TURN CEILING FIRED: request %s generated "
+                        "%d tokens (chunks=%d) with no client max_tokens and "
+                        "the stream still running — force-terminating with "
+                        "finish_reason=length (ceiling=%d, "
+                        "VMLX_MODEL_OWNED_MAX_TOKENS overrides)",
+                        response_id,
+                        completion_tokens,
+                        _model_owned_outputs_seen,
+                        _model_owned_ceiling,
+                    )
+                    try:
+                        output.finish_reason = "length"
+                    except Exception:
+                        pass
+                    if hasattr(engine, "abort_request"):
+                        await engine.abort_request(response_id)
+                    if content_was_emitted:
+                        _ceiling_chunk = ChatCompletionChunk(
+                            id=response_id,
+                            created=_created_ts,
+                            model=request.model,
+                            choices=[
+                                ChatCompletionChunkChoice(
+                                    delta=ChatCompletionChunkDelta(),
+                                    finish_reason="length",
+                                )
+                            ],
+                        )
+                        yield f"data: {_dump_sse_json(_ceiling_chunk)}\n\n"
+                    break
+
             chunk_logprobs = None
             if request.logprobs:
                 raw_logprobs = getattr(output, "logprobs", None) or []
@@ -16130,6 +16244,9 @@ async def stream_chat_completion(
         answer_kwargs = dict(kwargs)
         answer_kwargs["enable_thinking"] = False
         answer_kwargs["max_tokens"] = int(_answer_budget or 256)
+        # The answer pass sets an explicit bounded max_tokens above — it is
+        # no longer a model-owned turn, so drop the unbounded-turn flag.
+        answer_kwargs.pop("_model_owned_max_tokens", None)
         answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
         if _answer_family == "MiniMax-M3":
             answer_ct_kwargs["thinking_mode"] = "disabled"
@@ -16524,6 +16641,18 @@ async def stream_responses_api(
     last_output = (
         None  # Track last engine output for finish_reason (status: incomplete)
     )
+
+    # ABSOLUTE MODEL-OWNED TURN CEILING (in-stream outer wall) — mirrors
+    # stream_chat_completion. Armed only when the client sent no output cap;
+    # counts tokens in THIS loop, independent of scheduler/generator length
+    # accounting (2026-07-02 openPangu runaway: 50k+ token decode despite an
+    # engine-resolved max_tokens of 4096).
+    _model_owned_ceiling = (
+        _model_owned_output_ceiling()
+        if kwargs.get("_model_owned_max_tokens")
+        else 0
+    )
+    _model_owned_outputs_seen = 0
 
     # Resolve effective enable_thinking:
     # Priority: top-level field > chat_template_kwargs > server default > auto-detect
@@ -16922,6 +17051,35 @@ async def stream_responses_api(
             _detail_chunk = getattr(output, "cache_detail", "") or None
             if _detail_chunk is not None:
                 _cache_detail = _detail_chunk
+
+            # Absolute model-owned turn ceiling (outer wall) — force-end a
+            # stream that outran every inner bound. The post-loop finalizer
+            # sees finish_reason="length" (status: incomplete) and the
+            # reasoning-only bounded answer pass still runs.
+            if _model_owned_ceiling > 0 and not output.finished:
+                _model_owned_outputs_seen += 1
+                if (
+                    max(completion_tokens, _model_owned_outputs_seen)
+                    >= _model_owned_ceiling
+                ):
+                    logger.error(
+                        "MODEL-OWNED TURN CEILING FIRED: request %s generated "
+                        "%d tokens (chunks=%d) with no client "
+                        "max_output_tokens and the stream still running — "
+                        "force-terminating with finish_reason=length "
+                        "(ceiling=%d, VMLX_MODEL_OWNED_MAX_TOKENS overrides)",
+                        response_id,
+                        completion_tokens,
+                        _model_owned_outputs_seen,
+                        _model_owned_ceiling,
+                    )
+                    try:
+                        output.finish_reason = "length"
+                    except Exception:
+                        pass
+                    if hasattr(engine, "abort_request"):
+                        await engine.abort_request(response_id)
+                    break
 
             if delta_text:
                 full_text += delta_text
@@ -17561,6 +17719,8 @@ async def stream_responses_api(
             answer_kwargs = dict(kwargs)
             answer_kwargs["enable_thinking"] = False
             answer_kwargs["max_tokens"] = int(_answer_budget or 256)
+            # Explicit bounded max_tokens above — no longer model-owned.
+            answer_kwargs.pop("_model_owned_max_tokens", None)
             answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
             if _answer_family == "MiniMax-M3":
                 answer_ct_kwargs["thinking_mode"] = "disabled"

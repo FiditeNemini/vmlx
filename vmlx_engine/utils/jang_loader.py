@@ -3270,14 +3270,45 @@ def _load_jang_v2_vlm(
         or "mxtq_bits" in jang_cfg
         or "mxtq_bits" in _quant
     )
-    _qwen_vl_force = os.environ.get("VMLX_QWEN_VL", "").strip().lower() in {"1", "true", "yes", "on"}
-    if _is_qwen_hybrid and _has_media and not _is_mxtq and not _native_mtp_vl_ready and not _qwen_vl_force:
+    _qwen_vl_env = os.environ.get("VMLX_QWEN_VL", "").strip().lower()
+    _qwen_vl_force = _qwen_vl_env in {"1", "true", "yes", "on"}
+    _qwen_vl_block = _qwen_vl_env in {"0", "false", "no", "off"}
+    _vendored_qwen_vl_ready = False
+    if (
+        _is_qwen_hybrid
+        and _has_media
+        and not _is_mxtq
+        and not _qwen_vl_block
+        and not _native_mtp_vl_ready
+    ):
+        # GAP-A fix: the vMLX-owned qwen3_5_family runtime (router gates stay
+        # nn.Linear) plus the mlx_vlm_mtp patch suite (1D text-RoPE via
+        # _patch_attention_text_rope) resolve both original justifications for
+        # the affine text-only fallback (docs/AUDIT-QWEN-AFFINE-JANG-VLM.md:
+        # M-RoPE text-logit corruption + gate quant_predicate decode crash).
+        try:
+            from ..models.qwen3_5_family import register_qwen3_5_family_runtime
+            _vendored_qwen_vl_ready = bool(register_qwen3_5_family_runtime())
+        except Exception as _q35_reg_err:
+            logger.warning(
+                "  qwen3_5_family vendored VLM runtime registration failed "
+                "(%s) — affine-JANG Qwen VL falls back to the text loader.",
+                _q35_reg_err,
+            )
+    if (
+        _is_qwen_hybrid
+        and _has_media
+        and not _is_mxtq
+        and not _native_mtp_vl_ready
+        and (_qwen_vl_block or (not _qwen_vl_force and not _vendored_qwen_vl_ready))
+    ):
         logger.warning(
-            "  Qwen3.5/3.6 affine-JANG VLM is routed text-only: current "
-            "mlx_vlm qwen3_5 M-RoPE text path corrupts logits. MXTQ/JANGTQ "
-            "Qwen VLM remains on the native VLM loader. Set VMLX_QWEN_VL=1 "
-            "to override (e.g. Ornith-1.0 affine bundles). See "
-            "docs/AUDIT-QWEN-AFFINE-JANG-VLM.md."
+            "  Qwen3.5/3.6 affine-JANG VLM is routed text-only: %s. "
+            "MXTQ/JANGTQ Qwen VLM remains on the native VLM loader. See "
+            "docs/AUDIT-QWEN-AFFINE-JANG-VLM.md.",
+            "VMLX_QWEN_VL=0 override active"
+            if _qwen_vl_block
+            else "vendored qwen3_5_family VLM runtime is unavailable",
         )
         globals()["_LAST_LOAD_VLM_FALLBACK"] = True
         return _load_jang_v2(
@@ -3291,22 +3322,30 @@ def _load_jang_v2_vlm(
             "  Qwen3.5/3.6 native-MTP VL artifact detected by tensor metadata; "
             "using the real mlx-vlm loader with vMLX MTP/VL runtime adapters."
         )
-    elif _is_qwen_hybrid and _has_media and not _is_mxtq and _qwen_vl_force:
+    elif (
+        _is_qwen_hybrid
+        and _has_media
+        and not _is_mxtq
+        and (_qwen_vl_force or _vendored_qwen_vl_ready)
+    ):
         logger.info(
-            "  Qwen3.5/3.6 affine-JANG VLM: VMLX_QWEN_VL=1 override active — "
-            "loading via real mlx-vlm VLM loader (text-only fallback bypassed)."
+            "  Qwen3.5/3.6 affine-JANG VLM: %s — loading via real mlx-vlm "
+            "VLM loader (text-only fallback bypassed).",
+            "VMLX_QWEN_VL=1 override active"
+            if _qwen_vl_force
+            else "vMLX-owned qwen3_5_family VLM runtime registered",
         )
-        # VMLX_QWEN_VL force-apply: the patch suite includes _patch_attention_text_rope
-        # which is the actual M-RoPE fix the gate was guarding against. Idempotent.
+        # The patch suite includes _patch_attention_text_rope, which is the
+        # actual M-RoPE fix the text-only gate was guarding against. Idempotent.
         try:
             from ..patches.mlx_vlm_mtp import apply_mlx_vlm_mtp_patch
             if apply_mlx_vlm_mtp_patch():
                 logger.info(
-                    "  VMLX_QWEN_VL: applied mlx_vlm qwen35_vl patch suite "
+                    "  qwen affine VL: applied mlx_vlm qwen35_vl patch suite "
                     "(M-RoPE / text RoPE / GatedDeltaNet fixes)."
                 )
         except Exception as _vlpe:
-            logger.warning("VMLX_QWEN_VL patch apply failed: %s", _vlpe)
+            logger.warning("qwen affine VL patch apply failed: %s", _vlpe)
 
     def _is_gemma4_unified_text_runtime_config(_cfg: dict) -> bool:
         return (
@@ -3412,7 +3451,12 @@ def _load_jang_v2_vlm(
     if _lang_for_rope is not None:
         force_text_rope_1d = bool(
             _is_mxfp_mode
-            or (_native_mtp_vl_ready and _is_qwen_hybrid and _has_media and not _is_mxtq)
+            or (
+                (_native_mtp_vl_ready or _qwen_vl_force or _vendored_qwen_vl_ready)
+                and _is_qwen_hybrid
+                and _has_media
+                and not _is_mxtq
+            )
         )
         setattr(_lang_for_rope, "_vmlx_force_text_rope_1d", force_text_rope_1d)
 

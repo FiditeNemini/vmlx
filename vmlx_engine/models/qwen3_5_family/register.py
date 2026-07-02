@@ -99,3 +99,25 @@ def register_qwen3_5_family_runtime() -> bool:
 
     _REGISTERED = True
     return True
+
+
+def qwen3_5_family_runtime_available() -> bool:
+    """Return True when the vMLX-owned Qwen 3.5 family VLM runtime can load.
+
+    Light check used by routing gates (``api/utils.is_mllm_model`` and the
+    model config registry) BEFORE the heavy VLM load path runs. Mirrors
+    ``gemma4_unified_register.gemma4_unified_runtime_available``: no vendored
+    module execution, just "are the vendored files present and is mlx-vlm
+    importable so registration will succeed at load time".
+    """
+    if _REGISTERED:
+        return True
+    if not (
+        (_VENDORED_DIR / "qwen3_5" / "__init__.py").is_file()
+        and (_VENDORED_DIR / "qwen3_5_moe" / "__init__.py").is_file()
+    ):
+        return False
+    try:
+        return importlib.util.find_spec("mlx_vlm.models") is not None
+    except Exception:
+        return False

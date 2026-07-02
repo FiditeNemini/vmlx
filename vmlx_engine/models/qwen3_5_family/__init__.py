@@ -22,6 +22,12 @@ files use relative ``from ..base import`` / ``from ..cache import`` /
 mlx-vlm because we live INSIDE that namespace at runtime.
 """
 
-from .register import register_qwen3_5_family_runtime
+from .register import (
+    qwen3_5_family_runtime_available,
+    register_qwen3_5_family_runtime,
+)
 
-__all__ = ["register_qwen3_5_family_runtime"]
+__all__ = [
+    "qwen3_5_family_runtime_available",
+    "register_qwen3_5_family_runtime",
+]

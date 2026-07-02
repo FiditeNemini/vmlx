@@ -1223,7 +1223,7 @@ class TestModelConfigs:
         assert inner_moe.reasoning_parser == "qwen3"
 
     def test_n2_pro_qwen35_moe_hybrid_vl_metadata_routes_text_only_until_vl_ready(
-        self, registry, tmp_path
+        self, registry, tmp_path, monkeypatch
     ):
         """N2 Pro JANG_1L is a qwen3_5_moe hybrid/VL-shaped artifact.
 
@@ -1282,6 +1282,12 @@ class TestModelConfigs:
             )
         )
 
+        from vmlx_engine import model_config_registry as mcr
+
+        monkeypatch.delenv("VMLX_QWEN_VL", raising=False)
+        monkeypatch.setattr(
+            mcr, "_vendored_qwen35_vlm_runtime_available", lambda: False
+        )
         registry.clear_cache()
         config = registry.lookup(str(tmp_path))
 
@@ -1355,14 +1361,12 @@ class TestModelConfigs:
         assert config.reasoning_parser == "qwen3"
 
     def test_qwen36_affine_jang_vlm_stays_text_loader_until_mrope_fixed(
-        self, registry, tmp_path
+        self, registry, tmp_path, monkeypatch
     ):
-        """Affine-JANG Qwen VLM-looking artifacts must not use mlx-vlm yet.
-
-        The bundle can carry real image/video metadata, but affine-JANG Qwen
-        text quality is currently safer through the language path until the
-        mlx-vlm M-RoPE fallback is fixed. This is not a broad VLM demotion:
-        JANGTQ/MXTQ and plain MLX/MXFP VLM rows remain covered separately.
+        """Affine-JANG Qwen VLM stays text-only when the vMLX-owned
+        qwen3_5_family runtime is unavailable (M-RoPE / gate-quant fixes
+        missing). This is not a broad VLM demotion: JANGTQ/MXTQ and plain
+        MLX/MXFP VLM rows remain covered separately.
         """
 
         (tmp_path / "config.json").write_text(
@@ -1396,6 +1400,12 @@ class TestModelConfigs:
             )
         )
 
+        from vmlx_engine import model_config_registry as mcr
+
+        monkeypatch.delenv("VMLX_QWEN_VL", raising=False)
+        monkeypatch.setattr(
+            mcr, "_vendored_qwen35_vlm_runtime_available", lambda: False
+        )
         registry.clear_cache()
         config = registry.lookup(str(tmp_path))
 
@@ -1404,6 +1414,25 @@ class TestModelConfigs:
         assert config.tool_parser == "qwen"
         assert config.reasoning_parser == "qwen3"
         assert config.is_mllm is False
+
+        # GAP-A fix: same bundle routes multimodal once the vendored runtime
+        # is available, and VMLX_QWEN_VL overrides in both directions.
+        monkeypatch.setattr(
+            mcr, "_vendored_qwen35_vlm_runtime_available", lambda: True
+        )
+        registry.clear_cache()
+        assert registry.lookup(str(tmp_path)).is_mllm is True
+
+        monkeypatch.setenv("VMLX_QWEN_VL", "0")
+        registry.clear_cache()
+        assert registry.lookup(str(tmp_path)).is_mllm is False
+
+        monkeypatch.setenv("VMLX_QWEN_VL", "1")
+        monkeypatch.setattr(
+            mcr, "_vendored_qwen35_vlm_runtime_available", lambda: False
+        )
+        registry.clear_cache()
+        assert registry.lookup(str(tmp_path)).is_mllm is True
 
     def test_qwen36_affine_jang_native_mtp_vlm_uses_vlm_loader(
         self, registry, tmp_path

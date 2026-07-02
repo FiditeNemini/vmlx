@@ -1670,7 +1670,7 @@ _ROWS: list[dict[str, Any]] = [
         "proves": [
             "VLM media request serialization, media cache salting, and tool follow-up paths stay source-covered",
             "Panel family detection keeps ZAYA-VL, Qwen VL/video/hybrid/indexed-MTP, MXFP4/MXFP8 VLM, and Nemotron stale-Omni sidecar routing covered",
-            "Engine family detection keeps affine-JANG Qwen VLM-looking artifacts on the text loader until the M-RoPE path is fixed",
+            "Engine family detection routes affine-JANG Qwen VLM artifacts multimodal only when the vendored qwen3_5_family runtime is available (text loader otherwise, VMLX_QWEN_VL overrides)",
             "Qwen3.6 VL JANG indexed-MTP artifacts stay multimodal only when indexed MTP and vision tensors exist",
             "MXTQ/JANGTQ and MXFP4/MXFP8 Qwen VLM rows preserve multimodal launch policy",
             "hybrid SSM companion cache, deferred rederive, and generic TQ suppression stay covered for VLM paths",

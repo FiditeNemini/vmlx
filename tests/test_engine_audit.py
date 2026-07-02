@@ -10042,8 +10042,9 @@ class TestJangVLMFallbacks:
         ],
     )
     def test_affine_qwen_mrope_families_route_text_only(
-        self, tmp_path, model_type, text_model_type
+        self, tmp_path, monkeypatch, model_type, text_model_type
     ):
+        """Text-only ONLY when the vendored qwen3_5_family runtime is missing."""
         from vmlx_engine.api import utils
 
         model_dir = self._write_qwen_hybrid_fixture(
@@ -10053,9 +10054,74 @@ class TestJangVLMFallbacks:
         config = json.loads((model_dir / "config.json").read_text())
         config["model_type"] = model_type
         (model_dir / "config.json").write_text(json.dumps(config))
+        monkeypatch.delenv("VMLX_QWEN_VL", raising=False)
+        monkeypatch.setattr(
+            utils, "_vendored_qwen35_vlm_runtime_available", lambda: False
+        )
         utils._IS_MLLM_CACHE.clear()
 
         assert utils.is_mllm_model(str(model_dir)) is False
+
+    @pytest.mark.parametrize(
+        "model_type,text_model_type",
+        [
+            ("qwen3_5", "qwen3_5_text"),
+            ("qwen3_vl", "qwen3_vl"),
+            ("qwen3_vl_moe", "qwen3_vl_moe"),
+        ],
+    )
+    def test_affine_qwen_routes_multimodal_when_vendored_runtime_available(
+        self, tmp_path, monkeypatch, model_type, text_model_type
+    ):
+        """GAP-A fix: vendored qwen3_5_family runtime available → VLM route."""
+        from vmlx_engine.api import utils
+
+        model_dir = self._write_qwen_hybrid_fixture(
+            tmp_path,
+            text_model_type=text_model_type,
+        )
+        config = json.loads((model_dir / "config.json").read_text())
+        config["model_type"] = model_type
+        (model_dir / "config.json").write_text(json.dumps(config))
+        monkeypatch.delenv("VMLX_QWEN_VL", raising=False)
+        monkeypatch.setattr(
+            utils, "_vendored_qwen35_vlm_runtime_available", lambda: True
+        )
+        utils._IS_MLLM_CACHE.clear()
+
+        assert utils.is_mllm_model(str(model_dir)) is True
+        utils._IS_MLLM_CACHE.clear()
+        assert utils.is_mllm_model(str(model_dir), force_mllm=True) is True
+
+    def test_affine_qwen_env_zero_forces_text_only_even_with_runtime(
+        self, tmp_path, monkeypatch
+    ):
+        from vmlx_engine.api import utils
+
+        model_dir = self._write_qwen_hybrid_fixture(tmp_path)
+        monkeypatch.setenv("VMLX_QWEN_VL", "0")
+        monkeypatch.setattr(
+            utils, "_vendored_qwen35_vlm_runtime_available", lambda: True
+        )
+        utils._IS_MLLM_CACHE.clear()
+
+        assert utils.is_mllm_model(str(model_dir)) is False
+        utils._IS_MLLM_CACHE.clear()
+        assert utils.is_mllm_model(str(model_dir), force_mllm=True) is False
+
+    def test_affine_qwen_env_one_forces_vlm_even_without_runtime(
+        self, tmp_path, monkeypatch
+    ):
+        from vmlx_engine.api import utils
+
+        model_dir = self._write_qwen_hybrid_fixture(tmp_path)
+        monkeypatch.setenv("VMLX_QWEN_VL", "1")
+        monkeypatch.setattr(
+            utils, "_vendored_qwen35_vlm_runtime_available", lambda: False
+        )
+        utils._IS_MLLM_CACHE.clear()
+
+        assert utils.is_mllm_model(str(model_dir)) is True
 
     def test_gemma4_unified_routes_text_only_when_mlx_vlm_runtime_missing(
         self,
@@ -10288,7 +10354,9 @@ class TestJangVLMFallbacks:
 
         wrapped(mx.array([[1]], dtype=mx.int32), cache=None)
 
-    def test_affine_qwen_hybrid_detection_normalizes_config_case_for_text_only(self, tmp_path):
+    def test_affine_qwen_hybrid_detection_normalizes_config_case_for_text_only(
+        self, tmp_path, monkeypatch
+    ):
         from vmlx_engine.api import utils
 
         model_dir = self._write_qwen_hybrid_fixture(
@@ -10296,14 +10364,22 @@ class TestJangVLMFallbacks:
             text_model_type="QWEN3_5_TEXT",
             layer_types=["LINEAR_ATTENTION", "FULL_ATTENTION"],
         )
+        monkeypatch.delenv("VMLX_QWEN_VL", raising=False)
+        monkeypatch.setattr(
+            utils, "_vendored_qwen35_vlm_runtime_available", lambda: False
+        )
         utils._IS_MLLM_CACHE.clear()
 
         assert utils.is_mllm_model(str(model_dir)) is False
 
-    def test_affine_qwen_hybrid_jang_overrides_forced_mllm(self, tmp_path):
+    def test_affine_qwen_hybrid_jang_overrides_forced_mllm(self, tmp_path, monkeypatch):
         from vmlx_engine.api import utils
 
         model_dir = self._write_qwen_hybrid_fixture(tmp_path)
+        monkeypatch.delenv("VMLX_QWEN_VL", raising=False)
+        monkeypatch.setattr(
+            utils, "_vendored_qwen35_vlm_runtime_available", lambda: False
+        )
         utils._IS_MLLM_CACHE.clear()
 
         assert utils.is_mllm_model(str(model_dir), force_mllm=True) is False
@@ -10317,15 +10393,20 @@ class TestJangVLMFallbacks:
         assert utils.is_mllm_model(str(model_dir)) is True
 
     def test_qwen_vlm_loader_affine_delegates_to_text_loader(self, tmp_path, monkeypatch):
-        """Affine-JANG Qwen hybrid uses text loader until mlx_vlm M-RoPE is fixed."""
+        """Affine-JANG Qwen hybrid uses text loader when the vendored runtime is missing."""
         from vmlx_engine.utils import jang_loader
         from vmlx_engine.models import gemma4_unified_register
+        from vmlx_engine.models import qwen3_5_family
         import mlx_vlm.utils as vlm_utils
 
         model_dir = self._write_qwen_hybrid_fixture(tmp_path)
         config = json.loads((model_dir / "config.json").read_text())
         jang_cfg = json.loads((model_dir / "jang_config.json").read_text())
 
+        monkeypatch.delenv("VMLX_QWEN_VL", raising=False)
+        monkeypatch.setattr(
+            qwen3_5_family, "register_qwen3_5_family_runtime", lambda: False
+        )
         monkeypatch.setattr(vlm_utils, "load_config", lambda path: dict(config))
         monkeypatch.setattr(
             gemma4_unified_register,
@@ -10413,6 +10494,7 @@ class TestJangVLMFallbacks:
         """The text fallback path must match the same normalized Qwen
         hybrid predicate as is_mllm_model()."""
         from vmlx_engine.utils import jang_loader
+        from vmlx_engine.models import qwen3_5_family
         import mlx_vlm.utils as vlm_utils
 
         model_dir = self._write_qwen_hybrid_fixture(
@@ -10423,6 +10505,10 @@ class TestJangVLMFallbacks:
         config = json.loads((model_dir / "config.json").read_text())
         jang_cfg = json.loads((model_dir / "jang_config.json").read_text())
 
+        monkeypatch.delenv("VMLX_QWEN_VL", raising=False)
+        monkeypatch.setattr(
+            qwen3_5_family, "register_qwen3_5_family_runtime", lambda: False
+        )
         monkeypatch.setattr(vlm_utils, "load_config", lambda path: dict(config))
         monkeypatch.setattr(
             vlm_utils,
@@ -10477,6 +10563,93 @@ class TestJangVLMFallbacks:
         with pytest.raises(NativeVlmReached):
             jang_loader._load_jang_v2_vlm(model_dir, jang_cfg)
         assert jang_loader._LAST_LOAD_VLM_FALLBACK is False
+
+    def test_qwen_vlm_loader_affine_uses_native_vlm_when_vendored_runtime_ready(
+        self, tmp_path, monkeypatch
+    ):
+        """GAP-A fix: vendored qwen3_5_family registered → real VLM loader."""
+        from vmlx_engine.utils import jang_loader
+        from vmlx_engine.models import qwen3_5_family
+        from vmlx_engine.patches import mlx_vlm_mtp
+        import mlx_vlm.utils as vlm_utils
+
+        class NativeVlmReached(RuntimeError):
+            pass
+
+        model_dir = self._write_qwen_hybrid_fixture(tmp_path)
+        config = json.loads((model_dir / "config.json").read_text())
+        jang_cfg = json.loads((model_dir / "jang_config.json").read_text())
+
+        mtp_patch_calls = []
+        monkeypatch.delenv("VMLX_QWEN_VL", raising=False)
+        monkeypatch.setattr(
+            qwen3_5_family, "register_qwen3_5_family_runtime", lambda: True
+        )
+        monkeypatch.setattr(
+            mlx_vlm_mtp,
+            "apply_mlx_vlm_mtp_patch",
+            lambda: mtp_patch_calls.append(True) or True,
+        )
+        monkeypatch.setattr(vlm_utils, "load_config", lambda path: dict(config))
+        monkeypatch.setattr(
+            vlm_utils,
+            "get_model_and_args",
+            lambda *, config: (_ for _ in ()).throw(NativeVlmReached()),
+        )
+        monkeypatch.setattr(
+            jang_loader,
+            "_load_jang_v2",
+            lambda *args, **kwargs: pytest.fail(
+                "affine Qwen VL must use the native VLM loader when the "
+                "vendored runtime is registered"
+            ),
+        )
+
+        with pytest.raises(NativeVlmReached):
+            jang_loader._load_jang_v2_vlm(model_dir, jang_cfg)
+        assert jang_loader._LAST_LOAD_VLM_FALLBACK is False
+        # The M-RoPE text-RoPE fix suite must be applied on this route.
+        assert mtp_patch_calls == [True]
+
+    def test_qwen_vlm_loader_affine_env_zero_forces_text_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        """VMLX_QWEN_VL=0 forces the text loader even with the vendored runtime."""
+        from vmlx_engine.utils import jang_loader
+        from vmlx_engine.models import qwen3_5_family
+        import mlx_vlm.utils as vlm_utils
+
+        model_dir = self._write_qwen_hybrid_fixture(tmp_path)
+        config = json.loads((model_dir / "config.json").read_text())
+        jang_cfg = json.loads((model_dir / "jang_config.json").read_text())
+
+        monkeypatch.setenv("VMLX_QWEN_VL", "0")
+        monkeypatch.setattr(
+            qwen3_5_family,
+            "register_qwen3_5_family_runtime",
+            lambda: pytest.fail(
+                "VMLX_QWEN_VL=0 must not register the vendored VLM runtime"
+            ),
+        )
+        monkeypatch.setattr(vlm_utils, "load_config", lambda path: dict(config))
+        monkeypatch.setattr(
+            vlm_utils,
+            "get_model_and_args",
+            lambda *, config: pytest.fail(
+                "VMLX_QWEN_VL=0 must not hit the native VLM loader"
+            ),
+        )
+        sentinel = object()
+        monkeypatch.setattr(
+            jang_loader,
+            "_load_jang_v2",
+            lambda *args, **kwargs: (sentinel, "tokenizer"),
+        )
+
+        model, tokenizer = jang_loader._load_jang_v2_vlm(model_dir, jang_cfg)
+        assert model is sentinel
+        assert tokenizer == "tokenizer"
+        assert jang_loader._LAST_LOAD_VLM_FALLBACK is True
 
 
 class TestTurboQuantKVTelemetry:

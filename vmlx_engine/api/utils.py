@@ -237,14 +237,44 @@ def _is_explicit_affine_jang_config(jang_config: dict) -> bool:
     )
 
 
-def _is_affine_jang_qwen_hybrid_vlm_path(local_path: str) -> bool:
-    """True for the known-bad affine-JANG Qwen hybrid mlx_vlm text path.
+def _qwen_vl_env_override():
+    """Tri-state VMLX_QWEN_VL override: True (force VLM), False (force text), None."""
+    raw = os.environ.get("VMLX_QWEN_VL", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return None
 
-    Qwen3.6 affine-JANG bundles carry real VL/video metadata, but the current
-    mlx_vlm qwen3_5 language path uses M-RoPE for text-only generation and
-    corrupts logits. Keep only affine-JANG on the text loader until
-    docs/AUDIT-QWEN-AFFINE-JANG-VLM.md is resolved. MXTQ/JANGTQ and non-JANG
-    Qwen VL bundles must remain multimodal.
+
+def _vendored_qwen35_vlm_runtime_available() -> bool:
+    """True when the vMLX-owned qwen3_5/qwen3_5_moe VLM runtime can serve loads."""
+    try:
+        from vmlx_engine.models.qwen3_5_family import (
+            qwen3_5_family_runtime_available,
+        )
+
+        return bool(qwen3_5_family_runtime_available())
+    except Exception:
+        return False
+
+
+def _is_affine_jang_qwen_hybrid_vlm_path(local_path: str) -> bool:
+    """True when an affine-JANG Qwen hybrid VL bundle must stay text-only.
+
+    Original exclusion (docs/AUDIT-QWEN-AFFINE-JANG-VLM.md, commit 80a62555f):
+    upstream mlx_vlm qwen3_5's ``Qwen3_5RotaryEmbedding`` M-RoPE path corrupts
+    text logits, and its ``quant_predicate`` force-quantizes float router gates
+    ("weight matrix should be uint32" decode crash on JANG affine bundles).
+
+    Both are fixed by the vMLX-owned runtime stack: the vendored
+    ``models/qwen3_5_family`` keeps router gates as ``nn.Linear`` and the
+    ``patches/mlx_vlm_mtp`` suite installs the 1D text-RoPE path
+    (``_patch_attention_text_rope`` + ``_vmlx_force_text_rope_1d``). So route
+    to the VLM path whenever that vendored runtime is available; fall back to
+    text-only only when it genuinely is not. ``VMLX_QWEN_VL=1/0`` is an
+    explicit override in both directions. MXTQ/JANGTQ and non-JANG Qwen VL
+    bundles are never gated here.
     """
     try:
         cfg_path = os.path.join(local_path, "config.json")
@@ -261,7 +291,12 @@ def _is_affine_jang_qwen_hybrid_vlm_path(local_path: str) -> bool:
             return False
         if not _is_explicit_affine_jang_config(jang_config):
             return False
-        return not _is_mxtq_jang_config(jang_config)
+        if _is_mxtq_jang_config(jang_config):
+            return False
+        override = _qwen_vl_env_override()
+        if override is not None:
+            return not override
+        return not _vendored_qwen35_vlm_runtime_available()
     except Exception:
         return False
 
@@ -393,9 +428,15 @@ def _is_mllm_cache_key(model_name: str, local_path: str) -> tuple:
             cfg_mtime = os.path.getmtime(cfg_path)
         if os.path.isfile(jang_path):
             jang_mtime = os.path.getmtime(jang_path)
-        return (model_name, local_path, cfg_mtime, jang_mtime)
+        return (
+            model_name,
+            local_path,
+            cfg_mtime,
+            jang_mtime,
+            _qwen_vl_env_override(),
+        )
     except Exception:
-        return (model_name, local_path, 0.0, 0.0)
+        return (model_name, local_path, 0.0, 0.0, _qwen_vl_env_override())
 
 
 def is_mllm_model(model_name: str, force_mllm: bool = False, force_text_only: bool = False) -> bool:
@@ -628,8 +669,8 @@ def is_mllm_model(model_name: str, force_mllm: bool = False, force_text_only: bo
         if force_mllm:
             _logger.warning(
                 "is_mllm_model(%s): affine-JANG Qwen hybrid overrides "
-                "force_mllm — current mlx_vlm qwen3_5 M-RoPE path corrupts "
-                "text logits; routing text-only until the VLM path is fixed",
+                "force_mllm — vendored qwen3_5_family VLM runtime is "
+                "unavailable (or VMLX_QWEN_VL=0 set); routing text-only",
                 model_name,
             )
         else:
@@ -711,9 +752,10 @@ def is_mllm_model(model_name: str, force_mllm: bool = False, force_text_only: bo
                             if _is_affine_jang_qwen_hybrid_vlm_path(local_path):
                                 _logger.warning(
                                     "is_mllm_model(%s): affine-JANG Qwen "
-                                    "hybrid has vision metadata but current "
-                                    "mlx_vlm M-RoPE path is unsafe — forcing "
-                                    "text-only",
+                                    "hybrid has vision metadata but the "
+                                    "vendored qwen3_5_family VLM runtime is "
+                                    "unavailable (or VMLX_QWEN_VL=0) — "
+                                    "forcing text-only",
                                     model_name,
                                 )
                                 return False

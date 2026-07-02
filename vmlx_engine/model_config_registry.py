@@ -16,6 +16,7 @@ Usage:
 """
 
 import logging
+import os
 import re
 import threading
 from dataclasses import dataclass, field, replace
@@ -182,6 +183,26 @@ def _is_affine_jang_qwen_hybrid_vlm(
     if not _is_explicit_affine_jang_config(jang_config):
         return False
     return not _is_mxtq_jang_config(jang_config)
+
+
+def _qwen_vl_env_override() -> bool | None:
+    """Tri-state VMLX_QWEN_VL override: True (force VLM), False (force text), None."""
+    raw = os.environ.get("VMLX_QWEN_VL", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _vendored_qwen35_vlm_runtime_available() -> bool:
+    """True when the vMLX-owned qwen3_5/qwen3_5_moe VLM runtime can serve loads."""
+    try:
+        from .models.qwen3_5_family import qwen3_5_family_runtime_available
+
+        return bool(qwen3_5_family_runtime_available())
+    except Exception:
+        return False
 
 
 def _is_step3p7_text_bridge(model_config: dict[str, Any]) -> bool:
@@ -732,12 +753,19 @@ class ModelConfigRegistry:
                     updates["is_mllm"] = False
                 updates["architecture_hints"] = hints
             elif _is_affine_jang_qwen_hybrid_vlm(local_model_config, jcfg):
-                # Qwen3.6 affine-JANG carries real VL/video metadata, but the
-                # current mlx_vlm qwen3_5 language path corrupts text logits
-                # through the M-RoPE fallback. Keep plain affine-JANG in
-                # text-loader mode, but allow indexed native-MTP VL artifacts
-                # that have a dedicated VLM route.
-                updates["is_mllm"] = _is_native_mtp_qwen_vl_artifact_ready(model_name)
+                # Affine-JANG Qwen VL routes multimodal when the vMLX-owned
+                # qwen3_5_family runtime is available (gate-quant + 1D
+                # text-RoPE fixes for the original M-RoPE corruption per
+                # docs/AUDIT-QWEN-AFFINE-JANG-VLM.md); text-only otherwise.
+                # VMLX_QWEN_VL=1/0 is an explicit override in both directions;
+                # indexed native-MTP VL artifacts keep their dedicated route.
+                _qwen_env = _qwen_vl_env_override()
+                if _qwen_env is not None:
+                    updates["is_mllm"] = _qwen_env
+                elif _is_native_mtp_qwen_vl_artifact_ready(model_name):
+                    updates["is_mllm"] = True
+                else:
+                    updates["is_mllm"] = _vendored_qwen35_vlm_runtime_available()
             elif mod == "vision" or mod == "multimodal" or (mod == "omni" and has_config_media):
                 # `omni` only becomes MLLM when config.json carries real
                 # media metadata. Some Nemotron-H text extracts keep stale

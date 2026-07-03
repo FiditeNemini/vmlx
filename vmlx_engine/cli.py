@@ -562,7 +562,14 @@ def serve_command(args):
                         if not getattr(args, "use_paged_cache", False)
                         else "ON(explicit)"
                     ),
-                    getattr(args, "tool_call_parser", None) or "qwen(auto)",
+                    # This transparency block runs BEFORE the registry
+                    # auto-config, so args.tool_call_parser/reasoning_parser are
+                    # still None here — the fallbacks must name what the
+                    # openpangu_v2 registry entry actually resolves to
+                    # (tool=openpangu, reasoning=deepseek_r1), NOT a generic
+                    # qwen default, or the summary contradicts the very next
+                    # "Auto-configured tool parser from registry: openpangu" line.
+                    getattr(args, "tool_call_parser", None) or "openpangu(auto)",
                     getattr(args, "reasoning_parser", None) or "deepseek_r1(auto)",
                     "OFF(forced)" if _op_jit_forced_off else "off",
                 )

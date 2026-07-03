@@ -39,9 +39,17 @@ class QwenToolParser(ToolParser):
     BRACKET_PATTERN = re.compile(r"\[Calling tool:\s*(\w+)\((\{.*?\})\)\]", re.DOTALL)
 
     # Qwen3-Coder / Qwen3.6 XML function-parameter format (issue #192):
-    #   <function=name><parameter=arg>value</parameter></function>
-    FUNCTION_PATTERN = re.compile(r"<function=([^>]+)>\s*(.*?)\s*</function>", re.DOTALL)
-    PARAMETER_PATTERN = re.compile(r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
+    #   canonical (per chat template): <function=name><parameter=arg>value</parameter></function>
+    # Tolerate the attribute variant the model sometimes emits off-format
+    # (observed live on Qwen3.6-27B-MXFP4): <function name="name">, <parameter name="arg">.
+    # Without this the equals-only regex misses the attribute form, the call is
+    # dropped for "missing required argument", and the raw XML leaks into content.
+    FUNCTION_PATTERN = re.compile(
+        r"<function(?:=|\s+name=[\"'])([^>\"']+)[\"']?>\s*(.*?)\s*</function>", re.DOTALL
+    )
+    PARAMETER_PATTERN = re.compile(
+        r"<parameter(?:=|\s+name=[\"'])([^>\"']+)[\"']?>\s*(.*?)\s*</parameter>", re.DOTALL
+    )
     BARE_ARG_PATTERN = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</\1>", re.DOTALL)
 
     @classmethod
@@ -173,7 +181,7 @@ class QwenToolParser(ToolParser):
             cleaned_text = self.XML_PATTERN.sub("", cleaned_text).strip()
 
         # Qwen3-Coder / Qwen3.6 XML function-parameter format (issue #192)
-        if not tool_calls and "<function=" in cleaned_text:
+        if not tool_calls and "<function" in cleaned_text:
             func_calls = self._parse_function_blocks(cleaned_text)
             if func_calls:
                 tool_calls.extend(func_calls)
@@ -219,7 +227,8 @@ class QwenToolParser(ToolParser):
         has_tool_marker = (
             "<tool_call>" in current_text
             or "[Calling tool:" in current_text
-            or "<function=" in current_text  # issue #192
+            or "<function=" in current_text  # issue #192 (canonical)
+            or "<function name=" in current_text  # off-format attribute variant
         )
 
         if not has_tool_marker:

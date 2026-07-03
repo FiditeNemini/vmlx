@@ -286,6 +286,42 @@ class TestQwenToolParser:
         assert result.tools_called
         assert len(result.tool_calls) == 2
 
+    def test_parameter_attribute_variant(self, parser):
+        """Qwen3.6 sometimes emits the off-format attribute variant
+        <function name="..."><parameter name="...">v</parameter></function>
+        instead of the canonical <function=...><parameter=...> form. Observed
+        live on Qwen3.6-27B-MXFP4: the equals-only regex missed it, the call was
+        dropped for a missing required arg, and the raw XML leaked into content.
+        The tolerant regex must parse both forms.
+        """
+        text = (
+            '<tool_call><function name="get_weather">'
+            '<parameter name="city">Tokyo</parameter>'
+            "</function></tool_call>"
+        )
+        result = parser.extract_tool_calls(text)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0]["name"] == "get_weather"
+        args = json.loads(result.tool_calls[0]["arguments"])
+        assert args["city"] == "Tokyo"
+        # the raw parameter XML must NOT leak into content
+        assert result.content is None or "<parameter" not in result.content
+
+    def test_canonical_equals_still_parses(self, parser):
+        """Regression guard: canonical equals form still parses after the
+        attribute-variant tolerance was added."""
+        text = (
+            "<tool_call><function=get_weather>"
+            "<parameter=city>Paris</parameter>"
+            "</function></tool_call>"
+        )
+        result = parser.extract_tool_calls(text)
+        assert result.tools_called
+        assert result.tool_calls[0]["name"] == "get_weather"
+        assert json.loads(result.tool_calls[0]["arguments"])["city"] == "Paris"
+
     def test_no_tool_call(self, parser):
         """Test text without tool calls."""
         text = "I can help you with that question."

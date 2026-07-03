@@ -3084,6 +3084,7 @@ def _load_jang_v2(
     _fix_quantized_bits(
         model,
         _post_load_quantization_overrides(config, jang_cfg),
+        model_type=_jang_effective_model_type(config),
     )
 
     if not hasattr(model, "config"):
@@ -4023,6 +4024,7 @@ def _load_jang_v2_vlm(
     _fix_quantized_bits(
         model,
         _post_load_quantization_overrides(config, jang_cfg),
+        model_type=_jang_effective_model_type(config),
     )
 
     if not hasattr(model, "config"):
@@ -4587,6 +4589,7 @@ def _load_jang_v1(path: Path, jang_cfg: dict, config_path: Path):
         _fix_quantized_bits(
             model,
             _post_load_quantization_overrides(config, jang_cfg),
+            model_type=_jang_effective_model_type(config),
         )
     finally:
         if tmp_dir:
@@ -4725,7 +4728,7 @@ def _load_jang_v1_vlm(
             del shard_weights
             gc.collect()
 
-        _fix_quantized_bits(model)
+        _fix_quantized_bits(model, model_type=_jang_effective_model_type(model_config))
     finally:
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -5833,11 +5836,38 @@ def _jang_needs_norm_shift(flat: dict) -> bool:
     return False
 
 
-def apply_jang_norm_shift(model) -> int:
+def _jang_effective_model_type(cfg) -> str:
+    """model_type from a config dict OR a model_config object (incl. text_config)."""
+    if cfg is None:
+        return ""
+    if isinstance(cfg, dict):
+        mt = cfg.get("model_type")
+        if not mt:
+            tc = cfg.get("text_config")
+            if isinstance(tc, dict):
+                mt = tc.get("model_type")
+        return str(mt or "")
+    mt = getattr(cfg, "model_type", None)
+    if not mt:
+        tc = getattr(cfg, "text_config", None)
+        mt = getattr(tc, "model_type", None) if tc is not None else None
+    return str(mt or "")
+
+
+def apply_jang_norm_shift(model, model_type: str = "") -> int:
     """Add +1.0 to qwen3.5 (Gemma-style) language RMSNorm weights that JANG stores
     un-shifted. Auto-detects, so it is a no-op for MXFP/already-shifted/standard
     RMSNorm bundles. Mirrors the vmlx-swift runtime shift; without it qwen3.5
-    JANG_4M/6M bundles (e.g. Ornith-1.0) emit only garbage."""
+    JANG_4M/6M bundles (e.g. Ornith-1.0) emit only garbage.
+
+    Gated to the qwen3.5/3.6 family: the +1 Gemma-style shift is a
+    qwen3.5 convention ONLY. The `_jang_needs_norm_shift` mean<0.5
+    auto-detect false-positives on standard-RMSNorm families
+    (minimax_m2, deepseek_v4) whose language norms also center near 0,
+    corrupting them into token-0 (NUL/BOS) output. Regression guard for
+    the 00ce4e994 shift."""
+    if str(model_type) not in {"qwen3_5", "qwen3_5_moe"}:
+        return 0
     from mlx.utils import tree_flatten, tree_unflatten
 
     try:
@@ -5862,7 +5892,7 @@ def apply_jang_norm_shift(model) -> int:
     return patched
 
 
-def _fix_quantized_bits(model, quantization_overrides: dict | None = None):
+def _fix_quantized_bits(model, quantization_overrides: dict | None = None, model_type: str = ""):
     """Fix per-layer bits AND group_size for JANG mixed-precision models.
 
     Matches jang-tools 2.1.0 logic: router/gate tensors prefer gs=64 (precision-critical),
@@ -6022,7 +6052,7 @@ def _fix_quantized_bits(model, quantization_overrides: dict | None = None):
         except Exception:
             pass
 
-    apply_jang_norm_shift(model)
+    apply_jang_norm_shift(model, model_type)
 
 
 def _normalize_ornith_subcomponent_types(config: dict) -> None:

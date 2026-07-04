@@ -147,14 +147,29 @@ class OpenPanguCausalConv(nn.Module):
     def __call__(
         self, x: mx.array, state: Optional[mx.array]
     ) -> Tuple[mx.array, mx.array]:
-        B = x.shape[0]
+        B, L, _ = x.shape
         pad = self.kernel_size - 1
-        if state is None:
+        fresh = state is None
+        if fresh:
             left = mx.zeros((B, pad, self.channels), dtype=x.dtype)
         else:
             left = state.astype(x.dtype)
         padded = mx.concatenate([left, x], axis=1)  # (B, pad+L, C)
         y = self.conv(padded)  # valid conv -> (B, L, C)
+        # Proper standard causal_conv1d semantics, confirmed against the authoritative
+        # omni-npu op (npu_mome.py: npu_fused_causal_conv1d, activation_mode="None",
+        # bias=None, residual_connection=1, zero initial state on a fresh sequence):
+        # boundary outputs at positions 0..k-2 are PARTIAL convolutions over the
+        # zero-left-pad — they are NOT zeroed. (The `conv[:k-1]=0` in jointfix's
+        # PanguTorchMOMEConv is a calibration-hook approximation — jointfix is
+        # explicitly "hooks rather than serving-kernel parity" — not the serving op.)
+        # Optional env override to A/B the two behaviors.
+        if fresh and pad > 0 and L > 0 and os.environ.get("OPENPANGU_CONV_ZERO_BOUNDARY"):
+            zlen = min(pad, L)
+            zero_then_one = mx.concatenate(
+                [mx.zeros((zlen,), dtype=y.dtype), mx.ones((L - zlen,), dtype=y.dtype)]
+            )
+            y = y * zero_then_one[None, :, None]
         new_state = padded[:, padded.shape[1] - pad :, :]
         return y + x, new_state
 

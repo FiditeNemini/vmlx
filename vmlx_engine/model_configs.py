@@ -1174,6 +1174,34 @@ def register_all(registry=None):
         )
     )
 
+    # MiniMax M3 (minimax_m3 / minimax_m3_vl) — vendored runtime under
+    # models/minimax_m3/ (native MSA sparse cache; cli.py auto-settings force
+    # paged=OFF, TQ-KV skip, JIT off). JANG stamps on M3 bundles carry only
+    # {family, modality, supports_tools, supports_thinking} — NO parser
+    # fields — so without this row the Tier-1 stamp path built a fresh
+    # ModelConfig with tool_parser=None and the model's native
+    # `]<]minimax[>[<tool_call>…<invoke…>` XML leaked verbatim into visible
+    # content (GitHub #226 items 2/6; reproduced live 2026-07-05 on
+    # MiniMax-M3-Coder-Small). Template tokens (chat_template.jinja):
+    # ns=`]<]minimax[>[`, role-begin=`]~b]`, eos=`[e~[` (200020); default
+    # thinking_mode=adaptive opens NO think rail (think_in_template stays
+    # False — the M3-specific `_m3_thinking_mode` server logic owns the
+    # enabled/adaptive/disabled rail states). `]~b]` doubles as the
+    # hallucination-loop stop, same class as the minimax(M2) row above.
+    _register(
+        ModelConfig(
+            family_name="minimax_m3",
+            model_types=["minimax_m3", "minimax_m3_vl"],
+            cache_type="kv",
+            eos_tokens=["[e~[", "]~b]"],
+            tool_parser="minimax_m3",
+            reasoning_parser="minimax_m3",
+            think_in_template=False,
+            supports_thinking=True,
+            priority=20,
+        )
+    )
+
     # ── xLAM (Salesforce) — no unique model_type, usually Llama-based ──
 
     # ── Kimi/Moonshot ──

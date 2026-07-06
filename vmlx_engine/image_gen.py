@@ -532,10 +532,13 @@ class ImageGenEngine:
 
         # Load from local path (NEVER silently download from HuggingFace)
         logger.info(f"Loading {resolved_class} from local path: {model_path}")
-        requested_lora = bool(lora_paths) or lora_scales is not None
-        if lora_scales is not None and not lora_paths:
+        # Truthiness (not `is not None`): an empty list means "no LoRA
+        # requested" — the CLI parser used to hand [] through for the absent
+        # flag and every LoRA-less mflux launch died here (GitHub #224).
+        requested_lora = bool(lora_paths) or bool(lora_scales)
+        if lora_scales and not lora_paths:
             raise ValueError("--lora-scales requires --lora-paths")
-        if lora_paths is not None and lora_scales is not None and len(lora_paths) != len(lora_scales):
+        if lora_paths and lora_scales and len(lora_paths) != len(lora_scales):
             raise ValueError("--lora-scales must have the same length as --lora-paths")
 
         model_kwargs = {

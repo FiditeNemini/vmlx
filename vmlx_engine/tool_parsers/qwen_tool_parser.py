@@ -47,8 +47,16 @@ class QwenToolParser(ToolParser):
     FUNCTION_PATTERN = re.compile(
         r"<function(?:=|\s+name=[\"'])([^>\"']+)[\"']?>\s*(.*?)\s*</function>", re.DOTALL
     )
+    # Third tolerated variant (observed live on Holo3-35B-A3B-mxfp4, sweep
+    # 2026-07-05): the model writes `>` instead of `=` after "parameter" —
+    # `<parameter>city>\nParis\n</parameter>`. The equals/attribute-only
+    # regex missed it, the call was dropped, and the raw XML leaked into
+    # visible content. The `>NAME>` form requires a whitespace-free name
+    # token followed by a second `>` before the value, so a genuine unnamed
+    # `<parameter>value</parameter>` body cannot false-match.
     PARAMETER_PATTERN = re.compile(
-        r"<parameter(?:=|\s+name=[\"'])([^>\"']+)[\"']?>\s*(.*?)\s*</parameter>", re.DOTALL
+        r"<parameter(?:=|\s+name=[\"']|>)([^>\"'\s]+)[\"']?>\s*(.*?)\s*</parameter>",
+        re.DOTALL,
     )
     BARE_ARG_PATTERN = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</\1>", re.DOTALL)
 

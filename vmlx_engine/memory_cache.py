@@ -403,6 +403,15 @@ class MemoryAwarePrefixCache:
             # loop on the next hit (the real multi-turn / repeated-prompt bug).
             if type(layer).__name__ == "MiniMaxM3SparseCache":
                 return True
+            # RotatingKVCache (gemma-4 / mixed-SWA): _clone_cache_for_fetch is
+            # only ever called at FULL cached length (exact / forward match — the
+            # reverse/truncating path calls _truncate_cache directly), so we can
+            # faithfully isolate-clone it without any lossy reduction. WITHOUT
+            # this it fell through to the stored-reference return below and decode
+            # rotated/appended into the shared buffer → polluted reuse → gemma-4
+            # divergence + dropped tool calls after ~3 identical requests.
+            if type(layer).__name__ == "RotatingKVCache":
+                return True
             if isinstance(layer, (KVCache, QuantizedKVCache)):
                 return type(layer).__name__ in ("KVCache", "QuantizedKVCache")
             if _CacheList and isinstance(layer, _CacheList):
@@ -506,6 +515,41 @@ class MemoryAwarePrefixCache:
                 )
                 if new_cache is None:
                     return None
+                truncated.append(new_cache)
+                continue
+            # RotatingKVCache (gemma-4 sliding + full mixed-SWA): faithfully
+            # ISOLATE-clone into a fresh RotatingKVCache so a cache hit cannot be
+            # mutated in place by decode (issue: gemma-4 prefix-cache pollution —
+            # identical greedy requests diverged after ~3 reuses because the hit
+            # returned the stored object by reference). We only reach here at full
+            # cached length (see _safe / _clone_cache_for_fetch), so no lossy
+            # rotating reduction is needed. If a TRUE reduction is ever requested
+            # (target < logical offset — only via the direct reverse-match
+            # _truncate_cache call), rotating truncation is lossy → return None to
+            # force a clean cache miss instead of downcasting to a plain KVCache.
+            if type(layer_cache).__name__ == "RotatingKVCache":
+                try:
+                    from mlx_lm.models.cache import RotatingKVCache
+                except ImportError:
+                    return None
+                keys = getattr(layer_cache, "keys", None)
+                values = getattr(layer_cache, "values", None)
+                if keys is None or values is None:
+                    return None
+                offset = int(getattr(layer_cache, "offset", 0) or 0)
+                if target_len < offset:
+                    return None  # lossy rotating truncation unsupported
+                new_cache = RotatingKVCache(
+                    max_size=layer_cache.max_size,
+                    keep=layer_cache.keep,
+                )
+                # full-buffer isolated copy (breaks aliasing with the stored entry)
+                new_cache.keys = _copy_positional_slice(keys)
+                new_cache.values = _copy_positional_slice(values)
+                new_cache.offset = offset
+                new_cache._idx = int(getattr(layer_cache, "_idx", offset) or 0)
+                if hasattr(layer_cache, "step"):
+                    new_cache.step = layer_cache.step
                 truncated.append(new_cache)
                 continue
             if _CacheList is not None and isinstance(layer_cache, _CacheList):

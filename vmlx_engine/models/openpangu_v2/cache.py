@@ -91,6 +91,48 @@ class OpenPanguV2LayerCache:
             self.kv.state = rest
         self.conv_states = [_nullable(a) for a in conv]
 
+    # ---- single-sequence BatchGenerator protocol -------------------------
+    # mlx_lm's BatchGenerator calls filter/extract/prepare/finalize on every
+    # layer cache during split/finish handling EVEN for a single sequence.
+    # Without these, serving openPangu with --continuous-batching aborted
+    # every request: AttributeError 'OpenPanguV2LayerCache' object has no
+    # attribute 'filter' from generate.py split→filter (sweep 2026-07-05,
+    # 66 aborts, empty responses with usage 0/0/0). The conv states are
+    # path-dependent and single-sequence native, so only the [0] fast path
+    # is supported — multi-sequence batching must queue serially (see the
+    # scheduler single-sequence guard for this cache type).
+    def filter(self, batch_indices) -> None:
+        keep = (
+            list(batch_indices)
+            if isinstance(batch_indices, (list, tuple))
+            else [batch_indices]
+        )
+        if keep != [0]:
+            raise NotImplementedError(
+                "OpenPanguV2LayerCache.filter() only supports the "
+                "single-sequence fast path. openPangu conv states are "
+                "path-dependent; multi-sequence batching must run serially."
+            )
+
+    def extract(self, idx: int) -> "OpenPanguV2LayerCache":
+        if idx != 0:
+            raise IndexError(
+                f"OpenPanguV2LayerCache.extract({idx}) is invalid for the "
+                "single-sequence fast path"
+            )
+        return self
+
+    def prepare(self, *args, **kwargs) -> None:
+        right_padding = kwargs.get("right_padding")
+        if right_padding is not None and any(int(x) != 0 for x in right_padding):
+            raise NotImplementedError(
+                "OpenPanguV2LayerCache.prepare() cannot right-pad the "
+                "single-sequence fast path"
+            )
+
+    def finalize(self) -> None:
+        return None
+
     @property
     def meta_state(self):
         inner = getattr(self.kv, "meta_state", ())

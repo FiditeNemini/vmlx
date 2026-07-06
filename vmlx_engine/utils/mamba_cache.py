@@ -94,6 +94,113 @@ def _is_tq_batch_api(c) -> bool:
     )
 
 
+def _tq_layer_is_empty(t) -> bool:
+    """True when a TurboQuant layer holds no K/V content at all."""
+    return (
+        getattr(t, "keys", None) is None
+        and getattr(t, "_joined_k", None) is None
+        and not getattr(t, "_compressed_tokens", 0)
+    )
+
+
+def _tq_row_state(t):
+    """Per-row (offsets, left_padding) int32 vectors for a TQ layer.
+
+    Unlike ``TurboQuantKVCache._batch_state()``, an EMPTY cache still
+    reports one entry per row it represents (a fresh single cache is one
+    row; a prepared/extended batched cache keeps its existing vectors).
+    """
+    import mlx.core as mx
+
+    offset = getattr(t, "offset", 0)
+    if getattr(t, "_is_batched", False) and getattr(offset, "size", 0):
+        lp = getattr(t, "left_padding", None)
+        if lp is None or getattr(lp, "size", 0) != offset.size:
+            lp = mx.zeros_like(offset)
+        return offset.astype(mx.int32), lp.astype(mx.int32)
+    return (
+        mx.array([int(offset)], dtype=mx.int32),
+        mx.array([0], dtype=mx.int32),
+    )
+
+
+def _patch_tq_empty_extend() -> None:
+    """Make TurboQuantKVCache.extend() safe for EMPTY caches.
+
+    jang_tools ``_batch_state()`` returns 0-length offset/left_padding
+    vectors when ``keys is None``, so under --continuous-batching:
+      * extending two FRESH caches (co-prefilling concurrent requests)
+        produced a batch with ``offset.shape == (0)`` ->
+        "[rope] offset must be a scalar or vector ... has shape (0)"
+      * extending an empty cache with a non-empty one silently DROPPED
+        the empty side's row (0-row keys concatenated away), desyncing
+        rows from uids.
+    Both are follow-ons of GitHub #225. Wrapped here instead of patching
+    jang_tools itself; lossless — TQ quantization is preserved.
+    """
+    try:
+        from jang_tools.turboquant.cache import TurboQuantKVCache
+    except Exception:
+        return
+    if getattr(TurboQuantKVCache.extend, "_vmlx_empty_rows_patched", False):
+        return
+    import mlx.core as mx
+
+    _orig_tq_extend = TurboQuantKVCache.extend
+
+    def _extend_empty_safe(self, other):
+        se, oe = _tq_layer_is_empty(self), _tq_layer_is_empty(other)
+        if not se and not oe:
+            return _orig_tq_extend(self, other)
+
+        so, sl = _tq_row_state(self)
+        oo, ol = _tq_row_state(other)
+
+        if se and oe:
+            # Pure bookkeeping merge — keys stay None, rows preserved.
+            self.offset = mx.concatenate([so, oo])
+            self.left_padding = mx.concatenate([sl, ol])
+            self._idx = max(
+                int(getattr(self, "_idx", 0) or 0),
+                int(getattr(other, "_idx", 0) or 0),
+            )
+            return
+
+        # Exactly one side empty: materialize the non-empty side's float
+        # view and zero-fill full-padding rows for the empty side so the
+        # row count stays aligned with uids.
+        if se:
+            ok, ov, oidx, ooff, olft = other._batch_state()
+            oidx = int(oidx)
+            zk = mx.zeros((int(so.size),) + tuple(ok.shape[1:]), ok.dtype)
+            zv = mx.zeros((int(so.size),) + tuple(ov.shape[1:]), ov.dtype)
+            shift = oidx - int(getattr(self, "_idx", 0) or 0)
+            self.keys = mx.concatenate([zk, ok])
+            self.values = mx.concatenate([zv, ov])
+            self.offset = mx.concatenate([so, ooff.astype(mx.int32)])
+            self.left_padding = mx.concatenate(
+                [sl + shift, olft.astype(mx.int32)]
+            )
+            self._idx = oidx
+            return
+
+        sk, sv, sidx, soff, slft = self._batch_state()
+        sidx = int(sidx)
+        zk = mx.zeros((int(oo.size),) + tuple(sk.shape[1:]), sk.dtype)
+        zv = mx.zeros((int(oo.size),) + tuple(sv.shape[1:]), sv.dtype)
+        shift = sidx - int(getattr(other, "_idx", 0) or 0)
+        self.keys = mx.concatenate([sk, zk])
+        self.values = mx.concatenate([sv, zv])
+        self.offset = mx.concatenate([soff.astype(mx.int32), oo])
+        self.left_padding = mx.concatenate(
+            [slft.astype(mx.int32), ol + shift]
+        )
+        self._idx = sidx
+
+    _extend_empty_safe._vmlx_empty_rows_patched = True
+    TurboQuantKVCache.extend = _extend_empty_safe
+
+
 def _needs_cpu_tolist_detour(model, prompt_cache) -> bool:
     """Return True for cache/model paths that still need CPU-stream tolist.
 
@@ -667,9 +774,18 @@ def patch_mlx_lm_for_mamba():
                 dequantized = [_dequantize_layer(c[i]) for c in caches]
                 cache = BatchKVCache.merge(dequantized)
             elif _is_tq_batch_api(layer_cache):
-                cache = caches[0][i]
-                for source in caches[1:]:
-                    cache.extend(source[i])
+                if all(_is_tq_batch_api(c[i]) for c in caches[1:]):
+                    cache = caches[0][i]
+                    for source in caches[1:]:
+                        cache.extend(source[i])
+                else:
+                    # Mixed TQ + non-TQ layers (GitHub #225 mode 1): TQ
+                    # extend() reads other._batch_state() which plain
+                    # KVCache lacks. Decode everything to float and merge
+                    # as BatchKVCache instead of aborting the engine.
+                    cache = _tq_decode_to_batch_kv(layer_cache)
+                    for source in caches[1:]:
+                        cache.extend(_promote_layer_for_extend(source[i]))
             elif _is_kv_like(layer_cache):
                 # TurboQuantKVCache after compress() has keys=None —
                 # BatchKVCache.merge needs actual tensors. Convert TQ
@@ -750,6 +866,128 @@ def patch_mlx_lm_for_mamba():
 
     gen_module._merge_caches = _patched_merge_caches
 
+    # ------------------------------------------------------------------
+    # GitHub #225: continuous-batching multi-client engine abort.
+    #
+    # The len(caches)==1 fast path in _patched_merge_caches deliberately
+    # keeps NATIVE single-sequence cache objects (numerical fidelity for
+    # Bailing/Ling hybrids — see comment above). That is correct for the
+    # whole lifetime of a single-sequence batch, but under
+    # --continuous-batching a second concurrently-arriving request joins
+    # the running batch through PromptProcessingBatch.extend() /
+    # generation-batch extend(), which zip per-layer caches and call
+    # ca.extend(cb):
+    #   * plain KVCache has no extend()              -> AttributeError
+    #   * TurboQuant extend(other) reads
+    #     other._batch_state() which plain KV lacks  -> AttributeError
+    # Either aborts the engine loop and kills every in-flight request
+    # (two clients within ~1s, e.g. Claude Code preflight + request).
+    #
+    # Fix: keep the single-sequence fast path, but PROMOTE both sides to
+    # batch-native caches at the moment two sequences actually have to
+    # coexist — the only point where batch conversion is mathematically
+    # required anyway. Compatibility is decided for the FULL layer list
+    # before any in-place mutation, so a failure can never leave a
+    # half-extended batch.
+    # ------------------------------------------------------------------
+    _original_extend_cache = gen_module._extend_cache
+
+    _BATCH_NATIVE = ("BatchKVCache", "BatchRotatingKVCache", "BatchMambaCache")
+
+    def _tq_decode_to_batch_kv(layer):
+        """Decode a TurboQuant layer to a float BatchKVCache.
+
+        Only reached when a TurboQuant cache must batch with a non-TQ
+        peer. TQ live decode is single-sequence only (see the scheduler
+        TQ guard), so the mixed multi-client case trades the quantized
+        buffer for correctness instead of aborting the engine.
+        """
+        keys, values, idx, offsets, left = layer._batch_state()
+        if keys is None:
+            # Row-correct empty promotion: a prepared/extended batched TQ
+            # cache represents several rows even with no content yet.
+            row_off, row_lp = _tq_row_state(layer)
+            out = BatchKVCache([0] * int(row_off.size))
+            out.offset = row_off
+            out.left_padding = row_lp
+            return out
+        idx = int(idx)
+        out = BatchKVCache([0] * int(keys.shape[0]))
+        out.keys = keys[..., :idx, :]
+        out.values = values[..., :idx, :]
+        out.offset = offsets
+        out.left_padding = left
+        out._idx = idx
+        return out
+
+    def _promote_layer_for_extend(layer):
+        """Native single-sequence cache layer -> batch-native equivalent."""
+        name = type(layer).__name__
+        if name in _BATCH_NATIVE:
+            return layer
+        if name == _TQ_CLASS_NAME:
+            return _tq_decode_to_batch_kv(layer)
+        if _QuantizedKVCache is not None and isinstance(layer, _QuantizedKVCache):
+            return BatchKVCache.merge([_dequantize_layer(layer)])
+        if isinstance(layer, RotatingKVCache):
+            return BatchRotatingKVCache.merge([layer])
+        if isinstance(layer, KVCache):
+            return BatchKVCache.merge([layer])
+        if isinstance(layer, (OrigMambaCache, BatchMambaCache)):
+            return (
+                layer
+                if isinstance(layer, BatchMambaCache)
+                else BatchMambaCache.merge([layer])
+            )
+        if isinstance(layer, CacheList):
+            return CacheList(*(_promote_layer_for_extend(s) for s in layer.caches))
+        # ArraysCache / ZayaNoStateCache / other natives batch through
+        # their own extend().
+        return layer
+
+    def _extend_compatible(ca, cb):
+        """True when ca.extend(cb) is safe without promotion."""
+        na, nb = type(ca).__name__, type(cb).__name__
+        if na == _TQ_CLASS_NAME or nb == _TQ_CLASS_NAME:
+            # TQ<->TQ extends natively; any TQ/non-TQ mix must decode.
+            return na == nb and _is_tq_batch_api(ca) and _is_tq_batch_api(cb)
+        if not callable(getattr(ca, "extend", None)):
+            return False
+        if na in _BATCH_NATIVE or nb in _BATCH_NATIVE:
+            # Batch-native extend() reads _idx/left_padding off `other`;
+            # a plain single-sequence peer would AttributeError mid-loop.
+            return na == nb
+        if isinstance(ca, CacheList) and isinstance(cb, CacheList):
+            return len(ca.caches) == len(cb.caches) and all(
+                _extend_compatible(a, b)
+                for a, b in zip(ca.caches, cb.caches)
+            )
+        # Same-type natives with their own extend (ArraysCache families,
+        # ZayaNoStateCache, ...). Plain KVCache/RotatingKVCache never get
+        # here — they have no extend() and were caught above.
+        return na == nb
+
+    def _patched_extend_cache(cache_a, cache_b):
+        if not cache_a:
+            return cache_b
+        if not cache_b:
+            return cache_a
+        if all(_extend_compatible(ca, cb) for ca, cb in zip(cache_a, cache_b)):
+            return _original_extend_cache(cache_a, cache_b)
+        promoted_a = [_promote_layer_for_extend(ca) for ca in cache_a]
+        promoted_b = [_promote_layer_for_extend(cb) for cb in cache_b]
+        for pa, pb in zip(promoted_a, promoted_b):
+            if not _extend_compatible(pa, pb):
+                raise ValueError(
+                    f"{type(pa).__name__} cannot batch with "
+                    f"{type(pb).__name__} under --continuous-batching. "
+                    "Restart the engine without --continuous-batching, or "
+                    "send requests serially (max_num_seqs=1)."
+                )
+        return _original_extend_cache(promoted_a, promoted_b)
+
+    gen_module._extend_cache = _patched_extend_cache
+
     logger.info("Patched mlx-lm for MambaCache batching support")
 
 
@@ -766,6 +1004,7 @@ def ensure_mamba_support():
     with _patch_lock:
         if not _patched:
             _patch_empty_batch_kv_extract()
+            _patch_tq_empty_extend()
             patch_mlx_lm_for_mamba()
             _patch_prompt_cache_sync()
             _patch_generation_step_sync()

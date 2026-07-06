@@ -70,6 +70,142 @@ def apply() -> None:
     import os as _os
     if _os.environ.get("VMLX_DISABLE_QWEN35_MROPE_PATCH", "0") != "1":
         _patch_qwen35_language_mrope_none_delta()
+    _patch_gemma4_attention_rope_order()
+
+
+def _patch_gemma4_attention_rope_order() -> None:
+    """gemma4: rope queries BEFORE cache.update_and_fetch (batch corruption).
+
+    Upstream ``mlx_vlm.models.gemma4.language.Attention.__call__`` ropes the
+    QUERIES only *after* ``cache.update_and_fetch(...)``. Batch caches
+    (BatchKVCache.update_and_fetch / BatchRotatingKVCache._update_in_place)
+    mutate ``self.offset`` IN PLACE (``self.offset += S`` on an mx.array), so
+    the query-rope graph node — built after the mutation — reads offset+1
+    while the keys/history were roped at offset: a +1 q/k positional skew on
+    EVERY batched decode step. Raw KVCache/RotatingKVCache carry Python-int
+    offsets (captured by value) and are immune — which is exactly why serial
+    requests were clean and only concurrent joins (which convert the running
+    caches to Batch classes, permanently) degenerated into token loops
+    ("The capital capital capital…", sweep 2026-07-05, task #76). Sliding
+    layers (theta 10k, full-dim rotation) flip the greedy argmax (logits
+    maxdiff ~12). Pinning the offset before the update is bit-exact vs the
+    raw-cache decode; this reorder was proven token-identical batched vs
+    solo. Idempotent; no-ops if upstream is absent.
+    """
+    try:
+        import mlx.core as _mx
+        from mlx_vlm.models.gemma4 import language as _g4lang
+        from mlx_vlm.models.gemma4.language import (
+            scaled_dot_product_attention as _g4_sdpa,
+        )
+    except Exception:
+        return
+    _attn_cls = getattr(_g4lang, "Attention", None)
+    if _attn_cls is None or getattr(
+        _attn_cls.__call__, "_vmlx_rope_order_patched", False
+    ):
+        return
+
+    # Two upstream shapes exist. Dispatch on the signature so we replicate
+    # the installed version faithfully (a mismatch feeds tuples into
+    # rms_norm and 500s every request — burned once on 2026-07-05):
+    #   new-style: __call__(x, mask, cache, shared_kv=None, offset=None)
+    #              -> (out, (keys, values), offset)
+    #   old-style: __call__(x, mask, cache) -> out, with an
+    #              is_kv_shared_layer state-read branch inline.
+    import inspect as _inspect
+
+    _params = _inspect.signature(_attn_cls.__call__).parameters
+    _new_style = "shared_kv" in _params
+
+    def _call_new_style(self, x, mask=None, cache=None, shared_kv=None, offset=None):
+        B, L, _ = x.shape
+        queries = self.q_proj(x).reshape(B, L, self.n_heads, self.head_dim)
+        queries = self.q_norm(queries)
+
+        if shared_kv is not None:
+            keys, values = shared_kv
+            queries = queries.transpose(0, 2, 1, 3)
+            queries = self.rope(queries, offset=offset)
+        else:
+            keys = self.k_proj(x).reshape(B, L, self.n_kv_heads, self.head_dim)
+            if self.use_k_eq_v:
+                values = keys
+            else:
+                values = self.v_proj(x).reshape(
+                    B, L, self.n_kv_heads, self.head_dim
+                )
+            offset = _mx.array(cache.offset) if cache is not None else 0
+            keys = self.k_norm(keys)
+            keys = keys.transpose(0, 2, 1, 3)
+            keys = self.rope(keys, offset=offset)
+            values = self.v_norm(values)
+            values = values.transpose(0, 2, 1, 3)
+            # vMLX reorder: rope queries with the SAME pre-update offset
+            # BEFORE the cache mutates it in place.
+            queries = queries.transpose(0, 2, 1, 3)
+            queries = self.rope(queries, offset=offset)
+            if cache is not None:
+                keys, values = cache.update_and_fetch(keys, values)
+
+        output = _g4_sdpa(
+            queries, keys, values, cache=cache, scale=self.scale, mask=mask
+        )
+        output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
+        return self.o_proj(output), (keys, values), offset
+
+    def _call_old_style(self, x, mask=None, cache=None):
+        B, L, _ = x.shape
+        queries = self.q_proj(x).reshape(B, L, self.n_heads, self.head_dim)
+        queries = self.q_norm(queries)
+
+        offset = 0
+        if self.is_kv_shared_layer and cache is not None:
+            state = cache.state
+            keys, values = state[0], state[1]
+            offset = cache.offset
+            queries = queries.transpose(0, 2, 1, 3)
+            queries = self.rope(queries, offset=offset)
+        else:
+            if cache is not None:
+                offset = cache.offset
+            keys = self.k_proj(x).reshape(B, L, self.n_kv_heads, self.head_dim)
+            if self.use_k_eq_v:
+                values = keys
+            else:
+                values = self.v_proj(x).reshape(
+                    B, L, self.n_kv_heads, self.head_dim
+                )
+            keys = self.k_norm(keys)
+            values = self.v_norm(values)
+            values = values.transpose(0, 2, 1, 3)
+            keys = keys.transpose(0, 2, 1, 3)
+            keys = self.rope(keys, offset=offset)
+            # vMLX reorder: rope queries with the SAME pre-update offset
+            # BEFORE update_and_fetch mutates cache.offset in place.
+            queries = queries.transpose(0, 2, 1, 3)
+            queries = self.rope(queries, offset=offset)
+            if cache is not None:
+                keys, values = cache.update_and_fetch(keys, values)
+
+        if mask is not None and isinstance(mask, _mx.array):
+            if mask.shape[-1] != keys.shape[-2]:
+                mask = mask[..., -keys.shape[-2]:]
+
+        output = _g4_sdpa(
+            queries, keys, values, cache=cache, scale=self.scale, mask=mask
+        )
+        output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
+        return self.o_proj(output)
+
+    _patched = _call_new_style if _new_style else _call_old_style
+    _patched._vmlx_rope_order_patched = True
+    _attn_cls.__call__ = _patched
+    _logger.info(
+        "mlx_vlm_compat: gemma4 Attention patched (%s-style) — queries roped "
+        "before cache.update_and_fetch (batched q/k offset-skew fix, task #76)",
+        "new" if _new_style else "old",
+    )
 
 
 class _Rank3KVTrimView:

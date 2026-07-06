@@ -66,14 +66,18 @@ def _split_cli_values(values: list[str] | None) -> list[str]:
     return out
 
 
-def _parse_lora_scales(values: list[str] | None) -> list[float]:
+def _parse_lora_scales(values: list[str] | None) -> list[float] | None:
     scales = []
     for value in _split_cli_values(values):
         try:
             scales.append(float(value))
         except ValueError:
             raise SystemExit(f"Error: --lora-scales values must be floats, got {value!r}")
-    return scales
+    # None = "flag not provided". Returning [] here made image_gen's
+    # `lora_scales is not None` guard fire on LoRA-less launches, so every
+    # mflux image model died at startup with "--lora-scales requires
+    # --lora-paths" (GitHub #224, FLUX.2-klein via the GUI).
+    return scales if scales else None
 
 
 def _validate_lora_args_for_model_type(args, *, is_image: bool) -> None:

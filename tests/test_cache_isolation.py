@@ -195,3 +195,95 @@ class TestPrefixCacheIsolation:
 
         stats = cache.get_stats()
         assert stats["entry_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# RotatingKVCache isolation (gemma-4 / mixed-SWA prefix-cache pollution)
+# ---------------------------------------------------------------------------
+
+mx = pytest.importorskip("mlx.core")
+_rot_mod = pytest.importorskip("mlx_lm.models.cache")
+RotatingKVCache = getattr(_rot_mod, "RotatingKVCache", None)
+
+
+def _build_rotating_kv_cache(offset: int, max_size: int = 64, keep: int = 4):
+    """Build a REAL RotatingKVCache advanced to `offset` positions.
+
+    Feeds `offset` single-token updates (B=1, n_heads=2, head_dim=8) so the
+    cache holds a genuine buffer with a non-zero offset, mirroring how a
+    prefill leaves a stored prefix entry.
+    """
+    rot = RotatingKVCache(max_size=max_size, keep=keep)
+    for i in range(offset):
+        k = mx.full((1, 2, 1, 8), float(i + 1))
+        v = mx.full((1, 2, 1, 8), float(-(i + 1)))
+        rot.update_and_fetch(k, v)
+    mx.eval(rot.keys, rot.values)
+    return rot
+
+
+@pytest.mark.skipif(
+    RotatingKVCache is None, reason="RotatingKVCache not available in this mlx_lm"
+)
+class TestRotatingKVCacheIsolation:
+    """gemma-4 mixed-SWA regression: a cache hit MUST return an isolated clone.
+
+    Before the fix, `_clone_cache_for_fetch` returned the STORED reference for
+    RotatingKVCache (excluded from the issue-#198 clone set), so decode rotated
+    /appended into the shared buffer -> polluted reuse -> identical greedy
+    requests diverged + dropped tool calls after ~3 reuses on gemma-4.
+    """
+
+    def test_clone_is_a_distinct_isolated_object(self):
+        """Fetch-clone must not be the stored object (old code returned it)."""
+        cache = _make_prefix_cache()
+        offset = 30
+        rot = _build_rotating_kv_cache(offset)
+
+        cloned = cache._clone_cache_for_fetch([rot], offset)
+
+        assert cloned is not None
+        assert len(cloned) == 1
+        clone_layer = cloned[0]
+        # Distinct object of the same type (the whole point of the fix).
+        assert clone_layer is not rot
+        assert type(clone_layer).__name__ == "RotatingKVCache"
+        # Positional bookkeeping preserved faithfully.
+        assert int(clone_layer.offset) == offset
+        assert clone_layer.max_size == rot.max_size
+        assert clone_layer.keep == rot.keep
+
+    def test_mutating_clone_does_not_pollute_stored_entry(self):
+        """Decode on the clone must leave the stored prefix untouched."""
+        cache = _make_prefix_cache()
+        offset = 30
+        rot = _build_rotating_kv_cache(offset)
+
+        # Snapshot the stored buffer BEFORE any reuse.
+        before = mx.array(rot.keys)
+        before_offset = int(rot.offset)
+
+        # First hit: clone, then "decode" a token into the clone.
+        clone_a = cache._clone_cache_for_fetch([rot], offset)[0]
+        k = mx.full((1, 2, 1, 8), 999.0)
+        v = mx.full((1, 2, 1, 8), -999.0)
+        clone_a.update_and_fetch(k, v)
+        mx.eval(clone_a.keys, clone_a.values)
+
+        # The stored entry must be byte-for-byte unchanged (isolation).
+        assert int(rot.offset) == before_offset
+        assert rot.keys.shape == before.shape
+        assert bool(mx.all(rot.keys == before))
+
+        # Second hit reproduces the ORIGINAL prefix, not the mutated one.
+        clone_b = cache._clone_cache_for_fetch([rot], offset)[0]
+        assert clone_b is not clone_a
+        assert int(clone_b.offset) == offset
+        assert clone_b.keys.shape == before.shape
+        assert bool(mx.all(clone_b.keys == before))
+
+    def test_reverse_truncation_refused_as_clean_miss(self):
+        """target_len < offset is lossy for rotating -> None (clean miss)."""
+        rot = _build_rotating_kv_cache(30)
+        # Direct reverse-match path: request fewer positions than stored.
+        assert MemoryAwarePrefixCache._truncate_cache([rot], 10) is None

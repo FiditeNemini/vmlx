@@ -407,6 +407,42 @@ class Scheduler:
                     ", ".join(changed),
                 )
 
+        # Single-batch-native cache families (sweep 2026-07-05): openPangu's
+        # OpenPanguV2LayerCache carries path-dependent conv states and Zaya's
+        # CCA conv_state is shaped for batch=1 — feeding either a 2-sequence
+        # batch corrupts or crashes the decode step ("[reshape] Cannot
+        # reshape array of size 128 into shape (1,1,1,64)" aborting all
+        # in-flight requests on Zaya; openPangu previously aborted earlier at
+        # the missing filter()). Mirror the TurboQuant guard above: force
+        # serial scheduling so concurrent clients queue instead of crashing.
+        _single_batch_native_family = (
+            self._model_type_for_runtime in {"openpangu_v2", "zaya"}
+            or self._uses_zaya_cache
+        )
+        if _single_batch_native_family:
+            changed = []
+            if self.config.max_num_seqs != 1:
+                changed.append(f"max_num_seqs {self.config.max_num_seqs}->1")
+                self.config.max_num_seqs = 1
+            if self.config.prefill_batch_size != 1:
+                changed.append(
+                    f"prefill_batch_size {self.config.prefill_batch_size}->1"
+                )
+                self.config.prefill_batch_size = 1
+            if self.config.completion_batch_size != 1:
+                changed.append(
+                    f"completion_batch_size {self.config.completion_batch_size}->1"
+                )
+                self.config.completion_batch_size = 1
+            if changed:
+                logger.warning(
+                    "%s cache is single-sequence native (path-dependent "
+                    "conv/CCA state); overriding %s so concurrent requests "
+                    "queue serially instead of corrupting the batch.",
+                    self._model_type_for_runtime,
+                    ", ".join(changed),
+                )
+
         # mlxstudio#138: surface the precedence when both knobs are set.
         # Without VMLX_DISABLE_TQ_KV, the loader's TQ patch wins because
         # BatchGenerator runs `model.make_cache()` and gets TurboQuantKVCache;

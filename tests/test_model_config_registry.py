@@ -1884,11 +1884,21 @@ class TestModelConfigComprehensiveChecks:
         "mistral",
         "gemma4",
         "minimax_m2",
+        # MiniMax-M3 ns-token think rail — registered in
+        # vmlx_engine/reasoning/__init__.py (register_parser("minimax_m3")).
+        # Selected by the minimax_m3 family row added for the GitHub #226
+        # autodetect gap (2026-07-05): JANG stamps carry no parser fields,
+        # so without the row native tool XML leaked into visible content.
+        "minimax_m3",
         "think_xml",
     }
     VALID_TOOL_PARSERS = {
         None, "qwen", "llama", "mistral", "deepseek", "hermes",
         "granite", "glm47", "step3p5", "nemotron", "minimax", "kimi",
+        # MiniMax-M3 tag-named-param XML (`]<]minimax[>[<tool_call>` /
+        # `<invoke name=...>`), ToolParserManager.register_module in
+        # vmlx_engine/tool_parsers/minimax_m3_tool_parser.py:130.
+        "minimax_m3",
         "dsml", "zaya_xml", "xml_function",
         # Gemma family: commit 3294a2da added `gemma3` for Google's
         # documented ``` ```tool_code\\nname(k=v)\\n``` ``` format, and

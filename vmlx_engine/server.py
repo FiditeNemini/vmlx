@@ -9181,13 +9181,13 @@ async def create_anthropic_message(
 
         async def generate():
             try:
-                async for chunk_str in stream_chat_completion(
+                async for chunk_str in _terminal_finish_guard(stream_chat_completion(
                     engine=engine,
                     messages=messages_dump,
                     request=chat_req,
                     fastapi_request=fastapi_request,
                     **_msg_kwargs,
-                ):
+                )):
                     # Pass through SSE comments (keep-alive) to prevent client timeout
                     if chunk_str.startswith(":"):
                         yield chunk_str
@@ -9995,9 +9995,9 @@ async def ollama_chat(fastapi_request: Request):
     async def ndjson_stream():
         buffered_tcs: list[dict] = []  # ollama-shape {function:{name,arguments}}
         done_sent = False
-        async for sse_line in stream_chat_completion(
+        async for sse_line in _terminal_finish_guard(stream_chat_completion(
             engine, messages, chat_req, fastapi_request=fastapi_request, **chat_kwargs
-        ):
+        )):
             # Peek at the SSE line to harvest tool_calls and rewrite the
             # chunk so the stateless adapter never sees them. `[DONE]` and
             # non-data lines pass through untouched.
@@ -12130,13 +12130,13 @@ async def create_chat_completion(
 
     if request.stream:
         return StreamingResponse(
-            stream_chat_completion(
+            _terminal_finish_guard(stream_chat_completion(
                 engine,
                 messages,
                 request,
                 fastapi_request=fastapi_request,
                 **chat_kwargs,
-            ),
+            )),
             media_type="text/event-stream",
         )
 
@@ -15001,6 +15001,66 @@ async def _stream_with_keepalive(
             pending.cancel()
 
 
+async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    """OpenAI terminal-contract guard for chat-completion SSE streams.
+
+    ``stream_chat_completion`` attaches ``finish_reason`` only inside
+    conditional branches (tool finish, flush-remainder, answer pass,
+    diagnostics, ...). Natural completion — content fully streamed, model
+    stops on EOS — hits none of them, so the stream ended ``…content →
+    [DONE]`` with NO chunk carrying ``finish_reason``. Strict OpenAI
+    clients (langchain, Claude Code/litellm) wait for a non-null
+    ``finish_reason`` before closing and hang or mark the response
+    incomplete (docs/STREAMING-FINISH-REASON-FINDINGS-2026-07-02.md;
+    GitHub #226 item 4). If no chunk carried a non-null finish_reason by
+    ``[DONE]``, inject exactly one terminal ``finish_reason:"stop"`` chunk.
+
+    Detection relies on ``_dump_sse_json``'s ``exclude_none=True`` (the
+    key only appears when non-null) and the raw ``json.dumps`` sites'
+    explicit ``: null`` form. Applied at the SSE route call sites so the
+    generator itself stays the single source for source-inspection
+    contract tests.
+    """
+    finish_seen = False
+    first_chunk_meta = None
+    async for sse in sse_stream:
+        if sse.startswith("data: ") and not sse.startswith("data: [DONE]"):
+            if first_chunk_meta is None and '"chat.completion.chunk"' in sse:
+                try:
+                    _p = json.loads(sse[6:].strip())
+                    first_chunk_meta = {
+                        "id": _p.get("id"),
+                        "created": _p.get("created"),
+                        "model": _p.get("model"),
+                    }
+                except Exception:
+                    pass
+            if (
+                not finish_seen
+                and '"finish_reason"' in sse
+                and '"finish_reason": null' not in sse
+            ):
+                finish_seen = True
+        elif sse.startswith("data: [DONE]") and not finish_seen:
+            if first_chunk_meta is not None:
+                terminal = {
+                    "id": first_chunk_meta["id"],
+                    "object": "chat.completion.chunk",
+                    "created": first_chunk_meta["created"],
+                    "model": first_chunk_meta["model"],
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(terminal, ensure_ascii=True)}\n\n"
+                finish_seen = True
+        yield sse
+
+
 async def stream_chat_completion(
     engine: BaseEngine,
     messages: list,
@@ -15601,7 +15661,32 @@ async def stream_chat_completion(
                         yield f"data: {_dump_sse_json(heartbeat)}\n\n"
                     continue
 
-                if _suppress_tools and emit_content:
+                # MiniMax-M3 forced/adaptive reasoning can spend the whole
+                # first-pass token budget in the prompt-opened <mm:think>
+                # rail, then emit only a partial visible answer before
+                # finish_reason="length". Defer no-tool visible content from
+                # that first pass until we know whether it ended cleanly; if
+                # it truncates, the post-stream thinking-off answer pass below
+                # emits the usable visible answer instead of leaking a prefix.
+                #
+                # Defer the RAW parser increment BEFORE the display-delta
+                # transforms: the deferral keeps streamed_content empty, so
+                # _visual_grounding_display_delta(accumulated, "") returned
+                # the FULL cleaned text every tick and the deferred buffer
+                # became a concatenation of cumulative snapshots
+                # ("TheThe skyThe sky appears…") — the duplicated-paragraph
+                # symptom of GitHub #226 item 5 (reproduced live 2026-07-05
+                # on MiniMax-M3-Coder-Small once the minimax_m3 parsers were
+                # autodetected). The end-of-stream flush already applies
+                # clean_output_text + _finalize_visible_text_for_request to
+                # the whole buffer, so raw deltas are the correct thing to
+                # store here. The deferral only arms when the request has no
+                # tools (see m3_reasoning_only_answer_enabled), so it cannot
+                # shadow the _suppress_tools display path below.
+                if m3_reasoning_only_answer_enabled and emit_content:
+                    deferred_m3_visible_content += emit_content
+                    emit_content = None
+                elif _suppress_tools and emit_content:
                     emit_content = _suppressed_tool_display_delta(
                         accumulated_content,
                         streamed_content,
@@ -15612,17 +15697,6 @@ async def stream_chat_completion(
                         accumulated_content,
                         streamed_content,
                     )
-
-                # MiniMax-M3 forced/adaptive reasoning can spend the whole
-                # first-pass token budget in the prompt-opened <mm:think>
-                # rail, then emit only a partial visible answer before
-                # finish_reason="length". Defer no-tool visible content from
-                # that first pass until we know whether it ended cleanly; if
-                # it truncates, the post-stream thinking-off answer pass below
-                # emits the usable visible answer instead of leaking a prefix.
-                if m3_reasoning_only_answer_enabled and emit_content:
-                    deferred_m3_visible_content += emit_content
-                    emit_content = None
 
                 # Skip chunks that have nothing to emit after conversion
                 if not emit_content and not emit_reasoning and not output.finished:
@@ -16134,10 +16208,16 @@ async def stream_chat_completion(
         # completion_tokens against the same resolved max_tokens; a fresh
         # _answer_budget here doubled total output past the cap (openPangu:
         # 4096 reasoning + 4096 answer = 8192 > the 4096 the client asked for).
-        # max(1, …) keeps a valid insert; if reasoning consumed the whole
-        # budget the turn correctly ends length-capped with no answer pass room.
+        # FLOOR the draw-down: a non-terminating reasoner (openPangu never emits
+        # </think> before the cap, so completion_tokens ≈ max_tokens on every
+        # turn) would otherwise collapse this to 1 token and stream a truncated
+        # one-word answer ("capital of France" → "The", "2+2" → "2") while the
+        # non-stream path (fresh max(32, max_tokens)) returns the full answer.
+        # Live-proven on openPangu-3M: floor 256 restores complete streamed
+        # answers; the overage is bounded by the floor (≤256), not the
+        # full-budget doubling the draw-down removed.
         answer_kwargs["max_tokens"] = max(
-            1, int(_answer_budget or 256) - int(completion_tokens or 0)
+            256, int(_answer_budget or 256) - int(completion_tokens or 0)
         )
         answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
         if _answer_family == "MiniMax-M3":
@@ -17573,9 +17653,11 @@ async def stream_responses_api(
             # budget, not a fresh full one (see the Chat Completions site): the
             # reasoning pass already spent completion_tokens against the same
             # resolved max_tokens, so a fresh _answer_budget doubled total
-            # output past the client's cap. max(1, …) keeps a valid insert.
+            # output past the client's cap. FLOOR at 256 so a non-terminating
+            # reasoner (openPangu) that fills the budget still streams a full
+            # answer instead of a 1-token stub; overage bounded by the floor.
             answer_kwargs["max_tokens"] = max(
-                1, int(_answer_budget or 256) - int(completion_tokens or 0)
+                256, int(_answer_budget or 256) - int(completion_tokens or 0)
             )
             answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
             if _answer_family == "MiniMax-M3":

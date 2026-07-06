@@ -14,6 +14,38 @@ Features:
 
 __version__ = "1.6.1"
 
+# transformers >= 5.13 rejects mlx-lm's legacy STRING-form tokenizer
+# registration — mlx_lm/tokenizer_utils.py:505 does
+# AutoTokenizer.register("NewlineTokenizer", fast_tokenizer_class=...)
+# and auto_factory._LazyAutoMapping.register now reads key.__module__ →
+# AttributeError: 'str' object has no attribute '__module__', crashing the
+# ENTIRE mlx_lm import (GitHub #226 item 1; also reproduced when the
+# bundled-python rebuild picked up transformers 5.13.0). Wrap register so
+# the original path runs first — behavior on <=5.12 is unchanged — and only
+# the legacy string form that the new transformers rejects is skipped
+# (nothing in the vmlx runtime resolves tokenizers by that string key).
+# MUST run before the mlx_lm import just below.
+try:
+    from transformers import AutoTokenizer as _vmlx_AutoTokenizer
+
+    if not getattr(
+        _vmlx_AutoTokenizer.register, "_vmlx_str_key_compat", False
+    ):
+        _vmlx_orig_register = _vmlx_AutoTokenizer.register
+
+        def _vmlx_register_compat(config_class, *args, **kwargs):
+            try:
+                return _vmlx_orig_register(config_class, *args, **kwargs)
+            except (AttributeError, TypeError, ValueError):
+                if isinstance(config_class, str):
+                    return None
+                raise
+
+        _vmlx_register_compat._vmlx_str_key_compat = True
+        _vmlx_AutoTokenizer.register = staticmethod(_vmlx_register_compat)
+except Exception:
+    pass
+
 # mlx_lm 0.31.x changed create_attention_mask() to require return_array and
 # window_size positional args.  mlx_vlm's qwen3_5/language.py calls
 # create_ssm_mask(h, cache) which calls cache.make_mask(N) without those args.

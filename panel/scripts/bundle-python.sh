@@ -136,7 +136,7 @@ echo "==> Installing MLX $MLX_VERSION wheels for $MLX_WHEEL_PLATFORM..."
 echo "==> Installing dependencies..."
 "$PYTHON" -m pip install \
   "mlx==$MLX_VERSION" "mlx-lm==$MLX_LM_VERSION" "mlx-vlm==$MLX_VLM_VERSION" \
-  "transformers>=4.40.0" "tokenizers>=0.19.0" "huggingface-hub>=0.23.0" \
+  "transformers>=4.40.0,<5.13" "tokenizers>=0.19.0" "huggingface-hub>=0.23.0" \
   "numpy>=1.24.0" "pillow>=10.0.0" \
   "opencv-python-headless>=4.8.0" \
   "fastapi>=0.100.0" "uvicorn>=0.23.0" \

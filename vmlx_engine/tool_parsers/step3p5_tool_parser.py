@@ -59,6 +59,12 @@ class Step3p5ToolParser(ToolParser):
         re.DOTALL,
     )
 
+    # Step-3.7 variant: arguments wrapped in <args><name>value</name>...</args>
+    # (instead of <parameter=name>value</parameter>). Tolerated additively so a
+    # single parser handles both Step-3.5 and Step-3.7 tool-call formats.
+    ARGS_BLOCK_PATTERN = re.compile(r"<args>(.*?)</args>", re.DOTALL)
+    ARGS_KV_PATTERN = re.compile(r"<([A-Za-z_][\w-]*)>\s*(.*?)\s*</\1>", re.DOTALL)
+
     def _get_param_schema(
         self, func_name: str, param_name: str, request: dict[str, Any] | None
     ) -> dict[str, Any] | None:
@@ -114,6 +120,27 @@ class Step3p5ToolParser(ToolParser):
 
         return value
 
+    def _parse_args_block(
+        self, func_name: str, content: str, request: dict[str, Any] | None
+    ) -> str | None:
+        """Parse the Step-3.7 ``<args><name>value</name>...</args>`` variant.
+
+        Returns a JSON-encoded arguments string, or ``None`` if the content
+        contains no recognizable ``<args>`` block (so callers can fall back).
+        """
+        block = self.ARGS_BLOCK_PATTERN.search(content)
+        if not block:
+            return None
+        pairs = self.ARGS_KV_PATTERN.findall(block.group(1))
+        if not pairs:
+            return None
+        arguments: dict[str, Any] = {}
+        for name, value in pairs:
+            name = name.strip()
+            schema = self._get_param_schema(func_name, name, request)
+            arguments[name] = self._coerce_value(value.strip(), schema)
+        return json.dumps(arguments, ensure_ascii=False)
+
     def extract_tool_calls(
         self, model_output: str, request: dict[str, Any] | None = None
     ) -> ExtractedToolCallInformation:
@@ -168,6 +195,15 @@ class Step3p5ToolParser(ToolParser):
                         "id": generate_tool_id(),
                         "name": func_name,
                         "arguments": json.dumps(arguments, ensure_ascii=False),
+                    }
+                )
+            elif (args_json := self._parse_args_block(func_name, content, request)) is not None:
+                # Step-3.7 <args><name>value</name>...</args> variant
+                tool_calls.append(
+                    {
+                        "id": generate_tool_id(),
+                        "name": func_name,
+                        "arguments": args_json,
                     }
                 )
             else:

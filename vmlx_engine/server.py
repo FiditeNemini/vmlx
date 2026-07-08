@@ -1017,6 +1017,47 @@ def _responses_fast_path_visible_text(output: Any, request: Any) -> str:
     )
 
 
+def _answer_pass_visible_delta(
+    raw_text: str,
+    already_sent: str,
+    request: Any,
+    finished: bool,
+) -> tuple[str, str]:
+    """Incremental visible-content delta for the STREAMED bounded answer pass (F6).
+
+    The MLLM stream only assembles ``GenerationOutput.text`` at ``finished=True``,
+    so the streaming answer pass accumulates ``new_text`` itself and calls this to
+    turn the raw accumulation into the next content delta. It applies the SAME
+    visible-text extraction the non-streaming answer pass used
+    (``clean_output_text`` + the ``enable_thinking`` ``</think>`` split) so the
+    streamed text is byte-identical to the old single chunk, then holds back a
+    marker-length tail (until ``finished``) so transient partial reasoning-marker
+    fragments — e.g. gemma's ``<|channel>thought`` cleaning to a bare ``thought``
+    before ``<channel|>`` arrives — are re-stripped before they can escape.
+
+    Returns ``(delta_to_emit, new_sent_cursor)``. ``delta_to_emit`` is ``""`` when
+    nothing new is safe to emit yet (held back, or a non-monotonic clean revision
+    that resyncs the cursor without emitting).
+    """
+    vis = raw_text
+    if getattr(request, "enable_thinking", None) is False and "</think>" in vis:
+        vis = vis.rsplit("</think>", 1)[1]
+    full = _finalize_visible_text_for_request(clean_output_text(vis), request)
+    if finished:
+        target = full
+    elif len(full) > _ANS_MARKER_HOLDBACK:
+        target = full[:-_ANS_MARKER_HOLDBACK]
+    else:
+        target = ""
+    if not target:
+        return "", already_sent
+    if not target.startswith(already_sent):
+        # Non-monotonic clean revision (a marker resolved and dropped a prefix we
+        # hadn't emitted): resync the cursor without emitting to avoid duplicates.
+        return "", target
+    return target[len(already_sent):], target
+
+
 def _visible_text_for_dsv4_completion(output: Any, engine: Any, request: Any) -> str:
     """Return the visible DSV4 completion text from chat-rail output."""
     raw_text = getattr(output, "raw_text", "") or getattr(output, "text", "") or ""
@@ -2911,6 +2952,14 @@ _TOOL_CALL_MARKERS = [
 # another tool-call block (which resets the window). Only parsers that opt in
 # via ToolParser.STREAM_STOPS_AFTER_COMPLETE_CALL are ever early-stopped.
 _STREAM_TOOL_CALL_STOP_GRACE_CHUNKS = 8
+
+# Characters held back from the tail of the bounded thinking-off answer pass
+# while streaming (F6). clean_output_text applied to a growing buffer transiently
+# emits partial reasoning-marker fragments (gemma's "<|channel>thought\n<channel|>"
+# = 27 chars, qwen/openpangu "</think>" <= 8); holding back this many chars until
+# the buffer grows / the stream finishes lets those artifacts be re-stripped
+# before they escape to the client. Longer than any known reasoning marker.
+_ANS_MARKER_HOLDBACK = 48
 
 _TOOL_MARKUP_RESIDUE_PATTERNS = []
 _TOOL_MARKUP_STRIP_TO_EOL_MARKERS = {
@@ -16230,35 +16279,80 @@ async def stream_chat_completion(
         answer_kwargs.pop("_vmlx_tools_present", None)
         answer_kwargs.pop("_vmlx_template_tools", None)
         try:
-            answer_output = await _await_chat_with_disconnect_abort(
-                engine,
-                messages=answer_messages,
-                chat_kwargs=answer_kwargs,
-                timeout=_stream_timeout,
-                fastapi_request=fastapi_request,
-                request_id=f"{response_id}:visible-answer",
-                endpoint=f"Chat Completions {_answer_family} visible answer pass",
-            )
-            answer_text = _responses_fast_path_visible_text(answer_output, request)
-            answer_text = _finalize_visible_text_for_request(answer_text, request)
-            if answer_text:
-                content_was_emitted = True
-                streamed_content += answer_text
-                completion_tokens += int(
-                    getattr(answer_output, "completion_tokens", 0) or 0
+            # F6: STREAM the bounded answer pass token-by-token instead of
+            # generating it in full and emitting it as one content delta. The
+            # single-delta form made the whole answer land at once after a long
+            # silent wait (a coding-harness / progressive-UI hazard whenever
+            # reasoning exhausts the budget and this fallback fires). The MLLM
+            # stream only assembles GenerationOutput.text at finished=True, so we
+            # accumulate new_text ourselves and let _answer_pass_visible_delta
+            # apply the same clean_output_text + </think> split the non-streaming
+            # path used (marker-length holdback until finish) — the streamed text
+            # is byte-identical to the old single chunk, just incremental.
+            _ans_raw = ""
+            _ans_sent = ""
+            _ans_ct = 0
+            _ans_any = False
+            async for answer_output in _stream_with_keepalive(
+                engine.stream_chat(messages=answer_messages, **answer_kwargs),
+                total_timeout=_stream_timeout,
+            ):
+                if answer_output is None:
+                    yield ": keep-alive\n\n"
+                    continue
+                if fastapi_request and await fastapi_request.is_disconnected():
+                    logger.info(
+                        "Client disconnected during %s answer pass, aborting %s",
+                        _answer_family,
+                        response_id,
+                    )
+                    if hasattr(engine, "abort_request"):
+                        await engine.abort_request(f"{response_id}:visible-answer")
+                    break
+                _ans_ct = (
+                    int(getattr(answer_output, "completion_tokens", 0) or 0) or _ans_ct
                 )
+                _ans_raw += getattr(answer_output, "new_text", "") or ""
+                _delta, _ans_sent = _answer_pass_visible_delta(
+                    _ans_raw,
+                    _ans_sent,
+                    request,
+                    bool(getattr(answer_output, "finished", False)),
+                )
+                if not _delta:
+                    continue
+                _ans_any = True
                 answer_chunk = ChatCompletionChunk(
                     id=response_id,
                     created=_created_ts,
                     model=request.model,
                     choices=[
                         ChatCompletionChunkChoice(
-                            delta=ChatCompletionChunkDelta(content=answer_text),
-                            finish_reason="stop",
+                            delta=ChatCompletionChunkDelta(content=_delta),
+                            finish_reason=None,
                         )
                     ],
                 )
                 yield f"data: {_dump_sse_json(answer_chunk)}\n\n"
+            if _ans_any:
+                content_was_emitted = True
+                streamed_content += _ans_sent
+                completion_tokens += int(_ans_ct or 0)
+                # Terminal finish for the answer-pass stream (mirrors the original
+                # single chunk's finish_reason="stop"): satisfies the OpenAI
+                # terminal-finish contract so strict clients don't hang.
+                answer_finish_chunk = ChatCompletionChunk(
+                    id=response_id,
+                    created=_created_ts,
+                    model=request.model,
+                    choices=[
+                        ChatCompletionChunkChoice(
+                            delta=ChatCompletionChunkDelta(),
+                            finish_reason="stop",
+                        )
+                    ],
+                )
+                yield f"data: {_dump_sse_json(answer_finish_chunk)}\n\n"
         except Exception as e:
             logger.error(
                 "%s Chat Completions visible answer pass failed for %s: %s",
@@ -17675,24 +17769,40 @@ async def stream_responses_api(
                 else f"Responses API {_answer_family} visible answer pass"
             )
             try:
-                answer_output = await _await_chat_with_disconnect_abort(
-                    engine,
-                    messages=answer_messages,
-                    chat_kwargs=answer_kwargs,
-                    timeout=_stream_timeout,
-                    fastapi_request=fastapi_request,
-                    request_id=f"{response_id}:visible-answer",
-                    endpoint=answer_endpoint,
-                )
-                answer_text = _responses_fast_path_visible_text(answer_output, request)
-                answer_text = _finalize_visible_text_for_request(answer_text, request)
-                if answer_text:
-                    display_text = answer_text
-                    content_was_emitted = True
-                    streamed_text += answer_text
-                    completion_tokens += int(
-                        getattr(answer_output, "completion_tokens", 0) or 0
+                # F6: STREAM the answer pass token-by-token (see the Chat
+                # Completions site for the full rationale + mechanics). The MLLM
+                # stream only assembles GenerationOutput.text at finished=True, so
+                # accumulate new_text and apply the SAME clean_output_text +
+                # `</think>` split the non-streaming path used, holding back a
+                # marker-length tail so transient partial-marker fragments are
+                # re-stripped before they escape. Final text is identical to the
+                # old single delta — just incremental.
+                _ans_raw = ""
+                _ans_sent = ""
+                _ans_ct = 0
+                async for answer_output in _stream_with_keepalive(
+                    engine.stream_chat(messages=answer_messages, **answer_kwargs),
+                    total_timeout=_stream_timeout,
+                ):
+                    if answer_output is None:
+                        continue
+                    if fastapi_request and await fastapi_request.is_disconnected():
+                        if hasattr(engine, "abort_request"):
+                            await engine.abort_request(f"{response_id}:visible-answer")
+                        break
+                    _ans_ct = (
+                        int(getattr(answer_output, "completion_tokens", 0) or 0)
+                        or _ans_ct
                     )
+                    _ans_raw += getattr(answer_output, "new_text", "") or ""
+                    _delta, _ans_sent = _answer_pass_visible_delta(
+                        _ans_raw,
+                        _ans_sent,
+                        request,
+                        bool(getattr(answer_output, "finished", False)),
+                    )
+                    if not _delta:
+                        continue
                     yield _sse(
                         "response.output_text.delta",
                         {
@@ -17700,9 +17810,14 @@ async def stream_responses_api(
                             "item_id": msg_id,
                             "output_index": output_index,
                             "content_index": 0,
-                            "delta": answer_text,
+                            "delta": _delta,
                         },
                     )
+                if _ans_sent:
+                    display_text = _ans_sent
+                    content_was_emitted = True
+                    streamed_text += _ans_sent
+                    completion_tokens += int(_ans_ct or 0)
             except Exception as e:
                 logger.error(
                     "%s visible answer pass failed for %s: %s",

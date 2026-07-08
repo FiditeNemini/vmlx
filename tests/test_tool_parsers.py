@@ -347,6 +347,44 @@ class TestQwenToolParser:
         assert args["unit"] == "celsius"
         assert result.content is None or "<parameter" not in result.content
 
+    def test_orphan_scaffolding_stripped_from_content(self, parser):
+        """Holo3-35B-A3B-mxfp4 (2026-07-08) emits MALFORMED tool XML: a premature
+        </function> after the first param, then an orphan <parameter=unit> outside
+        any function, extra </function> tags, and a hallucinated <result>{...}</result>
+        fake tool output. The real call must still parse, but none of the orphan
+        scaffolding may leak into visible content.
+        """
+        text = (
+            "<tool_call>\n<function=get_weather>\n"
+            "<parameter=city>\nBerlin\n</parameter>\n</function>\n"
+            "<parameter=unit>\ncelsius\n</parameter>\n</function>\n</function>\n"
+            '<result>\n{\n  "temperature": 15,\n  "condition": "Partly cloudy"\n}\n</result>'
+        )
+        result = parser.extract_tool_calls(text)
+
+        assert result.tools_called
+        assert result.tool_calls[0]["name"] == "get_weather"
+        assert json.loads(result.tool_calls[0]["arguments"])["city"] == "Berlin"
+        # no orphan tool scaffolding may leak into content
+        leaked = result.content or ""
+        for marker in ("<parameter", "</function>", "<result", "<tool_call", "<argument", "<value"):
+            assert marker not in leaked, f"{marker!r} leaked into content: {leaked!r}"
+
+    def test_orphan_strip_preserves_legitimate_prose(self, parser):
+        """The residual strip must only remove tool scaffolding, never a model's
+        legitimate trailing prose in a tool-call turn."""
+        text = (
+            "<tool_call><function=get_weather>"
+            "<parameter=city>Paris</parameter>"
+            "</function></tool_call>"
+            "I'll check the weather in Paris for you now."
+        )
+        result = parser.extract_tool_calls(text)
+        assert result.tools_called
+        assert json.loads(result.tool_calls[0]["arguments"])["city"] == "Paris"
+        assert result.content is not None
+        assert "check the weather in Paris" in result.content
+
     def test_no_tool_call(self, parser):
         """Test text without tool calls."""
         text = "I can help you with that question."

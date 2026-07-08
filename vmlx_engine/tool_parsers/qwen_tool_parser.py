@@ -71,6 +71,27 @@ class QwenToolParser(ToolParser):
     )
     BARE_ARG_PATTERN = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</\1>", re.DOTALL)
 
+    # Residual tool-scaffolding strip. Some off-format / quant-degraded models
+    # (observed live on Holo3-35B-A3B-mxfp4, 2026-07-08) emit ORPHAN scaffolding
+    # AFTER the parsed call: a premature </function> then a second
+    # <parameter=unit>celsius</parameter> outside any <function>, extra
+    # </function> tags, a hallucinated <result>{...}</result> fake tool output,
+    # or an <argument>/<value> dialect. FUNCTION_PATTERN only removes a matched
+    # <function=..>..</function> block, so these orphans leak into visible
+    # content. In a CONFIRMED tool-call turn (tool_calls already extracted) none
+    # of these tags are user-facing prose, so strip them so nothing leaks. Gated
+    # to only-when-tool_calls-found (below) — normal text turns are untouched.
+    RESIDUAL_TOOL_MARKUP = re.compile(
+        r"<parameter\b[^>]*>.*?</parameter>"
+        r"|</?parameter\b[^>]*>"
+        r"|</?function\b[^>]*>"
+        r"|</?tool_call\b[^>]*>"
+        r"|<result\b[^>]*>.*?</result>"
+        r"|<argument\b[^>]*>.*?</argument>"
+        r"|<value\b[^>]*>.*?</value>",
+        re.DOTALL,
+    )
+
     @classmethod
     def _plain_tool_line_call(
         cls, text: str, request: dict[str, Any] | None
@@ -212,6 +233,10 @@ class QwenToolParser(ToolParser):
                 )
 
         if tool_calls:
+            if cleaned_text:
+                # Strip orphan tool scaffolding a degraded model may emit after
+                # the parsed call so it never leaks into user-visible content.
+                cleaned_text = self.RESIDUAL_TOOL_MARKUP.sub("", cleaned_text).strip()
             return ExtractedToolCallInformation(
                 tools_called=True,
                 tool_calls=tool_calls,

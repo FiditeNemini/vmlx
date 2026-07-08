@@ -415,9 +415,22 @@ class Scheduler:
         # in-flight requests on Zaya; openPangu previously aborted earlier at
         # the missing filter()). Mirror the TurboQuant guard above: force
         # serial scheduling so concurrent clients queue instead of crashing.
+        #
+        # MiniMax-M3 (MiniMaxM3SparseCache) is the same class of hazard: its
+        # attention derives positions from a SCALAR cache.offset
+        # (`mx.arange(offset, offset + Sq)`) and the Lightning-Indexer's
+        # `isinstance(cache, MiniMaxM3SparseCache)` guard only fires on the
+        # native single-batch cache. Under BatchGenerator the per-sequence
+        # BatchKVCache makes `offset` an array, so `mx.arange` raises
+        # `TypeError: arange(): incompatible function arguments` and the engine
+        # loop aborts EVERY in-flight request (live-repro'd 2026-07-08 with two
+        # concurrent >2048-token requests at --max-num-seqs 2). It only stays
+        # correct because max_num_seqs defaults to 1; pin it like the others so
+        # a user-set --max-num-seqs>1 queues serially instead of DoS-ing.
         _single_batch_native_family = (
             self._model_type_for_runtime in {"openpangu_v2", "zaya"}
             or self._uses_zaya_cache
+            or self._uses_m3_msa_cache
         )
         if _single_batch_native_family:
             changed = []

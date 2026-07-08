@@ -322,6 +322,31 @@ class TestQwenToolParser:
         assert result.tool_calls[0]["name"] == "get_weather"
         assert json.loads(result.tool_calls[0]["arguments"])["city"] == "Paris"
 
+    def test_parameter_colon_variant(self, parser):
+        """Qwen3.6-27B-JANG_4M under reasoning-on + multi-parameter tools emits a
+        COLON name separator: <parameter:city>Tokyo</parameter>. Observed live
+        2026-07-08 — the equals/attribute/`>` regex missed it, so the params
+        dropped, the call arrived with empty required args, the server dropped it
+        "missing required argument", and the whole <tool_call><function=...>
+        <parameter:...> XML leaked into visible content. The tolerant regex must
+        parse the colon form and keep every parameter.
+        """
+        text = (
+            "<tool_call>\n<function=get_weather>\n"
+            "<parameter:city>Tokyo</parameter>\n"
+            "<parameter:unit>celsius</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+        result = parser.extract_tool_calls(text)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0]["name"] == "get_weather"
+        args = json.loads(result.tool_calls[0]["arguments"])
+        assert args["city"] == "Tokyo"
+        assert args["unit"] == "celsius"
+        assert result.content is None or "<parameter" not in result.content
+
     def test_no_tool_call(self, parser):
         """Test text without tool calls."""
         text = "I can help you with that question."

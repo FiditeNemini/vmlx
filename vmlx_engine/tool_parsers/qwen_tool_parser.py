@@ -44,8 +44,12 @@ class QwenToolParser(ToolParser):
     # (observed live on Qwen3.6-27B-MXFP4): <function name="name">, <parameter name="arg">.
     # Without this the equals-only regex misses the attribute form, the call is
     # dropped for "missing required argument", and the raw XML leaks into content.
+    # The colon separator (`<function:name>`) is the same dialect as the colon
+    # parameter form below; tolerated defensively so a mixed-dialect bundle
+    # can't drop the whole call.
     FUNCTION_PATTERN = re.compile(
-        r"<function(?:=|\s+name=[\"'])([^>\"']+)[\"']?>\s*(.*?)\s*</function>", re.DOTALL
+        r"<function(?:=|:|\s+name=[\"'])([^>\"':]+)[\"']?>\s*(.*?)\s*</function>",
+        re.DOTALL,
     )
     # Third tolerated variant (observed live on Holo3-35B-A3B-mxfp4, sweep
     # 2026-07-05): the model writes `>` instead of `=` after "parameter" —
@@ -54,8 +58,15 @@ class QwenToolParser(ToolParser):
     # visible content. The `>NAME>` form requires a whitespace-free name
     # token followed by a second `>` before the value, so a genuine unnamed
     # `<parameter>value</parameter>` body cannot false-match.
+    # Fourth tolerated variant (observed live 2026-07-08 on Qwen3.6-27B-JANG_4M
+    # under reasoning-on + multi-parameter tools): the model writes a COLON name
+    # separator — `<parameter:city>Tokyo</parameter>`. The equals/attribute/`>`
+    # only regex missed it, so the parameter dropped, the call arrived with empty
+    # required args, the server dropped it "missing required argument", and the
+    # whole `<tool_call><function=...><parameter:...>` XML leaked into content
+    # (reason_off/tool was unaffected because that path emitted JSON args).
     PARAMETER_PATTERN = re.compile(
-        r"<parameter(?:=|\s+name=[\"']|>)([^>\"'\s]+)[\"']?>\s*(.*?)\s*</parameter>",
+        r"<parameter(?:=|:|\s+name=[\"']|>)([^>\"'\s]+)[\"']?>\s*(.*?)\s*</parameter>",
         re.DOTALL,
     )
     BARE_ARG_PATTERN = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</\1>", re.DOTALL)
@@ -237,6 +248,7 @@ class QwenToolParser(ToolParser):
             or "[Calling tool:" in current_text
             or "<function=" in current_text  # issue #192 (canonical)
             or "<function name=" in current_text  # off-format attribute variant
+            or "<function:" in current_text  # colon dialect (2026-07-08)
         )
 
         if not has_tool_marker:

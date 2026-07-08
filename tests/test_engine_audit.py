@@ -14655,6 +14655,23 @@ class TestStreamUsagePropagatesCacheDetail:
 
             async def stream_chat(self, *, messages, **kwargs):
                 calls.append(("stream", messages, dict(kwargs)))
+                # F6: the Responses API bounded thinking-off visible answer pass
+                # now STREAMS via engine.stream_chat (enable_thinking=False)
+                # instead of the old non-streaming _await_chat_with_disconnect_abort.
+                if kwargs.get("enable_thinking") is False:
+                    assert "tools" not in kwargs
+                    assert messages[-1]["role"] == "assistant"
+                    assert messages[-1]["content"] == ""
+                    assert "internal-only plan" in messages[-1]["reasoning_content"]
+                    yield GenerationOutput(
+                        text="VISIBLE_GEMMA_ANSWER",
+                        new_text="VISIBLE_GEMMA_ANSWER",
+                        prompt_tokens=12,
+                        completion_tokens=3,
+                        finished=True,
+                        finish_reason="stop",
+                    )
+                    return
                 yield GenerationOutput(
                     text="Thinking Process:\n\nNeed an internal-only plan.",
                     new_text="Thinking Process:\n\nNeed an internal-only plan.",
@@ -14665,33 +14682,6 @@ class TestStreamUsagePropagatesCacheDetail:
                     finished=True,
                     finish_reason="stop",
                 )
-
-        async def fake_visible_answer(
-            engine,
-            *,
-            messages,
-            chat_kwargs,
-            timeout,
-            fastapi_request,
-            request_id,
-            endpoint,
-        ):
-            calls.append(("answer", messages, dict(chat_kwargs), request_id, endpoint))
-            assert request_id.endswith(":visible-answer")
-            assert endpoint == "Responses API Gemma4 visible answer pass"
-            assert chat_kwargs["enable_thinking"] is False
-            assert "tools" not in chat_kwargs
-            assert messages[-1]["role"] == "assistant"
-            assert messages[-1]["content"] == ""
-            assert "internal-only plan" in messages[-1]["reasoning_content"]
-            return GenerationOutput(
-                text="VISIBLE_GEMMA_ANSWER",
-                new_text="VISIBLE_GEMMA_ANSWER",
-                prompt_tokens=12,
-                completion_tokens=3,
-                finished=True,
-                finish_reason="stop",
-            )
 
         class _Registry:
             def lookup(self, _key):
@@ -14718,7 +14708,6 @@ class TestStreamUsagePropagatesCacheDetail:
         monkeypatch.setattr(server, "_model_path", None)
         monkeypatch.setattr(server, "_reasoning_parser", Gemma4ReasoningParser())
         monkeypatch.setattr(server, "_tool_call_parser", None)
-        monkeypatch.setattr(server, "_await_chat_with_disconnect_abort", fake_visible_answer)
         monkeypatch.setattr(registry, "get_model_config_registry", lambda: _Registry())
 
         request = ResponsesRequest(
@@ -14743,7 +14732,9 @@ class TestStreamUsagePropagatesCacheDetail:
         usage = _payloads(events, "response.usage")[-1]["usage"]
 
         assert calls[0][0] == "stream"
-        assert calls[1][0] == "answer"
+        # F6: the visible answer pass is a second stream_chat with thinking off.
+        assert calls[1][0] == "stream"
+        assert calls[1][2].get("enable_thinking") is False
         assert any("internal-only plan" in row["delta"] for row in reasoning)
         assert [row["delta"] for row in content] == ["VISIBLE_GEMMA_ANSWER"]
         assert completed["output_text"] == "VISIBLE_GEMMA_ANSWER"
@@ -14779,6 +14770,26 @@ class TestStreamUsagePropagatesCacheDetail:
 
             async def stream_chat(self, *, messages, **kwargs):
                 calls.append(("stream", messages, dict(kwargs)))
+                # F6: the bounded thinking-off visible answer pass now STREAMS
+                # via engine.stream_chat (enable_thinking=False) instead of the
+                # old non-streaming _await_chat_with_disconnect_abort call.
+                if kwargs.get("enable_thinking") is False:
+                    assert kwargs["chat_template_kwargs"]["thinking_mode"] == "disabled"
+                    assert "tools" not in kwargs
+                    assert "_vmlx_tools_present" not in kwargs
+                    assert "_vmlx_template_tools" not in kwargs
+                    assert messages[-1]["role"] == "assistant"
+                    assert messages[-1]["content"] == ""
+                    assert "internal M3 plan" in messages[-1]["reasoning_content"]
+                    yield GenerationOutput(
+                        text="VISIBLE_M3_ANSWER",
+                        new_text="VISIBLE_M3_ANSWER",
+                        prompt_tokens=20,
+                        completion_tokens=4,
+                        finished=True,
+                        finish_reason="stop",
+                    )
+                    return
                 yield GenerationOutput(
                     text="Need an internal M3 plan.",
                     new_text="Need an internal M3 plan.",
@@ -14789,36 +14800,6 @@ class TestStreamUsagePropagatesCacheDetail:
                     finished=True,
                     finish_reason="stop",
                 )
-
-        async def fake_visible_answer(
-            engine,
-            *,
-            messages,
-            chat_kwargs,
-            timeout,
-            fastapi_request,
-            request_id,
-            endpoint,
-        ):
-            calls.append(("answer", messages, dict(chat_kwargs), request_id, endpoint))
-            assert request_id.endswith(":visible-answer")
-            assert endpoint == "Chat Completions MiniMax-M3 visible answer pass"
-            assert chat_kwargs["enable_thinking"] is False
-            assert chat_kwargs["chat_template_kwargs"]["thinking_mode"] == "disabled"
-            assert "tools" not in chat_kwargs
-            assert "_vmlx_tools_present" not in chat_kwargs
-            assert "_vmlx_template_tools" not in chat_kwargs
-            assert messages[-1]["role"] == "assistant"
-            assert messages[-1]["content"] == ""
-            assert "internal M3 plan" in messages[-1]["reasoning_content"]
-            return GenerationOutput(
-                text="VISIBLE_M3_ANSWER",
-                new_text="VISIBLE_M3_ANSWER",
-                prompt_tokens=20,
-                completion_tokens=4,
-                finished=True,
-                finish_reason="stop",
-            )
 
         class _Registry:
             def lookup(self, _key):
@@ -14834,7 +14815,6 @@ class TestStreamUsagePropagatesCacheDetail:
         monkeypatch.setattr(server, "_model_path", None)
         monkeypatch.setattr(server, "_reasoning_parser", MiniMaxM3ReasoningParser())
         monkeypatch.setattr(server, "_tool_call_parser", None)
-        monkeypatch.setattr(server, "_await_chat_with_disconnect_abort", fake_visible_answer)
         monkeypatch.setattr(registry, "get_model_config_registry", lambda: _Registry())
 
         request = ChatCompletionRequest(
@@ -14858,7 +14838,9 @@ class TestStreamUsagePropagatesCacheDetail:
                 chunks.append(json.loads(line.removeprefix("data: ")))
 
         assert calls[0][0] == "stream"
-        assert calls[1][0] == "answer"
+        # F6: the visible answer pass is a second stream_chat with thinking off.
+        assert calls[1][0] == "stream"
+        assert calls[1][2].get("enable_thinking") is False
         reasoning_deltas = [
             choice["delta"].get("reasoning_content") or choice["delta"].get("reasoning")
             for chunk in chunks
@@ -14908,6 +14890,25 @@ class TestStreamUsagePropagatesCacheDetail:
 
             async def stream_chat(self, *, messages, **kwargs):
                 calls.append(("stream", messages, dict(kwargs)))
+                # F6: the bounded thinking-off visible answer pass now STREAMS
+                # via engine.stream_chat (enable_thinking=False).
+                if kwargs.get("enable_thinking") is False:
+                    assert kwargs["chat_template_kwargs"]["thinking_mode"] == "disabled"
+                    # #66 draw-down floor: max(256, budget - completion_tokens).
+                    # completion=120 leaves < 256, so the pass is floored to 256.
+                    assert kwargs["max_tokens"] == 256
+                    assert messages[-1]["role"] == "assistant"
+                    assert messages[-1]["content"] == ""
+                    assert "MM3_STREAM_CHAT_OK" in messages[-1]["reasoning_content"]
+                    yield GenerationOutput(
+                        text="MM3_STREAM_CHAT_OK Oracle EBS is an integrated Oracle business application suite.",
+                        new_text="MM3_STREAM_CHAT_OK Oracle EBS is an integrated Oracle business application suite.",
+                        prompt_tokens=35,
+                        completion_tokens=15,
+                        finished=True,
+                        finish_reason="stop",
+                    )
+                    return
                 yield GenerationOutput(
                     text=(
                         "The user asked for MM3_STREAM_CHAT_OK."
@@ -14925,34 +14926,6 @@ class TestStreamUsagePropagatesCacheDetail:
                     finish_reason="length",
                 )
 
-        async def fake_visible_answer(
-            engine,
-            *,
-            messages,
-            chat_kwargs,
-            timeout,
-            fastapi_request,
-            request_id,
-            endpoint,
-        ):
-            calls.append(("answer", messages, dict(chat_kwargs), request_id, endpoint))
-            assert request_id.endswith(":visible-answer")
-            assert endpoint == "Chat Completions MiniMax-M3 visible answer pass"
-            assert chat_kwargs["enable_thinking"] is False
-            assert chat_kwargs["chat_template_kwargs"]["thinking_mode"] == "disabled"
-            assert chat_kwargs["max_tokens"] == 180
-            assert messages[-1]["role"] == "assistant"
-            assert messages[-1]["content"] == ""
-            assert "MM3_STREAM_CHAT_OK" in messages[-1]["reasoning_content"]
-            return GenerationOutput(
-                text="MM3_STREAM_CHAT_OK Oracle EBS is an integrated Oracle business application suite.",
-                new_text="MM3_STREAM_CHAT_OK Oracle EBS is an integrated Oracle business application suite.",
-                prompt_tokens=35,
-                completion_tokens=15,
-                finished=True,
-                finish_reason="stop",
-            )
-
         class _Registry:
             def lookup(self, _key):
                 return SimpleNamespace(
@@ -14967,7 +14940,6 @@ class TestStreamUsagePropagatesCacheDetail:
         monkeypatch.setattr(server, "_model_path", None)
         monkeypatch.setattr(server, "_reasoning_parser", MiniMaxM3ReasoningParser())
         monkeypatch.setattr(server, "_tool_call_parser", None)
-        monkeypatch.setattr(server, "_await_chat_with_disconnect_abort", fake_visible_answer)
         monkeypatch.setattr(registry, "get_model_config_registry", lambda: _Registry())
 
         request = ChatCompletionRequest(
@@ -14999,7 +14971,9 @@ class TestStreamUsagePropagatesCacheDetail:
             if line.startswith("data: ") and line.strip() != "data: [DONE]":
                 chunks.append(json.loads(line.removeprefix("data: ")))
 
-        assert [call[0] for call in calls] == ["stream", "answer"]
+        # F6: the visible answer pass is a second stream_chat with thinking off.
+        assert [call[0] for call in calls] == ["stream", "stream"]
+        assert calls[1][2].get("enable_thinking") is False
         content_deltas = [
             choice["delta"].get("content")
             for chunk in chunks

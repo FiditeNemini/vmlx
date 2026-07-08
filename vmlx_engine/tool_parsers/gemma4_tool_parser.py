@@ -25,6 +25,13 @@ from .abstract_tool_parser import (
 _STC = "<|tool_call>"    # start-of-tool-call
 _ETC = "<tool_call|>"    # end-of-tool-call
 
+# Tool-response role markers. A model must NEVER *generate* these — the
+# tool-response role belongs to the client. Degraded low-bit gemma bundles
+# sometimes hallucinate a fake `<|tool_response>...` block (with an invented
+# answer + orphan `thought` channel-name) AFTER emitting the real tool call.
+_TRESP_OPEN = "<|tool_response>"
+_TRESP_CLOSE = "<tool_response|>"
+
 # Pattern to extract tool calls: <|tool_call>call:name{...}<tool_call|>
 _TOOL_CALL_PATTERN = re.compile(
     r'<\|tool_call>call:(\w+)\{(.*?)\}<tool_call\|>',
@@ -137,6 +144,14 @@ class Gemma4ToolParser(ToolParser):
         """Extract tool calls from complete Gemma 4 model output."""
         tool_calls: list[dict[str, Any]] = []
         cleaned_text = model_output
+
+        # Drop hallucinated tool-response blocks BEFORE any other parsing. A
+        # model must never generate a tool response; when a degraded bundle
+        # emits `<|tool_call>...<tool_call|><|tool_response>...<fabricated
+        # answer>` we must keep the real call but discard the invented result
+        # (and its orphan `thought` channel-name) so neither the fake data nor
+        # the leftover marker reaches the user. Fixes stream+nonstream alike.
+        cleaned_text = self._strip_hallucinated_tool_response(cleaned_text)
 
         # Strip think/channel tags
         cleaned_text = self._strip_thought_channel(cleaned_text)
@@ -295,6 +310,23 @@ class Gemma4ToolParser(ToolParser):
         """
         self._gemma4_emitted_count = 0
         self._gemma4_emitted_ids = []
+
+    @staticmethod
+    def _strip_hallucinated_tool_response(text: str) -> str:
+        """Drop a model-generated tool-response block.
+
+        The tool-response role belongs to the client — a model must never emit
+        `<|tool_response>`. Low-bit gemma bundles sometimes hallucinate one
+        right after the real tool call, inventing an answer the model cannot
+        actually know (it called the tool precisely because it doesn't). Cut
+        from the first tool-response marker to end so the fabricated result —
+        and any orphan `thought` channel-name embedded in it — never reaches
+        the user. Legitimate prose emitted BEFORE the tool call is preserved.
+        """
+        idx = text.find(_TRESP_OPEN)
+        if idx >= 0:
+            return text[:idx].rstrip()
+        return text
 
     @staticmethod
     def _strip_thought_channel(text: str) -> str:

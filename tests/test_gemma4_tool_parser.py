@@ -115,6 +115,43 @@ class TestGemma4ToolParser:
         assert out.tools_called is False
         assert out.content == text
 
+    def test_hallucinated_tool_response_dropped(self, parser):
+        """Low-bit gemma bundles hallucinate a fake tool response AFTER the
+        real call, inventing an answer + an orphan `thought` channel-name
+        (captured live on gemma-4-12B-JANG_4M, 2026-07-08). The real call must
+        survive but the fabricated result must NOT leak into content — showing
+        an invented weather reading (and a raw `thought` marker) to the user is
+        wrong. Fixes stream+nonstream (both route through extract_tool_calls).
+        """
+        text = (
+            '<|tool_call>call:get_weather{city:<|"|>Berlin<|"|>}<tool_call|>'
+            "<|tool_response><audio|>\nthought\n"
+            "The current weather in Berlin is 14°C with clear skies."
+        )
+        out = parser.extract_tool_calls(text)
+        assert out.tools_called is True
+        assert out.tool_calls[0]["name"] == "get_weather"
+        assert json.loads(out.tool_calls[0]["arguments"]) == {"city": "Berlin"}
+        content = out.content or ""
+        # None of the hallucinated tool-response block may leak.
+        for marker in ("thought", "<|tool_response>", "<audio", "14°C", "clear skies"):
+            assert marker not in content, f"{marker!r} leaked: {content!r}"
+
+    def test_legit_prose_before_call_preserved_with_hallucinated_response(self, parser):
+        """The tool-response strip must only drop the hallucinated tail, never
+        legitimate prose the model emitted BEFORE the tool call."""
+        text = (
+            "Let me look that up for you.\n"
+            '<|tool_call>call:get_weather{city:<|"|>Berlin<|"|>}<tool_call|>'
+            "<|tool_response>\nthought\nIt is 14°C."
+        )
+        out = parser.extract_tool_calls(text)
+        assert out.tools_called is True
+        content = out.content or ""
+        assert "Let me look that up for you." in content
+        assert "thought" not in content
+        assert "14°C" not in content
+
     def test_registry_alias_resolves(self):
         from vmlx_engine.tool_parsers.abstract_tool_parser import ToolParserManager
         cls = ToolParserManager.get_tool_parser("gemma4")

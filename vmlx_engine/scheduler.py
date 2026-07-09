@@ -987,6 +987,14 @@ class Scheduler:
                     config=cache_config,
                     model_path=self.config.model_path,
                 )
+                # The isolate-clone handed back by fetch() slices MLX arrays, and
+                # MLX pins each one to the creating thread's stream. fetch() is
+                # reached from add_request() on the API thread, so the clone must
+                # be built on the llm-worker that owns the generation stream —
+                # otherwise decode dies with "no Stream(gpu, 0) in current thread"
+                # and the request collapses into an empty 200 (F11, Laguna).
+                if self.config.step_executor is not None:
+                    self.memory_aware_cache.set_clone_executor(self.config.step_executor)
                 logger.info(
                     f"Memory-aware cache enabled: "
                     f"limit={self.memory_aware_cache.memory_limit_mb:.1f}MB"

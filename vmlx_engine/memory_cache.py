@@ -424,8 +424,104 @@ class MemoryAwarePrefixCache:
 
         if not cache or not all(_safe(layer) for layer in cache):
             return cache
-        cloned = self._truncate_cache(cache, length)
+        cloned = self._clone_on_stream_owner(cache, length)
         return cloned if cloned is not None else cache
+
+    def set_clone_executor(self, executor: Any, worker_name_prefix: str | None = None) -> None:
+        """Register the single-thread worker executor that owns the MLX stream.
+
+        Optional: without it the clone runs inline, which is what every caller
+        already on the worker wants. The name prefix is read off the executor
+        (ThreadPoolExecutor names its threads "<prefix>_N") so this works for
+        both the LLM scheduler's "llm-worker" and the MLLM scheduler's
+        "mllm-worker" without either having to declare it.
+        """
+        self._clone_executor = executor
+        if worker_name_prefix is None:
+            worker_name_prefix = getattr(executor, "_thread_name_prefix", "") or "llm-worker"
+        self._clone_worker_prefix = worker_name_prefix
+
+    def _clone_on_stream_owner(self, cache: list[Any], length: int) -> list[Any] | None:
+        """Build the isolate-clone on the thread that owns the MLX stream.
+
+        _truncate_cache slices the stored KV arrays, and MLX binds each new array
+        to a completion event on the stream of the *creating* thread. fetch() is
+        reached from add_request() on the API/event-loop thread, so the clone came
+        out tied to MainThread's Stream(gpu, 0). The llm-worker then evaluated
+        logits computed from it and could not resolve that stream:
+
+            RuntimeError: There is no Stream(gpu, 0) in current thread.
+
+        mx.eval() on the API thread does not sever this — the event stays with the
+        producing stream. The engine already defers stored-cache q4/q8 dequant to
+        the worker for exactly this reason (see _schedule_waiting); the clone
+        itself was still born on the API thread.
+
+        Single-sequence families surface it first: SingleBatchGenerator samples
+        straight from the restored cache, so the throw lands in _start_request and
+        the request is aborted into an empty 200 — Laguna returned 0 tokens on
+        every prefix-cache hit. The batched generators re-home cache tensors onto
+        their own stream before use, which is why gemma-4 never hit it.
+
+        Today fetch() is only reached from add_request() on the API thread, but
+        clone inline whenever we are already on the worker: submitting to a
+        single-thread executor from inside that same thread would deadlock.
+        """
+        executor = getattr(self, "_clone_executor", None)
+        prefix = getattr(self, "_clone_worker_prefix", "llm-worker")
+        if executor is None or threading.current_thread().name.startswith(prefix):
+            cloned = self._truncate_cache(cache, length)
+        else:
+            try:
+                cloned = executor.submit(self._truncate_cache, cache, length).result()
+            except Exception as exc:
+                # Never fall through to the caller's stored-reference return here:
+                # handing decode the live cached entry is the shared-buffer
+                # corruption this clone exists to prevent. Clone inline instead —
+                # the worst case is the stream error, not a polluted cache.
+                logger.warning("worker-side prefix-cache clone failed (%s); cloning inline", exc)
+                cloned = self._truncate_cache(cache, length)
+        if cloned is not None:
+            self._materialize_cloned_cache(cloned)
+        return cloned
+
+    @staticmethod
+    def _materialize_cloned_cache(cloned: list[Any]) -> None:
+        """Evaluate the clone's arrays on the thread that just created them.
+
+        Leaves concrete data with no pending graph, so the slice ops cannot be
+        re-scheduled onto another thread's stream later. Only sound when called
+        from _clone_on_stream_owner, i.e. on the stream owner.
+        """
+        try:
+            import mlx.core as mx
+        except Exception:
+            return
+
+        arrays: list[Any] = []
+
+        def _collect(obj) -> None:
+            subs = getattr(obj, "caches", None)
+            if subs:
+                for sub in subs:
+                    _collect(sub)
+                return
+            for attr in ("keys", "values", "idx_keys", "biases", "scales"):
+                val = getattr(obj, attr, None)
+                if isinstance(val, mx.array):
+                    arrays.append(val)
+                elif isinstance(val, (tuple, list)):
+                    arrays.extend(v for v in val if isinstance(v, mx.array))
+
+        for layer in cloned:
+            if layer is not None:
+                _collect(layer)
+        if not arrays:
+            return
+        try:
+            mx.eval(*arrays)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("cache clone materialization skipped: %s", exc)
 
     @staticmethod
     def _truncate_cache(

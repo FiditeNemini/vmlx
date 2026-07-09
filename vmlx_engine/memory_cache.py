@@ -378,12 +378,12 @@ class MemoryAwarePrefixCache:
 
         Issue #198 (1C): only clone when every layer is a plainly-sliceable
         positional cache (KVCache / QuantizedKVCache, incl. CacheList of
-        those). _truncate_cache rebuilds those as fresh objects with sliced
-        arrays -> independent offset and (on next update) independent buffer,
-        so generation cannot contaminate the stored entry. For RotatingKVCache
-        (would be lossily converted), MambaCache / cumulative state (cannot be
-        truncated), or unknown types, fall back to the stored reference
-        (unchanged behavior).
+        those, plus RotatingKVCache, MiniMaxM3SparseCache and TurboQuantKVCache,
+        which _truncate_cache rebuilds explicitly). _truncate_cache rebuilds those
+        as fresh objects with sliced arrays -> independent offset and (on next
+        update) independent buffer, so generation cannot contaminate the stored
+        entry. For MambaCache / cumulative state (cannot be truncated) or unknown
+        types, fall back to the stored reference (unchanged behavior).
         """
         try:
             from mlx_lm.models.cache import KVCache, QuantizedKVCache
@@ -411,6 +411,17 @@ class MemoryAwarePrefixCache:
             # rotated/appended into the shared buffer → polluted reuse → gemma-4
             # divergence + dropped tool calls after ~3 identical requests.
             if type(layer).__name__ == "RotatingKVCache":
+                return True
+            # TurboQuantKVCache (M2.7 all-layer, Qwen3.6 every-4th, gemma-4 mixed-SWA
+            # full-attention slots). It is NOT a KVCache subclass, so it used to fall
+            # through to the stored-reference return below — and because TQ is
+            # monotonic-growth (update_and_fetch does `self.offset += num_new` and
+            # writes into self.keys), decode then appended straight into the CACHED
+            # entry. Proven live on gemma-4 + VMLX_SWA_TQ: the stored 18-token entry's
+            # offset walked 18 -> 34 -> 50 -> 66 across repeated hits, so a later
+            # "capital of France?" hit replayed a polluted prefix and answered
+            # "Berlin." _truncate_cache now rebuilds it as a fresh isolated cache.
+            if type(layer).__name__ == "TurboQuantKVCache":
                 return True
             if isinstance(layer, (KVCache, QuantizedKVCache)):
                 return type(layer).__name__ in ("KVCache", "QuantizedKVCache")
@@ -572,8 +583,49 @@ class MemoryAwarePrefixCache:
             except Exception:
                 return value
 
+        def _clone_turboquant_layer(src, length):
+            """Rebuild a TurboQuantKVCache as a fresh, independent cache.
+
+            _get_full_cache() is pure: it returns the decoded float view the source
+            itself attends over (joined buffer if it has compressed, else the float
+            buffer), so slicing it is faithful even when part of the source is packed.
+            The clone starts in the pre-compress state with empty packed buffers and
+            will re-compress on its own once it passes compress_after; keeping the
+            source's encoders or packed arrays would re-share mutable state, which is
+            the whole thing we are here to prevent.
+
+            Reset to the clean single-sequence contract (_idx=None, no padding) — the
+            live-cache validator whitelists _idx=None for genuine TQ classes (F10).
+            """
+            try:
+                from jang_tools.turboquant.cache import TurboQuantKVCache
+            except Exception:
+                return None
+            full_k, full_v = src._get_full_cache()
+            if full_k is None or full_v is None or length > full_k.shape[2]:
+                return None
+            clone = TurboQuantKVCache(
+                key_dim=src.key_dim,
+                value_dim=src.value_dim,
+                key_bits=src.key_bits,
+                value_bits=src.value_bits,
+                seed=src._seed,
+                compress_after=src.compress_after,
+                sink_tokens=src.sink_tokens,
+            )
+            clone.keys = _copy_positional_slice(full_k[..., :length, :])
+            clone.values = _copy_positional_slice(full_v[..., :length, :])
+            clone.offset = int(length)
+            return clone
+
         truncated = []
         for layer_cache in cache:
+            if type(layer_cache).__name__ == "TurboQuantKVCache":
+                tq_clone = _clone_turboquant_layer(layer_cache, target_len)
+                if tq_clone is None:
+                    return None
+                truncated.append(tq_clone)
+                continue
             # MiniMax-M3 MSA cache: a KVCache subclass with an EXTRA append-only
             # idx_keys lane (Lightning-Indexer). The generic KVCache branch below
             # would downcast it to a plain KVCache and DROP idx_keys — then the

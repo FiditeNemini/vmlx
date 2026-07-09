@@ -3628,6 +3628,36 @@ def _wrap_batch_caches(cache: List[Any]) -> List[Any]:
     return wrapped
 
 
+def _offset_proxy_needed_for_model_type(model_type: str) -> bool:
+    """Scalar-offset proxying is ONLY for Qwen-style VL language models.
+
+    Qwen attention layers slice with ``cache.offset`` (requires a Python int)
+    and take explicit position_ids, so their rope never reads cache.offset —
+    flattening it is safe there. Every mlx_lm-style family served through this
+    generator (gemma4, step3p5/step3p7, mimo_v2, zaya) instead ROPES from
+    ``cache.offset`` and needs the raw per-row array: a flattened scalar
+    silently ropes co-batched rows at the max row's position (F18, proven
+    joined-vs-solo greedy divergence on Step-3.7 while fixed-gemma4 is
+    byte-identical) and can hit the mx.fast.rope scalar-offset batch>1 kernel
+    corruption (F16). Gate on the explicit config model_type (no name regex).
+    """
+    mt = str(model_type or "").lower()
+    if mt.startswith("qwen"):
+        return True
+    # gemma4 stays wrapped: its patched attention reads the TRUE per-row
+    # offset through the proxy (_gemma4_cache_rope_offset -> _inner), while
+    # its model code has int(c.offset) sites (per-layer-inputs on E-models)
+    # that require the scalar. Wrapping is therefore both safe and needed.
+    if mt.startswith("gemma"):
+        return True
+    # Verified array-safe (offset used ONLY for rope, mlx_lm-style):
+    # step3p5/step3p7, mimo_v2/mimo_v2_flash. Unknown families default to
+    # UNWRAPPED because mlx_lm's own batch generation contract is per-row
+    # array offsets; a family that needs the int proxy should be added
+    # explicitly above.
+    return False
+
+
 class MLLMBatchGenerator:
     """Batch generator for Vision Language Models on Apple Metal.
 
@@ -7582,13 +7612,15 @@ class MLLMBatchGenerator:
         if input_tokens.ndim == 1:
             input_tokens = input_tokens[:, None]
 
-        # Wrap BatchKVCache with offset-safe proxies for VL models.
-        # Several Qwen VL attention layers use cache.offset in slice ops that
-        # require int, but BatchKVCache.offset is mx.array. The proxy converts it.
-        # Always wrap: a batch that started with N>1 requests can filter down to 1
-        # while cache remains BatchKVCache (offset still mx.array). The proxy is a
-        # no-op when offset is already int (single-request path with raw KVCache).
-        cache = _wrap_batch_caches(cache)
+        # Wrap BatchKVCache with offset-safe proxies ONLY for Qwen-style VL
+        # language models: their attention slices with cache.offset (needs a
+        # Python int; batch that filtered down to 1 still carries an mx.array
+        # offset) and they position via explicit position_ids, so flattening
+        # is safe. All other families rope FROM cache.offset and must see the
+        # raw per-row array — see _offset_proxy_needed_for_model_type
+        # (F16/F18, 2026-07-08).
+        if _offset_proxy_needed_for_model_type(self._model_type):
+            cache = _wrap_batch_caches(cache)
 
         trace = self._decode_trace
         model_t0 = time.perf_counter() if trace else 0.0

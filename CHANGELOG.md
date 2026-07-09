@@ -24,6 +24,23 @@ All notable changes to vMLX Engine will be documented in this file.
 - Local MiMo V2.5 JANG_2L was refreshed from max2 over the TB-routed HTTP endpoint and verified byte-for-byte by manifest. This is still not full MiMo release clearance: live text/cache now works, but tool behavior, VL/audio/video, and performance remain separate proof rows.
 - MiMo V2.5 JANG_2L tool behavior remains a release blocker: a forced XML-function tool call stayed HTTP 200 but produced raw malformed `<tool_call>` text and punctuation garbage with zero parsed tool calls.
 
+## [1.6.4] - 2026-07-09
+
+### Fixed
+- Prefix-cache hits no longer die with `RuntimeError: There is no Stream(gpu, 0) in current thread`. MLX binds every array to a completion event on the stream of the thread that created it; the prefix-cache isolate-clone was built on the API/event-loop thread, so the llm-worker could not evaluate logits derived from it. The throw was swallowed and the request returned an empty 200, which made every cache hit on a single-sequence model (Laguna) generate zero tokens. The clone is now built on the worker that owns the stream. Batched generators re-home cache tensors themselves, which is why gemma-4 never showed it.
+- `TurboQuantKVCache` layers are no longer handed to decode by reference on a prefix-cache hit. TQ is not a `KVCache` subclass, so the clone gate rejected it and returned the stored entry; TQ is monotonic-growth, so decode appended into the cached prefix and later hits replayed a polluted context. `_truncate_cache` now rebuilds TQ layers as fresh independent caches. Only mixed layer lists stored a live TQ object, so the pure-TQ families (MiniMax-M2.7, Qwen3.6) never surfaced it.
+
+### Added
+- `VMLX_SWA_TQ=1` (opt-in, default off): per-layer TurboQuant KV on the full-attention slots of mixed sliding/full attention models, leaving the sliding slots on their native `RotatingKVCache` so the `mixed_swa_kv_v1` window metadata survives. gemma-4-12B maps to 8 TQ + 40 rotating; gemma-4-26B-A4B to 5 + 25. See `docs/MIXED-SWA-TURBOQUANT-KV.md`.
+- Regression test `tests/test_turboquant_prefix_cache_clone.py` pinning TQ prefix-cache isolation.
+
+### Changed
+- ZAYA text models now reason by default. `architecture_hints.default_enable_thinking` was hard-stamped `False`, so a request that did not pass `enable_thinking` rendered a closed empty `<think></think>` block and the model never opened its reasoning rail. `think_in_template` stays `False` — ZAYA opens its own rail and the qwen3 reasoning parser routes it to `reasoning_content`. An explicit `enable_thinking` still wins in both directions.
+
+### Notes
+- TurboQuant KV does not compress during decode on any model: `compress_after` defaults to `0` and nothing sets it, so a `TurboQuantKVCache` holds plain float KV. Only `_recompress_to_tq` (paged / disk-L2 reconstruction, and the paged cache is off by default) ever calls `.compress()`. `VMLX_SWA_TQ` is therefore output-identical to the default path today and is kept opt-in until `compress_after` is wired end-to-end, which will change decode numerics for every TurboQuant family.
+- Pre-existing, unchanged by this release, both reproducible with `VMLX_SWA_TQ` off: prefix-cache hits are not byte-faithful to a cold run on gemma (warm is stable — the q4 stored-prefix round-trip), and gemma-4-26B-A4B's greedy answer differs solo vs co-batched at `--max-num-seqs 2` intermittently.
+
 ## [1.5.49] - 2026-05-23
 
 ### Fixed

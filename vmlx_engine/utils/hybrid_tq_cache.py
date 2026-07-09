@@ -55,6 +55,51 @@ def is_turboquant_make_cache(make_cache: Any) -> bool:
     return getattr(make_cache, "__name__", "") in TURBOQUANT_MAKE_CACHE_NAMES
 
 
+def _config_layer_types(model_config: dict[str, Any]) -> list[str]:
+    """Return the model's declared per-layer attention kinds, or []."""
+    candidates = [model_config]
+    text_cfg = model_config.get("text_config")
+    if isinstance(text_cfg, dict):
+        candidates.append(text_cfg)
+    for candidate in candidates:
+        layer_types = candidate.get("layer_types")
+        if isinstance(layer_types, list) and layer_types:
+            return [str(item).lower() for item in layer_types]
+    return []
+
+
+def is_mixed_swa_tq_supported(model_config: dict[str, Any], n_cache_slots: int) -> bool:
+    """True for gemma-4-style mixed sliding/full attention with a usable layout.
+
+    Requires the config to declare one layer_type per native cache slot, and to
+    actually mix sliding with non-sliding layers. Without a 1:1 mapping we cannot
+    tell which slot is the unbounded full-attention one, so TQ stays off.
+    """
+    layer_types = _config_layer_types(model_config)
+    if len(layer_types) != n_cache_slots:
+        return False
+    has_sliding = any("sliding" in t for t in layer_types)
+    has_full = any("sliding" not in t for t in layer_types)
+    return has_sliding and has_full
+
+
+def build_mixed_swa_layer_types(model_config: dict[str, Any]) -> list[str]:
+    """Map declared layer kinds onto the hybrid builder's slot vocabulary.
+
+    Full-attention slots become "attention" (TurboQuantKVCache): their KV grows
+    with the whole context, so 3-bit encode is where the memory actually is.
+    Sliding slots become "sliding", which the hybrid builder leaves as the model's
+    native RotatingKVCache — TurboQuantKVCache is monotonic-growth (no max_size /
+    keep / trim), so it cannot honour a sliding window, and a 512-token window
+    saves almost nothing anyway. This keeps the mixed_swa_kv_v1 rotating-window
+    metadata intact, which a flat TQ wrap would destroy.
+    """
+    return [
+        "sliding" if "sliding" in t else "attention"
+        for t in _config_layer_types(model_config)
+    ]
+
+
 def _is_kv_cache_slot(slot: Any) -> bool:
     return type(slot).__name__ in (
         "KVCache",

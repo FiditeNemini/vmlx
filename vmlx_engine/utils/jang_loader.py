@@ -1604,11 +1604,20 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
                 return True
         return False
 
-    if _has_mixed_attention_layout(model_config):
+    # Mixed sliding/full attention (gemma-4, Laguna). A FLAT TQ wrap would replace
+    # every slot, destroying the RotatingKVCache window metadata that the
+    # mixed_swa_kv_v1 contract depends on. But the full-attention slots grow with
+    # the whole context and are exactly where TQ pays off, so under VMLX_SWA_TQ we
+    # TQ those slots only and leave the sliding slots on their native rotating
+    # cache. See build_mixed_swa_layer_types.
+    _mixed_swa_layout = _has_mixed_attention_layout(model_config)
+    _swa_tq_opt_in = _os_tq.environ.get("VMLX_SWA_TQ") in ("1", "true", "TRUE", "yes", "on")
+    if _mixed_swa_layout and not _swa_tq_opt_in:
         logger.info(
             "  TurboQuant KV skipped: mixed sliding/full attention model uses "
             "native RotatingKVCache metadata; flat generic TQ-KV would violate "
-            "the mixed_swa_kv_v1 cache contract."
+            "the mixed_swa_kv_v1 cache contract. Set VMLX_SWA_TQ=1 for per-layer "
+            "TQ on the full-attention slots only."
         )
         return
 
@@ -1673,6 +1682,8 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         return
     from .hybrid_tq_cache import (
         build_hybrid_turboquant_make_cache,
+        build_mixed_swa_layer_types,
+        is_mixed_swa_tq_supported,
         is_qwen36_hybrid_tq_supported,
     )
 
@@ -1688,7 +1699,15 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
     except Exception:
         n_layers = len(model.layers)
         _native_cache_types = []
-    if any(t in ("RotatingKVCache", "BatchRotatingKVCache") for t in _native_cache_types):
+    _has_rotating_slots = any(
+        t in ("RotatingKVCache", "BatchRotatingKVCache") for t in _native_cache_types
+    )
+    _mixed_swa_tq = (
+        _mixed_swa_layout
+        and _swa_tq_opt_in
+        and is_mixed_swa_tq_supported(model_config, n_layers)
+    )
+    if _has_rotating_slots and not _mixed_swa_tq:
         logger.info(
             "  TurboQuant KV skipped: native rotating/full attention cache layout "
             "requires RotatingKVCache metadata; flat generic TQ-KV would violate "
@@ -1758,7 +1777,23 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
             + " layers"
         )
 
-    if _n_ssm > 0:
+    if _mixed_swa_tq:
+        # Full-attention slots -> TurboQuantKVCache; sliding slots keep their
+        # native RotatingKVCache (window + metadata untouched).
+        _layer_types = build_mixed_swa_layer_types(model_config)
+        _n_full = sum(1 for lt in _layer_types if lt == "attention")
+        logger.info(
+            f"  Mixed-SWA TurboQuant KV: {_n_full} full-attention slots encoded, "
+            f"{len(_layer_types) - _n_full} sliding slots left on RotatingKVCache"
+        )
+        _turboquant_make_cache = build_hybrid_turboquant_make_cache(
+            model.make_cache,
+            tq_config,
+            _key_dim,
+            _val_dim,
+            _layer_types,
+        )
+    elif _n_ssm > 0:
         if not is_qwen36_hybrid_tq_supported(model_config, _layer_types):
             logger.info(
                 "  TurboQuant KV skipped: hybrid/path-dependent cache family "

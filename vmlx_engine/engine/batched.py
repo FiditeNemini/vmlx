@@ -256,12 +256,20 @@ class BatchedEngine(BaseEngine):
             return False
         if os.environ.get("VMLINUX_DISABLE_MLLM_MEDIA_SIMPLE_FALLBACK") == "1":
             return False
-        # Gemma4 media is coherent through MLXMultimodalLM.chat(), while the
-        # current batched MLLM scheduler path can produce corrupted visible
-        # image/audio output after a valid media prefill. Keep text-only Gemma4
-        # on the optimized scheduler/cache path; only media turns use the
-        # proven simple VLM forward until batched media prefill parity is fixed.
-        return self._model_family_name() == "gemma4"
+        # gemma4 IMAGE/VIDEO turns ride the optimized batched path. 2026-07-08
+        # live A/B (VMLINUX_DISABLE_MLLM_MEDIA_SIMPLE_FALLBACK=1) showed the
+        # historical "corrupted media prefill" no longer reproduces: batched
+        # output is coherent across single + multi-turn AND more accurate than
+        # the simple forward (which mis-described the image), and it STREAMS
+        # token-by-token (the simple forward yields a single delta) with full
+        # generation_config sampling parity. Media embeddings are still not
+        # prefix-cached (mllm_scheduler skips media cache store, path-dependent).
+        # AUDIO stays on the proven simple MLXMultimodalLM.chat() forward until
+        # batched audio-prefill parity is separately verified. Escape hatch:
+        # VMLINUX_DISABLE_MLLM_MEDIA_SIMPLE_FALLBACK=1 forces batched for all.
+        if self._model_family_name() == "gemma4":
+            return bool(audio)
+        return False
 
     async def _simple_mllm_chat_output(
         self,

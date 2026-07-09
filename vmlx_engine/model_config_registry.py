@@ -609,15 +609,17 @@ class ModelConfigRegistry:
             preserve_template_metadata_when_no_thinking = False
 
             if is_zaya_family:
-                # Text ZAYA is reasoning-capable, but the honest prompt
-                # contract is still not "starts inside <think>".
-                # enable_thinking=False renders a closed empty block. Do not
-                # let stale converter stamps resurrect think_in_template=True.
+                # Text ZAYA is reasoning-capable, and reasoning is now the
+                # default like every other reasoning family. The honest prompt
+                # contract is still not "starts inside <think>": the model opens
+                # its own rail, so think_in_template stays False and the qwen3
+                # reasoning parser picks up the spontaneous <think>. Do not let
+                # stale converter stamps resurrect think_in_template=True.
                 updates["supports_thinking"] = True
                 updates["reasoning_parser"] = "qwen3"
                 updates["think_in_template"] = False
                 zaya_hints = dict(getattr(base, "architecture_hints", None) or {})
-                zaya_hints["default_enable_thinking"] = False
+                zaya_hints["default_enable_thinking"] = True
                 updates["architecture_hints"] = zaya_hints
             elif is_zaya1_vl_family:
                 # The current ZAYA1-VL VLM template is plain:

@@ -8722,7 +8722,7 @@ class TestZayaCCACachePolicy:
         assert cfg.tool_parser == "minimax"
         assert cfg.reasoning_parser == "minimax_m2"
 
-    def test_zaya_auto_defaults_to_no_think_but_explicit_on_still_works(self, tmp_path):
+    def test_zaya_auto_defaults_to_think_but_explicit_off_still_works(self, tmp_path):
         from vmlx_engine import server
 
         model_dir = self._write_zaya_fixture(tmp_path)
@@ -8745,11 +8745,21 @@ class TestZayaCCACachePolicy:
                 engine=None,
                 auto_detect=True,
             )
+            explicit_off = server._resolve_enable_thinking(
+                request_value=False,
+                ct_kwargs={},
+                tools_present=False,
+                model_key=str(model_dir),
+                engine=None,
+                auto_detect=True,
+            )
         finally:
             server._default_enable_thinking = old_default
 
-        assert resolved is False
+        # Zaya reasons by default (2026-07-09); an explicit request still wins both ways.
+        assert resolved is True
         assert explicit_on is True
+        assert explicit_off is False
 
     def test_server_default_false_is_explicit_and_request_off_still_wins(self):
         from vmlx_engine import server

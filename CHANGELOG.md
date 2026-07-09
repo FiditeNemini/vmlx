@@ -31,7 +31,7 @@ All notable changes to vMLX Engine will be documented in this file.
 - `TurboQuantKVCache` layers are no longer handed to decode by reference on a prefix-cache hit. TQ is not a `KVCache` subclass, so the clone gate rejected it and returned the stored entry; TQ is monotonic-growth, so decode appended into the cached prefix and later hits replayed a polluted context. `_truncate_cache` now rebuilds TQ layers as fresh independent caches. Only mixed layer lists stored a live TQ object, so the pure-TQ families (MiniMax-M2.7, Qwen3.6) never surfaced it.
 
 ### Added
-- `VMLX_SWA_TQ=1` (opt-in, default off): per-layer TurboQuant KV on the full-attention slots of mixed sliding/full attention models, leaving the sliding slots on their native `RotatingKVCache` so the `mixed_swa_kv_v1` window metadata survives. gemma-4-12B maps to 8 TQ + 40 rotating; gemma-4-26B-A4B to 5 + 25. See `docs/MIXED-SWA-TURBOQUANT-KV.md`.
+- `VMLX_SWA_TQ=1` (opt-in, default off): per-layer TurboQuant KV on the full-attention slots of mixed sliding/full attention models, leaving the sliding slots on their native `RotatingKVCache` so the `mixed_swa_kv_v1` window metadata survives. gemma-4-12B maps to 8 TQ + 40 rotating; gemma-4-26B-A4B to 5 + 25; Step-3.7-Flash to 12 + 33. Verified byte-equal to the default path on all three. See `docs/MIXED-SWA-TURBOQUANT-KV.md`.
 - Regression test `tests/test_turboquant_prefix_cache_clone.py` pinning TQ prefix-cache isolation.
 
 ### Changed

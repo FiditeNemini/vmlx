@@ -264,29 +264,33 @@ class TestMLLMBatchRequestSampling:
 class TestBatchedEngineVideoTemplate:
     """BatchedEngine MLLM template handling for video-only requests."""
 
-    def test_gemma4_audio_only_media_uses_simple_mllm_fallback(self, monkeypatch):
+    def test_gemma4_audio_only_media_stays_on_batched_scheduler(self):
+        # 2026-07-08 (F16+F17): gemma4 AUDIO rides the batched path. The old
+        # simple-fallback route passed `audio=` which Gemma4Processor rejects
+        # (silent empty responses on audio-tower E-models, F17), while the
+        # batched preprocessor's input_features route handles gemma4 audio
+        # correctly — and the batched-media corruption the fallback guarded
+        # against (F16) is fixed. No media modality may route to the fallback.
         from vmlx_engine.engine.batched import BatchedEngine
 
         engine = BatchedEngine.__new__(BatchedEngine)
         engine._is_mllm = True
         engine._model_family_name = lambda: "gemma4"
 
-        assert engine._use_simple_mllm_media_fallback(
+        assert not engine._use_simple_mllm_media_fallback(
             images=[],
             videos=[],
+            audio=["/tmp/audio.wav"],
+        )
+        assert not engine._use_simple_mllm_media_fallback(
+            images=["img.png"],
+            videos=["vid.mp4"],
             audio=["/tmp/audio.wav"],
         )
         assert not engine._use_simple_mllm_media_fallback(
             images=[],
             videos=[],
             audio=[],
-        )
-
-        monkeypatch.setenv("VMLINUX_DISABLE_MLLM_MEDIA_SIMPLE_FALLBACK", "1")
-        assert not engine._use_simple_mllm_media_fallback(
-            images=[],
-            videos=[],
-            audio=["/tmp/audio.wav"],
         )
 
     def test_non_gemma4_audio_only_media_stays_on_batched_scheduler(self):

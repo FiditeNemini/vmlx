@@ -256,19 +256,19 @@ class BatchedEngine(BaseEngine):
             return False
         if os.environ.get("VMLINUX_DISABLE_MLLM_MEDIA_SIMPLE_FALLBACK") == "1":
             return False
-        # gemma4 IMAGE/VIDEO turns ride the optimized batched path. 2026-07-08
-        # live A/B (VMLINUX_DISABLE_MLLM_MEDIA_SIMPLE_FALLBACK=1) showed the
-        # historical "corrupted media prefill" no longer reproduces: batched
-        # output is coherent across single + multi-turn AND more accurate than
-        # the simple forward (which mis-described the image), and it STREAMS
-        # token-by-token (the simple forward yields a single delta) with full
-        # generation_config sampling parity. Media embeddings are still not
-        # prefix-cached (mllm_scheduler skips media cache store, path-dependent).
-        # AUDIO stays on the proven simple MLXMultimodalLM.chat() forward until
-        # batched audio-prefill parity is separately verified. Escape hatch:
-        # VMLINUX_DISABLE_MLLM_MEDIA_SIMPLE_FALLBACK=1 forces batched for all.
-        if self._model_family_name() == "gemma4":
-            return bool(audio)
+        # gemma4 media (image/video/AUDIO) rides the optimized batched path.
+        # 2026-07-08: the historical "corrupted batched media prefill" this
+        # fallback guarded against was root-caused as F16 (mx.fast.rope
+        # batch>1 scalar-offset row corruption through _BatchOffsetSafeCache)
+        # and is FIXED in mlx_vlm_compat — full concurrency matrix verified
+        # clean live. AUDIO must use batched: the simple MLLM.chat() forward
+        # passes `audio=` which Gemma4Processor rejects ("does not support
+        # audio parameter") and surfaced as silent empty responses on the
+        # audio-tower E-models (F17); the batched preprocessor's
+        # input_features route handles gemma4 audio correctly (E2B live:
+        # perception + recall + tool-after-audio PASS). Media embeddings are
+        # still not prefix-cached (mllm_scheduler skips media cache store,
+        # path-dependent).
         return False
 
     async def _simple_mllm_chat_output(

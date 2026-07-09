@@ -71,6 +71,63 @@ def apply() -> None:
     if _os.environ.get("VMLX_DISABLE_QWEN35_MROPE_PATCH", "0") != "1":
         _patch_qwen35_language_mrope_none_delta()
     _patch_gemma4_attention_rope_order()
+    _patch_gemma4_proportional_rope_batch_offset()
+
+
+def _patch_gemma4_proportional_rope_batch_offset() -> None:
+    """gemma4 ProportionalRoPE: expand scalar offset to per-row at batch>1.
+
+    mx.fast.rope (mlx 0.31.2) computes rows 1+ INCORRECTLY (garbage or NaN)
+    when called with batch>1 and a SCALAR offset at gemma4 full-attention
+    shapes (e.g. (B,16,1,128) f16, freqs len 64) — proven by minimal repro
+    2026-07-08: identical duplicate rows in, row0 bit-exact vs solo, row1
+    NaN/garbage; the SAME call with a per-row offset array [o]*B is bit-exact
+    on every row (F16 root cause, task #59). Sliding-layer standard RoPE at
+    (B,8,1,256) is unaffected, which is why only full-attention layers (8/48)
+    corrupted. Until the Metal kernel is fixed upstream, force the safe
+    array-offset code path whenever more than one row is present. Values are
+    unchanged — this only dodges the broken scalar kernel path. Idempotent.
+    """
+    try:
+        import mlx.core as _mx
+        from mlx_vlm.models.gemma4.rope_utils import ProportionalRoPE as _PRoPE
+    except Exception:
+        return
+    if getattr(_PRoPE.__call__, "_vmlx_batch_offset_patched", False):
+        return
+    _orig_call = _PRoPE.__call__
+
+    def _batch_safe_call(self, x, offset=0):
+        if x.shape[0] > 1 and (
+            isinstance(offset, int)
+            or (isinstance(offset, _mx.array) and offset.ndim == 0)
+        ):
+            offset = _mx.full((x.shape[0],), offset, dtype=_mx.int32)
+        return _orig_call(self, x, offset=offset)
+
+    _batch_safe_call._vmlx_batch_offset_patched = True
+    _PRoPE.__call__ = _batch_safe_call
+    _logger.info(
+        "mlx_vlm_compat: gemma4 ProportionalRoPE patched — scalar rope offset "
+        "expanded to per-row array at batch>1 (mx.fast.rope scalar-offset "
+        "batch corruption workaround, task #59/F16)"
+    )
+
+
+def _gemma4_cache_rope_offset(cache):
+    """Per-row rope offset for the gemma4 attention patch.
+
+    _step() wraps BatchKVCache in _BatchOffsetSafeCache so Qwen slice ops see
+    a scalar int — but consuming that flattened scalar for ROPE gives every
+    row the max row's position: joining rows hit the mx.fast.rope scalar-batch
+    kernel bug (garbage/NaN, F16) and shorter rows are silently roped at the
+    wrong position. Read the TRUE offset from the proxied cache instead —
+    Batch* caches carry a per-row mx.array, raw caches a Python int.
+    """
+    import mlx.core as _mx
+
+    raw = getattr(cache, "_inner", cache).offset
+    return raw if isinstance(raw, _mx.array) else _mx.array(raw)
 
 
 def _patch_gemma4_attention_rope_order() -> None:
@@ -135,7 +192,10 @@ def _patch_gemma4_attention_rope_order() -> None:
                 values = self.v_proj(x).reshape(
                     B, L, self.n_kv_heads, self.head_dim
                 )
-            offset = _mx.array(cache.offset) if cache is not None else 0
+            # Per-row offsets (NOT the proxy's flattened scalar): scalar rope
+            # offsets at batch>1 hit the mx.fast.rope row-corruption bug (F16)
+            # and mis-position shorter rows. See _gemma4_cache_rope_offset.
+            offset = _gemma4_cache_rope_offset(cache) if cache is not None else 0
             keys = self.k_norm(keys)
             keys = keys.transpose(0, 2, 1, 3)
             keys = self.rope(keys, offset=offset)
@@ -163,12 +223,13 @@ def _patch_gemma4_attention_rope_order() -> None:
         if self.is_kv_shared_layer and cache is not None:
             state = cache.state
             keys, values = state[0], state[1]
-            offset = cache.offset
+            # Per-row offsets — see _gemma4_cache_rope_offset (F16).
+            offset = _gemma4_cache_rope_offset(cache)
             queries = queries.transpose(0, 2, 1, 3)
             queries = self.rope(queries, offset=offset)
         else:
             if cache is not None:
-                offset = cache.offset
+                offset = _gemma4_cache_rope_offset(cache)
             keys = self.k_proj(x).reshape(B, L, self.n_kv_heads, self.head_dim)
             if self.use_k_eq_v:
                 values = keys

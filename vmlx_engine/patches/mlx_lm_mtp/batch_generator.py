@@ -705,17 +705,26 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
     state.stats.backbone_ms += (time.perf_counter() - t0) * 1000
 
     t0 = time.perf_counter()
-    rows = []
-    for i in range(n + 1):
-        row = logits[:, i, :]
-        if procs is not None:
-            row = _apply_processors(procs, prev_bufs[i], row)
-        rows.append(row)
-    # Batched logprobs: one logsumexp over (n+1, vocab).
-    combined_logits = mx.concatenate(rows, axis=0)  # (n+1, vocab)
+    if procs is None:
+        # The (n+1, vocab) slab is already contiguous — skip n+1 slices + a
+        # concatenate. (Measured neutral on Hy3; kept because it is simply
+        # less work. The per-cycle cost that makes MTP a loss on this MoE is
+        # the verify forward itself, not this bookkeeping — see below.)
+        combined_logits = logits[0]
+    else:
+        combined_logits = mx.concatenate(
+            [
+                _apply_processors(procs, prev_bufs[i], logits[:, i, :])
+                for i in range(n + 1)
+            ],
+            axis=0,
+        )
     combined_lp = combined_logits - mx.logsumexp(
         combined_logits, axis=-1, keepdims=True
     )
+    # Sample per row: a single batched sampler() call measured identical on
+    # Hy3 and would change RNG consumption for stochastic samplers, so keep
+    # the row-wise draws the depth-1 path has always used.
     sampled = [sampler(combined_lp[i : i + 1]) for i in range(n + 1)]
     mx.eval(*sampled)
     sampled_ids = [int(t.tolist()[0]) for t in sampled]

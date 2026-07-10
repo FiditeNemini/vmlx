@@ -89,6 +89,43 @@ class TestHy3NativeMtpAutodetect:
         assert status["status"] == "native_runtime_ready"
         assert status["runtime_scope"] == "text"
 
+    def test_bundle_declared_block_disables_runtime_but_keeps_artifact(
+        self, tmp_path, monkeypatch
+    ):
+        """A bundle that MEASURED MTP as a slowdown can declare it blocked.
+
+        Hy3-JANG_2L does: verify forwards on an MoE cost ~35% more per extra
+        token (expert gather scales with distinct experts), so at 65.8%
+        depth-1 acceptance MTP is a net loss (29.9 vs 33.4 tok/s).
+        """
+        from vmlx_engine.native_mtp import inspect_native_mtp_bundle
+
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP_FORCE", raising=False)
+        _write_hy3_jang_2l_native_bundle(tmp_path)
+        jc = json.loads((tmp_path / "jang_config.json").read_text())
+        jc["runtime"]["native_mtp_blocked"] = "measured net slowdown on JANG_2L"
+        (tmp_path / "jang_config.json").write_text(json.dumps(jc))
+
+        status = inspect_native_mtp_bundle(str(tmp_path))
+
+        # artifact is still valid & detected — this is an acceleration block
+        assert status["artifact_available"] is True
+        assert status["runtime_supported"] is True
+        assert status["index_has_mtp_tensors"] is True
+        assert status["issues"] == []
+        # ...but the runtime will not engage
+        assert status["runtime_available"] is False
+        assert status["runtime_validation_blocked"] is True
+        assert status["status"] == "runtime_validation_blocked"
+        assert "measured net slowdown" in status["runtime_reason"]
+
+        # and it is overridable for experiments
+        monkeypatch.setenv("VMLX_NATIVE_MTP_FORCE", "1")
+        forced = inspect_native_mtp_bundle(str(tmp_path))
+        assert forced["runtime_available"] is True
+        assert forced["status"] == "native_runtime_ready"
+
     def test_env_kill_switch_still_wins(self, tmp_path, monkeypatch):
         from vmlx_engine.native_mtp import inspect_native_mtp_bundle
 

@@ -458,13 +458,30 @@ def _env_disabled(*names: str) -> bool:
 
 
 def _runtime_validation_block_reason(jang_cfg: dict[str, Any]) -> str | None:
-    """Block native MTP for artifact profiles that failed live validation.
+    """Block native MTP for artifacts that failed live validation.
 
-    The JANG_2K profile still needs the native-MTP VL loader route for image
-    input, but the 2026-05-17 six-variant packaged gate showed native MTP was
-    slower and less coherent for this artifact profile. Keep this as a runtime
-    acceleration block, not an artifact metadata failure.
+    Two sources, both runtime *acceleration* blocks — never artifact metadata
+    failures (the MTP weights stay valid and present):
+
+    1. ``jang_config["runtime"]["native_mtp_blocked"] = "<measured reason>"``.
+       A bundle that measured MTP as a net slowdown declares it here, rather
+       than the engine hardcoding profile names. Override with
+       ``VMLX_NATIVE_MTP_FORCE=1`` to re-run the experiment.
+    2. The legacy JANG_2K profile block (2026-05-17 packaged six-variant gate:
+       low acceptance, speed regression, coherence failures).
     """
+    runtime = (
+        jang_cfg.get("runtime") if isinstance(jang_cfg.get("runtime"), dict) else {}
+    )
+    declared = runtime.get("native_mtp_blocked")
+    if isinstance(declared, str) and declared.strip():
+        if _env_enabled("VMLINUX_NATIVE_MTP_FORCE", "VMLX_NATIVE_MTP_FORCE"):
+            return None
+        return (
+            f"bundle declares native MTP blocked: {declared.strip()} "
+            "(set VMLX_NATIVE_MTP_FORCE=1 to force the experimental path)"
+        )
+
     quantization = (
         jang_cfg.get("quantization")
         if isinstance(jang_cfg.get("quantization"), dict)

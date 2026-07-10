@@ -531,3 +531,54 @@ class TestDepthGating:
         assert _effective_depth(_Batch()) == 3
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", "0")
         assert _effective_depth(_Batch()) == 1
+
+
+class TestMeasurementHooksDefaultOff:
+    """The profiling/bypass hooks added while diagnosing MTP throughput must be
+    inert unless their env var is set — they add barriers / skip the MTP path,
+    which would silently change production behavior if left on."""
+
+    def test_profile_and_bypass_default_off(self):
+        from vmlx_engine.patches.mlx_lm_mtp import batch_generator as bg
+
+        assert bg._MTP_PROFILE is False
+        assert bg._MTP_BYPASS is False
+
+    def test_pbar_is_noop_when_profiling_off(self, monkeypatch):
+        """_pbar must not force an eval (or import mlx) when profiling is off."""
+        from vmlx_engine.patches.mlx_lm_mtp import batch_generator as bg
+
+        monkeypatch.setattr(bg, "_MTP_PROFILE", False)
+        # Passing a bare object would raise inside mx.eval; a no-op ignores it.
+        bg._pbar(object(), object())  # must not raise
+
+
+class TestBundleDepthSidecar:
+    """Hy3-JANG_2L pins best_depth=1 so a forced MTP run does not inherit the
+    global depth-3 default (which measured ~-43%). Depth 2/3 are strictly worse
+    on this MoE: the verify grows ~11.5ms/extra token while chained-draft
+    acceptance collapses."""
+
+    def test_best_depth_1_sidecar_resolves_to_depth_1(self, tmp_path, monkeypatch):
+        import json
+
+        from vmlx_engine.native_mtp import native_mtp_effective_depth
+
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP_DEPTH", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP_DEPTH", raising=False)
+        (tmp_path / "vmlx_mtp_tuning.json").write_text(
+            json.dumps({"native_mtp": {"blocked": True, "best_depth": 1},
+                        "best_depth": 1})
+        )
+        depth, source = native_mtp_effective_depth(str(tmp_path))
+        assert depth == 1
+        assert "best_depth" in source
+
+    def test_no_sidecar_still_defaults_to_3(self, tmp_path, monkeypatch):
+        from vmlx_engine.native_mtp import native_mtp_effective_depth
+
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP_DEPTH", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP_DEPTH", raising=False)
+        depth, source = native_mtp_effective_depth(str(tmp_path))
+        assert depth == 3
+        assert source == "default"

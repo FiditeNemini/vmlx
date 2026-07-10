@@ -1420,13 +1420,19 @@ def register_all(registry=None):
     #     route_norm=True, router_scaling_factor=2.826.
     #   - Cache: standard causal KV. NOT MLA, NOT SSM hybrid, NOT CCA, NOT VL.
     #   - MTP: `num_nextn_predict_layers=1`. The native runtime IS implemented
-    #     (jang_tools.hy3 Hy3MTPLayer + patches/mlx_lm_mtp/hy_v3_model.py), and
-    #     greedy output is byte-identical at depth 1/2/3. It is nonetheless
-    #     OFF for Hy3-JANG_2L, which declares `runtime.native_mtp_blocked`:
-    #     speculative decode LOSES on this MoE because a verify forward costs
-    #     ~+11ms per extra token (routed expert gather scales with the number
-    #     of distinct experts), so 65.8% depth-1 acceptance nets 29.9 tok/s vs
-    #     33.4 off. Set VMLX_NATIVE_MTP_FORCE=1 to re-run that experiment.
+    #     (jang_tools.hy3 Hy3MTPLayer + patches/mlx_lm_mtp/hy_v3_model.py) and
+    #     correct, but OFF for Hy3-JANG_2L via `runtime.native_mtp_blocked`.
+    #     Footprint-controlled A/B (head loaded in both arms): depth-1 MTP nets
+    #     ~-3%. The verify forward is the floor — a 2-token verify costs 1.36x a
+    #     1-token forward (per-row 2-bit MoE dequant+matmul; NOT distinct-expert
+    #     memory — same-expert 2-tok == diff-expert 2-tok). That puts break-even
+    #     acceptance at ~59%; the affine-8 head drafts against the 2-bit backbone
+    #     at ~58%, so MTP straddles break-even. Driver is already optimal
+    #     (sample/cache/head <3ms/cycle; loose head-cache beats rollback/fresh;
+    #     pipelining measured -1.6%). Only a higher-bit routed backbone (raising
+    #     head-vs-backbone agreement past break-even) can flip it. Depth is
+    #     pinned to 1 in vmlx_mtp_tuning.json (depth 2/3 are strictly worse).
+    #     VMLX_NATIVE_MTP_FORCE=1 re-runs the experiment.
     #   - Reasoning: `<think>...</think>` tags + `<｜reasoning_mode｜>reasoning_effort:
     #     no_think|low|high`. Default `no_think` emits closed `<think></think>`
     #     prefill. The tags are qwen3-compatible and match the JANG

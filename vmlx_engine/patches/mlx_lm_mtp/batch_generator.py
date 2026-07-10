@@ -20,10 +20,21 @@ active set of sequences in continuous batching. We patch:
   verify outputs.
 
 The throughput math (greedy, accept rate p):
-  - Cost per *cycle*: 1× backbone (2-token verify) + 1× MTP head ≈ 1.15
   - Tokens per cycle: 1 + p (accept emits draft+bonus; reject emits verify_pred only)
-  - At p≈1: 0.575 cost/token → ~1.74× throughput
-  - At p≈0.5: ~0.77 cost/token → ~1.30× throughput
+  - Cost per cycle: 1× backbone (n+1-token verify) + 1× MTP head.
+
+  The win depends ENTIRELY on how much cheaper the (n+1)-token verify forward is
+  than (n+1) single-token forwards. On a DENSE model the marginal verify token
+  is nearly free (weights read once) so the ratio is ~1.05× and MTP wins big.
+  On an MoE it is NOT: measured on Hy3-JANG_2L a 2-token verify costs 1.36× a
+  1-token forward (43.6ms vs 31.5ms) because each routed expert does per-row
+  2-bit dequant+matmul — the cost is per-row COMPUTE, not shared expert-read
+  memory (proven: a 2-token forward whose rows pick the SAME experts costs the
+  same as one whose rows pick DIFFERENT experts). Break-even acceptance is
+  therefore ~59%; Hy3's affine-8 head drafts against a 2-bit backbone accept at
+  ~58%, so MTP straddles break-even and nets ~-3%. See `native_mtp_blocked` in
+  the JANG_2L bundle. It only becomes a win with a higher-bit routed backbone
+  (less-damaged → higher head agreement → acceptance clears break-even).
 
 Greedy identity (sampler is None): the patched dispatch must produce the same
 tokens as the standard step. The oMLX-side equivalent is pinned in
@@ -57,6 +68,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import random
 from collections import deque
 from dataclasses import dataclass, field
@@ -65,6 +77,25 @@ from typing import Any, Deque, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 _PATCHED = False
+
+# Barrier-based per-phase profiling. Off by default (adds an mx.eval after each
+# GPU phase, which serializes the pipeline — measurement only). When on, the
+# _MtpStats timings become real GPU-phase costs instead of enqueue times.
+_MTP_PROFILE = bool(os.environ.get("VMLX_MTP_PROFILE"))
+
+# Measurement bypass: keep the MTP head LOADED (so the memory footprint and
+# residency are identical to an MTP-on run) but decode with the standard
+# autoregressive step. This isolates the MTP algorithm from the head's memory
+# cost, giving a footprint-controlled baseline for A/B on a variance-prone box.
+_MTP_BYPASS = bool(os.environ.get("VMLX_MTP_BYPASS"))
+
+
+def _pbar(*arrays) -> None:
+    """Profiling-only barrier: resolve `arrays` iff VMLX_MTP_PROFILE is set."""
+    if _MTP_PROFILE:
+        import mlx.core as mx
+
+        mx.eval(*arrays)
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +125,8 @@ def apply() -> bool:
 
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
+        if _MTP_BYPASS:
+            return  # head stays loaded; decode via the standard step
         if _is_mtp_eligible(self):
             try:
                 _post_init_mtp(self)
@@ -702,6 +735,7 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
             return_hidden=True,
             n_confirmed=1,
         )
+    _pbar(logits, hidden)  # profiling: isolate real verify-forward GPU cost
     state.stats.backbone_ms += (time.perf_counter() - t0) * 1000
 
     t0 = time.perf_counter()
@@ -869,6 +903,7 @@ def _draft_chain(
 
         hidden = mtp_hidden[:, -1:, :]
         cur_tok = state.draft_toks[-1]
+    _pbar(*state.draft_toks)  # profiling: isolate real MTP-head GPU cost
     state.stats.mtp_head_ms += (time.perf_counter() - t_start) * 1000
 
 

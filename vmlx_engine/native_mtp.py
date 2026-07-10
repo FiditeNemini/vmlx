@@ -31,9 +31,13 @@ _FAMILY_ALIAS = {
 # through GenerationBatch. DeepSeek-V4 has model-side code copied for later
 # work, but vMLX's DSV4 runtime uses a custom generator, so do not advertise
 # it as native-MTP active yet.
+# hy_v3 (Tencent Hy3): model-side hooks live in jang_tools.hy3.model
+# (Hy3MTPLayer + mtp_forward/make_mtp_cache); patches/mlx_lm_mtp/hy_v3_model.py
+# gates head attachment. Bundle ships the DSV3-style head as mtp.0.* tensors.
 _RUNTIME_SUPPORTED_FAMILIES = {
     "qwen3_5",
     "qwen3_5_moe",
+    "hy_v3",
 }
 _EAGLE3_NATIVE_MTP_FAMILIES = {
     "minimax_m3",

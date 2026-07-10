@@ -67,7 +67,13 @@ def apply_mlx_lm_mtp_patch() -> bool:
     if _PATCHED:
         return True
 
-    from . import batch_generator, cache_rollback, deepseek_v4_model, qwen35_model
+    from . import (
+        batch_generator,
+        cache_rollback,
+        deepseek_v4_model,
+        hy_v3_model,
+        qwen35_model,
+    )
 
     if not cache_rollback.apply():
         return False
@@ -88,6 +94,14 @@ def apply_mlx_lm_mtp_patch() -> bool:
         logger.debug("DeepSeek-V4 MTP patch raised: %s", exc)
     if not dsv4_ok:
         logger.debug("DeepSeek-V4 MTP patch did not apply (likely missing base patch)")
+
+    try:
+        hy_v3_ok = hy_v3_model.apply()
+    except Exception as exc:
+        hy_v3_ok = False
+        logger.debug("hy_v3 MTP patch raised: %s", exc)
+    if not hy_v3_ok:
+        logger.debug("hy_v3 MTP patch did not apply (jang_tools.hy3 unavailable)")
     if not batch_generator.apply():
         logger.warning(
             "BatchGenerator MTP dispatch patch failed; MTP path will be inactive"

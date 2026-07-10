@@ -2239,11 +2239,23 @@ class Scheduler:
             return "bailing_hybrid"
         return ""
 
+    def _canonicalize_tags(self, text: str) -> str:
+        """Rewrite variant-suffixed special tags (`</think:opensource>`) to the
+        bare spelling every downstream parser matches. Identity for bundles
+        that don't use a variant. See `special_tag_dialect`."""
+        canon = getattr(self, "_tag_canonicalizer", None)
+        if canon is None:
+            from .special_tag_dialect import build_canonical_map, compile_canonicalizer
+
+            canon = compile_canonicalizer(build_canonical_map(self._actual_tokenizer))
+            self._tag_canonicalizer = canon if canon is not None else False
+        return canon(text) if canon else text
+
     def _decode_tokens(self, token_ids: List[int]) -> str:
         """
         Decode token IDs to text, handling both tokenizers and processors.
         """
-        return self._actual_tokenizer.decode(token_ids)
+        return self._canonicalize_tags(self._actual_tokenizer.decode(token_ids))
 
     @staticmethod
     def _encode_prompt_text(tokenizer: Any, prompt: str, add_special_tokens: Optional[bool]) -> List[int]:
@@ -2260,11 +2272,11 @@ class Scheduler:
     def _get_detokenizer(self, request_id: str) -> Any:
         """Get or create a streaming detokenizer for a request."""
         if request_id not in self._detokenizer_pool:
-            from mlx_lm.tokenizer_utils import NaiveStreamingDetokenizer
+            from .special_tag_dialect import make_streaming_detokenizer
 
-            detok = NaiveStreamingDetokenizer(self._actual_tokenizer)
-            detok.reset()
-            self._detokenizer_pool[request_id] = detok
+            self._detokenizer_pool[request_id] = make_streaming_detokenizer(
+                self._actual_tokenizer
+            )
         return self._detokenizer_pool[request_id]
 
     def _cleanup_detokenizer(self, request_id: str) -> None:

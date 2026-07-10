@@ -1419,8 +1419,14 @@ def register_all(registry=None):
     #     shared expert, layer 0 dense FFN (first_k_dense_replace=1),
     #     route_norm=True, router_scaling_factor=2.826.
     #   - Cache: standard causal KV. NOT MLA, NOT SSM hybrid, NOT CCA, NOT VL.
-    #   - MTP: `num_nextn_predict_layers=1`. First runtime: `preserved_disabled`
-    #     (normal autoregressive decode using only the 80 base layers).
+    #   - MTP: `num_nextn_predict_layers=1`. The native runtime IS implemented
+    #     (jang_tools.hy3 Hy3MTPLayer + patches/mlx_lm_mtp/hy_v3_model.py), and
+    #     greedy output is byte-identical at depth 1/2/3. It is nonetheless
+    #     OFF for Hy3-JANG_2L, which declares `runtime.native_mtp_blocked`:
+    #     speculative decode LOSES on this MoE because a verify forward costs
+    #     ~+11ms per extra token (routed expert gather scales with the number
+    #     of distinct experts), so 65.8% depth-1 acceptance nets 29.9 tok/s vs
+    #     33.4 off. Set VMLX_NATIVE_MTP_FORCE=1 to re-run that experiment.
     #   - Reasoning: `<think>...</think>` tags + `<｜reasoning_mode｜>reasoning_effort:
     #     no_think|low|high`. Default `no_think` emits closed `<think></think>`
     #     prefill. The tags are qwen3-compatible and match the JANG
@@ -1433,6 +1439,11 @@ def register_all(registry=None):
     #     Role-boundary stops: model output should never emit `<｜hy_User｜>`
     #     or `<｜hy_Assistant｜>` mid-response (same hallucination-loop class
     #     as DSV4/MiniMax/Kimi role-marker fixes).
+    #     NOTE: the shipped tokenizer spells ALL of these — and `</think>`, and
+    #     every tool tag — with an `:opensource` suffix, e.g.
+    #     `<｜hy_eos:opensource｜>`. The bare spellings below are correct because
+    #     `special_tag_dialect` canonicalizes them at the token→text boundary.
+    #     Without that adapter these stop strings never match.
     #   - Provisional contract until first bundle ships and `verify_directory`
     #     proves the per-projection bit map. think_in_template=False because
     #     the template prefills `<think></think>` for default `no_think`,

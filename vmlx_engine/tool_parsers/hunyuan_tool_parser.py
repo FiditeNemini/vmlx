@@ -26,6 +26,12 @@ from the argument body. Argument values are coerced via ``json.loads``
 when possible (so ``"true"`` becomes ``True``, ``"42"`` becomes
 ``42``), otherwise kept as strings.
 
+Every tag may carry a ``:variant`` suffix. The handoff doc above shows the
+bare form, but the shipped ``tencent/Hy3`` tokenizer defines *only* the
+suffixed tokens — ``<tool_calls:opensource>``, ``<tool_sep:opensource>``,
+``<arg_key:opensource>``, and so on — so a bare-tag-only parser never fires
+on the real model. Both forms are accepted.
+
 Reasoning is handled by the separate ``qwen3`` reasoning parser on
 ``<think>...</think>`` tags — this parser only touches tool calls.
 """
@@ -51,23 +57,30 @@ class HunyuanToolParser(ToolParser):
 
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
+    # Optional ``:variant`` suffix on every tag (the shipped Hy3 tokenizer
+    # uses ``:opensource``; the handoff contract uses the bare form).
+    _V = r"(?::[A-Za-z0-9_-]+)?"
+
     TOOL_CALLS_PATTERN = re.compile(
-        r"<tool_calls>\s*(.*?)\s*</tool_calls>",
+        rf"<tool_calls{_V}>\s*(.*?)\s*</tool_calls{_V}>",
         re.DOTALL,
     )
     TOOL_CALL_PATTERN = re.compile(
-        r"<tool_call>\s*(.*?)\s*</tool_call>",
+        rf"<tool_call{_V}>\s*(.*?)\s*</tool_call{_V}>",
         re.DOTALL,
     )
     ARG_KEY_PATTERN = re.compile(
-        r"<arg_key>\s*(.*?)\s*</arg_key>",
+        rf"<arg_key{_V}>\s*(.*?)\s*</arg_key{_V}>",
         re.DOTALL,
     )
     ARG_VALUE_PATTERN = re.compile(
-        r"<arg_value>\s*(.*?)\s*</arg_value>",
+        rf"<arg_value{_V}>\s*(.*?)\s*</arg_value{_V}>",
         re.DOTALL,
     )
-    TOOL_SEP = "<tool_sep>"
+    TOOL_SEP_PATTERN = re.compile(rf"<tool_sep{_V}>")
+    # Cheap pre-checks that mirror the full patterns' tag spelling.
+    TOOL_CALLS_OPEN = re.compile(rf"<tool_calls{_V}>")
+    TOOL_CALLS_CLOSE = re.compile(rf"</tool_calls{_V}>")
 
     @staticmethod
     def _coerce(value: str) -> Any:
@@ -84,7 +97,7 @@ class HunyuanToolParser(ToolParser):
         model_output: str,
         request: dict[str, Any] | None = None,
     ) -> ExtractedToolCallInformation:
-        if "<tool_calls>" not in model_output:
+        if not self.TOOL_CALLS_OPEN.search(model_output):
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
@@ -92,9 +105,10 @@ class HunyuanToolParser(ToolParser):
         tool_calls: list[dict[str, Any]] = []
         for envelope in self.TOOL_CALLS_PATTERN.findall(model_output):
             for raw_call in self.TOOL_CALL_PATTERN.findall(envelope):
-                if self.TOOL_SEP not in raw_call:
+                parts = self.TOOL_SEP_PATTERN.split(raw_call, maxsplit=1)
+                if len(parts) != 2:
                     continue
-                name, args_blob = raw_call.split(self.TOOL_SEP, 1)
+                name, args_blob = parts
                 # Pair keys with values positionally — order matters in the
                 # template emission, both lists should be the same length.
                 keys = self.ARG_KEY_PATTERN.findall(args_blob)
@@ -133,9 +147,9 @@ class HunyuanToolParser(ToolParser):
     ) -> dict[str, Any] | None:
         # Stream visible content until we see the envelope close, then
         # extract the full block (mirrors zaya_tool_parser.py's approach).
-        if "<tool_calls>" not in current_text:
+        if not self.TOOL_CALLS_OPEN.search(current_text):
             return {"content": delta_text}
-        if "</tool_calls>" in delta_text:
+        if self.TOOL_CALLS_CLOSE.search(delta_text):
             result = self.extract_tool_calls(current_text, request=request)
             if result.tools_called:
                 return {

@@ -143,6 +143,68 @@ class TestHunyuanToolParser:
         assert "tool_calls" in result
         assert result["tool_calls"][0]["function"]["name"] == "fn"
 
+    def test_opensource_variant_tags_parse(self, parser):
+        """The shipped tencent/Hy3 tokenizer defines ONLY `:opensource`-suffixed
+        tool tokens — there is no bare `<tool_calls>` token. This is verbatim
+        output captured from Hy3-JANG_2L on the vmlx server; a bare-tag-only
+        parser returned zero tool_calls for it."""
+        text = (
+            "<tool_calls:opensource>\n"
+            "<tool_call:opensource>get_weather<tool_sep:opensource>\n"
+            "<arg_key:opensource>city</arg_key:opensource>\n"
+            "<arg_value:opensource>Tokyo</arg_value:opensource>\n"
+            "<arg_key:opensource>unit</arg_key:opensource>\n"
+            "<arg_value:opensource>c</arg_value:opensource>\n"
+            "</tool_call:opensource>\n"
+            "</tool_calls:opensource>"
+        )
+        out = parser.extract_tool_calls(text)
+        assert out.tools_called is True
+        assert len(out.tool_calls) == 1
+        assert out.tool_calls[0]["name"] == "get_weather"
+        assert json.loads(out.tool_calls[0]["arguments"]) == {
+            "city": "Tokyo",
+            "unit": "c",
+        }
+        assert out.content is None
+
+    def test_opensource_variant_streaming_close(self, parser):
+        """`</tool_calls:opensource>` is a single special token, so it lands in
+        one delta — the streaming close-check must match the suffixed spelling."""
+        cur = "<tool_calls:opensource>\n<tool_call:opensource>fn<tool_sep:opensource>"
+        assert parser.extract_tool_calls_streaming("", cur, cur) is None
+
+        prev = cur
+        cur += (
+            "\n<arg_key:opensource>k</arg_key:opensource>"
+            "<arg_value:opensource>v</arg_value:opensource>\n"
+            "</tool_call:opensource>\n</tool_calls:opensource>"
+        )
+        result = parser.extract_tool_calls_streaming(prev, cur, "</tool_calls:opensource>")
+        assert result is not None
+        assert result["tool_calls"][0]["function"]["name"] == "fn"
+
+    def test_tool_call_tag_does_not_swallow_tool_calls_envelope(self, parser):
+        """`<tool_call{variant}>` must not match the `<tool_calls…>` envelope
+        (the optional-suffix regex makes that failure mode reachable)."""
+        assert parser.TOOL_CALL_PATTERN.search("<tool_calls:opensource></tool_calls:opensource>") is None
+        assert parser.TOOL_CALL_PATTERN.search("<tool_calls></tool_calls>") is None
+        assert parser.TOOL_CALLS_OPEN.search("<tool_call:opensource>") is None
+
+    def test_mixed_bare_and_suffixed_tags_still_parse(self, parser):
+        """Defensive: a variant suffix on some tags but not others."""
+        text = (
+            "<tool_calls:opensource>\n"
+            "<tool_call>fn<tool_sep>\n"
+            "<arg_key:opensource>k</arg_key>\n"
+            "<arg_value>42</arg_value:opensource>\n"
+            "</tool_call>\n"
+            "</tool_calls:opensource>"
+        )
+        out = parser.extract_tool_calls(text)
+        assert out.tools_called is True
+        assert json.loads(out.tool_calls[0]["arguments"]) == {"k": 42}
+
     def test_registry_aliases_resolve(self):
         """Verify the parser registers under all 3 aliases."""
         from vmlx_engine.tool_parsers.abstract_tool_parser import ToolParserManager

@@ -203,10 +203,25 @@ class TestMemoryAwarePrefixCache:
 
     @pytest.fixture
     def mock_kv_cache(self):
-        """Create a mock KV cache with known size."""
+        """Create a REAL KVCache of a known size.
+
+        These tests exercise fetch(), and fetch() returns an isolate-clone. Only a
+        genuine cache class can be cloned — `_safe()` deliberately allowlists exact
+        type names, because `_truncate_cache`'s duck-typed branch rebuilds a plain
+        KVCache and downcasting an unknown subclass would silently drop its
+        semantics. A stub would therefore be rejected and fetch would MISS.
+
+        Shape (1, 1, seq, 1) float32 => 4 bytes per side per position, so
+        `size_bytes` maps exactly onto seq = size_bytes // 8.
+        """
+        import mlx.core as mx
+        from mlx_lm.models.cache import KVCache
 
         def _create(size_bytes: int):
-            return [MockKVCache(size_bytes // 2, size_bytes // 2)]
+            seq = max(1, size_bytes // 8)
+            layer = KVCache()
+            layer.update_and_fetch(mx.zeros((1, 1, seq, 1)), mx.zeros((1, 1, seq, 1)))
+            return [layer]
 
         return _create
 
@@ -226,7 +241,11 @@ class TestMemoryAwarePrefixCache:
 
         # Fetch exact match
         result, remaining = small_cache.fetch(tokens)
-        assert result is kv  # Same reference, no copy
+        # An isolate-clone, never the stored object: decode writes through whatever
+        # fetch() hands back, so aliasing the entry would corrupt later hits (F20).
+        assert result is not None
+        assert result is not kv
+        assert result[0] is not kv[0]
         assert remaining == []
 
     def test_fetch_prefix_match(self, small_cache, mock_kv_cache):
@@ -239,7 +258,8 @@ class TestMemoryAwarePrefixCache:
         long_tokens = [1, 2, 3, 4, 5, 6]
         result, remaining = small_cache.fetch(long_tokens)
 
-        assert result is kv
+        assert result is not None
+        assert result is not kv  # isolate-clone, not the stored entry
         assert remaining == [4, 5, 6]
 
     def test_fetch_reverse_prefix_match(self, small_cache, mock_kv_cache):
@@ -309,7 +329,11 @@ class TestMemoryAwarePrefixCache:
 
         # Fetch [1,2,3,4,5] - should forward match [1,2,3] (not reverse match [1,2,3,4,5,6,7,8])
         result, remaining = small_cache.fetch([1, 2, 3, 4, 5])
-        assert result is short_kv
+        # An isolate-clone of the SHORT entry: identified by its 3-token offset,
+        # not by object identity (fetch never aliases the stored entry).
+        assert result is not None
+        assert result is not short_kv
+        assert result[0].offset == 3
         assert remaining == [4, 5]
 
     def test_fetch_miss(self, small_cache, mock_kv_cache):
@@ -487,15 +511,25 @@ class TestLargeContextCacheReuse:
         return MemoryAwarePrefixCache(model, config)
 
     def _make_kv_cache(self, num_tokens: int, num_layers: int = 64):
-        """Create a mock KV cache simulating Qwen3-Coder-Next dimensions.
+        """Create a REAL KVCache per layer, one position per token.
 
-        Each layer has keys+values of shape (1, n_kv_heads, seq_len, head_dim).
-        With GQA (4 kv_heads, 128 head_dim, fp16): 4*128*2*2 = 2048 bytes/token/layer
-        For 4-bit quantized: ~50 bytes/token/layer (realistic for quantized models).
+        These tests assert cache HITS, and fetch() only returns a hit for a cache it
+        can isolate-clone — a stub is rejected and fetch misses (see the mock_kv_cache
+        fixture above). Shape (1, 1, num_tokens, 1) float32 keeps this to 8 bytes per
+        token per layer, so even the 100k-token / 64-layer case is ~51MB. The
+        `large_cache` fixture's 8GB budget is far above that either way.
         """
-        bytes_per_token_per_layer = 50  # Realistic for 4-bit quantized GQA models
-        layer_bytes = num_tokens * bytes_per_token_per_layer
-        return [MockKVCache(layer_bytes // 2, layer_bytes // 2) for _ in range(num_layers)]
+        import mlx.core as mx
+        from mlx_lm.models.cache import KVCache
+
+        layers = []
+        for _ in range(num_layers):
+            layer = KVCache()
+            layer.update_and_fetch(
+                mx.zeros((1, 1, num_tokens, 1)), mx.zeros((1, 1, num_tokens, 1))
+            )
+            layers.append(layer)
+        return layers
 
     def test_cache_100k_tokens_store_and_fetch(self, large_cache):
         """Verify that a 100k token cache can be stored and retrieved."""
@@ -506,9 +540,10 @@ class TestLargeContextCacheReuse:
         assert large_cache.store(tokens, kv) is True
         assert len(large_cache) == 1
 
-        # Exact fetch should return same reference
+        # Exact fetch returns an isolate-clone, not the stored entry
         result, remaining = large_cache.fetch(tokens)
-        assert result is kv
+        assert result is not None
+        assert result is not kv
         assert remaining == []
 
     def test_multi_turn_growing_context(self, large_cache):
@@ -572,9 +607,13 @@ class TestLargeContextCacheReuse:
             cache.store(tokens, kv)
             entries.append(tokens)
 
-        # Most recent entries should still be in cache
-        result, _ = cache.fetch(entries[-1])
-        assert result is not None, "Most recent entry should be in cache"
+        # Most recent entries should still be in cache. Check residency directly
+        # rather than via fetch(): these are 50MB size-accounting stubs, and fetch()
+        # correctly refuses to hand back a cache it cannot isolate-clone, so it would
+        # report a (clean) miss for a resident entry. Eviction policy is what's under
+        # test here, not clonability.
+        assert tuple(entries[-1]) in cache._entries, "Most recent entry should be in cache"
+        assert tuple(entries[0]) not in cache._entries, "Oldest entry should be evicted"
 
         stats = cache.get_stats()
         assert stats["evictions"] > 0, "Should have evicted older entries"

@@ -373,22 +373,28 @@ class MemoryAwarePrefixCache:
             f"ttl={ttl_str}"
         )
 
-    def _clone_cache_for_fetch(self, cache: list, length: int) -> list:
-        """Return an isolated clone of a cache hit, or the stored reference.
+    def _clone_cache_for_fetch(self, cache: list, length: int) -> list | None:
+        """Return an isolated clone of a cache hit, or None to force a clean miss.
 
-        Issue #198 (1C): only clone when every layer is a plainly-sliceable
-        positional cache (KVCache / QuantizedKVCache, incl. CacheList of
-        those, plus RotatingKVCache, MiniMaxM3SparseCache and TurboQuantKVCache,
-        which _truncate_cache rebuilds explicitly). _truncate_cache rebuilds those
-        as fresh objects with sliced arrays -> independent offset and (on next
-        update) independent buffer, so generation cannot contaminate the stored
-        entry. For MambaCache / cumulative state (cannot be truncated) or unknown
-        types, fall back to the stored reference (unchanged behavior).
+        Issue #198 (1C): _truncate_cache rebuilds each layer as a fresh object with
+        copied arrays -> independent offset and (on next update) independent buffer,
+        so generation cannot contaminate the stored entry. Handled: KVCache /
+        QuantizedKVCache (incl. CacheList of those), RotatingKVCache,
+        MiniMaxM3SparseCache, TurboQuantKVCache, and cumulative SSM/conv state
+        (MambaCache / ArraysCache) — the last of these only because this method is
+        by contract called at the entry's FULL cached length, where the state needs
+        copying rather than reducing.
+
+        This NEVER returns the stored reference. Decode writes through every layer
+        it is handed, so sharing the cached object corrupts it (F11's sibling F20:
+        a hybrid KV+SSM entry's offsets walked 18 -> 19 after one decode step, and
+        later hits replayed the polluted prefix). If a layer cannot be isolated we
+        return None and the caller recomputes.
         """
         try:
             from mlx_lm.models.cache import KVCache, QuantizedKVCache
         except Exception:
-            return cache
+            return None
         try:
             from mlx_lm.models.cache import CacheList as _CacheList
         except Exception:
@@ -431,12 +437,27 @@ class MemoryAwarePrefixCache:
                     type(sc).__name__ in ("KVCache", "QuantizedKVCache")
                     for sc in subs
                 )
+            # Cumulative SSM/conv state (MambaCache / ArraysCache: a `.cache` list of
+            # arrays). It cannot be REDUCED, but we are at the full cached length, so
+            # _truncate_cache copies its arrays instead. This is what makes a hybrid
+            # KVCache+SSM layer list cloneable at all; previously one such layer made
+            # _safe() reject the WHOLE list and the caller shared the stored entry.
+            if isinstance(getattr(layer, "cache", None), list):
+                return True
             return False
 
-        if not cache or not all(_safe(layer) for layer in cache):
-            return cache
-        cloned = self._clone_on_stream_owner(cache, length)
-        return cloned if cloned is not None else cache
+        if not cache:
+            return None
+        if not all(_safe(layer) for layer in cache):
+            # No cache layer is safe to share: decode writes through every one of
+            # them. If we cannot isolate a layer we must take a clean miss and
+            # recompute rather than hand back the stored object (F20).
+            logger.warning(
+                "prefix-cache hit not isolatable (layers=%s); forcing a clean miss",
+                [type(layer).__name__ for layer in cache],
+            )
+            return None
+        return self._clone_on_stream_owner(cache, length)
 
     def set_clone_executor(self, executor: Any, worker_name_prefix: str | None = None) -> None:
         """Register the single-thread worker executor that owns the MLX stream.
@@ -481,17 +502,23 @@ class MemoryAwarePrefixCache:
         executor = getattr(self, "_clone_executor", None)
         prefix = getattr(self, "_clone_worker_prefix", "llm-worker")
         if executor is None or threading.current_thread().name.startswith(prefix):
-            cloned = self._truncate_cache(cache, length)
+            cloned = self._truncate_cache(cache, length, True)
         else:
             try:
-                cloned = executor.submit(self._truncate_cache, cache, length).result()
+                cloned = executor.submit(
+                    self._truncate_cache, cache, length, True
+                ).result()
             except Exception as exc:
-                # Never fall through to the caller's stored-reference return here:
-                # handing decode the live cached entry is the shared-buffer
-                # corruption this clone exists to prevent. Clone inline instead —
-                # the worst case is the stream error, not a polluted cache.
-                logger.warning("worker-side prefix-cache clone failed (%s); cloning inline", exc)
-                cloned = self._truncate_cache(cache, length)
+                # A clone we cannot build on the owning worker is a cache miss, not
+                # a reason to improvise. Cloning inline here would bind the arrays to
+                # the API thread's stream and resurrect F11 (empty 200 on every hit);
+                # returning the stored entry would resurrect F20 (polluted prefix).
+                # Recomputing is the only correct answer.
+                logger.warning(
+                    "worker-side prefix-cache clone failed (%s); forcing a clean miss",
+                    exc,
+                )
+                return None
         if cloned is not None:
             self._materialize_cloned_cache(cloned)
         return cloned
@@ -517,7 +544,9 @@ class MemoryAwarePrefixCache:
                 for sub in subs:
                     _collect(sub)
                 return
-            for attr in ("keys", "values", "idx_keys", "biases", "scales"):
+            # "cache" carries the cumulative SSM/conv state arrays (ArraysCache /
+            # MambaCache); the rest are the positional KV lanes.
+            for attr in ("keys", "values", "idx_keys", "biases", "scales", "cache"):
                 val = getattr(obj, attr, None)
                 if isinstance(val, mx.array):
                     arrays.append(val)
@@ -536,7 +565,7 @@ class MemoryAwarePrefixCache:
 
     @staticmethod
     def _truncate_cache(
-        cache: list[Any], target_len: int
+        cache: list[Any], target_len: int, allow_cumulative_clone: bool = False
     ) -> list[Any] | None:
         """
         Create a truncated view of a cache for reverse prefix matching.
@@ -556,10 +585,17 @@ class MemoryAwarePrefixCache:
         Args:
             cache: Original cache (list of layer cache objects).
             target_len: Number of token positions to keep.
+            allow_cumulative_clone: Set only by _clone_cache_for_fetch, which by
+                contract is called at the FULL cached length. Cumulative SSM/conv
+                state cannot be REDUCED, but at full length it needs no reduction —
+                a faithful array copy isolates it. Without this the hybrid layer
+                list fell through to the stored-reference return and decode mutated
+                the cached entry in place (F20).
 
         Returns:
             New list of cache objects with truncated offsets, or None if
-            any layer cannot be truncated (e.g., MambaCache present).
+            any layer cannot be truncated (e.g., MambaCache present and this
+            is a true reduction).
         """
         try:
             from mlx_lm.models.cache import CacheList as _CacheList
@@ -582,6 +618,30 @@ class MemoryAwarePrefixCache:
                 return copied
             except Exception:
                 return value
+
+        def _clone_cumulative_layer(src):
+            """Copy a cumulative SSM/conv layer (MambaCache / ArraysCache).
+
+            The state arrays are the whole cache — there is no offset to slice — so
+            a faithful copy is only valid at the full cached length, which is the
+            only place the caller enables this. Shallow-copy preserves the concrete
+            class and its scalar attributes; replacing `.cache` with copied arrays
+            severs the one piece of mutable state decode writes through.
+            """
+            import copy as _copy
+
+            arrays = getattr(src, "cache", None)
+            if not isinstance(arrays, list):
+                return None
+            try:
+                clone = _copy.copy(src)
+                clone.cache = [
+                    None if a is None else _copy_positional_slice(a) for a in arrays
+                ]
+            except Exception as exc:
+                logger.warning("cumulative cache clone failed (%s); forcing miss", exc)
+                return None
+            return clone
 
         def _clone_turboquant_layer(src, length):
             """Rebuild a TurboQuantKVCache as a fresh, independent cache.
@@ -767,7 +827,20 @@ class MemoryAwarePrefixCache:
                 # Cumulative cache (MambaCache/ArraysCache): CANNOT truncate.
                 # State includes all tokens and can't be reduced without
                 # re-running the model. Return None to force cache miss.
-                return None
+                #
+                # At FULL cached length no reduction is being asked for, so a
+                # faithful copy of the state arrays is both correct and necessary:
+                # without it the whole hybrid layer list fell through to the
+                # stored-reference return in _clone_cache_for_fetch and decode
+                # advanced the CACHED entry's offsets in place (F20 — proven on a
+                # KV+ArraysCache list: stored offsets walked 18 -> 19 after one
+                # decode step, so later hits replayed a polluted prefix).
+                if not allow_cumulative_clone:
+                    return None
+                cumulative_clone = _clone_cumulative_layer(layer_cache)
+                if cumulative_clone is None:
+                    return None
+                truncated.append(cumulative_clone)
             else:
                 # Unknown cache type — can't truncate
                 return None
@@ -858,17 +931,20 @@ class MemoryAwarePrefixCache:
             # Check for exact match
             if tokens_key in self._entries:
                 entry = self._entries[tokens_key]
-                # Move to end (most recently used) and update access time
-                self._entries.move_to_end(tokens_key)
-                self._touch_type_lru(tokens_key, entry.cache_type)
-                entry.touch()
-                self._stats.hits += 1
-                self._stats.tokens_saved += len(tokens)
                 # issue #198 (1C): return an isolated clone so generation
                 # advancing offset/appending KV in place cannot contaminate
-                # the stored entry for future hits on the same prefix.
+                # the stored entry for future hits on the same prefix. A clone we
+                # cannot build is a miss — only count the hit once it succeeds.
                 cloned = self._clone_cache_for_fetch(entry.cache, len(tokens))
-                return cloned, []
+                if cloned is not None:
+                    self._entries.move_to_end(tokens_key)
+                    self._touch_type_lru(tokens_key, entry.cache_type)
+                    entry.touch()
+                    self._stats.hits += 1
+                    self._stats.tokens_saved += len(tokens)
+                    return cloned, []
+                self._stats.misses += 1
+                return None, tokens
 
             # Prefix scan: O(n) over all entries (Issue #62).
             #
@@ -911,17 +987,21 @@ class MemoryAwarePrefixCache:
 
             # Prefer forward match (exact prefix reuse, no truncation needed)
             if best_forward_match is not None:
-                self._entries.move_to_end(best_forward_match.tokens)
-                self._touch_type_lru(best_forward_match.tokens, best_forward_match.cache_type)
-                best_forward_match.touch()
-                self._stats.hits += 1
-                self._stats.tokens_saved += best_forward_length
-                remaining = tokens[best_forward_length:]
-                # issue #198 (1C): isolated clone (see exact-match path).
+                # issue #198 (1C): isolated clone (see exact-match path). This is the
+                # entry's FULL cached length (best_forward_length == cached_len), which
+                # is what lets cumulative SSM layers be copied rather than reduced.
                 cloned = self._clone_cache_for_fetch(
                     best_forward_match.cache, best_forward_length
                 )
-                return cloned, remaining
+                if cloned is not None:
+                    self._entries.move_to_end(best_forward_match.tokens)
+                    self._touch_type_lru(
+                        best_forward_match.tokens, best_forward_match.cache_type
+                    )
+                    best_forward_match.touch()
+                    self._stats.hits += 1
+                    self._stats.tokens_saved += best_forward_length
+                    return cloned, tokens[best_forward_length:]
 
             # Fall back to reverse match with cache truncation
             if best_reverse_match is not None:

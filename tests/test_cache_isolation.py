@@ -43,18 +43,36 @@ class _FakeKVLayer:
         self.values = _FakeTensor(nbytes // 2)
 
 
-def _make_mock_kv_layer(nbytes: int = 1024):
-    """Create a mock KV cache layer that reports a given memory size.
+def _make_mock_kv_layer(nbytes: int = 1024, fill: float = 0.0):
+    """Create a REAL KVCache layer of a given memory size.
 
-    Uses plain objects (not MagicMock) so that estimate_kv_cache_memory
-    can read .nbytes correctly (it gates on `not callable(keys_attr)`).
+    It must be a genuine cache class: fetch() returns an isolate-clone, and
+    `_safe()` allowlists exact type names (a stub is refused and fetch takes a
+    clean miss rather than aliasing the stored entry). Shape (1, 1, seq, 1)
+    float32 => 4 bytes per side per position, so seq = nbytes // 8.
+
+    `fill` tags the contents so a clone can be traced back to its source entry —
+    object identity no longer can.
     """
-    return _FakeKVLayer(nbytes)
+    import mlx.core as mx
+    from mlx_lm.models.cache import KVCache
+
+    seq = max(1, nbytes // 8)
+    layer = KVCache()
+    layer.update_and_fetch(
+        mx.full((1, 1, seq, 1), fill), mx.full((1, 1, seq, 1), fill)
+    )
+    return layer
 
 
-def _make_cache_list(nbytes_per_layer: int = 1024, num_layers: int = 2):
+def _make_cache_list(nbytes_per_layer: int = 1024, num_layers: int = 2, fill: float = 0.0):
     """Return a list of mock KV layers suitable for MemoryAwarePrefixCache."""
-    return [_make_mock_kv_layer(nbytes_per_layer) for _ in range(num_layers)]
+    return [_make_mock_kv_layer(nbytes_per_layer, fill) for _ in range(num_layers)]
+
+
+def _fill_of(cache_list):
+    """Read back the tag written by _make_cache_list."""
+    return float(cache_list[0].keys[0, 0, 0, 0])
 
 
 def _make_prefix_cache(max_memory_mb: int = 10, max_entries: int = 100):
@@ -84,7 +102,11 @@ class TestPrefixCacheIsolation:
         assert cache.store(tokens, kv_data) is True
 
         result, remaining = cache.fetch(tokens)
-        assert result is kv_data  # Same reference (no deep copy)
+        # An isolate-clone, never the stored object. Decode writes through whatever
+        # fetch() returns, so aliasing the entry would corrupt later hits (F20).
+        assert result is not None
+        assert result is not kv_data
+        assert all(got is not orig for got, orig in zip(result, kv_data))
         assert remaining == []
 
     def test_different_tokens_no_cross_contamination(self):
@@ -92,10 +114,10 @@ class TestPrefixCacheIsolation:
         cache = _make_prefix_cache()
 
         tokens_a = [10, 20, 30]
-        kv_a = _make_cache_list()
+        kv_a = _make_cache_list(fill=1.0)
 
         tokens_b = [40, 50, 60]
-        kv_b = _make_cache_list()
+        kv_b = _make_cache_list(fill=2.0)
 
         cache.store(tokens_a, kv_a)
         cache.store(tokens_b, kv_b)
@@ -103,8 +125,11 @@ class TestPrefixCacheIsolation:
         result_a, rem_a = cache.fetch(tokens_a)
         result_b, rem_b = cache.fetch(tokens_b)
 
-        assert result_a is kv_a
-        assert result_b is kv_b
+        # fetch() returns isolate-clones, so trace each result back to its source
+        # entry by content rather than by object identity.
+        assert _fill_of(result_a) == 1.0
+        assert _fill_of(result_b) == 2.0
+        assert result_a is not kv_a and result_b is not kv_b
         assert rem_a == []
         assert rem_b == []
 
@@ -175,7 +200,8 @@ class TestPrefixCacheIsolation:
 
         # Fetch with extra tokens -- forward prefix match
         result, remaining = cache.fetch([1, 2, 3, 4, 5])
-        assert result is kv  # Forward match returns stored cache
+        assert result is not None
+        assert result is not kv  # forward match returns an isolate-clone
         assert remaining == [5]  # Only the extra token remains
 
     def test_clear_removes_all_entries(self):

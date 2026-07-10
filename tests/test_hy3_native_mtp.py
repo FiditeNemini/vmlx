@@ -167,6 +167,7 @@ class TestHy3ModelMtpContract:
         import mlx.core as mx
 
         from jang_tools.hy3.model import Model
+        from vmlx_engine.patches.mlx_lm_mtp import is_mtp_active, set_mtp_active
 
         weights = {
             "model.norm.weight": mx.ones((64,)),
@@ -174,7 +175,15 @@ class TestHy3ModelMtpContract:
             "model.layers.2.eh_proj.weight": mx.ones((64, 128)),  # legacy MTP
         }
 
-        bare = Model(_tiny_hy3_args())
+        # Another test module may have left the process-wide MTP gate on; once
+        # the patch is applied, Model.__init__ auto-attaches the head when it
+        # is. Pin the flag so `bare` really is head-free.
+        prev = is_mtp_active()
+        set_mtp_active(False)
+        try:
+            bare = Model(_tiny_hy3_args())
+        finally:
+            set_mtp_active(prev)
         out = bare.sanitize(dict(weights))
         assert "mtp.0.enorm.weight" not in out
         assert "model.layers.2.eh_proj.weight" not in out
@@ -212,10 +221,16 @@ class TestHy3ModelMtpContract:
             set_mtp_active(prev)
 
     def test_model_has_native_mtp_runtime_walk_finds_hy3_head(self):
-        from vmlx_engine.native_mtp import model_has_native_mtp_runtime
         from jang_tools.hy3.model import Model
+        from vmlx_engine.native_mtp import model_has_native_mtp_runtime
+        from vmlx_engine.patches.mlx_lm_mtp import is_mtp_active, set_mtp_active
 
-        model = Model(_tiny_hy3_args())
+        prev = is_mtp_active()
+        set_mtp_active(False)  # see note above: patched __init__ reads this
+        try:
+            model = Model(_tiny_hy3_args())
+        finally:
+            set_mtp_active(prev)
         assert model_has_native_mtp_runtime(model) is False
         model.attach_mtp()
         assert model_has_native_mtp_runtime(model) is True

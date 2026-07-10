@@ -255,12 +255,17 @@ class _MtpStats:
     """
 
     cycles: int = 0  # number of verify cycles run
-    accepts: int = 0  # cycles where the draft was accepted
-    rejects: int = 0  # cycles where the draft was rejected
+    accepts: int = 0  # cycles where the FULL draft chain was accepted
+    rejects: int = 0  # cycles with at least one rejected draft position
     init_emits: int = 0  # tokens emitted from the post-init queue (always 2)
     draft_emits: int = 0  # tokens emitted as accepted drafts
     bonus_emits: int = 0  # tokens emitted as bonus (accepted + emit_bonus)
     verify_emits: int = 0  # tokens emitted as verify-position correction (reject path)
+    # Depth-aware counters (depth > 1 engages only when every cache layer is
+    # trimmable — pure-KV families like hy_v3; hybrids stay depth-1).
+    depth: int = 1  # resolved draft depth for this sequence
+    draft_tokens_proposed: int = 0  # sum of chain lengths across cycles
+    draft_tokens_accepted: int = 0  # sum of accepted prefix lengths
     # Component-level timings. Help diagnose where MTP overhead comes from
     # when accept rate is healthy but wall-clock throughput isn't.
     backbone_ms: float = 0.0  # cumulative time inside the 2-token verify forward
@@ -283,20 +288,22 @@ class _MtpState:
     mtp_cache: Optional[List[Any]] = None
 
     # First input token of the next verify forward. Tracked as a 1-element
-    # mx.array (uint32) so it can be concatenated with `draft_tok` cheaply.
+    # mx.array (uint32) so it can be concatenated with the drafts cheaply.
     next_main: Optional[Any] = None
 
-    # Draft logprobs (vocab,) needed by stochastic acceptance / residual sampling.
-    draft_tok: Optional[Any] = None  # (1,) uint32
-    draft_lp: Optional[Any] = None  # (vocab,) float
+    # Draft chain (depth >= 1). Parallel lists, one entry per chained draft:
+    # d1 predicts the token after next_main, d2 the one after d1, ...
+    draft_toks: List[Any] = field(default_factory=list)  # each (1,) uint32
+    draft_lps: List[Any] = field(default_factory=list)  # each (vocab,) float
     # Filtered (sampler-applied) draft logprobs reused by the next cycle's
-    # acceptance ratio + residual sampling. None when the sampler exposes no
-    # metadata and vMLX falls back to raw-lp acceptance.
-    draft_accept_lp: Optional[Any] = None  # (vocab,) float
-    # Host-side int copy of draft_tok. Cached at draft creation time so the
-    # verify cycle can compare draft vs verify ids without a separate
-    # GPU→CPU sync (`int(draft_tok.tolist()[0])` would force a stall).
-    draft_id: int = -1
+    # acceptance ratio + residual sampling.
+    draft_accept_lps: List[Any] = field(default_factory=list)  # each (vocab,)
+    # Host-side int copies cached at draft creation time so the verify cycle
+    # compares draft vs verify ids without a GPU→CPU sync per position.
+    draft_ids: List[int] = field(default_factory=list)
+
+    # Resolved draft depth for this sequence (1..3).
+    depth: int = 1
 
     # Accept-rate / throughput counters. Surfaced via logger.info on finish.
     stats: _MtpStats = field(default_factory=_MtpStats)
@@ -408,14 +415,18 @@ def _trim_token_buffer(gen_batch: Any, n: int) -> None:
     buf._size = max(0, buf._size - n)
 
 
-def _restore_or_trim_caches(prompt_cache: List[Any]) -> bool:
-    """Roll back one token from each layer cache after a draft rejection.
+def _restore_or_trim_caches(prompt_cache: List[Any], n: int = 1) -> bool:
+    """Roll back ``n`` speculative tokens from each layer cache after a
+    (possibly partial) draft-chain rejection.
 
     SSM / linear-attention layers expose ``rollback_state`` populated by the
-    patched ``GatedDeltaNet.__call__``; we restore that snapshot. Standard
-    KV cache layers (full-attention) expose ``trim`` and ``is_trimmable``;
-    we trim by 1. Layers that support neither cause the entire MTP step to
-    fall back to the standard path.
+    patched ``GatedDeltaNet.__call__``; that snapshot restores to the
+    confirmed prefix, i.e. it drops ALL speculative tokens of the last
+    forward. Partial rollback (n < chain length) is therefore only valid on
+    trimmable KV layers — which is why depth > 1 is gated on every cache
+    layer being trimmable (see ``_effective_depth``). Standard KV cache
+    layers trim by ``n``. Layers that support neither cause the entire MTP
+    step to fall back to the standard path.
     """
     for c in prompt_cache:
         rollback = getattr(c, "rollback_state", None)
@@ -426,10 +437,40 @@ def _restore_or_trim_caches(prompt_cache: List[Any]) -> bool:
             c.rollback_state = None
             continue
         if hasattr(c, "is_trimmable") and c.is_trimmable():
-            c.trim(1)
+            c.trim(n)
             continue
         return False
     return True
+
+
+def _effective_depth(gen_batch: Any) -> int:
+    """Resolve the draft-chain depth (1..3) for this sequence.
+
+    Sources, in order: VMLINUX/VMLX_NATIVE_MTP_DEPTH env, the bundle's
+    validated ``vmlx_mtp_tuning.json``, default (via
+    ``native_mtp_effective_depth``). Depth > 1 additionally requires:
+      - every prompt-cache layer trimmable (partial rollback is a KV trim;
+        SSM rollback_state can only restore to the confirmed prefix), and
+      - ``mtp_forward`` supporting ``return_hidden`` (chained drafting feeds
+        the head's hidden back as the next step's previous-hidden).
+    Hybrid families (qwen3.5/3.6) fail the trimmable check and keep the
+    proven depth-1 behavior byte-for-byte.
+    """
+    try:
+        from vmlx_engine.native_mtp import native_mtp_effective_depth
+
+        depth, _source = native_mtp_effective_depth(None)
+    except Exception:
+        depth = 1
+    depth = max(1, min(3, int(depth or 1)))
+    if depth <= 1:
+        return 1
+    for c in gen_batch.prompt_cache:
+        if getattr(c, "rollback_state", None) is not None:
+            return 1
+        if not (hasattr(c, "is_trimmable") and c.is_trimmable()):
+            return 1
+    return depth
 
 
 def _clear_rollback(prompt_cache: List[Any]) -> None:
@@ -501,46 +542,29 @@ def _post_init_mtp(gen_batch: Any) -> None:
     next_main_lp = _logprobs(next_main_logits)
     next_main_tok = sampler(next_main_lp)  # (1,)
 
-    # MTP head sees (hidden_at_main, next_main_tok) and proposes the draft
-    # that the *next* verify cycle will check against forward([next_main, draft]).
-    mtp_cache = gen_batch.model.make_mtp_cache()
-    hidden_at_main = hidden[:, -1:, :]  # (1, 1, H)
-    next_ids = next_main_tok.reshape(1, 1)
-    with mx.stream(_get_generation_stream()):
-        mtp_logits = gen_batch.model.mtp_forward(hidden_at_main, next_ids, mtp_cache)
-    mtp_logits_2d = mtp_logits[:, -1, :]
-    if procs is not None:
-        prev_with_main_and_next = mx.concatenate(
-            [prev_buf, _ensure_uint32(next_main_tok)]
-        )
-        mtp_logits_2d = _apply_processors(
-            procs, prev_with_main_and_next, mtp_logits_2d
-        )
-    draft_lp_2d = _logprobs(mtp_logits_2d)
-    draft_tok = sampler(draft_lp_2d)
-    # Filtered draft lp — what the sampler actually drew from. The next
-    # cycle's acceptance ratio uses this so the math matches the
-    # sampling distribution rather than the raw softmax.
-    draft_accept_lp_2d = _accept_lp_for(sampler, draft_lp_2d)
+    mx.eval(main_tok, next_main_tok)
 
-    mx.eval(main_tok, next_main_tok, draft_tok)
-
-    # Queue the two confirmed tokens (main_tok + next_main_tok); their
-    # logprobs come from the standard / patched samplers. Cache draft_id
-    # while the array is already evaluated to avoid re-syncing in cycle 1.
     state = _MtpState()
-    state.mtp_cache = mtp_cache
+    state.mtp_cache = gen_batch.model.make_mtp_cache()
+    state.depth = _effective_depth(gen_batch)
+    state.stats.depth = state.depth
     state.next_main = _ensure_uint32(next_main_tok)
-    state.draft_tok = _ensure_uint32(draft_tok)
-    state.draft_lp = draft_lp_2d.squeeze(0)
-    state.draft_accept_lp = draft_accept_lp_2d.squeeze(0)
-    state.draft_id = int(draft_tok.tolist()[0])
     state.queue.append((int(main_tok.tolist()[0]), main_lp, "init"))
     state.queue.append(
         (int(next_main_tok.tolist()[0]), next_main_lp.squeeze(0), "init")
     )
-
     gen_batch._omlx_mtp_state = state
+
+    # Draft chain: the head sees (hidden_at_main, next_main_tok) and proposes
+    # d1..dN for the first verify cycle forward([next_main, d1..dN]).
+    hidden_at_main = hidden[:, -1:, :]  # (1, 1, H)
+    _draft_chain(
+        gen_batch,
+        state,
+        hidden_at_main,
+        state.next_main,
+        prev_buf=prev_buf,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -581,17 +605,28 @@ def _log_mtp_stats(uid: Any, stats: "_MtpStats", finish_reason: str) -> None:
         rate_str = f"{stats.accepts / stats.cycles * 100:.1f}%"
     else:
         rate_str = "n/a"
+    if stats.draft_tokens_proposed > 0:
+        tok_rate_str = (
+            f"{stats.draft_tokens_accepted / stats.draft_tokens_proposed * 100:.1f}%"
+        )
+    else:
+        tok_rate_str = "n/a"
     logger.info(
-        "MTP[%s] finish=%s tokens=%d cycles=%d accept=%d/%d (%s) "
+        "MTP[%s] finish=%s depth=%d tokens=%d cycles=%d full-accept=%d/%d (%s) "
+        "draft-tokens=%d/%d (%s) "
         "emits[init=%d,draft=%d,bonus=%d,verify=%d] "
         "timing[backbone=%.1fms mtp=%.1fms sample=%.1fms cache=%.1fms]",
         uid,
         finish_reason,
+        stats.depth,
         total_emits,
         stats.cycles,
         stats.accepts,
         stats.cycles,
         rate_str,
+        stats.draft_tokens_accepted,
+        stats.draft_tokens_proposed,
+        tok_rate_str,
         stats.init_emits,
         stats.draft_emits,
         stats.bonus_emits,
@@ -619,37 +654,46 @@ def _bump_emit_stat(state: _MtpState, source: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
-    """Run one verify cycle. Populates ``state.queue`` with 1 (reject) or 2
-    (accept) tokens for upcoming emit calls. Updates ``state.next_main`` and
-    ``state.draft_tok`` / ``state.draft_lp`` for the cycle after that.
+    """Run one verify cycle over the draft chain ``d1..dN``.
+
+    One backbone forward over ``[next_main, d1..dN]`` (N+1 tokens,
+    ``n_confirmed=1``), longest-prefix acceptance, then one new draft chain
+    from the last confirmed position. Populates ``state.queue`` with
+    ``k`` accepted drafts + 1 correction/bonus token (k in 0..N), rolls the
+    cache back by ``N - k`` on partial/full rejection, and refreshes
+    ``state.next_main`` / draft-chain lists for the next cycle.
+
+    Depth 1 reproduces the original 2-token draft+bonus cycle exactly.
     """
     import time
 
     import mlx.core as mx
 
-    if state.next_main is None or state.draft_tok is None:
-        raise _MtpStepFallback("verify cycle entered without next_main / draft")
+    if state.next_main is None or not state.draft_toks:
+        raise _MtpStepFallback("verify cycle entered without next_main / drafts")
 
     sampler = _resolve_sampler(gen_batch)
     procs = _proc_list(gen_batch)
     is_greedy = _is_greedy(gen_batch)
+    n = len(state.draft_toks)
 
-    inputs = mx.concatenate([state.next_main, state.draft_tok])  # (2,)
+    inputs = mx.concatenate([state.next_main] + list(state.draft_toks))  # (n+1,)
 
     # Update the token buffer per position so logits processors see the same
-    # history shape as standard autoregressive decode.
-    prev_main = None
-    prev_draft = None
+    # history shape as standard autoregressive decode. prev_bufs[i] is the
+    # buffer state after consuming inputs[0..i].
+    prev_bufs: List[Any] = []
     if procs is not None:
-        prev_main = gen_batch._token_context[0].update_and_fetch(state.next_main)
-        prev_draft = gen_batch._token_context[0].update_and_fetch(state.draft_tok)
+        prev_bufs.append(
+            gen_batch._token_context[0].update_and_fetch(state.next_main)
+        )
+        for d in state.draft_toks:
+            prev_bufs.append(gen_batch._token_context[0].update_and_fetch(d))
 
     # --- backbone forward + sample (single eval point) ---
     # Dispatch backbone, processors, logprobs, and sampler all on stream
     # without forcing intermediate evaluation. The single ``mx.eval`` after
     # sampling resolves the whole graph in one stall instead of two.
-    # Tradeoff: backbone_ms / sample_ms split is no longer wall-clock
-    # accurate (everything lands in sample_ms), but cumulative timing is.
     t0 = time.perf_counter()
     with mx.stream(_get_generation_stream()):
         logits, hidden = gen_batch.model(
@@ -658,174 +702,165 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
             return_hidden=True,
             n_confirmed=1,
         )
-        verify_logits = logits[:, 0, :]
-        bonus_logits = logits[:, 1, :]
     state.stats.backbone_ms += (time.perf_counter() - t0) * 1000
 
     t0 = time.perf_counter()
-    if procs is not None:
-        verify_logits = _apply_processors(procs, prev_main, verify_logits)
-        bonus_logits = _apply_processors(procs, prev_draft, bonus_logits)
-    # Batched logprobs: one logsumexp over (2, vocab) instead of two over
-    # (1, vocab). Shaves one reduction per cycle on the vocab dimension.
-    combined_logits = mx.concatenate(
-        [verify_logits, bonus_logits], axis=0
-    )  # (2, vocab)
+    rows = []
+    for i in range(n + 1):
+        row = logits[:, i, :]
+        if procs is not None:
+            row = _apply_processors(procs, prev_bufs[i], row)
+        rows.append(row)
+    # Batched logprobs: one logsumexp over (n+1, vocab).
+    combined_logits = mx.concatenate(rows, axis=0)  # (n+1, vocab)
     combined_lp = combined_logits - mx.logsumexp(
         combined_logits, axis=-1, keepdims=True
     )
-    verify_lp_2d = combined_lp[0:1]
-    bonus_lp_2d = combined_lp[1:2]
-    verify_tok = sampler(verify_lp_2d)
-    bonus_tok = sampler(bonus_lp_2d)
-    mx.eval(verify_tok, bonus_tok)
+    sampled = [sampler(combined_lp[i : i + 1]) for i in range(n + 1)]
+    mx.eval(*sampled)
+    sampled_ids = [int(t.tolist()[0]) for t in sampled]
 
-    # ``draft_id`` was cached when the draft was sampled (post_init or the
-    # prior _step_mtp); skip the GPU→CPU sync that ``state.draft_tok.tolist()``
-    # would impose on every cycle.
-    draft_id = state.draft_id
-    verify_id = int(verify_tok.tolist()[0])
-    bonus_id = int(bonus_tok.tolist()[0])
-
-    # Filtered logprobs — distribution the sampler actually drew from.
-    # Used for acceptance ratio + residual sampling so they match the
-    # sampling distribution rather than raw softmax.
-    verify_accept_lp = _accept_lp_for(sampler, verify_lp_2d)
-    draft_accept_lp = (
-        state.draft_accept_lp
-        if state.draft_accept_lp is not None
-        else _accept_lp_for(sampler, state.draft_lp)
-    )
-
-    if is_greedy:
-        accept = verify_id == draft_id
-    else:
-        log_accept = (
-            verify_accept_lp[0, draft_id].item()
-            - draft_accept_lp[draft_id].item()
-        )
-        accept = log_accept >= 0 or random.random() < math.exp(log_accept)
+    # Longest-prefix acceptance. Position i's logits verify draft i+1
+    # (0-indexed: combined_lp[i] is the target distribution for d_{i+1}).
+    k = 0
+    while k < n:
+        d_id = state.draft_ids[k]
+        if is_greedy:
+            ok = sampled_ids[k] == d_id
+        else:
+            verify_accept_lp = _accept_lp_for(sampler, combined_lp[k : k + 1])
+            log_accept = (
+                verify_accept_lp[0, d_id].item()
+                - state.draft_accept_lps[k][d_id].item()
+            )
+            ok = log_accept >= 0 or random.random() < math.exp(log_accept)
+        if not ok:
+            break
+        k += 1
     state.stats.sample_ms += (time.perf_counter() - t0) * 1000
 
-    hidden_at_confirmed = hidden[:, 0:1, :]
-    hidden_at_draft = hidden[:, 1:2, :]
-
     state.stats.cycles += 1
-    if accept:
+    state.stats.draft_tokens_proposed += n
+    state.stats.draft_tokens_accepted += k
+    full_accept = k == n
+    if full_accept:
         state.stats.accepts += 1
-        # --- cache cleanup (timed) ---
-        t0 = time.perf_counter()
-        _clear_rollback(gen_batch.prompt_cache)
-        state.stats.cache_ops_ms += (time.perf_counter() - t0) * 1000
+    else:
+        state.stats.rejects += 1
 
-        # --- MTP head forward for next draft (timed inside _step_mtp) ---
-        new_draft, new_draft_lp = _step_mtp(
-            gen_batch,
-            hidden_at_draft,
-            _ensure_uint32(bonus_tok),
-            prev_buf=prev_draft if procs is not None else None,
-            stats=state.stats,
-        )
-        # Queue the two emitted tokens. The accepted draft uses the MTP
-        # head's original draft distribution as its logprobs; the bonus uses
-        # the verify forward's bonus distribution.
-        state.queue.append((draft_id, state.draft_lp, "draft"))
-        state.queue.append((bonus_id, bonus_lp_2d.squeeze(0), "bonus"))
-        state.next_main = _ensure_uint32(bonus_tok)
-        state.draft_tok = new_draft
-        state.draft_lp = new_draft_lp
-        return
-
-    # Reject path.
-    state.stats.rejects += 1
+    # --- cache rollback / cleanup (timed) ---
     t0 = time.perf_counter()
-    if not _restore_or_trim_caches(gen_batch.prompt_cache):
+    if full_accept:
+        _clear_rollback(gen_batch.prompt_cache)
+    else:
+        if not _restore_or_trim_caches(gen_batch.prompt_cache, n - k):
+            if procs is not None:
+                _trim_token_buffer(gen_batch, n - k)
+            raise _MtpStepFallback("cache layer rejects rollback")
         if procs is not None:
-            _trim_token_buffer(gen_batch, 1)
-        raise _MtpStepFallback("cache layer rejects rollback")
-    if procs is not None:
-        _trim_token_buffer(gen_batch, 1)
+            _trim_token_buffer(gen_batch, n - k)
     state.stats.cache_ops_ms += (time.perf_counter() - t0) * 1000
 
-    # Pick the verify-position emit token: residual sample for stochastic.
-    # Residual is computed on the *filtered* distributions so the sample
-    # comes from `max(p_target_filt - p_draft_filt, 0)` — matching what the
-    # sampler would have produced if it had drawn directly from the verify
-    # position. emit_lp returned to the caller stays as the raw verify lp
-    # so downstream logprobs reporting is consistent with non-MTP paths.
-    if is_greedy:
-        emit_id = verify_id
-        emit_lp = verify_lp_2d.squeeze(0)
+    # --- queue emits: k accepted drafts + 1 correction/bonus ---
+    for i in range(k):
+        state.queue.append((state.draft_ids[i], state.draft_lps[i], "draft"))
+
+    if full_accept:
+        emit_id = sampled_ids[n]
+        emit_lp = combined_lp[n : n + 1].squeeze(0)
+        source = "bonus"
+    elif is_greedy:
+        emit_id = sampled_ids[k]
+        emit_lp = combined_lp[k : k + 1].squeeze(0)
+        source = "verify"
     else:
-        emit_id, _ = _residual_sample(verify_accept_lp, draft_accept_lp)
-        emit_lp = verify_lp_2d.squeeze(0)
+        # Residual sample on the *filtered* distributions so the sample
+        # comes from `max(p_target_filt - p_draft_filt, 0)`. emit_lp stays
+        # the raw verify lp so downstream logprobs reporting is consistent
+        # with non-MTP paths.
+        verify_accept_lp = _accept_lp_for(sampler, combined_lp[k : k + 1])
+        emit_id, _ = _residual_sample(verify_accept_lp, state.draft_accept_lps[k])
+        emit_lp = combined_lp[k : k + 1].squeeze(0)
+        source = "verify"
+    state.queue.append((emit_id, emit_lp, source))
 
+    # --- new draft chain from the last confirmed position ---
     emit_tok = mx.array([emit_id], dtype=mx.uint32)
-    new_draft, new_draft_lp = _step_mtp(
-        gen_batch,
-        hidden_at_confirmed,
-        emit_tok,
-        prev_buf=prev_main if procs is not None else None,
-        stats=state.stats,
-    )
-
-    state.queue.append((emit_id, emit_lp, "verify"))
     state.next_main = emit_tok
-    state.draft_tok = new_draft
-    state.draft_lp = new_draft_lp
+    _draft_chain(
+        gen_batch,
+        state,
+        hidden[:, k : k + 1, :],
+        emit_tok,
+        prev_buf=prev_bufs[k] if procs is not None else None,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Helpers used by the verify cycle.
 # ---------------------------------------------------------------------------
 
-def _step_mtp(
+def _draft_chain(
     gen_batch: Any,
-    hidden_at_position: Any,
-    next_main_tok: Any,
+    state: _MtpState,
+    anchor_hidden: Any,
+    t0_tok: Any,
     prev_buf: Optional[Any],
-    stats: Optional["_MtpStats"] = None,
-) -> Tuple[Any, Any]:
-    """Run one MTP-head forward + sample. Returns ``(draft_tok, draft_lp)``.
+) -> None:
+    """Draft ``state.depth`` chained tokens with the MTP head.
 
-    Side effect: caches the host-side int copy of the new draft on
-    ``gen_batch._omlx_mtp_state.draft_id`` so the next verify cycle's
-    accept check is sync-free.
+    d1 = head(anchor_hidden, t0); d_{i+1} = head(h_i, d_i) where h_i is the
+    head's own (post-final-norm) hidden from step i — the same recursion
+    vLLM uses for multi-step MTP with a single head. Replaces the previous
+    single-draft ``_step_mtp``. The head cache is never rolled back (loose
+    history by design — verify guarantees correctness; the cache only
+    shapes draft quality).
+
+    Fills ``state.draft_toks / draft_lps / draft_accept_lps / draft_ids``.
     """
     import time
 
     import mlx.core as mx
 
-    state = gen_batch._omlx_mtp_state
     sampler = _resolve_sampler(gen_batch)
     procs = _proc_list(gen_batch)
 
-    t0 = time.perf_counter()
-    next_ids = next_main_tok.reshape(1, 1)
-    with mx.stream(_get_generation_stream()):
-        mtp_logits = gen_batch.model.mtp_forward(
-            hidden_at_position, next_ids, state.mtp_cache
-        )
-        mtp_logits_2d = mtp_logits[:, -1, :]
-    if procs is not None and prev_buf is not None:
-        prev_with_next = mx.concatenate(
-            [prev_buf, _ensure_uint32(next_main_tok)]
-        )
-        mtp_logits_2d = _apply_processors(procs, prev_with_next, mtp_logits_2d)
-    new_lp = _logprobs(mtp_logits_2d)
-    new_tok = sampler(new_lp)
-    # Filtered draft lp — what the sampler actually drew from. The next
-    # verify cycle's acceptance ratio uses this so the math matches the
-    # sampling distribution rather than raw softmax.
-    new_accept_lp = _accept_lp_for(sampler, new_lp)
-    # ``.tolist()`` forces evaluation; replaces the explicit ``mx.eval`` and
-    # piggybacks the host-side int caching on the same sync.
-    draft_id_int = int(new_tok.tolist()[0])
-    state.draft_id = draft_id_int
-    state.draft_accept_lp = new_accept_lp.squeeze(0)
-    if stats is not None:
-        stats.mtp_head_ms += (time.perf_counter() - t0) * 1000
-    return _ensure_uint32(new_tok), new_lp.squeeze(0)
+    state.draft_toks = []
+    state.draft_lps = []
+    state.draft_accept_lps = []
+    state.draft_ids = []
+
+    t_start = time.perf_counter()
+    hidden = anchor_hidden
+    cur_tok = t0_tok
+    proc_ctx = prev_buf
+    for _ in range(max(1, state.depth)):
+        next_ids = cur_tok.reshape(1, 1)
+        with mx.stream(_get_generation_stream()):
+            mtp_logits, mtp_hidden = gen_batch.model.mtp_forward(
+                hidden, next_ids, state.mtp_cache, return_hidden=True
+            )
+            mtp_logits_2d = mtp_logits[:, -1, :]
+        if procs is not None and proc_ctx is not None:
+            proc_ctx = mx.concatenate([proc_ctx, _ensure_uint32(cur_tok)])
+            mtp_logits_2d = _apply_processors(procs, proc_ctx, mtp_logits_2d)
+        new_lp = _logprobs(mtp_logits_2d)
+        new_tok = sampler(new_lp)
+        # Filtered draft lp — what the sampler actually drew from; the verify
+        # cycle's acceptance ratio uses this so the math matches the sampling
+        # distribution rather than raw softmax.
+        new_accept_lp = _accept_lp_for(sampler, new_lp)
+        # ``.tolist()`` forces evaluation and doubles as the host-side copy.
+        new_id = int(new_tok.tolist()[0])
+
+        state.draft_toks.append(_ensure_uint32(new_tok))
+        state.draft_lps.append(new_lp.squeeze(0))
+        state.draft_accept_lps.append(new_accept_lp.squeeze(0))
+        state.draft_ids.append(new_id)
+
+        hidden = mtp_hidden[:, -1:, :]
+        cur_tok = state.draft_toks[-1]
+    state.stats.mtp_head_ms += (time.perf_counter() - t_start) * 1000
 
 
 def _residual_sample(verify_lp_2d: Any, draft_lp_1d: Any) -> Tuple[int, Any]:

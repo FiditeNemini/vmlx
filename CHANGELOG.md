@@ -24,6 +24,17 @@ All notable changes to vMLX Engine will be documented in this file.
 - Local MiMo V2.5 JANG_2L was refreshed from max2 over the TB-routed HTTP endpoint and verified byte-for-byte by manifest. This is still not full MiMo release clearance: live text/cache now works, but tool behavior, VL/audio/video, and performance remain separate proof rows.
 - MiMo V2.5 JANG_2L tool behavior remains a release blocker: a forced XML-function tool call stayed HTTP 200 but produced raw malformed `<tool_call>` text and punctuation garbage with zero parsed tool calls.
 
+## [1.6.5] - 2026-07-09
+
+### Fixed
+- The prefix cache never hands decode the stored entry. `_clone_cache_for_fetch` used to fall back to returning the cached object itself whenever a layer failed the isolate-clone gate; decode writes through every layer it is given, so the stored prefix was mutated in place and later hits replayed a polluted context. This is the same defect already fixed for `RotatingKVCache`, the MiniMax-M3 sparse cache and `TurboQuantKVCache`. A cache that cannot be isolated is now a clean miss: the exact- and forward-match paths recompute, and the hit counters only advance once a clone succeeds.
+- Cumulative SSM/conv state (`MambaCache` / `ArraysCache`) is now cloned rather than shared. It cannot be *reduced* to a shorter token count, but `_clone_cache_for_fetch` is only ever called at the entry's full cached length, where nothing needs reducing — so the state arrays are copied. Reverse-match truncation, which is a true reduction, still refuses and takes a clean miss. This was latent rather than live: both schedulers auto-switch hybrid models onto the paged cache, so a hybrid layer list only reaches the memory-aware cache when hybrid detection fails open (`make_cache()` raising). Correctness no longer depends on that detector.
+- A worker-side clone failure now takes a clean miss instead of cloning inline on the API thread, which would have resurrected the 1.6.4 stream bug (empty 200 on every cache hit).
+
+### Notes
+- `tests/test_memory_cache.py` and `tests/test_cache_isolation.py` asserted the old aliasing contract (“Same reference, no copy”) using cache stubs that the clone gate rejects, so they had only ever exercised the stored-reference fallback. They now use real `KVCache` layers and assert isolation.
+- Verified live on Qwen3.6-27B (16 attention + 48 SSM layers): decode determinism, the prefix-cache pollution guard and multiturn recall all pass, KV+SSM cache hits are still served, and no cache is ever rejected as non-isolatable.
+
 ## [1.6.4] - 2026-07-09
 
 ### Fixed

@@ -107,11 +107,30 @@ def collect_multi_eos_ids(
     if hasattr(inner, "unk_token"):
         unk_token = inner.unk_token
 
+    # Registry eos strings use the canonical bare spelling. A variant-suffixed
+    # bundle (e.g. tencent/Hy3 ships only `<｜hy_eos:opensource｜>`) has no such
+    # token in vocab, which left the defensive multi-eos stop set uninstalled
+    # for the whole family. Resolve through the tokenizer's own dialect map so
+    # the registry stays canonical.
+    variant_spelling: dict[str, str] = {}
+    try:
+        from vmlx_engine.special_tag_dialect import build_canonical_map
+
+        variant_spelling = {
+            bare: suffixed for suffixed, bare in build_canonical_map(inner).items()
+        }
+    except Exception:
+        variant_spelling = {}
+
     if registry_eos_tokens:
         for tok in registry_eos_tokens:
             if tok is None:
                 continue
             tid = _resolve_token_to_id(inner, str(tok), rust_tok, unk_id, unk_token)
+            if tid is None and str(tok) in variant_spelling:
+                tid = _resolve_token_to_id(
+                    inner, variant_spelling[str(tok)], rust_tok, unk_id, unk_token
+                )
             if tid is None:
                 unresolved.append(str(tok))
                 continue

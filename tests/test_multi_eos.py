@@ -98,6 +98,43 @@ def test_collect_multi_eos_ids_ignores_role_tokens_for_non_deepseek(tmp_path: Pa
     assert unresolved == []
 
 
+def test_collect_multi_eos_ids_resolves_variant_suffixed_spellings(tmp_path: Path):
+    """Hy3-style bundle: vocab has only `:opensource`-suffixed specials, the
+    registry declares the canonical bare spelling. The resolver must fall back
+    through the tag-dialect map instead of leaving the stop set uninstalled."""
+    _write_json(tmp_path / "tokenizer_config.json", {})
+
+    class _Entry:
+        def __init__(self, content: str):
+            self.content = content
+
+    tok = _FakeTokenizer(
+        eos_token_id=1,
+        token_to_id={
+            "<｜hy_eos:opensource｜>": 120,
+            "<｜hy_User:opensource｜>": 121,
+            "<｜hy_Assistant:opensource｜>": 122,
+        },
+    )
+    tok.added_tokens_decoder = {
+        10: _Entry("</think:opensource>"),
+        120: _Entry("<｜hy_eos:opensource｜>"),
+        121: _Entry("<｜hy_User:opensource｜>"),
+        122: _Entry("<｜hy_Assistant:opensource｜>"),
+    }
+
+    resolved, unresolved = collect_multi_eos_ids(
+        tok,
+        str(tmp_path),
+        registry_eos_tokens=["<｜hy_eos｜>", "<｜hy_User｜>", "<｜hy_Assistant｜>"],
+        reasoning_parser="qwen3",
+        use_rust_tokenizer=False,
+    )
+
+    assert resolved == [1, 120, 121, 122]
+    assert unresolved == []
+
+
 def test_collect_multi_eos_ids_rejects_unknown_tokens_as_unresolved(tmp_path: Path):
     _write_json(
         tmp_path / "generation_config.json",

@@ -457,17 +457,19 @@ class BlockDiskStore:
                 return
 
             # Normalize all tensors to MLX arrays that mx.save_safetensors
-            # can handle.  Two issues to fix:
-            # 1. numpy ndarrays (from numpy-sliced block data) — convert to mx
-            # 2. bfloat16 dtype (unsupported by safetensors) — cast to float16
+            # can handle: numpy ndarrays (from numpy-sliced block data) are
+            # converted to mx. bfloat16 is stored NATIVELY — mx safetensors
+            # round-trips bf16 losslessly, and the historical bf16→fp16 cast
+            # was lossy (fp16 max ~65504: bf16 values like 65536.0 became
+            # inf, and mantissa drift caused warm-vs-warm divergence — F21 /
+            # 2026-07-10 audit High-3). The load path's recorded
+            # original-dtype restore remains as a no-op for new blocks and a
+            # compatibility cast for blocks written by older builds.
             import numpy as np
             needs_eval = []
             for k, v in tensors.items():
                 if isinstance(v, np.ndarray):
                     tensors[k] = mx.array(v)
-                    needs_eval.append(tensors[k])
-                elif isinstance(v, mx.array) and v.dtype == mx.bfloat16:
-                    tensors[k] = v.astype(mx.float16)
                     needs_eval.append(tensors[k])
 
             # Materialize all lazy MLX arrays on the calling thread.

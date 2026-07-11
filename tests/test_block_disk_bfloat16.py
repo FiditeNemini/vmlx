@@ -222,3 +222,28 @@ class TestWriteBlockAsync:
 
         assert stats["total_tokens_on_disk"] == 96
         assert stats["total_cached_tokens"] == 96
+
+
+class TestBfloat16Lossless:
+    """H3 regression (2026-07-10 sol audit): bf16 blocks must round-trip
+    LOSSLESSLY. The historical bf16->fp16 disk cast overflowed values above
+    fp16 max (~65504) to inf and drifted low-order mantissa bits (F21)."""
+
+    def test_roundtrip_preserves_values_beyond_fp16_range(self, disk_store):
+        import time
+        keys = mx.array([[[[1.0, 65536.0, 70144.0, -70144.0]]]], dtype=mx.bfloat16)
+        values = mx.array([[[[0.5, 65536.0, -65536.0, 2.0]]]], dtype=mx.bfloat16)
+        mx.eval(keys, values)  # noqa: S307 -- mlx tensor materialization
+        cache_data = [("kv", keys, values)]
+
+        block_hash = b"\x42" * 16
+        disk_store.write_block_async(block_hash, cache_data, 4)
+        time.sleep(1.0)
+
+        restored = disk_store.read_block(block_hash)
+        assert restored is not None
+        rk, rv = restored[0][1], restored[0][2]
+        assert rk.dtype == mx.bfloat16
+        assert bool(mx.all(rk == keys)), f"keys drifted: {rk.tolist()}"
+        assert bool(mx.all(rv == values)), f"values drifted: {rv.tolist()}"
+        assert not bool(mx.any(mx.isinf(rk))), "fp16 overflow to inf detected"

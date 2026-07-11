@@ -71,27 +71,50 @@ def compute_block_hash(
     # Include token content
     hasher.update(bytes(str(tuple(token_ids)), "utf-8"))
 
-    # Include extra keys if present
+    # Include extra keys if present.
+    #
+    # The encoding is canonical: every node contributes a type tag and a
+    # length-prefixed payload, and containers contribute their element count
+    # before their elements. Without this, adjacent fields concatenate
+    # ambiguously and distinct conditions collide — {'a':'bc'} vs {'ab':'c'},
+    # [1,23] vs [12,3] — which would let one request condition receive another
+    # condition's cached KV blocks.
     if extra_keys is not None:
+        import struct
+
         import mlx.core as mx
+
+        def _update_sized(tag: bytes, payload: bytes) -> None:
+            hasher.update(tag)
+            hasher.update(struct.pack("<Q", len(payload)))
+            hasher.update(payload)
 
         def _hash_extra(obj):
             if isinstance(obj, mx.array):
-                # Hash MLX arrays by shape + actual content bytes for collision safety.
-                # np.array(obj) copies to CPU; for small vision embeddings this is acceptable.
+                # dtype is part of identity: the same bytes under a different
+                # dtype are a different condition. np.array(obj) copies to
+                # CPU; for small vision embeddings this is acceptable.
                 import numpy as np
-                shape_bytes = bytes(str(obj.shape), "utf-8")
-                hasher.update(shape_bytes)
-                hasher.update(np.array(obj).tobytes())
+
+                _update_sized(
+                    b"A", bytes(f"{obj.dtype}|{tuple(obj.shape)}", "utf-8")
+                )
+                _update_sized(b"a", np.array(obj).tobytes())
             elif isinstance(obj, dict):
-                for k in sorted(obj.keys()):
-                    hasher.update(bytes(str(k), "utf-8"))
+                hasher.update(b"D")
+                hasher.update(struct.pack("<Q", len(obj)))
+                for k in sorted(obj.keys(), key=str):
+                    _update_sized(b"K", bytes(str(k), "utf-8"))
                     _hash_extra(obj[k])
             elif isinstance(obj, (list, tuple)):
+                hasher.update(b"L")
+                hasher.update(struct.pack("<Q", len(obj)))
                 for item in obj:
                     _hash_extra(item)
             else:
-                hasher.update(bytes(str(obj), "utf-8"))
+                _update_sized(
+                    b"S", bytes(f"{type(obj).__name__}|{obj}", "utf-8")
+                )
 
         _hash_extra(extra_keys)
 

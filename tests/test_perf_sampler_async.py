@@ -13,6 +13,7 @@ def _make_req(
     top_k=0,
     min_p=0.0,
     repetition_penalty=1.0,
+    seed=None,
 ):
     return types.SimpleNamespace(
         temperature=temperature,
@@ -20,6 +21,7 @@ def _make_req(
         top_k=top_k,
         min_p=min_p,
         repetition_penalty=repetition_penalty,
+        seed=seed,
     )
 
 
@@ -61,6 +63,13 @@ def test_shared_params_fast_path_repetition_penalty_none_is_ok():
     )
 
 
+def test_shared_params_fast_path_seeded_requests_stay_request_local():
+    from vmlx_engine.mllm_batch_generator import _batch_shares_sampler_params
+
+    assert _batch_shares_sampler_params([_make_req(seed=7), _make_req(seed=7)]) is False
+    assert _batch_shares_sampler_params([_make_req(), _make_req(seed=8)]) is False
+
+
 def test_shared_params_fast_path_uses_request_sampler_not_generator_default():
     """Shared requests can differ from the generator default sampler.
 
@@ -73,8 +82,8 @@ def test_shared_params_fast_path_uses_request_sampler_not_generator_default():
     source = inspect.getsource(mod.MLLMBatchGenerator._step)
     assert "_batch_shares_sampler_params(batch.requests)" in source
     assert "shared_sampler = self._make_request_sampler(batch.requests[0])" in source
-    assert "sampled = shared_sampler(logits)" in source
-    assert "sampled = self.sampler(logits)" in source
+    assert "_sample_mllm_prefill_logits(logits, shared_sampler)" in source
+    assert "_sample_mllm_prefill_logits(logits, self.sampler)" in source
 
 
 def test_single_batch_clone_array_uses_single_mul():

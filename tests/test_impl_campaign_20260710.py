@@ -103,6 +103,47 @@ def test_reasoning_effort_enables_supported_family_only(monkeypatch):
     ) is False
 
 
+def test_reasoning_effort_never_overrides_explicit_off(monkeypatch):
+    from vmlx_engine import server
+
+    class Registry:
+        config = SimpleNamespace(
+            family_name="gemma4",
+            model_type="gemma4",
+            supports_thinking=True,
+            architecture_hints={},
+        )
+
+        def lookup(self, _key):
+            return self.config
+
+    monkeypatch.setattr(
+        "vmlx_engine.model_config_registry.get_model_config_registry",
+        lambda: Registry(),
+    )
+    monkeypatch.setattr(server, "_default_enable_thinking", None)
+    assert server._resolve_enable_thinking(
+        False, {}, False, "gemma", reasoning_effort="high"
+    ) is False
+    assert server._resolve_enable_thinking(
+        None, {"enable_thinking": False}, False, "gemma", reasoning_effort="high"
+    ) is False
+    assert server._resolve_enable_thinking(
+        None, {}, False, "gemma", reasoning_effort="none"
+    ) is None
+
+
+def test_ollama_streaming_applies_hy3_reasoning_dialect():
+    import inspect
+
+    from vmlx_engine import server
+
+    source = inspect.getsource(server.ollama_chat)
+    policy_index = source.index("_apply_hy3_reasoning_policy(")
+    stream_index = source.index("async def ndjson_stream()")
+    assert policy_index < stream_index
+
+
 def test_capabilities_alias_uses_active_model(monkeypatch):
     from vmlx_engine import server
 

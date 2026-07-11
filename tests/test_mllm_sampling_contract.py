@@ -77,18 +77,43 @@ def test_repetition_sampler_contract_matches_at_token_zero_and_later(
     generator = SimpleNamespace(_model_type="qwen3_5")
     sampler = MLLMBatchGenerator._make_request_sampler(generator, request)
     logits = mx.array([[4.0, 3.0, 2.0, 1.0]])
-    normalized = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
     token, _ = _sample_mllm_prefill_logits(logits, sampler)
     mx.eval(token)
 
     from mlx_lm.sample_utils import make_logits_processors
 
-    expected = normalized
+    # Rebuild the original values because mlx-lm's processor mutates its logits
+    # array in place inside the sampler wrapper.
+    expected = mx.array([[4.0, 3.0, 2.0, 1.0]])
     context = mx.array([0, 2] + list(output_tokens))
     for processor in make_logits_processors(repetition_penalty=1.25):
         expected = processor(context, expected)
+    expected = expected - mx.logsumexp(expected, axis=-1, keepdims=True)
     assert len(observed) == 1
     assert bool(mx.allclose(observed[0], expected))
+
+
+def test_greedy_processor_path_is_exact_argmax_of_processed_logits():
+    request = SimpleNamespace(
+        temperature=0.0,
+        top_p=1.0,
+        top_k=0,
+        min_p=0.0,
+        repetition_penalty=2.0,
+        enable_thinking=False,
+        _original_token_ids=[0],
+        input_ids=mx.array([[0]], dtype=mx.int32),
+        output_tokens=[],
+    )
+    generator = SimpleNamespace(_model_type="qwen3_5")
+    sampler = MLLMBatchGenerator._make_request_sampler(generator, request)
+    # Raw argmax is token 0. Repetition penalty changes token 0 from 4 -> 2,
+    # making token 1 the exact processed-logit argmax.
+    token, _ = _sample_mllm_prefill_logits(
+        mx.array([[4.0, 3.0, 2.0, 1.0]]), sampler
+    )
+    mx.eval(token)
+    assert int(token.item()) == 1
 
 
 def test_decode_step_uses_the_same_normalizing_helper_as_prefill():

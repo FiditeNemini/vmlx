@@ -728,6 +728,11 @@ def _batch_shares_sampler_params(requests: List[Any]) -> bool:
     if not requests:
         return False
     first_req = requests[0]
+    # A seeded sampler owns mutable request-local PRNG state.  Sharing the first
+    # request's sampler across a batch would make every other request consume
+    # that state instead of its own seed.
+    if getattr(first_req, "seed", None) is not None:
+        return False
     if getattr(first_req, "repetition_penalty", 1.0) not in (None, 1.0):
         return False
     first_key = (
@@ -737,6 +742,8 @@ def _batch_shares_sampler_params(requests: List[Any]) -> bool:
         getattr(first_req, "min_p", None),
     )
     for req in requests[1:]:
+        if getattr(req, "seed", None) is not None:
+            return False
         if getattr(req, "repetition_penalty", 1.0) not in (None, 1.0):
             return False
         key = (
@@ -7043,6 +7050,8 @@ class MLLMBatchGenerator:
                     ids.tolist() if ids is not None else []
                 )
 
+            base_accepts_logits = _native_mtp_sampler_accepts_logits(base_sampler)
+
             def sampler_with_processors(logits, _req=request, _prompt_list=prompt_list):
                 # Build full token sequence (prompt + generated) so penalty
                 # applies to already-generated tokens, not just the prompt,
@@ -7051,10 +7060,17 @@ class MLLMBatchGenerator:
                 processed = logits
                 for proc in logits_processors:
                     processed = proc(all_tokens, processed)
+                # Logits processors follow mlx-lm's contract: they transform
+                # raw logits before the one log-softmax consumed by generic
+                # stochastic samplers.  Compact/greedy samplers intentionally
+                # stay in logit space.
+                if not base_accepts_logits:
+                    processed = _native_mtp_logprobs(processed)
                 return base_sampler(processed)
 
-            if _native_mtp_sampler_accepts_logits(base_sampler):
-                sampler_with_processors._vmlx_accepts_logits = True
+            # This wrapper now owns the raw-logit -> processed -> normalized
+            # transition, so callers must not normalize before invoking it.
+            sampler_with_processors._vmlx_accepts_logits = True
             request._cached_sampler = sampler_with_processors
             return sampler_with_processors
 

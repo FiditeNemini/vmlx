@@ -824,13 +824,10 @@ def _strip_residual_think_markup_for_display(text: str) -> str:
     if not text:
         return ""
     stripped = _THINK_STRIP_RE.sub("", text)
-    if stripped == text and (
-        "</think>" in text or "</mm:think>" in text or "[/THINK]" in text
-    ):
-        for end_tag in ("</think>", "</mm:think>", "[/THINK]"):
-            if end_tag in text:
-                _, _, stripped = text.partition(end_tag)
-                break
+    # Unlike tool parsing, display cleanup must not assume that all text before
+    # an orphan close marker is hidden reasoning.  The reasoning parser may
+    # already have isolated visible content; dropping the prefix here turns
+    # ``Visible</think> tail`` into just ``tail``.
     stripped = _strip_think_markers_keep_spacing(stripped)
     return stripped.strip()
 
@@ -10046,6 +10043,18 @@ async def ollama_chat(fastapi_request: Request):
         chat_kwargs["reasoning_effort"] = chat_req.reasoning_effort
         _ollama_ct_kwargs.setdefault("reasoning_effort", chat_req.reasoning_effort)
 
+    # Hy3's template ignores enable_thinking and opens its reasoning rail only
+    # for reasoning_effort=low|high.  The other three chat-shaped routes apply
+    # this family normalizer before generation; Ollama streaming builds kwargs
+    # locally and must do the same or think:true is parsed as reasoning while
+    # the model actually rendered its default no_think rail.
+    _apply_hy3_reasoning_policy(
+        chat_kwargs,
+        _ollama_ct_kwargs,
+        model_key=_model_path or _model_name or chat_req.model,
+        enable_thinking=chat_req.enable_thinking,
+    )
+
     # DSV4 three-mode mapping mirrored onto the Ollama adapter path so
     # clients that speak the Ollama wire format land on the right
     # thinking_mode/reasoning_effort pair for DSV4 bundles too.
@@ -16337,6 +16346,7 @@ async def stream_chat_completion(
         and accumulated_reasoning
         and not reasoning_was_streamed
         and not suppress_reasoning
+        and not (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
     ):
         fallback_chunk = ChatCompletionChunk(
             id=response_id,

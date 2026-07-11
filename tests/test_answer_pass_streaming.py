@@ -123,3 +123,24 @@ def test_both_stream_sites_use_the_delta_helper():
     resp_src = inspect.getsource(server_mod.stream_responses_api)
     assert "_answer_pass_visible_delta" in resp_src
     assert "engine.stream_chat(messages=answer_messages" in resp_src
+
+
+def test_chat_legacy_reasoning_fallback_cannot_precede_answer_pass():
+    """An armed answer pass must be the sole visible fallback.
+
+    Otherwise the legacy block emits accumulated reasoning as content without
+    updating ``content_was_emitted``, and the answer pass emits a second answer.
+    """
+    chat_src = inspect.getsource(server_mod.stream_chat_completion)
+    legacy_start = chat_src.index(
+        "# Fallback: if reasoning parser produced only reasoning with no content"
+    )
+    answer_start = chat_src.index(
+        "and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)",
+        legacy_start,
+    )
+    legacy_block = chat_src[legacy_start:answer_start]
+    assert (
+        "not (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)"
+        in legacy_block
+    )

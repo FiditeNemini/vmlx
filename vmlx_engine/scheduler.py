@@ -1777,11 +1777,22 @@ class Scheduler:
             except ImportError:
                 _CacheList = None
             import mlx.core as mx
+            import numpy as np
         except ImportError:
             return cache
 
         bits = self._kv_cache_bits
         group_size = self._kv_cache_group_size
+        def _packed_cpu(parts):
+            # Stored prefix state must outlive the request's Metal stream.
+            # Keep the already-quantized q4/q8 payload, scales, and zeros as
+            # independent NumPy buffers; fetch converts them back on the model
+            # owner worker immediately before dequantization.
+            # Paged cache reconstructs blocks immediately on the owner worker
+            # and its typed serializer expects MLX arrays, so retain MLX there.
+            if self.config.use_paged_cache:
+                return tuple(parts)
+            return tuple(np.array(part) for part in parts)
         result = []
         quantized_count = 0
         for i, layer_cache in enumerate(cache):
@@ -1796,10 +1807,10 @@ class Scheduler:
                     ):
                         try:
                             qkv = QuantizedKVCache(group_size=group_size, bits=bits)
-                            qkv.keys = tuple(
+                            qkv.keys = _packed_cpu(
                                 mx.quantize(sc.keys, group_size=group_size, bits=bits)
                             )
-                            qkv.values = tuple(
+                            qkv.values = _packed_cpu(
                                 mx.quantize(sc.values, group_size=group_size, bits=bits)
                             )
                             qkv.offset = sc.offset
@@ -1821,10 +1832,10 @@ class Scheduler:
             ):
                 try:
                     qkv = QuantizedKVCache(group_size=group_size, bits=bits)
-                    qkv.keys = tuple(
+                    qkv.keys = _packed_cpu(
                         mx.quantize(layer_cache.keys, group_size=group_size, bits=bits)
                     )
-                    qkv.values = tuple(
+                    qkv.values = _packed_cpu(
                         mx.quantize(
                             layer_cache.values, group_size=group_size, bits=bits
                         )
@@ -1881,6 +1892,9 @@ class Scheduler:
             return cache
 
         result = []
+        def _mlx_parts(parts):
+            return tuple(x if isinstance(x, mx.array) else mx.array(x) for x in parts)
+
         for i, layer_cache in enumerate(cache):
             if _CacheList is not None and isinstance(layer_cache, _CacheList):
                 # MoE: recurse into each sub-cache
@@ -1890,17 +1904,15 @@ class Scheduler:
                         if sc.keys is not None:
                             try:
                                 kv = KVCache()
+                                qk = _mlx_parts(sc.keys)
+                                qv = _mlx_parts(sc.values)
                                 kv.keys = mx.dequantize(
-                                    sc.keys[0],
-                                    sc.keys[1],
-                                    sc.keys[2],
+                                    qk[0], qk[1], qk[2],
                                     sc.group_size,
                                     sc.bits,
                                 )
                                 kv.values = mx.dequantize(
-                                    sc.values[0],
-                                    sc.values[1],
-                                    sc.values[2],
+                                    qv[0], qv[1], qv[2],
                                     sc.group_size,
                                     sc.bits,
                                 )
@@ -1921,17 +1933,15 @@ class Scheduler:
                 if layer_cache.keys is not None:
                     try:
                         kv = KVCache()
+                        qk = _mlx_parts(layer_cache.keys)
+                        qv = _mlx_parts(layer_cache.values)
                         kv.keys = mx.dequantize(
-                            layer_cache.keys[0],
-                            layer_cache.keys[1],
-                            layer_cache.keys[2],
+                            qk[0], qk[1], qk[2],
                             layer_cache.group_size,
                             layer_cache.bits,
                         )
                         kv.values = mx.dequantize(
-                            layer_cache.values[0],
-                            layer_cache.values[1],
-                            layer_cache.values[2],
+                            qv[0], qv[1], qv[2],
                             layer_cache.group_size,
                             layer_cache.bits,
                         )
@@ -2252,12 +2262,6 @@ class Scheduler:
             canon = compile_canonicalizer(build_canonical_map(self._actual_tokenizer))
             self._tag_canonicalizer = canon if canon is not None else False
         return canon(text) if canon else text
-
-    def _decode_tokens(self, token_ids: List[int]) -> str:
-        """
-        Decode token IDs to text, handling both tokenizers and processors.
-        """
-        return self._canonicalize_tags(self._actual_tokenizer.decode(token_ids))
 
     @staticmethod
     def _encode_prompt_text(tokenizer: Any, prompt: str, add_special_tokens: Optional[bool]) -> List[int]:
@@ -2804,6 +2808,34 @@ class Scheduler:
             self._wrap_generated_only_logits_processor(p, skip_prefix_tokens)
             for p in processors
         ]
+
+    def _request_seeded_sampler(self, request: Request):
+        """Return a stable request-local sampler when the API supplied a seed."""
+        seed = request.sampling_params.seed
+        if seed is None:
+            return None
+        cached = getattr(request, "_seeded_sampler", None)
+        if cached is not None:
+            return cached
+        params = request.sampling_params
+        if getattr(self, "_uses_m3_msa_cache", False):
+            sampler = make_minimax_m3_sampler(
+                temp=params.temperature,
+                top_p=params.top_p,
+                min_p=params.min_p,
+                top_k=params.top_k,
+                seed=int(seed),
+            )
+        else:
+            sampler = make_sampler(
+                temp=params.temperature,
+                top_p=params.top_p,
+                min_p=params.min_p,
+                top_k=params.top_k,
+                seed=int(seed),
+            )
+        request._seeded_sampler = sampler
+        return sampler
 
     def _ensure_batch_generator(self, sampling_params: SamplingParams) -> bool:
         """Ensure BatchGenerator exists with compatible settings."""
@@ -3836,17 +3868,6 @@ class Scheduler:
             len(remaining_tokens),
         )
         return trimmed_cache, remaining_tokens
-
-    @staticmethod
-    def _validate_single_cache(layer_cache: Any) -> bool:
-        """Validate a single cache layer object."""
-        try:
-            from .cache_record_validator import reject_live_cache_or_warn
-            return reject_live_cache_or_warn(
-                [layer_cache], source="scheduler-live-cache-layer"
-            )
-        except Exception:
-            return layer_cache is not None
 
     @staticmethod
     def _truncate_cache_to_prompt_length(
@@ -5691,6 +5712,9 @@ class Scheduler:
             try:
                 try:
                     insert_kwargs = {}
+                    request_sampler = self._request_seeded_sampler(request)
+                    if request_sampler is not None:
+                        insert_kwargs["samplers"] = [request_sampler]
                     if _m3vl_active:
                         insert_kwargs["pixel_values"] = [_m3vl_pv]
                         insert_kwargs["image_grid_thw"] = [_m3vl_grid]
@@ -5778,6 +5802,9 @@ class Scheduler:
                         request.remaining_tokens = request.prompt_token_ids
                         tokens_to_process = request.prompt_token_ids
                         insert_kwargs = {}
+                        request_sampler = self._request_seeded_sampler(request)
+                        if request_sampler is not None:
+                            insert_kwargs["samplers"] = [request_sampler]
                         if (
                             self.batch_generator.__class__.__name__
                             == "DSV4BatchGenerator"
@@ -6483,6 +6510,20 @@ class Scheduler:
                                                     f"{request_id}: {de}"
                                                 )
                                         if extracted_cache:
+                                            from .utils.turboquant_config import (
+                                                turboquant_cache_telemetry,
+                                            )
+
+                                            self._last_turboquant_cache = (
+                                                turboquant_cache_telemetry(extracted_cache)
+                                            )
+                                            if self._last_turboquant_cache.get(
+                                                "object_layers", 0
+                                            ):
+                                                logger.info(
+                                                    "TurboQuant live telemetry: %s",
+                                                    self._last_turboquant_cache,
+                                                )
                                             request._extracted_cache = extracted_cache
                                             request._extracted_cache_from_prompt_snapshot = bool(
                                                 snapshot_cache is not None
@@ -7249,6 +7290,18 @@ class Scheduler:
                                         else list(prompt_tokens)
                                     )
                                 cache_type = self._pick_cache_type_for_request(request)
+                                from .utils.turboquant_config import (
+                                    turboquant_cache_telemetry,
+                                )
+
+                                self._last_turboquant_cache = (
+                                    turboquant_cache_telemetry(cache_to_store)
+                                )
+                                if self._last_turboquant_cache.get("object_layers", 0):
+                                    logger.info(
+                                        "TurboQuant live telemetry: %s",
+                                        self._last_turboquant_cache,
+                                    )
                                 # Prompt disk L2 contract: fetch uses the full
                                 # generation-prompt-stripped prompt key, while
                                 # the payload is N-1 so the last prompt token is
@@ -7327,6 +7380,18 @@ class Scheduler:
                                     request._extracted_cache, prompt_len
                                 )
                             if cache_to_store is not None:
+                                from .utils.turboquant_config import (
+                                    turboquant_cache_telemetry,
+                                )
+
+                                self._last_turboquant_cache = (
+                                    turboquant_cache_telemetry(cache_to_store)
+                                )
+                                if self._last_turboquant_cache.get("object_layers", 0):
+                                    logger.info(
+                                        "TurboQuant live telemetry: %s",
+                                        self._last_turboquant_cache,
+                                    )
                                 if cache_key_override is None:
                                     cache_key_tokens = (
                                         prompt_tokens[:-1]
@@ -7981,6 +8046,7 @@ class Scheduler:
                     [[correction_token]],
                     max_tokens=[max(1, remaining - 1)],
                     caches=[kv_cache],
+                    samplers=[self._request_seeded_sampler(request)],
                 )
                 removed = False
                 new_uid = new_uids[0]
@@ -8036,6 +8102,7 @@ class Scheduler:
                 [[bonus_token]],
                 max_tokens=[new_remaining],
                 caches=[kv_cache],
+                samplers=[self._request_seeded_sampler(request)],
             )
             removed = False  # re-inserted successfully
 
@@ -8084,6 +8151,7 @@ class Scheduler:
                         [[last_token]],
                         max_tokens=[max(1, remaining - 1)],
                         caches=cache_arg,
+                        samplers=[self._request_seeded_sampler(request)],
                     )
                     em_uid = em_uids[0]
                     self.uid_to_request_id.pop(old_uid, None)
@@ -8145,6 +8213,23 @@ class Scheduler:
             for attempt in range(max_retries + 1):
                 try:
                     responses = self.batch_generator.next()
+                    active_batch = getattr(self.batch_generator, "active_batch", None)
+                    active_cache = getattr(active_batch, "cache", None)
+                    if isinstance(active_cache, list):
+                        from .utils.turboquant_config import (
+                            turboquant_cache_telemetry,
+                        )
+
+                        telemetry = turboquant_cache_telemetry(active_cache)
+                        if telemetry.get("object_layers", 0):
+                            previous = getattr(self, "_last_turboquant_cache", None)
+                            self._last_turboquant_cache = telemetry
+                            if (
+                                previous is None
+                                or telemetry.get("compressed_tokens_total")
+                                != previous.get("compressed_tokens_total")
+                            ):
+                                logger.info("TurboQuant live telemetry: %s", telemetry)
                     output.has_work = True
 
                     if responses:
@@ -8356,6 +8441,9 @@ class Scheduler:
             "last_cache_reuse_partial": self._last_cache_reuse_partial,
             "last_cache_selection": self._last_cache_selection,
             "last_cache_execution": self._last_cache_execution,
+            "last_turboquant_cache": getattr(
+                self, "_last_turboquant_cache", None
+            ),
             "engine_path": generator_path,
             "batch_generator": {
                 "class": generator_cls,

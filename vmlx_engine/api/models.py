@@ -203,6 +203,7 @@ class ChatCompletionRequest(BaseModel):
     top_k: int | None = None  # Top-k sampling (0 = disabled)
     min_p: float | None = None  # Min-p sampling threshold
     repetition_penalty: float | None = None  # Repetition penalty (1.0 = disabled)
+    seed: int | None = None  # Per-request MLX sampling seed
     frequency_penalty: float | None = None  # Accepted for API compat (not implemented)
     presence_penalty: float | None = None  # Accepted for API compat (not implemented)
     # OpenAI-compatible per-token logprobs. Chat uses a boolean switch plus
@@ -486,6 +487,7 @@ class CompletionRequest(BaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    seed: int | None = None  # Per-request MLX sampling seed
     # Legacy OpenAI Completions logprobs count. None disables logprobs;
     # 0 returns sampled token logprobs without alternate top tokens; 1-20
     # returns that many top alternatives per generated token.
@@ -818,6 +820,7 @@ class ResponsesRequest(BaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    seed: int | None = None  # Per-request MLX sampling seed
     frequency_penalty: float | None = None  # Accepted for API compat (not implemented)
     presence_penalty: float | None = None  # Accepted for API compat (not implemented)
     max_output_tokens: int | None = None

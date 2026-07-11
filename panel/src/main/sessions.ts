@@ -628,16 +628,13 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
 
   const dsv4Active = detectedFamily === 'deepseek-v4'
   const dsv4PrefixOptIn = dsv4Active && config.dsv4PrefixCache !== false
-  // Phase-2 policy (2026-06-27 Eric directive after RAM-soak proof on Ornith 9B-MXFP4
-  // paged-on: 30-turn mixed-mode +5.4% RSS growth, plateaued by turn 11 — no leak).
-  // Generic / Gemma-SWA / MoE / hybrid: paged RAM block pool ON by default with
-  // block-disk-cache (L2) as the persistent prefix layer. SSD path is paged-coupled
-  // (engine emits warning + disables block-disk if paged is off), so default-on
-  // unlocks the SSD prefix-hit benefit (live-proven across restart iter 29).
-  // Path-dependent (DSV4) keeps dsv4PrefixOptIn gating.
-  const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : true
+  // Fresh generic sessions start with prefix reuse enabled and paged cache off.
+  // Architectures whose typed state requires paged cache still force their
+  // native lane at launch; every other family changes lanes only when the user
+  // toggles Paged Cache on.
+  const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : false
   const defaultEnableDiskCache = dsv4Active ? false : false
-  const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : true
+  const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : false
   const mutable = config as Record<string, any>
   let changed = false
 

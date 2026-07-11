@@ -15,6 +15,13 @@ QWEN36_HYBRID_MODEL_TYPES = frozenset(
     }
 )
 
+NEMOTRON_OMNI_HYBRID_MODEL_TYPES = frozenset(
+    {
+        "nemotron_h",
+        "nemotron_h_v2",
+    }
+)
+
 TURBOQUANT_MAKE_CACHE_NAMES = frozenset(
     {
         "_tq_make_cache",
@@ -45,10 +52,16 @@ def is_qwen36_hybrid_tq_supported(
     model_config: dict[str, Any],
     layer_types: list[str] | tuple[str, ...],
 ) -> bool:
-    """Return True for Qwen3.6-style hybrid configs with attention + SSM slots."""
+    """Return True for live-gated hybrid attention-KV TQ families.
+
+    Qwen3.6 and Nemotron-Omni both retain native cumulative SSM/Mamba state and
+    replace only native KVCache attention slots. Unknown hybrid families stay
+    fail-closed.
+    """
     if "ssm" not in layer_types:
         return False
-    return bool(_model_types(model_config) & QWEN36_HYBRID_MODEL_TYPES)
+    supported = QWEN36_HYBRID_MODEL_TYPES | NEMOTRON_OMNI_HYBRID_MODEL_TYPES
+    return bool(_model_types(model_config) & supported)
 
 
 def is_turboquant_make_cache(make_cache: Any) -> bool:
@@ -122,6 +135,9 @@ def build_hybrid_turboquant_make_cache(
     path-dependent hybrid companion state keeps its original class and
     initialization contract.
     """
+    from .turboquant_config import install_turboquant_live_telemetry
+
+    install_turboquant_live_telemetry()
     from jang_tools.turboquant.cache import TurboQuantKVCache
 
     n_layers = len(layer_types)
@@ -152,6 +168,7 @@ def build_hybrid_turboquant_make_cache(
                         key_bits=_cfg.key_bits_for_layer(i),
                         value_bits=_cfg.value_bits_for_layer(i),
                         seed=_cfg.seed + i,
+                        compress_after=int(getattr(_cfg, "compress_after", 0) or 0),
                         sink_tokens=_cfg.sink_tokens,
                     )
                 )
@@ -162,4 +179,7 @@ def build_hybrid_turboquant_make_cache(
     _hybrid_turboquant_make_cache._vmlx_hybrid_tq_policy = "attention_kv_only"
     _hybrid_turboquant_make_cache._vmlx_hybrid_tq_attention_layers = attention_layers
     _hybrid_turboquant_make_cache._vmlx_hybrid_tq_companion_layers = companion_layers
+    _hybrid_turboquant_make_cache._vmlx_tq_compress_after = int(
+        getattr(tq_config, "compress_after", 0) or 0
+    )
     return _hybrid_turboquant_make_cache

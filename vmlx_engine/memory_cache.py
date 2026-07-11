@@ -336,7 +336,6 @@ class MemoryAwarePrefixCache:
         # Thread safety: non-reentrant lock (store/fetch/_evict_lru don't
         # recurse into each other, so RLock is unnecessary overhead).
         self._lock = threading.Lock()
-
         # OrderedDict maintains insertion order for LRU
         # Key: tuple(tokens), Value: _CacheEntry
         self._entries: OrderedDict[tuple[int, ...], _CacheEntry] = OrderedDict()
@@ -608,6 +607,9 @@ class MemoryAwarePrefixCache:
                 import mlx.core as mx
                 import numpy as np
 
+                if isinstance(value, np.ndarray):
+                    return value.copy()
+
                 orig_dtype = getattr(value, "dtype", None)
                 if orig_dtype == mx.bfloat16:
                     copied = mx.array(np.array(value.astype(mx.float32))).astype(
@@ -796,8 +798,17 @@ class MemoryAwarePrefixCache:
                             group_size=layer_cache.group_size,
                             bits=layer_cache.bits,
                         )
-                        new_cache.keys = tuple(t[..., :safe_target, :] for t in k)
-                        new_cache.values = tuple(t[..., :safe_target, :] for t in v)
+                        # Tuple slicing alone leaves lazy views tied to the
+                        # stream that produced the stored q4/q8 entry. The next
+                        # request may then fail on its first sample with
+                        # ``no Stream(gpu, 0)``. Materialize independent arrays
+                        # just like the float KV branch below.
+                        new_cache.keys = tuple(
+                            _copy_positional_slice(t[..., :safe_target, :]) for t in k
+                        )
+                        new_cache.values = tuple(
+                            _copy_positional_slice(t[..., :safe_target, :]) for t in v
+                        )
                         new_cache.offset = safe_target
                         truncated.append(new_cache)
                     except ImportError:

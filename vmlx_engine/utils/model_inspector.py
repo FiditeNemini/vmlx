@@ -38,6 +38,18 @@ def _detect_turboquant_layer_types(
     model_type = str(text_cfg.get("model_type", "") or "").lower()
     key_dim = text_cfg.get("head_dim", 128)
     val_dim = text_cfg.get("head_dim", 128)
+    if model_type in {
+        "gemma4",
+        "gemma4_text",
+        "gemma4_unified",
+        "gemma4_unified_text",
+    }:
+        # Gemma 4 full-attention slots use their declared global head width,
+        # while sliding slots use head_dim. Mixed-SWA TQ wraps only the full
+        # slots, so its encoder must match global_head_dim exactly.
+        global_head_dim = int(text_cfg.get("global_head_dim") or key_dim)
+        key_dim = global_head_dim
+        val_dim = global_head_dim
     if text_cfg.get("kv_lora_rank", 0) > 0:
         key_dim = text_cfg.get("qk_nope_head_dim", 128) + text_cfg.get(
             "qk_rope_head_dim", 64

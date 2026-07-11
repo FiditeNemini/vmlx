@@ -91,6 +91,7 @@ export interface DetectedConfig {
     depth: number
     depthSource?: string
     runtimeScope: 'text' | 'text+vl'
+    nativeCacheType: string
     requiresDeterministicSampling: boolean
   }
   description: string
@@ -707,20 +708,25 @@ function detectNativeMtpCapability(
   if (jangCfg?.drop_mtp === true || jangCfg?.mtp?.enabled === false || jangCfg?.mtp?.kept === false) {
     return undefined
   }
-  if (nativeMtpBlockedByTuning(modelPath) || nativeMtpBlockedByProfile(jangCfg)) return undefined
+  const tuningDepth = readNativeMtpTuningDepth(modelPath)
+  if (
+    nativeMtpBlockedByTuning(modelPath) ||
+    (nativeMtpBlockedByProfile(jangCfg) && !tuningDepth)
+  ) return undefined
 
-  const qwenFamilies = new Set([
+  const supportedFamilies = new Set([
     'qwen3_5',
     'qwen3_5_text',
     'qwen3_5_moe',
     'qwen3_5_moe_text',
+    'hy_v3',
   ])
   const modelTypes = [
     parsedConfig.model_type,
     parsedConfig.text_config?.model_type,
     jangCfg?.capabilities?.family,
   ].map(value => String(value || '').toLowerCase())
-  if (!modelTypes.some(value => qwenFamilies.has(value))) return undefined
+  if (!modelTypes.some(value => supportedFamilies.has(value))) return undefined
 
   if (configuredNativeMtpLayers(parsedConfig, jangCfg) <= 0) return undefined
 
@@ -735,12 +741,13 @@ function detectNativeMtpCapability(
     const hasVisionWeights = keys.some(key =>
       /(^|\.)(vision_tower|vision_model|visual|patch_embed|multi_modal_projector|mm_projector|image_newline)(\.|$)/.test(key),
     )
-    const tuningDepth = readNativeMtpTuningDepth(modelPath)
+    const hy3 = modelTypes.includes('hy_v3')
     return {
       supported: true,
       depth: tuningDepth?.depth ?? 3,
       depthSource: tuningDepth?.source ?? 'default',
       runtimeScope: configDeclaresMedia(parsedConfig) && hasVisionWeights ? 'text+vl' : 'text',
+      nativeCacheType: hy3 ? 'plain_kv_v1' : 'hybrid_ssm_attention_kv_v1',
       requiresDeterministicSampling: true,
     }
   } catch {

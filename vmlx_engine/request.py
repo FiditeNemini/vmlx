@@ -62,6 +62,7 @@ class SamplingParams:
     top_k: int = 0  # 0 means disabled
     min_p: float = 0.0
     repetition_penalty: float = 1.0
+    seed: Optional[int] = None
     stop: Optional[List[str]] = None
     stop_token_ids: Optional[List[int]] = None
     logprobs: bool = False

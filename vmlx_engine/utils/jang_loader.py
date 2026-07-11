@@ -1663,6 +1663,7 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
                 "critical_value_bits": 4,
                 "critical_layers": [0, 1, 2, -3, -2, -1],
                 "seed": 42,
+                "compress_after": 0,
             }
             logger.info("  TurboQuant auto-enabled via VMLX_FORCE_TQ_AUTO=1")
         else:
@@ -1676,7 +1677,11 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         return
 
     try:
-        from jang_tools.turboquant.config import TurboQuantConfig, make_turboquant_cache
+        from .turboquant_config import (
+            TurboQuantConfig,
+            make_turboquant_cache,
+            resolve_compress_after,
+        )
     except ImportError:
         logger.warning("  TurboQuant config found but turboquant module not available")
         return
@@ -1691,8 +1696,16 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
     # Ling/Bailing appends MTP layers to `model.layers` but intentionally
     # omits them from make_cache()/forward generation. Counting layers here
     # produced an extra TQ cache slot and a fake attention layer.
+    _native_make_cache = getattr(model, "make_cache", None)
+    if _native_make_cache is None:
+        from mlx_lm.models.cache import make_prompt_cache
+
+        # Several stock/custom MLX runtimes (including Hy3) intentionally rely
+        # on mlx_lm's official cache factory instead of defining make_cache.
+        # Derive that native layout first, then install vMLX's patched factory.
+        _native_make_cache = lambda: make_prompt_cache(model)
     try:
-        _native_cache = model.make_cache()
+        _native_cache = _native_make_cache()
         n_layers = len(_native_cache)
         _native_cache_types = [type(c).__name__ for c in _native_cache]
         del _native_cache
@@ -1718,6 +1731,8 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
             "the mixed_swa_kv_v1 cache contract."
         )
         return
+    _tq_cfg = dict(_tq_cfg)
+    _tq_cfg["compress_after"] = resolve_compress_after(_tq_cfg, model_config)
     # Use _tq_cfg (which may be auto-generated defaults) instead of re-reading jang_cfg
     tq_config = TurboQuantConfig.from_jang_config({"turboquant": _tq_cfg}, n_layers)
     if not tq_config:
@@ -1791,7 +1806,7 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
             f"{len(_layer_types) - _n_full} sliding slots left on RotatingKVCache"
         )
         _turboquant_make_cache = build_hybrid_turboquant_make_cache(
-            model.make_cache,
+            _native_make_cache,
             tq_config,
             _key_dim,
             _val_dim,
@@ -1801,11 +1816,10 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         if not is_qwen36_hybrid_tq_supported(model_config, _layer_types):
             logger.info(
                 "  TurboQuant KV skipped: hybrid/path-dependent cache family "
-                "is not on the Qwen3.6 selective attention-KV allow-list; "
+                "is not on the live-gated selective attention-KV allow-list; "
                 "native KV + non-KV companion state remains active."
             )
             return
-        _native_make_cache = model.make_cache
         _turboquant_make_cache = build_hybrid_turboquant_make_cache(
             _native_make_cache,
             tq_config,
@@ -1821,11 +1835,26 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
             return make_turboquant_cache(_cfg, _n, [_kd] * _n, [_vd] * _n, _lt)
 
     model.make_cache = _turboquant_make_cache
-    logger.info(
-        f"  TurboQuant enabled: {tq_config.default_key_bits}-bit keys, "
-        f"{tq_config.default_value_bits}-bit values, "
-        f"{len(tq_config.critical_layers)} critical layers"
+    _turboquant_make_cache._vmlx_tq_compress_after = int(
+        getattr(tq_config, "compress_after", 0) or 0
     )
+    if tq_config.compress_after > 0:
+        logger.info(
+            "  TurboQuant objects active; live encode enabled after %d tokens "
+            "(%d-bit keys, %d-bit values, %d critical layers). No resident-memory "
+            "reduction is claimed because the current attention path retains a "
+            "decoded float view.",
+            tq_config.compress_after,
+            tq_config.default_key_bits,
+            tq_config.default_value_bits,
+            len(tq_config.critical_layers),
+        )
+    else:
+        logger.info(
+            "  TurboQuant objects active; live encode disabled; stored prefix q4 "
+            "remains scheduler-owned (%d critical layers)",
+            len(tq_config.critical_layers),
+        )
 
 
 # Shard flush threshold for v1 streaming repack (~2 GB)

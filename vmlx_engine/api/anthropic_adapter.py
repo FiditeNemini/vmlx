@@ -89,6 +89,7 @@ class AnthropicRequest(BaseModel):
     chat_template_kwargs: dict | None = None
     # Non-Anthropic passthrough for explicit enable_thinking bool.
     enable_thinking: bool | None = None
+    seed: int | None = None
 
     @field_validator("max_tokens")
     @classmethod
@@ -250,6 +251,7 @@ def to_chat_completion(req: AnthropicRequest) -> ChatCompletionRequest:
         tools=tools,
         tool_choice=tool_choice,
         enable_thinking=enable_thinking,
+        seed=req.seed,
         chat_template_kwargs=chat_template_kwargs,
         # Forward reasoning_effort if the ct_kwargs carry it (DSV4 "max"
         # gets set via thinking.budget_tokens≥32768 above). Keeps the

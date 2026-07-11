@@ -116,7 +116,11 @@ def _apply_turboquant_to_model(model, model_path: str):
         return
 
     try:
-        from jang_tools.turboquant.config import TurboQuantConfig, make_turboquant_cache
+        from .turboquant_config import (
+            TurboQuantConfig,
+            make_turboquant_cache,
+            resolve_compress_after,
+        )
     except ImportError:
         return  # TQ not available
 
@@ -202,7 +206,12 @@ def _apply_turboquant_to_model(model, model_path: str):
         # slot that remains empty and breaks BatchGenerator.extract_cache().
         native_cache_types = []
         try:
-            native_cache = model.make_cache()
+            native_make_cache = getattr(model, "make_cache", None)
+            if native_make_cache is None:
+                from mlx_lm.models.cache import make_prompt_cache
+
+                native_make_cache = lambda: make_prompt_cache(model)
+            native_cache = native_make_cache()
             n_layers = len(native_cache)
             native_cache_types = [type(c).__name__ for c in native_cache]
             del native_cache
@@ -238,7 +247,8 @@ def _apply_turboquant_to_model(model, model_path: str):
         if _is_hybrid and not _supports_selective_hybrid_tq:
             logger.info(
                 "  TurboQuant skipped: hybrid/path-dependent cache detected; "
-                "only Qwen3.6 selective attention-KV live TQ is supported. "
+                "only live-gated Qwen3.6/Nemotron-Omni selective attention-KV "
+                "TQ is supported. "
                 "Native KV + non-KV state remains active for this family."
             )
             return
@@ -252,12 +262,13 @@ def _apply_turboquant_to_model(model, model_path: str):
             critical_value_bits=4,
             critical_layers=[0, 1, 2, -3, -2, -1],
             seed=42,
+            compress_after=resolve_compress_after({}, config),
         )
 
         n_cache = len(layer_types)
 
         if _is_hybrid:
-            _native_make_cache = model.make_cache
+            _native_make_cache = native_make_cache
             _tq_make_cache = build_hybrid_turboquant_make_cache(
                 _native_make_cache,
                 tq_config,
@@ -276,10 +287,21 @@ def _apply_turboquant_to_model(model, model_path: str):
 
         n_attn = sum(1 for t in layer_types if t == "attention")
         n_ssm = sum(1 for t in layer_types if t == "ssm")
-        logger.info(
-            f"  TurboQuant auto-enabled: 3-bit keys/values, "
-            f"{n_attn} attention" + (f" + {n_ssm} SSM" if n_ssm > 0 else "") + " layers"
-        )
+        if tq_config.compress_after > 0:
+            logger.info(
+                "  TurboQuant objects active; live encode enabled after %d tokens; "
+                "no resident-memory reduction claimed: %d attention%s layers",
+                tq_config.compress_after,
+                n_attn,
+                f" + {n_ssm} SSM" if n_ssm > 0 else "",
+            )
+        else:
+            logger.info(
+                "  TurboQuant objects active; live encode disabled; stored prefix "
+                "quantization is scheduler-owned (q4 in auto mode): %d attention%s layers",
+                n_attn,
+                f" + {n_ssm} SSM" if n_ssm > 0 else "",
+            )
     except Exception as e:
         logger.debug(f"TurboQuant auto-enable failed (non-fatal): {e}")
 

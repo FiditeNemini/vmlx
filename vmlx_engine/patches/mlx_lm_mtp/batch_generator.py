@@ -776,7 +776,9 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
                 verify_accept_lp[0, d_id].item()
                 - state.draft_accept_lps[k][d_id].item()
             )
-            ok = log_accept >= 0 or random.random() < math.exp(log_accept)
+            _uniform = getattr(sampler, "_vmlx_random_uniform", None)
+            draw = _uniform() if _uniform is not None else random.random()
+            ok = log_accept >= 0 or draw < math.exp(log_accept)
         if not ok:
             break
         k += 1
@@ -822,7 +824,9 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
         # the raw verify lp so downstream logprobs reporting is consistent
         # with non-MTP paths.
         verify_accept_lp = _accept_lp_for(sampler, combined_lp[k : k + 1])
-        emit_id, _ = _residual_sample(verify_accept_lp, state.draft_accept_lps[k])
+        emit_id, _ = _residual_sample(
+            verify_accept_lp, state.draft_accept_lps[k], sampler=sampler
+        )
         emit_lp = combined_lp[k : k + 1].squeeze(0)
         source = "verify"
     state.queue.append((emit_id, emit_lp, source))
@@ -907,7 +911,9 @@ def _draft_chain(
     state.stats.mtp_head_ms += (time.perf_counter() - t_start) * 1000
 
 
-def _residual_sample(verify_lp_2d: Any, draft_lp_1d: Any) -> Tuple[int, Any]:
+def _residual_sample(
+    verify_lp_2d: Any, draft_lp_1d: Any, *, sampler=None
+) -> Tuple[int, Any]:
     """Sample from ``max(p_target - p_draft, 0)`` (Leviathan et al. 2022).
 
     On degenerate input (residual all zero) falls back to the target
@@ -927,7 +933,9 @@ def _residual_sample(verify_lp_2d: Any, draft_lp_1d: Any) -> Tuple[int, Any]:
     # p=0 so no safety epsilon is needed.
     z = residual.sum(keepdims=True)
     dist = mx.where(z > 0, residual, p_target)
-    sample = mx.random.categorical(mx.log(dist).reshape(1, -1))
+    logits = mx.log(dist).reshape(1, -1)
+    categorical = getattr(sampler, "_vmlx_categorical", None)
+    sample = categorical(logits) if categorical is not None else mx.random.categorical(logits)
     return int(sample.item()), verify_lp_2d.squeeze(0)
 
 

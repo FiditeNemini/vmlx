@@ -2058,6 +2058,7 @@ class MLLMScheduler:
             top_k=kwargs.get("top_k", 0),
             min_p=kwargs.get("min_p", 0.0),
             repetition_penalty=kwargs.get("repetition_penalty", 1.0),
+            seed=kwargs.get("seed"),
             stop=stop or [],
             stop_token_ids=kwargs.get("stop_token_ids", []),
         )
@@ -2261,6 +2262,7 @@ class MLLMScheduler:
                 top_k=request.sampling_params.top_k,
                 min_p=request.sampling_params.min_p,
                 repetition_penalty=request.sampling_params.repetition_penalty,
+                seed=request.sampling_params.seed,
                 max_prompt_tokens=int(getattr(request, "_max_prompt_tokens", 0) or 0),
                 enable_thinking=getattr(request, "enable_thinking", None),
                 video_fps=request.video_fps,

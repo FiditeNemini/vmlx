@@ -426,13 +426,6 @@ def _mtp_layer_count_from_keys(keys: list[str]) -> int | None:
     return max(indexes) + 1
 
 
-def _vision_weight_keys(bundle_path: str | Path | None) -> tuple[list[str], str | None]:
-    weight_keys, _source, error = _bundle_weight_keys(bundle_path)
-    if error:
-        return [], error
-    return _vision_keys_from_weight_keys(weight_keys), None
-
-
 def _vision_keys_from_weight_keys(weight_keys: list[str]) -> list[str]:
     vision_re = re.compile(
         r"(^|\.)(vision_tower|vision_model|visual|patch_embed|"

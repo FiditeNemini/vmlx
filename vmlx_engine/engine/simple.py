@@ -507,6 +507,7 @@ class SimpleEngine(BaseEngine):
         # SimpleEngine has no prefix cache — eat the bypass kwarg so it
         # doesn't leak into self._model.generate which would reject it.
         kwargs.pop("_bypass_prefix_cache", None)
+        request_seed = kwargs.pop("seed", None)
         max_prompt_tokens = int(kwargs.pop("max_prompt_tokens", 0) or 0)
         self._raise_if_prompt_over_limit(
             prompt,
@@ -515,6 +516,10 @@ class SimpleEngine(BaseEngine):
         )
 
         async with self._generation_lock:
+            if request_seed is not None:
+                import mlx.core as mx
+
+                mx.random.seed(int(request_seed))
             output = await self._run_model_call(
                 self._model.generate,
                 prompt=prompt,
@@ -572,6 +577,7 @@ class SimpleEngine(BaseEngine):
         # SimpleEngine has no prefix cache — eat the bypass kwarg so it
         # doesn't leak into self._model.generate which would reject it.
         kwargs.pop("_bypass_prefix_cache", None)
+        request_seed = kwargs.pop("seed", None)
         max_prompt_tokens = int(kwargs.pop("max_prompt_tokens", 0) or 0)
         self._raise_if_prompt_over_limit(
             prompt,
@@ -580,6 +586,10 @@ class SimpleEngine(BaseEngine):
         )
 
         async with self._generation_lock:
+            if request_seed is not None:
+                import mlx.core as mx
+
+                mx.random.seed(int(request_seed))
             accumulated_text = ""
             prompt_tokens = 0
             completion_tokens = 0

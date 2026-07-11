@@ -8122,8 +8122,8 @@ class TestStartupCompatibilityGuards:
         assert 'os.environ["VMLX_DISABLE_TQ_KV"] = "1"' in cli_source
         assert "VMLINUX_DISABLE_TQ_KV" not in cli_source
 
-    def test_hybrid_auto_mode_enables_qwen_selective_live_tq_only(self):
-        """Qwen3.6 hybrid auto mode TQs attention KV while preserving SSM state."""
+    def test_hybrid_auto_mode_enables_proven_selective_live_tq_families(self):
+        """Qwen3.6/Nemotron TQ attention KV while preserving typed SSM state."""
         cli_source = Path("./vmlx_engine/cli.py").read_text()
         scheduler_source = Path("./vmlx_engine/scheduler.py").read_text()
         tokenizer_source = Path("./vmlx_engine/utils/tokenizer.py").read_text()
@@ -8131,7 +8131,8 @@ class TestStartupCompatibilityGuards:
         assert 'getattr(_mc, "cache_type", None) == "hybrid"' in cli_source
         assert "Qwen3.6 hybrid/path-dependent cache model detected" in cli_source
         assert "attention KVCache" in cli_source
-        assert "Only Qwen3.6 has a selective live" in cli_source
+        assert "Qwen3.6 and Nemotron-H have a" in cli_source
+        assert "Nemotron-H hybrid/path-dependent cache model detected" in cli_source
         hybrid_idx = cli_source.index('getattr(_mc, "cache_type", None) == "hybrid"')
         hybrid_block = cli_source[hybrid_idx : cli_source.index("if _mc.family_name !=", hybrid_idx)]
         assert 'args.kv_cache_quantization = "none"' not in hybrid_block

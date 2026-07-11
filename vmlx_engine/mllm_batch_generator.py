@@ -1682,14 +1682,15 @@ def _trace_mimo_v2_generated_token(
 
 
 def _recompress_to_tq(cache: List[Any], language_model) -> List[Any]:
-    """Re-wrap reconstructed KVCache layers into TurboQuantKVCache and compress.
+    """Re-wrap reconstructed KVCache layers into threshold-aware TQ objects.
 
     After paged cache reconstruction, KV layers are full-precision float16.
-    If the model uses TurboQuant, this wastes 5.3x memory vs the 3-bit
-    compressed form used during generation. This function:
+    If live encode is enabled, mirror the same thresholded transition used by
+    generation. The current jang attention path retains a decoded float view,
+    so this function does not claim a resident-memory reduction.
     1. Gets a TQ template from model.make_cache() to extract TQ config
     2. For each KVCache layer, creates a matching TurboQuantKVCache
-    3. Copies keys/values and calls .compress() to restore 3-bit storage
+    3. Copies keys/values and encodes only when the family gate is active
 
     Returns the cache list with KV layers replaced by compressed TQ layers.
     Non-KV layers (SSM/ArraysCache) pass through unchanged.
@@ -1716,6 +1717,9 @@ def _recompress_to_tq(cache: List[Any], language_model) -> List[Any]:
         return cache  # No TQ layers in template — not a TQ model
 
     tq_count = 0
+    encoded_count = 0
+    resident_before = 0
+    resident_after = 0
     result = list(cache)
     for i, layer in enumerate(result):
         if not isinstance(layer, KVCache):
@@ -1736,6 +1740,8 @@ def _recompress_to_tq(cache: List[Any], language_model) -> List[Any]:
             value_dim=actual_val_dim,
             key_bits=tpl.key_bits,
             value_bits=tpl.value_bits,
+            seed=getattr(tpl, "_seed", 42),
+            compress_after=int(getattr(tpl, "compress_after", 0) or 0),
             sink_tokens=tpl.sink_tokens,
         )
         # Copy reconstructed float16 data into TQ
@@ -1743,13 +1749,32 @@ def _recompress_to_tq(cache: List[Any], language_model) -> List[Any]:
         tq.values = layer.values
         tq.offset = layer.offset
         tq.step = getattr(layer, 'step', layer.keys.shape[2]) if layer.keys.ndim >= 3 else layer.offset
-        # Compress to 3-bit — this creates _joined_k/_joined_v and clears .keys/.values
-        tq.compress()
+        resident_before += int(layer.keys.nbytes + layer.values.nbytes)
+        if tq.compress_after > 0 and tq.offset > tq.compress_after:
+            tq.compress(tq.compress_after)
+            encoded_count += 1
+        for name in (
+            "keys", "values", "_decoded_k_buffer", "_decoded_v_buffer",
+            "_joined_k", "_joined_v",
+        ):
+            value = getattr(tq, name, None)
+            if value is not None and hasattr(value, "nbytes"):
+                resident_after += int(value.nbytes)
+        resident_after += int(getattr(tq, "compressed_nbytes", 0) or 0)
         result[i] = tq
         tq_count += 1
 
     if tq_count > 0:
-        logger.info(f"Re-compressed {tq_count} KV layers to TurboQuant (5x memory savings)")
+        logger.info(
+            "Re-wrapped %d KV layers as TurboQuant objects: encoded=%d, "
+            "resident_before=%d, resident_after=%d, delta=%+d bytes; no "
+            "resident-memory reduction claimed",
+            tq_count,
+            encoded_count,
+            resident_before,
+            resident_after,
+            resident_after - resident_before,
+        )
     return result
 
 
@@ -3067,6 +3092,7 @@ class MLLMBatchRequest:
     top_k: int = 0
     min_p: float = 0.0
     repetition_penalty: float = 1.0
+    seed: Optional[int] = None
     max_prompt_tokens: int = 0
     enable_thinking: Optional[bool] = None
 
@@ -3313,6 +3339,7 @@ class MLLMBatchStats:
         self.last_cache_execution: Optional[Dict[str, Any]] = None
         self.last_native_mtp: Optional[Dict[str, Any]] = None
         self.last_prefill_trace: Optional[Dict[str, Any]] = None
+        self.last_turboquant_cache: Optional[Dict[str, Any]] = None
 
     def record_native_mtp(
         self,
@@ -3359,6 +3386,7 @@ class MLLMBatchStats:
             "last_cache_execution": self.last_cache_execution,
             "last_native_mtp": self.last_native_mtp,
             "last_prefill_trace": self.last_prefill_trace,
+            "last_turboquant_cache": self.last_turboquant_cache,
         }
 
 
@@ -6291,6 +6319,16 @@ class MLLMBatchGenerator:
                     if trace is not None:
                         trace.start("forward")
                     logits = self._run_vision_encoding(req, cache=req_cache)
+                    from .utils.turboquant_config import turboquant_cache_telemetry
+
+                    self._stats.last_turboquant_cache = turboquant_cache_telemetry(
+                        req_cache
+                    )
+                    if self._stats.last_turboquant_cache.get("object_layers", 0):
+                        logger.info(
+                            "TurboQuant live telemetry: %s",
+                            self._stats.last_turboquant_cache,
+                        )
                     if trace is not None:
                         trace.stop("forward")
                         if self._decode_trace:
@@ -6978,6 +7016,7 @@ class MLLMBatchGenerator:
             top_p=request.top_p,
             top_k=request.top_k if request.top_k > 0 else 0,
             min_p=request.min_p if request.min_p > 0 else 0.0,
+            seed=getattr(request, "seed", None),
         )
 
         logits_processors = []

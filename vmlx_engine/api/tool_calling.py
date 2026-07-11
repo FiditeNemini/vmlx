@@ -309,24 +309,6 @@ def check_and_inject_fallback_tools(
         else template_tools
     )
 
-    def _render_dsml_examples(
-        tools: list[dict],
-        *,
-        include_parameters: bool = True,
-    ) -> str:
-        blocks: list[str] = []
-        for tool in tools:
-            name, props = _tool_props(tool)
-            lines = [f'<｜DSML｜invoke name="{name}">']
-            if include_parameters:
-                for param in props:
-                    lines.append(
-                        f'  <｜DSML｜parameter name="{param}" string="true">VALUE HERE</｜DSML｜parameter>'
-                    )
-            lines.append("</｜DSML｜invoke>")
-            blocks.append("\n".join(lines))
-        return "\n\n".join(blocks)
-
     def _render_dsml_tool_calls_example(tools: list[dict]) -> str:
         # DSV4 already has the generic DSML parameter grammar in its native
         # template. Do not inject placeholder parameter values here: live DSV4

@@ -1117,10 +1117,6 @@ _jang_sampling_defaults_cache: dict[str, dict] = {}
 _generation_defaults_cache: dict[str, dict] = {}
 
 
-def _nearly_equal(a: float, b: float, eps: float = 1e-6) -> bool:
-    return abs(float(a) - float(b)) <= eps
-
-
 def _jang_chat_sampling_default(model_name: str, key: str) -> float | None:
     """Read a numeric default from the loaded bundle's
     ``jang_config.json::chat.sampling_defaults.<key>``. Cached per-path.
@@ -2766,6 +2762,7 @@ def _resolve_enable_thinking(
     model_key: str,
     engine=None,
     auto_detect: bool = False,
+    reasoning_effort: str | None = None,
 ) -> bool | None:
     """Resolve enable_thinking using the shared precedence chain.
 
@@ -2798,6 +2795,26 @@ def _resolve_enable_thinking(
         return request_value
     if "enable_thinking" in ct_kwargs:
         return bool(ct_kwargs["enable_thinking"])
+    _effort = str(reasoning_effort or "").strip().lower()
+    _supports_thinking = False
+    if _mc is not None:
+        _supports_explicit = getattr(_mc, "supports_thinking", None)
+        _supports_thinking = (
+            bool(_supports_explicit)
+            if _supports_explicit is not None
+            else bool(
+                getattr(_mc, "reasoning_parser", None)
+                or getattr(_mc, "think_in_template", False)
+            )
+        )
+    if (
+        _effort
+        and _effort not in {"none", "off", "false", "disabled", "no_think"}
+        and _supports_thinking
+    ):
+        # A concrete per-request effort is itself an explicit reasoning request.
+        # Family-specific normalizers below still own the exact effort dialect.
+        return True
     if _default_enable_thinking is True:
         return True
     if _default_enable_thinking is False:
@@ -6332,10 +6349,6 @@ def _bundle_index_tensor_prefix_status(
         return False, f"model.safetensors.index.json read failed: {type(exc).__name__}: {exc}"
 
 
-def _bundle_index_has_tensor_prefix(bundle_path: str | None, prefix: str) -> bool:
-    return _bundle_index_tensor_prefix_status(bundle_path, prefix)[0]
-
-
 def _bundle_index_mtp_layer_count(bundle_path: str | None) -> int | None:
     """Count distinct ``mtp.N.*`` layer indexes in the bundle's weight map.
 
@@ -7057,6 +7070,7 @@ def _turboquant_kv_cache_status(engine=None, scheduler=None) -> dict:
         return mc is not None and getattr(mc, "__name__", "") in (
             "_tq_make_cache",
             "_turboquant_make_cache",
+            "_hybrid_turboquant_make_cache",
         )
 
     if not tq_active and engine is not None:
@@ -7081,12 +7095,75 @@ def _turboquant_kv_cache_status(engine=None, scheduler=None) -> dict:
                     _stack.append(_nxt)
 
     if tq_active:
+        compress_after = 0
+        template_layers = []
+        if engine is not None:
+            _seen = set()
+            _stack = []
+            for _attr in ("_model", "model"):
+                _value = _diagnostic_attr(engine, _attr)
+                if _value is not None:
+                    _stack.append(_value)
+            while _stack and not template_layers:
+                _value = _stack.pop()
+                if id(_value) in _seen:
+                    continue
+                _seen.add(id(_value))
+                make_cache = getattr(_value, "make_cache", None)
+                if _check_make_cache(_value):
+                    compress_after = int(
+                        getattr(make_cache, "_vmlx_tq_compress_after", 0) or 0
+                    )
+                    try:
+                        template_layers = list(make_cache() or [])
+                    except Exception:
+                        template_layers = []
+                for _next_attr in ("model", "language_model"):
+                    _next = _diagnostic_attr(_value, _next_attr)
+                    if _next is not None and id(_next) not in _seen:
+                        _stack.append(_next)
+        tq_layers = [
+            layer
+            for layer in template_layers
+            if type(layer).__name__ == "TurboQuantKVCache"
+        ]
+        if tq_layers:
+            compress_after = max(
+                compress_after,
+                max(int(getattr(layer, "compress_after", 0) or 0) for layer in tq_layers),
+            )
+        live_encode_enabled = compress_after > 0
+        live_telemetry = None
+        try:
+            from jang_tools.turboquant.cache import TurboQuantKVCache
+
+            live_telemetry = getattr(
+                TurboQuantKVCache, "_vmlx_last_compress", None
+            )
+        except Exception:
+            live_telemetry = None
+        kv_bits = int(getattr(scheduler, "_kv_cache_bits", 0) or 0) if scheduler else 0
+        stored_prefix = f"q{kv_bits}" if kv_bits > 0 else "native"
         status = {
             "enabled": True,
+            "objects_active": True,
+            "live_encode_enabled": live_encode_enabled,
+            "compress_after": compress_after,
+            "stored_prefix_quantization": stored_prefix,
             "default_bits": 3,
             "critical_bits": 4,
             "critical_layers": "first 3 + last 3",
+            "resident_memory_reduction_claimed": False,
+            "description": (
+                f"TQ objects active; live encode enabled after {compress_after} tokens; "
+                f"stored prefix {stored_prefix}; packed serialization active; no "
+                "resident-memory reduction claimed"
+                if live_encode_enabled
+                else f"TQ objects active; live encode disabled; stored prefix {stored_prefix}"
+            ),
         }
+        if live_telemetry is not None:
+            status["live_encode_telemetry"] = dict(live_telemetry)
         cfg = getattr(scheduler, "config", None) if scheduler is not None else None
         if cfg is not None:
             batch_api = bool(getattr(scheduler, "_tq_batch_api", False))
@@ -8918,6 +8995,12 @@ async def model_capabilities(model_id: str) -> dict:
     }
 
 
+@app.get("/v1/capabilities", dependencies=[Depends(verify_api_key)])
+async def active_model_capabilities() -> dict:
+    """Return capabilities for the active model without requiring its id."""
+    return await model_capabilities(_resolve_model_name() or "default")
+
+
 # =============================================================================
 # Anthropic Messages API
 # =============================================================================
@@ -9100,6 +9183,8 @@ async def create_anthropic_message(
         "max_tokens": _resolve_max_tokens(chat_req.max_tokens, chat_req.model),
         "max_prompt_tokens": _msg_max_prompt_tokens,
     }
+    if chat_req.seed is not None:
+        _msg_kwargs["seed"] = chat_req.seed
     _set_resolved_top_k(_msg_kwargs, chat_req.top_k, chat_req.model)
     _normalize_deterministic_sampling_filters(
         _msg_kwargs,
@@ -9127,6 +9212,7 @@ async def create_anthropic_message(
         model_key=_model_path or _model_name or chat_req.model,
         engine=engine,
         auto_detect=True,
+        reasoning_effort=chat_req.reasoning_effort,
     )
     if _et is not None:
         _msg_kwargs["enable_thinking"] = _et
@@ -9918,6 +10004,8 @@ async def ollama_chat(fastapi_request: Request):
         "top_p": _resolve_top_p(chat_req.top_p, chat_req.model),
         "max_prompt_tokens": _ollama_max_prompt_tokens,
     }
+    if chat_req.seed is not None:
+        chat_kwargs["seed"] = chat_req.seed
     if chat_req.stop:
         chat_kwargs["stop"] = chat_req.stop
     _set_resolved_top_k(chat_kwargs, chat_req.top_k, chat_req.model)
@@ -9943,6 +10031,7 @@ async def ollama_chat(fastapi_request: Request):
         model_key=_model_path or _model_name or chat_req.model,
         engine=engine,
         auto_detect=True,
+        reasoning_effort=chat_req.reasoning_effort,
     )
     if _et is not None:
         chat_kwargs["enable_thinking"] = _et
@@ -11503,6 +11592,8 @@ async def create_completion(request: CompletionRequest):
                 "stop": request.stop,
                 "max_prompt_tokens": _completion_max_prompt_tokens,
             }
+            if request.seed is not None:
+                gen_kwargs["seed"] = request.seed
             _set_resolved_top_k(gen_kwargs, request.top_k, request.model)
             _normalize_deterministic_sampling_filters(
                 gen_kwargs,
@@ -11924,6 +12015,8 @@ async def create_chat_completion(
         "top_p": _resolve_top_p(request.top_p, request.model),
         "max_prompt_tokens": _chat_max_prompt_tokens,
     }
+    if request.seed is not None:
+        chat_kwargs["seed"] = request.seed
     if response_format:
         chat_kwargs["_vmlx_response_format"] = (
             response_format.model_dump(exclude_none=True, by_alias=True)
@@ -11959,6 +12052,7 @@ async def create_chat_completion(
         model_key=_model_path or _model_name or request.model,
         engine=engine,
         auto_detect=True,
+        reasoning_effort=request.reasoning_effort,
     )
     if _et is not None:
         chat_kwargs["enable_thinking"] = _et
@@ -13970,6 +14064,8 @@ async def create_response(
         "top_p": _resolve_top_p(request.top_p, request.model),
         "max_prompt_tokens": _responses_max_prompt_tokens,
     }
+    if request.seed is not None:
+        chat_kwargs["seed"] = request.seed
     _response_text_format = None
     if request.text and isinstance(request.text, dict):
         _response_text_format = request.text
@@ -14006,6 +14102,7 @@ async def create_response(
         model_key=_model_path or _model_name or request.model,
         engine=engine,
         auto_detect=True,
+        reasoning_effort=request.reasoning_effort,
     )
     if _et is not None:
         chat_kwargs["enable_thinking"] = _et
@@ -14896,6 +14993,8 @@ async def stream_completions_multi(
                 "request_id": prompt_request_id,
                 "max_prompt_tokens": _effective_max_prompt_tokens(request),
             }
+            if request.seed is not None:
+                gen_kwargs["seed"] = request.seed
             _set_resolved_top_k(gen_kwargs, request.top_k, request.model)
             _normalize_deterministic_sampling_filters(
                 gen_kwargs,
@@ -15188,6 +15287,7 @@ async def stream_chat_completion(
         model_key=_model_path or _model_name or request.model,
         engine=engine,
         auto_detect=True,
+        reasoning_effort=request.reasoning_effort,
     )
 
     # Check if model's chat template injects <think> in the assistant prefix
@@ -16750,6 +16850,7 @@ async def stream_responses_api(
         model_key=_model_path or _model_name or request.model,
         engine=engine,
         auto_detect=True,
+        reasoning_effort=request.reasoning_effort,
     )
 
     # Reasoning parser setup (mirrors stream_chat_completion)

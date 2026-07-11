@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Tuple
 
@@ -111,6 +112,26 @@ def load_laguna_model(model_path: str | Path) -> Tuple[Any, Any]:
     except Exception as _cfg_err:
         logger.debug("Laguna model.config attach failed: %s", _cfg_err)
         model.config = {"model_type": "laguna"}
+
+    # The dedicated Laguna loader bypasses the generic JANG loader, so the
+    # mixed-SWA TurboQuant patch must be applied here as well. Keep the same
+    # explicit opt-in and architecture checks: only full-attention KV slots are
+    # replaced; sliding-window RotatingKVCache slots remain model-owned.
+    try:
+        jang_cfg = {}
+        jang_cfg_path = path / "jang_config.json"
+        if jang_cfg_path.is_file():
+            jang_cfg = json.loads(jang_cfg_path.read_text())
+        from ..utils.jang_loader import _patch_turboquant_make_cache
+
+        _patch_turboquant_make_cache(model, jang_cfg, model.config)
+        if os.environ.get("VMLX_SWA_TQ") in ("1", "true", "TRUE", "yes", "on"):
+            logger.info(
+                "Laguna mixed-SWA TurboQuant opt-in evaluated: full-attention "
+                "slots use TQ only when auto/model configuration enabled it"
+            )
+    except Exception as _tq_err:
+        logger.warning("Laguna mixed-SWA TurboQuant setup failed closed: %s", _tq_err)
 
     # Tokenizer: poolside-flavored. Laguna ships
     # tokenizer.json + tokenizer_config.json + chat_template.jinja with

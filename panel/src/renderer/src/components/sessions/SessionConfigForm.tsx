@@ -135,7 +135,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
   cacheMemoryPercent: 15,
   cacheTtlMinutes: 0,
   noMemoryAwareCache: false,
-  usePagedCache: true,
+  usePagedCache: false,
   pagedCacheBlockSize: 64,
   maxCacheBlocks: 1000,
   kvCacheQuantization: 'auto',
@@ -144,7 +144,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
   enableDiskCache: true,
   diskCacheMaxGb: 10,
   diskCacheDir: '',
-  enableBlockDiskCache: true,
+  enableBlockDiskCache: false,
   blockDiskCacheMaxGb: 10,
   blockDiskCacheDir: '',
   streamInterval: 1,
@@ -298,6 +298,7 @@ interface SessionConfigFormProps {
     depth?: number
     depthSource?: string
     runtimeScope?: string
+    nativeCacheType?: string
     requiresDeterministicSampling?: boolean
   }
   /** Model type — image models show minimal settings */
@@ -1503,7 +1504,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={3}
           disabled={nativeMtpMode === 'off'}
         />
-        <InfoNote text={`Detected scope: ${detectedNativeMtp?.runtimeScope || 'text'}; depth source: ${detectedNativeMtp?.depthSource || 'default'}. Hybrid cache bundles use paged cache while prefix cache is enabled so KV blocks and SSM state stay in one cache contract.`} />
+        <InfoNote text={`Detected scope: ${detectedNativeMtp?.runtimeScope || 'text'}; native cache: ${detectedNativeMtp?.nativeCacheType || detectedCacheSubtype || detectedCacheType || 'unknown'}; depth source: ${detectedNativeMtp?.depthSource || 'default'}. Hybrid cache bundles use paged cache while prefix cache is enabled so KV blocks and SSM state stay in one cache contract.`} />
       </Section>
 
       {/* Speculative Decoding */}

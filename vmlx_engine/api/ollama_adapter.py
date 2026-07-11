@@ -113,6 +113,13 @@ def _apply_ollama_num_predict(opts: dict, req: dict[str, Any]) -> None:
         req["max_tokens"] = max_tokens
 
 
+def _apply_ollama_seed(body: dict, opts: dict, req: dict[str, Any]) -> None:
+    """Forward Ollama's request-local seed to the internal text API."""
+    value = opts.get("seed", body.get("seed"))
+    if value is not None:
+        req["seed"] = value
+
+
 def ollama_chat_to_openai(body: dict) -> dict:
     """Convert Ollama /api/chat request to OpenAI /v1/chat/completions."""
     opts = body.get("options", {})
@@ -159,6 +166,7 @@ def ollama_chat_to_openai(body: dict) -> dict:
         "stream_options": {"include_usage": True},
     }
     _apply_ollama_num_predict(opts, req)
+    _apply_ollama_seed(body, opts, req)
     if opts.get("temperature") is not None:
         req["temperature"] = opts["temperature"]
     if opts.get("top_p") is not None:
@@ -213,6 +221,7 @@ def ollama_generate_to_openai(body: dict) -> dict:
         "stream": body.get("stream", True),
     }
     _apply_ollama_num_predict(opts, req)
+    _apply_ollama_seed(body, opts, req)
     if opts.get("temperature") is not None:
         req["temperature"] = opts["temperature"]
     if opts.get("top_p") is not None:
@@ -258,6 +267,7 @@ def ollama_generate_to_openai_chat(body: dict) -> dict:
         "stream_options": {"include_usage": True},
     }
     _apply_ollama_num_predict(opts, req)
+    _apply_ollama_seed(body, opts, req)
     if opts.get("temperature") is not None:
         req["temperature"] = opts["temperature"]
     if opts.get("top_p") is not None:

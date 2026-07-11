@@ -24,6 +24,32 @@ All notable changes to vMLX Engine will be documented in this file.
 - Local MiMo V2.5 JANG_2L was refreshed from max2 over the TB-routed HTTP endpoint and verified byte-for-byte by manifest. This is still not full MiMo release clearance: live text/cache now works, but tool behavior, VL/audio/video, and performance remain separate proof rows.
 - MiMo V2.5 JANG_2L tool behavior remains a release blocker: a forced XML-function tool call stayed HTTP 200 but produced raw malformed `<tool_call>` text and punctuation garbage with zero parsed tool calls.
 
+## [1.6.6] - 2026-07-10
+
+### Added
+- Tencent Hy3 (hy_v3) family runtime: model support with clean handling of
+  MTP-dropped bundles (`num_nextn_predict_layers=0` loads without a headless
+  speculative head; capabilities endpoint reports the drop), hunyuan tool
+  parser and qwen3 reasoning rails wired from the registry, and the native
+  MTP runtime for bundles that preserve the head (depth pinned per family).
+- Variant-suffixed special-token dialects (e.g. Hy3's `:opensource` spellings)
+  are canonicalized at the token-to-text boundary, so reasoning split,
+  tool-call parse, and think-tag stripping work on bundles that ship only
+  suffixed specials.
+
+### Fixed
+- The defensive multi-eos stop set now installs for tokenizers that only ship
+  variant-suffixed eos/role tokens. The resolver falls back through the same
+  dialect map, so the registry keeps one canonical spelling per family and
+  role-flip stop protection is no longer silently inert on such bundles.
+
+### Notes
+- Bundle-side (jang converter, shipped separately): Hy3 bundles now stamp
+  audited chat sampling defaults (`temperature 0.9, top_p 0.9, min_p 0.05`).
+  The 2-bit routed tail was measured to loop at temp 0.9 with untruncated
+  sampling (3/6 at top_p 1.0); either floor eliminates it (0/20 live).
+  Explicit request parameters always override bundle defaults.
+
 ## [1.6.5] - 2026-07-09
 
 ### Fixed

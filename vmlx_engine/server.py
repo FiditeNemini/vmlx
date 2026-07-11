@@ -7571,7 +7571,12 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
             ],
             "generic_turboquant_kv": {
                 "enabled": tq_enabled,
-                "reason": "live_tq_kv" if tq_enabled else "not_active",
+                # Objects-only policy descriptor (matches plain/hybrid siblings).
+                # NOT a live-encode claim: mixed-SWA TQ installs TurboQuant KV
+                # objects but live encode is gated by compress_after (default 0
+                # -> off). The truthful live-encode state lives in the top-level
+                # turboquant_kv_cache block; do not re-assert "live" here.
+                "reason": "mixed_swa_attention_kv" if tq_enabled else "not_active",
             },
             "storage_quantization": {
                 "enabled": stored_kv_bits > 0,

@@ -498,9 +498,12 @@ class TestNativeMtpAutodetect:
 
         assert utils.is_mllm_model(str(tmp_path)) is True
 
-    def test_jang2k_profile_blocks_native_mtp_runtime_but_keeps_vl_artifact_route(
+    def test_jang2k_profile_alone_does_not_block_native_mtp_runtime(
         self, monkeypatch, tmp_path
     ):
+        """The legacy engine-side JANG_2K profile block was removed 2026-07-10
+        after the final post-train Hy3-JANG_2K-MTP measured depth-1 MTP as a
+        net win. Only a bundle-declared measured stamp may block."""
         from vmlx_engine.api import utils
         from vmlx_engine.native_mtp import inspect_native_mtp_bundle
 
@@ -513,11 +516,9 @@ class TestNativeMtpAutodetect:
 
         assert status["artifact_available"] is True
         assert status["runtime_supported"] is True
-        assert status["runtime_available"] is False
-        assert status["runtime_validation_blocked"] is True
-        assert status["status"] == "runtime_validation_blocked"
-        assert "JANG_2K native MTP acceleration is blocked" in status["runtime_reason"]
-        assert status["runtime_scope"] == "text+vl"
+        assert status["runtime_available"] is True
+        assert status["runtime_validation_blocked"] is False
+        assert status["status"] == "native_runtime_ready"
         assert utils.is_mllm_model(str(tmp_path)) is True
 
     def test_native_mtp_inspection_reuses_weight_key_scan_for_startup(
@@ -552,13 +553,19 @@ class TestNativeMtpAutodetect:
         assert status["vision_tensor_count"] == 1
         assert status["index_mtp_layer_count"] == 1
 
-    def test_jang2k_native_mtp_validation_block_has_explicit_override(
+    def test_bundle_declared_stamp_has_force_override(
         self, monkeypatch, tmp_path
     ):
+        """VMLX_NATIVE_MTP_FORCE=1 re-enables a stamped bundle for re-measurement."""
         from vmlx_engine.native_mtp import inspect_native_mtp_bundle
 
-        monkeypatch.setenv("VMLINUX_NATIVE_MTP_ALLOW_JANG2K", "1")
+        monkeypatch.setenv("VMLX_NATIVE_MTP_FORCE", "1")
         _write_qwen36_jang2k_mtp_bundle(tmp_path)
+        jang_cfg = json.loads((tmp_path / "jang_config.json").read_text())
+        jang_cfg.setdefault("runtime", {})["native_mtp_blocked"] = (
+            "measured net slowdown on this bundle"
+        )
+        (tmp_path / "jang_config.json").write_text(json.dumps(jang_cfg))
 
         status = inspect_native_mtp_bundle(tmp_path)
 
@@ -566,14 +573,21 @@ class TestNativeMtpAutodetect:
         assert status["runtime_validation_blocked"] is False
         assert status["status"] == "native_runtime_ready"
 
-    def test_jang2k_native_mtp_patch_preserves_validation_block_reason(
+    def test_bundle_declared_stamp_preserves_validation_block_reason(
         self, monkeypatch, tmp_path
     ):
+        """A measured ``runtime.native_mtp_blocked`` stamp — the only block
+        source now — must keep the patch sanitize-only and surface the reason."""
         from vmlx_engine import native_mtp
 
-        monkeypatch.delenv("VMLINUX_NATIVE_MTP_ALLOW_JANG2K", raising=False)
-        monkeypatch.delenv("VMLX_NATIVE_MTP_ALLOW_JANG2K", raising=False)
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP_FORCE", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP_FORCE", raising=False)
         _write_qwen36_jang2k_mtp_bundle(tmp_path)
+        jang_cfg = json.loads((tmp_path / "jang_config.json").read_text())
+        jang_cfg.setdefault("runtime", {})["native_mtp_blocked"] = (
+            "measured net slowdown on this bundle"
+        )
+        (tmp_path / "jang_config.json").write_text(json.dumps(jang_cfg))
         calls = []
         monkeypatch.setattr(native_mtp, "_apply_mlx_lm_mtp_patch", lambda: True)
         monkeypatch.setattr(
@@ -588,7 +602,7 @@ class TestNativeMtpAutodetect:
         assert status["runtime_active"] is False
         assert status["runtime_available"] is False
         assert status["status"] == "runtime_validation_blocked"
-        assert "JANG_2K native MTP acceleration is blocked" in status["runtime_reason"]
+        assert "measured net slowdown on this bundle" in status["runtime_reason"]
 
     def test_native_mtp_vl_loader_reaches_real_vlm_path_for_affine_qwen(
         self, tmp_path, monkeypatch

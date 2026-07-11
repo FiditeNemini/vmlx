@@ -460,15 +460,21 @@ def _env_disabled(*names: str) -> bool:
 def _runtime_validation_block_reason(jang_cfg: dict[str, Any]) -> str | None:
     """Block native MTP for artifacts that failed live validation.
 
-    Two sources, both runtime *acceleration* blocks — never artifact metadata
-    failures (the MTP weights stay valid and present):
+    Single source, a runtime *acceleration* block — never an artifact metadata
+    failure (the MTP weights stay valid and present):
 
-    1. ``jang_config["runtime"]["native_mtp_blocked"] = "<measured reason>"``.
-       A bundle that measured MTP as a net slowdown declares it here, rather
-       than the engine hardcoding profile names. Override with
-       ``VMLX_NATIVE_MTP_FORCE=1`` to re-run the experiment.
-    2. The legacy JANG_2K profile block (2026-05-17 packaged six-variant gate:
-       low acceptance, speed regression, coherence failures).
+    ``jang_config["runtime"]["native_mtp_blocked"] = "<measured reason>"``.
+    A bundle that measured MTP as a net slowdown declares it here, rather
+    than the engine hardcoding profile names. Override with
+    ``VMLX_NATIVE_MTP_FORCE=1`` to re-run the experiment.
+
+    History: a legacy engine-side JANG_2K profile block (from the 2026-05-17
+    packaged six-variant gate on the Hy3 PREVIEW) lived here until 2026-07-10,
+    when the final post-train Hy3-JANG_2K-MTP measured depth-1 native MTP as a
+    net win with coherent output (d1 30.6 vs 27.8 tok/s baseline, ~full
+    acceptance; d2 -6% at 24.5%; d3 -31% at 1.9%). Profile-name blocks rot
+    when models are re-trained; measured per-bundle stamps and tuning
+    sidecars are the only block/depth sources now.
     """
     runtime = (
         jang_cfg.get("runtime") if isinstance(jang_cfg.get("runtime"), dict) else {}
@@ -481,27 +487,7 @@ def _runtime_validation_block_reason(jang_cfg: dict[str, Any]) -> str | None:
             f"bundle declares native MTP blocked: {declared.strip()} "
             "(set VMLX_NATIVE_MTP_FORCE=1 to force the experimental path)"
         )
-
-    quantization = (
-        jang_cfg.get("quantization")
-        if isinstance(jang_cfg.get("quantization"), dict)
-        else {}
-    )
-    profile = str(
-        quantization.get("profile")
-        or jang_cfg.get("profile")
-        or ""
-    ).strip().upper()
-    if profile != "JANG_2K":
-        return None
-    if _env_enabled("VMLINUX_NATIVE_MTP_ALLOW_JANG2K", "VMLX_NATIVE_MTP_ALLOW_JANG2K"):
-        return None
-    return (
-        "JANG_2K native MTP acceleration is blocked by validation policy: "
-        "the 2026-05-17 packaged six-variant gate showed low MTP acceptance, "
-        "MTP speed regression, and coherence failures. Set "
-        "VMLINUX_NATIVE_MTP_ALLOW_JANG2K=1 to force the experimental path."
-    )
+    return None
 
 
 def native_mtp_effective_depth(

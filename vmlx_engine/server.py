@@ -12717,7 +12717,21 @@ async def create_chat_completion(
                     endpoint="Chat Completions visible answer pass (non-stream)",
                 )
                 _ns_text = clean_output_text(getattr(_ns_out, "text", "") or "")
-                if _ns_text:
+                # Only adopt the salvage when it actually COMPLETED. A salvage
+                # that itself hit the bounded budget (finish_reason="length") is
+                # an incomplete fragment: for qwen3.5/3.6 a length-truncated
+                # reasoning re-continues as planning prose, so surfacing that
+                # fragment leaks internal planning as the visible answer (W2-1,
+                # live-proven: the model closes reasoning and answers cleanly
+                # once max_tokens is large enough — the leak is a symptom of a
+                # too-small output budget, not a failure to answer). On an
+                # incomplete salvage keep the honest finish_reason="length"
+                # result so the client raises max_tokens; a natural stop within
+                # the bounded budget (the gemma4/M3/Hy3 rescue) is still adopted.
+                _ns_answer_complete = (
+                    getattr(_ns_out, "finish_reason", None) != "length"
+                )
+                if _ns_text and _ns_answer_complete:
                     content_for_parsing = _ns_text
                     try:
                         output.completion_tokens += int(getattr(_ns_out, "completion_tokens", 0) or 0)
@@ -14872,7 +14886,21 @@ async def create_response(
                     endpoint="Responses visible answer pass (non-stream)",
                 )
                 _ns_text = clean_output_text(getattr(_ns_out, "text", "") or "")
-                if _ns_text:
+                # Only adopt the salvage when it actually COMPLETED. A salvage
+                # that itself hit the bounded budget (finish_reason="length") is
+                # an incomplete fragment: for qwen3.5/3.6 a length-truncated
+                # reasoning re-continues as planning prose, so surfacing that
+                # fragment leaks internal planning as the visible answer (W2-1,
+                # live-proven: the model closes reasoning and answers cleanly
+                # once max_tokens is large enough — the leak is a symptom of a
+                # too-small output budget, not a failure to answer). On an
+                # incomplete salvage keep the honest finish_reason="length"
+                # result so the client raises max_tokens; a natural stop within
+                # the bounded budget (the gemma4/M3/Hy3 rescue) is still adopted.
+                _ns_answer_complete = (
+                    getattr(_ns_out, "finish_reason", None) != "length"
+                )
+                if _ns_text and _ns_answer_complete:
                     content_for_parsing = _ns_text
                     try:
                         output.completion_tokens += int(getattr(_ns_out, "completion_tokens", 0) or 0)
@@ -16571,6 +16599,23 @@ async def stream_chat_completion(
         and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
         and accumulated_reasoning.strip()
         and not tool_calls_emitted
+        # W2-1: do NOT fabricate a streamed answer for qwen3.5/3.6 when the
+        # reasoning itself was budget-truncated (finish_reason="length"). Those
+        # models reason verbosely and never close </think> within a small
+        # max_tokens; the bounded thinking-off salvage then re-continues the
+        # truncated reasoning as planning prose and streams it as the visible
+        # answer (live-proven: the model closes reasoning and answers cleanly
+        # once max_tokens is large enough — the leak is a too-small-budget
+        # symptom, so the honest result is finish_reason="length"). Non-stream
+        # discards an incomplete salvage after the fact; F6 streams the salvage
+        # incrementally so already-sent deltas can't be recalled, hence a
+        # firing-time gate. Scoped to qwen3_5* only: MiniMax-M3/gemma4/Hy3
+        # produce a COMPLETE bounded answer on length-truncation and still rely
+        # on this rescue (test_minimax_m3_chat_stream_length_truncated_...).
+        and not (
+            getattr(last_output, "finish_reason", None) == "length"
+            and _family_name in ("qwen3_5", "qwen3_5_moe")
+        )
         and _remaining_answer_pass_budget(
             (
                 m3_reasoning_only_answer_budget

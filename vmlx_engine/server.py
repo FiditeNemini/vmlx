@@ -6574,7 +6574,14 @@ def _model_mtp_status_with_loaded_runtime(bundle_path: str | None) -> dict:
             _native_mtp_sampling_policy,
         )
     )
-    status["request_gate"] = "temperature=0,repetition_penalty=1.0"
+    # Greedy requests take the identity-verify path; stochastic requests
+    # take rejection-sampling acceptance (min(1, p_target/p_draft)) which
+    # preserves the target distribution. The old "temperature=0 required"
+    # string predated stochastic verify (2026-07-10 audit High-4: the
+    # advertised gate did not match runtime behavior).
+    status["request_gate"] = (
+        "greedy=identity-verify; stochastic=rejection-sampling-acceptance"
+    )
     try:
         from .native_mtp import model_has_native_mtp_runtime
 

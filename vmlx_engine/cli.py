@@ -1273,7 +1273,8 @@ def serve_command(args):
             policy = getattr(args, "native_mtp_sampling_policy", "compatible-only")
             print(f"  Native MTP: {mtp_display}{depth_suffix} (scope: {scope}, policy: {policy})")
             if policy == "compatible-only" and mtp_status.get("runtime_available"):
-                print("    Request gate: temperature=0 and repetition_penalty=1.0 required")
+                print("    Request gate: greedy=identity-verify; "
+                      "stochastic=rejection-sampling acceptance")
             elif policy == "deterministic-defaults" and mtp_status.get("runtime_available"):
                 print("    Startup defaults: temperature=0, top_p=1, top_k=0, min_p=0")
     except Exception:

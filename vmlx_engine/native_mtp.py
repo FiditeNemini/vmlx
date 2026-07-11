@@ -176,13 +176,17 @@ def _model_tuning_depth(
             and native_mtp.get("validated") is not False
             and native_mtp.get("output_equivalent") is not False
         )
-        if native_mtp_depth_allowed:
-            candidates.append(
-                (
-                    "vmlx_mtp_tuning.json:native_mtp.best_depth",
-                    native_mtp.get("best_depth"),
-                )
+        if not native_mtp_depth_allowed:
+            # A tuning file that declares its native_mtp measurement
+            # blocked/invalid must not leak a depth through the legacy
+            # top-level fallback keys either (2026-07-10 audit High-4).
+            return None, None
+        candidates.append(
+            (
+                "vmlx_mtp_tuning.json:native_mtp.best_depth",
+                native_mtp.get("best_depth"),
             )
+        )
 
     sweep_result = tuning.get("best_native_mtp_depth")
     if isinstance(sweep_result, dict):
@@ -523,9 +527,20 @@ def native_mtp_effective_depth(
     try:
         depth = int(raw)
     except (TypeError, ValueError):
+        # An invalid explicit override must NOT silently become the generic
+        # D3 default — that bypasses measured tuning sidecars and family
+        # fallbacks (2026-07-10 audit High-4). Ignore it and resolve as if
+        # unset.
+        if source != "default":
+            logger.warning(
+                "Ignoring invalid %s=%r; resolving native MTP depth from "
+                "tuning/family instead",
+                source,
+                raw,
+            )
         depth = 3
-        source = f"invalid:{source}"
-    if raw is not None and source != "default":
+        source = "default"
+    if source != "default":
         return max(1, min(3, depth)), source
 
     tuned_path = model_path or _ACTIVE_NATIVE_MTP_MODEL_PATH

@@ -299,3 +299,35 @@ def test_hy3_tuning_sidecar_outranks_family_fallback(tmp_path):
     depth, source = native_mtp_effective_depth(str(tmp_path))
     assert depth == 2
     assert source == "vmlx_mtp_tuning.json:native_mtp.best_depth"
+
+
+def test_invalid_depth_env_does_not_bypass_sidecar(tmp_path, monkeypatch):
+    """Audit H4: an invalid VMLX_NATIVE_MTP_DEPTH must be ignored (resolve
+    from tuning/family), not silently become the generic D3 default."""
+    import json
+    from vmlx_engine.native_mtp import native_mtp_effective_depth
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "hy_v3"}))
+    (tmp_path / "jang_config.json").write_text(json.dumps({}))
+    (tmp_path / "vmlx_mtp_tuning.json").write_text(
+        json.dumps({"native_mtp": {"best_depth": 1, "validated": True}})
+    )
+    monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", "banana")
+    depth, source = native_mtp_effective_depth(str(tmp_path))
+    assert depth == 1
+    assert source == "vmlx_mtp_tuning.json:native_mtp.best_depth"
+
+
+def test_blocked_tuning_file_leaks_no_depth(tmp_path):
+    """Audit H4: a tuning file whose native_mtp block is invalid must not
+    leak a depth through the legacy top-level fallback keys."""
+    import json
+    from vmlx_engine.native_mtp import _model_tuning_depth
+
+    (tmp_path / "vmlx_mtp_tuning.json").write_text(json.dumps({
+        "native_mtp": {"blocked": True, "best_depth": 2},
+        "best_native_mtp_depth": {"best_depth": 3},
+        "best_depth": 3,
+    }))
+    depth, source = _model_tuning_depth(str(tmp_path))
+    assert depth is None and source is None

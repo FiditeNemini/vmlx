@@ -1315,8 +1315,10 @@ class Scheduler:
             non_kv.discard("CacheList")
             return bool(non_kv)
         except Exception as e:
-            logger.warning(f"make_cache() failed during hybrid detection: {e}")
-            return False
+            raise RuntimeError(
+                "make_cache() failed during cache-architecture detection; "
+                "refusing to classify the model as plain KV"
+            ) from e
 
     def _expected_cache_layer_count(self) -> Optional[int]:
         """Return the number of cache-bearing layers for validation/scope keys.

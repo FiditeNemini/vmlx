@@ -30,6 +30,7 @@ def test_container_shape_distinguished():
 
 def test_scalar_type_distinguished():
     assert _h([1]) != _h(["1"])
+    assert _h({1: "value"}) != _h({"1": "value"})
 
 
 def test_mx_array_dtype_distinguished():

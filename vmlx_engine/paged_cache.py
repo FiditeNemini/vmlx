@@ -103,8 +103,17 @@ def compute_block_hash(
             elif isinstance(obj, dict):
                 hasher.update(b"D")
                 hasher.update(struct.pack("<Q", len(obj)))
-                for k in sorted(obj.keys(), key=str):
-                    _update_sized(b"K", bytes(str(k), "utf-8"))
+                for k in sorted(
+                    obj.keys(),
+                    key=lambda value: (
+                        type(value).__module__,
+                        type(value).__qualname__,
+                        repr(value),
+                    ),
+                ):
+                    hasher.update(b"K")
+                    _hash_extra(k)
+                    hasher.update(b"V")
                     _hash_extra(obj[k])
             elif isinstance(obj, (list, tuple)):
                 hasher.update(b"L")

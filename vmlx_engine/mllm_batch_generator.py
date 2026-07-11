@@ -2184,7 +2184,13 @@ def _sample_mllm_prefill_logits(
     logits_2d: mx.array,
     sampler: Callable[[mx.array], mx.array],
 ) -> Tuple[mx.array, Optional[mx.array]]:
-    """Sample the first MLLM decode token without logprobs when possible."""
+    """Sample the first MLLM decode token without logprobs when possible.
+
+    Generic mlx-lm stochastic samplers consume normalized log-probabilities,
+    while vMLX's greedy and compact-top-k wrappers explicitly opt into raw
+    logits via ``_vmlx_accepts_logits``.  Decode must use this same helper so
+    token zero and every later token share one input-space contract.
+    """
     if _native_mtp_sampler_accepts_logits(sampler):
         sampled = _native_mtp_ensure_uint32(sampler(logits_2d))
         return sampled, logits_2d if _mimo_v2_token_trace_enabled() else None
@@ -7668,15 +7674,18 @@ class MLLMBatchGenerator:
                     pass
             if _batch_shares_sampler_params(batch.requests):
                 shared_sampler = self._make_request_sampler(batch.requests[0])
-                sampled = shared_sampler(logits)
+                sampled, _ = _sample_mllm_prefill_logits(logits, shared_sampler)
             else:
                 tokens = []
                 for i, req in enumerate(batch.requests):
                     req_sampler = self._make_request_sampler(req)
-                    tokens.append(req_sampler(logits[i:i+1]))
+                    token, _ = _sample_mllm_prefill_logits(
+                        logits[i:i+1], req_sampler
+                    )
+                    tokens.append(token)
                 sampled = mx.concatenate(tokens, axis=0)
         else:
-            sampled = self.sampler(logits)
+            sampled, _ = _sample_mllm_prefill_logits(logits, self.sampler)
 
         if trace:
             mx.synchronize()

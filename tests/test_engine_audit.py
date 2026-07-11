@@ -14908,9 +14908,8 @@ class TestStreamUsagePropagatesCacheDetail:
                 # via engine.stream_chat (enable_thinking=False).
                 if kwargs.get("enable_thinking") is False:
                     assert kwargs["chat_template_kwargs"]["thinking_mode"] == "disabled"
-                    # #66 draw-down floor: max(256, budget - completion_tokens).
-                    # completion=120 leaves < 256, so the pass is floored to 256.
-                    assert kwargs["max_tokens"] == 256
+                    # One total client cap: 180 - 120 leaves exactly 60 tokens.
+                    assert kwargs["max_tokens"] == 60
                     assert messages[-1]["role"] == "assistant"
                     assert messages[-1]["content"] == ""
                     assert "MM3_STREAM_CHAT_OK" in messages[-1]["reasoning_content"]

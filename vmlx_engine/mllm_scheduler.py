@@ -920,8 +920,11 @@ class MLLMScheduler:
             if not non_kv:
                 return False
             return True
-        except Exception:
-            return False
+        except Exception as exc:
+            raise RuntimeError(
+                "MLLM language-model make_cache() failed during cache-architecture "
+                "detection; refusing to classify it as plain KV"
+            ) from exc
 
     def _mllm_request_has_media_cache_context(
         self,

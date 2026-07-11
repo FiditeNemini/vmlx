@@ -38,7 +38,7 @@ class ModelConfig:
     model_types: List[str]  # e.g. ["llama", "qwen2", "mistral"]
 
     # Cache configuration
-    cache_type: str = "kv"  # "kv" | "mamba" | "hybrid" | "rotating_kv"
+    cache_type: str = "kv"  # "native" | "kv" | "mamba" | "hybrid" | "rotating_kv"
     cache_subtype: Optional[str] = None  # e.g. "zaya_cca", "deepseek_v4_composite"
 
     # Tokenizer overrides
@@ -77,8 +77,13 @@ class ModelConfig:
 _DEFAULT_CONFIG = ModelConfig(
     family_name="unknown",
     model_types=[],
-    cache_type="kv",
-    description="Default configuration for unknown models",
+    cache_type="native",
+    architecture_hints={
+        "detection_fail_closed": True,
+        "force_native_cache": True,
+        "disable_automatic_parsers": True,
+    },
+    description="Conservative native-cache/parser configuration for unknown models",
     priority=999,
 )
 
@@ -483,8 +488,10 @@ class ModelConfigRegistry:
                 return None
             try:
                 jcfg = json.loads(jcfg_path.read_text())
-            except Exception:
-                return None
+            except Exception as exc:
+                raise RuntimeError(
+                    f"invalid authoritative JANG stamp {jcfg_path}: {exc}"
+                ) from exc
             local_model_config: dict[str, Any] = {}
             try:
                 cfg_path = Path(model_name) / "config.json"
@@ -492,8 +499,10 @@ class ModelConfigRegistry:
                     loaded_cfg = json.loads(cfg_path.read_text())
                     if isinstance(loaded_cfg, dict):
                         local_model_config = loaded_cfg
-            except Exception:
-                local_model_config = {}
+            except Exception as exc:
+                raise RuntimeError(
+                    f"could not read config.json beside JANG stamp {jcfg_path}: {exc}"
+                ) from exc
             caps = jcfg.get("capabilities")
             if not isinstance(caps, dict):
                 # Fallback: some bundles (notably DSV4-Flash) use the
@@ -524,7 +533,9 @@ class ModelConfigRegistry:
                     return None
             family = caps.get("family") or ""
             if not family:
-                return None
+                raise RuntimeError(
+                    f"authoritative JANG stamp {jcfg_path} has no family"
+                )
 
             # Start from an existing family config if the stamp's family name
             # matches one we know OR if the stamped family is actually a
@@ -789,8 +800,8 @@ class ModelConfigRegistry:
             base = _with_hybrid_override_pattern_hint(base, local_model_config)
             return base
         except Exception as e:
-            logger.debug(f"_try_jang_stamp failed for {model_name}: {e}")
-            return None
+            logger.error("JANG stamp detection failed closed for %s: %s", model_name, e)
+            raise
 
     def lookup(self, model_name: str) -> ModelConfig:
         """
@@ -875,6 +886,11 @@ class ModelConfigRegistry:
                     for k in ("vision_config", "audio_config", "video_config")
                 )
             except Exception as e:
+                config_path = os.path.join(str(resolved_path), "config.json")
+                if os.path.isfile(config_path):
+                    raise RuntimeError(
+                        f"model config detection failed closed for {model_name}: {e}"
+                    ) from e
                 logger.warning(f"Could not load config.json for {model_name} to check model_type: {e}")
 
             # Also check text_config.model_type for VLM wrapper models
@@ -889,8 +905,10 @@ class ModelConfigRegistry:
                         raw = json.loads(cfg_path.read_text())
                         text_model_type = raw.get("text_config", {}).get("model_type", "").lower()
                         has_media_config = has_media_config or _config_declares_media(raw)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"text_config detection failed closed for {model_name}: {exc}"
+                    ) from exc
 
             if model_type:
                 # Name-based disambiguation for models sharing model_type:

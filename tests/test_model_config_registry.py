@@ -1069,7 +1069,7 @@ class TestModelConfigs:
     def test_unknown_model(self, registry):
         config = self._lookup(registry, "completely-unknown-model-xyz", "totally_unknown_type")
         assert config.family_name == "unknown"
-        assert config.cache_type == "kv"
+        assert config.cache_type == "native"
 
     def test_zaya_config(self, registry):
         config = self._lookup(registry, "Zyphra/ZAYA1-8B", "zaya")

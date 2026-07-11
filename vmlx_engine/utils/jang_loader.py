@@ -1696,9 +1696,13 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         n_layers = len(_native_cache)
         _native_cache_types = [type(c).__name__ for c in _native_cache]
         del _native_cache
-    except Exception:
-        n_layers = len(model.layers)
-        _native_cache_types = []
+    except Exception as exc:
+        logger.warning(
+            "  TurboQuant KV skipped: native make_cache() failed, so cache "
+            "architecture is unknown and must remain on the model-owned path: %s",
+            exc,
+        )
+        return
     _has_rotating_slots = any(
         t in ("RotatingKVCache", "BatchRotatingKVCache") for t in _native_cache_types
     )
@@ -1760,11 +1764,11 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         else:
             logger.warning(
                 "  TurboQuant cache layout mismatch: detector produced %d "
-                "entries for %d native cache slots; falling back to all-attention",
+                "entries for %d native cache slots; keeping native cache",
                 len(_layer_types),
                 n_layers,
             )
-            _layer_types = ["attention"] * n_layers
+            return
 
     _n_attn = sum(1 for t in _layer_types if t == "attention")
     _n_ssm = sum(1 for t in _layer_types if t == "ssm")

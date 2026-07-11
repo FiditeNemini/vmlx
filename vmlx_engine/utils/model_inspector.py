@@ -116,8 +116,9 @@ def is_mla_model(config: Any) -> bool:
     * a model object exposing a ``config`` attribute (best-effort)
 
     The check looks at top-level ``kv_lora_rank`` first, then ``text_config.kv_lora_rank``,
-    then any nested ``language_config`` / ``llm_config`` if present. Returns ``False``
-    on any error so callers degrade safely.
+    then any nested ``language_config`` / ``llm_config`` if present. Detection
+    failures return ``True`` conservatively so callers retain the model's native
+    cache instead of installing flat TurboQuant on an unknown layout.
     """
     cfg: Optional[dict[str, Any]] = None
 
@@ -131,7 +132,7 @@ def is_mla_model(config: Any) -> bool:
             if p.exists():
                 cfg = json.loads(p.read_text())
         except Exception:
-            return False
+            return True
     else:
         # Best-effort: model object with .config or .args
         for attr in ("config", "args", "model_config"):
@@ -144,7 +145,7 @@ def is_mla_model(config: Any) -> bool:
                 break
 
     if not isinstance(cfg, dict):
-        return False
+        return True
 
     # Try every nested config tree where MLA might be declared.
     for sub in (
@@ -168,7 +169,7 @@ def is_mla_model(config: Any) -> bool:
             if int(sub.get("kv_lora_rank") or 0) > 0:
                 return True
         except (TypeError, ValueError):
-            continue
+            return True
         # DeepSeek V4-Flash / V4-Pro don't set kv_lora_rank but they ARE MLA:
         # single latent KV head (num_key_value_heads=1, head_dim=512) with
         # q_lora_rank+o_lora_rank projections. Runtime lives in
@@ -186,7 +187,7 @@ def is_mla_model(config: Any) -> bool:
             if int(sub.get("num_kv_shared_layers") or 0) > 0:
                 return True
         except (TypeError, ValueError):
-            continue
+            return True
     return False
 
 

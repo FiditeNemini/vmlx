@@ -1058,6 +1058,19 @@ def _answer_pass_visible_delta(
     return target[len(already_sent):], target
 
 
+def _remaining_answer_pass_budget(cap: Any, used: Any) -> int:
+    """Return the unspent portion of one client-visible output-token cap."""
+    try:
+        resolved_cap = max(0, int(cap or 0))
+    except (TypeError, ValueError):
+        resolved_cap = 0
+    try:
+        resolved_used = max(0, int(used or 0))
+    except (TypeError, ValueError):
+        resolved_used = 0
+    return max(0, resolved_cap - resolved_used)
+
+
 def _visible_text_for_dsv4_completion(output: Any, engine: Any, request: Any) -> str:
     """Return the visible DSV4 completion text from chat-rail output."""
     raw_text = getattr(output, "raw_text", "") or getattr(output, "text", "") or ""
@@ -12383,6 +12396,10 @@ async def create_chat_completion(
         and reasoning_text
         and not _ns_thinking_off
         and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
+        and _remaining_answer_pass_budget(
+            chat_kwargs.get("max_tokens") or 256,
+            getattr(output, "completion_tokens", 0),
+        ) > 0
     ):
         try:
             from .model_config_registry import get_model_config_registry as _ns_mcr
@@ -12394,17 +12411,9 @@ async def create_chat_completion(
             _ns_family = None
         _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
         if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4", "openpangu_v2") or _ns_is_m3:
-            # The answer pass must not hand out a fresh full budget on top of
-            # what the reasoning pass already spent — total completion tokens
-            # must never exceed the client's resolved cap (2026-07-10 audit
-            # Critical-1). Budget the retry by the remaining allowance; if the
-            # reasoning pass already consumed the whole cap, take a small
-            # floor so a degraded reasoner still emits a short answer rather
-            # than an empty turn.
             _ns_cap = int(chat_kwargs.get("max_tokens") or 256)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
-            _ns_remaining = _ns_cap - _ns_used
-            _ns_budget = _ns_remaining if _ns_remaining >= 32 else 32
+            _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
             logger.info(
                 "%s non-stream chat produced no visible content; running "
                 "bounded thinking-off answer pass (reasoning_chars=%d, "
@@ -14531,6 +14540,10 @@ async def create_response(
         and reasoning_text
         and not _ns_thinking_off
         and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
+        and _remaining_answer_pass_budget(
+            chat_kwargs.get("max_tokens") or 256,
+            getattr(output, "completion_tokens", 0),
+        ) > 0
     ):
         try:
             from .model_config_registry import get_model_config_registry as _ns_mcr
@@ -14542,12 +14555,15 @@ async def create_response(
             _ns_family = None
         _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
         if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4", "openpangu_v2") or _ns_is_m3:
-            _ns_budget = max(32, int(chat_kwargs.get("max_tokens") or 256))
+            _ns_cap = int(chat_kwargs.get("max_tokens") or 256)
+            _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
+            _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
             logger.info(
                 "%s non-stream responses produced no visible content; running "
                 "bounded thinking-off answer pass (reasoning_chars=%d, "
-                "answer_budget=%d)",
-                _ns_family, len(reasoning_text or ""), _ns_budget,
+                "cap=%d, used=%d, answer_budget=%d)",
+                _ns_family, len(reasoning_text or ""), _ns_cap, _ns_used,
+                _ns_budget,
             )
             _ns_kwargs = dict(chat_kwargs)
             _ns_kwargs["enable_thinking"] = False
@@ -15349,7 +15365,7 @@ async def stream_chat_completion(
     ):
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            m3_reasoning_only_answer_budget = max(32, _requested_output_budget)
+            m3_reasoning_only_answer_budget = max(0, _requested_output_budget)
             m3_reasoning_only_answer_enabled = True
             _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
             if _requested_thinking_budget is not None:
@@ -15369,7 +15385,7 @@ async def stream_chat_completion(
     ):
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            reasoning_only_answer_budget = max(32, _requested_output_budget)
+            reasoning_only_answer_budget = max(0, _requested_output_budget)
             reasoning_only_answer_enabled = True
             reasoning_only_answer_family = "Gemma4"
             _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
@@ -15398,7 +15414,7 @@ async def stream_chat_completion(
         # family, so the answer pass is reliable.
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            reasoning_only_answer_budget = max(32, _requested_output_budget)
+            reasoning_only_answer_budget = max(0, _requested_output_budget)
             reasoning_only_answer_enabled = True
             reasoning_only_answer_family = (
                 "openPangu" if _family_name == "openpangu_v2" else "Qwen3.5"
@@ -16242,6 +16258,14 @@ async def stream_chat_completion(
         and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
         and accumulated_reasoning.strip()
         and not tool_calls_emitted
+        and _remaining_answer_pass_budget(
+            (
+                m3_reasoning_only_answer_budget
+                if m3_reasoning_only_answer_enabled
+                else reasoning_only_answer_budget
+            ) or 256,
+            completion_tokens,
+        ) > 0
     ):
         _answer_family = (
             "MiniMax-M3"
@@ -16270,21 +16294,9 @@ async def stream_chat_completion(
         ]
         answer_kwargs = dict(kwargs)
         answer_kwargs["enable_thinking"] = False
-        # Draw the bounded answer pass from the turn's REMAINING output budget,
-        # not a fresh full one. The reasoning pass already spent
-        # completion_tokens against the same resolved max_tokens; a fresh
-        # _answer_budget here doubled total output past the cap (openPangu:
-        # 4096 reasoning + 4096 answer = 8192 > the 4096 the client asked for).
-        # FLOOR the draw-down: a non-terminating reasoner (openPangu never emits
-        # </think> before the cap, so completion_tokens ≈ max_tokens on every
-        # turn) would otherwise collapse this to 1 token and stream a truncated
-        # one-word answer ("capital of France" → "The", "2+2" → "2") while the
-        # non-stream path (fresh max(32, max_tokens)) returns the full answer.
-        # Live-proven on openPangu-3M: floor 256 restores complete streamed
-        # answers; the overage is bounded by the floor (≤256), not the
-        # full-budget doubling the draw-down removed.
-        answer_kwargs["max_tokens"] = max(
-            256, int(_answer_budget or 256) - int(completion_tokens or 0)
+        answer_kwargs["max_tokens"] = _remaining_answer_pass_budget(
+            _answer_budget or 256,
+            completion_tokens,
         )
         answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
         if _answer_family == "MiniMax-M3":
@@ -16842,7 +16854,7 @@ async def stream_responses_api(
     ):
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            m3_reasoning_only_answer_budget = max(32, _requested_output_budget)
+            m3_reasoning_only_answer_budget = max(0, _requested_output_budget)
             m3_reasoning_only_answer_enabled = True
             _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
             if _requested_thinking_budget is not None:
@@ -16859,7 +16871,7 @@ async def stream_responses_api(
     ):
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            reasoning_only_answer_budget = max(32, _requested_output_budget)
+            reasoning_only_answer_budget = max(0, _requested_output_budget)
             reasoning_only_answer_enabled = True
             reasoning_only_answer_family = "Gemma4"
             _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
@@ -16885,7 +16897,7 @@ async def stream_responses_api(
         # family, so the answer pass is reliable.
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            reasoning_only_answer_budget = max(32, _requested_output_budget)
+            reasoning_only_answer_budget = max(0, _requested_output_budget)
             reasoning_only_answer_enabled = True
             reasoning_only_answer_family = (
                 "openPangu" if _family_name == "openpangu_v2" else "Qwen3.5"
@@ -17733,6 +17745,14 @@ async def stream_responses_api(
             and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
             and accumulated_reasoning.strip()
             and not tool_calls
+            and _remaining_answer_pass_budget(
+                (
+                    m3_reasoning_only_answer_budget
+                    if m3_reasoning_only_answer_enabled
+                    else reasoning_only_answer_budget
+                ) or 256,
+                completion_tokens,
+            ) > 0
         ):
             _answer_family = (
                 "MiniMax-M3"
@@ -17761,15 +17781,9 @@ async def stream_responses_api(
             ]
             answer_kwargs = dict(kwargs)
             answer_kwargs["enable_thinking"] = False
-            # Draw the bounded answer pass from the turn's REMAINING output
-            # budget, not a fresh full one (see the Chat Completions site): the
-            # reasoning pass already spent completion_tokens against the same
-            # resolved max_tokens, so a fresh _answer_budget doubled total
-            # output past the client's cap. FLOOR at 256 so a non-terminating
-            # reasoner (openPangu) that fills the budget still streams a full
-            # answer instead of a 1-token stub; overage bounded by the floor.
-            answer_kwargs["max_tokens"] = max(
-                256, int(_answer_budget or 256) - int(completion_tokens or 0)
+            answer_kwargs["max_tokens"] = _remaining_answer_pass_budget(
+                _answer_budget or 256,
+                completion_tokens,
             )
             answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
             if _answer_family == "MiniMax-M3":

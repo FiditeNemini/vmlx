@@ -11783,7 +11783,20 @@ async def create_completion(request: CompletionRequest):
                     ),
                     timeout=timeout,
                 )
-            elif _is_loaded_mimo_v2_model(request.model):
+            elif _is_loaded_mimo_v2_model(request.model) or bool(
+                getattr(engine, "is_mllm", False)
+                or getattr(engine, "_is_mllm", False)
+            ):
+                # Loaded MLLM (any modality/quant): the raw /v1/completions
+                # rail feeds engine.generate() an unframed string, but the
+                # MLLM text-only preprocessor tokenizes with
+                # add_special_tokens=False on the contract that the prompt
+                # already passed through apply_chat_template(). Raw completion
+                # violates that -> no BOS / no instruct turn framing ->
+                # malformed prefill -> constant-token degeneration (W1-3).
+                # Wrap the completion string as one user message so the
+                # engine's native chat template builds valid input, exactly
+                # as the DSV4 and MiMo-V2 completion rails already do.
                 chat_kwargs = _completion_gen_kwargs_to_chat_kwargs(gen_kwargs)
                 output = await asyncio.wait_for(
                     engine.chat(
@@ -15166,7 +15179,15 @@ async def stream_completions_multi(
             if request.logprobs is not None:
                 gen_kwargs["logprobs"] = True
                 gen_kwargs["top_logprobs"] = request.logprobs
-            if _is_loaded_mimo_v2_model(request.model):
+            if _is_loaded_mimo_v2_model(request.model) or bool(
+                getattr(engine, "is_mllm", False)
+                or getattr(engine, "_is_mllm", False)
+            ):
+                # Loaded MLLM on the streaming /v1/completions rail: same W1-3
+                # degeneration as the non-stream branch (raw prompt bypasses
+                # the native chat template -> malformed MLLM prefill). Route
+                # through engine.chat() and emit one aggregate completion
+                # chunk, matching the existing MiMo-V2 completion behavior.
                 chat_kwargs = _completion_gen_kwargs_to_chat_kwargs(gen_kwargs)
                 output = await asyncio.wait_for(
                     engine.chat(

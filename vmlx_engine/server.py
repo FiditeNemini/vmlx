@@ -812,7 +812,9 @@ def _jangtq_bits_from_profile(profile: Any) -> int | None:
     return int(match.group(1))
 
 
-def _strip_residual_think_markup_for_display(text: str) -> str:
+def _strip_residual_think_markup_for_display(
+    text: str, drop_orphan_close_prefix: bool = True
+) -> str:
     """Remove stale think markup after reasoning was intentionally suppressed.
 
     `clean_output_text()` deliberately keeps `<think>` markers for normal
@@ -820,14 +822,26 @@ def _strip_residual_think_markup_for_display(text: str) -> str:
     `</think>` appears.  That is wrong for product paths where thinking has
     been resolved off: residual model tags are not user-visible content and
     must be removed before display cleaning runs.
+
+    An orphan close marker (no matching open) means the text before it was an
+    unclosed reasoning block that leaked into the display string; the default
+    display-cleanup contract drops that hidden-reasoning prefix.
+
+    Post-parse call sites, where the reasoning parser has ALREADY isolated the
+    visible content into a separate field, pass ``drop_orphan_close_prefix=
+    False`` — there ``Visible</think> tail`` is genuine content and dropping it
+    to ``tail`` loses the answer (2026-07-11 reasoning-stress).
     """
     if not text:
         return ""
     stripped = _THINK_STRIP_RE.sub("", text)
-    # Unlike tool parsing, display cleanup must not assume that all text before
-    # an orphan close marker is hidden reasoning.  The reasoning parser may
-    # already have isolated visible content; dropping the prefix here turns
-    # ``Visible</think> tail`` into just ``tail``.
+    if drop_orphan_close_prefix and stripped == text and (
+        "</think>" in text or "</mm:think>" in text or "[/THINK]" in text
+    ):
+        for end_tag in ("</think>", "</mm:think>", "[/THINK]"):
+            if end_tag in text:
+                _, _, stripped = text.partition(end_tag)
+                break
     stripped = _strip_think_markers_keep_spacing(stripped)
     return stripped.strip()
 
@@ -12578,7 +12592,8 @@ async def create_chat_completion(
                 content_for_parsing = reasoning_text
             elif content_for_parsing:
                 content_for_parsing = _strip_residual_think_markup_for_display(
-                    content_for_parsing
+                    content_for_parsing,
+                    drop_orphan_close_prefix=False,
                 )
             reasoning_text = None
 
@@ -14739,7 +14754,8 @@ async def create_response(
                 content_for_parsing = reasoning_text
             elif content_for_parsing:
                 content_for_parsing = _strip_residual_think_markup_for_display(
-                    content_for_parsing
+                    content_for_parsing,
+                    drop_orphan_close_prefix=False,
                 )
             reasoning_text = None
 

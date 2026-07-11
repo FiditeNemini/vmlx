@@ -216,8 +216,12 @@ def test_display_cleanup_removes_residual_think_markup_without_reopening():
     assert server._strip_residual_think_markup_for_display(
         "<think>hidden</think>Visible"
     ) == "Visible"
+    # Post-parse call sites (reasoning already isolated) must keep the visible
+    # prefix before an orphan close — dropping it would lose the answer. The
+    # default display contract still drops an orphan-close prefix as leaked
+    # reasoning (see test_minimax_m3_residual_think_markup_is_stripped...).
     assert server._strip_residual_think_markup_for_display(
-        "Visible</think> tail"
+        "Visible</think> tail", drop_orphan_close_prefix=False
     ) == "Visible tail"
     assert server._strip_residual_think_markup_for_display(
         "<think>Visible"

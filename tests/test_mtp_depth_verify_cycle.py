@@ -559,7 +559,7 @@ class TestBundleDepthSidecar:
     on this MoE: the verify grows ~11.5ms/extra token while chained-draft
     acceptance collapses."""
 
-    def test_best_depth_1_sidecar_resolves_to_depth_1(self, tmp_path, monkeypatch):
+    def test_blocked_sidecar_leaks_no_legacy_depth(self, tmp_path, monkeypatch):
         import json
 
         from vmlx_engine.native_mtp import native_mtp_effective_depth
@@ -571,8 +571,8 @@ class TestBundleDepthSidecar:
                         "best_depth": 1})
         )
         depth, source = native_mtp_effective_depth(str(tmp_path))
-        assert depth == 1
-        assert "best_depth" in source
+        assert depth == 3
+        assert source == "default"
 
     def test_no_sidecar_still_defaults_to_3(self, tmp_path, monkeypatch):
         from vmlx_engine.native_mtp import native_mtp_effective_depth

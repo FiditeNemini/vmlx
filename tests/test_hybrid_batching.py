@@ -421,15 +421,16 @@ class TestMemoryCacheFallbackWarning:
 class TestHybridDetectionLogging:
     """Tests for hybrid model detection error handling."""
 
-    def test_is_hybrid_model_logs_exception(self):
-        """_is_hybrid_model should log warning when make_cache() raises."""
+    def test_is_hybrid_model_fails_closed_on_exception(self):
+        """A failed cache probe must not silently classify the model as KV."""
         from vmlx_engine.scheduler import Scheduler
-        import inspect
 
-        source = inspect.getsource(Scheduler._is_hybrid_model)
-        # Should log, not silently swallow
-        assert "logger.warning" in source
-        assert "make_cache() failed" in source
+        class BrokenModel:
+            def make_cache(self):
+                raise RuntimeError("broken cache")
+
+        with pytest.raises(RuntimeError, match="refusing to classify"):
+            Scheduler._is_hybrid_model(BrokenModel())
 
 
 class TestRotatingKVCachePreservation:

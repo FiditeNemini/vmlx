@@ -7496,6 +7496,16 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
         hybrid_tq_companion_layers = list(
             getattr(scheduler, "_hybrid_live_tq_companion_layers", []) or []
         )
+        # Live encode is gated by compress_after (default 0 -> objects-only, no
+        # live decode-time encoding). Report the truthful mode: "live_decode"
+        # ONLY when compress_after > 0 actually enables encoding; otherwise
+        # "attention_kv_objects" (TQ objects installed but not encoding). The
+        # authoritative live-encode counters live in the top-level
+        # turboquant_kv_cache block (_turboquant_kv_cache_status).
+        hybrid_tq_compress_after = int(
+            getattr(scheduler, "_hybrid_live_tq_compress_after", 0) or 0
+        )
+        hybrid_tq_live_encode = hybrid_tq_enabled and hybrid_tq_compress_after > 0
         try:
             stored_kv_bits = int(getattr(scheduler, "_kv_cache_bits", 0) or 0)
         except (TypeError, ValueError):
@@ -7523,7 +7533,12 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
             },
             "live_attention_tq_kv": {
                 "enabled": hybrid_tq_enabled,
-                "mode": "live_decode" if hybrid_tq_enabled else None,
+                "mode": (
+                    ("live_decode" if hybrid_tq_live_encode else "attention_kv_objects")
+                    if hybrid_tq_enabled
+                    else None
+                ),
+                "compress_after": hybrid_tq_compress_after if hybrid_tq_enabled else None,
                 "applies_to": "attention_kv_layers_only",
                 "ssm_policy": "native_full_precision_companion_state",
                 "attention_layers": hybrid_tq_attention_layers,

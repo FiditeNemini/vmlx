@@ -379,6 +379,12 @@ class Scheduler:
         self._hybrid_live_tq_companion_layers = list(
             getattr(_model_make_cache, "_vmlx_hybrid_tq_companion_layers", ()) or []
         )
+        # compress_after gates whether attention-KV TQ actually live-encodes
+        # during decode (0 => objects-only, no live encode). Capture it so
+        # capabilities can report the truthful mode instead of assuming decode.
+        self._hybrid_live_tq_compress_after = int(
+            getattr(_model_make_cache, "_vmlx_tq_compress_after", 0) or 0
+        )
         self._tq_batch_api = self._turboquant_cache_supports_batch_api(model)
         self._log_runtime_cache_contract(model)
         if self._tq_active and self._tq_batch_api:

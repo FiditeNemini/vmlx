@@ -465,6 +465,7 @@ class MLLMScheduler:
         self._hybrid_live_tq_policy = None
         self._hybrid_live_tq_attention_layers = []
         self._hybrid_live_tq_companion_layers = []
+        self._hybrid_live_tq_compress_after = 0
 
         # Detect hybrid models (mixed KVCache + MambaCache layers)
         lang_model = self.model.language_model if hasattr(self.model, "language_model") else self.model
@@ -1185,6 +1186,9 @@ class MLLMScheduler:
                 )
                 self._hybrid_live_tq_companion_layers = list(
                     getattr(make_cache, "_vmlx_hybrid_tq_companion_layers", ()) or []
+                )
+                self._hybrid_live_tq_compress_after = int(
+                    getattr(make_cache, "_vmlx_tq_compress_after", 0) or 0
                 )
                 return
             for attr in ("model", "language_model"):

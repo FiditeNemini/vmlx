@@ -124,6 +124,8 @@ def test_native_cache_status_reports_hybrid_live_attention_tq():
         _hybrid_live_tq_policy="attention_kv_only",
         _hybrid_live_tq_attention_layers=[0, 2],
         _hybrid_live_tq_companion_layers=[1, 3],
+        # compress_after=0 => objects-only, no live decode-time encoding.
+        _hybrid_live_tq_compress_after=0,
         _hybrid_kv_positions=[0, 2],
         _kv_cache_bits=4,
         _kv_cache_group_size=64,
@@ -138,12 +140,20 @@ def test_native_cache_status_reports_hybrid_live_attention_tq():
         "enabled": True,
         "reason": "hybrid_attention_kv_only",
     }
+    # Objects-only run (compress_after=0): must NOT over-claim "live_decode".
     assert status["live_attention_tq_kv"] == {
         "enabled": True,
-        "mode": "live_decode",
+        "mode": "attention_kv_objects",
+        "compress_after": 0,
         "applies_to": "attention_kv_layers_only",
         "ssm_policy": "native_full_precision_companion_state",
         "attention_layers": [0, 2],
         "companion_layers": [1, 3],
     }
     assert status["attention_kv_storage_quantization"]["mode"] == "storage_boundary"
+
+    # When compress_after > 0, live encode is genuinely enabled -> "live_decode".
+    scheduler._hybrid_live_tq_compress_after = 16
+    status_live = _native_cache_status(scheduler)
+    assert status_live["live_attention_tq_kv"]["mode"] == "live_decode"
+    assert status_live["live_attention_tq_kv"]["compress_after"] == 16

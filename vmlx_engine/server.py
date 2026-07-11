@@ -12394,12 +12394,23 @@ async def create_chat_completion(
             _ns_family = None
         _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
         if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4", "openpangu_v2") or _ns_is_m3:
-            _ns_budget = max(32, int(chat_kwargs.get("max_tokens") or 256))
+            # The answer pass must not hand out a fresh full budget on top of
+            # what the reasoning pass already spent — total completion tokens
+            # must never exceed the client's resolved cap (2026-07-10 audit
+            # Critical-1). Budget the retry by the remaining allowance; if the
+            # reasoning pass already consumed the whole cap, take a small
+            # floor so a degraded reasoner still emits a short answer rather
+            # than an empty turn.
+            _ns_cap = int(chat_kwargs.get("max_tokens") or 256)
+            _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
+            _ns_remaining = _ns_cap - _ns_used
+            _ns_budget = _ns_remaining if _ns_remaining >= 32 else 32
             logger.info(
                 "%s non-stream chat produced no visible content; running "
                 "bounded thinking-off answer pass (reasoning_chars=%d, "
-                "answer_budget=%d)",
-                _ns_family, len(reasoning_text or ""), _ns_budget,
+                "cap=%d, used=%d, answer_budget=%d)",
+                _ns_family, len(reasoning_text or ""), _ns_cap, _ns_used,
+                _ns_budget,
             )
             _ns_kwargs = dict(chat_kwargs)
             _ns_kwargs["enable_thinking"] = False

@@ -153,7 +153,41 @@ def compute_model_cache_key(
             for fname in ("config.json", "jang_config.json"):
                 p = os.path.join(model_path, fname)
                 if os.path.exists(p):
-                    parts.append(f"{fname}_mtime={int(os.path.getmtime(p))}")
+                    # Sub-second config edits share an integer mtime, so mix
+                    # fractional mtime + size too (2026-07-10 audit High-2).
+                    parts.append(f"{fname}_mtime={os.path.getmtime(p):.6f}")
+                    parts.append(f"{fname}_size={os.path.getsize(p)}")
+        except Exception:
+            pass
+
+        # 2b. Weight-artifact fingerprint — replacing weight shards in place
+        # under the same path/config MUST invalidate the L2 disk cache
+        # (2026-07-10 audit High-2). Hash the safetensors index, or absent an
+        # index each shard's size+mtime. Cheap: no tensor bytes are read.
+        try:
+            import hashlib as _hl
+
+            wsig = _hl.sha256()
+            hashed = False
+            index_p = os.path.join(model_path, "model.safetensors.index.json")
+            if os.path.exists(index_p):
+                with open(index_p, "rb") as _f:
+                    wsig.update(_f.read())
+                wsig.update(str(os.path.getsize(index_p)).encode())
+                hashed = True
+            else:
+                for fn in sorted(
+                    f for f in os.listdir(model_path)
+                    if f.endswith(".safetensors")
+                ):
+                    sp = os.path.join(model_path, fn)
+                    wsig.update(
+                        f"{fn}:{os.path.getsize(sp)}:"
+                        f"{os.path.getmtime(sp):.6f}".encode()
+                    )
+                    hashed = True
+            if hashed:
+                parts.append(f"weights={wsig.hexdigest()[:16]}")
         except Exception:
             pass
 

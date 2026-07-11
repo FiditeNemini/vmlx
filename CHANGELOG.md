@@ -31,17 +31,57 @@ All notable changes to vMLX Engine will be documented in this file.
   MTP-dropped bundles (`num_nextn_predict_layers=0` loads without a headless
   speculative head; capabilities endpoint reports the drop), hunyuan tool
   parser and qwen3 reasoning rails wired from the registry, and the native
-  MTP runtime for bundles that preserve the head (depth pinned per family).
+  MTP runtime for bundles that preserve the head. Native MTP autodetects the
+  profitable draft depth (env > measured `vmlx_mtp_tuning.json` sidecar >
+  family fallback (hy_v3 -> depth 1) > generic D3); on the 2K-MTP bundle
+  depth 1 is a measured ~+10-14% decode win while depths 2/3 collapse
+  acceptance. The dead legacy JANG_2K profile block that silently disabled MTP
+  was removed.
 - Variant-suffixed special-token dialects (e.g. Hy3's `:opensource` spellings)
   are canonicalized at the token-to-text boundary, so reasoning split,
   tool-call parse, and think-tag stripping work on bundles that ship only
   suffixed specials.
+- Reasoning parity across surfaces: a concrete `reasoning_effort` implies
+  `enable_thinking` for reasoning-capable families when thinking is otherwise
+  unspecified, applied uniformly across OpenAI Chat/Responses, Anthropic, and
+  Ollama — so families with their own reasoning trigger (e.g. gemma4) engage
+  reasoning via `reasoning_effort`. Family guards (Mistral none/high,
+  MiniMax custom-off, unsupported families) remain authoritative.
+- Text chat/completions honor a request-local `seed`; `/v1/capabilities`
+  responds for the active model.
 
 ### Fixed
 - The defensive multi-eos stop set now installs for tokenizers that only ship
   variant-suffixed eos/role tokens. The resolver falls back through the same
   dialect map, so the registry keeps one canonical spelling per family and
   role-flip stop protection is no longer silently inert on such bundles.
+- Reasoning-runaway answer pass: a native always-reasoning or degraded runaway
+  reasoner that consumes the whole token budget inside its hidden rail still
+  emits a visible final answer instead of empty content. The answer pass draws
+  the remaining budget with a bounded floor (never the unbounded fresh-budget
+  the earlier path used). Applies to qwen3.5/3.6, gemma4, openpangu, MiniMax-M3
+  and MiniMax-M2. Fixed alongside answer-pass double-emission, a display path
+  that dropped visible text before an orphan `</think>`, and (Ollama) a
+  streamed final answer that was misrouted into `message.thinking`.
+- MLLM stochastic decode normalizes logits once before the shared sampler
+  contract (prefill and decode now agree); invalid `native-mtp-depth` overrides
+  are ignored instead of silently falling back to D3.
+- Paged-cache block hashing uses a canonical type-tagged, length-delimited
+  encoding for request-conditioned keys, so distinct multimodal/adapter
+  conditions cannot collide onto the same KV blocks.
+- Disk L2 (block) cache stores bfloat16 natively instead of a lossy bf16->fp16
+  cast that overflowed large values to infinity and drifted low bits (the
+  source of warm-vs-warm divergence on the paged+L2 path).
+- L2 cache identity now includes a weight-artifact fingerprint plus sub-second
+  config fingerprints, so replacing weights in place under the same path no
+  longer reuses stale KV.
+- Architecture/cache detection fails closed to a conservative native-cache
+  path instead of failing open into an incompatible policy.
+- TurboQuant KV `compress_after` is a real engine field wired end-to-end; live
+  encode is available for diagnostics but defaults OFF (measured not to
+  beneficially trade coherence or memory on any family), and capability/log
+  strings now describe the actual encoded state rather than unearned 3-bit /
+  memory-savings claims.
 
 ### Notes
 - Bundle-side (jang converter, shipped separately): Hy3 bundles now stamp

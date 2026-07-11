@@ -499,9 +499,14 @@ def native_mtp_effective_depth(
     drafting through that head, clamped to the verifier implementation's D3
     support.
 
-    Validated model-local tuning files are honored before the generic D3
+    Validated model-local tuning files are honored before the family/generic
     fallback. That lets measured bundles such as 27B MXFP4 use their proven
-    D2 policy while preserving D3 for artifacts without a sidecar.
+    D2 policy while preserving D3 for Qwen artifacts without a sidecar.
+
+    Family fallback: hy_v3 defaults to depth 1 — the 2026-07-10 sweep on
+    Hy3-JANG_2K-MTP measured d1 +10% vs baseline (~full acceptance) but
+    d2 -6% (24.5%) and d3 -31% (1.9%); deeper drafts collapse acceptance
+    against the hy3 head. Qwen3.6 keeps the D3 default.
     """
     env_name = None
     raw = None
@@ -523,11 +528,21 @@ def native_mtp_effective_depth(
     if raw is not None and source != "default":
         return max(1, min(3, depth)), source
 
+    tuned_path = model_path or _ACTIVE_NATIVE_MTP_MODEL_PATH
     if not _env_disabled("VMLINUX_NATIVE_MTP_USE_TUNING", "VMLX_NATIVE_MTP_USE_TUNING"):
-        tuned_path = model_path or _ACTIVE_NATIVE_MTP_MODEL_PATH
         tuned_depth, tuned_source = _model_tuning_depth(tuned_path)
         if tuned_depth is not None and tuned_source is not None:
             return tuned_depth, tuned_source
+
+    try:
+        family = _bundle_family(
+            _read_json(tuned_path, "config.json"),
+            _read_json(tuned_path, "jang_config.json"),
+        )
+    except Exception:
+        family = None
+    if family == "hy_v3":
+        return 1, "family_default:hy_v3"
     return max(1, min(3, depth)), source
 
 

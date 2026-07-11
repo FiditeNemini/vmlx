@@ -271,3 +271,31 @@ class TestHy3ModelMtpContract:
         assert model_has_native_mtp_runtime(model) is False
         model.attach_mtp()
         assert model_has_native_mtp_runtime(model) is True
+
+
+def test_hy3_family_depth_fallback_is_one(tmp_path):
+    """An hy_v3 MTP bundle WITHOUT a tuning sidecar must default to depth 1
+    (2026-07-10 sweep: d1 +10%, d2 -6% @24.5% accept, d3 -31% @1.9%).
+    Qwen artifacts keep the D3 fallback."""
+    import json
+    from vmlx_engine.native_mtp import native_mtp_effective_depth
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "hy_v3"}))
+    (tmp_path / "jang_config.json").write_text(json.dumps({}))
+    depth, source = native_mtp_effective_depth(str(tmp_path))
+    assert depth == 1
+    assert source == "family_default:hy_v3"
+
+
+def test_hy3_tuning_sidecar_outranks_family_fallback(tmp_path):
+    import json
+    from vmlx_engine.native_mtp import native_mtp_effective_depth
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "hy_v3"}))
+    (tmp_path / "jang_config.json").write_text(json.dumps({}))
+    (tmp_path / "vmlx_mtp_tuning.json").write_text(
+        json.dumps({"native_mtp": {"best_depth": 2, "validated": True}})
+    )
+    depth, source = native_mtp_effective_depth(str(tmp_path))
+    assert depth == 2
+    assert source == "vmlx_mtp_tuning.json:native_mtp.best_depth"

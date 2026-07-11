@@ -747,7 +747,11 @@ function detectNativeMtpCapability(
       depth: tuningDepth?.depth ?? 3,
       depthSource: tuningDepth?.source ?? 'default',
       runtimeScope: configDeclaresMedia(parsedConfig) && hasVisionWeights ? 'text+vl' : 'text',
-      nativeCacheType: hy3 ? 'plain_kv_v1' : 'hybrid_ssm_attention_kv_v1',
+      // Match the runtime schema string reported by /v1/capabilities
+      // (cache.native.schema): hy3 is plain attention (plain_kv_v1); the
+      // qwen3.6 hybrid SSM+attention bundle reports hybrid_ssm_v1 (NOT
+      // hybrid_ssm_attention_kv_v1, which matched nothing the engine emits).
+      nativeCacheType: hy3 ? 'plain_kv_v1' : 'hybrid_ssm_v1',
       requiresDeterministicSampling: true,
     }
   } catch {

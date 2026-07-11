@@ -12717,19 +12717,25 @@ async def create_chat_completion(
                     endpoint="Chat Completions visible answer pass (non-stream)",
                 )
                 _ns_text = clean_output_text(getattr(_ns_out, "text", "") or "")
-                # Only adopt the salvage when it actually COMPLETED. A salvage
-                # that itself hit the bounded budget (finish_reason="length") is
-                # an incomplete fragment: for qwen3.5/3.6 a length-truncated
-                # reasoning re-continues as planning prose, so surfacing that
-                # fragment leaks internal planning as the visible answer (W2-1,
-                # live-proven: the model closes reasoning and answers cleanly
-                # once max_tokens is large enough — the leak is a symptom of a
-                # too-small output budget, not a failure to answer). On an
-                # incomplete salvage keep the honest finish_reason="length"
-                # result so the client raises max_tokens; a natural stop within
-                # the bounded budget (the gemma4/M3/Hy3 rescue) is still adopted.
+                # For qwen3.5/3.6 ONLY, adopt the salvage when it actually
+                # COMPLETED. A salvage that itself hit the bounded budget
+                # (finish_reason="length") is an incomplete fragment: a
+                # length-truncated reasoning re-continues as planning prose, so
+                # surfacing that fragment leaks internal planning as the visible
+                # answer (W2-1, live-proven: the model closes reasoning and
+                # answers cleanly once max_tokens is large enough — the leak is
+                # a symptom of a too-small output budget). Keeping the honest
+                # finish_reason="length" result makes the client raise
+                # max_tokens. Scoped to qwen3_5* because other families
+                # (gemma4/M3/openpangu/minimax_m2/Hy3) emit a coherent worked
+                # answer here — an incomplete salvage is a legitimate partial
+                # answer, not a leak, and must still be surfaced (live-proven:
+                # MiniMax-M2.7 truncates its visible worked solution honestly,
+                # no planning leak). See streaming gate for the matching scope.
+                _ns_qwen_scope = _ns_family in ("qwen3_5", "qwen3_5_moe")
                 _ns_answer_complete = (
-                    getattr(_ns_out, "finish_reason", None) != "length"
+                    not _ns_qwen_scope
+                    or getattr(_ns_out, "finish_reason", None) != "length"
                 )
                 if _ns_text and _ns_answer_complete:
                     content_for_parsing = _ns_text
@@ -14886,19 +14892,25 @@ async def create_response(
                     endpoint="Responses visible answer pass (non-stream)",
                 )
                 _ns_text = clean_output_text(getattr(_ns_out, "text", "") or "")
-                # Only adopt the salvage when it actually COMPLETED. A salvage
-                # that itself hit the bounded budget (finish_reason="length") is
-                # an incomplete fragment: for qwen3.5/3.6 a length-truncated
-                # reasoning re-continues as planning prose, so surfacing that
-                # fragment leaks internal planning as the visible answer (W2-1,
-                # live-proven: the model closes reasoning and answers cleanly
-                # once max_tokens is large enough — the leak is a symptom of a
-                # too-small output budget, not a failure to answer). On an
-                # incomplete salvage keep the honest finish_reason="length"
-                # result so the client raises max_tokens; a natural stop within
-                # the bounded budget (the gemma4/M3/Hy3 rescue) is still adopted.
+                # For qwen3.5/3.6 ONLY, adopt the salvage when it actually
+                # COMPLETED. A salvage that itself hit the bounded budget
+                # (finish_reason="length") is an incomplete fragment: a
+                # length-truncated reasoning re-continues as planning prose, so
+                # surfacing that fragment leaks internal planning as the visible
+                # answer (W2-1, live-proven: the model closes reasoning and
+                # answers cleanly once max_tokens is large enough — the leak is
+                # a symptom of a too-small output budget). Keeping the honest
+                # finish_reason="length" result makes the client raise
+                # max_tokens. Scoped to qwen3_5* because other families
+                # (gemma4/M3/openpangu/minimax_m2/Hy3) emit a coherent worked
+                # answer here — an incomplete salvage is a legitimate partial
+                # answer, not a leak, and must still be surfaced (live-proven:
+                # MiniMax-M2.7 truncates its visible worked solution honestly,
+                # no planning leak). See streaming gate for the matching scope.
+                _ns_qwen_scope = _ns_family in ("qwen3_5", "qwen3_5_moe")
                 _ns_answer_complete = (
-                    getattr(_ns_out, "finish_reason", None) != "length"
+                    not _ns_qwen_scope
+                    or getattr(_ns_out, "finish_reason", None) != "length"
                 )
                 if _ns_text and _ns_answer_complete:
                     content_for_parsing = _ns_text

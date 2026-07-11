@@ -1019,6 +1019,8 @@ def _answer_pass_visible_delta(
     already_sent: str,
     request: Any,
     finished: bool,
+    *,
+    holdback: int | None = None,
 ) -> tuple[str, str]:
     """Incremental visible-content delta for the STREAMED bounded answer pass (F6).
 
@@ -1040,10 +1042,14 @@ def _answer_pass_visible_delta(
     if getattr(request, "enable_thinking", None) is False and "</think>" in vis:
         vis = vis.rsplit("</think>", 1)[1]
     full = _finalize_visible_text_for_request(clean_output_text(vis), request)
-    if finished:
+    safe_holdback = max(
+        0,
+        int(_ANS_MARKER_HOLDBACK if holdback is None else holdback),
+    )
+    if finished or safe_holdback == 0:
         target = full
-    elif len(full) > _ANS_MARKER_HOLDBACK:
-        target = full[:-_ANS_MARKER_HOLDBACK]
+    elif len(full) > safe_holdback:
+        target = full[:-safe_holdback]
     else:
         target = ""
     if not target:
@@ -1662,6 +1668,49 @@ def _apply_hy3_reasoning_policy(
         return
     chat_kwargs["reasoning_effort"] = normalized
     ct_kwargs["reasoning_effort"] = normalized
+
+
+def _force_answer_pass_direct_rail(
+    answer_kwargs: dict,
+    *,
+    family_name: str | None,
+) -> None:
+    """Keep a bounded visible-answer retry on the family's direct rail.
+
+    Hy3 ignores ``enable_thinking=False`` and keys its template exclusively on
+    ``reasoning_effort``.  Copying the first-pass kwargs therefore used to keep
+    ``reasoning_effort=high`` on the retry: the final answer was parsed as
+    reasoning and Ollama streamed it in ``message.thinking``.  Normalize both
+    the engine kwarg and template kwarg so every chat-shaped route classifies
+    retry tokens as visible content.
+    """
+    answer_kwargs["enable_thinking"] = False
+    if family_name != "hy_v3":
+        return
+    answer_kwargs["reasoning_effort"] = "no_think"
+    answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
+    answer_ct_kwargs["reasoning_effort"] = "no_think"
+    answer_kwargs["chat_template_kwargs"] = answer_ct_kwargs
+
+
+_REASONING_ANSWER_PASS_FAMILIES = frozenset(
+    {
+        "gemma4",
+        "hy_v3",
+        "minimax_m2",
+        "openpangu_v2",
+        "qwen3_5",
+        "qwen3_5_moe",
+    }
+)
+
+
+def _reasoning_answer_pass_family_label(family_name: str) -> str:
+    return {
+        "hy_v3": "Hy3",
+        "minimax_m2": "MiniMax-M2",
+        "openpangu_v2": "openPangu",
+    }.get(family_name, "Qwen3.5")
 
 
 def _hy3_prompt_starts_in_reasoning(
@@ -9950,6 +9999,8 @@ async def ollama_show(fastapi_request: Request):
 async def ollama_chat(fastapi_request: Request):
     """Ollama-compatible chat — translates to /v1/chat/completions internally."""
     from .api.ollama_adapter import (
+        _now_iso,
+        merge_ollama_stream_terminal,
         ollama_chat_to_openai,
         openai_chat_response_to_ollama,
         openai_chat_chunk_to_ollama_ndjson,
@@ -10182,10 +10233,26 @@ async def ollama_chat(fastapi_request: Request):
     # the adapter's final done-chunk output before yielding it.
     async def ndjson_stream():
         buffered_tcs: list[dict] = []  # ollama-shape {function:{name,arguments}}
-        done_sent = False
+        pending_done: dict | None = None
         async for sse_line in _terminal_finish_guard(stream_chat_completion(
             engine, messages, chat_req, fastapi_request=fastapi_request, **chat_kwargs
         )):
+            # Ollama permits exactly one terminal line, and it must follow all
+            # message content. Chat streaming may produce a provisional
+            # first-pass length terminal before the bounded answer pass. Hold
+            # every terminal until upstream [DONE], merging usage/tool fields.
+            if sse_line.strip() == "data: [DONE]":
+                if pending_done is None:
+                    pending_done = {
+                        "model": model_name,
+                        "created_at": _now_iso(),
+                        "message": {"role": "assistant", "content": ""},
+                        "done": True,
+                        "done_reason": "stop",
+                    }
+                yield json.dumps(pending_done) + "\n"
+                pending_done = None
+                continue
             # Peek at the SSE line to harvest tool_calls and rewrite the
             # chunk so the stateless adapter never sees them. `[DONE]` and
             # non-data lines pass through untouched.
@@ -10256,12 +10323,36 @@ async def ollama_chat(fastapi_request: Request):
             try:
                 _ndjson_done_obj = json.loads(ndjson)
                 if _ndjson_done_obj.get("done") is True:
-                    if done_sent:
-                        continue
-                    done_sent = True
+                    _terminal_message = dict(
+                        _ndjson_done_obj.get("message") or {}
+                    )
+                    if _terminal_message.get("content") or _terminal_message.get(
+                        "thinking"
+                    ):
+                        _payload_obj = dict(_ndjson_done_obj)
+                        _payload_obj["message"] = {
+                            key: value
+                            for key, value in _terminal_message.items()
+                            if key != "tool_calls"
+                        }
+                        _payload_obj["done"] = False
+                        _payload_obj.pop("done_reason", None)
+                        _payload_obj.pop("eval_count", None)
+                        _payload_obj.pop("prompt_eval_count", None)
+                        yield json.dumps(_payload_obj) + "\n"
+                        _terminal_message["content"] = ""
+                        _terminal_message.pop("thinking", None)
+                        _ndjson_done_obj["message"] = _terminal_message
+                    pending_done = merge_ollama_stream_terminal(
+                        pending_done,
+                        _ndjson_done_obj,
+                    )
+                    continue
             except (json.JSONDecodeError, TypeError):
                 pass
             yield ndjson
+        if pending_done is not None:
+            yield json.dumps(pending_done) + "\n"
 
     return _SR(ndjson_stream(), media_type="application/x-ndjson")
 
@@ -12515,8 +12606,12 @@ async def create_chat_completion(
         or getattr(request, "enable_thinking", None) is False
         or (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is False
     )
+    _ns_reasoning_truncated = (
+        bool(reasoning_text)
+        and getattr(output, "finish_reason", None) == "length"
+    )
     if (
-        not content_for_parsing
+        (not content_for_parsing or _ns_reasoning_truncated)
         and reasoning_text
         and not _ns_thinking_off
         and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
@@ -12534,7 +12629,7 @@ async def create_chat_completion(
         except Exception:
             _ns_family = None
         _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
-        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4", "openpangu_v2", "minimax_m2") or _ns_is_m3:
+        if _ns_family in _REASONING_ANSWER_PASS_FAMILIES or _ns_is_m3:
             _ns_cap = int(chat_kwargs.get("max_tokens") or 256)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
             _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
@@ -12546,7 +12641,10 @@ async def create_chat_completion(
                 _ns_budget,
             )
             _ns_kwargs = dict(chat_kwargs)
-            _ns_kwargs["enable_thinking"] = False
+            _force_answer_pass_direct_rail(
+                _ns_kwargs,
+                family_name=_ns_family,
+            )
             _ns_kwargs["max_tokens"] = _ns_budget
             _ns_ct = dict(_ns_kwargs.get("chat_template_kwargs") or {})
             if _ns_is_m3:
@@ -14662,8 +14760,12 @@ async def create_response(
         or getattr(request, "enable_thinking", None) is False
         or (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is False
     )
+    _ns_reasoning_truncated = (
+        bool(reasoning_text)
+        and getattr(output, "finish_reason", None) == "length"
+    )
     if (
-        not content_for_parsing
+        (not content_for_parsing or _ns_reasoning_truncated)
         and reasoning_text
         and not _ns_thinking_off
         and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
@@ -14681,7 +14783,7 @@ async def create_response(
         except Exception:
             _ns_family = None
         _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
-        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4", "openpangu_v2", "minimax_m2") or _ns_is_m3:
+        if _ns_family in _REASONING_ANSWER_PASS_FAMILIES or _ns_is_m3:
             _ns_cap = int(chat_kwargs.get("max_tokens") or 256)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
             _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
@@ -14693,7 +14795,10 @@ async def create_response(
                 _ns_budget,
             )
             _ns_kwargs = dict(chat_kwargs)
-            _ns_kwargs["enable_thinking"] = False
+            _force_answer_pass_direct_rail(
+                _ns_kwargs,
+                family_name=_ns_family,
+            )
             _ns_kwargs["max_tokens"] = _ns_budget
             _ns_ct = dict(_ns_kwargs.get("chat_template_kwargs") or {})
             if _ns_is_m3:
@@ -15446,7 +15551,7 @@ async def stream_chat_completion(
     streamed_content = (
         ""  # Track content actually yielded to client (for post-stream dedup)
     )
-    deferred_m3_visible_content = ""
+    deferred_reasoning_visible_content = ""
     content_was_emitted = False  # Whether any content chunk was actually sent
     reasoning_was_streamed = False  # Whether any reasoning_content chunk was sent
 
@@ -15532,7 +15637,7 @@ async def stream_chat_completion(
             reasoning_only_answer_family = ""
     if (
         not reasoning_only_answer_enabled
-        and _family_name in ("qwen3_5", "qwen3_5_moe", "openpangu_v2", "minimax_m2")
+        and _family_name in _REASONING_ANSWER_PASS_FAMILIES
         and _effective_thinking is not False
         and not _stream_tools_available
     ):
@@ -15546,8 +15651,8 @@ async def stream_chat_completion(
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
             reasoning_only_answer_budget = max(0, _requested_output_budget)
             reasoning_only_answer_enabled = True
-            reasoning_only_answer_family = (
-                "openPangu" if _family_name == "openpangu_v2" else ("MiniMax-M2" if _family_name == "minimax_m2" else "Qwen3.5")
+            reasoning_only_answer_family = _reasoning_answer_pass_family_label(
+                _family_name
             )
             _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
             if _requested_thinking_budget is not None:
@@ -15874,13 +15979,12 @@ async def stream_chat_completion(
                         yield f"data: {_dump_sse_json(heartbeat)}\n\n"
                     continue
 
-                # MiniMax-M3 forced/adaptive reasoning can spend the whole
-                # first-pass token budget in the prompt-opened <mm:think>
-                # rail, then emit only a partial visible answer before
-                # finish_reason="length". Defer no-tool visible content from
-                # that first pass until we know whether it ended cleanly; if
-                # it truncates, the post-stream thinking-off answer pass below
-                # emits the usable visible answer instead of leaking a prefix.
+                # A family with the bounded reasoning answer pass can spend
+                # almost the whole first-pass budget in reasoning, then emit a
+                # partial visible prefix before finish_reason="length". Defer
+                # no-tool visible content until the first pass ends cleanly; if
+                # it truncates, the direct-rail answer pass below emits the
+                # complete answer instead of leaking an unusable prefix.
                 #
                 # Defer the RAW parser increment BEFORE the display-delta
                 # transforms: the deferral keeps streamed_content empty, so
@@ -15896,8 +16000,11 @@ async def stream_chat_completion(
                 # store here. The deferral only arms when the request has no
                 # tools (see m3_reasoning_only_answer_enabled), so it cannot
                 # shadow the _suppress_tools display path below.
-                if m3_reasoning_only_answer_enabled and emit_content:
-                    deferred_m3_visible_content += emit_content
+                if (
+                    m3_reasoning_only_answer_enabled
+                    or reasoning_only_answer_enabled
+                ) and emit_content:
+                    deferred_reasoning_visible_content += emit_content
                     emit_content = None
                 elif _suppress_tools and emit_content:
                     emit_content = _suppressed_tool_display_delta(
@@ -16326,34 +16433,52 @@ async def stream_chat_completion(
 
     if (
         not content_was_emitted
-        and m3_reasoning_only_answer_enabled
-        and deferred_m3_visible_content.strip()
+        and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
+        and deferred_reasoning_visible_content.strip()
         and (not last_output or getattr(last_output, "finish_reason", None) != "length")
     ):
         buffered_text = _finalize_visible_text_for_request(
-            clean_output_text(deferred_m3_visible_content),
+            clean_output_text(deferred_reasoning_visible_content),
             request,
         )
         if buffered_text:
             content_was_emitted = True
             streamed_content += buffered_text
-            buffered_chunk = ChatCompletionChunk(
-                id=response_id,
-                created=_created_ts,
-                model=request.model,
-                choices=[
-                    ChatCompletionChunkChoice(
-                        delta=ChatCompletionChunkDelta(content=buffered_text),
-                        finish_reason=(
-                            getattr(last_output, "finish_reason", None)
-                            if last_output
-                            else "stop"
-                        )
-                        or "stop",
-                    )
-                ],
+            # Hy3's parser may reveal a short direct answer only once its rail
+            # closes. Preserve Ollama's incremental content contract by
+            # replaying that finalized safe text in bounded deltas instead of
+            # one terminal blob. Other marker-heavy families retain the prior
+            # single finalized chunk.
+            buffered_parts = (
+                [
+                    buffered_text[index : index + 4]
+                    for index in range(0, len(buffered_text), 4)
+                ]
+                if _family_name == "hy_v3"
+                else [buffered_text]
             )
-            yield f"data: {_dump_sse_json(buffered_chunk)}\n\n"
+            for index, buffered_part in enumerate(buffered_parts):
+                buffered_chunk = ChatCompletionChunk(
+                    id=response_id,
+                    created=_created_ts,
+                    model=request.model,
+                    choices=[
+                        ChatCompletionChunkChoice(
+                            delta=ChatCompletionChunkDelta(content=buffered_part),
+                            finish_reason=(
+                                (
+                                    getattr(last_output, "finish_reason", None)
+                                    if last_output
+                                    else "stop"
+                                )
+                                or "stop"
+                            )
+                            if index == len(buffered_parts) - 1
+                            else None,
+                        )
+                    ],
+                )
+                yield f"data: {_dump_sse_json(buffered_chunk)}\n\n"
 
     # Fallback: if reasoning parser produced only reasoning with no content,
     # emit the reasoning text as content so clients always get a usable response.
@@ -16424,7 +16549,10 @@ async def stream_chat_completion(
             }
         ]
         answer_kwargs = dict(kwargs)
-        answer_kwargs["enable_thinking"] = False
+        _force_answer_pass_direct_rail(
+            answer_kwargs,
+            family_name=_family_name,
+        )
         answer_kwargs["max_tokens"] = _remaining_answer_pass_budget(
             _answer_budget or 256,
             completion_tokens,
@@ -16479,6 +16607,11 @@ async def stream_chat_completion(
                     _ans_sent,
                     request,
                     bool(getattr(answer_output, "finished", False)),
+                    # Hy3's retry is explicitly forced onto no_think, so no
+                    # reasoning marker can resolve later. Stream every token;
+                    # holding 48 characters made short Ollama answers arrive
+                    # as one terminal message.content chunk.
+                    holdback=0 if _family_name == "hy_v3" else _ANS_MARKER_HOLDBACK,
                 )
                 if not _delta:
                     continue
@@ -17017,7 +17150,7 @@ async def stream_responses_api(
             reasoning_only_answer_family = ""
     if (
         not reasoning_only_answer_enabled
-        and _family_name in ("qwen3_5", "qwen3_5_moe", "openpangu_v2", "minimax_m2")
+        and _family_name in _REASONING_ANSWER_PASS_FAMILIES
         and _effective_thinking is not False
         and not _stream_tools_available
     ):
@@ -17031,8 +17164,8 @@ async def stream_responses_api(
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
             reasoning_only_answer_budget = max(0, _requested_output_budget)
             reasoning_only_answer_enabled = True
-            reasoning_only_answer_family = (
-                "openPangu" if _family_name == "openpangu_v2" else ("MiniMax-M2" if _family_name == "minimax_m2" else "Qwen3.5")
+            reasoning_only_answer_family = _reasoning_answer_pass_family_label(
+                _family_name
             )
             _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
             if _requested_thinking_budget is not None:
@@ -17912,7 +18045,10 @@ async def stream_responses_api(
                 }
             ]
             answer_kwargs = dict(kwargs)
-            answer_kwargs["enable_thinking"] = False
+            _force_answer_pass_direct_rail(
+                answer_kwargs,
+                family_name=_family_name,
+            )
             answer_kwargs["max_tokens"] = _remaining_answer_pass_budget(
                 _answer_budget or 256,
                 completion_tokens,
@@ -17964,6 +18100,11 @@ async def stream_responses_api(
                         _ans_sent,
                         request,
                         bool(getattr(answer_output, "finished", False)),
+                        holdback=(
+                            0
+                            if _family_name == "hy_v3"
+                            else _ANS_MARKER_HOLDBACK
+                        ),
                     )
                     if not _delta:
                         continue

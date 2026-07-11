@@ -292,3 +292,98 @@ def test_chat_stream_chunk_converts_to_ollama_generate_ndjson():
 
     assert out["response"] == "Pa"
     assert out["done"] is False
+
+
+def test_hy3_answer_pass_streams_final_text_as_ollama_content():
+    """Hy3's bounded retry must leave the high-effort thinking rail.
+
+    If ``reasoning_effort=high`` survives from the first pass, the parser sends
+    the final answer as ``reasoning_content`` and Ollama misroutes it to
+    ``message.thinking``.  The direct-rail retry produces a content delta; the
+    adapter must preserve that channel while keeping genuine reasoning separate.
+    """
+    from vmlx_engine import server
+    from vmlx_engine.api.ollama_adapter import openai_chat_chunk_to_ollama_ndjson
+
+    answer_kwargs = {
+        "enable_thinking": True,
+        "reasoning_effort": "high",
+        "chat_template_kwargs": {"reasoning_effort": "high"},
+    }
+    assert "hy_v3" in server._REASONING_ANSWER_PASS_FAMILIES
+    server._force_answer_pass_direct_rail(
+        answer_kwargs,
+        family_name="hy_v3",
+    )
+    assert answer_kwargs == {
+        "enable_thinking": False,
+        "reasoning_effort": "no_think",
+        "chat_template_kwargs": {"reasoning_effort": "no_think"},
+    }
+
+    reasoning_line = "data: " + json.dumps(
+        {
+            "choices": [
+                {
+                    "delta": {"reasoning_content": "internal rail"},
+                    "finish_reason": None,
+                }
+            ]
+        }
+    )
+    answer_line = "data: " + json.dumps(
+        {
+            "choices": [
+                {
+                    "delta": {"content": "FINAL-CHECK"},
+                    "finish_reason": None,
+                }
+            ]
+        }
+    )
+    reasoning = json.loads(openai_chat_chunk_to_ollama_ndjson(reasoning_line, "hy3"))
+    answer = json.loads(openai_chat_chunk_to_ollama_ndjson(answer_line, "hy3"))
+
+    assert reasoning["message"] == {
+        "role": "assistant",
+        "content": "",
+        "thinking": "internal rail",
+    }
+    assert answer["message"] == {
+        "role": "assistant",
+        "content": "FINAL-CHECK",
+    }
+
+
+def test_ollama_terminal_merge_defers_length_until_after_answer_and_usage():
+    from vmlx_engine.api.ollama_adapter import merge_ollama_stream_terminal
+
+    provisional = {
+        "model": "hy3",
+        "message": {"role": "assistant", "content": "", "thinking": "reason"},
+        "done": True,
+        "done_reason": "length",
+    }
+    answer_stop = {
+        "model": "hy3",
+        "message": {"role": "assistant", "content": ""},
+        "done": True,
+        "done_reason": "stop",
+    }
+    usage = {
+        "model": "hy3",
+        "message": {"role": "assistant", "content": ""},
+        "done": True,
+        "done_reason": "stop",
+        "eval_count": 428,
+        "prompt_eval_count": 97,
+    }
+
+    merged = merge_ollama_stream_terminal(provisional, answer_stop)
+    merged = merge_ollama_stream_terminal(merged, usage)
+
+    assert merged["done"] is True
+    assert merged["done_reason"] == "stop"
+    assert merged["eval_count"] == 428
+    assert merged["prompt_eval_count"] == 97
+    assert merged["message"]["thinking"] == "reason"

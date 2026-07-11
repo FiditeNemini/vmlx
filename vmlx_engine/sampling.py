@@ -11,10 +11,18 @@ from mlx_lm.sample_utils import make_sampler as _mlx_make_sampler
 
 
 class _SamplerWrapper:
-    def __init__(self, sampler: Callable[[mx.array], mx.array], *, accepts_logits: bool = False):
+    def __init__(
+        self,
+        sampler: Callable[[mx.array], mx.array],
+        *,
+        accepts_logits: bool = False,
+        is_greedy: bool = False,
+    ):
         self._sampler = sampler
         if accepts_logits:
             self._vmlx_accepts_logits = True
+        if is_greedy:
+            self._vmlx_is_greedy = True
 
     def __call__(self, logits: mx.array) -> mx.array:
         return self._sampler(logits)
@@ -42,7 +50,11 @@ def make_sampler(
     """
 
     if float(temp or 0.0) == 0.0:
-        return _SamplerWrapper(lambda x: mx.argmax(x, axis=-1), accepts_logits=True)
+        return _SamplerWrapper(
+            lambda x: mx.argmax(x, axis=-1),
+            accepts_logits=True,
+            is_greedy=True,
+        )
 
     if seed is not None:
         if int(top_k or 0) > 0 and float(min_p or 0.0) == 0.0:

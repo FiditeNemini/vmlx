@@ -374,8 +374,11 @@ def _resolve_sampler(gen_batch: Any):
 def _is_greedy(gen_batch: Any) -> bool:
     """Return whether the active batch uses the deterministic sampler path."""
     if gen_batch.samplers and gen_batch.samplers[0] is not None:
-        return False
-    return True
+        # Seeded requests install a request-local sampler even at temperature
+        # zero. Object presence therefore cannot distinguish stochastic from
+        # greedy: recognize the explicit argmax contract marker.
+        return bool(getattr(gen_batch.samplers[0], "_vmlx_is_greedy", False))
+    return bool(getattr(gen_batch.fallback_sampler, "_vmlx_is_greedy", True))
 
 
 def _proc_list(gen_batch: Any) -> Optional[List[Any]]:

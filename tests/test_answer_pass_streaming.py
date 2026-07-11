@@ -24,7 +24,7 @@ def _req(enable_thinking=True):
     return SimpleNamespace(enable_thinking=enable_thinking)
 
 
-def _drive(raw_chunks, request):
+def _drive(raw_chunks, request, *, holdback=_ANS_MARKER_HOLDBACK):
     """Replicate the streaming loop: accumulate new_text, collect emitted deltas.
 
     The last chunk is delivered with finished=True (the engine's terminal chunk),
@@ -36,7 +36,13 @@ def _drive(raw_chunks, request):
     for i, piece in enumerate(raw_chunks):
         raw += piece
         finished = i == len(raw_chunks) - 1
-        delta, sent = _answer_pass_visible_delta(raw, sent, request, finished)
+        delta, sent = _answer_pass_visible_delta(
+            raw,
+            sent,
+            request,
+            finished,
+            holdback=holdback,
+        )
         if delta:
             deltas.append(delta)
     return deltas, raw
@@ -77,6 +83,14 @@ def test_short_answer_flushes_once_on_finish():
     raw_chunks = [answer[i:i + 3] for i in range(0, len(answer), 3)]
     deltas, raw = _drive(raw_chunks, _req())
     assert deltas == [answer]
+
+
+def test_hy3_direct_rail_short_answer_streams_incrementally():
+    """Hy3 no_think has no late reasoning marker, so it needs no holdback."""
+    chunks = ["TURN", "1: ", "ORBIT", "-731"]
+    deltas, raw = _drive(chunks, _req(enable_thinking=False), holdback=0)
+    assert len(deltas) == len(chunks)
+    assert "".join(deltas) == raw
 
 
 def test_deltas_are_monotonic_prefix_extensions():
@@ -144,3 +158,23 @@ def test_chat_legacy_reasoning_fallback_cannot_precede_answer_pass():
         "not (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)"
         in legacy_block
     )
+
+
+def test_all_bounded_answer_families_defer_partial_first_pass_content():
+    """A length-truncated visible prefix must not suppress the direct retry."""
+    source = inspect.getsource(server_mod.stream_chat_completion)
+    assert (
+        "m3_reasoning_only_answer_enabled\n"
+        "                    or reasoning_only_answer_enabled"
+    ) in source
+    assert "deferred_reasoning_visible_content += emit_content" in source
+    assert 'if _family_name == "hy_v3"' in source
+    assert "buffered_text[index : index + 4]" in source
+
+
+def test_nonstream_answer_pass_replaces_length_truncated_visible_prefix():
+    chat_source = inspect.getsource(server_mod.create_chat_completion)
+    responses_source = inspect.getsource(server_mod.create_response)
+    expected = "(not content_for_parsing or _ns_reasoning_truncated)"
+    assert expected in chat_source
+    assert expected in responses_source

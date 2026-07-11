@@ -506,6 +506,58 @@ def openai_chat_chunk_to_ollama_ndjson(sse_line: str, model: str) -> str | None:
     return json.dumps(result) + "\n"
 
 
+def merge_ollama_stream_terminal(
+    pending: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge deferred Ollama terminal chunks into one final done line.
+
+    Chat streaming can emit a first-pass ``length`` terminal, then run a
+    bounded visible-answer pass, then emit a ``stop`` terminal and a separate
+    usage terminal. Ollama requires exactly one ``done:true`` line after every
+    content chunk. Preserve tool calls and usage while allowing the answer-pass
+    ``stop`` reason to replace the provisional first-pass ``length`` reason.
+    """
+    merged: dict[str, Any] = dict(pending or {})
+    merged.update(
+        {
+            "model": current.get("model", merged.get("model", "")),
+            "created_at": current.get("created_at", merged.get("created_at", _now_iso())),
+            "done": True,
+        }
+    )
+
+    previous_message = dict((pending or {}).get("message") or {})
+    current_message = dict(current.get("message") or {})
+    message: dict[str, Any] = {
+        "role": current_message.get(
+            "role",
+            previous_message.get("role", "assistant"),
+        ),
+        "content": current_message.get("content")
+        or previous_message.get("content")
+        or "",
+    }
+    for key in ("thinking", "tool_calls"):
+        value = current_message.get(key) or previous_message.get(key)
+        if value:
+            message[key] = value
+    merged["message"] = message
+
+    for key in ("eval_count", "prompt_eval_count", "total_duration"):
+        if key in current:
+            merged[key] = current[key]
+
+    if message.get("tool_calls"):
+        merged["done_reason"] = "tool_calls"
+    else:
+        merged["done_reason"] = current.get(
+            "done_reason",
+            merged.get("done_reason", "stop"),
+        )
+    return merged
+
+
 def openai_chat_chunk_to_ollama_generate_ndjson(
     sse_line: str, model: str
 ) -> str | None:

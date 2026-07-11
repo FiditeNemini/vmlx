@@ -21,3 +21,14 @@ def test_argmax_sampler_accepts_logits():
     assert getattr(sampler, "_vmlx_accepts_logits", False) is True
     token = int(sampler(mx.array([[0.1, 0.2, 9.0]], dtype=mx.float32)).item())
     assert token == 2
+
+
+def test_seeded_argmax_sampler_keeps_mtp_on_greedy_identity_path():
+    from types import SimpleNamespace
+
+    from vmlx_engine.patches.mlx_lm_mtp.batch_generator import _is_greedy
+
+    sampler = make_sampler(temp=0.0, seed=731)
+    assert getattr(sampler, "_vmlx_is_greedy", False) is True
+    batch = SimpleNamespace(samplers=[sampler], fallback_sampler=None)
+    assert _is_greedy(batch) is True

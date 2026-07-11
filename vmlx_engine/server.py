@@ -12504,7 +12504,7 @@ async def create_chat_completion(
         except Exception:
             _ns_family = None
         _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
-        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4", "openpangu_v2") or _ns_is_m3:
+        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4", "openpangu_v2", "minimax_m2") or _ns_is_m3:
             _ns_cap = int(chat_kwargs.get("max_tokens") or 256)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
             _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
@@ -14651,7 +14651,7 @@ async def create_response(
         except Exception:
             _ns_family = None
         _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
-        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4", "openpangu_v2") or _ns_is_m3:
+        if _ns_family in ("qwen3_5", "qwen3_5_moe", "gemma4", "openpangu_v2", "minimax_m2") or _ns_is_m3:
             _ns_cap = int(chat_kwargs.get("max_tokens") or 256)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
             _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
@@ -15502,7 +15502,7 @@ async def stream_chat_completion(
             reasoning_only_answer_family = ""
     if (
         not reasoning_only_answer_enabled
-        and _family_name in ("qwen3_5", "qwen3_5_moe", "openpangu_v2")
+        and _family_name in ("qwen3_5", "qwen3_5_moe", "openpangu_v2", "minimax_m2")
         and _effective_thinking is not False
         and not _stream_tools_available
     ):
@@ -15517,7 +15517,7 @@ async def stream_chat_completion(
             reasoning_only_answer_budget = max(0, _requested_output_budget)
             reasoning_only_answer_enabled = True
             reasoning_only_answer_family = (
-                "openPangu" if _family_name == "openpangu_v2" else "Qwen3.5"
+                "openPangu" if _family_name == "openpangu_v2" else ("MiniMax-M2" if _family_name == "minimax_m2" else "Qwen3.5")
             )
             _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
             if _requested_thinking_budget is not None:
@@ -16986,7 +16986,7 @@ async def stream_responses_api(
             reasoning_only_answer_family = ""
     if (
         not reasoning_only_answer_enabled
-        and _family_name in ("qwen3_5", "qwen3_5_moe", "openpangu_v2")
+        and _family_name in ("qwen3_5", "qwen3_5_moe", "openpangu_v2", "minimax_m2")
         and _effective_thinking is not False
         and not _stream_tools_available
     ):
@@ -17001,7 +17001,7 @@ async def stream_responses_api(
             reasoning_only_answer_budget = max(0, _requested_output_budget)
             reasoning_only_answer_enabled = True
             reasoning_only_answer_family = (
-                "openPangu" if _family_name == "openpangu_v2" else "Qwen3.5"
+                "openPangu" if _family_name == "openpangu_v2" else ("MiniMax-M2" if _family_name == "minimax_m2" else "Qwen3.5")
             )
             _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
             if _requested_thinking_budget is not None:

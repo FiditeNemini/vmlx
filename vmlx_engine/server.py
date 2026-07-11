@@ -1055,8 +1055,24 @@ def _answer_pass_visible_delta(
     return target[len(already_sent):], target
 
 
-def _remaining_answer_pass_budget(cap: Any, used: Any) -> int:
-    """Return the unspent portion of one client-visible output-token cap."""
+# Minimum tokens the reasoning-runaway answer pass may draw even when the first
+# (reasoning) pass already consumed the whole cap. A native always-reasoning or
+# degraded runaway reasoner can fill the entire budget inside its hidden rail;
+# with a hard-zero remainder the visible answer comes back EMPTY (2026-07-11
+# reasoning-stress: Chat/Responses/Anthropic reasoning-on turn-3 empty at 384
+# reasoning tokens). An empty turn is a worse failure than a small, BOUNDED
+# overage, so the answer pass is guaranteed this floor. This is distinct from
+# the audit-Critical-1 defect, which was an UNBOUNDED fresh-full-budget retry
+# (up to ~2x the cap); the overage here is bounded by ANSWER_PASS_FLOOR.
+ANSWER_PASS_FLOOR = 48
+
+
+def _remaining_answer_pass_budget(
+    cap: Any, used: Any, floor: int = ANSWER_PASS_FLOOR
+) -> int:
+    """Return the answer-pass token budget: the unspent cap, floored so the
+    visible answer is never starved to zero. The floor is a bounded overage,
+    not the unbounded fresh-full-budget the audit removed."""
     try:
         resolved_cap = max(0, int(cap or 0))
     except (TypeError, ValueError):
@@ -1065,7 +1081,12 @@ def _remaining_answer_pass_budget(cap: Any, used: Any) -> int:
         resolved_used = max(0, int(used or 0))
     except (TypeError, ValueError):
         resolved_used = 0
-    return max(0, resolved_cap - resolved_used)
+    remaining = max(0, resolved_cap - resolved_used)
+    try:
+        resolved_floor = max(0, int(floor))
+    except (TypeError, ValueError):
+        resolved_floor = 0
+    return max(resolved_floor, remaining)
 
 
 def _visible_text_for_dsv4_completion(output: Any, engine: Any, request: Any) -> str:

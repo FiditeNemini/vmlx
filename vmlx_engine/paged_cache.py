@@ -174,6 +174,13 @@ class CacheBlock:
     # (0 when cache_data is None). Tracked so the manager can hold a byte ceiling
     # like the memory-aware path instead of an unbounded block count.
     resident_bytes: int = 0
+    # Native path-dependent composite state (DSV4 SWA+CSA/HCA, ZAYA CCA
+    # conv_state+prev_hs, mixed-SWA rotating-window) is deliberately kept
+    # resident by the store path: an immediate same-process repeat can hit the
+    # block table before the async L2 write is index-readable and would
+    # otherwise reconstruct as None. Blocks flagged here are excluded from the
+    # byte-ceiling LRU so enforce_byte_budget can't drop that guarantee.
+    keep_resident: bool = False
 
     # Metadata
     token_count: int = 0
@@ -749,15 +756,28 @@ class PagedCacheManager:
         Recursively sums ``.nbytes`` of any array-like leaf (mlx arrays, incl.
         quantized) in the nested (keys, values) / composite structure. Non-array
         leaves (marker strings like "skip"/"kv", None, ints) contribute nothing.
-        Returns 0 on any error — accounting is advisory, never fatal.
+        Recurses into tuples/lists AND dict values, because DSV4's native
+        composite state (``("deepseek_v4", state_tree, meta, ...)``) and other
+        pytree-structured cache payloads nest their largest arrays under mapping
+        leaves — without dict recursion those undercount to zero and the byte
+        ceiling never triggers for DSV4. Returns 0 on any error — accounting is
+        advisory, never fatal.
         """
         total = 0
+        _seen: set = set()
 
         def _add(x: Any) -> None:
             nonlocal total
             nb = getattr(x, "nbytes", None)
             if isinstance(nb, int):
                 total += nb
+            elif isinstance(x, dict):
+                # Guard against pathological self-referential state trees.
+                if id(x) in _seen:
+                    return
+                _seen.add(id(x))
+                for e in x.values():
+                    _add(e)
             elif isinstance(x, (tuple, list)):
                 for e in x:
                     _add(e)
@@ -794,6 +814,7 @@ class PagedCacheManager:
                 and not b.is_null
                 and b.cache_data is not None
                 and b.block_hash is not None
+                and not b.keep_resident
             ]
             candidates.sort(key=lambda b: b.last_access)
             for block in candidates:
@@ -1600,6 +1621,12 @@ class PagedCacheManager:
                 block.reset_hash()
                 block.cache_data = None
                 block.cache_data_from_disk = False
+                block.resident_bytes = 0
+
+            # Every cache_data mirror was just dropped; the resident-byte
+            # accounting must return to zero or it stays a phantom positive that
+            # makes enforce_byte_budget over-evict every future store forever.
+            self.resident_bytes = 0
 
             self.stats.evictions = 0
             self.stats.cache_hits = 0
@@ -1619,6 +1646,11 @@ class PagedCacheManager:
             self.hash_to_block.clear()
             self.request_tables.clear()
             self.allocated_blocks.clear()
+
+            # Fresh block pool holds no cache_data mirror; drop the resident-byte
+            # accounting to zero so the byte ceiling doesn't over-evict on the
+            # next store (the recreated blocks default resident_bytes=0).
+            self.resident_bytes = 0
 
             # Reserve null block
             self.null_block = self.free_block_queue.popleft()

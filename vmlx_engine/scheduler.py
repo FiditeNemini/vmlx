@@ -7275,6 +7275,39 @@ class Scheduler:
                         finally:
                             # Clear extracted cache reference to help GC
                             request._extracted_cache = None
+                            # store_cache() re-registered this request in the
+                            # BlockAwarePrefixCache._request_tables map and holds
+                            # the freshly-stored / hash-deduped blocks at
+                            # ref_count>=1. The pre-store tracking cleanup at the
+                            # top of _cleanup_finished ran BEFORE this store, so
+                            # without a second release the completed request's
+                            # blocks stay pinned at ref>=1 forever: neither the
+                            # block-count LRU nor enforce_byte_budget can reclaim
+                            # them (both only evict ref==0 blocks), and the in-RAM
+                            # KV mirror ratchets upward with every distinct prompt.
+                            # Settle the stored blocks to "cached but free" so
+                            # memory pressure can reclaim them while they remain
+                            # prefix-reusable. Mirrors the pre-store idiom above.
+                            try:
+                                _stored_entry = (
+                                    self.block_aware_cache._request_tables.pop(
+                                        request_id, None
+                                    )
+                                )
+                                self.block_aware_cache.paged_cache.release_request_refs(
+                                    _stored_entry.block_table
+                                    if _stored_entry
+                                    else None
+                                )
+                                self.block_aware_cache.paged_cache.detach_request(
+                                    request_id
+                                )
+                            except Exception as _rel_e:
+                                logger.debug(
+                                    "Post-store paged ref release failed for %s: %s",
+                                    request_id,
+                                    _rel_e,
+                                )
                     else:
                         logger.info(
                             "Skipping paged cache store for %s: no extracted cache "

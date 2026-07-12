@@ -87,3 +87,69 @@ def test_enforce_noop_when_within_budget():
     _cache_a_block(mgr, mgr.blocks[1], 111, 400)
     assert mgr.enforce_byte_budget() == 0
     assert mgr.blocks[1].cache_data is not None
+
+
+def test_enforce_skips_keep_resident_native_state():
+    """DSV4/ZAYA/rotating-SWA composite blocks are flagged keep_resident and must
+    survive the byte ceiling — their RAM mirror has to outlive the async L2 write
+    so an immediate same-process repeat can reconstruct without corruption."""
+    mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=500)
+    # Oldest is the protected composite block; the plain block is newer.
+    _cache_a_block(mgr, mgr.blocks[1], 111, 600, last_access=1.0)  # LRU, protected
+    mgr.blocks[1].keep_resident = True
+    _cache_a_block(mgr, mgr.blocks[2], 222, 400, last_access=2.0)  # plain
+    assert mgr.resident_bytes == 1000
+    evicted = mgr.enforce_byte_budget()
+    # Only the plain block is eligible even though the protected one is LRU+biggest.
+    assert mgr.blocks[1].cache_data is not None  # keep_resident preserved
+    assert mgr.blocks[2].cache_data is None
+    assert evicted == 1
+    assert mgr.resident_bytes == 600
+
+
+def test_clear_resets_resident_accounting():
+    """clear() recreates the block pool (fresh resident_bytes=0 per block); the
+    global counter must follow or it stays a phantom positive that makes every
+    future store over-evict."""
+    mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=10_000)
+    _cache_a_block(mgr, mgr.blocks[1], 111, 4000)
+    _cache_a_block(mgr, mgr.blocks[2], 222, 4000)
+    assert mgr.resident_bytes == 8000
+    mgr.clear()
+    assert mgr.resident_bytes == 0
+    # A fresh store after clear accounts only its own bytes (no phantom carry).
+    _cache_a_block(mgr, mgr.blocks[1], 333, 1000)
+    assert mgr.resident_bytes == 1000
+
+
+def test_reset_prefix_cache_resets_resident_accounting():
+    mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=10_000)
+    _cache_a_block(mgr, mgr.blocks[1], 111, 4000)
+    assert mgr.resident_bytes == 4000
+    assert mgr.reset_prefix_cache() is True
+    assert mgr.resident_bytes == 0
+    assert all(b.resident_bytes == 0 for b in mgr.blocks)
+
+
+def test_estimate_block_nbytes_recurses_dicts():
+    """DSV4 composite state nests its largest arrays under mapping leaves; without
+    dict recursion the estimate undercounts to zero and the ceiling never fires."""
+
+    class _Arr:
+        def __init__(self, nbytes):
+            self.nbytes = nbytes
+
+    # tuple → dict → list → array leaves (DSV4-style pytree state)
+    cache_data = (
+        "deepseek_v4",
+        {"layer0": [_Arr(1000), _Arr(2000)], "layer1": {"k": _Arr(500)}},
+        "meta",
+    )
+    assert PagedCacheManager.estimate_block_nbytes(cache_data) == 3500
+    # Plain (keys, values) list path still works.
+    assert PagedCacheManager.estimate_block_nbytes([(_Arr(10), _Arr(20))]) == 30
+    # Self-referential dict must not infinite-loop.
+    d = {}
+    d["self"] = d
+    d["arr"] = _Arr(42)
+    assert PagedCacheManager.estimate_block_nbytes(d) == 42

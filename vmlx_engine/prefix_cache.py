@@ -2169,6 +2169,11 @@ class BlockAwarePrefixCache:
                     else:
                         block.cache_data = block_kv_data
                         block.cache_data_from_disk = False
+                        # Native composite state (DSV4/ZAYA/rotating-SWA) must
+                        # survive until its async L2 write is index-readable;
+                        # flag it so the byte ceiling never evicts the RAM mirror
+                        # out from under an immediate same-process repeat.
+                        block.keep_resident = keep_in_ram
                         if self.paged_cache.max_resident_bytes > 0:
                             self.paged_cache._note_resident(
                                 block,

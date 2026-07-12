@@ -16637,23 +16637,17 @@ async def stream_chat_completion(
         and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
         and accumulated_reasoning.strip()
         and not tool_calls_emitted
-        # W2-1: do NOT fabricate a streamed answer for qwen3.5/3.6 when the
-        # reasoning itself was budget-truncated (finish_reason="length"). Those
-        # models reason verbosely and never close </think> within a small
-        # max_tokens; the bounded thinking-off salvage then re-continues the
-        # truncated reasoning as planning prose and streams it as the visible
-        # answer (live-proven: the model closes reasoning and answers cleanly
-        # once max_tokens is large enough — the leak is a too-small-budget
-        # symptom, so the honest result is finish_reason="length"). Non-stream
-        # discards an incomplete salvage after the fact; F6 streams the salvage
-        # incrementally so already-sent deltas can't be recalled, hence a
-        # firing-time gate. Scoped to qwen3_5* only: MiniMax-M3/gemma4/Hy3
-        # produce a COMPLETE bounded answer on length-truncation and still rely
-        # on this rescue (test_minimax_m3_chat_stream_length_truncated_...).
-        and not (
-            getattr(last_output, "finish_reason", None) == "length"
-            and _family_name in ("qwen3_5", "qwen3_5_moe")
-        )
+        # W2-1 (parity fix): qwen3_5* used to be SUPPRESSED here whenever the
+        # first pass hit finish_reason="length" — the streamed salvage can't be
+        # recalled, so a length-truncated (leaky) salvage was pre-empted. But
+        # that starved the UI (streaming) of a visible answer while the API
+        # (non-stream) answered fine: non-stream RUNS the bounded thinking-off
+        # pass and adopts it only if it COMPLETES. We now match that here by
+        # BUFFERING the qwen3_5* pass (see _buffer_answer_pass): hold every delta
+        # until the pass finishes, then emit only if it completed cleanly
+        # (finish_reason != "length"); a truncated salvage is discarded before
+        # any byte is sent, so planning prose still can't leak. All reasoning
+        # modes (on/auto) arm this; explicit thinking-off never reaches here.
         and _remaining_answer_pass_budget(
             (
                 m3_reasoning_only_answer_budget
@@ -16718,10 +16712,20 @@ async def stream_chat_completion(
             # apply the same clean_output_text + </think> split the non-streaming
             # path used (marker-length holdback until finish) — the streamed text
             # is byte-identical to the old single chunk, just incremental.
+            #
+            # qwen3_5* EXCEPTION (W2-1 parity): a length-truncated thinking-off
+            # salvage can re-continue the cut reasoning as planning prose, and a
+            # streamed delta can't be recalled. So for qwen3_5* we BUFFER the
+            # whole pass (emit nothing during the loop) and emit it in one delta
+            # afterwards ONLY if it completed cleanly — matching the non-stream
+            # run-then-adopt-if-complete semantics without risking a leak.
+            _buffer_answer_pass = _family_name in ("qwen3_5", "qwen3_5_moe")
+            _ans_budget_cap = int(answer_kwargs.get("max_tokens") or 0)
             _ans_raw = ""
             _ans_sent = ""
             _ans_ct = 0
             _ans_any = False
+            _ans_last_out = None
             async for answer_output in _stream_with_keepalive(
                 engine.stream_chat(messages=answer_messages, **answer_kwargs),
                 total_timeout=_stream_timeout,
@@ -16738,10 +16742,14 @@ async def stream_chat_completion(
                     if hasattr(engine, "abort_request"):
                         await engine.abort_request(f"{response_id}:visible-answer")
                     break
+                _ans_last_out = answer_output
                 _ans_ct = (
                     int(getattr(answer_output, "completion_tokens", 0) or 0) or _ans_ct
                 )
                 _ans_raw += getattr(answer_output, "new_text", "") or ""
+                if _buffer_answer_pass:
+                    # Accumulate only; emit after we confirm clean completion.
+                    continue
                 _delta, _ans_sent = _answer_pass_visible_delta(
                     _ans_raw,
                     _ans_sent,
@@ -16768,6 +16776,40 @@ async def stream_chat_completion(
                     ],
                 )
                 yield f"data: {_dump_sse_json(answer_chunk)}\n\n"
+            if _buffer_answer_pass:
+                # Emit the buffered qwen3_5* answer as one delta, but ONLY if the
+                # pass itself completed. A pass that hit its bounded budget
+                # (finish_reason="length" or spent the whole cap) is the W2-1
+                # planning-prose leak risk and is discarded → honest empty +
+                # diagnostic, which tells the client to raise max_tokens.
+                _ans_truncated = (
+                    getattr(_ans_last_out, "finish_reason", None) == "length"
+                    or (_ans_budget_cap and _ans_ct >= _ans_budget_cap)
+                )
+                _full_delta, _ans_sent = _answer_pass_visible_delta(
+                    _ans_raw, "", request, True, holdback=0
+                )
+                if _full_delta and not _ans_truncated:
+                    _ans_any = True
+                    answer_chunk = ChatCompletionChunk(
+                        id=response_id,
+                        created=_created_ts,
+                        model=request.model,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                delta=ChatCompletionChunkDelta(content=_full_delta),
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+                    yield f"data: {_dump_sse_json(answer_chunk)}\n\n"
+                elif _ans_truncated:
+                    logger.info(
+                        "%s streaming answer pass truncated (finish=length, "
+                        "ct=%d/%d) — discarding to avoid planning-prose leak; "
+                        "client should raise max_tokens",
+                        _answer_family, _ans_ct, _ans_budget_cap,
+                    )
             if _ans_any:
                 content_was_emitted = True
                 streamed_content += _ans_sent
@@ -18153,17 +18195,12 @@ async def stream_responses_api(
             and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
             and accumulated_reasoning.strip()
             and not tool_calls
-            # W2-1 (streaming Responses sibling of stream_chat_completion): do NOT
-            # fabricate a streamed answer for qwen3.5/3.6 when the reasoning was
-            # budget-truncated (finish_reason="length"). The bounded thinking-off
-            # salvage re-continues the truncated reasoning as planning prose and
-            # streams it as the visible answer; F6 can't recall sent deltas, so
-            # gate at firing. Scoped to qwen3_5* only — M3/gemma4/openpangu/Hy3
-            # emit a COMPLETE bounded answer here and still rely on this rescue.
-            and not (
-                getattr(last_output, "finish_reason", None) == "length"
-                and _family_name in ("qwen3_5", "qwen3_5_moe")
-            )
+            # W2-1 parity (streaming Responses sibling of stream_chat_completion):
+            # RUN the qwen3_5* pass even on a length-truncated first pass, but
+            # BUFFER it (see _buffer_answer_pass below) and emit only on clean
+            # completion — matching the non-stream run-then-adopt-if-complete
+            # semantics without risking a streamed planning-prose leak. All
+            # reasoning modes (on/auto) arm this; explicit off never reaches here.
             and _remaining_answer_pass_budget(
                 (
                     m3_reasoning_only_answer_budget
@@ -18231,9 +18268,17 @@ async def stream_responses_api(
                 # marker-length tail so transient partial-marker fragments are
                 # re-stripped before they escape. Final text is identical to the
                 # old single delta — just incremental.
+                # qwen3_5* EXCEPTION (W2-1 parity): buffer the whole pass and
+                # emit only if it completes cleanly — see the Chat Completions
+                # site. A streamed output_text.delta can't be recalled, so a
+                # length-truncated (leaky) salvage must be discarded before any
+                # delta is sent.
+                _buffer_answer_pass = _family_name in ("qwen3_5", "qwen3_5_moe")
+                _ans_budget_cap = int(answer_kwargs.get("max_tokens") or 0)
                 _ans_raw = ""
                 _ans_sent = ""
                 _ans_ct = 0
+                _ans_last_out = None
                 async for answer_output in _stream_with_keepalive(
                     engine.stream_chat(messages=answer_messages, **answer_kwargs),
                     total_timeout=_stream_timeout,
@@ -18244,11 +18289,14 @@ async def stream_responses_api(
                         if hasattr(engine, "abort_request"):
                             await engine.abort_request(f"{response_id}:visible-answer")
                         break
+                    _ans_last_out = answer_output
                     _ans_ct = (
                         int(getattr(answer_output, "completion_tokens", 0) or 0)
                         or _ans_ct
                     )
                     _ans_raw += getattr(answer_output, "new_text", "") or ""
+                    if _buffer_answer_pass:
+                        continue
                     _delta, _ans_sent = _answer_pass_visible_delta(
                         _ans_raw,
                         _ans_sent,
@@ -18272,6 +18320,34 @@ async def stream_responses_api(
                             "delta": _delta,
                         },
                     )
+                if _buffer_answer_pass:
+                    _ans_truncated = (
+                        getattr(_ans_last_out, "finish_reason", None) == "length"
+                        or (_ans_budget_cap and _ans_ct >= _ans_budget_cap)
+                    )
+                    _full_delta, _ans_sent = _answer_pass_visible_delta(
+                        _ans_raw, "", request, True, holdback=0
+                    )
+                    if _full_delta and not _ans_truncated:
+                        yield _sse(
+                            "response.output_text.delta",
+                            {
+                                "type": "response.output_text.delta",
+                                "item_id": msg_id,
+                                "output_index": output_index,
+                                "content_index": 0,
+                                "delta": _full_delta,
+                            },
+                        )
+                    else:
+                        _ans_sent = ""
+                        if _ans_truncated:
+                            logger.info(
+                                "%s streaming Responses answer pass truncated "
+                                "(finish=length, ct=%d/%d) — discarding to avoid "
+                                "planning-prose leak; raise max_tokens",
+                                _answer_family, _ans_ct, _ans_budget_cap,
+                            )
                 if _ans_sent:
                     display_text = _ans_sent
                     content_was_emitted = True

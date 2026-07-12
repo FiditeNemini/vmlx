@@ -628,6 +628,14 @@ class ModelConfigRegistry:
                 # stale converter stamps resurrect think_in_template=True.
                 updates["supports_thinking"] = True
                 updates["reasoning_parser"] = "qwen3"
+                # ZAYA text emits Zyphra tool calls: an inner
+                # <function=...></function> block nested in
+                # <zyphra_tool_call></zyphra_tool_call> (special tokens 101/102).
+                # Only the "zaya_xml" parser matches that wrapper; force it like
+                # reasoning_parser so a stale bundle stamp (e.g. "qwen") cannot
+                # silently swap in a parser that never fires and leaks the raw
+                # <zyphra_tool_call> XML as content.
+                updates["tool_parser"] = "zaya_xml"
                 updates["think_in_template"] = False
                 zaya_hints = dict(getattr(base, "architecture_hints", None) or {})
                 zaya_hints["default_enable_thinking"] = True
@@ -642,6 +650,10 @@ class ModelConfigRegistry:
                 # contract.
                 updates["supports_thinking"] = False
                 updates["reasoning_parser"] = None
+                # ZAYA1-VL keeps tools active and uses the same Zyphra
+                # <zyphra_tool_call> wrapper as text ZAYA, so pin the matching
+                # parser rather than trusting a bundle stamp.
+                updates["tool_parser"] = "zaya_xml"
                 updates["think_in_template"] = False
                 zaya_hints = dict(getattr(base, "architecture_hints", None) or {})
                 zaya_hints["default_enable_thinking"] = False
@@ -714,7 +726,12 @@ class ModelConfigRegistry:
                 and base_supports_thinking is not False
             ):
                 updates["reasoning_parser"] = rp if rp != "none" else None
-            if tp is not None and not is_mimo_v2_family:
+            if (
+                tp is not None
+                and not is_mimo_v2_family
+                and not is_zaya_family
+                and not is_zaya1_vl_family
+            ):
                 updates["tool_parser"] = tp if tp != "none" else None
             if isinstance(tin, bool) and not (
                 is_zaya_family

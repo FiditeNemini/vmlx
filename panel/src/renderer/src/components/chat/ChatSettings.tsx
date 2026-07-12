@@ -581,7 +581,14 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
               placeholder={modelDefaults.maxTokens ? `${modelDefaults.maxTokens} (model default)` : t('chat.settings.maxTokensPlaceholder')}
               help={t('chat.settings.maxTokensHelp')}
             />
-            {thinkingSupported && displayedEnableThinking !== false && thinkingBudgetSupported !== false && (
+            {/* Show whenever the model has a reasoning parser (thinkingSupported). The
+                engine honors a top-level max_thinking_tokens for any reasoning-parser
+                family via its answer-pass cap, independent of whether the chat TEMPLATE
+                declares a budget. thinkingBudgetSupported only reflects template support,
+                so it must NOT hide the field — doing so hid it for Qwen3.5/3.6 (template
+                has <think> but no budget marker), leaving no way to bound runaway
+                reasoning that truncates with an empty visible answer. */}
+            {thinkingSupported && displayedEnableThinking !== false && (
               <NumberField
                 label={t('chat.settings.maxThinkingTokens')}
                 value={overrides.maxThinkingTokens}

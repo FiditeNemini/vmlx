@@ -1747,6 +1747,39 @@ def _reasoning_answer_pass_family_label(family_name: str) -> str:
     }.get(family_name, "Qwen3.5")
 
 
+# Families whose chat template cannot consume a trailing assistant reasoning
+# turn. The answer pass historically re-ran the conversation with the truncated
+# reasoning appended as ``{"role": "assistant", "content": "",
+# "reasoning_content": ...}`` so dialects that render prior reasoning keep it.
+# deepseek_v4 DROPS reasoning_content and renders that turn as an EMPTY
+# assistant turn + EOS + a SECOND generation prompt
+# (``<Assistant><eos><Assistant></think>``) — an out-of-distribution prompt that
+# degenerates the salvage into looping garbage (live-proven on DSV4-Flash
+# 2026-07-12: "+DERIV+DERIV..." at max_tokens=64, while the identical request
+# WITHOUT the appended turn answers cleanly on the same engine). step3p7
+# renders back-to-back assistant turns (reasoning inlined as a completed turn,
+# then a second assistant open). Both families run the answer pass on the
+# ORIGINAL messages instead.
+_ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset({"deepseek_v4", "step3p7"})
+
+
+def _answer_pass_messages(
+    messages: list,
+    family_name: str | None,
+    accumulated_reasoning: str,
+) -> list:
+    """Build the bounded thinking-off answer-pass conversation."""
+    if (family_name or "").lower() in _ANSWER_PASS_FRESH_CONTEXT_FAMILIES:
+        return list(messages)
+    return list(messages) + [
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": accumulated_reasoning,
+        }
+    ]
+
+
 def _hy3_prompt_starts_in_reasoning(
     *,
     model_key: str,
@@ -12793,9 +12826,9 @@ async def create_chat_completion(
             try:
                 _ns_out = await _await_chat_with_disconnect_abort(
                     engine,
-                    messages=list(messages) + [
-                        {"role": "assistant", "content": "", "reasoning_content": reasoning_text}
-                    ],
+                    messages=_answer_pass_messages(
+                        messages, _ns_family, reasoning_text
+                    ),
                     chat_kwargs=_ns_kwargs,
                     timeout=timeout,
                     fastapi_request=fastapi_request,
@@ -15011,9 +15044,9 @@ async def create_response(
             try:
                 _ns_out = await _await_chat_with_disconnect_abort(
                     engine,
-                    messages=list(messages) + [
-                        {"role": "assistant", "content": "", "reasoning_content": reasoning_text}
-                    ],
+                    messages=_answer_pass_messages(
+                        messages, _ns_family, reasoning_text
+                    ),
                     chat_kwargs=_ns_kwargs,
                     timeout=timeout,
                     fastapi_request=fastapi_request,
@@ -16788,13 +16821,9 @@ async def stream_chat_completion(
             len(accumulated_reasoning),
             _answer_budget,
         )
-        answer_messages = list(messages) + [
-            {
-                "role": "assistant",
-                "content": "",
-                "reasoning_content": accumulated_reasoning,
-            }
-        ]
+        answer_messages = _answer_pass_messages(
+            messages, _family_name, accumulated_reasoning
+        )
         answer_kwargs = dict(kwargs)
         # Register the answer-pass stream under the id the disconnect handler
         # aborts (`{response_id}:visible-answer`); otherwise it inherits the main
@@ -18364,13 +18393,9 @@ async def stream_responses_api(
                 len(accumulated_reasoning),
                 _answer_budget,
             )
-            answer_messages = list(messages) + [
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "reasoning_content": accumulated_reasoning,
-                }
-            ]
+            answer_messages = _answer_pass_messages(
+                messages, _family_name, accumulated_reasoning
+            )
             answer_kwargs = dict(kwargs)
             # Register the answer-pass stream under the id the disconnect handler
             # aborts (`{response_id}:visible-answer`); otherwise abort_request()

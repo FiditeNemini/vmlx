@@ -12501,6 +12501,44 @@ async def create_chat_completion(
     timeout = request.timeout if request.timeout is not None else _default_timeout
     response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
+    # Cap the thinking (first) pass at max_thinking_tokens for reasoning
+    # answer-pass families, mirroring the streaming path (15734-97) which caps
+    # the first pass at mtt so the bounded thinking-off answer pass keeps real
+    # budget. Without this the non-stream first pass runs reasoning to the full
+    # max_tokens (finish=length), leaving only ANSWER_PASS_FLOOR (48) for the
+    # answer pass — too small for qwen3.5/3.6 to complete, so the W2-1 scope
+    # rejects the truncated salvage and content is empty. Live-proven: qwen3.6
+    # mtt=128 non-stream reasoning=2208 content='' vs streaming reasoning=451
+    # content=answer. The original cap is preserved so the answer pass below
+    # sizes off the full budget, not the capped thinking budget.
+    _ns_answer_pass_original_cap = None
+    _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
+    if (
+        _ns_pre_mtt is not None
+        and chat_kwargs.get("enable_thinking") is not False
+        and getattr(request, "enable_thinking", None) is not False
+        and (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is not False
+        and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
+    ):
+        try:
+            from .model_config_registry import get_model_config_registry as _ns_pre_mcr
+            _ns_pre_family = getattr(
+                _ns_pre_mcr().lookup(_model_path or _model_name or request.model),
+                "family_name", None,
+            )
+        except Exception:
+            _ns_pre_family = None
+        if (
+            _ns_pre_family in _REASONING_ANSWER_PASS_FAMILIES
+            or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
+        ):
+            _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
+            _ns_pre_capped = max(1, min(_ns_pre_orig, int(_ns_pre_mtt)))
+            if _ns_pre_capped < _ns_pre_orig:
+                _ns_answer_pass_original_cap = _ns_pre_orig
+                chat_kwargs = dict(chat_kwargs)
+                chat_kwargs["max_tokens"] = _ns_pre_capped
+
     try:
         output = await _await_chat_with_disconnect_abort(
             engine,
@@ -12693,7 +12731,7 @@ async def create_chat_completion(
         and not _ns_thinking_off
         and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
         and _remaining_answer_pass_budget(
-            chat_kwargs.get("max_tokens") or 256,
+            _ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256,
             getattr(output, "completion_tokens", 0),
         ) > 0
     ):
@@ -12707,7 +12745,7 @@ async def create_chat_completion(
             _ns_family = None
         _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
         if _ns_family in _REASONING_ANSWER_PASS_FAMILIES or _ns_is_m3:
-            _ns_cap = int(chat_kwargs.get("max_tokens") or 256)
+            _ns_cap = int(_ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
             _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
             logger.info(
@@ -14669,6 +14707,38 @@ async def create_response(
     timeout = request.timeout if request.timeout is not None else _default_timeout
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
 
+    # Cap the thinking (first) pass at max_thinking_tokens for reasoning
+    # answer-pass families — mirror of the non-stream chat path (see there for
+    # the qwen3.6 mtt=128 empty-content live proof). Without it the Responses
+    # API non-stream surface hits the same runaway-reasoning empty-content bug.
+    _ns_answer_pass_original_cap = None
+    _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
+    if (
+        _ns_pre_mtt is not None
+        and chat_kwargs.get("enable_thinking") is not False
+        and getattr(request, "enable_thinking", None) is not False
+        and (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is not False
+        and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
+    ):
+        try:
+            from .model_config_registry import get_model_config_registry as _ns_pre_mcr
+            _ns_pre_family = getattr(
+                _ns_pre_mcr().lookup(_model_path or _model_name or request.model),
+                "family_name", None,
+            )
+        except Exception:
+            _ns_pre_family = None
+        if (
+            _ns_pre_family in _REASONING_ANSWER_PASS_FAMILIES
+            or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
+        ):
+            _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
+            _ns_pre_capped = max(1, min(_ns_pre_orig, int(_ns_pre_mtt)))
+            if _ns_pre_capped < _ns_pre_orig:
+                _ns_answer_pass_original_cap = _ns_pre_orig
+                chat_kwargs = dict(chat_kwargs)
+                chat_kwargs["max_tokens"] = _ns_pre_capped
+
     try:
         output = await _await_chat_with_disconnect_abort(
             engine,
@@ -14872,7 +14942,7 @@ async def create_response(
         and not _ns_thinking_off
         and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
         and _remaining_answer_pass_budget(
-            chat_kwargs.get("max_tokens") or 256,
+            _ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256,
             getattr(output, "completion_tokens", 0),
         ) > 0
     ):
@@ -14886,7 +14956,7 @@ async def create_response(
             _ns_family = None
         _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
         if _ns_family in _REASONING_ANSWER_PASS_FAMILIES or _ns_is_m3:
-            _ns_cap = int(chat_kwargs.get("max_tokens") or 256)
+            _ns_cap = int(_ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
             _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
             logger.info(

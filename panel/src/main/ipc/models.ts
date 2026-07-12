@@ -178,6 +178,7 @@ export interface GenerationDefaults {
   maxNewTokens?: number;
   maxThinkingTokens?: number;
   thinkingBudgetSupported?: boolean;
+  supportsThinkingBudget?: boolean;
   source?: "jang_config" | "generation_config";
 }
 
@@ -248,6 +249,18 @@ export async function readGenerationDefaults(
     const thinkingBudgetSupported = await readThinkingBudgetSupport(modelPath);
     if (thinkingBudgetSupported !== undefined) {
       defaults.thinkingBudgetSupported = thinkingBudgetSupported;
+    }
+    // Registry capability: only families whose engine honors a top-level
+    // max_thinking_tokens reasoning-phase cap flag this true. Surfaced so the
+    // renderer/request gates show + send the budget for exactly those families,
+    // independent of TEMPLATE-side (thinkingBudgetSupported) budget markers.
+    try {
+      const detected = detectModelConfigFromDir(modelPath);
+      if (detected?.supportsThinkingBudget === true) {
+        defaults.supportsThinkingBudget = true;
+      }
+    } catch {
+      // detection is best-effort; absence leaves the field undefined.
     }
 
     const configPath = join(modelPath, "generation_config.json");

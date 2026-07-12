@@ -36,6 +36,7 @@ function buildRequestBody(
     tools?: any[],
     detectedFamily?: string,
     thinkingBudgetSupported?: boolean,
+    supportsThinkingBudget?: boolean,
 ): Record<string, any> {
     const stopSequences = overrides?.stopSequences
         ? overrides.stopSequences.split(',').map(s => s.trim()).filter(Boolean)
@@ -64,12 +65,20 @@ function buildRequestBody(
             : overrides?.enableThinking
     const applyLocalThinkingBudget = (obj: Record<string, any>) => {
         if (isRemote || thinkingBudget == null || obj.enable_thinking === false) return
-        if (thinkingBudgetSupported === false) return
-        if (!sessionHasReasoningParser && detectedFamily !== 'deepseek-v4') return
+        // Only families whose engine honors a top-level max_thinking_tokens cap
+        // (registry supportsThinkingBudget) or whose chat TEMPLATE declares a budget
+        // marker (thinkingBudgetSupported) get the field. Families with a reasoning
+        // parser but no engine-side thinking-budget behavior (deepseek-v4,
+        // step-3.7-flash) ignore it — dsv4 uses reasoning_effort instead.
+        if (!(supportsThinkingBudget === true || thinkingBudgetSupported === true)) return
         obj.max_thinking_tokens = thinkingBudget
-        obj.chat_template_kwargs = {
-            ...(obj.chat_template_kwargs || {}),
-            thinking_budget: thinkingBudget,
+        // Template kwarg is TEMPLATE-side only; suppress it when the template has no
+        // budget marker even though the engine-level field is still sent.
+        if (thinkingBudgetSupported !== false) {
+            obj.chat_template_kwargs = {
+                ...(obj.chat_template_kwargs || {}),
+                thinking_budget: thinkingBudget,
+            }
         }
     }
 
@@ -319,7 +328,7 @@ describe('buildRequestBody — Chat Completions API', () => {
         expect(dsv4MaxThinkingAuto.reasoning_effort).toBe('max')
     })
 
-    it('keeps per-chat maxThinkingTokens as template thinking budget only, never output or prompt context', () => {
+    it('does NOT send max_thinking_tokens for deepseek-v4 (no engine thinking-budget; uses reasoning_effort)', () => {
         const body = buildRequestBody(
             'completions',
             'dsv4',
@@ -331,8 +340,9 @@ describe('buildRequestBody — Chat Completions API', () => {
             'deepseek-v4',
         )
 
-        expect(body.max_thinking_tokens).toBe(4096)
-        expect(body.chat_template_kwargs).toEqual({ enable_thinking: true, thinking_budget: 4096 })
+        expect(body.max_thinking_tokens).toBeUndefined()
+        expect(body.chat_template_kwargs).toEqual({ enable_thinking: true })
+        expect(body.chat_template_kwargs.thinking_budget).toBeUndefined()
         expect(body.reasoning_effort).toBe('max')
         expect(body.max_tokens).toBeUndefined()
         expect(body.max_output_tokens).toBeUndefined()
@@ -341,7 +351,26 @@ describe('buildRequestBody — Chat Completions API', () => {
         expect(body.max_context).toBeUndefined()
     })
 
-    it('suppresses maxThinkingTokens when local template metadata says thinking budget is unsupported', () => {
+    it('sends top-level max_thinking_tokens for an engine-honoring family (supportsThinkingBudget)', () => {
+        const body = buildRequestBody(
+            'completions',
+            'qwen35',
+            messages,
+            { enableThinking: true, maxThinkingTokens: 4096 },
+            false,
+            true,
+            undefined,
+            'qwen3.5',
+            undefined,
+            true,
+        )
+
+        expect(body.max_thinking_tokens).toBe(4096)
+        expect(body.chat_template_kwargs).toEqual({ enable_thinking: true, thinking_budget: 4096 })
+        expect(body.max_tokens).toBeUndefined()
+    })
+
+    it('sends top-level max_thinking_tokens but suppresses the template kwarg when the template declares no budget marker (engine-honoring family)', () => {
         const body = buildRequestBody(
             'completions',
             'gemma4',
@@ -352,14 +381,35 @@ describe('buildRequestBody — Chat Completions API', () => {
             undefined,
             'gemma4',
             false,
+            true,
         )
 
         expect(body.enable_thinking).toBe(true)
+        // Engine honors top-level max_thinking_tokens for gemma4 even though the
+        // template has no budget marker (thinkingBudgetSupported === false).
+        expect(body.max_thinking_tokens).toBe(4096)
+        // Template kwarg is TEMPLATE-side only and stays suppressed.
         expect(body.chat_template_kwargs).toEqual({ enable_thinking: true })
-        expect(body.max_thinking_tokens).toBeUndefined()
         expect(body.chat_template_kwargs.thinking_budget).toBeUndefined()
         expect(body.max_tokens).toBeUndefined()
         expect(body.max_prompt_tokens).toBeUndefined()
+    })
+
+    it('suppresses max_thinking_tokens for a reasoning family with neither engine nor template budget support', () => {
+        const body = buildRequestBody(
+            'completions',
+            'zaya',
+            messages,
+            { enableThinking: true, maxThinkingTokens: 4096 },
+            false,
+            true,
+            undefined,
+            'zaya',
+        )
+
+        expect(body.enable_thinking).toBe(true)
+        expect(body.max_thinking_tokens).toBeUndefined()
+        expect(body.chat_template_kwargs.thinking_budget).toBeUndefined()
     })
 
     it('switching chats never carries a previous chat maxTokens into Auto Chat Completions', () => {
@@ -595,7 +645,7 @@ describe('buildRequestBody — Responses API', () => {
         expect(body.dsv4_finalizer_tokens).toBeUndefined()
     })
 
-    it('keeps Responses maxThinkingTokens as thinking budget only and separate from output caps', () => {
+    it('does NOT send Responses max_thinking_tokens for deepseek-v4 (uses reasoning_effort, output cap preserved)', () => {
         const body = buildRequestBody(
             'responses',
             'dsv4',
@@ -607,13 +657,32 @@ describe('buildRequestBody — Responses API', () => {
             'deepseek-v4',
         )
         expect(body.max_output_tokens).toBe(300)
-        expect(body.max_thinking_tokens).toBe(4096)
-        expect(body.chat_template_kwargs).toEqual({ enable_thinking: true, thinking_budget: 4096 })
+        expect(body.max_thinking_tokens).toBeUndefined()
+        expect(body.chat_template_kwargs).toEqual({ enable_thinking: true })
+        expect(body.chat_template_kwargs.thinking_budget).toBeUndefined()
         expect(body.reasoning_effort).toBe('max')
         expect(body.max_tokens).toBeUndefined()
         expect(body.max_prompt_tokens).toBeUndefined()
         expect(body.max_context_tokens).toBeUndefined()
         expect(body.max_context).toBeUndefined()
+    })
+
+    it('sends Responses max_thinking_tokens for an engine-honoring family (supportsThinkingBudget)', () => {
+        const body = buildRequestBody(
+            'responses',
+            'minimax',
+            messages,
+            { enableThinking: true, maxTokens: 300, maxThinkingTokens: 4096 },
+            false,
+            true,
+            undefined,
+            'minimax',
+            undefined,
+            true,
+        )
+        expect(body.max_output_tokens).toBe(300)
+        expect(body.max_thinking_tokens).toBe(4096)
+        expect(body.chat_template_kwargs).toEqual({ enable_thinking: true, thinking_budget: 4096 })
     })
 
     it('suppresses stale maxThinkingTokens when thinking is explicitly off', () => {

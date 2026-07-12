@@ -3496,10 +3496,11 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         expect(source).toContain('format={formatTopK}')
     })
 
-    it('chat settings hides max-thinking tokens when template metadata says budget is unsupported', () => {
+    it('chat settings shows max-thinking tokens only for engine-honoring or template-budget families', () => {
         const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
         expect(source).toContain('setThinkingBudgetSupported(gen.thinkingBudgetSupported)')
-        expect(source).toContain('thinkingBudgetSupported !== false')
+        expect(source).toContain('setSupportsThinkingBudget(detected?.supportsThinkingBudget)')
+        expect(source).toContain('{(supportsThinkingBudget === true || thinkingBudgetSupported === true) && displayedEnableThinking !== false && (')
     })
 
     it('JANGTQ acceleration toggle is not exposed as a user setting', () => {

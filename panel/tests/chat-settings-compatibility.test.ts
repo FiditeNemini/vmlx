@@ -130,4 +130,24 @@ describe('chat settings cross-family compatibility warnings', () => {
     expect(source).toContain('!sessionHasReasoningParser')
     expect(source).toContain('chatDetectedFamily !== "deepseek-v4"')
   })
+
+  it('gates the Max Thinking Tokens field on engine-honoring or template budget support', () => {
+    const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
+
+    expect(source).toContain('const [supportsThinkingBudget, setSupportsThinkingBudget]')
+    expect(source).toContain('setSupportsThinkingBudget(detected?.supportsThinkingBudget)')
+    expect(source).toContain('{(supportsThinkingBudget === true || thinkingBudgetSupported === true) && displayedEnableThinking !== false && (')
+  })
+
+  it('main IPC sends top-level max_thinking_tokens only for engine-honoring families', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+
+    // The whole-block gate now keys off the registry/template budget capability,
+    // and the deepseek-v4 special-case is gone from applyLocalThinkingBudget.
+    expect(source).toContain('if (!(supportsThinkingBudget === true || thinkingBudgetSupported === true)) {')
+    expect(source).toContain('supportsThinkingBudget = detected.supportsThinkingBudget;')
+    expect(source).not.toContain('if (!sessionHasReasoningParser && chatDetectedFamily !== "deepseek-v4") {')
+    // Template kwarg stays TEMPLATE-side only.
+    expect(source).toContain('if (thinkingBudgetSupported !== false) {')
+  })
 })

@@ -26,6 +26,7 @@ declare global {
           toolParser?: string;
           reasoningParser?: string;
           supportsThinking?: boolean;
+          supportsThinkingBudget?: boolean;
           thinkInTemplate?: boolean;
           cacheType: string;
           cacheSubtype?: string;
@@ -50,6 +51,7 @@ declare global {
           maxNewTokens?: number;
           maxThinkingTokens?: number;
           thinkingBudgetSupported?: boolean;
+          supportsThinkingBudget?: boolean;
           source?: "jang_config" | "generation_config";
         } | null>;
         searchHF: (

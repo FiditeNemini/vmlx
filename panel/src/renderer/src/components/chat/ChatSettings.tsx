@@ -83,6 +83,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const [detectedReasoningParser, setDetectedReasoningParser] = useState<string | undefined>(undefined)
   const [detectedSupportsThinking, setDetectedSupportsThinking] = useState<boolean | undefined>(undefined)
   const [thinkingBudgetSupported, setThinkingBudgetSupported] = useState<boolean | undefined>(undefined)
+  const [supportsThinkingBudget, setSupportsThinkingBudget] = useState<boolean | undefined>(undefined)
   const [savedChatModelPath, setSavedChatModelPath] = useState<string | undefined>(undefined)
   const [messageCount, setMessageCount] = useState(0)
   const isRemote = session.type === 'remote'
@@ -141,11 +142,13 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
           setDetectedToolParser(detected?.toolParser)
           setDetectedReasoningParser(detected?.reasoningParser)
           setDetectedSupportsThinking(detected?.supportsThinking)
+          setSupportsThinkingBudget(detected?.supportsThinkingBudget)
         } catch (_) {
           setDetectedFamily(undefined)
           setDetectedToolParser(undefined)
           setDetectedReasoningParser(undefined)
           setDetectedSupportsThinking(undefined)
+          setSupportsThinkingBudget(undefined)
         }
       }
       // Saved non-null overrides win over model defaults. SQL NULL means the
@@ -581,14 +584,14 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
               placeholder={modelDefaults.maxTokens ? `${modelDefaults.maxTokens} (model default)` : t('chat.settings.maxTokensPlaceholder')}
               help={t('chat.settings.maxTokensHelp')}
             />
-            {/* Show whenever the model has a reasoning parser (thinkingSupported). The
-                engine honors a top-level max_thinking_tokens for any reasoning-parser
-                family via its answer-pass cap, independent of whether the chat TEMPLATE
-                declares a budget. thinkingBudgetSupported only reflects template support,
-                so it must NOT hide the field — doing so hid it for Qwen3.5/3.6 (template
-                has <think> but no budget marker), leaving no way to bound runaway
-                reasoning that truncates with an empty visible answer. */}
-            {thinkingSupported && displayedEnableThinking !== false && (
+            {/* Show ONLY for families whose engine honors a top-level
+                max_thinking_tokens reasoning-phase cap (registry supportsThinkingBudget)
+                or whose chat TEMPLATE declares a budget marker (thinkingBudgetSupported).
+                Families with a reasoning parser but no engine-side thinking-budget
+                behavior (deepseek-v4, step-3.7-flash, etc.) ignore the field, so showing
+                it would be untruthful. The supportsThinkingBudget flag covers Qwen3.5/3.6
+                whose template has <think> but no budget marker. */}
+            {(supportsThinkingBudget === true || thinkingBudgetSupported === true) && displayedEnableThinking !== false && (
               <NumberField
                 label={t('chat.settings.maxThinkingTokens')}
                 value={overrides.maxThinkingTokens}

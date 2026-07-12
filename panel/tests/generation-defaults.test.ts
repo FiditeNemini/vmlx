@@ -321,3 +321,26 @@ describe('readGenerationDefaults JANG sampling defaults', () => {
     })
   })
 })
+
+describe('readGenerationDefaults supportsThinkingBudget capability surfacing', () => {
+  it('surfaces supportsThinkingBudget for an engine-honoring family (qwen3.5)', async () => {
+    const dir = makeModelDir({
+      'config.json': { model_type: 'qwen3_5' },
+      'generation_config.json': { temperature: 0.7 },
+    }, 'vmlx-generation-defaults-stb-qwen35-')
+
+    await expect(readGenerationDefaults(dir)).resolves.toMatchObject({
+      supportsThinkingBudget: true,
+    })
+  })
+
+  it('does NOT surface supportsThinkingBudget for deepseek-v4 (no engine thinking budget)', async () => {
+    const dir = makeModelDir({
+      'config.json': { model_type: 'deepseek_v4' },
+      'generation_config.json': { temperature: 0.7 },
+    }, 'vmlx-generation-defaults-stb-dsv4-')
+
+    const defaults = await readGenerationDefaults(dir)
+    expect(defaults?.supportsThinkingBudget).toBeUndefined()
+  })
+})

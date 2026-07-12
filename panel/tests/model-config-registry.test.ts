@@ -1585,3 +1585,44 @@ describe('detectModelConfigFromDir local high-risk artifact parity', () => {
     }
   })
 })
+
+describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {
+  // Ground truth: ONLY families whose engine honors a top-level
+  // max_thinking_tokens reasoning-phase cap are flagged. Derived from the engine
+  // _REASONING_ANSWER_PASS_FAMILIES set plus the minimax_m3 thinking-cap branch.
+  const budgetFamilies: Array<{ modelType: string; family: string }> = [
+    { modelType: 'qwen3_5', family: 'qwen3.5' },
+    { modelType: 'qwen3_5_moe', family: 'qwen3.5-moe' },
+    { modelType: 'gemma4', family: 'gemma4' },
+    { modelType: 'gemma4_text', family: 'gemma4-text' },
+    { modelType: 'minimax_m2', family: 'minimax' },
+    { modelType: 'minimax_m3', family: 'minimax_m3' },
+    { modelType: 'openpangu_v2', family: 'openpangu_v2' },
+    { modelType: 'hy_v3', family: 'hy3' },
+  ]
+
+  for (const { modelType, family } of budgetFamilies) {
+    it(`flags supportsThinkingBudget for ${family} (model_type=${modelType})`, () => {
+      const dir = makeModelDir({ model_type: modelType })
+      const detected = detectModelConfigFromDir(dir)
+      expect(detected.family).toBe(family)
+      expect(detected.supportsThinkingBudget).toBe(true)
+    })
+  }
+
+  // Reasoning-parser families with NO engine-side thinking-budget behavior must
+  // NOT be flagged (dsv4 uses reasoning_effort; step-3.7-flash has no cap).
+  const nonBudgetFamilies: Array<{ modelType: string; family: string }> = [
+    { modelType: 'deepseek_v4', family: 'deepseek-v4' },
+    { modelType: 'step3p7', family: 'step-3.7-flash' },
+  ]
+
+  for (const { modelType, family } of nonBudgetFamilies) {
+    it(`does NOT flag supportsThinkingBudget for ${family} (model_type=${modelType})`, () => {
+      const dir = makeModelDir({ model_type: modelType })
+      const detected = detectModelConfigFromDir(dir)
+      expect(detected.family).toBe(family)
+      expect(detected.supportsThinkingBudget).toBeUndefined()
+    })
+  }
+})

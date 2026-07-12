@@ -963,6 +963,7 @@ export function registerChatHandlers(
       let chatIsMultimodal = false;
       let chatDetectedFamily: string | undefined;
       let thinkingBudgetSupported: boolean | undefined;
+      let supportsThinkingBudget: boolean | undefined;
       // VLM video sampling (Qwen 3.6, Qwen3.5-VL, etc.) — forwarded as
       // video_fps / video_max_frames on the request body when present.
       // Default undefined = engine default (2.0 fps, 8 max frames).
@@ -1018,6 +1019,7 @@ export function registerChatHandlers(
               thinkingBudgetSupported = undefined;
             }
             chatDetectedFamily = detected.family;
+            supportsThinkingBudget = detected.supportsThinkingBudget;
             timeoutSeconds = effectiveFamilyRequestTimeoutSeconds(
               timeoutSeconds,
               chatDetectedFamily,
@@ -1756,19 +1758,17 @@ export function registerChatHandlers(
             if (isRemote || resolvedThinkingBudget == null || obj.enable_thinking === false) {
               return;
             }
-            if (!sessionHasReasoningParser && chatDetectedFamily !== "deepseek-v4") {
+            // Engine-level reasoning-phase cap: the server honors a top-level
+            // max_thinking_tokens ONLY for the families whose answer-pass machinery
+            // caps the thinking pass at the budget (registry supportsThinkingBudget),
+            // or when the chat TEMPLATE itself declares a budget marker
+            // (thinkingBudgetSupported). Families with a reasoning parser but NO
+            // engine-side thinking-budget behavior (e.g. deepseek-v4, step-3.7-flash)
+            // ignore the field — dsv4 uses reasoning_effort instead — so sending it
+            // would be untruthful. Gate the whole block on either capability.
+            if (!(supportsThinkingBudget === true || thinkingBudgetSupported === true)) {
               return;
             }
-            // Engine-level reasoning-phase cap: the server honors top-level
-            // max_thinking_tokens for any reasoning-parser family via its answer-pass
-            // machinery (caps the thinking pass at the budget, then emits a bounded
-            // visible answer), INDEPENDENT of whether the chat template declares a
-            // thinking budget. thinkingBudgetSupported only reflects TEMPLATE-side
-            // budget support, so it gates ONLY the template kwarg below — never the
-            // engine-level field. Previously gating the whole block on it silently
-            // dropped a user-set budget for models like Qwen3.5/3.6 whose template
-            // has <think> but no budget marker, letting reasoning consume the entire
-            // max_tokens and truncate with an empty visible answer.
             obj.max_thinking_tokens = resolvedThinkingBudget;
             if (thinkingBudgetSupported !== false) {
               obj.chat_template_kwargs = {

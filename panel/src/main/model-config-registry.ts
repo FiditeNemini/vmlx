@@ -56,6 +56,7 @@ interface ModelConfig {
   toolParser?: string
   reasoningParser?: string
   supportsThinking?: boolean
+  supportsThinkingBudget?: boolean
   thinkInTemplate?: boolean
   defaultEnableThinking?: boolean
   usePagedCache?: boolean
@@ -71,6 +72,7 @@ export interface DetectedConfig {
   toolParser?: string
   reasoningParser?: string
   supportsThinking?: boolean
+  supportsThinkingBudget?: boolean
   thinkInTemplate?: boolean
   defaultEnableThinking?: boolean
   cacheType: string
@@ -119,8 +121,8 @@ registerFamily('zaya1-vl', { cacheType: 'hybrid', toolParser: 'zaya_xml', suppor
 // Qwen
 // Qwen 3.5 dense and MoE share model_types with VL variants — VL detection
 // relies on config.json vision_config, not the family's isMultimodal flag.
-registerFamily('qwen3.5', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: false, description: 'Qwen 3.5 (dense)', priority: 4 })
-registerFamily('qwen3.5-moe', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: false, description: 'Qwen 3.5 MoE', priority: 4 })
+registerFamily('qwen3.5', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: false, description: 'Qwen 3.5 (dense)', priority: 4 })
+registerFamily('qwen3.5-moe', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: false, description: 'Qwen 3.5 MoE', priority: 4 })
 registerFamily('qwen3-next', { cacheType: 'mamba', toolParser: 'qwen', reasoningParser: 'qwen3', usePagedCache: true, enableAutoToolChoice: true, description: 'Qwen 3 Next (hybrid Mamba)', priority: 1 })
 registerFamily('qwen3-vl', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: true, description: 'Qwen 3 Vision-Language', priority: 5 })
 registerFamily('qwen3-moe', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, description: 'Qwen 3 MoE', priority: 5 })
@@ -165,8 +167,8 @@ registerFamily('glm4', { cacheType: 'kv', toolParser: 'glm47', enableAutoToolCho
 // Gemma
 registerFamily('medgemma', { cacheType: 'kv', isMultimodal: true, description: 'Google MedGemma (medical multimodal)', priority: 3 })
 registerFamily('paligemma', { cacheType: 'kv', isMultimodal: true, description: 'Google PaliGemma', priority: 5 })
-registerFamily('gemma4', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 4 (multimodal)', priority: 5 })
-registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', enableAutoToolChoice: true, description: 'Gemma 4 (text-only)', priority: 4 })
+registerFamily('gemma4', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 4 (multimodal)', priority: 5 })
+registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', supportsThinkingBudget: true, enableAutoToolChoice: true, description: 'Gemma 4 (text-only)', priority: 4 })
 registerFamily('gemma3', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3 (multimodal)', priority: 10 })
 registerFamily('gemma3-text', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, description: 'Gemma 3 (text-only)', priority: 8 })
 registerFamily('gemma3n', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3n (multimodal)', priority: 10 })
@@ -207,12 +209,12 @@ registerFamily('functionary', { cacheType: 'kv', toolParser: 'functionary', enab
 
 // MiniMax uses its own parser name so panel-emitted CLI args match the engine
 // registry and diagnostics instead of relying on a generic qwen3 alias.
-registerFamily('minimax', { cacheType: 'kv', toolParser: 'minimax', reasoningParser: 'minimax_m2', enableAutoToolChoice: true, description: 'MiniMax', priority: 20 })
+registerFamily('minimax', { cacheType: 'kv', toolParser: 'minimax', reasoningParser: 'minimax_m2', supportsThinkingBudget: true, enableAutoToolChoice: true, description: 'MiniMax', priority: 20 })
 // MiniMax-M3 sparse MSA (MiniMaxM3SparseCache: GQA K/V + append-only idx_keys).
 // M3 must stay paged-OFF by default: the engine stores prefix snapshots through
 // the memory-aware L1 + SSD prompt disk cache, preserving keys/values/idx_keys as
 // a first-class M3 cache. The paged block-disk lane is not the default M3 path.
-registerFamily('minimax_m3', { cacheType: 'kv', toolParser: 'minimax_m3', reasoningParser: 'minimax_m3', enableAutoToolChoice: true, isMultimodal: true, usePagedCache: false, description: 'MiniMax-M3 (sparse MSA + Lightning-Indexer, VL)', priority: 5 })
+registerFamily('minimax_m3', { cacheType: 'kv', toolParser: 'minimax_m3', reasoningParser: 'minimax_m3', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: false, description: 'MiniMax-M3 (sparse MSA + Lightning-Indexer, VL)', priority: 5 })
 
 // openPangu-2.0-Flash: 92B MoE (6B active) MLA + DSA/SWA hybrid + 3 stateful
 // causal convs + mHC hyper-connections. Mirrors the engine registry entry
@@ -226,7 +228,7 @@ registerFamily('minimax_m3', { cacheType: 'kv', toolParser: 'minimax_m3', reason
 // through to generic — openpangu startup defaults (timeout 900, JIT off) in
 // sessions.ts never fired and the chat thinking toggle stayed disabled
 // (live UI matrix finding, 2026-07-02).
-registerFamily('openpangu_v2', { cacheType: 'kv', cacheSubtype: 'openpangu_v2_composite', toolParser: 'openpangu', reasoningParser: 'deepseek_r1', supportsThinking: true, thinkInTemplate: true, usePagedCache: false, enableAutoToolChoice: true, isMultimodal: false, description: 'openPangu-2.0-Flash (MLA + DSA/SWA + mHC MoE)', priority: 20 })
+registerFamily('openpangu_v2', { cacheType: 'kv', cacheSubtype: 'openpangu_v2_composite', toolParser: 'openpangu', reasoningParser: 'deepseek_r1', supportsThinking: true, supportsThinkingBudget: true, thinkInTemplate: true, usePagedCache: false, enableAutoToolChoice: true, isMultimodal: false, description: 'openPangu-2.0-Flash (MLA + DSA/SWA + mHC MoE)', priority: 20 })
 
 // Ling / Bailing hybrid: MLA softmax layers plus linear-attention/SSM-style
 // companion state. Eric directive 2026-05-11: treat Ling chat output as plain
@@ -237,7 +239,7 @@ registerFamily('ling', { cacheType: 'hybrid', toolParser: 'deepseek', supportsTh
 // Tencent Hy3-preview: text-only dense GQA KV + MoE. The chat template uses
 // reasoning_effort=no_think|low|high, so Python normalizes the UI thinking
 // toggle into Hy3's effort field before render.
-registerFamily('hy3', { cacheType: 'kv', toolParser: 'hunyuan', reasoningParser: 'qwen3', enableAutoToolChoice: true, description: 'Tencent Hy3-preview', priority: 4 })
+registerFamily('hy3', { cacheType: 'kv', toolParser: 'hunyuan', reasoningParser: 'qwen3', supportsThinkingBudget: true, enableAutoToolChoice: true, description: 'Tencent Hy3-preview', priority: 4 })
 
 // StepFun
 registerFamily('step-vl', { cacheType: 'kv', toolParser: 'step3p5', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: true, description: 'StepFun Step-1V Vision-Language', priority: 3 })
@@ -851,6 +853,7 @@ function configToDetected(family: string, config: Omit<ModelConfig, 'pattern' | 
     toolParser: config.toolParser,
     reasoningParser: config.reasoningParser,
     supportsThinking: config.supportsThinking,
+    supportsThinkingBudget: config.supportsThinkingBudget,
     thinkInTemplate: config.thinkInTemplate,
     defaultEnableThinking: config.defaultEnableThinking,
     cacheType: config.cacheType,

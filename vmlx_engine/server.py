@@ -18124,6 +18124,17 @@ async def stream_responses_api(
             and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
             and accumulated_reasoning.strip()
             and not tool_calls
+            # W2-1 (streaming Responses sibling of stream_chat_completion): do NOT
+            # fabricate a streamed answer for qwen3.5/3.6 when the reasoning was
+            # budget-truncated (finish_reason="length"). The bounded thinking-off
+            # salvage re-continues the truncated reasoning as planning prose and
+            # streams it as the visible answer; F6 can't recall sent deltas, so
+            # gate at firing. Scoped to qwen3_5* only — M3/gemma4/openpangu/Hy3
+            # emit a COMPLETE bounded answer here and still rely on this rescue.
+            and not (
+                getattr(last_output, "finish_reason", None) == "length"
+                and _family_name in ("qwen3_5", "qwen3_5_moe")
+            )
             and _remaining_answer_pass_budget(
                 (
                     m3_reasoning_only_answer_budget

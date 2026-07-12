@@ -72,8 +72,7 @@ def test_answer_pass_appends_reasoning_turn_for_legacy_families():
 def test_leak_guard_families_cover_fresh_context():
     """Fresh-context families share the qwen3_5 buffered-salvage leak guard
     (#92 semantics): emit a truncated salvage, discard only on a thinking
-    re-entry. The "<think>" raw check also catches the "<thinking>" variant
-    DSV4 emitted live (2026-07-12, deterministic 3/3)."""
+    re-entry."""
     guard = server_mod._ANSWER_PASS_LEAK_GUARD_FAMILIES
     for fam in ("qwen3_5", "qwen3_5_moe", "deepseek_v4", "step3p7",
                 "minimax", "minimax_m2"):
@@ -81,8 +80,20 @@ def test_leak_guard_families_cover_fresh_context():
     # families with live-proven coherent partial salvages stay unbuffered
     for fam in ("gemma4", "hy_v3", "laguna", "openpangu_v2"):
         assert fam not in guard
-    # the substring check that makes <thinking> variants discard
-    assert "<think>" in "<thinking>Let's parse the user's request."
+
+
+def test_thinking_reentry_matches_tag_variants():
+    """DSV4 live-emitted "<thinking>..." (deterministic 3/3). A literal
+    "<think>" needle does NOT match it — the closing ">" never aligns with
+    "ing>" — which is exactly the miss the open-prefix helper fixes."""
+    reentry = server_mod._answer_pass_thinking_reentry
+    assert "<think>" not in "<thinking>Let's parse the user's request."
+    assert reentry("<thinking>Let's parse the user's request.")
+    assert reentry("<think>\nplanning\n</think>")
+    assert reentry("prefix text <think>")
+    assert not reentry("A clean answer: BLUE-FALCON 37 Paris.")
+    assert not reentry("")
+    assert not reentry(None)
 
 
 def test_minimax_family_armed_for_answer_pass():

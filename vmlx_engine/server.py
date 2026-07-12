@@ -1777,9 +1777,9 @@ _ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
 )
 
 # Families whose salvage is BUFFERED and discarded on a thinking re-entry
-# (raw contains "<think>", which also matches the "<thinking>" variant by
-# prefix). qwen3_5* established the semantics (#92: emit a truncated salvage,
-# reject only genuine planning-prose re-entry). deepseek_v4 joined 2026-07-12:
+# (raw re-opens a thinking block — see _answer_pass_thinking_reentry).
+# qwen3_5* established the semantics (#92: emit a truncated salvage, reject
+# only genuine planning-prose re-entry). deepseek_v4 joined 2026-07-12:
 # live-deterministic repro — with a prior salvage answer in history and a tight
 # budget, the DSV4 salvage re-opened planning as "<thinking>Let's parse the
 # user's request..." and leaked it as visible content. The fresh-context
@@ -1787,6 +1787,19 @@ _ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
 _ANSWER_PASS_LEAK_GUARD_FAMILIES = (
     frozenset({"qwen3_5", "qwen3_5_moe"}) | _ANSWER_PASS_FRESH_CONTEXT_FAMILIES
 )
+
+
+def _answer_pass_thinking_reentry(raw_text: str) -> bool:
+    """True when a thinking-off salvage re-opened a thinking block.
+
+    Match the bare "<think" OPEN prefix so tag variants count: DSV4
+    live-emitted "<thinking>Let's parse..." (2026-07-12, deterministic 3/3),
+    which a literal "<think>" needle MISSES — its closing ">" never matches
+    the variant's "ing>". The open-prefix form catches <think>, <thinking>,
+    and attribute variants alike; a thinking-OFF salvage has no legitimate
+    reason to open any of them.
+    """
+    return "<think" in (raw_text or "")
 
 
 def _answer_pass_messages(
@@ -12885,8 +12898,8 @@ async def create_chat_completion(
                 # Adopt the truncated answer; reject ONLY a genuine <think>
                 # re-entry (clean_output_text does not strip <think>, so the
                 # raw-text check is load-bearing).
-                _ns_reasoning_leak = _ns_qwen_scope and (
-                    "<think>" in (getattr(_ns_out, "text", "") or "")
+                _ns_reasoning_leak = _ns_qwen_scope and _answer_pass_thinking_reentry(
+                    getattr(_ns_out, "text", "") or ""
                 )
                 _ns_answer_complete = not _ns_reasoning_leak
                 if _ns_text and _ns_answer_complete:
@@ -15103,8 +15116,8 @@ async def create_response(
                 # Adopt the truncated answer; reject ONLY a genuine <think>
                 # re-entry (clean_output_text does not strip <think>, so the
                 # raw-text check is load-bearing).
-                _ns_reasoning_leak = _ns_qwen_scope and (
-                    "<think>" in (getattr(_ns_out, "text", "") or "")
+                _ns_reasoning_leak = _ns_qwen_scope and _answer_pass_thinking_reentry(
+                    getattr(_ns_out, "text", "") or ""
                 )
                 _ns_answer_complete = not _ns_reasoning_leak
                 if _ns_text and _ns_answer_complete:
@@ -16973,7 +16986,7 @@ async def stream_chat_completion(
                 # (a <think> marker in the raw output) — clean_output_text does NOT
                 # strip <think>, so this guard is load-bearing. Never-empty beats a
                 # truncated-but-honest answer (Eric: output MUST stream after reasoning).
-                _ans_reasoning_leak = "<think>" in _ans_raw
+                _ans_reasoning_leak = _answer_pass_thinking_reentry(_ans_raw)
                 if _full_delta and not _ans_reasoning_leak:
                     _ans_any = True
                     answer_chunk = ChatCompletionChunk(
@@ -18523,7 +18536,7 @@ async def stream_responses_api(
                     # Parity with the Chat Completions site (2026-07-12): emit a
                     # length-truncated but CLEAN answer instead of discarding to
                     # empty; discard ONLY on an actual <think> re-entry leak.
-                    _ans_reasoning_leak = "<think>" in _ans_raw
+                    _ans_reasoning_leak = _answer_pass_thinking_reentry(_ans_raw)
                     if _full_delta and not _ans_reasoning_leak:
                         yield _sse(
                             "response.output_text.delta",

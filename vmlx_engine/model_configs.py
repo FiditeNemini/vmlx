@@ -221,8 +221,23 @@ def register_all(registry=None):
             eos_tokens=["</assistant>", "〈|EOS|〉"],
             tool_parser="qwen",
             reasoning_parser="qwen3",
-            think_in_template=True,
+            # Laguna's chat template GATES the think rail on enable_thinking
+            # (verified live: omitted/False → generation prompt ends `</think>`
+            # = reasoning OFF; True → ends `<think>` = reasoning ON). It does
+            # NOT inject `<think>` unconditionally, so think_in_template must be
+            # False — otherwise the Auto (unset) path is probed as reasoning-ON
+            # (`_prompt_enable_ns = True if None`, server.py ~12573), the qwen3
+            # parser is seeded reasoning-first, and the model's plain answer is
+            # captured entirely as reasoning_content → EMPTY visible content.
+            # architecture_hints.default_enable_thinking=False makes Auto resolve
+            # to explicit reasoning-off (the template's own jinja default),
+            # matching the proven-working enable_thinking=False path. Reasoning
+            # stays opt-in via enable_thinking=True (works given adequate budget;
+            # the model reasons verbosely, ~400+ tok, then closes and answers).
+            # Mirrors the ZAYA reasoning contract above.
+            think_in_template=False,
             supports_thinking=True,
+            architecture_hints={"default_enable_thinking": False},
             is_mllm=False,
             priority=10,
         )

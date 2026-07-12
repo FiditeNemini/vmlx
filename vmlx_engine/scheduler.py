@@ -948,11 +948,33 @@ class Scheduler:
                         )
                         block_disk_store = None
 
-                # Use paged cache for memory efficiency
+                # Use paged cache for memory efficiency.
+                # Give the block pool the SAME RAM-byte ceiling the memory-aware
+                # path uses (default 20% of available RAM, 32 GB hard cap) so the
+                # in-RAM block KV mirror can't ratchet resident GPU memory upward
+                # with distinct prefixes. Without this, the pool grew to a flat
+                # max_cache_blocks regardless of per-model KV size (measured
+                # +3.7 GB vs +98 MB for the memory-aware path on the same
+                # workload). enforce_byte_budget() evicts only free (ref==0)
+                # cached blocks, disk-L2 write-through first.
+                from .memory_cache import MemoryCacheConfig as _MemCacheCfg
+
+                _paged_resident_budget = _MemCacheCfg(
+                    max_memory_mb=self.config.cache_memory_mb,
+                    max_memory_percent=self.config.cache_memory_percent,
+                ).compute_memory_limit()
                 self.paged_cache_manager = PagedCacheManager(
                     block_size=self.config.paged_cache_block_size,
                     max_blocks=self.config.max_cache_blocks,
                     disk_store=block_disk_store,
+                    max_resident_bytes=_paged_resident_budget,
+                )
+                logger.info(
+                    "Paged cache RAM ceiling: %.0f MB (%.0f%% of available); "
+                    "block pool max_blocks=%d",
+                    _paged_resident_budget / (1024 * 1024),
+                    self.config.cache_memory_percent * 100,
+                    self.config.max_cache_blocks,
                 )
                 self.block_aware_cache = BlockAwarePrefixCache(
                     model=model,

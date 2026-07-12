@@ -742,6 +742,32 @@ class PagedCacheManager:
             self.resident_bytes = max(0, self.resident_bytes - block.resident_bytes)
             block.resident_bytes = 0
 
+    @staticmethod
+    def estimate_block_nbytes(cache_data: Any) -> int:
+        """Best-effort resident RAM (bytes) of a block's KV mirror.
+
+        Recursively sums ``.nbytes`` of any array-like leaf (mlx arrays, incl.
+        quantized) in the nested (keys, values) / composite structure. Non-array
+        leaves (marker strings like "skip"/"kv", None, ints) contribute nothing.
+        Returns 0 on any error — accounting is advisory, never fatal.
+        """
+        total = 0
+
+        def _add(x: Any) -> None:
+            nonlocal total
+            nb = getattr(x, "nbytes", None)
+            if isinstance(nb, int):
+                total += nb
+            elif isinstance(x, (tuple, list)):
+                for e in x:
+                    _add(e)
+
+        try:
+            _add(cache_data)
+        except Exception:
+            return 0
+        return total
+
     def enforce_byte_budget(self) -> int:
         """Evict free cached blocks until resident RAM is within the byte ceiling.
 
@@ -1158,6 +1184,7 @@ class PagedCacheManager:
                     del self.hash_to_block[block.hash_value]
             block.reset_hash()
             block.cache_data = None
+            self._release_resident(block)
             block.cache_data_from_disk = False
             self.stats.evictions += 1
 
@@ -1168,6 +1195,8 @@ class PagedCacheManager:
         block.cache_data_from_disk = True
         block.token_count = token_count
         block.touch()
+        if self.max_resident_bytes > 0:
+            self._note_resident(block, self.estimate_block_nbytes(cache_data))
         self.allocated_blocks[block.block_id] = block
 
         # Register in hash cache

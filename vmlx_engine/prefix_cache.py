@@ -2169,6 +2169,11 @@ class BlockAwarePrefixCache:
                     else:
                         block.cache_data = block_kv_data
                         block.cache_data_from_disk = False
+                        if self.paged_cache.max_resident_bytes > 0:
+                            self.paged_cache._note_resident(
+                                block,
+                                self.paged_cache.estimate_block_nbytes(block_kv_data),
+                            )
                         logger.debug(
                             f"Stored tensor slice for block {block.block_id}: "
                             f"tokens [{global_start}:{global_end}], {len(block_kv_data)} layers"
@@ -2312,6 +2317,14 @@ class BlockAwarePrefixCache:
             f"{len(block_table.block_ids)} blocks ({blocks_with_data} with tensor data), "
             f"{block_table.num_tokens} tokens"
         )
+
+        # Hold the RAM byte ceiling: evict free (ref==0) cached blocks — disk-L2
+        # write-through first — so the in-RAM block mirror doesn't ratchet upward
+        # with distinct prefixes. No-op when the ceiling is disabled. The blocks
+        # just stored for this request are ref_count>=1, so they are never the
+        # ones evicted here.
+        if self.paged_cache.max_resident_bytes > 0:
+            self.paged_cache.enforce_byte_budget()
 
         return block_table
 

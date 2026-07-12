@@ -16763,6 +16763,11 @@ async def stream_chat_completion(
             }
         ]
         answer_kwargs = dict(kwargs)
+        # Register the answer-pass stream under the id the disconnect handler
+        # aborts (`{response_id}:visible-answer`); otherwise it inherits the main
+        # request_id and abort_request() misses, leaking the answer-pass
+        # generation on the GPU after the client disconnects mid-answer-pass.
+        answer_kwargs["request_id"] = f"{response_id}:visible-answer"
         _force_answer_pass_direct_rail(
             answer_kwargs,
             family_name=_family_name,
@@ -18316,6 +18321,11 @@ async def stream_responses_api(
                 }
             ]
             answer_kwargs = dict(kwargs)
+            # Register the answer-pass stream under the id the disconnect handler
+            # aborts (`{response_id}:visible-answer`); otherwise abort_request()
+            # misses and the answer-pass generation leaks on the GPU after a
+            # mid-answer-pass client disconnect. Mirror of the Chat Completions site.
+            answer_kwargs["request_id"] = f"{response_id}:visible-answer"
             _force_answer_pass_direct_rail(
                 answer_kwargs,
                 family_name=_family_name,

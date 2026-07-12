@@ -1716,8 +1716,25 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
         "openpangu_v2",
         "qwen3_5",
         "qwen3_5_moe",
+        # deepseek_v4 / step3p7 are bare deepseek_r1/qwen3 reasoners: on a hard
+        # prompt they can run the thinking block to the full budget without ever
+        # emitting a post-</think> answer, yielding empty content (agentic-loop
+        # stall). They honor enable_thinking=False on the direct rail, so the
+        # bounded thinking-off answer pass is coherent for them too.
+        "deepseek_v4",
+        "step3p7",
     }
 )
+
+# Families whose FIRST (thinking) pass may be capped by a client-sent
+# max_thinking_tokens. deepseek_v4 / step3p7 are deliberately EXCLUDED: they key
+# on reasoning_effort, not a thinking-token budget, so max_thinking_tokens is an
+# inert field for them and capping max_tokens by it would wrongly truncate the
+# answer. They still receive the never-empty answer pass above.
+_THINKING_BUDGET_CAP_FAMILIES = _REASONING_ANSWER_PASS_FAMILIES - {
+    "deepseek_v4",
+    "step3p7",
+}
 
 
 def _reasoning_answer_pass_family_label(family_name: str) -> str:
@@ -1725,6 +1742,8 @@ def _reasoning_answer_pass_family_label(family_name: str) -> str:
         "hy_v3": "Hy3",
         "minimax_m2": "MiniMax-M2",
         "openpangu_v2": "openPangu",
+        "deepseek_v4": "DeepSeek-V4",
+        "step3p7": "Step-3.7",
     }.get(family_name, "Qwen3.5")
 
 
@@ -12529,7 +12548,7 @@ async def create_chat_completion(
         except Exception:
             _ns_pre_family = None
         if (
-            _ns_pre_family in _REASONING_ANSWER_PASS_FAMILIES
+            _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
         ):
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
@@ -14736,7 +14755,7 @@ async def create_response(
         except Exception:
             _ns_pre_family = None
         if (
-            _ns_pre_family in _REASONING_ANSWER_PASS_FAMILIES
+            _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
         ):
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)

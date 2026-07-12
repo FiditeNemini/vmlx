@@ -1711,6 +1711,7 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
     {
         "gemma4",
         "hy_v3",
+        "laguna",
         "minimax_m2",
         "openpangu_v2",
         "qwen3_5",

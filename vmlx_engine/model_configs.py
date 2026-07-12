@@ -88,10 +88,13 @@ def register_all(registry=None):
     # ZAYA (Zyphra) — CCA attention + top-1 MoE.
     #
     # ZAYA is reasoning-capable, and the qwen3 parser extracts generated
-    # <think> blocks on the thinking rail. The honest product contract is
-    # supports_thinking=True. think_in_template stays False because the default
-    # no-thinking prompt must start generation in visible content, not make the
-    # parser route every first token into reasoning_content.
+    # <think> blocks on the thinking rail. Per Eric's directive, all
+    # reasoning-capable families default reasoning ON (API + UI), so
+    # architecture_hints.default_enable_thinking=True. think_in_template stays
+    # False because ZAYA's template gates the think rail on enable_thinking
+    # (does not inject <think> unconditionally); the Auto→reasoning-ON render
+    # then supplies the opening tag and the parser seed follows the rendered
+    # prompt.
     _register(
         ModelConfig(
             family_name="zaya",
@@ -104,7 +107,7 @@ def register_all(registry=None):
             think_in_template=False,
             supports_thinking=True,
             supports_native_tools=True,
-            architecture_hints={"default_enable_thinking": False},
+            architecture_hints={"default_enable_thinking": True},
             priority=3,
         )
     )
@@ -225,19 +228,20 @@ def register_all(registry=None):
             # (verified live: omitted/False → generation prompt ends `</think>`
             # = reasoning OFF; True → ends `<think>` = reasoning ON). It does
             # NOT inject `<think>` unconditionally, so think_in_template must be
-            # False — otherwise the Auto (unset) path is probed as reasoning-ON
-            # (`_prompt_enable_ns = True if None`, server.py ~12573), the qwen3
-            # parser is seeded reasoning-first, and the model's plain answer is
-            # captured entirely as reasoning_content → EMPTY visible content.
-            # architecture_hints.default_enable_thinking=False makes Auto resolve
-            # to explicit reasoning-off (the template's own jinja default),
-            # matching the proven-working enable_thinking=False path. Reasoning
-            # stays opt-in via enable_thinking=True (works given adequate budget;
-            # the model reasons verbosely, ~400+ tok, then closes and answers).
-            # Mirrors the ZAYA reasoning contract above.
+            # False (otherwise the Auto path mis-seeds the qwen3 parser
+            # reasoning-first even when reasoning is off).
+            #
+            # Per Eric's directive, ALL reasoning-capable families default
+            # reasoning ON (API + UI), so architecture_hints.default_enable_thinking
+            # = True → Auto resolves to reasoning-ON (template renders `<think>`).
+            # Laguna reasons verbosely (~400+ tok before it closes `</think>`), so
+            # on a tight budget reasoning-on would truncate to empty content; the
+            # family is therefore in _REASONING_ANSWER_PASS_FAMILIES (server.py)
+            # which caps the thinking pass at max_thinking_tokens then runs a
+            # bounded thinking-off answer pass, guaranteeing a visible answer.
             think_in_template=False,
             supports_thinking=True,
-            architecture_hints={"default_enable_thinking": False},
+            architecture_hints={"default_enable_thinking": True},
             is_mllm=False,
             priority=10,
         )

@@ -3210,6 +3210,21 @@ def _parser_routes_tools_via_reasoning_channel(request_parser, harmony_active: b
     return "gptoss" in name or "gpt_oss" in name or "harmony" in name
 
 
+def _reasoning_parser_is_harmony(parser) -> bool:
+    """GPT-OSS / Harmony models ALWAYS speak the channel protocol. The analysis
+    prefix is frequently injected by the chat TEMPLATE (rendered prompt), not via
+    a ``prompt_suffix`` kwarg, so the prompt_suffix-based ``_harmony_prefix_active``
+    check misses it and reports False. That mis-routes streaming's pre-final
+    analysis into the plain-content fallback and leaks chain-of-thought as visible
+    content on every streaming surface (chat/responses/ollama) + Anthropic (which
+    drains the chat stream). Non-stream is immune (parses the complete text's final
+    marker). Detect the harmony parser by type so all reset_state() sites can force
+    harmony_active=True — restoring stream/non-stream parity. Scoped to gpt_oss:
+    this parser class is only ever instantiated for harmony models."""
+    name = type(parser).__name__.lower() if parser is not None else ""
+    return "gptoss" in name or "gpt_oss" in name or "harmony" in name
+
+
 def _has_tool_marker_or_partial_suffix(text: str) -> bool:
     """Return True for full native tool markers or a marker split at stream tail."""
     if not text:
@@ -12524,6 +12539,10 @@ async def create_chat_completion(
         # Clone parser per-request to avoid shared state across concurrent requests
         request_parser = _reasoning_parser.__class__()
         # Initialize parser state (harmony_active, etc.) — same as streaming path
+        # NOTE: non-stream extract_reasoning() parses the COMPLETE text and finds
+        # the harmony final marker on its own, so it never needs the harmony_active
+        # hint (and forcing it True here alters channel parsing enough to drop
+        # gpt_oss tool calls — the streaming-only leak fix must NOT touch this path).
         _harmony_prefix_active = "prompt_suffix" in chat_kwargs and chat_kwargs.get(
             "prompt_suffix", ""
         ).startswith("<|start|>assistant<|channel|>analysis")
@@ -14681,6 +14700,10 @@ async def create_response(
         # Clone parser per-request to avoid shared state across concurrent requests
         request_parser = _reasoning_parser.__class__()
         # Initialize parser state (harmony_active, etc.) — same as streaming path
+        # NOTE: non-stream extract_reasoning() parses the COMPLETE text and finds
+        # the harmony final marker on its own, so it never needs the harmony_active
+        # hint (and forcing it True here alters channel parsing enough to drop
+        # gpt_oss tool calls — the streaming-only leak fix must NOT touch this path).
         _harmony_prefix_active = "prompt_suffix" in chat_kwargs and chat_kwargs.get(
             "prompt_suffix", ""
         ).startswith("<|start|>assistant<|channel|>analysis")
@@ -15625,9 +15648,12 @@ async def stream_chat_completion(
     # Create a per-request parser instance to avoid mutable-state conflicts
     # when multiple requests stream concurrently.
     # Check if Harmony analysis prefix was injected (set by chat endpoint above)
-    _harmony_prefix_active = "prompt_suffix" in kwargs and kwargs.get(
-        "prompt_suffix", ""
-    ).startswith("<|start|>assistant<|channel|>analysis")
+    _harmony_prefix_active = (
+        "prompt_suffix" in kwargs
+        and kwargs.get("prompt_suffix", "").startswith(
+            "<|start|>assistant<|channel|>analysis"
+        )
+    ) or _reasoning_parser_is_harmony(_reasoning_parser)
     request_parser = None
     if _reasoning_parser:
         request_parser = _reasoning_parser.__class__()
@@ -17296,9 +17322,12 @@ async def stream_responses_api(
 
     # Create a per-request parser instance to avoid mutable-state conflicts
     # when multiple requests stream concurrently.
-    _harmony_prefix_active = "prompt_suffix" in kwargs and kwargs.get(
-        "prompt_suffix", ""
-    ).startswith("<|start|>assistant<|channel|>analysis")
+    _harmony_prefix_active = (
+        "prompt_suffix" in kwargs
+        and kwargs.get("prompt_suffix", "").startswith(
+            "<|start|>assistant<|channel|>analysis"
+        )
+    ) or _reasoning_parser_is_harmony(_reasoning_parser)
     request_parser = None
     if _reasoning_parser:
         request_parser = _reasoning_parser.__class__()

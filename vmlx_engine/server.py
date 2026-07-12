@@ -2912,6 +2912,15 @@ def _resolve_enable_thinking(
     if isinstance(default_hint, bool):
         return default_hint
 
+    # Eric directive: reasoning-capable families default reasoning ON when the
+    # request is Auto (no explicit value / server default / family hint). Most
+    # reasoning templates already default ON, but some (e.g. gemma4, laguna) have
+    # jinja templates that default OFF, so returning True here makes the
+    # ON-by-default behavior uniform across api + ui. Non-reasoning families stay
+    # None (template decides -> no think rail). Effort-based families
+    # (deepseek-v4, mistral4) have downstream policy resolvers that override this.
+    if _supports_thinking:
+        return True
     return None
 
 

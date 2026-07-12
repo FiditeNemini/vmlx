@@ -222,7 +222,15 @@ def register_all(registry=None):
             model_types=["laguna"],
             cache_type="kv",
             eos_tokens=["</assistant>", "〈|EOS|〉"],
-            tool_parser="qwen",
+            # Laguna emits GLM-style tool calls:
+            #   <tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>
+            # The qwen parser only matches JSON / <function=...> and returns
+            # tools_called=False on this shape — it strips the block from
+            # content, so NON-stream survives only via the generic fallback and
+            # STREAMING silently drops the call. glm47 natively parses the
+            # arg_key/arg_value form in both stream and non-stream (unit + live
+            # proven: get_weather(city=Tokyo), zero leak).
+            tool_parser="glm47",
             reasoning_parser="qwen3",
             # Laguna's chat template GATES the think rail on enable_thinking
             # (verified live: omitted/False → generation prompt ends `</think>`

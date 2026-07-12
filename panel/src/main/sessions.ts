@@ -17,6 +17,12 @@ import { canonicalizeReasoningParserForCli } from '../shared/reasoningParserAlia
 import { GENERATION_STARTUP_DEFAULTS_VERSION, LEGACY_GENERIC_MAX_OUTPUT_TOKENS } from '../shared/sessionConfigMigrations'
 import { appendMetalWiredLimitGuidance, classifyLargeModelMemoryPreflight } from '../shared/metalWiredLimit'
 import {
+  estimateModelLaunchResidentBytes,
+  isLazyMmapJangBundle,
+  estimateMacReclaimableMemoryBytes,
+  effectiveLaunchAvailableBytes,
+} from './modelLaunchMemory'
+import {
   BACKEND_STDERR_DISCONNECT_NORMALIZED_LINE,
   normalizeBackendStderrChunk,
 } from './backend-stderr'
@@ -836,14 +842,6 @@ function estimateModelFileBytes(modelPath: string): number {
   }
 }
 
-/** Estimate model memory usage from safetensors file sizes. Returns bytes or 0 if unknown. */
-function estimateModelMemory(modelPath: string): number {
-  const fileBytes = estimateModelFileBytes(modelPath)
-  if (fileBytes <= 0) return 0
-  // Model size on disk + ~30% overhead for KV cache, activations, framework
-  return Math.round(fileBytes * 1.3)
-}
-
 function formatGb(bytes: number): string {
   return (bytes / 1e9).toFixed(1)
 }
@@ -1571,12 +1569,24 @@ export class SessionManager extends EventEmitter {
       }
     }
 
-    // Memory estimation: warn if model is too large for available RAM
+    // Memory estimation: warn if model is too large for available RAM.
+    // JANG bundles are lazy-mmap — only ~70% resident at launch and the OS reclaims
+    // file-cache pages to back the mmap — so use the mmap-aware resident estimate
+    // (×0.7 for JANG, ×1.3 only for non-mmap) plus a bounded reclaimable allowance
+    // on top of freemem(). The old disk×1.3 + raw-freemem() path over-estimated
+    // ~2× and under-counted available RAM, producing false "won't fit" warnings on
+    // models that load fine (DSV4-Flash / MM3 JANGTQ load at ~67 GB resident, not
+    // the ~110–136 GB the heuristic showed).
     const modelFileBytes = estimateModelFileBytes(config.modelPath)
-    const modelSizeBytes = estimateModelMemory(config.modelPath)
+    const totalBytes = totalmem()
+    const modelSizeBytes = estimateModelLaunchResidentBytes(config.modelPath, modelFileBytes, totalBytes)
     if (modelSizeBytes > 0) {
-      const availableBytes = freemem()
-      const totalBytes = totalmem()
+      const lazyMmap = isLazyMmapJangBundle(config.modelPath)
+      const availableBytes = effectiveLaunchAvailableBytes(freemem(), {
+        lazyMmap,
+        reclaimableBytes: estimateMacReclaimableMemoryBytes(),
+        totalBytes,
+      })
       const usagePercent = ((totalBytes - availableBytes) / totalBytes) * 100
       const modelGB = formatGb(modelSizeBytes)
       const availGB = (availableBytes / 1e9).toFixed(1)

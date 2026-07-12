@@ -2992,17 +2992,27 @@ class Scheduler:
     ) -> Tuple[List[int], int]:
         """Return prefill tail + cached count for disk L2 prefix hits.
 
-        Disk prompt L2 entries store cache state for the matched key length.
-        The restored cache offset is therefore ``len(matched_tokens)``; do not
-        re-feed the last matched token on a prefix hit.
+        Disk prompt L2 payloads store KV state for ``len(matched_tokens) - 1``
+        tokens, NOT ``len(matched_tokens)``: every disk write truncates via
+        ``_truncate_cache_to_prompt_length`` (target ``prompt_len - 1``) so the
+        last matched token can be re-fed on a hit. Its docstring states the
+        contract for exactly this path — "forward prefix match: remaining has
+        extra tokens INCLUDING THE Nth token". So the restored cache offset is
+        ``len(matched) - 1`` and ``matched[-1]`` must lead the uncached tail,
+        identically to the exact-hit helper. (Returning ``len(matched)`` and
+        dropping ``matched[-1]`` silently skips one token — a warm disk-prefix
+        vs cold positional skew on non-hybrid models.)
         """
         key_tokens = list(fetch_tokens or [])
         matched = list(matched_tokens or [])
         suffix = list(gen_prompt_suffix or [])
         if matched:
-            tail = list(key_tokens[len(matched):]) + suffix
+            offset = max(len(matched) - 1, 0)
+            # key_tokens[offset:] == [matched[-1], *uncached_tail]; re-feed
+            # matched[-1] so its KV is (re)computed against the N-1 payload.
+            tail = list(key_tokens[offset:]) + suffix
             if tail:
-                return tail, len(matched)
+                return tail, offset
         return Scheduler._prefix_hit_tail_and_cached_tokens(
             fetch_tokens=matched or key_tokens,
             remaining=[],

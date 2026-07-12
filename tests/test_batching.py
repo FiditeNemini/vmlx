@@ -136,25 +136,31 @@ class TestPrefixHitTailAccounting:
         assert remaining == []
         assert cached_tokens == 3
 
-    def test_disk_prefix_hit_does_not_refeed_last_matched_token(self):
+    def test_disk_prefix_hit_refeeds_last_matched_token(self):
+        # Disk stores key P (len 4) with an N-1=3-token payload, so the offset is
+        # len(P)-1=3 and P[-1]=13 must lead the tail before the uncached tokens
+        # F[len(P):]=[14,15] and the generation suffix. (This mirrors the exact-hit
+        # helper and the store-side _truncate_cache_to_prompt_length contract.)
         remaining, cached_tokens = Scheduler._disk_prefix_hit_tail_and_cached_tokens(
             fetch_tokens=[10, 11, 12, 13, 14, 15],
             matched_tokens=[10, 11, 12, 13],
             gen_prompt_suffix=[90, 91],
         )
 
-        assert remaining == [14, 15, 90, 91]
-        assert cached_tokens == 4
+        assert remaining == [13, 14, 15, 90, 91]
+        assert cached_tokens == 3
 
-    def test_disk_exact_hit_with_generation_suffix_uses_suffix_only(self):
+    def test_disk_exact_hit_with_generation_suffix_refeeds_last_token(self):
+        # matched==fetch: the disk helper must agree with the exact-hit helper —
+        # cached=N-1 and the last matched token is re-fed before the suffix.
         remaining, cached_tokens = Scheduler._disk_prefix_hit_tail_and_cached_tokens(
             fetch_tokens=[10, 11, 12, 13],
             matched_tokens=[10, 11, 12, 13],
             gen_prompt_suffix=[90, 91],
         )
 
-        assert remaining == [90, 91]
-        assert cached_tokens == 4
+        assert remaining == [13, 90, 91]
+        assert cached_tokens == 3
 
 
 class TestSamplingParams:

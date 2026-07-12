@@ -457,7 +457,11 @@ def test_scheduler_disk_l2_prefix_hit_replays_uncached_tail(monkeypatch):
 
         def fetch_longest_prefix(self, tokens):
             assert tokens == [10, 11, 12, 13, 14]
-            return [_m3_cache(seq=4)], [10, 11, 12, 13]
+            # Store contract: key P=[10,11,12,13] (4 tokens) but the payload is
+            # truncated to N-1=3 tokens (_truncate_cache_to_prompt_length) so the
+            # last matched token P[-1]=13 is re-fed on a hit. Mock the payload at
+            # seq=3 to mirror the real N-1 disk store.
+            return [_m3_cache(seq=3)], [10, 11, 12, 13]
 
     scheduler = object.__new__(Scheduler)
     scheduler.memory_aware_cache = _MemoryCache()
@@ -479,9 +483,12 @@ def test_scheduler_disk_l2_prefix_hit_replays_uncached_tail(monkeypatch):
     Scheduler.add_request(scheduler, request)
 
     assert request.prompt_cache is not None
-    _assert_m3_cache(request.prompt_cache[0], seq=4)
-    assert request.cached_tokens == 4
-    assert request.remaining_tokens == [14, 90, 91]
+    _assert_m3_cache(request.prompt_cache[0], seq=3)
+    # N-1 contract: matched key P=[10,11,12,13] carries a 3-token payload, so the
+    # cache offset is len(P)-1=3 and the scheduler re-feeds P[-1]=13 ahead of the
+    # uncached tail F[len(P):]=[14] and the generation suffix [90,91].
+    assert request.cached_tokens == 3
+    assert request.remaining_tokens == [13, 14, 90, 91]
     assert request._cache_detail == "disk"
 
 

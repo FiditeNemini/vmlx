@@ -43,22 +43,23 @@ _MSGS = [{"role": "user", "content": "Remember codeword BLUE-FALCON."}]
 _TRUNC = "We are given the task. Interpretation: We need BLUE-F"
 
 
-def test_answer_pass_fresh_context_for_dsv4_and_step37():
-    """deepseek_v4/step3p7 templates render the appended reasoning turn as a
-    malformed empty/double assistant turn (DSV4: <Assistant><eos><Assistant>
-    </think> — live-proven degenerate salvage 2026-07-12). Their answer pass
-    must re-run the ORIGINAL messages with nothing appended."""
-    for fam in ("deepseek_v4", "step3p7"):
+def test_answer_pass_fresh_context_families():
+    """deepseek_v4/step3p7/minimax templates render the appended reasoning turn
+    as a malformed empty/double assistant turn (DSV4: <Assistant><eos>
+    <Assistant></think>; minimax: back-to-back ]~b]ai turns — live-proven
+    degenerate/empty salvage 2026-07-12). Their answer pass must re-run the
+    ORIGINAL messages with nothing appended."""
+    for fam in ("deepseek_v4", "step3p7", "minimax", "minimax_m2"):
         out = server_mod._answer_pass_messages(_MSGS, fam, _TRUNC)
         assert out == _MSGS
         assert out is not _MSGS  # fresh copy, caller list not aliased
 
 
 def test_answer_pass_appends_reasoning_turn_for_legacy_families():
-    """The 9-family live-proven behavior (W14/W15) is untouched: the truncated
+    """The legacy live-proven behavior (W14/W15) is untouched: the truncated
     reasoning rides along as an assistant turn."""
     for fam in ("qwen3_5", "qwen3_5_moe", "gemma4", "hy_v3", "laguna",
-                "minimax_m2", "openpangu_v2", None, "reasoning model"):
+                "openpangu_v2", None, "reasoning model"):
         out = server_mod._answer_pass_messages(_MSGS, fam, _TRUNC)
         assert out[:-1] == _MSGS
         assert out[-1] == {
@@ -66,3 +67,14 @@ def test_answer_pass_appends_reasoning_turn_for_legacy_families():
             "content": "",
             "reasoning_content": _TRUNC,
         }
+
+
+def test_minimax_family_armed_for_answer_pass():
+    """MiniMax-M2.x bundles report family_name "minimax" — the parser name
+    "minimax_m2" alone left M2.7 reasoning-only turns EMPTY (live-proven
+    2026-07-12). Both spellings must arm the rail and label as MiniMax-M2."""
+    assert "minimax" in server_mod._REASONING_ANSWER_PASS_FAMILIES
+    assert "minimax" in server_mod._THINKING_BUDGET_CAP_FAMILIES
+    label = server_mod._reasoning_answer_pass_family_label
+    assert label("minimax") == "MiniMax-M2"
+    assert label("minimax_m2") == "MiniMax-M2"

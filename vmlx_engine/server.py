@@ -1712,6 +1712,15 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
         "gemma4",
         "hy_v3",
         "laguna",
+        # MiniMax-M2.x bundles report family_name "minimax" ("minimax_m2" is
+        # only their REASONING PARSER name — no bundle resolves to it as a
+        # family, so that entry alone left M2.7 reasoning-only turns EMPTY at
+        # tight budgets, live-proven 2026-07-12). Keep both spellings so a
+        # future bundle that does report minimax_m2 stays covered. The M2.7
+        # direct rail is reliable: ensure_thinking_off_sentinel renders the
+        # empty-thought contract and a fresh thinking-off pass at the 48-token
+        # floor answers cleanly (live-proven).
+        "minimax",
         "minimax_m2",
         "openpangu_v2",
         "qwen3_5",
@@ -1740,6 +1749,7 @@ _THINKING_BUDGET_CAP_FAMILIES = _REASONING_ANSWER_PASS_FAMILIES - {
 def _reasoning_answer_pass_family_label(family_name: str) -> str:
     return {
         "hy_v3": "Hy3",
+        "minimax": "MiniMax-M2",
         "minimax_m2": "MiniMax-M2",
         "openpangu_v2": "openPangu",
         "deepseek_v4": "DeepSeek-V4",
@@ -1758,9 +1768,13 @@ def _reasoning_answer_pass_family_label(family_name: str) -> str:
 # 2026-07-12: "+DERIV+DERIV..." at max_tokens=64, while the identical request
 # WITHOUT the appended turn answers cleanly on the same engine). step3p7
 # renders back-to-back assistant turns (reasoning inlined as a completed turn,
-# then a second assistant open). Both families run the answer pass on the
+# then a second assistant open). minimax (M2.x) renders back-to-back ]~b]ai
+# turns the same way (truncated think closed as a full turn, then a second
+# empty-think assistant open). These families run the answer pass on the
 # ORIGINAL messages instead.
-_ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset({"deepseek_v4", "step3p7"})
+_ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
+    {"deepseek_v4", "step3p7", "minimax", "minimax_m2"}
+)
 
 
 def _answer_pass_messages(

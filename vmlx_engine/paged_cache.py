@@ -170,6 +170,10 @@ class CacheBlock:
     # List of (keys, values) per layer, shape: (1, n_kv_heads, block_tokens, head_dim)
     cache_data: Optional[List[Tuple[Any, Any]]] = None
     cache_data_from_disk: bool = False
+    # Resident RAM bytes currently attributed to this block's cache_data mirror
+    # (0 when cache_data is None). Tracked so the manager can hold a byte ceiling
+    # like the memory-aware path instead of an unbounded block count.
+    resident_bytes: int = 0
 
     # Metadata
     token_count: int = 0
@@ -552,6 +556,7 @@ class PagedCacheManager:
         max_blocks: int = 1000,
         enable_caching: bool = True,
         disk_store: "Optional[Any]" = None,
+        max_resident_bytes: int = 0,
     ):
         if block_size < 1:
             raise ValueError(f"block_size must be >= 1, got {block_size}")
@@ -562,6 +567,14 @@ class PagedCacheManager:
         self.enable_caching = enable_caching
         # Optional L2 disk store for block persistence (BlockDiskStore)
         self._disk_store = disk_store
+        # RAM byte ceiling for the in-RAM block KV mirror. 0 = unbounded (legacy
+        # behavior: the pool grows to max_blocks with no byte ceiling). When > 0,
+        # enforce_byte_budget() evicts free (ref_count==0) cached blocks — writing
+        # them to L2 disk first if a store is present — to hold this ceiling,
+        # mirroring MemoryAwarePrefixCache. Prevents the paged pool from
+        # ratcheting resident GPU memory upward with distinct prefixes.
+        self.max_resident_bytes = max(0, int(max_resident_bytes or 0))
+        self.resident_bytes = 0
 
         # Create all blocks
         self.blocks: List[CacheBlock] = [
@@ -703,11 +716,66 @@ class PagedCacheManager:
 
             block.reset_hash()
             block.cache_data = None  # Free tensor memory
+            self._release_resident(block)
             block.cache_data_from_disk = False
             self.stats.evictions += 1
             return True
 
         return False
+
+    def _note_resident(self, block: CacheBlock, nbytes: int) -> None:
+        """Attribute ``nbytes`` of resident RAM to ``block``'s cache_data mirror.
+
+        Idempotent per block: replaces any prior attribution so re-promotion or
+        re-store does not double-count. No-op when the byte ceiling is disabled.
+        """
+        if self.max_resident_bytes <= 0:
+            return
+        nbytes = max(0, int(nbytes or 0))
+        with self._lock:
+            self.resident_bytes += nbytes - block.resident_bytes
+            block.resident_bytes = nbytes
+
+    def _release_resident(self, block: CacheBlock) -> None:
+        """Drop ``block``'s resident-byte attribution (called when cache_data is freed)."""
+        if block.resident_bytes:
+            self.resident_bytes = max(0, self.resident_bytes - block.resident_bytes)
+            block.resident_bytes = 0
+
+    def enforce_byte_budget(self) -> int:
+        """Evict free cached blocks until resident RAM is within the byte ceiling.
+
+        Only blocks with ``ref_count == 0`` (not referenced by any in-flight
+        request) are eligible, so this can never corrupt an active sequence.
+        Eviction goes through ``_maybe_evict_cached_block``, which write-throughs
+        to the L2 disk store (when present) before dropping the RAM mirror — so a
+        later prefix hit re-promotes from disk instead of full-prefilling.
+        Evicts least-recently-used first. Returns the number of blocks evicted.
+        No-op when the ceiling is disabled (``max_resident_bytes <= 0``).
+        """
+        if self.max_resident_bytes <= 0:
+            return 0
+        evicted = 0
+        with self._lock:
+            if self.resident_bytes <= self.max_resident_bytes:
+                return 0
+            # LRU order: oldest access first. Only free (ref_count==0), still-cached
+            # blocks are eligible; null block and in-flight blocks are excluded.
+            candidates = [
+                b
+                for b in self.blocks
+                if b.ref_count == 0
+                and not b.is_null
+                and b.cache_data is not None
+                and b.block_hash is not None
+            ]
+            candidates.sort(key=lambda b: b.last_access)
+            for block in candidates:
+                if self.resident_bytes <= self.max_resident_bytes:
+                    break
+                if self._maybe_evict_cached_block(block):
+                    evicted += 1
+        return evicted
 
     def free_block(self, block_id: int) -> bool:
         """

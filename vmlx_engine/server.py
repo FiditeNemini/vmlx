@@ -12800,10 +12800,17 @@ async def create_chat_completion(
                 # MiniMax-M2.7 truncates its visible worked solution honestly,
                 # no planning leak). See streaming gate for the matching scope.
                 _ns_qwen_scope = _ns_family in ("qwen3_5", "qwen3_5_moe")
-                _ns_answer_complete = (
-                    not _ns_qwen_scope
-                    or getattr(_ns_out, "finish_reason", None) != "length"
+                # 2026-07-12 parity fix (streaming siblings): a length-truncated
+                # qwen3_5* salvage is a CLEAN cut-off answer, not a planning-prose
+                # leak — the direct-rail thinking-off pass does not emit <think>.
+                # Discarding it left the turn EMPTY and stalled agentic loops.
+                # Adopt the truncated answer; reject ONLY a genuine <think>
+                # re-entry (clean_output_text does not strip <think>, so the
+                # raw-text check is load-bearing).
+                _ns_reasoning_leak = _ns_qwen_scope and (
+                    "<think>" in (getattr(_ns_out, "text", "") or "")
                 )
+                _ns_answer_complete = not _ns_reasoning_leak
                 if _ns_text and _ns_answer_complete:
                     content_for_parsing = _ns_text
                     try:
@@ -15011,10 +15018,17 @@ async def create_response(
                 # MiniMax-M2.7 truncates its visible worked solution honestly,
                 # no planning leak). See streaming gate for the matching scope.
                 _ns_qwen_scope = _ns_family in ("qwen3_5", "qwen3_5_moe")
-                _ns_answer_complete = (
-                    not _ns_qwen_scope
-                    or getattr(_ns_out, "finish_reason", None) != "length"
+                # 2026-07-12 parity fix (streaming siblings): a length-truncated
+                # qwen3_5* salvage is a CLEAN cut-off answer, not a planning-prose
+                # leak — the direct-rail thinking-off pass does not emit <think>.
+                # Discarding it left the turn EMPTY and stalled agentic loops.
+                # Adopt the truncated answer; reject ONLY a genuine <think>
+                # re-entry (clean_output_text does not strip <think>, so the
+                # raw-text check is load-bearing).
+                _ns_reasoning_leak = _ns_qwen_scope and (
+                    "<think>" in (getattr(_ns_out, "text", "") or "")
                 )
+                _ns_answer_complete = not _ns_reasoning_leak
                 if _ns_text and _ns_answer_complete:
                     content_for_parsing = _ns_text
                     try:
@@ -16874,7 +16888,19 @@ async def stream_chat_completion(
                 _full_delta, _ans_sent = _answer_pass_visible_delta(
                     _ans_raw, "", request, True, holdback=0
                 )
-                if _full_delta and not _ans_truncated:
+                # 2026-07-12 (live-proven on Qwen3.6-27B-MXFP4-CRACK-MTP): the
+                # W2-1 blanket discard-on-truncation threw away a CLEAN, usable
+                # answer whenever a runaway reasoner left the answer pass only the
+                # ANSWER_PASS_FLOOR budget — the turn came back EMPTY and stalled
+                # agentic loops. The direct-rail thinking-off pass emits a plain
+                # answer with NO <think> block, so a length-truncated pass is a
+                # cut-off answer, not the planning-prose leak W2-1 guarded against.
+                # Emit it. Discard ONLY when the pass actually re-entered reasoning
+                # (a <think> marker in the raw output) — clean_output_text does NOT
+                # strip <think>, so this guard is load-bearing. Never-empty beats a
+                # truncated-but-honest answer (Eric: output MUST stream after reasoning).
+                _ans_reasoning_leak = "<think>" in _ans_raw
+                if _full_delta and not _ans_reasoning_leak:
                     _ans_any = True
                     answer_chunk = ChatCompletionChunk(
                         id=response_id,
@@ -16888,11 +16914,17 @@ async def stream_chat_completion(
                         ],
                     )
                     yield f"data: {_dump_sse_json(answer_chunk)}\n\n"
+                elif _ans_reasoning_leak:
+                    logger.info(
+                        "%s streaming answer pass re-entered reasoning "
+                        "(<think> leak, ct=%d/%d) — discarding to avoid "
+                        "planning-prose leak; client should raise max_tokens",
+                        _answer_family, _ans_ct, _ans_budget_cap,
+                    )
                 elif _ans_truncated:
                     logger.info(
-                        "%s streaming answer pass truncated (finish=length, "
-                        "ct=%d/%d) — discarding to avoid planning-prose leak; "
-                        "client should raise max_tokens",
+                        "%s streaming answer pass truncated with no visible "
+                        "content (ct=%d/%d) — client should raise max_tokens",
                         _answer_family, _ans_ct, _ans_budget_cap,
                     )
             if _ans_any:
@@ -18418,7 +18450,11 @@ async def stream_responses_api(
                     _full_delta, _ans_sent = _answer_pass_visible_delta(
                         _ans_raw, "", request, True, holdback=0
                     )
-                    if _full_delta and not _ans_truncated:
+                    # Parity with the Chat Completions site (2026-07-12): emit a
+                    # length-truncated but CLEAN answer instead of discarding to
+                    # empty; discard ONLY on an actual <think> re-entry leak.
+                    _ans_reasoning_leak = "<think>" in _ans_raw
+                    if _full_delta and not _ans_reasoning_leak:
                         yield _sse(
                             "response.output_text.delta",
                             {
@@ -18431,11 +18467,17 @@ async def stream_responses_api(
                         )
                     else:
                         _ans_sent = ""
-                        if _ans_truncated:
+                        if _ans_reasoning_leak:
                             logger.info(
-                                "%s streaming Responses answer pass truncated "
-                                "(finish=length, ct=%d/%d) — discarding to avoid "
-                                "planning-prose leak; raise max_tokens",
+                                "%s streaming Responses answer pass re-entered "
+                                "reasoning (<think> leak, ct=%d/%d) — discarding to "
+                                "avoid planning-prose leak; raise max_tokens",
+                                _answer_family, _ans_ct, _ans_budget_cap,
+                            )
+                        elif _ans_truncated:
+                            logger.info(
+                                "%s streaming Responses answer pass truncated with "
+                                "no visible content (ct=%d/%d) — raise max_tokens",
                                 _answer_family, _ans_ct, _ans_budget_cap,
                             )
                 if _ans_sent:

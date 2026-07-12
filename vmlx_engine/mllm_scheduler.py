@@ -2296,11 +2296,17 @@ class MLLMScheduler:
         # Track per-request additions so they can be removed on cleanup
         # (prevents stop tokens leaking across unrelated requests).
         if batch_requests and self.batch_generator is not None:
-            for request in scheduled:
-                if request.sampling_params.stop_token_ids:
-                    new_tokens = set(request.sampling_params.stop_token_ids)
-                    self.batch_generator.stop_tokens.update(new_tokens)
-                    request._added_stop_tokens = new_tokens
+            # Guarded: upstream mlx_lm BatchGenerator has NO `stop_tokens`
+            # attribute — unguarded this raised AttributeError out of
+            # scheduling for any request with stop_token_ids on the batched
+            # MLLM path (issue #229-#236 review; mirror of the LLM scheduler
+            # site). The guard must NOT gate the insert() below.
+            if hasattr(self.batch_generator, "stop_tokens"):
+                for request in scheduled:
+                    if request.sampling_params.stop_token_ids:
+                        new_tokens = set(request.sampling_params.stop_token_ids)
+                        self.batch_generator.stop_tokens.update(new_tokens)
+                        request._added_stop_tokens = new_tokens
             uids = self.batch_generator.insert(batch_requests)
 
             for uid, request in zip(uids, scheduled):

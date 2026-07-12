@@ -5906,10 +5906,18 @@ class Scheduler:
                 scheduled.append(request)
 
                 # H1 parity: Add per-request stop tokens to shared batch generator
-                # Track additions so they can be removed on cleanup
+                # Track additions so they can be removed on cleanup.
+                # Upstream mlx_lm BatchGenerator (continuous batching / native
+                # MTP) has NO `stop_tokens` attribute — only our
+                # SingleBatchGenerator / DSV4BatchGenerator do. Unguarded, any
+                # request carrying stop_token_ids raised AttributeError out of
+                # _schedule_waiting into step() (issue #229-#236 review). For
+                # generators without the shared set, per-request stops are
+                # enforced scheduler-side in the decode loop instead.
                 if (
                     request.sampling_params.stop_token_ids
                     and self.batch_generator is not None
+                    and hasattr(self.batch_generator, "stop_tokens")
                 ):
                     new_tokens = set(request.sampling_params.stop_token_ids)
                     self.batch_generator.stop_tokens.update(new_tokens)
@@ -6059,6 +6067,21 @@ class Scheduler:
             # Check if finished BEFORE adding token to detokenizer
             # so stop tokens (e.g. <|im_end|>) don't leak into new_text
             is_stop = response.finish_reason == "stop" or spec_hit_stop
+            # Per-request stop_token_ids fallback for batch generators WITHOUT
+            # a shared `stop_tokens` set (upstream mlx_lm BatchGenerator under
+            # continuous batching / native MTP). Our SingleBatchGenerator /
+            # DSV4BatchGenerator stop inside the generator via the shared set;
+            # upstream cannot, so the request's stop tokens would otherwise be
+            # silently IGNORED (issue #229-#236 review). Checked before the
+            # detokenizer add, so the stop token never leaks into new_text —
+            # identical surface behavior to the generator-side stop.
+            if (
+                not is_stop
+                and request.sampling_params.stop_token_ids
+                and not hasattr(self.batch_generator, "stop_tokens")
+                and response.token in request.sampling_params.stop_token_ids
+            ):
+                is_stop = True
             string_stop_truncate = -1  # >=0 when string stop matched
 
             if not is_stop:

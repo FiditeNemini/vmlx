@@ -932,6 +932,26 @@ class MemoryAwarePrefixCache:
             self._stats.misses += 1
             return None, tokens
 
+        # issue #233: the match phase runs under self._lock, but the CLONE runs
+        # with the lock RELEASED. _clone_cache_for_fetch hops to the llm-worker
+        # executor (F11: the clone must be born on the MLX stream owner) and
+        # blocks on .result(); the same worker's step() -> _cleanup_finished()
+        # -> store() blocks on self._lock — holding the lock across the hop is
+        # a lock inversion that deadlocks in the DEFAULT config (and likewise
+        # against remove()). Releasing it is safe because the single-thread
+        # executor — not the mutex — is what serializes the clone against
+        # decode, and _truncate_cache is read-only on the source arrays. We
+        # snapshot entry.cache (the LIST) under the lock: evictors do
+        # `del entry.cache`, so touching the entry attribute after release is
+        # an intermittent AttributeError that reads as a flaky miss.
+        _hit_entry = None  # the _CacheEntry OBJECT — identity token for revalidation
+        _hit_key: tuple[int, ...] | None = None
+        _hit_cache: list | None = None  # snapshot of entry.cache
+        _hit_kind = ""  # "exact" | "forward"
+        _hit_len = 0
+        _rev_entry = None  # reverse-match fallback (original fallthrough semantics)
+        _rev_cache: list | None = None
+
         with self._lock:
             # Evict expired entries before lookup
             if self._ttl_seconds > 0:
@@ -946,16 +966,8 @@ class MemoryAwarePrefixCache:
                 # advancing offset/appending KV in place cannot contaminate
                 # the stored entry for future hits on the same prefix. A clone we
                 # cannot build is a miss — only count the hit once it succeeds.
-                cloned = self._clone_cache_for_fetch(entry.cache, len(tokens))
-                if cloned is not None:
-                    self._entries.move_to_end(tokens_key)
-                    self._touch_type_lru(tokens_key, entry.cache_type)
-                    entry.touch()
-                    self._stats.hits += 1
-                    self._stats.tokens_saved += len(tokens)
-                    return cloned, []
-                self._stats.misses += 1
-                return None, tokens
+                _hit_entry, _hit_key, _hit_cache = entry, tokens_key, entry.cache
+                _hit_kind, _hit_len = "exact", len(tokens)
 
             # Prefix scan: O(n) over all entries (Issue #62).
             #
@@ -974,7 +986,8 @@ class MemoryAwarePrefixCache:
             best_reverse_match: _CacheEntry | None = None
             best_reverse_length = 0
 
-            for cached_key, entry in self._entries.items():
+            _scan_entries = () if _hit_entry is not None else self._entries.items()
+            for cached_key, entry in _scan_entries:
                 cached_len = len(cached_key)
 
                 if cached_len < len(tokens):
@@ -997,36 +1010,57 @@ class MemoryAwarePrefixCache:
                         best_reverse_length = len(tokens)
 
             # Prefer forward match (exact prefix reuse, no truncation needed)
-            if best_forward_match is not None:
+            if _hit_entry is None and best_forward_match is not None:
                 # issue #198 (1C): isolated clone (see exact-match path). This is the
                 # entry's FULL cached length (best_forward_length == cached_len), which
                 # is what lets cumulative SSM layers be copied rather than reduced.
-                cloned = self._clone_cache_for_fetch(
-                    best_forward_match.cache, best_forward_length
-                )
-                if cloned is not None:
-                    self._entries.move_to_end(best_forward_match.tokens)
-                    self._touch_type_lru(
-                        best_forward_match.tokens, best_forward_match.cache_type
-                    )
-                    best_forward_match.touch()
-                    self._stats.hits += 1
-                    self._stats.tokens_saved += best_forward_length
-                    return cloned, tokens[best_forward_length:]
+                _hit_entry = best_forward_match
+                _hit_key = best_forward_match.tokens
+                _hit_cache = best_forward_match.cache
+                _hit_kind, _hit_len = "forward", best_forward_length
 
-            # Fall back to reverse match with cache truncation
+            # Reverse match with cache truncation — snapshot as the fallback so a
+            # failed forward clone still falls through to it (original semantics).
             if best_reverse_match is not None:
-                truncated = self._truncate_cache(best_reverse_match.cache, len(tokens))
-                if truncated is not None:
-                    self._entries.move_to_end(best_reverse_match.tokens)
-                    self._touch_type_lru(best_reverse_match.tokens, best_reverse_match.cache_type)
-                    best_reverse_match.touch()
-                    self._stats.hits += 1
-                    self._stats.tokens_saved += len(tokens)
-                    return truncated, []
+                _rev_entry = best_reverse_match
+                _rev_cache = best_reverse_match.cache
 
-            self._stats.misses += 1
-            return None, tokens
+            if _hit_entry is None and _rev_entry is None:
+                self._stats.misses += 1
+                return None, tokens
+
+        # ── clone phase: LOCK RELEASED (issue #233, see header comment) ──
+        cloned: list | None = None
+        remaining: list[int] = []
+        if _hit_entry is not None:
+            cloned = self._clone_cache_for_fetch(_hit_cache, _hit_len)
+            if cloned is not None and _hit_kind == "forward":
+                remaining = tokens[_hit_len:]
+        if cloned is None and _rev_entry is not None:
+            # Fall back to reverse match with cache truncation
+            cloned = self._truncate_cache(_rev_cache, len(tokens))
+            if cloned is not None:
+                _hit_entry, _hit_key = _rev_entry, _rev_entry.tokens
+                _hit_len = len(tokens)
+                remaining = []
+
+        with self._lock:
+            if cloned is None:
+                self._stats.misses += 1
+                return None, tokens
+            # Revalidate on the ENTRY OBJECT'S identity, not just the key: a
+            # concurrent evict+re-store swaps the object behind the same key,
+            # and _touch_type_lru INSERTS absent keys (which would desync
+            # _lru_by_type for an entry that no longer exists). On identity
+            # failure the clone is still real data built from a then-valid
+            # snapshot — return it and count the hit; just skip LRU touching.
+            if _hit_key is not None and self._entries.get(_hit_key) is _hit_entry:
+                self._entries.move_to_end(_hit_key)
+                self._touch_type_lru(_hit_key, _hit_entry.cache_type)
+                _hit_entry.touch()
+            self._stats.hits += 1
+            self._stats.tokens_saved += _hit_len
+            return cloned, remaining
 
     def store(
         self,
@@ -1264,22 +1298,36 @@ class MemoryAwarePrefixCache:
             return True
 
     def reset_stats(self) -> None:
-        """Reset hit/miss/eviction counters while preserving cached entries."""
-        self._stats = CacheStats(
-            max_memory_bytes=self._max_memory,
-            current_memory_bytes=self._current_memory,
-            entry_count=len(self._entries),
-        )
+        """Reset hit/miss/eviction counters while preserving cached entries.
+
+        Locked: called worker-side from _ensure_batch_generator while fetch()
+        may be iterating/mutating state under the same structures (issue #233
+        review — the unlocked form raced fetch()'s stats writes).
+        """
+        with self._lock:
+            self._stats = CacheStats(
+                max_memory_bytes=self._max_memory,
+                current_memory_bytes=self._current_memory,
+                entry_count=len(self._entries),
+            )
 
     def clear(self) -> None:
-        """Clear all cached entries."""
-        self._entries.clear()
-        for d in self._lru_by_type.values():
-            d.clear()
-        for t in self._bytes_by_type:
-            self._bytes_by_type[t] = 0
-        self._current_memory = 0
-        self._stats = CacheStats(max_memory_bytes=self._max_memory)
+        """Clear all cached entries.
+
+        Locked: called worker-side from _ensure_batch_generator while fetch()
+        iterates self._entries.items() under the lock — the unlocked clear()
+        mutated the OrderedDict mid-iteration (live RuntimeError; issue #233
+        review). Now that fetch() releases the lock across its clone, the
+        interleavings that reach this got more frequent, not less.
+        """
+        with self._lock:
+            self._entries.clear()
+            for d in self._lru_by_type.values():
+                d.clear()
+            for t in self._bytes_by_type:
+                self._bytes_by_type[t] = 0
+            self._current_memory = 0
+            self._stats = CacheStats(max_memory_bytes=self._max_memory)
         logger.debug("Cache cleared")
 
     def get_stats(self) -> dict[str, Any]:

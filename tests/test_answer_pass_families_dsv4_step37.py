@@ -69,6 +69,22 @@ def test_answer_pass_appends_reasoning_turn_for_legacy_families():
         }
 
 
+def test_leak_guard_families_cover_fresh_context():
+    """Fresh-context families share the qwen3_5 buffered-salvage leak guard
+    (#92 semantics): emit a truncated salvage, discard only on a thinking
+    re-entry. The "<think>" raw check also catches the "<thinking>" variant
+    DSV4 emitted live (2026-07-12, deterministic 3/3)."""
+    guard = server_mod._ANSWER_PASS_LEAK_GUARD_FAMILIES
+    for fam in ("qwen3_5", "qwen3_5_moe", "deepseek_v4", "step3p7",
+                "minimax", "minimax_m2"):
+        assert fam in guard
+    # families with live-proven coherent partial salvages stay unbuffered
+    for fam in ("gemma4", "hy_v3", "laguna", "openpangu_v2"):
+        assert fam not in guard
+    # the substring check that makes <thinking> variants discard
+    assert "<think>" in "<thinking>Let's parse the user's request."
+
+
 def test_minimax_family_armed_for_answer_pass():
     """MiniMax-M2.x bundles report family_name "minimax" — the parser name
     "minimax_m2" alone left M2.7 reasoning-only turns EMPTY (live-proven

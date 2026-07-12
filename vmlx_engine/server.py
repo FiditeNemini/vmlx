@@ -1776,6 +1776,18 @@ _ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
     {"deepseek_v4", "step3p7", "minimax", "minimax_m2"}
 )
 
+# Families whose salvage is BUFFERED and discarded on a thinking re-entry
+# (raw contains "<think>", which also matches the "<thinking>" variant by
+# prefix). qwen3_5* established the semantics (#92: emit a truncated salvage,
+# reject only genuine planning-prose re-entry). deepseek_v4 joined 2026-07-12:
+# live-deterministic repro — with a prior salvage answer in history and a tight
+# budget, the DSV4 salvage re-opened planning as "<thinking>Let's parse the
+# user's request..." and leaked it as visible content. The fresh-context
+# families share the risk profile, so they share the guard.
+_ANSWER_PASS_LEAK_GUARD_FAMILIES = (
+    frozenset({"qwen3_5", "qwen3_5_moe"}) | _ANSWER_PASS_FRESH_CONTEXT_FAMILIES
+)
+
 
 def _answer_pass_messages(
     messages: list,
@@ -12865,7 +12877,7 @@ async def create_chat_completion(
                 # answer, not a leak, and must still be surfaced (live-proven:
                 # MiniMax-M2.7 truncates its visible worked solution honestly,
                 # no planning leak). See streaming gate for the matching scope.
-                _ns_qwen_scope = _ns_family in ("qwen3_5", "qwen3_5_moe")
+                _ns_qwen_scope = _ns_family in _ANSWER_PASS_LEAK_GUARD_FAMILIES
                 # 2026-07-12 parity fix (streaming siblings): a length-truncated
                 # qwen3_5* salvage is a CLEAN cut-off answer, not a planning-prose
                 # leak — the direct-rail thinking-off pass does not emit <think>.
@@ -15083,7 +15095,7 @@ async def create_response(
                 # answer, not a leak, and must still be surfaced (live-proven:
                 # MiniMax-M2.7 truncates its visible worked solution honestly,
                 # no planning leak). See streaming gate for the matching scope.
-                _ns_qwen_scope = _ns_family in ("qwen3_5", "qwen3_5_moe")
+                _ns_qwen_scope = _ns_family in _ANSWER_PASS_LEAK_GUARD_FAMILIES
                 # 2026-07-12 parity fix (streaming siblings): a length-truncated
                 # qwen3_5* salvage is a CLEAN cut-off answer, not a planning-prose
                 # leak — the direct-rail thinking-off pass does not emit <think>.
@@ -16880,7 +16892,7 @@ async def stream_chat_completion(
             # whole pass (emit nothing during the loop) and emit it in one delta
             # afterwards ONLY if it completed cleanly — matching the non-stream
             # run-then-adopt-if-complete semantics without risking a leak.
-            _buffer_answer_pass = _family_name in ("qwen3_5", "qwen3_5_moe")
+            _buffer_answer_pass = _family_name in _ANSWER_PASS_LEAK_GUARD_FAMILIES
             _ans_budget_cap = int(answer_kwargs.get("max_tokens") or 0)
             _ans_raw = ""
             _ans_sent = ""
@@ -18453,7 +18465,7 @@ async def stream_responses_api(
                 # site. A streamed output_text.delta can't be recalled, so a
                 # length-truncated (leaky) salvage must be discarded before any
                 # delta is sent.
-                _buffer_answer_pass = _family_name in ("qwen3_5", "qwen3_5_moe")
+                _buffer_answer_pass = _family_name in _ANSWER_PASS_LEAK_GUARD_FAMILIES
                 _ans_budget_cap = int(answer_kwargs.get("max_tokens") or 0)
                 _ans_raw = ""
                 _ans_sent = ""

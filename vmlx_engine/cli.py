@@ -1460,11 +1460,12 @@ def serve_command(args):
             getattr(args, "cache_memory_mb", None)
             or getattr(args, "cache_memory_percent", 0) != 0.20
         ):
-            logger.warning(
-                "--cache-memory-mb/--cache-memory-percent apply only to "
-                "memory-aware non-paged prefix cache. Paged cache ignores "
-                "those flags. Use --max-cache-blocks for L1 RAM capacity and "
-                "--block-disk-cache-max-gb for L2 disk capacity."
+            logger.info(
+                "Paged cache: --cache-memory-mb/--cache-memory-percent set the "
+                "L1 RAM byte ceiling for the block KV mirror (free blocks are "
+                "evicted, disk-L2 write-through first, to hold it). "
+                "--max-cache-blocks caps the block-pool count; "
+                "--block-disk-cache-max-gb caps L2 disk."
             )
 
         scheduler_config = SchedulerConfig(

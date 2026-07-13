@@ -1472,11 +1472,22 @@ export class SessionManager extends EventEmitter {
         if (resolved.length === 1) {
           console.log(`[SESSION] modelPath missing (${config.modelPath}) — re-resolved by identity to ${resolved[0]}`)
           config.modelPath = resolved[0]
-          // Persist so the UI + future starts use the valid path.
-          try {
-            db.updateSession(session.id, { modelPath: resolved[0] })
-          } catch (e) {
-            console.warn(`[SESSION] Failed to persist re-resolved modelPath for ${session.id}: ${e}`)
+          // Persist so the UI + future starts use the valid path — but ONLY when
+          // no other session already owns that path. sessions.model_path is
+          // UNIQUE, and the valid path is typically owned by the very session we
+          // re-resolved against, so a blind update would throw a UNIQUE
+          // constraint error. In that collision case persistence is both
+          // impossible and unnecessary: the identity re-resolution re-fires
+          // cheaply on every start and the launch already uses the valid path.
+          const pathOwnedElsewhere = db.getSessions().some(
+            s => s.id !== session.id && s.modelPath?.replace(/\/+$/, '') === resolved[0],
+          )
+          if (!pathOwnedElsewhere) {
+            try {
+              db.updateSession(session.id, { modelPath: resolved[0] })
+            } catch (e) {
+              console.warn(`[SESSION] Failed to persist re-resolved modelPath for ${session.id}: ${e}`)
+            }
           }
         } else {
           throw new Error(`Model not found at: ${config.modelPath}`)

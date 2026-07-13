@@ -2,6 +2,14 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.8] - 2026-07-12
+
+### Fixed
+- Reasoning models no longer truncate their visible answer mid-sentence. The engine's fallback output budget (used when a request sends no `max_tokens`, no explicit CLI/session default is set, and the bundle omits `max_new_tokens`) was a flat 4096 tokens shared by the hidden `<think>` reasoning phase and the visible answer; a verbose reasoner spent it all on reasoning and the answer starved (observed live on MiniMax-M2.7: reasoning 17400 chars, answer 183 chars, `finish=length`). Reasoning-capable models now fall back to a larger budget (detected via registry family capability — `reasoning_parser`/`think_in_template` — with the active parser as a fallback), while non-reasoning models keep the modest 4096 loop guard. The projected Metal headroom guard clamps the value per-model, so it never exceeds safe headroom (MiniMax-M2.7 80GB → 14522; MiniMax-M3 79GB → 16384). No request/response schema, endpoint, field, or resolution precedence changed — only the fallback value for reasoning models. Verified live across reasoning ON/OFF/AUTO and all API surfaces (OpenAI chat/completions/responses, Anthropic messages, Ollama, MLLM/VL).
+
+### Notes
+- Verified MiniMax-M3 (lightning/MSA sparse cache, paged-incompatible → routed to its own `MiniMaxM3SparseCache`, not forced-paged): warm-vs-warm greedy determinism byte-identical, prefix-cache hit + clean prompt-boundary re-prefill, memory-aware prefix cache bounded by its 11 GB ceiling.
+
 ## [Unreleased]
 
 ### Fixed

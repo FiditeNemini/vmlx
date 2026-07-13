@@ -51,6 +51,12 @@ All notable changes to vMLX Engine will be documented in this file.
   deepseek_v4/step3p7 (fixes a malformed appended reasoning turn) and no longer
   leaks truncated reasoning or a `<think>`/`<thinking>` re-entry into the visible
   answer.
+- MLLM/VL paged cache now honors the same RAM byte ceiling as the text path
+  (`--cache-memory-mb`/`--cache-memory-percent`). Previously the MLLM scheduler's
+  block pool was bounded only by `--max-cache-blocks`, so under paged-default-ON a
+  forced-paged VL/MLLM model (e.g. Step-3.7 video) had no byte ceiling on its
+  in-RAM block KV mirror. Verified live: Step-3.7 (q4 KV, 3 GB ceiling) held flat
+  at +0.27 GB RSS across an 18-turn growing multiturn.
 - Memory-cache lock inversion (community #233 deadlock), a `stop_token_ids`
   attribute crash, and a lockless cache-clear race.
 - Paged cache RAM is now bounded by a byte ceiling: completed-request block

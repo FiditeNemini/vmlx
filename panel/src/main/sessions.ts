@@ -16,6 +16,7 @@ import { canonicalizeToolParserId } from '../shared/toolParserAliases'
 import { canonicalizeReasoningParserForCli } from '../shared/reasoningParserAliases'
 import { GENERATION_STARTUP_DEFAULTS_VERSION, LEGACY_GENERIC_MAX_OUTPUT_TOKENS } from '../shared/sessionConfigMigrations'
 import { appendMetalWiredLimitGuidance, classifyLargeModelMemoryPreflight } from '../shared/metalWiredLimit'
+import { sessionMatchesModelPath } from '../shared/sessionUtils'
 import {
   estimateModelLaunchResidentBytes,
   isLazyMmapJangBundle,
@@ -1452,7 +1453,35 @@ export class SessionManager extends EventEmitter {
     const isImageSession = config.modelType === 'image'
 
     if (!isImageSession) {
-      if (!existsSync(config.modelPath)) throw new Error(`Model not found at: ${config.modelPath}`)
+      if (!existsSync(config.modelPath)) {
+        // LE10: the saved path may be a stale symlink/alias (e.g. a
+        // ~/.mlxstudio/models/X target that moved) while the SAME model is
+        // present at a different real path (e.g. an external drive). Re-resolve
+        // by model IDENTITY (basename) against other known sessions whose path
+        // still exists — a real comparison, and only when exactly one distinct
+        // valid path matches, never a guess. This lets Start succeed instead of
+        // failing on a dead symlink when the model is plainly available.
+        const resolved = Array.from(new Set(
+          db.getSessions()
+            .filter(s =>
+              s.id !== sessionId &&
+              sessionMatchesModelPath(s.modelPath, config.modelPath) &&
+              existsSync(s.modelPath))
+            .map(s => s.modelPath.replace(/\/+$/, ''))
+        ))
+        if (resolved.length === 1) {
+          console.log(`[SESSION] modelPath missing (${config.modelPath}) — re-resolved by identity to ${resolved[0]}`)
+          config.modelPath = resolved[0]
+          // Persist so the UI + future starts use the valid path.
+          try {
+            db.updateSession(session.id, { modelPath: resolved[0] })
+          } catch (e) {
+            console.warn(`[SESSION] Failed to persist re-resolved modelPath for ${session.id}: ${e}`)
+          }
+        } else {
+          throw new Error(`Model not found at: ${config.modelPath}`)
+        }
+      }
 
       // Block starting a session with an actively downloading model
       const downloadMarker = join(config.modelPath, '.vmlx-downloading')

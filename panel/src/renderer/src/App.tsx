@@ -21,7 +21,7 @@ import { ModelDoctor } from './components/tools/ModelDoctor'
 import { ModelConverter } from './components/tools/ModelConverter'
 import { ApiDashboard } from './components/api/ApiDashboard'
 import { ImageTab } from './components/image/ImageTab'
-import { isImageSession } from '../../shared/sessionUtils'
+import { isImageSession, sessionMatchesModelPath } from '../../shared/sessionUtils'
 import { useTranslation, LOCALE_NAMES, LOCALE_FLAGS, type Locale } from './i18n'
 
 function App() {
@@ -90,11 +90,24 @@ function App() {
       return
     }
 
-    // Find the session for this model — prefer running, then any matching, then first available
-    const exactRunning = sessions.find(s => s.modelPath === modelPath && s.status === 'running')
-    const exactAny = sessions.find(s => s.modelPath === modelPath)
-    const fallback = sessions.find(s => s.status === 'running') || sessions[0]
-    const session = exactRunning || exactAny || fallback
+    // Match the chat's model to a session by real model IDENTITY, not raw path
+    // equality. The same model is stored under different path prefixes — a
+    // ~/.mlxstudio/models/X symlink vs the real /Volumes/…/org/X, or an HF repo
+    // id vs its resolved local dir — so `s.modelPath === modelPath` misses the
+    // right session and reverts the chat to an arbitrary session of a DIFFERENT
+    // model (disabling the composer). `sessionMatchesModelPath` mirrors the
+    // backend send-path resolver in ipc/chat.ts.
+    const sameModel = (s: typeof sessions[number]) => sessionMatchesModelPath(s.modelPath, modelPath)
+    const usable = (s: typeof sessions[number]) =>
+      s.status === 'running' || s.status === 'loading' || s.status === 'standby'
+    // Prefer this model's ready session, then this model in any state, then any
+    // ready session, then anything — never silently jump to a different model's
+    // session when this model's own session exists.
+    const session =
+      sessions.find(s => sameModel(s) && usable(s)) ||
+      sessions.find(s => sameModel(s)) ||
+      sessions.find(s => usable(s)) ||
+      sessions[0]
 
     if (session) {
       openChat(chatId, session.id)

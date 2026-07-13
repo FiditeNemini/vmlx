@@ -2144,8 +2144,18 @@ export function SliderField({
     }
   }
 
-  // Clamp slider display value to range (for when input allows beyond max)
-  const sliderValue = isUnlimited ? min : Math.min(Math.max(value, min), max)
+  // Anchor the range track to the step grid so round values (64, 512, 1000,
+  // 1024…) are representable. With a raw min of 1 the grid is 1 + k·step, so a
+  // value like 64 (step 16) falls between 49 and 65 and the browser snaps the
+  // thumb to 65 while the number field shows the true 64 — a visible off-by-one
+  // between the paired controls. Anchor the range's min/max and thumb to the
+  // step grid; the number input keeps the exact semantic value/min.
+  const sliderMin = Math.ceil(min / step) * step
+  const sliderMax = Math.max(sliderMin, Math.floor(max / step) * step)
+  const snapToGrid = (v: number) => sliderMin + Math.round((v - sliderMin) / step) * step
+  const sliderValue = isUnlimited
+    ? sliderMin
+    : Math.min(Math.max(snapToGrid(value), sliderMin), sliderMax)
   // Show local input while editing, parent value otherwise
   const displayValue = localInput !== null ? localInput : (isUnlimited ? '' : value)
 
@@ -2181,8 +2191,8 @@ export function SliderField({
         <input
           type="range"
           className="cfg-slider flex-1"
-          min={min}
-          max={max}
+          min={sliderMin}
+          max={sliderMax}
           step={step}
           value={sliderValue}
           onChange={handleSliderChange}

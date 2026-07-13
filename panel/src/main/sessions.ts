@@ -2148,11 +2148,21 @@ export class SessionManager extends EventEmitter {
     for (const [k, v] of Object.entries(config as Record<string, unknown>)) {
       if (v !== undefined) cleanConfig[k] = v
     }
-    const merged = { ...currentConfig, ...cleanConfig }
-    // Run the cache-stack defaults migration BEFORE marking the version current,
-    // so a settings-save can't silently stamp an un-migrated (e.g. v7 paged-off)
-    // config as v8 and bypass the paged-default-ON flip (2026-07-12).
-    applyCacheStackStartupDefaultMigration(merged as Partial<ServerConfig>, (merged as Partial<ServerConfig>).modelPath)
+    // Migrate the STORED baseline to the current cache-stack defaults version
+    // FIRST, then layer the user's explicit edits on top so user intent wins.
+    // Running the migration on the already-merged config (old order) let the
+    // per-family default reset (gemma4/M3 paged-OFF, cache-memory 15%, block-L2
+    // OFF) clobber the very cache fields the user just changed in this save —
+    // the edits silently vanished while maxTokens (untouched by the migration)
+    // persisted, so the launched engine received stale cache values. Live-found
+    // via Codex Electron QA (2026-07-13): UI showed paged/L2/19%/2048 but the
+    // engine launched --no-paged-cache --cache-memory-percent 0.15 with no
+    // --max-tokens. A settings-save still can't stamp an un-migrated config as
+    // current, because the baseline is migrated here before the merge.
+    const migratedBaseline: Record<string, unknown> = { ...currentConfig }
+    applyCacheStackStartupDefaultMigration(migratedBaseline as Partial<ServerConfig>, (migratedBaseline.modelPath as string) || undefined)
+    markCacheStackStartupDefaultsCurrent(migratedBaseline as Partial<ServerConfig>)
+    const merged = { ...migratedBaseline, ...cleanConfig }
     markCacheStackStartupDefaultsCurrent(merged as Partial<ServerConfig>)
 
     // Log sleep config changes

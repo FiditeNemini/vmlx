@@ -483,10 +483,14 @@ function buildCommandPreview(
       const prefixCacheMaxBytes = finitePositiveInteger(config.prefixCacheMaxBytes)
       if (prefixCacheMaxBytes != null) parts.push('--prefix-cache-max-bytes', prefixCacheMaxBytes.toString())
     } else {
+      // H1 parity: --cache-memory-mb/--cache-memory-percent set the paged L1 RAM
+      // byte ceiling and DO reach the engine under paged (sessions.ts emits them
+      // unconditionally). The preview must show them in both modes or it lies
+      // about the launch. Only --cache-ttl-minutes is genuinely inert under paged.
       const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
-      if (!usePagedCache && cacheMemoryMb != null) parts.push('--cache-memory-mb', cacheMemoryMb.toString())
+      if (cacheMemoryMb != null) parts.push('--cache-memory-mb', cacheMemoryMb.toString())
       const cacheMemoryPercent = finitePositiveNumber(config.cacheMemoryPercent)
-      if (!usePagedCache && cacheMemoryPercent != null) parts.push('--cache-memory-percent', (cacheMemoryPercent / 100).toString())
+      if (cacheMemoryPercent != null) parts.push('--cache-memory-percent', (cacheMemoryPercent / 100).toString())
       const cacheTtlMinutes = finitePositiveNumber(config.cacheTtlMinutes)
       if (cacheTtlMinutes != null && !usePagedCache) parts.push('--cache-ttl-minutes', cacheTtlMinutes.toString())
     }

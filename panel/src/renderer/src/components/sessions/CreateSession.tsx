@@ -68,6 +68,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
   const [modelFilter, setModelFilter] = useState('')
   const [config, setConfig] = useState<SessionConfig>(DEFAULT_CONFIG)
   const [detectedCacheType, setDetectedCacheType] = useState<string | undefined>()
+  const [detectedUsePagedCache, setDetectedUsePagedCache] = useState<boolean | undefined>(undefined)
   const [detectedCacheSubtype, setDetectedCacheSubtype] = useState<string | undefined>()
   const [detectedFamily, setDetectedFamily] = useState<string | undefined>()
   const [detectedIsTurboQuant, setDetectedIsTurboQuant] = useState<boolean>(false)
@@ -117,6 +118,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
     })
     if (detected?.cacheType) setDetectedCacheType(detected.cacheType)
     else setDetectedCacheType('kv')
+    setDetectedUsePagedCache(detected?.usePagedCache)
     setDetectedCacheSubtype(detected?.cacheSubtype)
     if (detected?.family && detected.family !== 'unknown') setDetectedFamily(detected.family)
     else setDetectedFamily(undefined)
@@ -615,6 +617,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                               try {
                                 const det = await window.api.models.detectConfig(model.path) as any
                                 if (det?.cacheType) setDetectedCacheType(det.cacheType)
+                                setDetectedUsePagedCache(det?.usePagedCache)
                                 setDetectedCacheSubtype(det?.cacheSubtype)
                                 if (det?.family && det.family !== 'unknown') setDetectedFamily(det.family)
                                 else setDetectedFamily(undefined)
@@ -852,7 +855,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             </p>
           </div>
         ) : (
-          <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedCacheType} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} />
+          <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} />
         )}
 
         {/* Launch */}

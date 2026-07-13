@@ -986,6 +986,60 @@ def serve_command(args):
                     "full precision with async clean-prefill rederive.",
                     _old_kvq,
                 )
+
+        # Eric 2026-07-12 (reverses prior paged-default-OFF): paged cache
+        # defaults ON for autodetected TEXT models at startup so long contexts
+        # stay resident within a bounded block budget. Auto-exclusions (mirroring
+        # the Electron app's exclusion set so UI parity holds):
+        #   - M3 lightning-index MSA (minimax_m3/_vl), openPangu-v2 DSA composite,
+        #     gemma4/gemma4_text mixed-SWA RotatingKVCache — paged breaks their
+        #     native cache lane.
+        #   - MLLM/VL loads — the MLLM paged path still lacks the byte ceiling
+        #     (#98); do NOT default MLLM/VL to paged until that lands. Text-only
+        #     forced loads of VL bundles are not MLLM here, so they still qualify.
+        # DSV4 (composite) and Zaya (CCA) already decided their own paged state in
+        # the policies above (so _is_dsv4_model / an already-set use_paged_cache are
+        # skipped by the guards below); hybrid SSM families additionally auto-switch
+        # to paged inside the scheduler. Only applies while prefix cache is active
+        # (paged is a prefix-cache backend) and continuous batching is on.
+        # --no-paged-cache opts out of THIS generic default (families whose native
+        # cache REQUIRES paged still enable it via their own policy/scheduler).
+        _PAGED_INCOMPATIBLE_FAMILIES = {
+            "minimax_m3",
+            "minimax_m3_vl",
+            "openpangu_v2",
+            "gemma4",
+            "gemma4_text",
+        }
+        try:
+            from .api.utils import is_mllm_model
+            _paged_default_is_mllm = is_mllm_model(
+                args.model,
+                force_mllm=getattr(args, "is_mllm", False),
+                force_text_only=getattr(args, "force_text_only", False),
+            )
+        except Exception:
+            # Detection failure -> be conservative and treat as MLLM (skip default).
+            _paged_default_is_mllm = True
+        _paged_default_prefix_active = getattr(
+            args, "enable_prefix_cache", True
+        ) and not getattr(args, "disable_prefix_cache", False)
+        if (
+            getattr(args, "continuous_batching", True)
+            and _paged_default_prefix_active
+            and not _paged_default_is_mllm
+            and not getattr(args, "disable_paged_cache", False)
+            and not getattr(args, "use_paged_cache", False)
+            and not _is_dsv4_model
+            and _mc.family_name not in _PAGED_INCOMPATIBLE_FAMILIES
+        ):
+            args.use_paged_cache = True
+            logger.info(
+                "Paged cache defaulted ON for autodetected text family=%s "
+                "(bounded-block prefix reuse; pass --no-paged-cache to opt out).",
+                _mc.family_name,
+            )
+
         if _mc.family_name != "unknown":
             # Auto-apply tool parser
             if (
@@ -2526,6 +2580,17 @@ Examples:
              "workloads. Requires --continuous-batching.",
     )
     serve_parser.add_argument(
+        "--no-paged-cache",
+        dest="disable_paged_cache",
+        action="store_true",
+        help="Opt out of the generic default-on paged cache. Paged cache is ON by "
+             "default for autodetected TEXT models at startup EXCEPT arch-incompatible "
+             "families (M3, openPangu-v2, gemma4 mixed-SWA) and MLLM/VL loads (pending "
+             "the #98 byte-ceiling). This flag disables that generic default; families "
+             "whose native cache REQUIRES paged (DSV4 composite, Zaya CCA, hybrid SSM) "
+             "still enable it via their own policy.",
+    )
+    serve_parser.add_argument(
         "--paged-cache-block-size",
         type=int,
         default=64,
@@ -3131,7 +3196,9 @@ Examples:
     bench_parser.add_argument(
         "--use-paged-cache",
         action="store_true",
-        help="Use paged KV cache for memory efficiency (experimental)",
+        help="Use paged KV cache for memory efficiency (experimental). NOTE: bench "
+             "does not apply the serve-path generic paged default-on; pass this "
+             "explicitly to benchmark the paged backend.",
     )
     bench_parser.add_argument(
         "--paged-cache-block-size",

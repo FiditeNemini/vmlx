@@ -278,6 +278,7 @@ interface SessionConfigFormProps {
   onReset?: () => void
   /** Detected model cache type ('kv', 'mamba', etc.) for feature gating */
   detectedCacheType?: string
+  detectedUsePagedCache?: boolean
   /** Detected architecture cache subtype for KV models with typed native cache contracts */
   detectedCacheSubtype?: string
   /** Detected model family for feature gating where cache type alone is ambiguous */
@@ -309,7 +310,7 @@ interface SessionConfigFormProps {
   sessionId?: string
 }
 
-export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedCacheSubtype, detectedFamily, detectedToolParser, detectedReasoningParser, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId }: SessionConfigFormProps) {
+export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedUsePagedCache, detectedCacheSubtype, detectedFamily, detectedToolParser, detectedReasoningParser, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId }: SessionConfigFormProps) {
   const { t } = useTranslation()
   const isImage = modelType === 'image'
   const isImageEdit = isImage && (imageMode === 'edit' || config.imageMode === 'edit')
@@ -366,10 +367,17 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const subtypeRequiresPagedCache =
     detectedCacheSubtype === 'step3p7_full_sliding_kv' ||
     detectedCacheSubtype === 'mixed_swa_kv'
-  const architectureRequiresPagedCache = zayaCcaActive || dsv4CompositeCacheOptIn || isMambaCache || subtypeRequiresPagedCache
+  // 2026-07-12 parity: a native cache-type/subtype only FORCES paged in the UI
+  // when detection actually resolved paged ON for this family. Gemma mixed-SWA is
+  // rotating_kv but paged-OFF (detectedUsePagedCache=false), so it must NOT show a
+  // forced/checked-disabled paged box while the launch emits --no-paged-cache. This
+  // mirrors the launch gate (sessions.ts architectureRequiresPagedCache).
+  const nativePagedFamilyActive =
+    (isMambaCache || subtypeRequiresPagedCache) && detectedUsePagedCache === true
+  const architectureRequiresPagedCache = zayaCcaActive || dsv4CompositeCacheOptIn || nativePagedFamilyActive
   const zayaTypedCacheRequiresPaged = zayaCcaActive && !batchingOff && !prefixOff
   const dsv4CompositeRequiresPaged = dsv4CompositeCacheOptIn && !batchingOff && !prefixOff
-  const nativeCacheRequiresPaged = (isMambaCache || subtypeRequiresPagedCache) && !batchingOff && !prefixOff
+  const nativeCacheRequiresPaged = nativePagedFamilyActive && !batchingOff && !prefixOff
   const cacheControlState = {
     continuousBatching: effectiveContinuousBatching,
     enablePrefixCache: effectivePrefixCacheEnabled,

@@ -172,6 +172,7 @@ const TEXT_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--enable-prefix-cache',
   '--disable-prefix-cache',
   '--use-paged-cache',
+  '--no-paged-cache',
   '--paged-cache-block-size',
   '--max-cache-blocks',
   '--kv-cache-quantization',
@@ -246,6 +247,7 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--enable-prefix-cache',
   '--disable-prefix-cache',
   '--use-paged-cache',
+  '--no-paged-cache',
   '--paged-cache-block-size',
   '--max-cache-blocks',
   '--kv-cache-quantization',
@@ -497,6 +499,10 @@ function buildCommandPreview(
     if (pagedCacheBlockSize != null) parts.push('--paged-cache-block-size', pagedCacheBlockSize.toString())
     const maxCacheBlocks = finitePositiveInteger(config.maxCacheBlocks)
     if (maxCacheBlocks != null) parts.push('--max-cache-blocks', maxCacheBlocks.toString())
+  } else if (!prefixCacheOff && !usePagedCache) {
+    // Parity with main launch (sessions.ts): emit explicit --no-paged-cache so the
+    // preview matches what the engine receives (paged default-ON reversal).
+    parts.push('--no-paged-cache')
   }
 
   // KV cache quantization — requires prefix cache ON (works for both LLM and VLM)
@@ -887,7 +893,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
         )}
 
         {/* Config Form */}
-        <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedConfig?.cacheType} detectedCacheSubtype={detectedConfig?.cacheSubtype} detectedFamily={detectedConfig?.family} detectedToolParser={detectedConfig?.toolParser} detectedReasoningParser={detectedConfig?.reasoningParser} detectedIsTurboQuant={detectedConfig?.isTurboQuant} detectedIsMultimodal={detectedConfig?.isMultimodal} detectedForceTextOnly={detectedConfig?.forceTextOnly} detectedMaxContext={detectedConfig?.maxContextLength} detectedNativeMtp={(detectedConfig as any)?.nativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} sessionId={sessionId} />
+        <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedConfig?.cacheType} detectedUsePagedCache={detectedConfig?.usePagedCache} detectedCacheSubtype={detectedConfig?.cacheSubtype} detectedFamily={detectedConfig?.family} detectedToolParser={detectedConfig?.toolParser} detectedReasoningParser={detectedConfig?.reasoningParser} detectedIsTurboQuant={detectedConfig?.isTurboQuant} detectedIsMultimodal={detectedConfig?.isMultimodal} detectedForceTextOnly={detectedConfig?.forceTextOnly} detectedMaxContext={detectedConfig?.maxContextLength} detectedNativeMtp={(detectedConfig as any)?.nativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} sessionId={sessionId} />
 
         {/* Command Preview */}
         <div className="mt-4">

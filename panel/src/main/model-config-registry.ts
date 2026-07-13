@@ -837,6 +837,22 @@ function applyConfigMetadataOverrides(
     // no drift). Default to paged-off/SSD-prefix; rotating_kv cacheType still drives the UI label.
     next.usePagedCache = false
   }
+  // 2026-07-12 (paged default ON, MLLM/#98 guard): a family can be marked
+  // multimodal AFTER its registry paged default was computed (e.g. Qwen3.5 media,
+  // Mistral-4 remapped mistral3->mistral4 text then media-detected). Dense/rotating
+  // KV VL/MLLM loads must NOT default to paged (the engine excludes MLLM from the
+  // generic paged default until the #98 byte-ceiling lands). Hybrid/mamba VL that
+  // REQUIRE paged (Qwen3.5 linear-attn, zaya1-vl) keep their cacheType-driven paged;
+  // step-3.7's typed full+sliding KV keeps its explicit paged. Only clear the
+  // default-on for non-paged-required KV cache types.
+  if (
+    next.isMultimodal === true &&
+    !next.forceTextOnly &&
+    (next.cacheType === 'kv' || next.cacheType === 'rotating_kv') &&
+    next.cacheSubtype !== 'step3p7_full_sliding_kv'
+  ) {
+    next.usePagedCache = false
+  }
   return next
 }
 
@@ -859,7 +875,12 @@ function configToDetected(family: string, config: Omit<ModelConfig, 'pattern' | 
     cacheType: config.cacheType,
     cacheSubtype: config.cacheSubtype,
     architectureHints: config.architectureHints,
-    usePagedCache: config.usePagedCache ?? false,
+    // 2026-07-12 (paged default ON, UI<->engine parity): families that declare
+    // usePagedCache keep their value (hybrid/SSM = true, M3/openPangu = false).
+    // Undeclared families default ON for TEXT and OFF for multimodal/VL — VL
+    // stays on the memory-aware path until the MLLM paged byte-ceiling (#98)
+    // lands. gemma mixed-SWA is separately forced OFF in applyConfigMetadataOverrides.
+    usePagedCache: config.usePagedCache ?? (config.isMultimodal ? false : true),
     enableAutoToolChoice: config.enableAutoToolChoice ?? false,
     isMultimodal: config.isMultimodal ?? false,
     description: config.description

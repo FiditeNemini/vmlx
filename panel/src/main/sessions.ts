@@ -358,6 +358,7 @@ const TEXT_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--enable-prefix-cache',
   '--disable-prefix-cache',
   '--use-paged-cache',
+  '--no-paged-cache',
   '--paged-cache-block-size',
   '--max-cache-blocks',
   '--kv-cache-quantization',
@@ -432,6 +433,7 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--enable-prefix-cache',
   '--disable-prefix-cache',
   '--use-paged-cache',
+  '--no-paged-cache',
   '--paged-cache-block-size',
   '--max-cache-blocks',
   '--kv-cache-quantization',
@@ -612,7 +614,7 @@ function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   return changed
 }
 
-const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 7
+const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 8
 
 function markCacheStackStartupDefaultsCurrent(config: Partial<ServerConfig>): boolean {
   if (config.cacheStackStartupDefaultsVersion === CACHE_STACK_STARTUP_DEFAULTS_VERSION) return false
@@ -623,10 +625,14 @@ function markCacheStackStartupDefaultsCurrent(config: Partial<ServerConfig>): bo
 function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, modelPath?: string): boolean {
   const targetPath = modelPath || config.modelPath
   let detectedFamily: string | undefined
+  let detectedUsePaged: boolean | undefined
   if (targetPath) {
     try {
       const detected = detectModelConfigFromDir(targetPath)
       detectedFamily = normalizeDetectedFamilyName(detected.family)
+      // Fully-resolved per-family paged capability (registry default-on for
+      // text, OFF for VL/M3/openPangu/gemma-mixed-SWA via config overrides).
+      detectedUsePaged = detected.usePagedCache
     } catch {
       /* detection is best-effort here; buildArgs repeats detection at launch */
     }
@@ -634,13 +640,14 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
 
   const dsv4Active = detectedFamily === 'deepseek-v4'
   const dsv4PrefixOptIn = dsv4Active && config.dsv4PrefixCache !== false
-  // Fresh generic sessions start with prefix reuse enabled and paged cache off.
-  // Architectures whose typed state requires paged cache still force their
-  // native lane at launch; every other family changes lanes only when the user
-  // toggles Paged Cache on.
-  const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : false
-  const defaultEnableDiskCache = dsv4Active ? false : false
-  const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : false
+  // 2026-07-12 (paged default ON): fresh sessions inherit the detected per-family
+  // paged default so the UI shows — and the engine launches with — paged ON for
+  // autodetected TEXT families, OFF for VL/MLLM (pending #98) and arch-incompatible
+  // families. DSV4 uses its prefix opt-in. Block-disk L2 (paged-compatible) follows
+  // paged; legacy disk L2 stays off (it is not paged-compatible).
+  const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : (detectedUsePaged ?? false)
+  const defaultEnableDiskCache = false
+  const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : !!defaultUsePagedCache
   const mutable = config as Record<string, any>
   let changed = false
 
@@ -692,6 +699,16 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
 
   const zayaCacheMigrationTarget = isZayaCacheStackMigrationTarget(modelPath || config.modelPath)
   const isM3MigrateTarget = /minimax.?m3/i.test((modelPath || config.modelPath || "").toLowerCase())
+  // v8 paged-default-ON: resolve the detected per-family paged capability so the
+  // generic-family migration branch flips existing paged-OFF sessions to the new
+  // default (text ON; VL/MLLM/M3/openPangu/gemma-mixed-SWA stay OFF). Best-effort.
+  let migrationDetectedUsePaged: boolean | undefined
+  try {
+    const _migDetected = detectModelConfigFromDir(String(modelPath || config.modelPath || ''))
+    migrationDetectedUsePaged = _migDetected.usePagedCache
+  } catch {
+    /* detection best-effort; leave undefined -> paged-off in the generic branch */
+  }
   const staleM3PagedOn =
     isM3MigrateTarget &&
     config.usePagedCache === true &&
@@ -770,6 +787,36 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     config.usePagedCache === true &&
     config.enableBlockDiskCache === true &&
     config.kvCacheQuantization === 'none'
+  // v8 (2026-07-12): flip generic TEXT families that the v7 default left paged-OFF
+  // to the new paged-ON default. Only fires when detection says this family should
+  // be paged (text) — VL/M3/openPangu/gemma-mixed-SWA resolve to false and are left
+  // untouched. Scoped to prefix-cache-on continuous-batching sessions.
+  const staleV7GenericPagedOff =
+    !zayaCacheMigrationTarget &&
+    !isM3MigrateTarget &&
+    migrationDetectedUsePaged === true &&
+    Number(config.cacheStackStartupDefaultsVersion || 0) === 7 &&
+    config.continuousBatching === true &&
+    config.enablePrefixCache === true &&
+    config.usePagedCache === false &&
+    // EXACT v7 generic paged-OFF default tuple across EVERY field the migration
+    // below overwrites/flips — any deviation means the user touched this session,
+    // so we leave it untouched (preserve intentional user config).
+    Number(config.maxNumSeqs) === 1 &&
+    Number(config.prefillBatchSize) === 512 &&
+    Number(config.prefillStepSize) === 2048 &&
+    Number(config.completionBatchSize) === 512 &&
+    config.enableDiskCache === false &&
+    config.enableBlockDiskCache === false &&
+    config.kvCacheQuantization === 'auto' &&
+    Number(config.cacheMemoryPercent) === 15 &&
+    Number(config.cacheMemoryMb) === 0 &&
+    Number(config.maxCacheBlocks) === 1000 &&
+    Number(config.pagedCacheBlockSize) === 64 &&
+    Number(config.blockDiskCacheMaxGb) === 10 &&
+    config.noMemoryAwareCache === false &&
+    Number(config.prefixCacheSize) === 100 &&
+    Number(config.prefixCacheMaxBytes) === 0
 
   if (
     !staleContinuousDefaults &&
@@ -780,7 +827,8 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     !stalePhase1GenericPagedOff &&
     !stalePhase2GenericPagedOn &&
     !staleM3PagedOn &&
-    !staleM3BlockDiskOn
+    !staleM3BlockDiskOn &&
+    !staleV7GenericPagedOff
   ) return false
 
   config.continuousBatching = true
@@ -808,10 +856,16 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     // Structural families (DSV4/ZAYA CCA/hybrid SSM SWA subtype) still route
     // through cacheTypeRequiresPaged/cacheSubtypeRequiresPaged at spawn time
     // and stay paged-required — that's a runtime constraint, not a default.
-    config.usePagedCache = false
+    // v8 (Eric 2026-07-12, reverses v7): paged cache defaults ON for autodetected
+    // TEXT families and OFF for VL/MLLM (pending #98) + arch-incompatible families
+    // (M3/openPangu/gemma mixed-SWA carry usePagedCache:false in the registry).
+    // Derive from the fully-resolved detected capability so existing generic
+    // sessions inherit the new default; block-disk L2 (paged-compatible) follows.
+    const migratedGenericPaged = migrationDetectedUsePaged ?? false
+    config.usePagedCache = migratedGenericPaged
     config.maxCacheBlocks = config.maxCacheBlocks ?? 1000
     config.enableDiskCache = false
-    config.enableBlockDiskCache = false
+    config.enableBlockDiskCache = migratedGenericPaged
     config.blockDiskCacheMaxGb = config.blockDiskCacheMaxGb ?? 10
   }
   markCacheStackStartupDefaultsCurrent(config)
@@ -2092,6 +2146,10 @@ export class SessionManager extends EventEmitter {
       if (v !== undefined) cleanConfig[k] = v
     }
     const merged = { ...currentConfig, ...cleanConfig }
+    // Run the cache-stack defaults migration BEFORE marking the version current,
+    // so a settings-save can't silently stamp an un-migrated (e.g. v7 paged-off)
+    // config as v8 and bypass the paged-default-ON flip (2026-07-12).
+    applyCacheStackStartupDefaultMigration(merged as Partial<ServerConfig>, (merged as Partial<ServerConfig>).modelPath)
     markCacheStackStartupDefaultsCurrent(merged as Partial<ServerConfig>)
 
     // Log sleep config changes
@@ -3121,6 +3179,14 @@ export class SessionManager extends EventEmitter {
       if (maxCacheBlocks != null) {
         args.push('--max-cache-blocks', maxCacheBlocks.toString())
       }
+    } else if (!prefixCacheOff && !usePagedCache) {
+      // UI<->engine parity (2026-07-12): the engine now defaults paged cache ON
+      // for autodetected text families. When the app's effective policy is OFF
+      // (arch-incompatible family — M3/gemma4 mixed-SWA/openPangu; MLLM/VL pending
+      // #98; or an explicit user opt-out) we MUST emit --no-paged-cache so the
+      // engine matches the visible UI setting instead of silently falling through
+      // to its default-on. Never emit it when prefix cache is off (paged is moot).
+      args.push('--no-paged-cache')
     }
 
     // KV cache quantization for stored prefix cache entries

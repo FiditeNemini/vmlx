@@ -433,13 +433,15 @@ function buildCommandPreview(
 
   // Parser resolution: User explicit choice -> Detected config -> Fallback
   // (mirrors buildArgs: user choice wins over detection)
+  // "" = user chose "None" → engine needs the literal "none" flag to opt out
+  // (absence auto-configures from the registry). Mirrors buildArgs in sessions.ts.
   const effectiveToolParser = config.toolCallParser === ''
-    ? undefined
+    ? 'none'
     : canonicalizeToolParserId(config.toolCallParser && config.toolCallParser !== 'auto' ? config.toolCallParser
       : detected?.toolParser)
   const effectiveAutoTool = config.enableAutoToolChoice ?? detected?.enableAutoToolChoice
   const requestedReasoningParser = config.reasoningParser === ''
-    ? undefined
+    ? 'none'
     : (config.reasoningParser && config.reasoningParser !== 'auto' ? config.reasoningParser
       : detected?.reasoningParser)
   const effectiveReasoningParser = canonicalizeReasoningParserForCli(requestedReasoningParser)
@@ -549,8 +551,11 @@ function buildCommandPreview(
   if (maxContextLength != null) {
     parts.push('--max-prompt-tokens', maxContextLength.toString())
   }
-  // Tool integration — mirrors buildArgs lines 1136-1147
-  if (effectiveToolParser) {
+  // Tool integration — mirrors buildArgs in sessions.ts
+  if (effectiveToolParser === 'none') {
+    // Hard opt-out: literal flag, no auto-tool-choice.
+    parts.push('--tool-call-parser', 'none')
+  } else if (effectiveToolParser) {
     parts.push('--tool-call-parser', effectiveToolParser)
     if (effectiveAutoTool || config.enableAutoToolChoice === undefined) {
       parts.push('--enable-auto-tool-choice')

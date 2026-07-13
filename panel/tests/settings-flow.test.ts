@@ -358,12 +358,12 @@ function buildCommandPreview(
     // Parser resolution: User explicit choice -> Detected config -> Fallback
     // (mirrors buildArgs: user choice wins over detection)
     const effectiveToolParser = config.toolCallParser === ''
-        ? undefined
+        ? 'none'
         : canonicalizeToolParserId(config.toolCallParser && config.toolCallParser !== 'auto' ? config.toolCallParser
             : detected?.toolParser)
     const effectiveAutoTool = config.enableAutoToolChoice ?? detected?.enableAutoToolChoice
     const requestedReasoningParser = config.reasoningParser === ''
-        ? undefined
+        ? 'none'
         : (config.reasoningParser && config.reasoningParser !== 'auto' ? config.reasoningParser
             : detected?.reasoningParser)
     const effectiveReasoningParser = canonicalizeReasoningParserForCli(requestedReasoningParser)
@@ -455,7 +455,9 @@ function buildCommandPreview(
         parts.push('--max-tokens', maxTokens.toString())
     }
     // Pass resolved parsers directly (mirrors buildArgs lines 1139-1150)
-    if (effectiveToolParser) {
+    if (effectiveToolParser === 'none') {
+        parts.push('--tool-call-parser', 'none')
+    } else if (effectiveToolParser) {
         parts.push('--tool-call-parser', effectiveToolParser)
         if (effectiveAutoTool || config.enableAutoToolChoice === undefined) {
             parts.push('--enable-auto-tool-choice')
@@ -1213,6 +1215,20 @@ describe('Tool Integration', () => {
         expect(getFlagValue(preview({ enableAutoToolChoice: true, toolCallParser: 'auto' }, { toolParser: 'hy_v3' }), '--tool-call-parser')).toBe('hunyuan')
     })
 
+    it('"None" tool parser emits the literal --tool-call-parser none (engine opt-out), not an absent flag', () => {
+        // The engine only disables tool parsing on the LITERAL "none"; an absent
+        // flag makes it auto-configure the detected parser. So "None" must emit it,
+        // even when a parser was detected — and must NOT enable auto-tool-choice.
+        const out = preview({ toolCallParser: '', enableAutoToolChoice: true }, { toolParser: 'qwen' })
+        expect(getFlagValue(out, '--tool-call-parser')).toBe('none')
+        expect(out).not.toContain('--enable-auto-tool-choice')
+    })
+
+    it('"None" reasoning parser emits the literal --reasoning-parser none (engine opt-out)', () => {
+        const out = preview({ reasoningParser: '' }, { reasoningParser: 'qwen3' })
+        expect(getFlagValue(out, '--reasoning-parser')).toBe('none')
+    })
+
     it('tool parser dropdown exposes DSV4 DSML, Hy3, and ZAYA parsers', () => {
         const formSource = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
         expect(formSource).toContain("value: 'dsml'")
@@ -1273,9 +1289,12 @@ describe('Tool Integration', () => {
         expect(getFlagValue(out, '--tool-call-parser')).toBe('llama')
     })
 
-    it('empty tool parser disables tool parsing', () => {
+    it('empty tool parser disables tool parsing via literal --tool-call-parser none', () => {
+        // "None" must emit the literal opt-out flag; an absent flag would make the
+        // engine auto-configure the detected parser (the parity bug this fixes).
         const out = preview({ enableAutoToolChoice: true, toolCallParser: '' }, { toolParser: 'qwen' })
-        expect(hasFlag(out, '--tool-call-parser')).toBe(false)
+        expect(getFlagValue(out, '--tool-call-parser')).toBe('none')
+        expect(hasFlag(out, '--enable-auto-tool-choice')).toBe(false)
     })
 
     it('uses detected reasoning parser when user is auto', () => {
@@ -1396,9 +1415,11 @@ describe('Tool Integration', () => {
         expect(getFlagValue(out, '--mcp-config')).toBe('/Volumes/Data/mcp.json')
     })
 
-    it('empty reasoning parser disables reasoning', () => {
+    it('empty reasoning parser disables reasoning via literal --reasoning-parser none', () => {
+        // "None" must emit the literal opt-out flag; an absent flag would make the
+        // engine auto-configure the detected reasoning parser (the parity bug this fixes).
         const out = preview({ reasoningParser: '' }, { reasoningParser: 'qwen3' })
-        expect(hasFlag(out, '--reasoning-parser')).toBe(false)
+        expect(getFlagValue(out, '--reasoning-parser')).toBe('none')
     })
 })
 

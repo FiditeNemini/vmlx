@@ -3094,16 +3094,24 @@ export class SessionManager extends EventEmitter {
     // Parser resolution: User explicit choice -> Detected config -> Fallback logic
     // Empty string "" = user explicitly chose "None" (disabled) — always respected.
     const userToolParser = config.toolCallParser
+    // Empty string = user explicitly chose "None". The engine only treats the
+    // LITERAL "none" as a hard opt-out; an ABSENT flag makes it auto-configure the
+    // detected parser from the registry (cli.py:785,1047-1054). So map "" -> "none"
+    // and emit it — otherwise the "None (disable tool parsing)" option is inert.
     const effectiveToolParser = userToolParser === ''
-      ? undefined                     // User explicitly chose "None"
+      ? 'none'
       : canonicalizeToolParserId(userToolParser && userToolParser !== 'auto' ? userToolParser
         : detected.toolParser)       // Fallback to detection if auto or missing
 
     const effectiveAutoTool = config.enableAutoToolChoice ?? detected.enableAutoToolChoice
 
     const userReasoningParser = config.reasoningParser
+    // Empty string = user chose "None". Same engine gotcha as the tool parser:
+    // only the literal "none" is a hard opt-out; an absent flag auto-configures
+    // from the registry (cli.py:882,1056-1067). Map "" -> "none" so "None"
+    // actually disables reasoning extraction instead of silently acting as Auto.
     const requestedReasoningParser = userReasoningParser === ''
-      ? undefined                     // User explicitly chose "None"
+      ? 'none'
       : (userReasoningParser && userReasoningParser !== 'auto' ? userReasoningParser
         : detected.reasoningParser)  // Fallback to detection if auto or missing
     const effectiveReasoningParser = canonicalizeReasoningParserForCli(requestedReasoningParser)
@@ -3114,7 +3122,11 @@ export class SessionManager extends EventEmitter {
     // Pass resolved parsers directly to the CLI so backend doesn't guess.
     // When a tool parser is set, --enable-auto-tool-choice is required by the engine
     // (cli.py gates on both flags). Enable it unless user explicitly disabled auto-tool-choice.
-    if (effectiveToolParser) {
+    if (effectiveToolParser === 'none') {
+      // Hard opt-out: emit the literal flag so the engine disables tool parsing;
+      // do NOT enable auto-tool-choice (the engine gates it on parser != "none").
+      args.push('--tool-call-parser', 'none')
+    } else if (effectiveToolParser) {
       args.push('--tool-call-parser', effectiveToolParser)
       // Ensure --enable-auto-tool-choice is set when a parser is present
       if (effectiveAutoTool || config.enableAutoToolChoice === undefined) {

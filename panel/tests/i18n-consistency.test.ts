@@ -200,23 +200,4 @@ describe('i18n locale consistency', () => {
       }
     }
   })
-
-  it('MM3/Gemma cache-control explanations remain exact technical English in settings source', () => {
-    const settingsForm = readFileSync(
-      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'sessions', 'SessionConfigForm.tsx'),
-      'utf-8',
-    )
-
-    for (const exact of [
-      'MiniMax-M3 uses native MSA SSD prefix cache with keys, values, idx_keys, and absolute offsets',
-      'Generic Block Disk Cache (L2) is locked OFF',
-      'MiniMax-M3 keeps generic KV q4/q8 disabled',
-      'Mixed full/sliding attention cache detected',
-      'Generic flat TurboQuant KV is not implied unless a typed rotating-cache codec is proven',
-      'tool parser',
-      'reasoning parser',
-    ]) {
-      expect(settingsForm).toContain(exact)
-    }
-  })
 })

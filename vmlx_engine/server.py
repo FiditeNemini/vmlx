@@ -3031,11 +3031,8 @@ def _resolve_enable_thinking(
                 or getattr(_mc, "think_in_template", False)
             )
         )
-    if (
-        _effort
-        and _effort not in {"none", "off", "false", "disabled", "no_think"}
-        and _supports_thinking
-    ):
+    _effort_disables = _effort in {"none", "off", "false", "disabled", "no_think"}
+    if _effort and not _effort_disables and _supports_thinking:
         # A concrete per-request effort is itself an explicit reasoning request.
         # Family-specific normalizers below still own the exact effort dialect.
         return True
@@ -3061,7 +3058,12 @@ def _resolve_enable_thinking(
     # ON-by-default behavior uniform across api + ui. Non-reasoning families stay
     # None (template decides -> no think rail). Effort-based families
     # (deepseek-v4, mistral4) have downstream policy resolvers that override this.
-    if _supports_thinking:
+    #
+    # An explicit disable-effort (reasoning_effort="none"/"off"/...) is NOT a
+    # hard OFF (that arrives via request_value / ct_kwargs enable_thinking=False
+    # and returns False above) but it must NOT be swept into the ON-by-default
+    # rail either: it stays Auto (None) so the native template/runtime decides.
+    if _supports_thinking and not _effort_disables:
         return True
     return None
 

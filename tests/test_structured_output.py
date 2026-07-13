@@ -606,6 +606,8 @@ class TestGuidedJsonLogitsProcessor:
     """Tests for llguidance-backed JSON/schema token masking."""
 
     def test_json_schema_processor_masks_non_json_start_token(self):
+        import pytest
+        pytest.importorskip("llguidance")
         import mlx.core as mx
         from tokenizers import Tokenizer
         from tokenizers.decoders import ByteLevel as ByteLevelDecoder

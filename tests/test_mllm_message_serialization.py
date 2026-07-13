@@ -1581,6 +1581,10 @@ def test_simple_engine_routes_mimo_text_only_chat_through_language_model():
     engine._is_mllm = True
     engine._model_name = "JANGQ-AI/MiMo-V2.5-JANG_2L"
     engine._model = _Model()
+    # No on-disk config exists for this bare repo id and there is intentionally
+    # no name-regex family tier, so _model_family_name() would resolve to
+    # "unknown". Pin it to the real family so text-only routing is exercised.
+    engine._model_family_name = lambda: "mimo_v2"
     engine._generation_lock = asyncio.Lock()
 
     async def _run_model_call(fn, /, *args, **kwargs):

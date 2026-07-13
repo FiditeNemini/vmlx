@@ -153,10 +153,18 @@ def test_hy3_release_row_is_present_with_hunyuan_contract():
 
 
 def test_hy3_affine_rows_track_generation_and_quantization_contract():
+    import pytest
+
     rows = {row.id: row for row in ROWS}
 
     for row_id in ("hy3_preview_jang_2k", "hy3_preview_jang_2l"):
         static = static_audit(rows[row_id])
+
+        # Registry family resolution needs the on-disk bundle; without it the
+        # lookup returns 'unknown'. Skip when the local bundle is absent, matching
+        # the sibling zaya static-audit guard.
+        if not static["exists"]:
+            pytest.skip(f"local bundle for {row_id} is not present")
 
         assert static["registry"]["family_name"] == "hy_v3"
         assert static["registry"]["reasoning_parser"] == "qwen3"

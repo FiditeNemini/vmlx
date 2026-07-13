@@ -1736,7 +1736,7 @@ def dsv4_long_prompt_specs() -> list[dict[str, Any]]:
                 "with </html>; no markdown fence, no explanation, no TODO, no "
                 "omitted sections."
             ),
-            "enable_thinking": True,
+            "enable_thinking": False,
             "max_tokens": 2600,
             "temperature": 0.0,
             "top_p": 1.0,

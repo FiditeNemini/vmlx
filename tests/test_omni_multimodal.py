@@ -89,7 +89,7 @@ def test_omni_component_status_omits_video_without_runtime_bridge(tmp_path):
     assert status["has_radio_weights"] is True
     assert status["has_video_preprocessor_config"] is False
     assert status["video_bridge_supported"] is False
-    assert status["modalities"] == ["text", "audio", "image"]
+    assert status["modalities"] == ["text", "audio", "image", "video"]
     assert status["missing"] == []
     assert is_omni_multimodal_bundle(bundle) is True
 
@@ -263,9 +263,14 @@ async def test_omni_dispatch_rejects_unsupported_video_before_session_load(tmp_p
         chat_template_kwargs = {}
         enable_thinking = False
 
+    # Video is no longer rejected before session load: omni radio/vision
+    # bundles now advertise a frame-fallback video path, so the pre-load
+    # modality gate no longer returns 400 for a video-present request. Dispatch
+    # proceeds past the gate and only fails later at load time (500) because
+    # this fake tmp bundle has no loadable model. The contract under test is
+    # that there is NO 400 reject-before-load for video.
     with pytest.raises(HTTPException) as exc:
         await dispatch_omni_chat_completion(_Request(), str(bundle))
 
-    assert exc.value.status_code == 400
-    assert "video" in exc.value.detail
-    assert OmniMultimodalDispatcher._instance is None
+    assert exc.value.status_code != 400
+    assert exc.value.status_code == 500

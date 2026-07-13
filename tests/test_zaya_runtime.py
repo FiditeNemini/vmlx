@@ -727,8 +727,10 @@ def test_mimo_v2_mllm_text_only_messages_use_plain_processor_content():
         has_media=False,
     )
 
-    assert normalized[0]["content"] == "Output exactly ACK."
-    assert normalized[1]["content"] == "Say ACK."
+    # mimo_v2 folds leading system/developer messages into the first user turn.
+    assert len(normalized) == 1
+    assert normalized[0]["role"] == "user"
+    assert normalized[0]["content"] == "Output exactly ACK.\n\nSay ACK."
 
 
 def test_mimo_v2_mllm_keeps_media_messages_rich_for_processor():
@@ -808,6 +810,9 @@ def test_zaya1_vl_thinking_off_prompt_does_not_inject_closed_think(monkeypatch):
 
     model = MLXMultimodalLM.__new__(MLXMultimodalLM)
     model.processor = object()
+    # The thinking-off branch reads self.model_name (mllm.py:5346); the bare
+    # __new__ object would otherwise have no such attribute.
+    model.model_name = "zaya1_vl"
     model.config = {
         "model_type": "zaya1_vl",
         "capabilities": {"supports_thinking": False},

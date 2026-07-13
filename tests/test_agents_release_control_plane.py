@@ -56,14 +56,15 @@ def test_agents_forbids_fake_release_clearance_shortcuts():
 
 
 def test_release_tracker_points_at_current_control_plane_checklist():
+    # The 2026-06-07 execution tracker was pruned in 380bb5274. The current
+    # control-plane release tracker lives under the CODEX-REVERIFY-2026-07-11
+    # checklist directory.
     tracker = Path(
-        "docs/internal/VMLX_MLXSTUDIO_RELEASE_EXECUTION_TRACKER_2026_06_07.md"
+        "docs/internal/CODEX-REVERIFY-2026-07-11/RELEASE-TRACKER.md"
     ).read_text(encoding="utf-8")
 
-    assert (
-        "build/current-full-release-objective-checklist-after-jangtq2-live-release-smoke-20260608.json"
-        in tracker
-    )
-    assert "Agent control-plane update - 2026-06-07" in tracker
-    assert "status=open" in tracker
-    assert "failed_count=14" in tracker
+    assert "release tracker" in tracker.lower()
+    assert "Status:" in tracker
+    assert "all-routes-final.json" in tracker
+    assert "full-suite-baseline.xml" in tracker
+    assert "release lock" in tracker

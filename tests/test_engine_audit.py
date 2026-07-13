@@ -5640,7 +5640,7 @@ class TestV4DiskCacheDequantizeGuard:
         source = inspect.getsource(Scheduler.add_request)
         fetch_idx = source.find("disk_cache.fetch")
         assert fetch_idx != -1, "disk_cache.fetch not found in add_request"
-        after_fetch = source[fetch_idx:fetch_idx + 900]
+        after_fetch = source[fetch_idx:fetch_idx + 1600]
         assert "_prompt_cache_needs_worker_dequant = True" in after_fetch, (
             "disk_cache.fetch must mark cache hits for worker-side dequantization"
         )
@@ -5768,6 +5768,22 @@ class TestV4PrefixCacheLRU:
             keys.extend(od.keys())
         return keys
 
+    @staticmethod
+    def _mock_cache_layer(nbytes=128):
+        """A cache layer whose byte-size estimate is a real int.
+
+        store_cache now calls estimate_kv_cache_memory() on the stored
+        layers to do byte accounting. A bare MagicMock returns a MagicMock
+        size, which breaks the LRU eviction/duplicate size comparisons.
+        Present as an empty (keys=None) layer that reports a fixed real
+        nbytes and no idx_keys buffer so the estimate is a clean int.
+        """
+        layer = MagicMock()
+        layer.keys = None
+        layer.nbytes = nbytes
+        layer.idx_keys = None
+        return layer
+
     def test_lru_is_ordered_dict(self):
         from vmlx_engine.prefix_cache import PrefixCacheManager
         mock_model = MagicMock()
@@ -5787,7 +5803,7 @@ class TestV4PrefixCacheLRU:
         mock_model = MagicMock()
         mgr = PrefixCacheManager(mock_model, max_entries=10)
         tokens = [1, 2, 3]
-        cache = [MagicMock()]
+        cache = [self._mock_cache_layer()]
         mgr.store_cache(tokens, cache)
         mgr.store_cache(tokens, cache)
         total = len(self._all_lru_keys(mgr))
@@ -5814,10 +5830,10 @@ class TestV4PrefixCacheLRU:
         from vmlx_engine.prefix_cache import PrefixCacheManager
         mock_model = MagicMock()
         mgr = PrefixCacheManager(mock_model, max_entries=2)
-        mgr.store_cache([1], [MagicMock()])
-        mgr.store_cache([2], [MagicMock()])
+        mgr.store_cache([1], [self._mock_cache_layer()])
+        mgr.store_cache([2], [self._mock_cache_layer()])
         # This should evict [1]
-        mgr.store_cache([3], [MagicMock()])
+        mgr.store_cache([3], [self._mock_cache_layer()])
         keys = self._all_lru_keys(mgr)
         assert len(keys) == 2
         assert (mgr.model_key, (1,)) not in keys, "LRU entry [1] should have been evicted"
@@ -5854,7 +5870,7 @@ class TestV4bDiskCacheDequantFallthrough:
         # Find the disk cache section
         fetch_idx = source.find("disk_cache = self.disk_cache.fetch")
         assert fetch_idx != -1
-        after_fetch = source[fetch_idx:fetch_idx + 2000]
+        after_fetch = source[fetch_idx:fetch_idx + 2600]
         # The pattern: if dequant fails (disk_cache is None), must NOT set cached_tokens
         # Correct pattern: else branch gates all state mutations
         assert "else:" in after_fetch, (

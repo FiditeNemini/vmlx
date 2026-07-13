@@ -3715,7 +3715,10 @@ class TestToolParserConcurrency:
         assert "<|tool_call_end|>" in _TOOL_CALL_MARKERS
         assert "not emit_content.strip()" in source
         assert "not content.strip()" in source
-        assert "tool_call_generating=True" in source
+        # Per #219 the vMLX-only `tool_call_generating` wire field was removed in
+        # favor of a spec-clean OpenAI streaming tool_calls START delta; the
+        # whitespace-buffering behavior above is what this test guards.
+        assert "No `tool_call_generating` field" in source
 
     def test_tool_markup_residue_strips_all_registered_marker_families(self):
         """Display cleanup must track every family marker, not only DSML/Hy3."""
@@ -3745,7 +3748,13 @@ class TestToolParserConcurrency:
             assert "```tool_code" not in cleaned, (family, cleaned)
 
     def test_visual_grounding_markup_is_not_visible_chat_text(self):
-        """ZAYA-VL point/box control spans must not leak into UI text."""
+        """ZAYA-VL point/box control MARKERS must not leak into UI text.
+
+        Per #196, coordinate-bearing grounding spans (inner text contains a
+        digit) preserve their inner text so grounding VLMs stay usable over the
+        OpenAI API — only the surrounding markers are stripped. Digit-free
+        control spans are dropped entirely.
+        """
         from vmlx_engine.server import (
             _strip_visual_grounding_markup_for_display,
             _visual_grounding_display_delta,
@@ -3755,13 +3764,13 @@ class TestToolParserConcurrency:
             _strip_visual_grounding_markup_for_display(
                 "Before <|point_start|>(40, 100)<|point_end|> after"
             )
-            == "Before  after"
+            == "Before (40, 100) after"
         )
         assert (
             _strip_visual_grounding_markup_for_display(
                 "<|box_start|>[1,2,3,4]<|box_end|> answer"
             )
-            == " answer"
+            == "[1,2,3,4] answer"
         )
         assert (
             _visual_grounding_display_delta(
@@ -8826,10 +8835,11 @@ class TestZayaCCACachePolicy:
     def test_minimax_auto_stays_unset_and_explicit_thinking_still_works(
         self, tmp_path
     ):
-        """MiniMax supports thinking, but omitted/Auto must stay unset.
+        """MiniMax supports thinking; omitted/Auto defaults reasoning ON.
 
-        The engine must not hide runtime/template issues behind a family-level
-        forced off rail. Explicit user thinking controls still win.
+        Per the 2026-07-12 directive (408fe44c2) reasoning-capable families
+        default reasoning ON when the request is Auto so behavior is uniform
+        across api + ui. Explicit user thinking controls still win.
         """
         from vmlx_engine import server
         from vmlx_engine.model_config_registry import get_model_config_registry
@@ -8862,17 +8872,18 @@ class TestZayaCCACachePolicy:
 
         assert cfg.supports_thinking is True
         assert cfg.reasoning_parser == "minimax_m2"
-        assert auto_resolved is None
+        assert auto_resolved is True
         assert explicit_on is True
 
     @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
     def test_qwen36_auto_stays_unset_and_explicit_thinking_still_works(
         self, tmp_path, model_type
     ):
-        """Qwen3.6 supports thinking, but omitted/Auto must stay unset.
+        """Qwen3.6 supports thinking; omitted/Auto defaults reasoning ON.
 
-        Visibility/coherency issues must be fixed in template/runtime handling,
-        not by converting Auto into a hidden off rail.
+        Per the 2026-07-12 uniform default-ON directive (408fe44c2), Auto
+        resolves reasoning-capable families ON so api + ui match. Explicit user
+        thinking controls still win.
         """
         from vmlx_engine import server
         from vmlx_engine.model_config_registry import get_model_config_registry
@@ -8906,7 +8917,7 @@ class TestZayaCCACachePolicy:
         assert cfg.family_name == model_type
         assert cfg.supports_thinking is True
         assert cfg.reasoning_parser == "qwen3"
-        assert auto_resolved is None
+        assert auto_resolved is True
         assert explicit_on is True
 
     def test_gemma4_tools_auto_stays_unset_and_explicit_thinking_still_works(self):
@@ -10359,7 +10370,10 @@ class TestJangVLMFallbacks:
         assert cfg.architecture_hints["runtime_scope"] == "source_gemma4_unified_vlm"
         assert cfg.architecture_hints["vl_runtime_available"] is True
         assert cfg.architecture_hints["audio_runtime_available"] is True
-        assert cfg.architecture_hints["default_enable_thinking"] is False
+        # gemma4's jinja template defaults thinking OFF; per the 2026-07-12
+        # uniform default-ON directive the registry stamps default_enable_thinking
+        # True so Auto resolves reasoning ON (live-confirmed on Gemma-4-26B).
+        assert cfg.architecture_hints["default_enable_thinking"] is True
 
     def test_batched_model_wrapper_does_not_inject_pixel_values_for_gemma4_text_wrapper(
         self,
@@ -12177,8 +12191,8 @@ class TestTurboQuantKVTelemetry:
         assert "normalizedDetectedFamily === 'deepseek-v4'" in form_source
         # JIT incompat list expanded 2026-05-09 to include TurboQuant
         # (engine skips mx.compile for TurboQuantKVCache; UI now matches).
-        assert "disabled={flashMoeActive || distributedActive || dsv4Active || zayaCcaActive || turboQuantActive || multimodalActive || hybridCacheActive}" in form_source
-        assert "checked={!!config.enableJit && !flashMoeActive && !distributedActive && !dsv4Active && !zayaCcaActive && !turboQuantActive && !multimodalActive && !hybridCacheActive}" in form_source
+        assert "disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || multimodalActive || hybridCacheActive}" in form_source
+        assert "checked={!!config.enableJit && !flashMoeActive && !distributedActive && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !multimodalActive && !hybridCacheActive}" in form_source
         assert "disabled={config.continuousBatching || multimodalActive || dsv4Active}" in form_source
 
     def test_responses_long_context_tool_cache_gate_script_pins_artifacts(self):
@@ -14382,7 +14396,7 @@ class TestJitTurboQuantSymmetricGuard:
         assert "turboQuantActive" in form
         assert "detectedIsTurboQuant" in form
         # disabled prop covers turboQuantActive and hybrid path-dependent caches.
-        assert "disabled={flashMoeActive || distributedActive || dsv4Active || zayaCcaActive || turboQuantActive || multimodalActive || hybridCacheActive}" in form
+        assert "disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || multimodalActive || hybridCacheActive}" in form
 
     def test_detect_config_stamps_isTurboQuant_flag(self):
         """detectModelConfigFromDir must set isTurboQuant when bundle is TQ.

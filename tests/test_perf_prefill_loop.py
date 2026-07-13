@@ -27,8 +27,8 @@ def test_chunk_loop_uses_sorted_boundary_pointer():
 
 def test_chunk_loop_precomputes_state_layers():
     src = _mllm_source()
-    assert "_state_layers" in src
-    assert "mx.eval([c.state for c in _state_layers])" in src
+    assert "_materialize_prefill_cache_state(cache)" in src
+    assert "mx.eval(*items)" in src
 
 
 def test_chunk_loop_hoists_all_tokens_tolist():

@@ -297,6 +297,8 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--enable-pld',
   '--pld-summary-interval',
   '--is-mllm',
+  '--model-family',
+  '--text-only',
   '--mcp-config',
   '--mcp-disabled-servers',
   '--mcp-disabled-tools',

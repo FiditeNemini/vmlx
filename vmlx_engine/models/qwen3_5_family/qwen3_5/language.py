@@ -598,6 +598,12 @@ class LanguageModel(nn.Module):
                 cache_offset = offset
             elif isinstance(offset, mx.array):
                 cache_offset = (offset if offset.ndim == 0 else offset[0]).item()
+            elif offset is None:
+                # A freshly constructed cache can report a None offset before the
+                # first write; treat that as position 0 rather than crashing the
+                # mRoPE delta path. (Defensive hardening formerly applied via
+                # mlx_vlm_compat monkeypatch; kept here now the module is vendored.)
+                cache_offset = 0
             else:
                 raise ValueError(f"Unexpected cache offset type: {type(offset)}")
 

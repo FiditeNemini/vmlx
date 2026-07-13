@@ -171,15 +171,27 @@ class TestMLLMHelperFunctions:
         assert kwargs["rope_deltas"].tolist() == [[7]]
 
     def test_qwen35_language_mrope_delta_patch_installed(self):
-        """Qwen/N2 language forward must not add cache offsets to None deltas."""
-        pytest.importorskip("mlx_vlm")
+        """Qwen/N2 language forward must not crash on a None cache offset.
 
-        from mlx_vlm.models.qwen3_5 import language as qwen35_language
+        The None-offset coercion was formerly injected via an mlx_vlm_compat
+        monkeypatch; now that qwen3_5/language.py is vendored, the guarantee is
+        native. Assert the vendored source itself coerces a None offset to 0
+        (either via the native ``offset is None`` branch or the legacy marker).
+        """
+        pytest.importorskip("mlx_vlm")
+        import importlib
+        import inspect
+
         from vmlx_engine.utils import mlx_vlm_compat
 
         mlx_vlm_compat.apply()
+        # apply() installs the vendored qwen3_5 package into sys.modules; fetch
+        # the module AFTER apply so we inspect the vendored (native None-safe)
+        # LanguageModel, not the pre-swap upstream binding.
+        qwen35_language = importlib.import_module("mlx_vlm.models.qwen3_5.language")
 
-        assert getattr(
+        src = inspect.getsource(qwen35_language.LanguageModel.__call__)
+        assert "offset is None" in src or getattr(
             qwen35_language.LanguageModel.__call__,
             "_vmlx_mrope_none_delta_patched",
             False,
@@ -188,13 +200,14 @@ class TestMLLMHelperFunctions:
     def test_qwen35_language_mrope_treats_none_cache_offset_as_zero(self):
         """Fresh Qwen/N2 VLM caches can report None offset before first prefill."""
         pytest.importorskip("mlx_vlm")
+        import importlib
         from types import SimpleNamespace
 
         import mlx.core as mx
-        from mlx_vlm.models.qwen3_5 import language as qwen35_language
         from vmlx_engine.utils import mlx_vlm_compat
 
         mlx_vlm_compat.apply()
+        qwen35_language = importlib.import_module("mlx_vlm.models.qwen3_5.language")
 
         captured = {}
 

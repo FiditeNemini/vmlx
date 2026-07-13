@@ -4,11 +4,28 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from tests.cross_matrix import run_issue179_minimax_k_root_cause_audit as gate
 from tests.cross_matrix import run_issue179_public_dmg_contract as dmg_gate
 
 
+def _require_public_dmg_contract_evidence() -> None:
+    """Skip tests that read the locally-generated (gitignored) issue-179 public
+    DMG contract evidence when it is absent — e.g. a clean checkout or the release
+    box. The audit *logic* is covered by the tmp_path/pure-function tests below;
+    these two assert against real local evidence that only exists after the
+    issue-179 collection has been run on this machine (build/issue-179/ is
+    gitignored). Without this guard they hard-fail on every clean tree."""
+    if not gate.analyze_public_release_dmg_contracts(Path(".")):
+        pytest.skip(
+            "requires locally-generated build/issue-179 public DMG contract "
+            "evidence (gitignored; run the issue-179 collection to populate)"
+        )
+
+
 def test_issue179_audit_keeps_reporter_cancel_404_boundary_open():
+    _require_public_dmg_contract_evidence()
     audit = gate.build_audit(Path("."))
 
     assert audit["status"] == "open"
@@ -163,6 +180,7 @@ def test_issue179_public_dmg_contract_extracts_server_route_and_hash(tmp_path):
 
 
 def test_issue179_audit_surfaces_latest_public_dmg_contract():
+    _require_public_dmg_contract_evidence()
     audit = gate.build_audit(Path("."))
 
     latest = audit["latest_public_release_dmg_contract"]

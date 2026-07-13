@@ -540,8 +540,9 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('hy3')
     expect(detected.cacheType).toBe('kv')
-    // Phase-1 (2026-06-13): plain-KV text models default paged-OFF (SSD prefix).
-    expect(detected.usePagedCache).toBe(false)
+    // Paged-default-ON campaign (2026-07-12): autodetected plain-KV text models
+    // default paged-ON (Hy3 is not in the excluded set M3/openpangu_v2/gemma4).
+    expect(detected.usePagedCache).toBe(true)
     expect(detected.toolParser).toBe('hunyuan')
     expect(detected.reasoningParser).toBe('qwen3')
     expect(detected.enableAutoToolChoice).toBe(true)

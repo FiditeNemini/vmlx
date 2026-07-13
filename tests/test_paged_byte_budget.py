@@ -153,3 +153,30 @@ def test_estimate_block_nbytes_recurses_dicts():
     d["self"] = d
     d["arr"] = _Arr(42)
     assert PagedCacheManager.estimate_block_nbytes(d) == 42
+
+
+def test_both_schedulers_pass_max_resident_bytes_to_paged_manager():
+    """#98 parity: the MLLM/VL scheduler must give its PagedCacheManager the
+    same RAM-byte ceiling the text scheduler does. Before the fix the MLLM path
+    instantiated PagedCacheManager without max_resident_bytes, so the VL/MLLM
+    paged pool (e.g. Step-3.7 video, forced-paged under paged-default-ON) was
+    bounded only by max_cache_blocks — the exact gap the text path closed in
+    Wave-18. This source-parity guard prevents a silent regression."""
+    import re
+
+    text_src = open("vmlx_engine/scheduler.py").read()
+    mllm_src = open("vmlx_engine/mllm_scheduler.py").read()
+
+    # Both call sites must exist and both must thread max_resident_bytes.
+    for name, src in (("scheduler.py", text_src), ("mllm_scheduler.py", mllm_src)):
+        calls = re.findall(r"PagedCacheManager\((.*?)\)", src, re.DOTALL)
+        # The production instantiation is the one that also passes max_blocks.
+        prod = [c for c in calls if "max_blocks" in c and "block_size" in c]
+        assert prod, f"{name}: no production PagedCacheManager(...) call found"
+        assert any("max_resident_bytes=" in c for c in prod), (
+            f"{name}: production PagedCacheManager must pass max_resident_bytes "
+            f"(RAM byte ceiling parity, #98)"
+        )
+        assert any("compute_memory_limit()" in src for _ in prod), (
+            f"{name}: must derive the ceiling from MemoryCacheConfig.compute_memory_limit()"
+        )

@@ -617,10 +617,32 @@ class MLLMScheduler:
                     from .paged_cache import PagedCacheManager
                     from .prefix_cache import BlockAwarePrefixCache
 
+                    # Parity with the text scheduler (#98): give the MLLM/VL block
+                    # pool the SAME RAM-byte ceiling the memory-aware path uses
+                    # (default 20% of available RAM, 32 GB hard cap). Without it the
+                    # MLLM paged pool was bounded only by max_cache_blocks, so the
+                    # in-RAM block KV mirror could ratchet resident memory upward
+                    # with distinct prefixes regardless of per-model KV size — the
+                    # exact gap the text path closed in Wave-18. enforce_byte_budget()
+                    # evicts only free (ref==0) cached blocks, disk-L2 first.
+                    from .memory_cache import MemoryCacheConfig as _MemCacheCfg
+
+                    _mllm_paged_resident_budget = _MemCacheCfg(
+                        max_memory_mb=self.config.cache_memory_mb,
+                        max_memory_percent=self.config.cache_memory_percent,
+                    ).compute_memory_limit()
                     self.paged_cache_manager = PagedCacheManager(
                         block_size=self.config.paged_cache_block_size,
                         max_blocks=self.config.max_cache_blocks,
                         disk_store=block_disk_store,
+                        max_resident_bytes=_mllm_paged_resident_budget,
+                    )
+                    logger.info(
+                        "MLLM paged cache RAM ceiling: %.0f MB (%.0f%% of available); "
+                        "block pool max_blocks=%d",
+                        _mllm_paged_resident_budget / (1024 * 1024),
+                        self.config.cache_memory_percent * 100,
+                        self.config.max_cache_blocks,
                     )
                     self.block_aware_cache = BlockAwarePrefixCache(
                         model=lang_model,

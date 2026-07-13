@@ -24,6 +24,58 @@ All notable changes to vMLX Engine will be documented in this file.
 - Local MiMo V2.5 JANG_2L was refreshed from max2 over the TB-routed HTTP endpoint and verified byte-for-byte by manifest. This is still not full MiMo release clearance: live text/cache now works, but tool behavior, VL/audio/video, and performance remain separate proof rows.
 - MiMo V2.5 JANG_2L tool behavior remains a release blocker: a forced XML-function tool call stayed HTTP 200 but produced raw malformed `<tool_call>` text and punctuation garbage with zero parsed tool calls.
 
+## [1.6.7] - 2026-07-12
+
+### Changed
+- Paged KV cache now defaults ON for autodetected text families when continuous
+  batching and the prefix cache are active. Detection is per-family: dense text
+  and hybrid-SSM/linear-attention families (Qwen3.5/3.6, Zaya, Nemotron-H,
+  LFM2.5, Laguna, Hy3, Step-3.7) launch paged; multimodal/VL bundles, MiniMax-M3,
+  openPangu-v2, and Gemma 4 stay on their own cache paths. DeepSeek-V4-Flash keeps
+  its composite opt-in. Explicit `--use-paged-cache` / `--no-paged-cache` always
+  win. The Electron panel is fully reconciled with the engine: the visible cache
+  toggle, the launch flag, and the engine's effective policy now match for every
+  family (no silent OFF), with a migration that flips only untouched prior-default
+  text sessions.
+- Reasoning defaults ON for every reasoning-capable family (Eric directive),
+  applied uniformly across Chat/Responses/Anthropic/Ollama, with family guards
+  (Mistral none/high, MiniMax custom-off, Laguna template-default-OFF) still
+  authoritative. `max_thinking_tokens` is honored and gated to engine-answer-pass
+  families on both streaming and non-streaming paths.
+
+### Fixed
+- Never-empty answer after runaway reasoning: a reasoner that consumes the whole
+  token budget inside its hidden rail still streams a visible answer instead of
+  empty content, across chat and `/v1/responses`, for qwen3.5/3.6, DeepSeek-V4,
+  Step-3.7 and the MiniMax families. The answer pass runs a fresh context for
+  deepseek_v4/step3p7 (fixes a malformed appended reasoning turn) and no longer
+  leaks truncated reasoning or a `<think>`/`<thinking>` re-entry into the visible
+  answer.
+- Memory-cache lock inversion (community #233 deadlock), a `stop_token_ids`
+  attribute crash, and a lockless cache-clear race.
+- Paged cache RAM is now bounded by a byte ceiling: completed-request block
+  references are released after store so the ceiling can evict (Wave-18 RAM fix),
+  and the disk-L2 longest-prefix off-by-one that re-fed the wrong matched block
+  was corrected.
+- Loaded MLLM `/v1/completions` (plus stream and Ollama raw) now route through the
+  chat rail instead of feeding an unframed prompt to the MLLM tokenizer, which had
+  caused constant-token degeneration on Gemma-4 and other VL bundles.
+- `gpt_oss` streaming no longer leaks harmony analysis into visible content.
+- Laguna uses the glm47 tool parser (GLM arg_key/arg_value format, fixes silent
+  streaming tool-call loss); ZAYA/ZAYA1-VL pin `zaya_xml` as a defense against a
+  stale bundle stamp.
+- `/v1/capabilities` reports truthful cache/TQ policy descriptors for hybrid and
+  mixed-SWA families; the panel launch RAM estimate no longer over-counts
+  lazy-mmap JANG bundles.
+
+### Notes
+- Step-3.7-Flash video in the Electron UI was investigated (Codex NO-GO) and found
+  sound: the engine, qwen3 reasoning parser, step3p5 tool parser and mRoPE all
+  produce a clean reasoning/answer split under an adequate output budget. Step-3.7
+  is a very long reasoner whose JANG_K bundle omits `max_new_tokens`; at the 4096
+  fallback it can be capped mid-reasoning, in which case the never-empty floor
+  emits truncated reasoning as the answer (documented behavior, not a parser leak).
+
 ## [1.6.6] - 2026-07-10
 
 ### Added

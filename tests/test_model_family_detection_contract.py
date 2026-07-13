@@ -304,8 +304,11 @@ def test_decode_speed_gate_has_distinct_jang_jangtq_mxfp_speed_rows():
 def test_decode_speed_gate_jang_only_rows_keep_text_mx_matmul_launch_policy():
     from tests.cross_matrix.run_decode_speed_gate import ROWS, build_serve_command
 
+    # Text-only JANG bundles (no vision). qwen27_jang4m is intentionally NOT
+    # here: the JANG_4M-CRACK bundle ships real vision (config.json vision_config
+    # + image_token_id, jang_config has_vision/modality=vision) and is validated
+    # in the VLM block below alongside qwen27_jang4m_mtp.
     jang_only_rows = {
-        "qwen27_jang4m": ("qwen", "qwen3"),
         "qwen35_jang4k_ext": ("qwen", "qwen3"),
         "minimax_jang2l_crack": ("minimax", "minimax_m2"),
     }
@@ -331,20 +334,21 @@ def test_decode_speed_gate_jang_only_rows_keep_text_mx_matmul_launch_policy():
         assert "JANGTQ_MPP" not in joined
         assert "JANGTQ_DISABLE_DSV4" not in joined
 
-    mtp_vlm = ROWS["qwen27_jang4m_mtp"]
-    mtp_vlm_cmd = build_serve_command(
-        mtp_vlm,
-        python=Path("/bundle/python3"),
-        port=8794,
-        prefill_step_size=2048,
-    )
-    assert "JANG_" in mtp_vlm.path
-    assert "JANGTQ" not in mtp_vlm.path
-    assert mtp_vlm.is_mllm is True
-    assert "--is-mllm" in mtp_vlm_cmd
-    assert "--max-tokens" not in mtp_vlm_cmd
-    assert mtp_vlm_cmd[mtp_vlm_cmd.index("--tool-call-parser") + 1] == "qwen"
-    assert mtp_vlm_cmd[mtp_vlm_cmd.index("--reasoning-parser") + 1] == "qwen3"
+    for vlm_row_name, port in (("qwen27_jang4m", 8794), ("qwen27_jang4m_mtp", 8795)):
+        vlm = ROWS[vlm_row_name]
+        vlm_cmd = build_serve_command(
+            vlm,
+            python=Path("/bundle/python3"),
+            port=port,
+            prefill_step_size=2048,
+        )
+        assert "JANG_" in vlm.path, vlm_row_name
+        assert "JANGTQ" not in vlm.path, vlm_row_name
+        assert vlm.is_mllm is True, vlm_row_name
+        assert "--is-mllm" in vlm_cmd, vlm_row_name
+        assert "--max-tokens" not in vlm_cmd, vlm_row_name
+        assert vlm_cmd[vlm_cmd.index("--tool-call-parser") + 1] == "qwen"
+        assert vlm_cmd[vlm_cmd.index("--reasoning-parser") + 1] == "qwen3"
 
 
 def test_decode_speed_gate_health_rejects_wrong_weight_kernel_family():
@@ -628,7 +632,9 @@ def test_decode_speed_gate_build_command_preserves_row_parser_modality_policy():
 
     representative_rows = {
         "dsv4_k": {"mllm": False, "tool": "dsml", "reasoning": "deepseek_r1"},
-        "qwen27_jang4m": {"mllm": False, "tool": "qwen", "reasoning": "qwen3"},
+        # Qwen3.6-27B-JANG_4M-CRACK ships real vision (config.json vision_config +
+        # image_token_id, jang_config has_vision/modality=vision) → VLM.
+        "qwen27_jang4m": {"mllm": True, "tool": "qwen", "reasoning": "qwen3"},
         "qwen27_mxfp8_mtp": {"mllm": True, "tool": "qwen", "reasoning": "qwen3"},
         "zaya_vl_jangtq4": {"mllm": True, "tool": "zaya_xml", "reasoning": None},
         "ling_mxfp4": {"mllm": False, "tool": "deepseek", "reasoning": None},

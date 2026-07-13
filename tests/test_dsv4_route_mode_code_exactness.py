@@ -1,5 +1,9 @@
+import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from tests.cross_matrix.run_dsv4_route_mode_code_exactness import (
     CASE_NAMES,
@@ -14,6 +18,37 @@ from tests.cross_matrix.run_dsv4_route_mode_code_exactness import (
     prompt_diagnostics,
     run,
     selected_case_names,
+)
+
+
+def _dsv4_encoding_available() -> bool:
+    """True when the DeepSeek-V4-Flash source ``encoding_dsv4.py`` is resolvable.
+
+    The full ``dry_run``/``run`` probes below render prompts through the real
+    DSV4 chat encoder, which fail-closes unless the source encoding module is
+    present (it ships only with the DeepSeek-V4-Flash source bundle — not with
+    the JANG runtime weights bundle or ``jang_tools``). On hosts without that
+    bundle these end-to-end probes are env-skipped rather than reporting a
+    false failure; the prompt-rail classification logic itself is covered by the
+    ``fake_renderer`` tests above. Mirrors
+    ``dsv4_chat_encoder._default_encoding_dirs`` resolution.
+    """
+    env = os.environ.get("DSV4_ENCODING_DIR")
+    if env and (Path(env) / "encoding_dsv4.py").exists():
+        return True
+    try:
+        from vmlx_engine.loaders.dsv4_chat_encoder import _default_encoding_dirs
+    except Exception:
+        return False
+    try:
+        return any((d / "encoding_dsv4.py").exists() for d in _default_encoding_dirs())
+    except Exception:
+        return False
+
+
+requires_dsv4_encoding = pytest.mark.skipif(
+    not _dsv4_encoding_available(),
+    reason="DeepSeek-V4-Flash source encoding_dsv4.py bundle not present on this host",
 )
 
 
@@ -315,6 +350,7 @@ def test_dsv4_code_exactness_probe_records_near_miss_identifier_candidates():
     } in analysis["identifier_corruption_candidates"]
 
 
+@requires_dsv4_encoding
 def test_dsv4_code_exactness_probe_dry_run_records_all_prompt_rails():
     class Args:
         python = "/tmp/python"
@@ -434,6 +470,7 @@ def test_dsv4_code_exactness_probe_case_filter_rejects_unknown_cases():
         raise AssertionError("unknown DSV4 exactness case should fail")
 
 
+@requires_dsv4_encoding
 def test_dsv4_code_exactness_probe_dry_run_honors_case_filter():
     class Args:
         python = "/tmp/python"
@@ -455,6 +492,7 @@ def test_dsv4_code_exactness_probe_dry_run_honors_case_filter():
     ]
 
 
+@requires_dsv4_encoding
 def test_dsv4_code_exactness_probe_live_launch_honors_case_filter(monkeypatch):
     import tests.cross_matrix.run_dsv4_route_mode_code_exactness as gate
 

@@ -1124,12 +1124,13 @@ class TestModelConfigs:
         assert config.think_in_template is True
         assert config.supports_thinking is True
         assert config.is_mllm is True
-        assert config.architecture_hints["runtime_scope"] == "source_vlm_needs_live_proof"
-        assert config.architecture_hints["vl_runtime_available"] is True
-        assert (
-            config.architecture_hints["text_bridge_runtime_scope"]
-            == "text_bridge_ignored_for_source_vlm"
-        )
+        # The source-VLM runtime_scope / vl_runtime_available / text_bridge hints
+        # are only emitted by the text-bridge branch, which reads a real
+        # config.json (model_file=step3p7_mlx.py + text_config=step3p5) from disk.
+        # The bare-mock lookup here cannot reach that branch, and the former
+        # hardcoded Step-3.7-Flash-JANG_2L bundle no longer exists on disk. That
+        # routing is covered end-to-end by
+        # test_step37_flash_jang_text_bridge_routes_to_source_vlm_runtime_when_available.
         assert config.architecture_hints["sliding_window"] == 512
 
     def test_step37_flash_jang_text_bridge_routes_to_source_vlm_runtime_when_available(

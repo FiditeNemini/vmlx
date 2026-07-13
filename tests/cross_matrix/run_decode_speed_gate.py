@@ -36,6 +36,7 @@ DSV4_AFFINE_MODEL_CANDIDATES = (
     "/Users/example/models/JANGQ/"
     "DeepSeek-V4-Flash-JANG_DQ2-Token8-DownG32-Gate3Math6-NoMTP",
     "/Users/example/models/JANGQ/DeepSeek-V4-Flash-JANG",
+    "/Users/example/models/dealign.ai/DeepSeek-V4-Flash-JANG-CRACK",
 )
 
 
@@ -150,6 +151,7 @@ ROWS: dict[str, Row] = {
     "qwen27_jang4m": Row(
         "qwen27_jang4m",
         "/Users/example/models/dealign.ai/Qwen3.6-27B-JANG_4M-CRACK",
+        is_mllm=True,
         tool_parser="qwen",
         reasoning_parser="qwen3",
         expected_min_tps=18.0,
@@ -297,7 +299,7 @@ ROWS: dict[str, Row] = {
     "laguna": Row(
         "laguna",
         "/Users/example/models/JANGQ/Laguna-XS.2-JANGTQ",
-        tool_parser="qwen",
+        tool_parser="glm47",
         reasoning_parser="qwen3",
         max_tokens=192,
         expected_min_tps=15.0,

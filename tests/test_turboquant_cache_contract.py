@@ -254,11 +254,17 @@ def test_mimo_v2_jang_loader_skips_generic_turboquant_kv_auto_mode(monkeypatch, 
     assert "TurboQuant KV skipped: MiMo-V2 uses native asymmetric full/SWA" in caplog.text
 
 
-def test_paged_cache_warns_memory_aware_budget_flags_are_ignored(
+def test_paged_cache_reports_cache_memory_sets_l1_byte_ceiling(
     tmp_path,
     monkeypatch,
     caplog,
 ):
+    # Truthful-log reconciliation (paged-default-ON campaign): since the Wave-18
+    # byte-ceiling work, the paged path DOES honor --cache-memory-mb/percent — it
+    # computes _paged_resident_budget and passes it to PagedCacheManager as
+    # max_resident_bytes (scheduler.py). The old warning claiming the flags are
+    # ignored was false; the engine now logs an INFO explaining they set the L1
+    # RAM byte ceiling.
     import logging
 
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5"}))
@@ -268,9 +274,11 @@ def test_paged_cache_warns_memory_aware_budget_flags_are_ignored(
     args.cache_memory_mb = 4096
     args.cache_memory_percent = 0.35
 
-    caplog.set_level(logging.WARNING, logger="vmlx_engine.cli")
+    caplog.set_level(logging.INFO, logger="vmlx_engine.cli")
 
     _run_serve_until_uvicorn(monkeypatch, args)
 
     assert "--cache-memory-mb/--cache-memory-percent" in caplog.text
-    assert "Use --max-cache-blocks" in caplog.text
+    assert "L1 RAM byte ceiling" in caplog.text
+    # The stale "ignored" claim must NOT resurface.
+    assert "apply only to" not in caplog.text

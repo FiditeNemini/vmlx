@@ -192,8 +192,18 @@ def test_ui_defaults_prefix_on_paged_off_and_hy3_mtp_native_type_visible():
     sessions = open("panel/src/main/sessions.ts").read()
     registry = open("panel/src/main/model-config-registry.ts").read()
     assert "enablePrefixCache: true" in form
+    # DEFAULT_CONFIG pre-detection fallback stays false; the effective default now
+    # comes from the detection layer (see registry assertion below).
     assert "usePagedCache: false" in form
-    assert "const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : false" in sessions
+    # Paged cache default-ON reversal (Eric directive): the launch default now
+    # honors the detected per-family policy (text ON / MLLM OFF) instead of a
+    # hardcoded false. DSV4 still follows its composite opt-in.
+    assert (
+        "const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : (detectedUsePaged ?? false)"
+        in sessions
+    )
+    # Registry resolves paged ON for autodetected text families, OFF for multimodal.
+    assert "usePagedCache: config.usePagedCache ?? (config.isMultimodal ? false : true)" in registry
     assert "'hy_v3'" in registry
     assert "nativeCacheType: hy3 ? 'plain_kv_v1'" in registry
     assert "native cache:" in form

@@ -187,7 +187,7 @@ async function collectPagedCacheSettingsUi(page, fakeModelDir) {
       prefixChecked: !!checkboxFor('Enable Prefix Cache')?.checked,
       pagedChecked: !!checkboxFor('Use Paged KV Cache')?.checked,
       bodyIncludesCapacity: document.body.innerText.includes('Effective paged capacity: 64 tokens/block x 1000 blocks = 64,000 tokens'),
-      bodyIncludesIgnoredText: document.body.innerText.includes('Cache Memory Limit, Cache Memory %, and Cache TTL are ignored while paged cache is active'),
+      bodyIncludesIgnoredText: document.body.innerText.includes('Cache TTL is ignored while paged cache is active'),
       cacheMemoryLimit: disabledStateFor('Cache Memory Limit'),
       cacheMemoryPercent: disabledStateFor('Cache Memory %'),
       cacheTtl: disabledStateFor('Cache TTL'),
@@ -406,15 +406,18 @@ async function main() {
     if (!settingsUi.visible) result.failures.push('settings UI was not visible')
     if (!onState.pagedChecked) result.failures.push('paged cache on-state checkbox was not checked')
     if (!onState.bodyIncludesCapacity) result.failures.push('paged cache on-state effective capacity text missing')
-    if (!onState.bodyIncludesIgnoredText) result.failures.push('paged cache on-state ignored MB/%/TTL text missing')
+    if (!onState.bodyIncludesIgnoredText) result.failures.push('paged cache on-state TTL-ignored text missing')
+    // #98/H1: under paged cache the memory-budget controls stay LIVE (they set the
+    // L1 RAM byte ceiling), so only Cache TTL is disabled in the paged on-state.
     for (const [label, state] of Object.entries({
       'Cache Memory Limit': onState.cacheMemoryLimit,
       'Cache Memory %': onState.cacheMemoryPercent,
-      'Cache TTL': onState.cacheTtl,
     })) {
       if (!state?.found) result.failures.push(`${label} control not found in paged on-state`)
-      if (!state?.disabled) result.failures.push(`${label} control not disabled in paged on-state`)
+      if (state?.disabled) result.failures.push(`${label} control should stay enabled (live L1 RAM ceiling) in paged on-state`)
     }
+    if (!onState.cacheTtl?.found) result.failures.push('Cache TTL control not found in paged on-state')
+    if (!onState.cacheTtl?.disabled) result.failures.push('Cache TTL control not disabled in paged on-state')
     if (offState.pagedChecked) result.failures.push('paged cache off-state checkbox was still checked')
     if (offState.bodyIncludesCapacity) result.failures.push('paged cache off-state still showed effective capacity text')
     for (const [label, state] of Object.entries({

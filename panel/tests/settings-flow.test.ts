@@ -402,10 +402,14 @@ function buildCommandPreview(
             const prefixCacheMaxBytes = finitePositiveInteger(config.prefixCacheMaxBytes)
             if (prefixCacheMaxBytes != null) parts.push('--prefix-cache-max-bytes', prefixCacheMaxBytes.toString())
         } else {
+            // --cache-memory-mb / --cache-memory-percent bound RAM in BOTH modes:
+            // memory-aware cap for the prefix store, and the paged L1 RAM byte
+            // ceiling (#98). Mirrors sessions.ts: emit regardless of usePagedCache.
             const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
-            if (!usePagedCache && cacheMemoryMb != null) parts.push('--cache-memory-mb', cacheMemoryMb.toString())
+            if (cacheMemoryMb != null) parts.push('--cache-memory-mb', cacheMemoryMb.toString())
             const cacheMemoryPercent = finitePositiveNumber(config.cacheMemoryPercent)
-            if (!usePagedCache && cacheMemoryPercent != null) parts.push('--cache-memory-percent', (cacheMemoryPercent / 100).toString())
+            if (cacheMemoryPercent != null) parts.push('--cache-memory-percent', (cacheMemoryPercent / 100).toString())
+            // Cache TTL stays memory-aware-only; paged backend has no TTL.
             const cacheTtlMinutes = finitePositiveNumber(config.cacheTtlMinutes)
             if (cacheTtlMinutes != null && !usePagedCache) parts.push('--cache-ttl-minutes', cacheTtlMinutes.toString())
         }
@@ -836,7 +840,9 @@ describe('Paged KV Cache', () => {
         expect(hasFlag(out, '--disable-prefix-cache')).toBe(false)
         expect(hasFlag(out, '--use-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
-        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
+        // #98/H1: cache-memory-% sets the paged L1 RAM byte ceiling, so it is
+        // emitted under paged cache (previously dropped).
+        expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.3')
     })
 
     it('ZAYA typed CCA still honors explicit prefix-cache off', () => {
@@ -2231,7 +2237,8 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(out, '--is-mllm')).toBe(true)
         expect(hasFlag(out, '--use-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
-        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
+        // #98/H1: cache-memory-% sets the paged L1 RAM byte ceiling → emitted.
+        expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.15')
     })
 
     it('detected Mamba cache forces paged cache while regular KV respects saved false', () => {
@@ -2271,7 +2278,8 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(out, '--use-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-disk-cache')).toBe(false)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
-        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
+        // #98/H1: cache-memory-% sets the paged L1 RAM byte ceiling → emitted.
+        expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.15')
     })
 
     it('changing maxCacheBlocks produces different CLI output', () => {
@@ -2341,7 +2349,7 @@ describe('Default IP and New Settings', () => {
     it('session manager migrates the exact stale continuous-cache default tuple', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         expect(source).toContain('function applyCacheStackStartupDefaultMigration')
-        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 6')
+        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 8')
         expect(source).toContain('function markCacheStackStartupDefaultsCurrent')
         expect(source).toContain('config.cacheStackStartupDefaultsVersion = CACHE_STACK_STARTUP_DEFAULTS_VERSION')
         expect(source).toContain('config.continuousBatching === true')
@@ -2433,11 +2441,12 @@ describe('Default IP and New Settings', () => {
         expect(helper).toContain("setConfigValue(mutable, 'enableDiskCache', defaultEnableDiskCache)")
         expect(helper).toContain("setConfigValue(mutable, 'enableBlockDiskCache', defaultEnableBlockDiskCache)")
         expect(helper).toContain("setConfigValue(mutable, 'kvCacheQuantization', 'auto')")
-        // Phase-2 (2026-06-27): generic default flipped from paged-off → paged-on
-        // after RAM-soak proved no leak. SSD path is paged-coupled, so paged-on
-        // unlocks the block-disk-cache prefix-hit benefit.
-        expect(helper).toContain('const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : true')
-        expect(helper).toContain('const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : true')
+        // v8 paged-default-ON (2026-07-12): fresh sessions inherit the detected
+        // per-family paged capability — paged ON for autodetected TEXT families,
+        // OFF for VL/MLLM (#98) and arch-incompatible families. DSV4 keeps its
+        // prefix opt-in. SSD block-disk L2 is paged-coupled, so it follows paged.
+        expect(helper).toContain('const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : (detectedUsePaged ?? false)')
+        expect(helper).toContain('const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : !!defaultUsePagedCache')
     })
 
     it('adopted running sessions apply bundle generation defaults before saving config', () => {
@@ -3107,16 +3116,20 @@ describe('Feature Interaction', () => {
         expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.15')
     })
 
-    it('omits memory-aware cache budget flags when paged cache is active', () => {
+    it('emits cache memory budget flags under paged cache (paged L1 RAM byte ceiling, #98)', () => {
         const out = preview({
             enablePrefixCache: true,
             usePagedCache: true,
             cacheMemoryMb: 4096,
             cacheMemoryPercent: 35,
         })
+        // #98/H1: --cache-memory-mb/percent set the paged block-pool L1 RAM byte
+        // ceiling (bound RAM + evict free blocks), so they reach the engine under
+        // paged cache. Only --cache-ttl-minutes stays paged-inapplicable.
         expect(hasFlag(out, '--use-paged-cache')).toBe(true)
-        expect(hasFlag(out, '--cache-memory-mb')).toBe(false)
-        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
+        expect(getFlagValue(out, '--cache-memory-mb')).toBe('4096')
+        expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.35')
+        expect(hasFlag(out, '--cache-ttl-minutes')).toBe(false)
     })
 
     it('settings form renders effective paged capacity and ignored memory-budget state', () => {

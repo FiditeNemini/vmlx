@@ -16,18 +16,21 @@ describe('cache capacity display helpers', () => {
     )
   })
 
-  it('names MB and percent cache controls as ignored while paged cache is active', () => {
-    expect(pagedCacheMemoryIgnoredText).toContain('Cache Memory Limit')
-    expect(pagedCacheMemoryIgnoredText).toContain('Cache Memory %')
-    expect(pagedCacheMemoryIgnoredText).toContain('ignored while paged cache is active')
+  it('explains that MB/percent set the paged L1 RAM ceiling and only TTL is ignored', () => {
+    // #98/H1: under paged cache the memory-budget controls are LIVE — they set the
+    // L1 RAM byte ceiling for the block pool. Only Cache TTL is inapplicable.
+    expect(pagedCacheMemoryIgnoredText).toContain('Cache TTL is ignored while paged cache is active')
+    expect(pagedCacheMemoryIgnoredText).toContain('Cache Memory Limit / Cache Memory %')
+    expect(pagedCacheMemoryIgnoredText).toContain('L1 RAM byte ceiling for the paged block pool')
     expect(pagedCacheMemoryIgnoredText).toContain('Max Cache Blocks')
   })
 
   it('derives disabled/ignored control state from effective paged cache state', () => {
+    // #98/H1: memory-budget controls stay enabled+live under paged; only TTL disabled.
     expect(pagedCacheControlsState(true)).toEqual({
-      memoryBudgetControlsDisabled: true,
+      memoryBudgetControlsDisabled: false,
       cacheTtlDisabled: true,
-      memoryBudgetIgnored: true,
+      memoryBudgetIgnored: false,
     })
     expect(pagedCacheControlsState(false)).toEqual({
       memoryBudgetControlsDisabled: false,

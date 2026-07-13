@@ -58,6 +58,33 @@ class ZayaToolParser(ToolParser):
             value = wrapped.group(1).strip()
         return value
 
+    @staticmethod
+    def _unwrap_double_wrapped(arguments: dict[str, Any]) -> dict[str, Any]:
+        """Collapse a demonstrably double-wrapped argument object.
+
+        Zaya (esp. the JANG_4M quant) sometimes emits the *entire* JSON argument
+        object as the value of a single ``<parameter=NAME>`` — e.g. the model is
+        asked to call ``read_file`` with ``{"path": p, "offset": 1, "limit": 5}``
+        and produces ``<parameter=path>{"path": p, "offset": 1, "limit": 5}
+        </parameter>``. After ``json.loads`` that becomes
+        ``{"path": {"path": p, "offset": 1, "limit": 5}}`` — the tool then rejects
+        ``path`` as an object and the model retries the same malformed call until
+        the UI iteration guard interrupts it (live-found via Codex Electron QA,
+        2026-07-13).
+
+        Only unwrap when the signature is unambiguous: a single argument whose
+        value is a dict that itself re-declares that same key. This never
+        stringifies arbitrary objects into scalars and cannot fire on a
+        legitimately object-valued argument (whose own key would not reappear
+        inside it), so well-formed calls are untouched.
+        """
+        if len(arguments) != 1:
+            return arguments
+        (sole_key, sole_value), = arguments.items()
+        if isinstance(sole_value, dict) and sole_key in sole_value:
+            return sole_value
+        return arguments
+
     def extract_tool_calls(
         self, model_output: str, request: dict[str, Any] | None = None
     ) -> ExtractedToolCallInformation:
@@ -76,6 +103,7 @@ class ZayaToolParser(ToolParser):
                         arguments[param_name.strip()] = json.loads(value)
                     except (json.JSONDecodeError, ValueError):
                         arguments[param_name.strip()] = value
+                arguments = self._unwrap_double_wrapped(arguments)
                 tool_calls.append(
                     {
                         "id": generate_tool_id(),

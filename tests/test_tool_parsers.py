@@ -734,6 +734,52 @@ class TestZayaToolParser:
             "content": "REAL_UI_LIVE_TOOL_ONE",
         }
 
+    def test_double_wrapped_arguments_are_unwrapped(self, parser):
+        """Zaya JANG_4M can emit the whole args object as a single parameter.
+
+        Live-found (Codex Electron QA 2026-07-13): the model produced
+        `<parameter=path>{"path": ..., "offset": 1, "limit": 5}</parameter>`,
+        which json.loads collapses to `{"path": {"path": ..., ...}}`; the tool
+        then rejected `path` as an object and the model looped the same
+        malformed call until the UI guard interrupted it. The parser now
+        unwraps the demonstrably double-wrapped object.
+        """
+        text = (
+            "<zyphra_tool_call>\n"
+            "<function=read_file>\n"
+            '<parameter=path>{"path": "/repo/README.md", "offset": 1, "limit": 5}</parameter>\n'
+            "</function>\n"
+            "</zyphra_tool_call>"
+        )
+
+        result = parser.extract_tool_calls(text)
+
+        assert result.tools_called
+        assert result.tool_calls[0]["name"] == "read_file"
+        args = json.loads(result.tool_calls[0]["arguments"])
+        assert args == {"path": "/repo/README.md", "offset": 1, "limit": 5}
+
+    def test_object_valued_argument_is_not_unwrapped(self, parser):
+        """A legitimately object-valued single arg must be left intact.
+
+        The unwrap only fires when the sole key re-appears inside its own dict
+        value, so a real object argument (whose key is not a member of the
+        object) passes through unchanged.
+        """
+        text = (
+            "<zyphra_tool_call>\n"
+            "<function=configure>\n"
+            '<parameter=settings>{"width": 80, "height": 24}</parameter>\n'
+            "</function>\n"
+            "</zyphra_tool_call>"
+        )
+
+        result = parser.extract_tool_calls(text)
+
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0]["arguments"])
+        assert args == {"settings": {"width": 80, "height": 24}}
+
 
 class TestXLAMToolParser:
     """Test the xLAM tool parser."""

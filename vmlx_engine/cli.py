@@ -437,7 +437,9 @@ def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
             f"block_size={args.paged_cache_block_size}, "
             f"max_blocks={args.max_cache_blocks}, "
             f"capacity={capacity} tokens "
-            "(--cache-memory-mb ignored for paged cache)"
+            "(--cache-memory-mb/--cache-memory-percent set the L1 RAM byte "
+            "ceiling for the block KV mirror; --max-cache-blocks caps the "
+            "block-pool count)"
         )
     ]
     if getattr(args, "enable_block_disk_cache", False):

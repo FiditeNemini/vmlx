@@ -26,7 +26,7 @@ function formatInteger(value: number): string {
 }
 
 export const pagedCacheMemoryIgnoredText =
-  'Cache Memory Limit, Cache Memory %, and Cache TTL are ignored while paged cache is active. Use Max Cache Blocks and Block Size for in-RAM paged capacity.'
+  'Cache TTL is ignored while paged cache is active. Cache Memory Limit / Cache Memory % set the L1 RAM byte ceiling for the paged block pool (they bound RAM and evict free blocks); Max Cache Blocks and Block Size set token capacity.'
 
 export function resolvePagedCacheCapacity(input: PagedCacheCapacityInput): {
   blockSize: number
@@ -54,9 +54,13 @@ export function pagedCacheCapacityText(input: PagedCacheCapacityInput): string {
 }
 
 export function pagedCacheControlsState(effectiveUsePagedCache: boolean): PagedCacheControlsState {
+  // Under paged cache the memory budget controls (Cache Memory Limit / %) stay
+  // LIVE: they set the L1 RAM byte ceiling for the paged block pool (#98), so
+  // the UI value must reach the engine. Only Cache TTL is inapplicable to the
+  // paged backend.
   return {
-    memoryBudgetControlsDisabled: effectiveUsePagedCache,
+    memoryBudgetControlsDisabled: false,
     cacheTtlDisabled: effectiveUsePagedCache,
-    memoryBudgetIgnored: effectiveUsePagedCache,
+    memoryBudgetIgnored: false,
   }
 }

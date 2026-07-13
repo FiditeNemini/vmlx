@@ -301,6 +301,7 @@ const ADDITIONAL_ARG_VALUE_FLAGS = new Set([
   '--mcp-enabled-servers',
   '--mcp-enabled-tools',
   '--mflux-class',
+  '--model-family',
   '--num-draft-tokens',
   '--native-mtp-depth',
   '--native-mtp-sampling-policy',
@@ -3148,12 +3149,18 @@ export class SessionManager extends EventEmitter {
           args.push('--prefix-cache-max-bytes', prefixCacheMaxBytes.toString())
         }
       } else {
+        // --cache-memory-mb / --cache-memory-percent bound RAM in BOTH modes:
+        // for memory-aware cache they cap the prefix store, and for paged cache
+        // (#98) they set the L1 RAM byte ceiling for the block KV mirror that
+        // evicts free blocks. Emit them regardless of usePagedCache so the UI
+        // value actually reaches the engine (previously they were dropped under
+        // paged, so the app's default silently fell back to the engine's 20%).
         const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
-        if (!usePagedCache && cacheMemoryMb != null) {
+        if (cacheMemoryMb != null) {
           args.push('--cache-memory-mb', cacheMemoryMb.toString())
         }
         const cacheMemoryPercent = finitePositiveNumber(config.cacheMemoryPercent)
-        if (!usePagedCache && cacheMemoryPercent != null) {
+        if (cacheMemoryPercent != null) {
           args.push('--cache-memory-percent', (cacheMemoryPercent / 100).toString())
         }
         // Cache TTL (time-to-live for cache entries) — only meaningful for memory-aware cache, not paged cache

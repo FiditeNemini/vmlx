@@ -159,6 +159,18 @@ _model_name: str | None = None
 _model_path: str | None = None  # Full local path for config.json lookups
 _served_model_name: str | None = None  # Custom name for API (--served-model-name)
 _FALLBACK_MAX_OUTPUT_TOKENS = 4096
+# Reasoning models spend part of the output budget on the hidden <think> phase
+# that never reaches the user. A flat 4096 conflates two different budgets: a
+# non-reasoner's answer budget vs a reasoner's (reasoning + answer) budget, so a
+# verbose reasoner with no bundle max_new_tokens spends the whole 4096 on
+# reasoning and the visible answer truncates mid-sentence at finish="length"
+# (observed live: MiniMax-M2.7 reasoning=17400 chars, answer=183 chars). Give
+# reasoning-capable models strictly more fallback headroom. The projected Metal
+# headroom guard clamps this per-model on memory-constrained loads (implicit
+# path clamps, never raises), which greatly reduces the OOM risk of the larger
+# fallback — though it does not absolutely eliminate it (the guard estimates
+# standard KV geometry and can be disabled).
+_FALLBACK_MAX_OUTPUT_TOKENS_REASONING = _FALLBACK_MAX_OUTPUT_TOKENS * 4
 _default_max_tokens: int = _FALLBACK_MAX_OUTPUT_TOKENS
 _default_max_tokens_explicit: bool = False
 _default_timeout: float = 300.0  # Default request timeout in seconds (5 minutes)
@@ -1521,10 +1533,49 @@ def _resolve_max_tokens(request_value: int | None, model_name: str = "") -> int:
             model_name=model_name,
         )
     return _apply_projected_output_guard(
-        _FALLBACK_MAX_OUTPUT_TOKENS,
+        _effective_fallback_max_tokens(),
         explicit=False,
         model_name=model_name,
     )
+
+
+def _loaded_model_is_reasoning_capable() -> bool:
+    """True when the loaded model will emit reasoning tokens that share the
+    output budget with the visible answer.
+
+    Uses the loaded-family registry capability (reasoning_parser or
+    think_in_template) as the authoritative signal, with the active parser
+    instance as a fallback for unknown/unstamped models. Keying on the active
+    parser alone would miss a reasoning family whose parser was disabled
+    (--reasoning-parser none), failed to initialize, or was stamped off while
+    the chat template still injects <think> — those models still reason and
+    still starve their answer under the flat fallback.
+    """
+    if _reasoning_parser is not None:
+        return True
+    mc = _current_model_config()
+    if mc is not None:
+        if getattr(mc, "reasoning_parser", None):
+            return True
+        if getattr(mc, "think_in_template", False):
+            return True
+    return False
+
+
+def _effective_fallback_max_tokens() -> int:
+    """Bounded engine fallback when no request/CLI/bundle cap exists.
+
+    Reasoning-capable models get a strictly larger fallback because the hidden
+    <think> phase consumes output tokens that never reach the user; a flat 4096
+    would leave the visible answer starved. Non-reasoning models keep the modest
+    4096 loop guard. The projected Metal headroom guard clamps whichever value
+    down per-model on memory-constrained loads, which greatly reduces (but does
+    not absolutely eliminate — the guard estimates standard KV geometry and can
+    be disabled) the OOM risk of the larger fallback.
+    """
+    if _loaded_model_is_reasoning_capable():
+        return _FALLBACK_MAX_OUTPUT_TOKENS_REASONING
+    return _FALLBACK_MAX_OUTPUT_TOKENS
 
 
 @dataclass(frozen=True)
@@ -6073,8 +6124,11 @@ def load_model(
         logger.info(f"Default max tokens override: {_default_max_tokens}")
     else:
         logger.info(
-            "Default max tokens fallback: %s (bundle max_new_tokens wins when present)",
+            "Default max tokens fallback: %s base / %s for reasoning-capable "
+            "models (bundle max_new_tokens wins when present; projected Metal "
+            "guard clamps per-model)",
             _FALLBACK_MAX_OUTPUT_TOKENS,
+            _FALLBACK_MAX_OUTPUT_TOKENS_REASONING,
         )
 
 

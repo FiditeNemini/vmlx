@@ -74,6 +74,78 @@ def test_explicit_default_over_safe_headroom_rejects(monkeypatch):
     assert "1024" in str(exc.value.detail)
 
 
+def test_reasoning_model_fallback_gets_larger_headroom(monkeypatch):
+    """A reasoning-capable model with no bundle/CLI cap must fall back to the
+    larger reasoning budget so the hidden <think> phase cannot starve the
+    visible answer (observed live: MiniMax-M2.7 reasoning ate the whole flat
+    4096 and the answer truncated at 183 chars, finish=length)."""
+    from vmlx_engine import server
+
+    monkeypatch.setattr(server, "_default_max_tokens_explicit", False)
+    monkeypatch.setattr(server, "_bundle_sampling_default", lambda model_name, key: None)
+    # Ample projected headroom so the guard does not clamp the fallback.
+    monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": None)
+
+    monkeypatch.setattr(server, "_reasoning_parser", object())
+    assert (
+        server._resolve_max_tokens(None, "reasoning-model")
+        == server._FALLBACK_MAX_OUTPUT_TOKENS_REASONING
+    )
+    assert (
+        server._FALLBACK_MAX_OUTPUT_TOKENS_REASONING > server._FALLBACK_MAX_OUTPUT_TOKENS
+    )
+
+
+def test_non_reasoning_model_keeps_modest_fallback(monkeypatch):
+    """Non-reasoning models keep the modest 4096 loop guard."""
+    from vmlx_engine import server
+
+    monkeypatch.setattr(server, "_default_max_tokens_explicit", False)
+    monkeypatch.setattr(server, "_bundle_sampling_default", lambda model_name, key: None)
+    monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": None)
+
+    monkeypatch.setattr(server, "_reasoning_parser", None)
+    monkeypatch.setattr(server, "_current_model_config", lambda: None)
+    assert (
+        server._resolve_max_tokens(None, "plain-model")
+        == server._FALLBACK_MAX_OUTPUT_TOKENS
+    )
+
+
+def test_reasoning_family_with_parser_disabled_still_gets_larger_fallback(monkeypatch):
+    """A reasoning family whose active parser is disabled/failed (None) but
+    whose registry entry is reasoning-capable (reasoning_parser set OR
+    think_in_template) still reasons via the chat template and must get the
+    larger fallback — keying on the active parser alone would miss it."""
+    from types import SimpleNamespace
+    from vmlx_engine import server
+
+    monkeypatch.setattr(server, "_default_max_tokens_explicit", False)
+    monkeypatch.setattr(server, "_bundle_sampling_default", lambda model_name, key: None)
+    monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": None)
+    monkeypatch.setattr(server, "_reasoning_parser", None)
+
+    # Registry says reasoning_parser is set even though the active instance is None.
+    monkeypatch.setattr(
+        server, "_current_model_config",
+        lambda: SimpleNamespace(reasoning_parser="qwen3", think_in_template=False),
+    )
+    assert (
+        server._resolve_max_tokens(None, "reasoning-family-parser-off")
+        == server._FALLBACK_MAX_OUTPUT_TOKENS_REASONING
+    )
+
+    # think_in_template alone (template injects <think>) also qualifies.
+    monkeypatch.setattr(
+        server, "_current_model_config",
+        lambda: SimpleNamespace(reasoning_parser=None, think_in_template=True),
+    )
+    assert (
+        server._resolve_max_tokens(None, "think-in-template-model")
+        == server._FALLBACK_MAX_OUTPUT_TOKENS_REASONING
+    )
+
+
 def test_projection_uses_loaded_model_config(monkeypatch):
     from vmlx_engine import server
 

@@ -399,7 +399,7 @@ async function main() {
     result.appLogTail = app.appLog.slice(-200)
     const joined = (sessionResult.logs || []).join('\n')
     result.pagedCapacityLogFound = joined.includes(result.expectedLog)
-    result.cacheMemoryIgnoredTextFound = joined.includes('--cache-memory-mb/--cache-memory-percent are ignored while paged cache is active')
+    result.cacheMemoryIgnoredTextFound = joined.includes('--cache-memory-mb/--cache-memory-percent set the L1 RAM byte ceiling that evicts free blocks')
     result.failures = []
     const onState = settingsUi.onState || {}
     const offState = settingsUi.offState || {}

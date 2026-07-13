@@ -297,10 +297,12 @@ def test_paged_cache_capacity_is_visible_and_not_memory_mb_driven() -> None:
 
     assert "pagedCacheCapacityLogLine" in panel
     assert "tokens/block x" in panel
-    assert "--cache-memory-mb/--cache-memory-percent are ignored while paged cache is active" in panel
+    # Truthful post-#98 messaging: --cache-memory-mb/percent set the paged L1 RAM
+    # byte ceiling (they are NOT ignored); Max Cache Blocks sizes token capacity.
+    assert "set the L1 RAM byte ceiling that evicts free blocks" in panel
     assert "Max Cache Blocks" in panel
     assert "capacity={capacity} tokens" in cli
-    assert "--cache-memory-mb ignored for paged cache" in cli
+    assert "set the L1 RAM byte " in cli
 
 
 def test_live_metal_headroom_ui_proof_checks_paged_capacity_log() -> None:
@@ -309,7 +311,7 @@ def test_live_metal_headroom_ui_proof_checks_paged_capacity_log() -> None:
     )
 
     assert "Paged cache capacity: 64 tokens/block x 64 blocks = 4096 tokens." in source
-    assert "--cache-memory-mb/--cache-memory-percent are ignored while paged cache is active" in source
+    assert "--cache-memory-mb/--cache-memory-percent set the L1 RAM byte ceiling that evicts free blocks" in source
     assert "window.api.sessions.create" in source
     assert "window.api.sessions.getLogs" in source
 

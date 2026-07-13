@@ -2727,6 +2727,11 @@ class TestServerSamplingResolution:
         generation_config.max_new_tokens. In that case the engine still needs
         a real bounded output budget instead of inheriting the historical
         32768 fallback, which lets long turns drift into loops.
+
+        hy_v3 is a reasoning family, so the bounded fallback is the
+        reasoning-aware budget (larger than a non-reasoner's 4096 because the
+        hidden <think> phase shares the budget) — still bounded and well under
+        the dangerous 32768. A non-reasoning bundle keeps the modest 4096.
         """
         import vmlx_engine.server as server
 
@@ -2735,10 +2740,15 @@ class TestServerSamplingResolution:
         monkeypatch.setattr(server, "_model_path", str(tmp_path))
         monkeypatch.setattr(server, "_default_max_tokens", 32768)
         monkeypatch.setattr(server, "_default_max_tokens_explicit", False, raising=False)
+        # Isolate from active-parser global pollution: force the deterministic
+        # registry-capability path (hy_v3 is reasoning-capable per registry).
+        monkeypatch.setattr(server, "_reasoning_parser", None, raising=False)
         server._jang_sampling_defaults_cache.clear()
         server._generation_defaults_cache.clear()
 
-        assert server._resolve_max_tokens(None, "bundle-model") == 4096
+        resolved = server._resolve_max_tokens(None, "bundle-model")
+        assert resolved == server._FALLBACK_MAX_OUTPUT_TOKENS_REASONING
+        assert resolved < 32768  # still bounded — no historical 32K loop drift
 
     def test_ling_bailing_omitted_top_k_uses_audited_family_cap(
         self,

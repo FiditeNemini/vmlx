@@ -684,7 +684,7 @@ function pagedCacheCapacityLogLine(args: string[]): string | null {
   const blockSize = numericArgValue(args, '--paged-cache-block-size') ?? 64
   const maxBlocks = numericArgValue(args, '--max-cache-blocks') ?? 1000
   const capacity = blockSize * maxBlocks
-  return `Paged cache capacity: ${blockSize} tokens/block x ${maxBlocks} blocks = ${capacity} tokens. --cache-memory-mb/--cache-memory-percent are ignored while paged cache is active; use Max Cache Blocks for the in-RAM paged capacity.\n`
+  return `Paged cache capacity: ${blockSize} tokens/block x ${maxBlocks} blocks = ${capacity} tokens. Token capacity is sized by Max Cache Blocks; --cache-memory-mb/--cache-memory-percent set the L1 RAM byte ceiling that evicts free blocks (they bound RAM, not token capacity).\n`
 }
 
 function isZayaCacheStackMigrationTarget(modelPath?: string): boolean {

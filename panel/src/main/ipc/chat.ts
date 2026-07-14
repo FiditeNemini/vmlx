@@ -1318,6 +1318,14 @@ export function registerChatHandlers(
       // Build request messages with system prompt if set
       // Using any[] to support tool_calls and tool_call_id fields
       const requestMessages: any[] = [];
+      // Boundary marker: index into requestMessages where THIS turn's fresh tool
+      // exchange begins (set right after history replay is assembled). The
+      // tool-call/result harvest that persists into this assistant row must only
+      // scan from here — scanning the whole array re-harvests every prior turn's
+      // replayed tool calls/results into this row, so each turn stores the union
+      // of all prior tool exchanges and the payload grows super-linearly across
+      // turns (measured 3.3k→12.5k→21.3k tokens), starving the answer budget.
+      let currentTurnToolStart = 0;
 
       // Add system prompt from overrides if available, or agentic prompt when built-in tools enabled
       const hasSystemPrompt = !!overrides?.systemPrompt;
@@ -1596,6 +1604,10 @@ export function registerChatHandlers(
       }
       requestMessages.length = 0;
       requestMessages.push(...mergedMessages);
+      // History replay is now fully assembled (system + all prior turns + current
+      // user message). Everything pushed after this point is THIS turn's fresh
+      // tool exchange (the agentic tool loop). Harvest only from here.
+      currentTurnToolStart = requestMessages.length;
 
       // Prepare assistant message placeholder
       const assistantMessage: Message = {
@@ -3726,7 +3738,10 @@ export function registerChatHandlers(
             tool_call_id: string;
             content: string;
           }> = [];
-          for (const m of requestMessages) {
+          // Only THIS turn's fresh tool exchange (from currentTurnToolStart) —
+          // never the replayed prior-turn tool calls/results, which would
+          // otherwise be re-persisted into this row and multiply on each replay.
+          for (const m of requestMessages.slice(currentTurnToolStart)) {
             if (
               m &&
               m.role === "assistant" &&

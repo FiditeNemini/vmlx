@@ -391,11 +391,15 @@ function buildCommandPreview(
   const dsv4PrefixCacheOptIn = dsv4Active && config.dsv4PrefixCache !== false
   const omniBackendActive = detectedFamily === 'nemotron-h' && detected?.isMultimodal === true
   const effectiveSmelt = !!(config as any).smelt && !dsv4Active
-  const isVLM = dsv4Active || effectiveSmelt || detected?.forceTextOnly ? false
+  // User explicitly toggled multimodal OFF (Force Off) — must beat detected VL.
+  // Mirror buildArgs (sessions.ts): m3Active stands in for m3VlRoute since the
+  // registry sets m3VlRoute for every minimax_m3 bundle while keeping isMultimodal
+  // true, so M3 must emit NEITHER --is-mllm NOR --text-only.
+  const userForceTextOnly = config.isMultimodal === false
+  const isVLM = dsv4Active || effectiveSmelt || detected?.forceTextOnly || userForceTextOnly || m3Active ? false
     : detected?.isMultimodal ? true
       : config.isMultimodal === true ? true
-        : config.isMultimodal === false ? false
-          : false
+        : false
   const zayaCcaActive = isZayaCcaFamily(detectedFamily)
   const turboQuantActive = !!detected?.isTurboQuant
   const hybridCacheActive = cacheTypeRequiresPaged(detected?.cacheType)
@@ -424,6 +428,12 @@ function buildCommandPreview(
   if (!dsv4Active && completionBatchSize != null) parts.push('--completion-batch-size', completionBatchSize.toString())
 
   if (isVLM) parts.push('--is-mllm')
+  else if (!dsv4Active && !effectiveSmelt && !m3Active && detected?.isMultimodal && (userForceTextOnly || detected?.forceTextOnly)) {
+    // Model autodetects as VL but must run TEXT-ONLY (user Force-Off, or a family
+    // whose VL runtime path isn't wired). Mirrors buildArgs: --text-only forces
+    // is_mllm_model->False so the engine doesn't re-autodetect VL from config.json.
+    parts.push('--text-only')
+  }
   const cacheStackActive = dsv4Active ? true : config.continuousBatching !== false
   if (cacheStackActive) {
     parts.push('--continuous-batching')

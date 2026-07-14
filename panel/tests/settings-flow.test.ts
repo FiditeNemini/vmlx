@@ -326,7 +326,14 @@ function buildCommandPreview(
     const dsv4PrefixCacheOptIn = dsv4Active && config.dsv4PrefixCache !== false
     const omniBackendActive = detectedFamily === 'nemotron-h' && detected?.isMultimodal === true
     const effectiveSmelt = !!config.smelt && !dsv4Active
-    const isVLM = dsv4Active || effectiveSmelt || detected?.forceTextOnly ? false : (!!detected?.isMultimodal || config.isMultimodal === true)
+    // Mirror buildArgs (sessions.ts): user Force-Off (isMultimodal===false) beats
+    // detected VL; m3Active stands in for m3VlRoute (registry sets it for every
+    // minimax_m3 bundle) so M3 emits NEITHER --is-mllm NOR --text-only.
+    const userForceTextOnly = config.isMultimodal === false
+    const isVLM = dsv4Active || effectiveSmelt || detected?.forceTextOnly || userForceTextOnly || m3Active ? false
+        : detected?.isMultimodal ? true
+            : config.isMultimodal === true ? true
+                : false
     const zayaCcaActive = isZayaCcaFamily(detectedFamily)
     const hybridCacheActive = detected?.cacheType === 'hybrid' || detected?.cacheType === 'mamba'
     const effectiveDistributed = requestedDistributed && !dsv4Active
@@ -351,6 +358,9 @@ function buildCommandPreview(
     if (!dsv4Active && completionBatchSize != null) parts.push('--completion-batch-size', completionBatchSize.toString())
 
     if (isVLM) parts.push('--is-mllm')
+    else if (!dsv4Active && !effectiveSmelt && !m3Active && detected?.isMultimodal && (userForceTextOnly || detected?.forceTextOnly)) {
+        parts.push('--text-only')
+    }
     const cacheStackActive = dsv4Active ? true : config.continuousBatching !== false
     if (cacheStackActive) parts.push('--continuous-batching')
     else parts.push('--no-continuous-batching')
@@ -710,9 +720,14 @@ describe('VLM Mode', () => {
         expect(hasFlag(out, '--is-mllm')).toBe(true)
     })
 
-    it('auto-detected VLM wins over stale isMultimodal=false', () => {
+    it('user Force-Off beats auto-detected VLM: emits --text-only, not --is-mllm', () => {
+        // Migration (sessions.ts) guarantees a detected-VL model only carries
+        // isMultimodal===false when the user deliberately toggled Force-Off, so
+        // buildArgs runs it text-only. Live-proven: Gemma4 Force-Off -> --text-only,
+        // engine rejects image input (400). Preview must match that launch shape.
         const out = preview({ isMultimodal: false }, { isMultimodal: true })
-        expect(hasFlag(out, '--is-mllm')).toBe(true)
+        expect(hasFlag(out, '--is-mllm')).toBe(false)
+        expect(hasFlag(out, '--text-only')).toBe(true)
     })
 
     it('manual isMultimodal=false is respected when detection is not VLM', () => {
@@ -2613,8 +2628,11 @@ describe('JIT Toggle', () => {
     })
 
     it('multimodal/VLM detection suppresses --enable-jit because mlx-vlm streaming is not compile-safe', () => {
+        // Genuine detected VLM (user did NOT Force-Off): runs --is-mllm and JIT is
+        // suppressed. (A Force-Off isMultimodal=false would instead run text-only and
+        // re-enable JIT — see the Force-Off parity test.)
         const out = preview(
-            { enableJit: true, isMultimodal: false },
+            { enableJit: true },
             { family: 'zaya1-vl', isMultimodal: true },
         )
 

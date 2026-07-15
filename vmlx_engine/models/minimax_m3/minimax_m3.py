@@ -76,6 +76,7 @@ class ModelArgs(BaseModelArgs):
     # VL (vision) — populated from raw config in from_dict; None = text-only.
     vision_config: Optional[dict] = None
     image_token_index: int = 200025
+    video_token_index: int = 200026
     projector_hidden_size: int = 6144
 
     @classmethod
@@ -97,6 +98,7 @@ class ModelArgs(BaseModelArgs):
         # build the vision stack. None when the bundle has no vision_config (text-only).
         merged["vision_config"] = params.get("vision_config")
         merged["image_token_index"] = params.get("image_token_index", 200025)
+        merged["video_token_index"] = params.get("video_token_index", 200026)
         merged["projector_hidden_size"] = params.get(
             "projector_hidden_size", merged.get("hidden_size", 6144))
         allowed = set(cls.__dataclass_fields__)
@@ -349,18 +351,48 @@ class Model(nn.Module):
                 "projector_hidden_size": args.projector_hidden_size,
             })
 
-    def _embed_with_images(self, inputs, pixel_values, image_grid_thw):
-        """Run the vision stack and splice image embeds into the text embeddings
-        at the image-token positions. inputs: (B, L). Returns (B, L, H)."""
+    def _embed_with_media(
+        self,
+        inputs,
+        *,
+        pixel_values=None,
+        image_grid_thw=None,
+        pixel_values_videos=None,
+        video_grid_thw=None,
+    ):
+        """Splice image and video embeddings into their placeholder positions.
+
+        The official M3 implementation routes both modalities through the same
+        vision tower/projector and distinguishes them only by placeholder token.
+        """
         import numpy as np
-        img = self.vision(pixel_values, image_grid_thw)        # (num_img_tokens, H)
         te = self.model.embed_tokens(inputs)                    # (B, L, H)
         B, L = inputs.shape[0], inputs.shape[1]
         flat = te.reshape(B * L, te.shape[-1])
         ids_np = np.asarray(inputs).reshape(B * L)
-        pos = np.where(ids_np == self.args.image_token_index)[0]
-        if pos.size > 0:
-            flat[mx.array(pos)] = img.reshape(-1, img.shape[-1]).astype(flat.dtype)
+
+        def _scatter(values, grid, token_id, label):
+            nonlocal flat
+            if values is None:
+                return
+            features = self.vision(values, grid)
+            positions = np.where(ids_np == token_id)[0]
+            if int(positions.size) != int(features.shape[0]):
+                raise ValueError(
+                    f"M3 VL {label} features/tokens mismatch: "
+                    f"{features.shape[0]} features for {positions.size} tokens"
+                )
+            flat[mx.array(positions)] = features.reshape(
+                -1, features.shape[-1]
+            ).astype(flat.dtype)
+
+        _scatter(pixel_values, image_grid_thw, self.args.image_token_index, "image")
+        _scatter(
+            pixel_values_videos,
+            video_grid_thw,
+            self.args.video_token_index,
+            "video",
+        )
         return flat.reshape(B, L, te.shape[-1])
 
     def __call__(
@@ -370,16 +402,26 @@ class Model(nn.Module):
         input_embeddings=None,
         *,
         pixel_values=None,
+        pixel_values_videos=None,
         image_grid_thw=None,
+        video_grid_thw=None,
         mask=None,  # M3 builds its own causal/block mask; accept + ignore.
         return_aux: bool = False,
         aux_layers: tuple[int, ...] = EAGLE3_AUX_LAYERS,
         **kwargs,  # absorb other MLLM kwargs (video_*, audio_*) harmlessly
     ):
-        if (pixel_values is not None and input_embeddings is None
-                and hasattr(self, "vision")):
-            input_embeddings = self._embed_with_images(
-                inputs, pixel_values, image_grid_thw)
+        if (
+            (pixel_values is not None or pixel_values_videos is not None)
+            and input_embeddings is None
+            and hasattr(self, "vision")
+        ):
+            input_embeddings = self._embed_with_media(
+                inputs,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                pixel_values_videos=pixel_values_videos,
+                video_grid_thw=video_grid_thw,
+            )
         out = self.model(
             inputs,
             cache,

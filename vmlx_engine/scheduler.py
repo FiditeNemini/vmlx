@@ -5739,8 +5739,10 @@ class Scheduler:
             # an image request here; text requests are byte-for-byte unchanged.
             _m3vl_pv = getattr(request, "pixel_values", None)
             _m3vl_grid = getattr(request, "image_grid_thw", None)
+            _m3vl_pv_video = getattr(request, "pixel_values_videos", None)
+            _m3vl_video_grid = getattr(request, "video_grid_thw", None)
             _m3vl_active = (
-                _m3vl_pv is not None
+                (_m3vl_pv is not None or _m3vl_pv_video is not None)
                 and self.batch_generator.__class__.__name__ == "SingleBatchGenerator"
             )
             if _m3vl_active:
@@ -5754,8 +5756,12 @@ class Scheduler:
                     if request_sampler is not None:
                         insert_kwargs["samplers"] = [request_sampler]
                     if _m3vl_active:
-                        insert_kwargs["pixel_values"] = [_m3vl_pv]
-                        insert_kwargs["image_grid_thw"] = [_m3vl_grid]
+                        if _m3vl_pv is not None:
+                            insert_kwargs["pixel_values"] = [_m3vl_pv]
+                            insert_kwargs["image_grid_thw"] = [_m3vl_grid]
+                        if _m3vl_pv_video is not None:
+                            insert_kwargs["pixel_values_videos"] = [_m3vl_pv_video]
+                            insert_kwargs["video_grid_thw"] = [_m3vl_video_grid]
                         request_processors = self._request_logits_processors(
                             request, list(tokens_to_process)
                         )

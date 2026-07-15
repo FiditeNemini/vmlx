@@ -328,6 +328,8 @@ class EngineCore:
         max_prompt_tokens: Optional[int] = None,
         pixel_values: Optional[Any] = None,
         image_grid_thw: Optional[Any] = None,
+        pixel_values_videos: Optional[Any] = None,
+        video_grid_thw: Optional[Any] = None,
         prompt_token_ids: Optional[List[int]] = None,
     ) -> str:
         """
@@ -363,11 +365,8 @@ class EngineCore:
             videos=videos,
         )
 
-        # M3 VL (additive): the engine preprocessed images into pixel_values +
-        # image_grid_thw and an input_ids list that ALREADY contains the expanded
-        # image tokens. Set prompt_token_ids directly so the scheduler skips
-        # re-tokenizing the templated string (which would not expand the image
-        # placeholder), and carry the vision tensors for the prefill forward.
+        # M3 VL: carry preprocessed image/video tensors and input ids whose
+        # media placeholders are already expanded by the bundle processor.
         if prompt_token_ids is not None:
             request.prompt_token_ids = list(prompt_token_ids)
             request.num_prompt_tokens = len(request.prompt_token_ids)
@@ -375,6 +374,17 @@ class EngineCore:
             request.pixel_values = pixel_values
         if image_grid_thw is not None:
             request.image_grid_thw = image_grid_thw
+        if pixel_values_videos is not None:
+            request.pixel_values_videos = pixel_values_videos
+        if video_grid_thw is not None:
+            request.video_grid_thw = video_grid_thw
+
+        # Standard LLM prefix keys are token-only. Different media with the
+        # same placeholder-token layout must never cross-reuse KV state. The
+        # MLLM scheduler has media-salted keys; this text-routed M3 path does
+        # not, so fail safe by bypassing every cache lookup/store for media.
+        if pixel_values is not None or pixel_values_videos is not None:
+            request._bypass_prefix_cache = True
 
         # Attach gen_prompt_len for prefix cache key stripping.
         # The scheduler reads this via getattr(request, '_gen_prompt_len', 0)

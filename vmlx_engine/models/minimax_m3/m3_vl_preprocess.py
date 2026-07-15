@@ -76,8 +76,66 @@ def _load_pil_images(images: List[Any]):
     return out
 
 
-def _normalize_messages_for_template(messages: List[dict]) -> Tuple[List[dict], List[Any]]:
-    """Return (templated-ready messages, ordered raw image inputs).
+def _load_pil_videos(videos: List[Any], *, max_frames: int | None = None):
+    """Resolve video inputs to bounded RGB frame lists for the M3 processor.
+
+    The bundled processor delegates path decoding to PyAV, which is not shipped
+    in the app. OpenCV is already bundled for the existing media stack, so decode
+    here and pass in-memory RGB frames. Sampling is deliberately bounded by the
+    model's ``vision_segment_max_frames`` default (4) to avoid turning a long
+    user video into unbounded prefill memory.
+    """
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    from ..mllm import process_video_input
+
+    if max_frames is None:
+        max_frames = int(os.environ.get("VMLINUX_M3_VL_MAX_FRAMES", "4") or 4)
+    max_frames = max(1, max_frames)
+
+    decoded = []
+    for video in videos:
+        path = process_video_input(video)
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            cap.release()
+            raise ValueError(f"M3 VL: failed to open video input {path!r}")
+
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        frames = []
+        if frame_count > 0:
+            indices = np.linspace(
+                0,
+                max(frame_count - 1, 0),
+                num=min(max_frames, frame_count),
+                dtype=np.int64,
+            )
+            for index in indices.tolist():
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+                frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+        else:
+            while len(frames) < max_frames:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+        cap.release()
+
+        if not frames:
+            raise ValueError(f"M3 VL: video input {path!r} produced no frames")
+        decoded.append(frames)
+    return decoded
+
+
+def _normalize_messages_for_template(
+    messages: List[dict],
+) -> Tuple[List[dict], List[Any], List[Any]]:
+    """Return templated messages plus ordered raw image and video inputs.
 
     The MiniMax chat template emits an image placeholder for content items of
     the form ``{"type": "image"}``. OpenAI-format requests carry images as
@@ -88,13 +146,14 @@ def _normalize_messages_for_template(messages: List[dict]) -> Tuple[List[dict], 
     """
     out_msgs: List[dict] = []
     raw_images: List[Any] = []
+    raw_videos: List[Any] = []
     for msg in messages:
         content = msg.get("content")
         if not isinstance(content, list):
             out_msgs.append(msg)
             continue
         new_content = []
-        image_placeholders = []
+        media_placeholders = []
         for item in content:
             if not isinstance(item, dict):
                 new_content.append(item)
@@ -107,7 +166,14 @@ def _normalize_messages_for_template(messages: List[dict]) -> Tuple[List[dict], 
                     src = src.get("url", src)
                 if src is not None:
                     raw_images.append(src)
-                image_placeholders.append({"type": "image"})
+                media_placeholders.append({"type": "image"})
+            elif itype in ("video_url", "video", "input_video"):
+                src = item.get("video_url", item.get("video", item.get("url")))
+                if isinstance(src, dict):
+                    src = src.get("url", src)
+                if src is not None:
+                    raw_videos.append(src)
+                media_placeholders.append({"type": "video"})
             else:
                 new_content.append(item)
         # MiniMax-M3's proven diagnostic path places image placeholders before
@@ -116,8 +182,8 @@ def _normalize_messages_for_template(messages: List[dict]) -> Tuple[List[dict], 
         # model behave as if no image was available on mixed text+image turns.
         # Keep raw_images in document order, but render image tokens before the
         # textual prompt for this M3-only preprocessing path.
-        out_msgs.append({**msg, "content": image_placeholders + new_content})
-    return out_msgs, raw_images
+        out_msgs.append({**msg, "content": media_placeholders + new_content})
+    return out_msgs, raw_images, raw_videos
 
 
 def preprocess_m3_vl_messages(
@@ -125,15 +191,15 @@ def preprocess_m3_vl_messages(
     messages: List[dict],
     *,
     extra_images: Optional[List[Any]] = None,
+    extra_videos: Optional[List[Any]] = None,
     add_generation_prompt: bool = True,
     enable_thinking: Optional[bool] = None,
-) -> Optional[Tuple[List[int], Any, Any]]:
-    """Template `messages` + run the MiniMax processor -> (input_ids, pv, grid).
+) -> Optional[Tuple[List[int], Any, Any, Any, Any]]:
+    """Template messages and return text ids plus image/video tensors.
 
-    Mirrors the proven diag preprocessing exactly: normalize image items to
-    ``{"type": "image"}``, ``apply_chat_template`` via the processor's tokenizer,
-    then call the processor with the raw PIL images. Returns ``None`` when there
-    are no images.
+    The result is ``(input_ids, pixel_values, image_grid_thw,
+    pixel_values_videos, video_grid_thw)``. Image and video patches share the
+    same official M3 vision tower but use distinct placeholder token ids.
     """
     import mlx.core as mx
     import numpy as np
@@ -141,7 +207,7 @@ def preprocess_m3_vl_messages(
     proc = _get_processor(model_path)
     tok = getattr(proc, "tokenizer", proc)
 
-    norm_msgs, raw_images = _normalize_messages_for_template(messages)
+    norm_msgs, raw_images, raw_videos = _normalize_messages_for_template(messages)
     if not raw_images and extra_images:
         # The server's extract_multimodal_content() flattens message content to
         # plain text and hands the images out-of-band (engine.chat images=...).
@@ -167,7 +233,26 @@ def preprocess_m3_vl_messages(
                 break
         if not injected:
             norm_msgs = norm_msgs + [{"role": "user", "content": placeholders}]
-    if not raw_images:
+    if not raw_videos and extra_videos:
+        raw_videos = list(extra_videos)
+        placeholders = [{"type": "video"} for _ in raw_videos]
+        injected = False
+        for i in range(len(norm_msgs) - 1, -1, -1):
+            if norm_msgs[i].get("role") == "user":
+                m = norm_msgs[i]
+                c = m.get("content")
+                if isinstance(c, str):
+                    new_c = placeholders + [{"type": "text", "text": c}]
+                elif isinstance(c, list):
+                    new_c = placeholders + list(c)
+                else:
+                    new_c = placeholders
+                norm_msgs[i] = {**m, "content": new_c}
+                injected = True
+                break
+        if not injected:
+            norm_msgs = norm_msgs + [{"role": "user", "content": placeholders}]
+    if not raw_images and not raw_videos:
         return None
 
     # MiniMax-M3 templates ignore the common enable_thinking kwarg and branch on
@@ -194,35 +279,64 @@ def preprocess_m3_vl_messages(
             tokenize=False,
         )
 
-    pil_images = _load_pil_images(raw_images)
-    if not pil_images:
-        raise ValueError("M3 VL: all image inputs failed to load")
-
-    out = proc(text=[txt], images=pil_images, return_tensors="np")
+    pil_images = _load_pil_images(raw_images) if raw_images else []
+    pil_videos = _load_pil_videos(raw_videos) if raw_videos else []
+    proc_kwargs = {"text": [txt], "return_tensors": "np"}
+    if pil_images:
+        proc_kwargs["images"] = pil_images
+    if pil_videos:
+        proc_kwargs["videos"] = pil_videos
+        # The bundle's processor defaults video resizing off, but arbitrary UI
+        # clips are not guaranteed to be multiples of patch_size*merge_size.
+        proc_kwargs["videos_kwargs"] = {"do_resize": True}
+    out = proc(**proc_kwargs)
     ids = np.asarray(out["input_ids"][0]).astype(np.int64)
     input_ids = [int(x) for x in ids.tolist()]
-    pixel_values = mx.array(out["pixel_values"]).astype(mx.bfloat16)
-    grid = mx.array(np.asarray(out["image_grid_thw"]).astype(np.int32))
+    pixel_values = None
+    image_grid = None
+    if out.get("pixel_values") is not None:
+        pixel_values = mx.array(out["pixel_values"]).astype(mx.bfloat16)
+        image_grid = mx.array(np.asarray(out["image_grid_thw"]).astype(np.int32))
+    pixel_values_videos = None
+    video_grid = None
+    if out.get("pixel_values_videos") is not None:
+        pixel_values_videos = mx.array(out["pixel_values_videos"]).astype(mx.bfloat16)
+        video_grid = mx.array(np.asarray(out["video_grid_thw"]).astype(np.int32))
     # Materialize NOW so no lazy graph crosses threads. Preprocessing runs on the
     # server event loop thread; the forward runs on the scheduler worker thread.
     # A lazy astype bound to this thread's default stream would otherwise fail to
     # resolve there (P0 VL stream bug: "no Stream(gpu,0) in current thread").
-    mx.eval(pixel_values, grid)
+    materialized = [
+        value
+        for value in (pixel_values, image_grid, pixel_values_videos, video_grid)
+        if value is not None
+    ]
+    mx.eval(*materialized)
 
     n_img = int((ids == 200025).sum())
+    n_video = int((ids == 200026).sum())
     logger.info(
-        "M3 VL preprocess: %d tokens, %d image tokens, pixel_values=%s grid=%s",
+        "M3 VL preprocess: %d tokens, %d image tokens, %d video tokens, "
+        "pixel_values=%s image_grid=%s pixel_values_videos=%s video_grid=%s",
         len(input_ids),
         n_img,
-        tuple(pixel_values.shape),
-        tuple(grid.shape),
+        n_video,
+        tuple(pixel_values.shape) if pixel_values is not None else None,
+        tuple(image_grid.shape) if image_grid is not None else None,
+        tuple(pixel_values_videos.shape) if pixel_values_videos is not None else None,
+        tuple(video_grid.shape) if video_grid is not None else None,
     )
-    if n_img == 0:
+    if raw_images and n_img == 0:
         raise ValueError(
             "M3 VL: chat template produced no image tokens (placeholder not "
             "rendered). Refusing to silently drop the image."
         )
-    return input_ids, pixel_values, grid
+    if raw_videos and n_video == 0:
+        raise ValueError(
+            "M3 VL: chat template produced no video tokens (placeholder not "
+            "rendered). Refusing to silently drop the video."
+        )
+    return input_ids, pixel_values, image_grid, pixel_values_videos, video_grid
 
 
 def preprocess_m3_vl(

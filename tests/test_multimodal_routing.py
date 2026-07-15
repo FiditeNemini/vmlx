@@ -160,7 +160,7 @@ def test_responses_m3_vl_image_only_carveout_preserves_ui_default_path(monkeypat
     import vmlx_engine.server as server
 
     engine = object()
-    monkeypatch.setattr(server, "_m3_vl_image_ok", lambda candidate: candidate is engine)
+    monkeypatch.setattr(server, "_m3_vl_media_ok", lambda candidate: candidate is engine)
     image_input = [
         {
             "type": "message",
@@ -182,14 +182,31 @@ def test_responses_m3_vl_image_only_carveout_preserves_ui_default_path(monkeypat
             ],
         }
     ]
+    video_input = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "what happens"},
+                {"type": "input_video", "video_url": "data:video/mp4;base64,AAAA"},
+            ],
+        }
+    ]
 
     image_modalities = server._responses_input_requested_modalities(image_input)
+    video_modalities = server._responses_input_requested_modalities(video_input)
     mixed_modalities = server._responses_input_requested_modalities(mixed_input)
 
     assert image_modalities == {"image"}
     assert server._m3_vl_response_image_only(engine, image_modalities)
     assert server._responses_modalities_unsupported_after_m3_vl_carveout(
         engine, image_modalities
+    ) == set()
+
+    assert video_modalities == {"video"}
+    assert server._m3_vl_response_media_supported(engine, video_modalities)
+    assert server._responses_modalities_unsupported_after_m3_vl_carveout(
+        engine, video_modalities
     ) == set()
 
     assert mixed_modalities == {"audio", "image"}
@@ -205,9 +222,9 @@ def test_m3_vl_text_runtime_reports_vision_capability(monkeypatch):
     engine = object()
     monkeypatch.setattr(server, "_engine", engine)
     monkeypatch.setattr(server, "_loaded_omni_modalities", lambda: None)
-    monkeypatch.setattr(server, "_m3_vl_image_ok", lambda candidate: candidate is engine)
+    monkeypatch.setattr(server, "_m3_vl_media_ok", lambda candidate: candidate is engine)
 
-    assert server._loaded_runtime_modalities() == ["text", "vision"]
+    assert server._loaded_runtime_modalities() == ["text", "vision", "video"]
 
 
 def test_server_rejects_text_only_multimodal_instead_of_silent_drop(monkeypatch):

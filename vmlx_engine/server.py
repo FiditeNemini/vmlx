@@ -2160,8 +2160,8 @@ def _messages_multimodal_summary(messages) -> dict:
     return summary
 
 
-def _m3_vl_image_ok(engine) -> bool:
-    """True iff VMLX_M3_VL is set and the loaded engine model is MiniMax-M3 VL.
+def _m3_vl_media_ok(engine) -> bool:
+    """True iff gated MiniMax-M3 image/video media is wired in the engine.
 
     Additive + gated: lets image requests through the text-routed (is_mllm=False)
     M3 path instead of being rejected. When VMLX_M3_VL is unset this always
@@ -2180,6 +2180,11 @@ def _m3_vl_image_ok(engine) -> bool:
     if model is None:
         return False
     return is_m3_vl_model(model)
+
+
+def _m3_vl_image_ok(engine) -> bool:
+    """Backward-compatible name for callers/tests from the image-only lane."""
+    return _m3_vl_media_ok(engine)
 
 
 def _messages_have_multimodal(messages) -> bool:
@@ -2268,18 +2273,27 @@ def _responses_input_requested_modalities(input_data) -> set[str]:
 
 def _m3_vl_response_image_only(engine, modalities: set[str]) -> bool:
     normalized = _normalize_modality_set(modalities)
-    return bool(normalized) and _m3_vl_image_ok(engine) and normalized <= {"image", "vision"}
+    return bool(normalized) and _m3_vl_media_ok(engine) and normalized <= {"image", "vision"}
+
+
+def _m3_vl_response_media_supported(engine, modalities: set[str]) -> bool:
+    normalized = _normalize_modality_set(modalities)
+    return (
+        bool(normalized)
+        and _m3_vl_media_ok(engine)
+        and normalized <= {"image", "vision", "video"}
+    )
 
 
 def _responses_modalities_unsupported_after_m3_vl_carveout(
     engine,
     modalities: set[str],
 ) -> set[str]:
-    if not modalities or not _m3_vl_image_ok(engine):
+    if not modalities or not _m3_vl_media_ok(engine):
         return set(modalities or set())
     return {
         m for m in modalities
-        if str(m).lower() not in ("image", "vision")
+        if str(m).lower() not in ("image", "vision", "video")
     }
 
 
@@ -2753,8 +2767,8 @@ def _loaded_runtime_modalities() -> list[str]:
     modalities = _loaded_omni_modalities()
     if modalities is not None:
         return modalities
-    if _m3_vl_image_ok(_engine):
-        return ["text", "vision"]
+    if _m3_vl_media_ok(_engine):
+        return ["text", "vision", "video"]
     modalities = _loaded_mllm_modalities()
     if modalities is not None:
         return modalities
@@ -9511,10 +9525,10 @@ async def create_anthropic_message(
 
     engine = get_engine()
     _msg_requested_modalities = _messages_requested_modalities(chat_req.messages)
-    if _msg_requested_modalities and _m3_vl_image_ok(engine):
+    if _msg_requested_modalities and _m3_vl_media_ok(engine):
         _msg_requested_modalities = {
             m for m in _msg_requested_modalities
-            if str(m).lower() not in ("image", "vision")
+            if str(m).lower() not in ("image", "vision", "video")
         }
     if _msg_requested_modalities:
         _reject_unsupported_multimodal(
@@ -9524,7 +9538,7 @@ async def create_anthropic_message(
     if (
         _messages_have_multimodal(chat_req.messages)
         and not engine.is_mllm
-        and not _m3_vl_image_ok(engine)
+        and not _m3_vl_media_ok(engine)
     ):
         _reject_unsupported_multimodal("/v1/messages")
 
@@ -10336,10 +10350,10 @@ async def ollama_chat(fastapi_request: Request):
 
     engine = get_engine()
     _ollama_requested_modalities = _messages_requested_modalities(chat_req.messages)
-    if _ollama_requested_modalities and _m3_vl_image_ok(engine):
+    if _ollama_requested_modalities and _m3_vl_media_ok(engine):
         _ollama_requested_modalities = {
             m for m in _ollama_requested_modalities
-            if str(m).lower() not in ("image", "vision")
+            if str(m).lower() not in ("image", "vision", "video")
         }
     if _ollama_requested_modalities:
         _reject_unsupported_multimodal(
@@ -10349,7 +10363,7 @@ async def ollama_chat(fastapi_request: Request):
     if (
         _messages_have_multimodal(chat_req.messages)
         and not engine.is_mllm
-        and not _m3_vl_image_ok(engine)
+        and not _m3_vl_media_ok(engine)
     ):
         _reject_unsupported_multimodal("/api/chat")
     chat_kwargs = {
@@ -12341,11 +12355,11 @@ async def create_chat_completion(
 
     engine = get_engine()
     _chat_requested_modalities = _messages_requested_modalities(request.messages)
-    if _chat_requested_modalities and _m3_vl_image_ok(engine):
-        # M3 VL (gated): image/vision are served by the text-routed M3 path.
+    if _chat_requested_modalities and _m3_vl_media_ok(engine):
+        # M3 VL media is served by the text-routed M3 path.
         _chat_requested_modalities = {
             m for m in _chat_requested_modalities
-            if str(m).lower() not in ("image", "vision")
+            if str(m).lower() not in ("image", "vision", "video")
         }
     if _chat_requested_modalities:
         _reject_unsupported_multimodal(
@@ -12381,9 +12395,7 @@ async def create_chat_completion(
         )
 
     has_media = bool(images or videos)
-    if has_media and not engine.is_mllm and not (
-        bool(images) and not videos and _m3_vl_image_ok(engine)
-    ):
+    if has_media and not engine.is_mllm and not _m3_vl_media_ok(engine):
         _reject_unsupported_multimodal("/v1/chat/completions")
 
     # Handle response_format - inject system prompt if needed
@@ -14416,9 +14428,9 @@ async def create_response(
     )
     # M3 VL is intentionally loaded through the text-routed M3 engine
     # (VMLX_M3_VL=1) because the upstream mlx-vlm wrapper is not published.
-    # Chat Completions, Anthropic, and Ollama already allow image-only M3
-    # requests through this path; Responses is the UI default, so it must
-    # preserve the same image carve-out instead of rejecting as text-only.
+    # Chat Completions, Anthropic, and Ollama allow M3 image/video requests
+    # through this path; Responses is the UI default and must preserve the
+    # same media arrays instead of rejecting or flattening them as text-only.
     _responses_requested_modalities = (
         _responses_modalities_unsupported_after_m3_vl_carveout(
             engine,
@@ -14434,7 +14446,7 @@ async def create_response(
         _responses_has_media
         and not engine.is_mllm
         and _loaded_omni_modalities() is None
-        and not _m3_vl_response_image_only(
+        and not _m3_vl_response_media_supported(
             engine,
             _responses_input_requested_modalities(request.input),
         )
@@ -14451,7 +14463,7 @@ async def create_response(
     _preserve_mm = bool(engine.is_mllm)
     if not _preserve_mm:
         _resp_modalities_for_preserve = _responses_input_requested_modalities(request.input)
-        if _m3_vl_response_image_only(engine, _resp_modalities_for_preserve):
+        if _m3_vl_response_media_supported(engine, _resp_modalities_for_preserve):
             _preserve_mm = True
     if not _preserve_mm:
         try:

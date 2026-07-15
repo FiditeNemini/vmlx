@@ -206,13 +206,17 @@ class BatchedEngine(BaseEngine):
         except Exception:
             return None
 
-    def _m3_vl_active(self, images: list | None) -> bool:
-        """True iff VMLX_M3_VL is set, this is an M3 VL model, and images exist.
+    def _m3_vl_active(
+        self,
+        images: list | None,
+        videos: list | None = None,
+    ) -> bool:
+        """True iff gated M3 VL is loaded and an image or video exists.
 
         Additive + gated: when this returns False the engine behaves exactly as
         before (text-only M3 stays on the 23.4 tok/s decode path untouched).
         """
-        if not images:
+        if not images and not videos:
             return False
         try:
             from ..models.minimax_m3.m3_vl_preprocess import (
@@ -228,11 +232,12 @@ class BatchedEngine(BaseEngine):
     def _m3_vl_preprocess(
         self,
         messages: list[dict],
-        images: list,
+        images: list | None,
+        videos: list | None,
         *,
         enable_thinking: bool | None = None,
     ):
-        """Run MiniMax processor -> (input_ids, pixel_values, image_grid_thw)."""
+        """Run the MiniMax processor for image and/or video content."""
         from ..models.minimax_m3.m3_vl_preprocess import preprocess_m3_vl_messages
 
         model_path = (
@@ -241,7 +246,8 @@ class BatchedEngine(BaseEngine):
         return preprocess_m3_vl_messages(
             model_path,
             messages,
-            extra_images=images,
+            extra_images=images or None,
+            extra_videos=videos or None,
             enable_thinking=enable_thinking,
         )
 
@@ -1705,6 +1711,8 @@ class BatchedEngine(BaseEngine):
         _m3vl_ids = kwargs.pop("_m3vl_prompt_token_ids", None)
         _m3vl_pv = kwargs.pop("_m3vl_pixel_values", None)
         _m3vl_grid = kwargs.pop("_m3vl_image_grid_thw", None)
+        _m3vl_pv_video = kwargs.pop("_m3vl_pixel_values_videos", None)
+        _m3vl_video_grid = kwargs.pop("_m3vl_video_grid_thw", None)
 
         sampling_params = SamplingParams(
             max_tokens=max_tokens,
@@ -1720,9 +1728,13 @@ class BatchedEngine(BaseEngine):
         )
 
         _m3vl_extra = {}
-        if _m3vl_pv is not None:
-            _m3vl_extra["pixel_values"] = _m3vl_pv
-            _m3vl_extra["image_grid_thw"] = _m3vl_grid
+        if _m3vl_pv is not None or _m3vl_pv_video is not None:
+            if _m3vl_pv is not None:
+                _m3vl_extra["pixel_values"] = _m3vl_pv
+                _m3vl_extra["image_grid_thw"] = _m3vl_grid
+            if _m3vl_pv_video is not None:
+                _m3vl_extra["pixel_values_videos"] = _m3vl_pv_video
+                _m3vl_extra["video_grid_thw"] = _m3vl_video_grid
             _m3vl_extra["prompt_token_ids"] = _m3vl_ids
 
         output = await self._engine.generate(
@@ -1846,6 +1858,8 @@ class BatchedEngine(BaseEngine):
         _m3vl_ids = kwargs.pop("_m3vl_prompt_token_ids", None)
         _m3vl_pv = kwargs.pop("_m3vl_pixel_values", None)
         _m3vl_grid = kwargs.pop("_m3vl_image_grid_thw", None)
+        _m3vl_pv_video = kwargs.pop("_m3vl_pixel_values_videos", None)
+        _m3vl_video_grid = kwargs.pop("_m3vl_video_grid_thw", None)
 
         sampling_params = SamplingParams(
             max_tokens=max_tokens,
@@ -1861,9 +1875,13 @@ class BatchedEngine(BaseEngine):
         )
 
         _m3vl_extra = {}
-        if _m3vl_pv is not None:
-            _m3vl_extra["pixel_values"] = _m3vl_pv
-            _m3vl_extra["image_grid_thw"] = _m3vl_grid
+        if _m3vl_pv is not None or _m3vl_pv_video is not None:
+            if _m3vl_pv is not None:
+                _m3vl_extra["pixel_values"] = _m3vl_pv
+                _m3vl_extra["image_grid_thw"] = _m3vl_grid
+            if _m3vl_pv_video is not None:
+                _m3vl_extra["pixel_values_videos"] = _m3vl_pv_video
+                _m3vl_extra["video_grid_thw"] = _m3vl_video_grid
             _m3vl_extra["prompt_token_ids"] = _m3vl_ids
 
         request_id = await self._engine.add_request(
@@ -2034,15 +2052,22 @@ class BatchedEngine(BaseEngine):
         # M3 VL (additive, gated): preprocess images into input_ids (with image
         # tokens) + pixel_values + image_grid_thw and stash them for the text
         # engine path. When inactive this is a no-op and the request is unchanged.
-        if self._m3_vl_active(all_images):
+        if self._m3_vl_active(all_images, all_videos):
             _m3 = self._m3_vl_preprocess(
-                messages, all_images, enable_thinking=thinking_enabled
+                messages,
+                all_images,
+                all_videos,
+                enable_thinking=thinking_enabled,
             )
             if _m3 is not None:
-                _ids, _pv, _grid = _m3
+                _ids, _pv, _grid, _pv_video, _video_grid = _m3
                 kwargs["_m3vl_prompt_token_ids"] = _ids
-                kwargs["_m3vl_pixel_values"] = _pv
-                kwargs["_m3vl_image_grid_thw"] = _grid
+                if _pv is not None:
+                    kwargs["_m3vl_pixel_values"] = _pv
+                    kwargs["_m3vl_image_grid_thw"] = _grid
+                if _pv_video is not None:
+                    kwargs["_m3vl_pixel_values_videos"] = _pv_video
+                    kwargs["_m3vl_video_grid_thw"] = _video_grid
 
         return await self.generate(
             prompt=prompt,
@@ -2194,15 +2219,22 @@ class BatchedEngine(BaseEngine):
             kwargs["segment_boundaries"] = segment_boundaries
 
         # M3 VL (additive, gated): preprocess images for the text engine path.
-        if self._m3_vl_active(all_images):
+        if self._m3_vl_active(all_images, all_videos):
             _m3 = self._m3_vl_preprocess(
-                messages, all_images, enable_thinking=thinking_enabled
+                messages,
+                all_images,
+                all_videos,
+                enable_thinking=thinking_enabled,
             )
             if _m3 is not None:
-                _ids, _pv, _grid = _m3
+                _ids, _pv, _grid, _pv_video, _video_grid = _m3
                 kwargs["_m3vl_prompt_token_ids"] = _ids
-                kwargs["_m3vl_pixel_values"] = _pv
-                kwargs["_m3vl_image_grid_thw"] = _grid
+                if _pv is not None:
+                    kwargs["_m3vl_pixel_values"] = _pv
+                    kwargs["_m3vl_image_grid_thw"] = _grid
+                if _pv_video is not None:
+                    kwargs["_m3vl_pixel_values_videos"] = _pv_video
+                    kwargs["_m3vl_video_grid_thw"] = _video_grid
 
         async for output in self.stream_generate(
             prompt=prompt,

@@ -8,6 +8,7 @@ block selection on cache reuse.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -590,6 +591,81 @@ def test_single_batch_m3_prefills_full_prompt_before_sampling():
     assert model.calls == [[11, 12, 13]]
 
 
+def test_single_batch_m3_video_tensors_are_forwarded_once_on_prefill():
+    from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
+    from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
+
+    class _FakeM3Model:
+        def __init__(self):
+            self.calls = []
+
+        def make_cache(self):
+            return [MiniMaxM3SparseCache()]
+
+        def __call__(self, tokens, cache=None, **kwargs):
+            self.calls.append((tokens.tolist()[0], dict(kwargs)))
+            return mx.zeros((1, tokens.shape[1], 8), dtype=mx.float32)
+
+    model = _FakeM3Model()
+    gen = SingleBatchGenerator(
+        model,
+        max_tokens=1,
+        sampler=lambda _logits: mx.array([3], dtype=mx.int32),
+        prefill_step_size=2,
+        stream=None,
+    )
+    video_values = mx.zeros((4, 3, 4), dtype=mx.bfloat16)
+    video_grid = mx.array([[4, 1, 1]], dtype=mx.int32)
+
+    gen.insert(
+        [[11, 200026, 13]],
+        pixel_values_videos=[video_values],
+        video_grid_thw=[video_grid],
+    )
+    prompt_responses, generation_responses = gen.next()
+
+    assert len(prompt_responses) == 1
+    assert generation_responses == []
+    assert len(model.calls) == 1
+    tokens, kwargs = model.calls[0]
+    assert tokens == [11, 200026, 13]
+    assert kwargs["pixel_values"] is None
+    assert kwargs["image_grid_thw"] is None
+    assert kwargs["pixel_values_videos"].shape == video_values.shape
+    assert kwargs["video_grid_thw"].tolist() == [[4, 1, 1]]
+
+
+def test_engine_core_bypasses_token_only_prefix_cache_for_video_media():
+    from vmlx_engine.engine_core import EngineCore
+
+    seen = {}
+
+    class _Scheduler:
+        def add_request(self, request):
+            seen["request"] = request
+
+    core = object.__new__(EngineCore)
+    core.config = SimpleNamespace(stream_interval=1)
+    core.scheduler = _Scheduler()
+    core._output_collectors = {}
+    core._stream_states = {}
+    core._finished_events = {}
+
+    request_id = asyncio.run(
+        core.add_request(
+            prompt=[1, 200026, 2],
+            prompt_token_ids=[1, 200026, 2],
+            pixel_values_videos=object(),
+            video_grid_thw=object(),
+        )
+    )
+
+    request = seen["request"]
+    assert request.request_id == request_id
+    assert request.prompt_token_ids == [1, 200026, 2]
+    assert request._bypass_prefix_cache is True
+
+
 def test_single_batch_m3_chunks_long_prompt_before_final_sample():
     from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
     from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
@@ -785,6 +861,79 @@ def test_minimax_m3_vl_preprocess_maps_reasoning_to_thinking_mode(monkeypatch):
         )
         assert seen_kwargs[-1]["thinking_mode"] == expected
         assert "enable_thinking" not in seen_kwargs[-1]
+
+
+def test_minimax_m3_vl_preprocess_builds_native_video_tensors(monkeypatch):
+    import numpy as np
+
+    from vmlx_engine.models.minimax_m3 import m3_vl_preprocess
+
+    seen = {}
+
+    class _Tokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            seen["messages"] = messages
+            seen["template_kwargs"] = dict(kwargs)
+            return "<video> describe"
+
+    class _Processor:
+        tokenizer = _Tokenizer()
+
+        def __call__(self, **kwargs):
+            seen["processor_kwargs"] = dict(kwargs)
+            return {
+                "input_ids": np.array([[1, 200026, 2]], dtype=np.int64),
+                "pixel_values_videos": np.zeros((4, 3, 4), dtype=np.float32),
+                "video_grid_thw": np.array([[4, 1, 1]], dtype=np.int32),
+            }
+
+    monkeypatch.setattr(m3_vl_preprocess, "_get_processor", lambda _path: _Processor())
+    monkeypatch.setattr(
+        m3_vl_preprocess,
+        "_load_pil_videos",
+        lambda _videos: [[object(), object(), object(), object()]],
+    )
+
+    result = m3_vl_preprocess.preprocess_m3_vl_messages(
+        "/tmp/m3",
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_video",
+                        "video_url": "data:video/mp4;base64,AA==",
+                    },
+                    {"type": "input_text", "text": "describe"},
+                ],
+            }
+        ],
+        enable_thinking=False,
+    )
+
+    ids, pixel_values, image_grid, video_values, video_grid = result
+    assert ids == [1, 200026, 2]
+    assert pixel_values is None
+    assert image_grid is None
+    assert video_values.shape == (4, 3, 4)
+    assert video_grid.tolist() == [[4, 1, 1]]
+    assert seen["messages"][0]["content"][0] == {"type": "video"}
+    assert seen["processor_kwargs"]["videos_kwargs"] == {"do_resize": True}
+    assert len(seen["processor_kwargs"]["videos"][0]) == 4
+
+
+def test_minimax_m3_model_args_preserve_video_token_index():
+    from vmlx_engine.models.minimax_m3.minimax_m3 import ModelArgs
+
+    args = ModelArgs.from_dict(
+        {
+            "model_type": "minimax_m3_vl",
+            "text_config": {"hidden_size": 32},
+            "video_token_index": 4242,
+        }
+    )
+
+    assert args.video_token_index == 4242
 
 
 def test_minimax_m3_reasoning_parser_accepts_fallback_think_tags():

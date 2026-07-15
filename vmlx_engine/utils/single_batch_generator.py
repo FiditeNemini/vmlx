@@ -56,6 +56,8 @@ class _Request:
     # embeddings; cleared after that forward so decode never re-passes them.
     pixel_values: Any = None
     image_grid_thw: Any = None
+    pixel_values_videos: Any = None
+    video_grid_thw: Any = None
 
 
 @dataclass
@@ -284,12 +286,16 @@ class SingleBatchGenerator:
         state_machines: Optional[list[SequenceStateMachine]] = None,
         pixel_values: Optional[list[Any]] = None,
         image_grid_thw: Optional[list[Any]] = None,
+        pixel_values_videos: Optional[list[Any]] = None,
+        video_grid_thw: Optional[list[Any]] = None,
     ):
         max_tokens = max_tokens or [self.max_tokens] * len(prompts)
         caches = caches or [None] * len(prompts)
         # M3 VL (additive): per-prompt vision tensors, default None == text path.
         pixel_values = pixel_values or [None] * len(prompts)
         image_grid_thw = image_grid_thw or [None] * len(prompts)
+        pixel_values_videos = pixel_values_videos or [None] * len(prompts)
+        video_grid_thw = video_grid_thw or [None] * len(prompts)
         all_tokens = all_tokens or [[] for _ in prompts]
         samplers = samplers or [None] * len(prompts)
         logits_processors = logits_processors or [self.logits_processors] * len(prompts)
@@ -303,7 +309,19 @@ class SingleBatchGenerator:
             )
 
         uids: list[int] = []
-        for prompt, max_tok, cache, context, sampler, processors, sm, pv, grid in zip(
+        for (
+            prompt,
+            max_tok,
+            cache,
+            context,
+            sampler,
+            processors,
+            sm,
+            pv,
+            grid,
+            pv_video,
+            video_grid,
+        ) in zip(
             prompts,
             max_tokens,
             caches,
@@ -313,6 +331,8 @@ class SingleBatchGenerator:
             state_machines,
             pixel_values,
             image_grid_thw,
+            pixel_values_videos,
+            video_grid_thw,
         ):
             prompt_tokens = list(prompt)
             if not prompt_tokens:
@@ -334,6 +354,8 @@ class SingleBatchGenerator:
                 token_context=TokenBuffer(list(context or [])),
                 pixel_values=pv,
                 image_grid_thw=grid,
+                pixel_values_videos=pv_video,
+                video_grid_thw=video_grid,
             )
             self._unprocessed.append(req)
             uids.append(uid)
@@ -349,18 +371,34 @@ class SingleBatchGenerator:
         # single forward they are cleared so decode never re-passes them, leaving
         # the 23.4 tok/s decode hot path byte-for-byte unchanged.
         pv = req.pixel_values
-        if pv is not None:
+        pv_video = req.pixel_values_videos
+        if pv is not None or pv_video is not None:
             grid = req.image_grid_thw
+            video_grid = req.video_grid_thw
             req.pixel_values = None
             req.image_grid_thw = None
+            req.pixel_values_videos = None
+            req.video_grid_thw = None
             # The vision tensors were created on a different thread (the server
             # event loop, during preprocessing). Rehome them onto THIS generator
             # stream so their lazy graph doesn't resolve a stale Stream(gpu,0)
             # when the scheduler worker thread evals (the P0 VL stream bug).
-            pv = self._rehome_on_stream(pv)
+            if pv is not None:
+                pv = self._rehome_on_stream(pv)
             if grid is not None:
                 grid = self._rehome_on_stream(grid)
-            return self.model(arr, cache=req.cache, pixel_values=pv, image_grid_thw=grid)
+            if pv_video is not None:
+                pv_video = self._rehome_on_stream(pv_video)
+            if video_grid is not None:
+                video_grid = self._rehome_on_stream(video_grid)
+            return self.model(
+                arr,
+                cache=req.cache,
+                pixel_values=pv,
+                image_grid_thw=grid,
+                pixel_values_videos=pv_video,
+                video_grid_thw=video_grid,
+            )
         return self.model(arr, cache=req.cache)
 
     def _prefill(self, tokens: list[int], req: _Request) -> None:
@@ -617,7 +655,19 @@ class SingleBatchGenerator:
         image-token positions must co-occur for the vision splice.
         """
         tokens = list(req.prompt_tokens)
-        step = max(1, int(self.prefill_step_size or len(tokens) or 1))
+        has_media = req.pixel_values is not None or req.pixel_values_videos is not None
+        # The processor emits one vision tensor containing features for every
+        # media placeholder in the prompt. Passing that tensor with only the
+        # first normal prefill chunk makes the feature count diverge whenever
+        # media tokens cross a chunk boundary (common for video after chat
+        # history). Keep the first media prefill atomic so every placeholder
+        # co-occurs with the tensor that supplies its embedding. Text-only M3
+        # retains the configured chunk size.
+        step = (
+            len(tokens)
+            if has_media
+            else max(1, int(self.prefill_step_size or len(tokens) or 1))
+        )
         pos = 0
         _prefill_keep_alloc = os.environ.get(
             "VMLINUX_PREFILL_KEEP_ALLOC",
@@ -670,7 +720,11 @@ class SingleBatchGenerator:
             req.cache = self._make_new_cache()
         # M3 MSA/VL: build prompt cache exactly like the clean reference runtime:
         # one full-prompt forward, then sample from the final-position logits.
-        if req.pixel_values is not None or self._cache_uses_m3_msa(req.cache):
+        if (
+            req.pixel_values is not None
+            or req.pixel_values_videos is not None
+            or self._cache_uses_m3_msa(req.cache)
+        ):
             req.prompt_processed = True
             self._prefill_full_and_sample(req)
             prompt_cache_snapshot = self._clone_prompt_cache_snapshot(req.cache)

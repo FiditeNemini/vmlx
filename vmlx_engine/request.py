@@ -170,6 +170,8 @@ class Request:
     # Processed multimodal inputs for VLM batching
     pixel_values: Optional[Any] = None  # Processed image tensors (mx.array)
     image_grid_thw: Optional[Any] = None  # Grid info for Qwen-VL models
+    pixel_values_videos: Optional[Any] = None  # Processed video tensors (mx.array)
+    video_grid_thw: Optional[Any] = None  # Temporal/spatial video grid
     attention_mask: Optional[Any] = None  # Attention mask for multimodal input
     multimodal_kwargs: Optional[Dict[str, Any]] = None  # Model-specific kwargs
     is_multimodal: bool = False  # Flag indicating this is a multimodal request

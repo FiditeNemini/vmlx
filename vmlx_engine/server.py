@@ -8944,12 +8944,21 @@ async def clear_cache(cache_type: str = Query("all", alias="type")):
     Clear caches.
 
     Query params:
-        type: "prefix" | "multimodal" | "all" (default: "all")
+        type: "ram" | "prefix" | "multimodal" | "all" (default: "all")
+
+        ``ram`` drops only resident/indexed prefix state and preserves every
+        disk-backed L2 store. ``prefix`` clears both RAM prefix state and its
+        prompt/block/SSM disk companions. Keeping these operations distinct is
+        important for validating and operating restart/L2 restore paths.
     """
     cleared = []
 
-    # Clear prefix cache
-    if cache_type in ("prefix", "all"):
+    clear_resident_prefix = cache_type in ("ram", "prefix", "all")
+    clear_prefix_l2 = cache_type in ("prefix", "all")
+
+    # Clear resident prefix cache. The underlying PagedCacheManager.clear()
+    # resets its RAM block pool but deliberately leaves _disk_store intact.
+    if clear_resident_prefix:
         scheduler = _get_scheduler()
         if scheduler is not None:
             if getattr(scheduler, "memory_aware_cache", None) is not None:
@@ -8961,12 +8970,12 @@ async def clear_cache(cache_type: str = Query("all", alias="type")):
             if getattr(scheduler, "prefix_cache", None) is not None:
                 scheduler.prefix_cache.clear()
                 cleared.append("legacy_prefix")
-            if getattr(scheduler, "disk_cache", None) is not None:
+            if clear_prefix_l2 and getattr(scheduler, "disk_cache", None) is not None:
                 scheduler.disk_cache.clear()
                 cleared.append("disk_cache")
             # Also clear L2 paged block disk store (separate from legacy disk_cache)
             paged_mgr = getattr(scheduler, "paged_cache_manager", None)
-            if paged_mgr is not None:
+            if clear_prefix_l2 and paged_mgr is not None:
                 disk_store = getattr(paged_mgr, "_disk_store", None)
                 if disk_store is not None:
                     disk_store.clear()
@@ -8984,11 +8993,12 @@ async def clear_cache(cache_type: str = Query("all", alias="type")):
                 ):
                     ssm_caches.append(candidate)
             ssm_disks = []
-            scheduler_ssm_disk = getattr(
-                scheduler, "_ssm_companion_disk_store", None
-            )
-            if scheduler_ssm_disk is not None:
-                ssm_disks.append(scheduler_ssm_disk)
+            if clear_prefix_l2:
+                scheduler_ssm_disk = getattr(
+                    scheduler, "_ssm_companion_disk_store", None
+                )
+                if scheduler_ssm_disk is not None:
+                    ssm_disks.append(scheduler_ssm_disk)
             ssm_l1_cleared = False
             ssm_l2_cleared = False
             for ssm_cache in ssm_caches:
@@ -8996,11 +9006,12 @@ async def clear_cache(cache_type: str = Query("all", alias="type")):
                 if callable(clear_ssm):
                     clear_ssm()
                     ssm_l1_cleared = True
-                ssm_disk = getattr(ssm_cache, "_disk", None)
-                if ssm_disk is not None and all(
-                    ssm_disk is not existing for existing in ssm_disks
-                ):
-                    ssm_disks.append(ssm_disk)
+                if clear_prefix_l2:
+                    ssm_disk = getattr(ssm_cache, "_disk", None)
+                    if ssm_disk is not None and all(
+                        ssm_disk is not existing for existing in ssm_disks
+                    ):
+                        ssm_disks.append(ssm_disk)
             for ssm_disk in ssm_disks:
                 clear_ssm_disk = getattr(ssm_disk, "clear", None)
                 if callable(clear_ssm_disk):

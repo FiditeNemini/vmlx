@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { shouldAutoContinueAfterToolUse } from '../src/shared/toolAutoContinue'
+import {
+  shouldAutoContinueAfterToolUse,
+  shouldFinishZayaAppleScriptToolRound,
+} from '../src/shared/toolAutoContinue'
 
 describe('tool auto-continue policy', () => {
   it('continues when a model stops after tools with no visible response', () => {
@@ -34,6 +37,30 @@ describe('tool auto-continue policy', () => {
         thresholdTokens: 100,
       }),
     ).toBe(false)
+  })
+
+  it('finishes the specialized ZAYA AppleScript bundle after its native action result', () => {
+    expect(
+      shouldFinishZayaAppleScriptToolRound(true, ['run_applescript']),
+    ).toBe(true)
+    expect(
+      shouldFinishZayaAppleScriptToolRound(false, ['run_applescript']),
+    ).toBe(false)
+    expect(
+      shouldFinishZayaAppleScriptToolRound(true, ['run_applescript', 'read_file']),
+    ).toBe(false)
+    expect(shouldFinishZayaAppleScriptToolRound(true, [])).toBe(false)
+  })
+
+  it('checks the terminal AppleScript round before sending a follow-up', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+    const policy = source.indexOf('shouldFinishZayaAppleScriptToolRound(')
+    const terminalBreak = source.indexOf('if (finishAfterNativeToolResult)', policy)
+    const followUp = source.indexOf('if (!(await sendFollowUp())) break;', policy)
+
+    expect(policy).toBeGreaterThan(-1)
+    expect(terminalBreak).toBeGreaterThan(policy)
+    expect(followUp).toBeGreaterThan(terminalBreak)
   })
 
   it('increments the auto-continue counter once per follow-up attempt', () => {

@@ -273,6 +273,23 @@ export const BUILTIN_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'run_applescript',
+      description: 'Execute AppleScript on this Mac with /usr/bin/osascript and return its output. Use this for macOS app automation and system scripting.',
+      parameters: {
+        type: 'object',
+        properties: {
+          script: {
+            type: 'string',
+            description: 'AppleScript source code to execute'
+          }
+        },
+        required: ['script']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'web_search',
       description: 'Search the web using Brave Search. Returns titles, URLs, and descriptions of matching pages.',
       parameters: {

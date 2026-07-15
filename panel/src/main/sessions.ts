@@ -620,7 +620,7 @@ function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   return changed
 }
 
-const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 8
+const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 9
 
 function markCacheStackStartupDefaultsCurrent(config: Partial<ServerConfig>): boolean {
   if (config.cacheStackStartupDefaultsVersion === CACHE_STACK_STARTUP_DEFAULTS_VERSION) return false
@@ -650,9 +650,11 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
   // paged default so the UI shows — and the engine launches with — paged ON for
   // autodetected TEXT families, OFF for VL/MLLM (pending #98) and arch-incompatible
   // families. DSV4 uses its prefix opt-in. Block-disk L2 (paged-compatible) follows
-  // paged; legacy disk L2 stays off (it is not paged-compatible).
+  // paged; non-paged families use the prompt-level L2 instead.
   const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : (detectedUsePaged ?? false)
-  const defaultEnableDiskCache = false
+  // Every prefix-cache lane gets one appropriate L2 by default: block L2 for
+  // paged families, prompt L2 for non-paged families. Never default both on.
+  const defaultEnableDiskCache = !dsv4Active && !defaultUsePagedCache
   const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : !!defaultUsePagedCache
   const mutable = config as Record<string, any>
   let changed = false
@@ -708,9 +710,11 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
   // v8 paged-default-ON: resolve the detected per-family paged capability so the
   // generic-family migration branch flips existing paged-OFF sessions to the new
   // default (text ON; VL/MLLM/M3/openPangu/gemma-mixed-SWA stay OFF). Best-effort.
+  let migrationDetectedFamily: string | undefined
   let migrationDetectedUsePaged: boolean | undefined
   try {
     const _migDetected = detectModelConfigFromDir(String(modelPath || config.modelPath || ''))
+    migrationDetectedFamily = normalizeDetectedFamilyName(_migDetected.family)
     migrationDetectedUsePaged = _migDetected.usePagedCache
   } catch {
     /* detection best-effort; leave undefined -> paged-off in the generic branch */
@@ -793,6 +797,28 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     config.usePagedCache === true &&
     config.enableBlockDiskCache === true &&
     config.kvCacheQuantization === 'none'
+  // v8 could stamp an adopted/pre-existing session current while preserving an
+  // impossible UI tuple from older defaults: paged ON + legacy prompt L2 ON +
+  // block L2 OFF. The UI cache policy cannot create that combination because
+  // enabling paged clears legacy L2 and enables block L2. Migrate only this
+  // exact stale tuple so a valid explicit block-L2 opt-out remains untouched.
+  const staleV8PagedLegacyDiskWithoutBlockL2 =
+    Number(config.cacheStackStartupDefaultsVersion || 0) === 8 &&
+    migrationDetectedFamily !== 'deepseek-v4' &&
+    migrationDetectedUsePaged === true &&
+    config.continuousBatching === true &&
+    config.enablePrefixCache === true &&
+    Number(config.maxNumSeqs) === 1 &&
+    Number(config.prefillBatchSize) === 512 &&
+    Number(config.prefillStepSize) === 2048 &&
+    Number(config.completionBatchSize) === 512 &&
+    config.usePagedCache === true &&
+    config.enableDiskCache === true &&
+    config.enableBlockDiskCache === false &&
+    config.kvCacheQuantization === 'auto' &&
+    Number(config.maxCacheBlocks) === 1000 &&
+    Number(config.pagedCacheBlockSize) === 64 &&
+    Number(config.blockDiskCacheMaxGb) === 10
   // v8 (2026-07-12): flip generic TEXT families that the v7 default left paged-OFF
   // to the new paged-ON default. Only fires when detection says this family should
   // be paged (text) — VL/M3/openPangu/gemma-mixed-SWA resolve to false and are left
@@ -829,6 +855,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     !staleNoPrefixBatchDefaults &&
     !stalePartialPagedCacheDefaults &&
     !staleExplicitNoneCacheCodecDefaults &&
+    !staleV8PagedLegacyDiskWithoutBlockL2 &&
     !staleV2GenericPagedOn &&
     !stalePhase1GenericPagedOff &&
     !stalePhase2GenericPagedOn &&
@@ -850,6 +877,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     // SSD-only non-paged lane is not yet wired (Phase-2). Keep paged RAM + block-disk.
     config.usePagedCache = true
     config.maxCacheBlocks = 1000
+    config.enableDiskCache = false
     config.enableBlockDiskCache = true
     config.blockDiskCacheMaxGb = 10
   } else {
@@ -2293,7 +2321,7 @@ export class SessionManager extends EventEmitter {
           // (hybrid/mamba/rotating-qwen/zaya/step3p7/dsv4) still set detected.usePagedCache=true
           // explicitly in the capability detector and stay paged until Phase-2 SSD typed-lane work.
           usePagedCache: detectedFamily === 'deepseek-v4' ? dsv4DefaultCacheOptIn : detected.usePagedCache ?? false,
-          enableDiskCache: detectedFamily === 'deepseek-v4' ? false : true,
+          enableDiskCache: detectedFamily === 'deepseek-v4' || detected.usePagedCache === true ? false : true,
           pagedCacheBlockSize: detectedFamily === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64,
           maxCacheBlocks: 1000,
           enableBlockDiskCache: detectedFamily === 'deepseek-v4' ? dsv4DefaultCacheOptIn : detected.usePagedCache === true,

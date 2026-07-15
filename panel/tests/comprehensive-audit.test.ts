@@ -3433,15 +3433,24 @@ describe("M3: chat:reasoningDone fires at tool iteration boundary", () => {
     const fs = require("fs");
     const source = fs.readFileSync("src/main/ipc/chat.ts", "utf-8");
 
-    // Find tool boundary: emitToolStatus('processing', '', undefined
+    const toolLoopIdx = source.indexOf("await executeToolCalls()");
+    const reasoningDoneIdx = source.indexOf(
+      'win.webContents.send("chat:reasoningDone"',
+      toolLoopIdx,
+    );
+    const resetIdx = source.indexOf(
+      "isReasoning = false; // Reset reasoning state for new iteration",
+      reasoningDoneIdx,
+    );
     const boundaryIdx = source.indexOf(
       'emitToolStatus("processing", "", undefined',
+      resetIdx,
     );
-    const preBoundary = source.substring(
-      Math.max(0, boundaryIdx - 600),
-      boundaryIdx,
-    );
-    expect(preBoundary).toContain("chat:reasoningDone");
+
+    expect(toolLoopIdx).toBeGreaterThan(-1);
+    expect(reasoningDoneIdx).toBeGreaterThan(toolLoopIdx);
+    expect(resetIdx).toBeGreaterThan(reasoningDoneIdx);
+    expect(boundaryIdx).toBeGreaterThan(resetIdx);
   });
 
   it("auto-continue boundary emits reasoningDone before resetting isReasoning", () => {
@@ -3832,6 +3841,20 @@ describe("Phase 6: Cache API Data Flow", () => {
 
       expect(source).toContain("kvQuant?.enabled");
       expect(source).toContain("disabled");
+    });
+
+    it("CachePanel separates RAM-only clearing from destructive prefix L2 clearing", () => {
+      const fs = require("fs");
+      const source = fs.readFileSync(
+        "src/renderer/src/components/sessions/CachePanel.tsx",
+        "utf-8",
+      );
+
+      expect(source).toContain("handleClear('ram')");
+      expect(source).toContain("Clear RAM");
+      expect(source).toContain("handleClear('prefix')");
+      expect(source).toContain("Clear Prefix + L2");
+      expect(source).toContain("preserving disk-backed L2");
     });
   });
 });

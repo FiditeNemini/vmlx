@@ -11569,6 +11569,63 @@ class TestTurboQuantKVTelemetry:
         assert "pixel_values" not in payload["caches"]
 
     @pytest.mark.asyncio
+    async def test_clear_cache_ram_preserves_every_prefix_l2_store(
+        self, monkeypatch
+    ):
+        import vmlx_engine.server as server
+
+        cleared: list[str] = []
+
+        class _Clearable:
+            def __init__(self, name):
+                self.name = name
+
+            def clear(self):
+                cleared.append(self.name)
+
+        class _PagedManager:
+            _disk_store = _Clearable("block_disk_store")
+
+        ssm_cache = _Clearable("ssm_companion")
+        ssm_cache._disk = _Clearable("ssm_companion_disk")
+
+        scheduler = SimpleNamespace(
+            memory_aware_cache=_Clearable("memory_aware_prefix"),
+            block_aware_cache=_Clearable("paged_prefix"),
+            prefix_cache=_Clearable("legacy_prefix"),
+            disk_cache=_Clearable("disk_cache"),
+            paged_cache_manager=_PagedManager(),
+            _ssm_state_cache=ssm_cache,
+            _ssm_companion_disk_store=_Clearable("scheduler_ssm_disk"),
+        )
+
+        monkeypatch.setattr(server, "_get_scheduler", lambda: scheduler)
+        monkeypatch.setattr(server, "clear_mlx_memory_cache", lambda log=None: False)
+
+        payload = await server.clear_cache("ram")
+
+        assert payload == {
+            "status": "cleared",
+            "caches": [
+                "memory_aware_prefix",
+                "paged_prefix",
+                "legacy_prefix",
+                "ssm_companion",
+            ],
+            "cache_type": "ram",
+        }
+        assert cleared == [
+            "memory_aware_prefix",
+            "paged_prefix",
+            "legacy_prefix",
+            "ssm_companion",
+        ]
+        assert "disk_cache" not in cleared
+        assert "block_disk_store" not in cleared
+        assert "ssm_companion_disk" not in cleared
+        assert "scheduler_ssm_disk" not in cleared
+
+    @pytest.mark.asyncio
     async def test_clear_cache_prefix_clears_mllm_owned_ssm_l2_before_first_request(
         self, monkeypatch
     ):

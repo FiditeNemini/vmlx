@@ -842,6 +842,16 @@ describe('buildRequestBody — Tool format', () => {
         expect(chat).toContain('/\\breply exactly\\s*:/i.test(latestUserText)')
         expect(chat).toContain('!suppressAgenticToolPromptForExactOutput')
     })
+
+    it('restricts AppleScript-specialized ZAYA bundles to their trained native tool schema', () => {
+        const chat = readFileSync('src/main/ipc/chat.ts', 'utf8')
+
+        expect(chat).toContain('function isZayaAppleScriptToolBundle(')
+        expect(chat).toContain('readFileSync(join(modelPath, "README.md"), "utf8")')
+        expect(chat).toContain('/\\brun_applescript\\b/i.test(readme)')
+        expect(chat).toContain('zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle')
+        expect(chat).toContain('BUILTIN_TOOLS.filter((t: any) => t.function.name === "run_applescript")')
+    })
 })
 
 // ─── filterTools logic ───────────────────────────────────────────────────────

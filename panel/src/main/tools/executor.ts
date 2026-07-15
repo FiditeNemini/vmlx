@@ -153,6 +153,8 @@ export async function executeBuiltinTool(
         result = copyFile(args.source, args.destination, workingDir); break
       case 'run_command':
         result = await runCommand(args.command, workingDir); break
+      case 'run_applescript':
+        result = await runAppleScript(args.script); break
       case 'web_search':
         result = await webSearch(args.query, args.count); break
       case 'fetch_url':
@@ -569,6 +571,68 @@ async function runCommand(command: string, workingDir: string): Promise<ToolResu
     proc.on('error', (err: Error) => {
       clearTimeout(timer)
       resolve({ content: `$ ${command}\n\nProcess error: ${err.message}`, is_error: true })
+    })
+  })
+}
+
+async function runAppleScript(script: string): Promise<ToolResult> {
+  if (!script || typeof script !== 'string') {
+    return { content: 'Missing required parameter: script', is_error: true }
+  }
+  return new Promise((resolve) => {
+    let stdout = '', stderr = ''
+    let killReason = ''
+    // Pass the source as an argv value to osascript directly. Do not invoke a
+    // shell: AppleScript supplied through the explicitly-enabled tool must not
+    // gain an extra shell interpolation layer before osascript receives it.
+    const proc = spawn('/usr/bin/osascript', ['-e', script], {
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    proc.stdout?.on('data', (d: Buffer) => {
+      stdout += d.toString()
+      if (!killReason && stdout.length > 10 * 1024 * 1024) {
+        killReason = 'Output exceeded 10MB limit'
+        proc.kill()
+      }
+    })
+    proc.stderr?.on('data', (d: Buffer) => {
+      stderr += d.toString()
+      if (!killReason && stderr.length > 10 * 1024 * 1024) {
+        killReason = 'Stderr exceeded 10MB limit'
+        proc.kill()
+      }
+    })
+    attachChildProcessStreamErrorGuard(proc.stdout, (err) => {
+      stderr += `\nStdout stream error: ${err.message}`
+    })
+    attachChildProcessStreamErrorGuard(proc.stderr, (err) => {
+      stderr += `\nStderr stream error: ${err.message}`
+    })
+    const timer = setTimeout(() => {
+      if (!killReason) {
+        killReason = 'AppleScript timed out after 60 seconds'
+        proc.kill()
+      }
+    }, 60000)
+    proc.on('close', (code, signal) => {
+      clearTimeout(timer)
+      const output = [stdout.trim(), stderr.trim() ? `STDERR:\n${stderr.trim()}` : '']
+        .filter(Boolean)
+        .join('\n\n')
+      if (killReason) {
+        resolve({ content: `${killReason}\n\n${output || '(no output)'}`, is_error: true })
+      } else if (code === 0) {
+        resolve({ content: `AppleScript exit code: 0\n\n${output || '(no output)'}`, is_error: false })
+      } else if (code === null && signal) {
+        resolve({ content: `AppleScript killed by signal ${signal}\n\n${output}`, is_error: true })
+      } else {
+        resolve({ content: `AppleScript exit code: ${code}\n\n${output}`, is_error: true })
+      }
+    })
+    proc.on('error', (err: Error) => {
+      clearTimeout(timer)
+      resolve({ content: `AppleScript process error: ${err.message}`, is_error: true })
     })
   })
 }

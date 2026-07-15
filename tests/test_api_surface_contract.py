@@ -206,6 +206,7 @@ def test_noheavy_api_cache_contract_pins_named_server_rows():
     assert "test_cache_entries_endpoint_lists_paged_prefix_blocks" in required
     assert "test_cache_warm_endpoint_prefills_and_stores_block_cache" in required
     assert "test_clear_cache_prefix_clears_prefix_l2_without_multimodal" in required
+    assert "test_clear_cache_ram_preserves_every_prefix_l2_store" in required
     assert "test_native_cache_status_reports_dsv4_separately_from_tq_kv" in required
     assert "test_native_cache_status_reports_zaya_typed_cca" in required
     assert "test_acceleration_status_reports_internal_jangtq_acceleration_when_enabled" in required

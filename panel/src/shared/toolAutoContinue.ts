@@ -14,3 +14,14 @@ export function shouldAutoContinueAfterToolUse({
   if (!content.trim()) return true
   return finishReason === 'length' && iterationTokenCount < thresholdTokens
 }
+
+export function shouldFinishZayaAppleScriptToolRound(
+  isAppleScriptToolBundle: boolean,
+  toolNames: string[],
+): boolean {
+  return (
+    isAppleScriptToolBundle &&
+    toolNames.length > 0 &&
+    toolNames.every((name) => name === 'run_applescript')
+  )
+}

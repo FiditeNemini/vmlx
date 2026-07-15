@@ -2372,7 +2372,7 @@ describe('Default IP and New Settings', () => {
     it('session manager migrates the exact stale continuous-cache default tuple', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         expect(source).toContain('function applyCacheStackStartupDefaultMigration')
-        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 8')
+        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 9')
         expect(source).toContain('function markCacheStackStartupDefaultsCurrent')
         expect(source).toContain('config.cacheStackStartupDefaultsVersion = CACHE_STACK_STARTUP_DEFAULTS_VERSION')
         expect(source).toContain('config.continuousBatching === true')
@@ -2469,7 +2469,35 @@ describe('Default IP and New Settings', () => {
         // OFF for VL/MLLM (#98) and arch-incompatible families. DSV4 keeps its
         // prefix opt-in. SSD block-disk L2 is paged-coupled, so it follows paged.
         expect(helper).toContain('const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : (detectedUsePaged ?? false)')
+        expect(helper).toContain('const defaultEnableDiskCache = !dsv4Active && !defaultUsePagedCache')
         expect(helper).toContain('const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : !!defaultUsePagedCache')
+    })
+
+    it('v9 migrates only the stale impossible paged plus legacy-L2 tuple to block L2', () => {
+        const source = readFileSync('src/main/sessions.ts', 'utf8')
+        const start = source.indexOf('const staleV8PagedLegacyDiskWithoutBlockL2 =')
+        const end = source.indexOf('// v8 (2026-07-12)', start)
+        const block = source.slice(start, end)
+
+        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 9')
+        expect(block).toContain('Number(config.cacheStackStartupDefaultsVersion || 0) === 8')
+        expect(block).toContain('migrationDetectedUsePaged === true')
+        expect(block).toContain('config.usePagedCache === true')
+        expect(block).toContain('config.enableDiskCache === true')
+        expect(block).toContain('config.enableBlockDiskCache === false')
+        expect(source).toContain('!staleV8PagedLegacyDiskWithoutBlockL2')
+        expect(source).toContain('config.enableDiskCache = false')
+        expect(source).toContain('config.enableBlockDiskCache = true')
+    })
+
+    it('adopted paged sessions default to block L2 without legacy L2', () => {
+        const source = readFileSync('src/main/sessions.ts', 'utf8')
+        const start = source.indexOf('async detectAndAdoptAll()')
+        const end = source.indexOf('applyBundleStartupDefaults(defaultConfig', start)
+        const block = source.slice(start, end)
+
+        expect(block).toContain("enableDiskCache: detectedFamily === 'deepseek-v4' || detected.usePagedCache === true ? false : true")
+        expect(block).toContain("enableBlockDiskCache: detectedFamily === 'deepseek-v4' ? dsv4DefaultCacheOptIn : detected.usePagedCache === true")
     })
 
     it('adopted running sessions apply bundle generation defaults before saving config', () => {

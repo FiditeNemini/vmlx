@@ -534,11 +534,20 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           {warming ? 'Warming...' : 'Warm Cache'}
         </button>
         <button
-          onClick={() => handleClear('prefix')}
+          onClick={() => handleClear('ram')}
           disabled={clearing}
+          title="Clear resident/indexed cache state while preserving disk-backed L2"
           className="px-3 py-1.5 text-xs border border-destructive/50 text-destructive rounded hover:bg-destructive/10 disabled:opacity-50"
         >
-          Clear Prefix
+          Clear RAM
+        </button>
+        <button
+          onClick={() => handleClear('prefix')}
+          disabled={clearing}
+          title="Clear prefix cache from RAM and disk-backed L2"
+          className="px-3 py-1.5 text-xs border border-destructive/50 text-destructive rounded hover:bg-destructive/10 disabled:opacity-50"
+        >
+          Clear Prefix + L2
         </button>
         <button
           onClick={() => handleClear('all')}

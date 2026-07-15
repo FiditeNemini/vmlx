@@ -4,6 +4,8 @@ import { v4 as uuidv4 } from "uuid";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
 import type { ClientRequest } from "node:http";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { db, Chat, Message, Folder } from "../database";
 import { sessionManager, resolveUrl, connectHost } from "../sessions";
 import { readGenerationDefaults } from "./models";
@@ -22,7 +24,10 @@ import {
   markReasoningToolBoundary,
   visibleReasoningSegments,
 } from "../../shared/interleavedReasoning";
-import { shouldAutoContinueAfterToolUse } from "../../shared/toolAutoContinue";
+import {
+  shouldAutoContinueAfterToolUse,
+  shouldFinishZayaAppleScriptToolRound,
+} from "../../shared/toolAutoContinue";
 import { buildToolMediaFollowupContent } from "../../shared/toolMediaFollowup";
 import { dsv4OutputBudget } from "../../shared/dsv4RequestBudget";
 import { projectedMetalHeadroomChatErrorContent } from "../../shared/chatErrorDisplay";
@@ -83,6 +88,23 @@ function shouldSuppressGenericAgenticPromptForNativeTools(
     modelName.includes("zaya") ||
     modelName.includes("lfm2")
   );
+}
+
+function isZayaAppleScriptToolBundle(
+  detectedFamily?: string,
+  modelPath?: string,
+): boolean {
+  if (detectedFamily !== "zaya" || !modelPath) return false;
+  try {
+    // The AppleScript fine-tune intentionally keeps the generic ZAYA model
+    // type/path. Its local model card is the only stable bundle-owned signal:
+    // it names run_applescript and documents raw AppleScript when tools are
+    // omitted. Restrict the schema only for that explicit model contract.
+    const readme = readFileSync(join(modelPath, "README.md"), "utf8").slice(0, 32_768);
+    return /\brun_applescript\b/i.test(readme) && /\bAppleScript\b/i.test(readme);
+  } catch {
+    return false;
+  }
 }
 
 function isExpectedChatBackendDisconnectError(error: unknown): boolean {
@@ -560,6 +582,7 @@ const SEARCH_TOOLS = new Set([
 ]);
 const SHELL_TOOLS = new Set([
   "run_command",
+  "run_applescript",
   "spawn_process",
   "get_process_output",
 ]);
@@ -607,15 +630,21 @@ function getDisabledTools(overrides: any): Set<string> {
 /** Filter BUILTIN_TOOLS based on per-category toggle overrides */
 function filterTools(
   overrides: any,
-  context: { hasDirectMediaAttachments?: boolean } = {},
+  context: {
+    hasDirectMediaAttachments?: boolean;
+    zayaAppleScriptToolBundle?: boolean;
+  } = {},
 ): any[] {
+  const availableTools = context.zayaAppleScriptToolBundle
+    ? BUILTIN_TOOLS.filter((t: any) => t.function.name === "run_applescript")
+    : BUILTIN_TOOLS;
   const disabled = getDisabledTools(overrides);
   if (context.hasDirectMediaAttachments) {
     disabled.add("read_image");
     disabled.add("read_video");
   }
-  if (disabled.size === 0) return BUILTIN_TOOLS;
-  return BUILTIN_TOOLS.filter((t: any) => !disabled.has(t.function.name));
+  if (disabled.size === 0) return availableTools;
+  return availableTools.filter((t: any) => !disabled.has(t.function.name));
 }
 
 // Track active requests per chat for abort/concurrency (B5/B6)
@@ -964,6 +993,7 @@ export function registerChatHandlers(
       let isHarmonyModel = false;
       let chatIsMultimodal = false;
       let chatDetectedFamily: string | undefined;
+      let chatUsesZayaAppleScriptToolBundle = false;
       let thinkingBudgetSupported: boolean | undefined;
       let supportsThinkingBudget: boolean | undefined;
       // VLM video sampling (Qwen 3.6, Qwen3.5-VL, etc.) — forwarded as
@@ -1021,6 +1051,10 @@ export function registerChatHandlers(
               thinkingBudgetSupported = undefined;
             }
             chatDetectedFamily = detected.family;
+            chatUsesZayaAppleScriptToolBundle = isZayaAppleScriptToolBundle(
+              chatDetectedFamily,
+              chat.modelPath,
+            );
             supportsThinkingBudget = detected.supportsThinkingBudget;
             timeoutSeconds = effectiveFamilyRequestTimeoutSeconds(
               timeoutSeconds,
@@ -1834,6 +1868,7 @@ export function registerChatHandlers(
             if (overrides?.builtinToolsEnabled) {
               obj.tools = filterTools(overrides, {
                 hasDirectMediaAttachments: hasMediaAttachments,
+                zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
               }).map((t) => ({
                 type: "function",
                 name: t.function.name,
@@ -1910,6 +1945,7 @@ export function registerChatHandlers(
               // e.g. {"type": "function", "function": {"name": ..., "parameters": ...}}
               obj.tools = filterTools(overrides, {
                 hasDirectMediaAttachments: hasMediaAttachments,
+                zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
               });
             }
             // enable_thinking: explicit user override sent to both local and remote.
@@ -3010,10 +3046,11 @@ export function registerChatHandlers(
             : `${baseUrl}/v1/chat/completions`;
           // Remote internet providers use Electron net.fetch; loopback model
           // servers use Node streaming so SSE tool events are not buffered.
+          const followUpBody = JSON.stringify(buildRequestBody());
           const followUpInit = {
             method: "POST",
             headers: { "Content-Type": "application/json", ...authHeaders },
-            body: JSON.stringify(buildRequestBody()),
+            body: followUpBody,
             signal: abortController.signal,
           };
           const useNodeStreamingFetch = !isRemote || isLoopbackUrl(url);
@@ -3386,6 +3423,19 @@ export function registerChatHandlers(
                 }, 30000)
               : null; // Ping every 30s during tool execution
 
+            // AppleScript-8B is a single native-action specialist: its model
+            // card defines one run_applescript call and explicitly says the
+            // agent executes that result. Live Electron follow-ups showed the
+            // fine-tune re-emits the same call indefinitely when the tool
+            // schema remains available after a successful result. Treat that
+            // bundle-owned one-call contract as terminal while leaving every
+            // general ZAYA/tool bundle on the normal multi-tool loop.
+            const finishAfterNativeToolResult =
+              shouldFinishZayaAppleScriptToolRound(
+                chatUsesZayaAppleScriptToolBundle,
+                receivedToolCalls.map((tc) => tc.function.name),
+              );
+
             try {
               await executeToolCalls();
             } finally {
@@ -3429,6 +3479,12 @@ export function registerChatHandlers(
             reasoningSegments = markReasoningToolBoundary(reasoningSegments);
             reasoningContent = ""; // Start a fresh reasoning segment for the next iteration
             // (thinking indicator removed)
+            if (finishAfterNativeToolResult) {
+              console.log(
+                "[CHAT] ZAYA AppleScript native tool result completed the one-call bundle contract",
+              );
+              break;
+            }
             emitToolStatus("processing", "", undefined, toolIteration);
             // Reset idle timer before follow-up — tools may have consumed minutes
             if (chatSession) sessionManager.touchSession(chatSession.id);

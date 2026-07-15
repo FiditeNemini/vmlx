@@ -165,3 +165,30 @@ describe('run_command result contract', () => {
     expect(result.content).toContain('STDERR:\nwarning')
   })
 })
+
+describe('run_applescript result contract', () => {
+  it('executes AppleScript directly and returns its output', async () => {
+    const workingDir = makeRoot('vmlx-tool-applescript-work-')
+
+    const result = await executeBuiltinTool(
+      'run_applescript',
+      { script: 'return 6 * 7' },
+      workingDir,
+    )
+
+    expect(result).toEqual({
+      content: 'AppleScript exit code: 0\n\n42',
+      is_error: false,
+    })
+  })
+
+  it('rejects an empty script', async () => {
+    const workingDir = makeRoot('vmlx-tool-applescript-work-')
+    const result = await executeBuiltinTool('run_applescript', {}, workingDir)
+
+    expect(result).toEqual({
+      content: 'Missing required parameter: script',
+      is_error: true,
+    })
+  })
+})

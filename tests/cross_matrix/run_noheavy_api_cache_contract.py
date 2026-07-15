@@ -127,6 +127,7 @@ REQUIRED_NOHEAVY_API_CACHE_TEST_MARKERS = (
     "test_cache_entries_endpoint_lists_paged_prefix_blocks",
     "test_cache_warm_endpoint_prefills_and_stores_block_cache",
     "test_clear_cache_prefix_clears_prefix_l2_without_multimodal",
+    "test_clear_cache_ram_preserves_every_prefix_l2_store",
     "test_native_cache_status_reports_dsv4_separately_from_tq_kv",
     "test_native_cache_status_reports_zaya_typed_cca",
     "test_native_cache_status_reports_plain_attention_kv",

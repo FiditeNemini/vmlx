@@ -555,7 +555,8 @@ async function runCommand(command: string, workingDir: string): Promise<ToolResu
         const combined = [stdout, stderr ? `STDERR:\n${stderr}` : ''].filter(Boolean).join('\n\n')
         resolve({ content: `$ ${command}\n\n${killReason}\n\n${combined}`, is_error: true })
       } else if (code === 0) {
-        resolve({ content: `$ ${command}\n\n${stdout}`, is_error: false })
+        const combined = [stdout, stderr ? `STDERR:\n${stderr}` : ''].filter(Boolean).join('\n\n')
+        resolve({ content: `$ ${command}\n\nExit code: 0\n\n${combined || '(no output)'}`, is_error: false })
       } else if (code === null && signal) {
         // Killed by external signal (e.g., OOM killer sends SIGKILL)
         const combined = [stdout, stderr ? `STDERR:\n${stderr}` : ''].filter(Boolean).join('\n\n')

@@ -2392,13 +2392,15 @@ export function registerChatHandlers(
                 responsesEventType === "response.heartbeat" &&
                 parsed.tool_call_generating
               ) {
-                if (!clientToolCallBuffering) clientToolCallBuffering = true;
-                emitToolStatus(
-                  "generating",
-                  "",
-                  "Generating tool call...",
-                  toolIteration,
-                );
+                if (!clientToolCallBuffering) {
+                  clientToolCallBuffering = true;
+                  emitToolStatus(
+                    "generating",
+                    "",
+                    "Generating tool call...",
+                    toolIteration,
+                  );
+                }
               }
 
               // Reasoning delta from OpenAI Responses reasoning-summary events.
@@ -2844,17 +2846,19 @@ export function registerChatHandlers(
               }
 
               // Detect server-side tool call buffering signal (TPS keeps counting, show status)
-              if (parsed.tool_call_generating) {
-                if (!clientToolCallBuffering) clientToolCallBuffering = true;
-                console.log(
-                  `[CHAT] Server signaled tool call generation in progress`,
-                );
-                emitToolStatus(
-                  "generating",
-                  "",
-                  "Generating tool call...",
-                  toolIteration,
-                );
+              if (!useResponsesApi && parsed.tool_call_generating) {
+                if (!clientToolCallBuffering) {
+                  clientToolCallBuffering = true;
+                  console.log(
+                    `[CHAT] Server signaled tool call generation in progress`,
+                  );
+                  emitToolStatus(
+                    "generating",
+                    "",
+                    "Generating tool call...",
+                    toolIteration,
+                  );
+                }
               }
 
               // Handle tool_calls from streaming response

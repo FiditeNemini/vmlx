@@ -138,3 +138,30 @@ describe('built-in tool executor path sandbox', () => {
     }
   })
 })
+
+describe('run_command result contract', () => {
+  it('reports a successful exit code and explicit empty output', async () => {
+    const workingDir = makeRoot('vmlx-tool-command-work-')
+
+    const result = await executeBuiltinTool('run_command', { command: 'true' }, workingDir)
+
+    expect(result).toEqual({
+      content: '$ true\n\nExit code: 0\n\n(no output)',
+      is_error: false,
+    })
+  })
+
+  it('preserves stderr from a successful command', async () => {
+    const workingDir = makeRoot('vmlx-tool-command-work-')
+
+    const result = await executeBuiltinTool(
+      'run_command',
+      { command: 'printf warning >&2' },
+      workingDir,
+    )
+
+    expect(result.is_error).toBe(false)
+    expect(result.content).toContain('Exit code: 0')
+    expect(result.content).toContain('STDERR:\nwarning')
+  })
+})

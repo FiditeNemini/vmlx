@@ -38,6 +38,25 @@ describe('tool status responsiveness contract', () => {
     expect(source).toContain('if (!isReasoningDelta && suppressVisibleToolDelta) return;')
   })
 
+  it('emits one generating status per buffered tool call instead of one per heartbeat', () => {
+    const source = readPanelSource('src/main/ipc/chat.ts')
+    const responsesHeartbeatStart = source.indexOf('responsesEventType === "response.heartbeat"')
+    const responsesHeartbeat = source.slice(
+      responsesHeartbeatStart,
+      source.indexOf('// Reasoning delta from OpenAI Responses', responsesHeartbeatStart),
+    )
+    const genericHeartbeat = source.slice(
+      source.indexOf('// Detect server-side tool call buffering signal'),
+      source.indexOf('// Handle tool_calls from streaming response'),
+    )
+
+    expect(responsesHeartbeat).toContain('if (!clientToolCallBuffering) {')
+    expect(responsesHeartbeat.match(/emitToolStatus\(/g)).toHaveLength(1)
+    expect(genericHeartbeat).toContain('if (!useResponsesApi && parsed.tool_call_generating)')
+    expect(genericHeartbeat).toContain('if (!clientToolCallBuffering) {')
+    expect(genericHeartbeat.match(/emitToolStatus\(/g)).toHaveLength(1)
+  })
+
   it('has a stall watchdog while waiting for a buffered tool call to finish', () => {
     const source = readPanelSource('src/main/ipc/chat.ts')
     const streamSseSource = source.slice(

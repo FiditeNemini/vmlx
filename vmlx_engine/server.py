@@ -8971,6 +8971,45 @@ async def clear_cache(cache_type: str = Query("all", alias="type")):
                 if disk_store is not None:
                     disk_store.clear()
                     cleared.append("block_disk_store")
+            # Hybrid SSM state is a prefix-cache companion with its own
+            # bounded resident L1 and nested disk L2. Clearing only KV/paged
+            # stores leaves SSM entries reusable after the UI says "Clear All".
+            ssm_caches = []
+            scheduler_ssm = getattr(scheduler, "_ssm_state_cache", None)
+            generator = getattr(scheduler, "batch_generator", None)
+            generator_ssm = getattr(generator, "_ssm_state_cache", None)
+            for candidate in (scheduler_ssm, generator_ssm):
+                if candidate is not None and all(
+                    candidate is not existing for existing in ssm_caches
+                ):
+                    ssm_caches.append(candidate)
+            ssm_disks = []
+            scheduler_ssm_disk = getattr(
+                scheduler, "_ssm_companion_disk_store", None
+            )
+            if scheduler_ssm_disk is not None:
+                ssm_disks.append(scheduler_ssm_disk)
+            ssm_l1_cleared = False
+            ssm_l2_cleared = False
+            for ssm_cache in ssm_caches:
+                clear_ssm = getattr(ssm_cache, "clear", None)
+                if callable(clear_ssm):
+                    clear_ssm()
+                    ssm_l1_cleared = True
+                ssm_disk = getattr(ssm_cache, "_disk", None)
+                if ssm_disk is not None and all(
+                    ssm_disk is not existing for existing in ssm_disks
+                ):
+                    ssm_disks.append(ssm_disk)
+            for ssm_disk in ssm_disks:
+                clear_ssm_disk = getattr(ssm_disk, "clear", None)
+                if callable(clear_ssm_disk):
+                    clear_ssm_disk()
+                    ssm_l2_cleared = True
+            if ssm_l1_cleared:
+                cleared.append("ssm_companion")
+            if ssm_l2_cleared:
+                cleared.append("ssm_companion_disk")
             try:
                 import gc as _gc
 

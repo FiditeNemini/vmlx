@@ -11523,12 +11523,16 @@ class TestTurboQuantKVTelemetry:
         class _PagedManager:
             _disk_store = _Clearable("block_disk_store")
 
+        ssm_cache = _Clearable("ssm_companion")
+        ssm_cache._disk = _Clearable("ssm_companion_disk")
+
         scheduler = SimpleNamespace(
             memory_aware_cache=_Clearable("memory_aware_prefix"),
             block_aware_cache=_Clearable("paged_prefix"),
             prefix_cache=_Clearable("legacy_prefix"),
             disk_cache=_Clearable("disk_cache"),
             paged_cache_manager=_PagedManager(),
+            _ssm_state_cache=ssm_cache,
         )
 
         monkeypatch.setattr(server, "_get_scheduler", lambda: scheduler)
@@ -11544,6 +11548,8 @@ class TestTurboQuantKVTelemetry:
             "legacy_prefix",
             "disk_cache",
             "block_disk_store",
+            "ssm_companion",
+            "ssm_companion_disk",
         ]
         assert cleared == [
             "memory_aware_prefix",
@@ -11551,9 +11557,46 @@ class TestTurboQuantKVTelemetry:
             "legacy_prefix",
             "disk_cache",
             "block_disk_store",
+            "ssm_companion",
+            "ssm_companion_disk",
         ]
         assert "multimodal_kv" not in payload["caches"]
         assert "pixel_values" not in payload["caches"]
+
+    @pytest.mark.asyncio
+    async def test_clear_cache_prefix_clears_mllm_owned_ssm_l2_before_first_request(
+        self, monkeypatch
+    ):
+        import vmlx_engine.server as server
+
+        cleared: list[str] = []
+
+        class _Clearable:
+            def clear(self):
+                cleared.append("mllm_ssm_disk")
+
+        scheduler = SimpleNamespace(
+            memory_aware_cache=None,
+            block_aware_cache=None,
+            prefix_cache=None,
+            disk_cache=None,
+            paged_cache_manager=None,
+            batch_generator=None,
+            _ssm_state_cache=None,
+            _ssm_companion_disk_store=_Clearable(),
+        )
+
+        monkeypatch.setattr(server, "_get_scheduler", lambda: scheduler)
+        monkeypatch.setattr(server, "clear_mlx_memory_cache", lambda log=None: False)
+
+        payload = await server.clear_cache("prefix")
+
+        assert payload == {
+            "status": "cleared",
+            "caches": ["ssm_companion_disk"],
+            "cache_type": "prefix",
+        }
+        assert cleared == ["mllm_ssm_disk"]
 
     @pytest.mark.asyncio
     async def test_cache_stats_projects_ssm_companion_disk_state(self, monkeypatch):

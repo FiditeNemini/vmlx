@@ -547,3 +547,188 @@ def test_lfm2_fallback_for_file_request_forbids_content_only_pseudo_call():
     assert "<|tool_call_start|>[run_command(command=" in injected
     assert "printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt" in injected
     assert 'Do not emit JSON such as {"content": "..."}' in injected
+
+
+def test_lfm2_direct_run_exactly_binds_command_without_placeholder():
+    """Direct shell requests must produce a concrete Liquid call example.
+
+    The real Electron LFM2.5 turn copied the old ``VALUE_HERE`` example and
+    executed ``:`` instead of the user's command.
+    """
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": "Run a shell command.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    user_request = (
+        "Use run_command exactly once to run exactly: printf LFM_TOOL_519 . "
+        "After the tool result, reply exactly LFM-TOOL=OK."
+    )
+
+    injected = check_and_inject_fallback_tools(
+        "user: run a command\nassistant:",
+        [{"role": "user", "content": user_request}],
+        tools,
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="lfm2",
+    )
+
+    assert (
+        "<|tool_call_start|>[run_command(command='printf LFM_TOOL_519')]"
+        "<|tool_call_end|>"
+    ) in injected
+    assert "run_command(command='VALUE_HERE')" not in injected
+    assert "After the tool result" not in injected.split(
+        "<|tool_call_start|>", 1
+    )[1].split("<|tool_call_end|>", 1)[0]
+
+
+def test_lfm2_tool_result_continuation_removes_schema_and_requires_final_answer():
+    class CaptureTokenizer:
+        last_kwargs = None
+        last_messages = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.last_kwargs = kwargs
+            self.last_messages = messages
+            contents = "\n".join(
+                str(message.get("content", "")) for message in messages
+            )
+            return (
+                "<|im_start|>assistant\n"
+                "<|tool_call_start|>[run_command(command='printf LFM_TOOL_519')]"
+                "<|tool_call_end|><|im_end|>\n"
+                "<|im_start|>tool\n"
+                f"{contents}<|im_end|>\n<|im_start|>assistant\n"
+            )
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Use run_command exactly once to run exactly: printf LFM_TOOL_519 . "
+                "After the tool result, reply exactly LFM-TOOL=OK."
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_lfm",
+                    "function": {
+                        "name": "run_command",
+                        "arguments": {"command": "printf LFM_TOOL_519"},
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_lfm", "content": "LFM_TOOL_519"},
+    ]
+    tokenizer = CaptureTokenizer()
+
+    injected = check_and_inject_fallback_tools(
+        "user: prior tool result\nassistant:",
+        messages,
+        tools,
+        tokenizer,
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="lfm2",
+    )
+
+    assert '[{"result": "LFM_TOOL_519"}]' in injected
+    assert injected.count("<|tool_call_start|>[run_command") == 1
+    assert tokenizer.last_kwargs["tools"] == tools
+    assert tokenizer.last_messages[-1]["content"] == '[{"result": "LFM_TOOL_519"}]'
+
+
+def test_lfm2_shell_tool_result_continuation_uses_structured_json():
+    class CaptureTokenizer:
+        last_messages = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.last_messages = messages
+            contents = "\n".join(
+                str(message.get("content", "")) for message in messages
+            )
+            return (
+                "<|im_start|>assistant\n"
+                "<|tool_call_start|>[run_command(command='pwd')]"
+                "<|tool_call_end|><|im_end|>\n"
+                "<|im_start|>tool\n"
+                f"{contents}<|im_end|>\n<|im_start|>assistant\n"
+            )
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    messages = [
+        {"role": "user", "content": "Use run_command with command `pwd`."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_lfm",
+                    "function": {
+                        "name": "run_command",
+                        "arguments": {"command": "pwd"},
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_lfm",
+            "content": "$ pwd\n\nExit code: 0\n\n/Users/example/mlx/vllm-mlx\n",
+        },
+    ]
+    tokenizer = CaptureTokenizer()
+
+    rendered = check_and_inject_fallback_tools(
+        "user: prior tool result\nassistant:",
+        messages,
+        tools,
+        tokenizer,
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="lfm2",
+    )
+
+    expected = (
+        '[{"exit_code": 0, "stdout": "/Users/example/mlx/vllm-mlx"}]'
+    )
+    assert expected in rendered
+    assert tokenizer.last_messages[-1]["content"] == expected

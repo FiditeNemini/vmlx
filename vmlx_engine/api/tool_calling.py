@@ -348,6 +348,10 @@ def check_and_inject_fallback_tools(
         is_qwen_native_tool_prompt
         and (tools_called_after_latest_user or tool_result_after_latest_user)
     )
+    lfm2_tool_result_continuation = bool(
+        is_lfm2_native_tool_prompt
+        and (tools_called_after_latest_user or tool_result_after_latest_user)
+    )
 
     def _recently_called_tools(tools: list[dict]) -> list[dict]:
         """Keep fallback schemas stable after a Responses tool round."""
@@ -755,6 +759,16 @@ def check_and_inject_fallback_tools(
         def _derive_run_command_value() -> str:
             if not request_text:
                 return ""
+            direct_patterns = (
+                r'\brun\s+exactly:\s*`([^`\n]{1,240})`',
+                r'\brun\s+exactly:\s*([^\n]{1,240}?)(?:\s+\.\s+(?:After|Then)\b|$)',
+                r'\bto\s+run:\s*([^\n]{1,240}?)(?:\s*\.\s+(?:After|Then)\b|$)',
+                r'(?<![A-Za-z0-9_])command\s+`([^`\n]{1,240})`',
+            )
+            for pattern in direct_patterns:
+                match = re.search(pattern, request_text, flags=re.IGNORECASE)
+                if match:
+                    return match.group(1).strip().rstrip(".,;:")
             read_then_create = re.search(
                 r"\bread\s+([A-Za-z0-9_.:/-]{1,120})\s+and\s+create\s+"
                 r"([A-Za-z0-9_.:/-]{1,120}).*?\bWrite(?:\s+the\s+text)?\s+"
@@ -1097,41 +1111,49 @@ def check_and_inject_fallback_tools(
             )
         )
     elif is_lfm2_native_tool_prompt:
-        lfm2_lines = [
-            "You have access to Liquid LFM2 native tools. When the user asks for one, "
-            "call it instead of explaining what you would do.",
-            "",
-        ]
-        for tool in lfm2_prompt_tools:
-            func = _tool_func(tool)
-            name = func.get("name", "") or "unknown_tool"
-            params = func.get("parameters", {}) or {}
-            props = params.get("properties", {}) if isinstance(params, dict) else {}
-            if props:
-                lfm2_lines.append(f"{name} fields: {', '.join(str(p) for p in props)}")
-            else:
-                lfm2_lines.append(f"{name} fields: none")
-            if name.strip().lower() == "run_command" and "command" in props:
-                command = _render_lfm2_examples([tool])
-                match = re.search(r"run_command\(command='([^']+)'\)", command)
-                if match:
-                    exact_command = match.group(1)
-                    lfm2_lines.append(
-                        f"For this request, run_command.command must be exactly: {exact_command}"
-                    )
-                    for token in re.findall(r"\b[A-Z][A-Z0-9_]{6,}\b", request_text):
+        if lfm2_tool_result_continuation:
+            # Liquid's native continuation contract is the assistant tool call,
+            # a JSON tool-role result, then a fresh assistant generation. Do not
+            # add a second synthetic instruction here; it competes with the
+            # trained transcript and made the 8B hybrid terminate after a short
+            # fragment in live Electron runs.
+            tool_prompt = ""
+        else:
+            lfm2_lines = [
+                "You have access to Liquid LFM2 native tools. When the user asks for one, "
+                "call it instead of explaining what you would do.",
+                "",
+            ]
+            for tool in lfm2_prompt_tools:
+                func = _tool_func(tool)
+                name = func.get("name", "") or "unknown_tool"
+                params = func.get("parameters", {}) or {}
+                props = params.get("properties", {}) if isinstance(params, dict) else {}
+                if props:
+                    lfm2_lines.append(f"{name} fields: {', '.join(str(p) for p in props)}")
+                else:
+                    lfm2_lines.append(f"{name} fields: none")
+                if name.strip().lower() == "run_command" and "command" in props:
+                    command = _render_lfm2_examples([tool])
+                    match = re.search(r"run_command\(command='([^']+)'\)", command)
+                    if match:
+                        exact_command = match.group(1)
                         lfm2_lines.append(
-                            f"Do not use {token} itself as a shell command; "
-                            "it is file content or answer text."
+                            f"For this request, run_command.command must be exactly: {exact_command}"
                         )
-        tool_prompt = (
-            "\n".join(lfm2_lines).rstrip()
-            + "\n\nWhen a tool call is needed, emit ONLY this Python-call-list shape. "
-            "Do not emit JSON, generic XML tool blocks, markdown, prose, or fake results. "
-            'Do not emit JSON such as {"content": "..."}; that is assistant text, '
-            "not a tool call.\n"
-            + _render_lfm2_examples(lfm2_prompt_tools)
-        )
+                        for token in re.findall(r"\b[A-Z][A-Z0-9_]{6,}\b", request_text):
+                            lfm2_lines.append(
+                                f"Do not use {token} itself as a shell command; "
+                                "it is file content or answer text."
+                            )
+            tool_prompt = (
+                "\n".join(lfm2_lines).rstrip()
+                + "\n\nWhen a tool call is needed, emit ONLY this Python-call-list shape. "
+                "Do not emit JSON, generic XML tool blocks, markdown, prose, or fake results. "
+                'Do not emit JSON such as {"content": "..."}; that is assistant text, '
+                "not a tool call.\n"
+                + _render_lfm2_examples(lfm2_prompt_tools)
+            )
     elif is_minimax_native_tool_prompt:
         minimax_prompt_tools = _requested_tools(template_tools)
         minimax_lines = [
@@ -1188,6 +1210,12 @@ def check_and_inject_fallback_tools(
                 and all(f"<function={name}>" in rendered for name in zaya_prompt_tool_names)
             )
         if is_lfm2_native_tool_prompt:
+            if lfm2_tool_result_continuation:
+                return (
+                    "<|tool_call_start|>" in rendered
+                    and "<|tool_call_end|>" in rendered
+                    and "<|im_start|>tool\n" in rendered
+                )
             return (
                 "<|tool_call_start|>" in rendered
                 and "<|tool_call_end|>" in rendered
@@ -1291,7 +1319,43 @@ def check_and_inject_fallback_tools(
 
     # Inject into messages
     messages_copy = [dict(m) for m in messages]
-    injected = False
+    if lfm2_tool_result_continuation:
+        # Liquid's documented native conversation format supplies tool results
+        # as JSON in the `tool` role. Electron's built-ins retain a useful
+        # human-readable shell transcript; wrap that real transcript rather
+        # than feeding unframed `$ command\n\noutput` text that makes LFM2.5
+        # terminate its final-answer pass at the first token.
+        for message in messages_copy:
+            if message.get("role") != "tool":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            try:
+                json.loads(content)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                shell_result = re.fullmatch(
+                    r"\$ (?P<command>[^\n]*)\n\nExit code: "
+                    r"(?P<exit_code>-?\d+)(?:\n\n(?P<stdout>[\s\S]*))?",
+                    content.strip(),
+                )
+                if shell_result:
+                    structured_result: dict[str, Any] = {
+                        "exit_code": int(shell_result.group("exit_code")),
+                    }
+                    stdout = (shell_result.group("stdout") or "").rstrip()
+                    if stdout:
+                        structured_result["stdout"] = stdout
+                    normalized_result = [structured_result]
+                else:
+                    normalized_result = [{"result": content}]
+                message["content"] = json.dumps(
+                    normalized_result,
+                    ensure_ascii=False,
+                )
+    # LFM2.5 continuation already has the native assistant/tool transcript;
+    # normalization below is the only injection it needs.
+    injected = lfm2_tool_result_continuation
     for msg in messages_copy:
         if injected:
             break
@@ -1321,11 +1385,22 @@ def check_and_inject_fallback_tools(
     # ZAYA templates that already exposed the native scaffold keep `tools` so
     # their own <tools>/<IMPORTANT> rules survive while concrete examples are added.
     safe_kwargs = dict(template_kwargs)
+    if is_lfm2_native_tool_prompt:
+        # Liquid's native template should retain its trained JSON tool schema,
+        # but an explicit single-tool request must not re-expand to every
+        # built-in tool after the concrete fallback was narrowed. The full
+        # coding-tool catalog overwhelms small LFM2 variants and encourages a
+        # prose simulation of the requested command instead of a native call.
+        safe_kwargs["tools"] = lfm2_prompt_tools
     if not (
-        is_zaya_native_tool_prompt
-        and zaya_template_has_native_scaffold
-        and not has_flat_responses_function_tools
-    ) and not is_xml_function_native_tool_prompt:
+        (
+            is_zaya_native_tool_prompt
+            and zaya_template_has_native_scaffold
+            and not has_flat_responses_function_tools
+        )
+        or is_lfm2_native_tool_prompt
+        or is_xml_function_native_tool_prompt
+    ):
         safe_kwargs.pop("tools", None)
 
     try:

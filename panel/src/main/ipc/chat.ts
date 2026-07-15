@@ -76,10 +76,12 @@ function shouldSuppressGenericAgenticPromptForNativeTools(
 ): boolean {
   const modelName = String(modelNameOrPath || "").toLowerCase();
   return (
+    detectedFamily === "lfm2" ||
     detectedFamily === "zaya" ||
     detectedFamily === "zaya1-vl" ||
     detectedFamily === "zaya1_vl" ||
-    modelName.includes("zaya")
+    modelName.includes("zaya") ||
+    modelName.includes("lfm2")
   );
 }
 

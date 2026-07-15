@@ -118,15 +118,17 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('!isRemote || isLoopbackUrl(url)')
   })
 
-  it('suppresses generic agentic instructions for ZAYA native tool prompts', () => {
+  it('suppresses generic agentic instructions for native ZAYA and LFM2 prompts', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
 
     expect(source).toContain('function shouldSuppressGenericAgenticPromptForNativeTools')
     expect(source).toContain('detectedFamily === "zaya"')
     expect(source).toContain('detectedFamily === "zaya1-vl"')
     expect(source).toContain('detectedFamily === "zaya1_vl"')
+    expect(source).toContain('detectedFamily === "lfm2"')
     expect(source).toContain('modelNameOrPath')
     expect(source).toContain('modelName.includes("zaya")')
+    expect(source).toContain('modelName.includes("lfm2")')
     expect(source).toContain('const suppressGenericAgenticToolPromptForNativeTools =')
 
     const promptBranch = source.slice(

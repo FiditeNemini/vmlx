@@ -2526,7 +2526,19 @@ class TestFallbackToolPromptFormat:
                         "required": ["command"],
                     },
                 },
-            }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                },
+            },
         ]
 
         tokenizer = FakeTokenizer()
@@ -2551,7 +2563,10 @@ class TestFallbackToolPromptFormat:
         assert "write_file(" not in rendered
         assert "<|tool_call_end|>" in rendered
         assert "<tool_call>" not in rendered
-        assert "tools" not in tokenizer.last_kwargs
+        # Liquid's native template renders the actual JSON schema from this
+        # kwarg. Keep only the explicitly requested schema alongside the
+        # concrete Python-call-list example.
+        assert tokenizer.last_kwargs["tools"] == [tools[0]]
 
     def test_lfm2_run_command_prompt_warns_against_bare_payload_command(self):
         from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools

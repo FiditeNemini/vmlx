@@ -298,6 +298,8 @@ def test_byte_budget_evicts_oldest_entries():
     cache.store([4], 1, [_FakeSSMLayer(4.0, shape=(8,))])
     assert cache.size == 3
     assert cache.total_nbytes == 96
+    assert cache.evictions == 1
+    assert cache.evicted_bytes == 32
     assert cache.fetch([1], 1) is None
     assert cache.fetch([2], 1) is not None
     assert cache.fetch([4], 1) is not None
@@ -318,6 +320,7 @@ def test_byte_budget_accounting_clears_and_replaces_existing_key():
     cache.store([1], 1, [_FakeSSMLayer(2.0, shape=(16,))])  # 64 bytes
     assert cache.size == 1
     assert cache.total_nbytes == 64
+    assert cache.evictions == 0  # replacing an identical key is not eviction
     cache.clear()
     assert cache.size == 0
     assert cache.total_nbytes == 0

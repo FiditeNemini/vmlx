@@ -118,6 +118,13 @@ interface HealthData {
     ssm_companion?: {
       entries?: number
       max_entries?: number
+      nbytes?: number
+      nbytes_mb?: number
+      max_bytes?: number
+      max_bytes_mb?: number
+      evictions?: number
+      evicted_bytes?: number
+      evicted_bytes_mb?: number
       disk?: {
         entries?: number
         total_tokens_on_disk?: number
@@ -127,6 +134,12 @@ interface HealthData {
     }
     totals?: {
       ram_tokens_cached?: number
+      l1_indexed_tokens?: number
+      l1_resident_bytes?: number
+      l1_resident_bytes_mb?: number
+      l1_max_resident_bytes?: number
+      l1_max_resident_bytes_mb?: number
+      l1_evictions?: number
       l2_prompt_tokens_on_disk?: number
       l2_block_tokens_on_disk?: number
       l2_ssm_tokens_on_disk?: number
@@ -641,8 +654,26 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
           <div className="grid grid-cols-2 gap-2 text-xs">
             {health.cache.totals?.ram_tokens_cached != null && (
               <InfoCard
-                label="RAM Cached Tokens"
+                label="RAM Resident Tokens"
                 value={(health.cache.totals.ram_tokens_cached || 0).toLocaleString()}
+              />
+            )}
+            {health.cache.totals?.l1_indexed_tokens != null && (
+              <InfoCard
+                label="L1 Indexed Tokens"
+                value={(health.cache.totals.l1_indexed_tokens || 0).toLocaleString()}
+              />
+            )}
+            {health.cache.totals?.l1_resident_bytes_mb != null && (
+              <InfoCard
+                label="L1 Resident Memory"
+                value={`${(health.cache.totals.l1_resident_bytes_mb || 0).toFixed(1)} / ${(health.cache.totals.l1_max_resident_bytes_mb || 0).toFixed(1)} MB`}
+              />
+            )}
+            {health.cache.totals?.l1_evictions != null && (
+              <InfoCard
+                label="L1 Evictions"
+                value={(health.cache.totals.l1_evictions || 0).toLocaleString()}
               />
             )}
             {(health.cache.totals?.l2_tokens_on_disk_store_sum ?? health.cache.totals?.l2_tokens_on_disk) != null && (
@@ -667,6 +698,22 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
               <InfoCard
                 label="SSM L2"
                 value={`${health.cache.ssm_companion.disk.entries || 0} entries / ${(health.cache.ssm_companion.disk.total_tokens_on_disk || 0).toLocaleString()} tokens`}
+              />
+            )}
+            {health.cache.ssm_companion?.nbytes_mb != null && (
+              <InfoCard
+                label="SSM Resident Memory"
+                value={health.cache.ssm_companion.max_bytes_mb != null
+                  ? `${health.cache.ssm_companion.nbytes_mb.toFixed(1)} / ${health.cache.ssm_companion.max_bytes_mb.toFixed(1)} MB`
+                  : `${health.cache.ssm_companion.nbytes_mb.toFixed(1)} MB`}
+              />
+            )}
+            {health.cache.ssm_companion?.evictions != null && (
+              <InfoCard
+                label="SSM Evictions"
+                value={health.cache.ssm_companion.evicted_bytes_mb != null && health.cache.ssm_companion.evicted_bytes_mb > 0
+                  ? `${health.cache.ssm_companion.evictions} / ${health.cache.ssm_companion.evicted_bytes_mb.toFixed(1)} MB`
+                  : String(health.cache.ssm_companion.evictions)}
               />
             )}
           </div>

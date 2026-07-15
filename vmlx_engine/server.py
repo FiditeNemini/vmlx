@@ -7897,11 +7897,29 @@ def _ssm_companion_snapshot(scheduler: Any) -> dict[str, Any] | None:
     if max_entries is None:
         max_entries = getattr(ssm_cache, "_max_entries", 0)
     nbytes = int(getattr(ssm_cache, "total_nbytes", 0) or 0)
+    max_bytes = getattr(ssm_cache, "max_bytes", None)
+    if max_bytes is None:
+        max_bytes = getattr(ssm_cache, "_max_bytes", None)
+    if max_bytes is not None:
+        max_bytes = int(max_bytes)
     snapshot: dict[str, Any] = {
         "entries": int(entries or 0),
         "max_entries": int(max_entries or 0),
         "nbytes": nbytes,
         "nbytes_mb": round(nbytes / (1024 * 1024), 2),
+        "evictions": int(getattr(ssm_cache, "evictions", 0) or 0),
+        "evicted_bytes": int(getattr(ssm_cache, "evicted_bytes", 0) or 0),
+        "evicted_bytes_mb": round(
+            int(getattr(ssm_cache, "evicted_bytes", 0) or 0)
+            / (1024 * 1024),
+            2,
+        ),
+        "max_bytes": max_bytes,
+        "max_bytes_mb": (
+            round(max_bytes / (1024 * 1024), 2)
+            if max_bytes is not None
+            else None
+        ),
         "disk_enabled": bool(getattr(ssm_cache, "disk_enabled", False)),
         "disk_directory": getattr(ssm_cache, "disk_directory", None),
     }
@@ -7953,12 +7971,73 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
         ssm_disk = result.get("ssm_companion", {}).get("disk") if isinstance(result.get("ssm_companion"), dict) else None
         ssm_tokens = _stat_int(ssm_disk, "total_tokens_on_disk", "total_cached_tokens")
         l2_store_sum = disk_tokens + block_tokens + ssm_tokens
+        l1_indexed_tokens = _stat_int(
+            scheduler_cache,
+            "total_tokens_cached",
+            "total_cached_tokens",
+            "tokens_cached",
+        )
+        paged_cache = (
+            scheduler_cache.get("paged_cache")
+            if isinstance(scheduler_cache, dict)
+            and isinstance(scheduler_cache.get("paged_cache"), dict)
+            else None
+        )
+        if paged_mgr is not None:
+            resident_blocks = [
+                block
+                for block in getattr(paged_mgr, "blocks", ())
+                if getattr(block, "cache_data", None) is not None
+                and int(getattr(block, "resident_bytes", 0) or 0) > 0
+            ]
+            paged_cache = {
+                "resident_tokens": sum(
+                    int(getattr(block, "token_count", 0) or 0)
+                    for block in resident_blocks
+                ),
+                "resident_bytes": int(
+                    getattr(paged_mgr, "resident_bytes", 0) or 0
+                ),
+                "max_resident_bytes": int(
+                    getattr(paged_mgr, "max_resident_bytes", 0) or 0
+                ),
+                "evictions": int(
+                    getattr(getattr(paged_mgr, "stats", None), "evictions", 0)
+                    or 0
+                ),
+            }
+        # In frugal paged-cache mode, ordinary KV blocks are indexed in L1 but
+        # their tensor payloads live only in L2. Do not label indexed tokens as
+        # resident RAM. Older scheduler snapshots lack the resident fields, so
+        # retain their historical value as a compatibility fallback.
+        ram_tokens_cached = (
+            int(paged_cache.get("resident_tokens", 0) or 0)
+            if paged_cache is not None and "resident_tokens" in paged_cache
+            else l1_indexed_tokens
+        )
+        l1_resident_bytes = (
+            int(paged_cache.get("resident_bytes", 0) or 0)
+            if paged_cache is not None
+            else 0
+        )
+        l1_max_resident_bytes = (
+            int(paged_cache.get("max_resident_bytes", 0) or 0)
+            if paged_cache is not None
+            else 0
+        )
         result["totals"] = {
-            "ram_tokens_cached": _stat_int(
-                scheduler_cache,
-                "total_tokens_cached",
-                "total_cached_tokens",
-                "tokens_cached",
+            "ram_tokens_cached": ram_tokens_cached,
+            "l1_indexed_tokens": l1_indexed_tokens,
+            "l1_resident_bytes": l1_resident_bytes,
+            "l1_resident_bytes_mb": round(l1_resident_bytes / (1024 * 1024), 2),
+            "l1_max_resident_bytes": l1_max_resident_bytes,
+            "l1_max_resident_bytes_mb": round(
+                l1_max_resident_bytes / (1024 * 1024), 2
+            ),
+            "l1_evictions": (
+                int(paged_cache.get("evictions", 0) or 0)
+                if paged_cache is not None
+                else 0
             ),
             "l2_prompt_tokens_on_disk": disk_tokens,
             "l2_block_tokens_on_disk": block_tokens,

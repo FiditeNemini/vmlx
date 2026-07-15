@@ -116,7 +116,19 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Cache Totals</h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {cacheTotals.ram_tokens_cached != null && (
-              <StatCard label="RAM Cached Tokens" value={(cacheTotals.ram_tokens_cached || 0).toLocaleString()} />
+              <StatCard label="RAM Resident Tokens" value={(cacheTotals.ram_tokens_cached || 0).toLocaleString()} />
+            )}
+            {cacheTotals.l1_indexed_tokens != null && (
+              <StatCard label="L1 Indexed Tokens" value={(cacheTotals.l1_indexed_tokens || 0).toLocaleString()} />
+            )}
+            {cacheTotals.l1_resident_bytes_mb != null && (
+              <StatCard
+                label="L1 Resident Memory"
+                value={`${(cacheTotals.l1_resident_bytes_mb || 0).toFixed(1)} / ${(cacheTotals.l1_max_resident_bytes_mb || 0).toFixed(1)} MB`}
+              />
+            )}
+            {cacheTotals.l1_evictions != null && (
+              <StatCard label="L1 Evictions" value={(cacheTotals.l1_evictions || 0).toLocaleString()} />
             )}
             {cacheTotals.l2_tokens_on_disk != null && (
               <StatCard label="L2 Tokens on Disk" value={(cacheTotals.l2_tokens_on_disk || 0).toLocaleString()} />
@@ -230,7 +242,17 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                   {ssm.nbytes_mb != null && ssm.nbytes_mb > 0 && (
                     <StatCard
                       label="SSM Bytes"
-                      value={`${ssm.nbytes_mb.toFixed(1)} MB`}
+                      value={ssm.max_bytes_mb != null
+                        ? `${ssm.nbytes_mb.toFixed(1)} / ${ssm.max_bytes_mb.toFixed(1)} MB`
+                        : `${ssm.nbytes_mb.toFixed(1)} MB`}
+                    />
+                  )}
+                  {ssm.evictions != null && (
+                    <StatCard
+                      label="SSM Evictions"
+                      value={ssm.evicted_bytes_mb != null && ssm.evicted_bytes_mb > 0
+                        ? `${ssm.evictions} / ${ssm.evicted_bytes_mb.toFixed(1)} MB`
+                        : String(ssm.evictions)}
                     />
                   )}
                   {ssm.disk?.total_tokens_on_disk != null && (

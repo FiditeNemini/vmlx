@@ -4076,10 +4076,43 @@ class MLLMScheduler:
                         "entry_count": paged_stats.get("entry_count", 0),
                     }
                     if self.paged_cache_manager is not None:
+                        manager = self.paged_cache_manager
                         stats["paged_cache"]["allocated_blocks"] = (
-                            len(self.paged_cache_manager.allocated_blocks)
-                            if hasattr(self.paged_cache_manager, "allocated_blocks")
+                            len(manager.allocated_blocks)
+                            if hasattr(manager, "allocated_blocks")
                             else 0
+                        )
+                        resident_blocks = [
+                            block
+                            for block in getattr(manager, "blocks", ())
+                            if getattr(block, "cache_data", None) is not None
+                            and int(getattr(block, "resident_bytes", 0) or 0) > 0
+                        ]
+                        resident_bytes = int(
+                            getattr(manager, "resident_bytes", 0) or 0
+                        )
+                        max_resident_bytes = int(
+                            getattr(manager, "max_resident_bytes", 0) or 0
+                        )
+                        stats["paged_cache"].update(
+                            {
+                                "resident_blocks": len(resident_blocks),
+                                "resident_tokens": sum(
+                                    int(getattr(block, "token_count", 0) or 0)
+                                    for block in resident_blocks
+                                ),
+                                "resident_bytes": resident_bytes,
+                                "resident_bytes_mb": round(
+                                    resident_bytes / (1024 * 1024), 2
+                                ),
+                                "max_resident_bytes": max_resident_bytes,
+                                "max_resident_bytes_mb": round(
+                                    max_resident_bytes / (1024 * 1024), 2
+                                ),
+                                "evictions": int(
+                                    getattr(manager.stats, "evictions", 0) or 0
+                                ),
+                            }
                         )
                 except Exception:
                     pass
@@ -4119,6 +4152,10 @@ class MLLMScheduler:
                         "max_entries": int(getattr(ssm_cache, "max_entries", 0) or 0),
                         "nbytes": nbytes,
                         "nbytes_mb": round(nbytes / (1024 * 1024), 2),
+                        "evictions": int(getattr(ssm_cache, "evictions", 0) or 0),
+                        "evicted_bytes": int(
+                            getattr(ssm_cache, "evicted_bytes", 0) or 0
+                        ),
                         "max_bytes": max_bytes,
                         "max_bytes_mb": (
                             round(max_bytes / (1024 * 1024), 2)

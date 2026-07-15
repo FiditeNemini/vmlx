@@ -11717,6 +11717,12 @@ class TestTurboQuantKVTelemetry:
                     "total_tokens_cached": 640,
                     "tokens_saved": 1280,
                     "allocated_blocks": 10,
+                    "paged_cache": {
+                        "resident_tokens": 128,
+                        "resident_bytes": 96 * 1024 * 1024,
+                        "max_resident_bytes": 256 * 1024 * 1024,
+                        "evictions": 7,
+                    },
                 }
 
         class _DiskCache:
@@ -11741,6 +11747,16 @@ class TestTurboQuantKVTelemetry:
 
         class _PagedManager:
             _disk_store = _BlockDisk()
+            resident_bytes = 96 * 1024 * 1024
+            max_resident_bytes = 256 * 1024 * 1024
+            stats = SimpleNamespace(evictions=7)
+            blocks = [
+                SimpleNamespace(
+                    cache_data=object(),
+                    resident_bytes=96 * 1024 * 1024,
+                    token_count=128,
+                )
+            ]
 
         class _SSMDisk:
             def stats(self):
@@ -11755,6 +11771,10 @@ class TestTurboQuantKVTelemetry:
         class _SSMCache:
             size = 1
             max_entries = 8
+            max_bytes = 512 * 1024 * 1024
+            total_nbytes = 448 * 1024 * 1024
+            evictions = 1
+            evicted_bytes = 149 * 1024 * 1024
             disk_enabled = True
             disk_directory = "/tmp/vmlx-test/ssm_companion"
             _disk = _SSMDisk()
@@ -11790,7 +11810,15 @@ class TestTurboQuantKVTelemetry:
         assert cache["disk_cache"]["total_tokens_on_disk"] == 384
         assert cache["block_disk_cache"]["total_tokens_on_disk"] == 256
         assert cache["ssm_companion"]["disk"]["total_tokens_on_disk"] == 128
-        assert cache["totals"]["ram_tokens_cached"] == 640
+        assert cache["totals"]["ram_tokens_cached"] == 128
+        assert cache["totals"]["l1_indexed_tokens"] == 640
+        assert cache["totals"]["l1_resident_bytes_mb"] == 96.0
+        assert cache["totals"]["l1_max_resident_bytes_mb"] == 256.0
+        assert cache["totals"]["l1_evictions"] == 7
+        assert cache["ssm_companion"]["nbytes_mb"] == 448.0
+        assert cache["ssm_companion"]["max_bytes_mb"] == 512.0
+        assert cache["ssm_companion"]["evictions"] == 1
+        assert cache["ssm_companion"]["evicted_bytes_mb"] == 149.0
         assert cache["totals"]["l2_prompt_tokens_on_disk"] == 384
         assert cache["totals"]["l2_block_tokens_on_disk"] == 256
         assert cache["totals"]["l2_ssm_tokens_on_disk"] == 128
@@ -11902,7 +11930,12 @@ class TestTurboQuantKVTelemetry:
 
         assert "Tokens on Disk" in cache_panel_source
         assert "Cache Totals" in cache_panel_source
-        assert "RAM Cached Tokens" in cache_panel_source
+        assert "RAM Resident Tokens" in cache_panel_source
+        assert "L1 Indexed Tokens" in cache_panel_source
+        assert "L1 Resident Memory" in cache_panel_source
+        assert "L1 Evictions" in cache_panel_source
+        assert "max_bytes_mb" in cache_panel_source
+        assert "SSM Evictions" in cache_panel_source
         assert "L2 Tokens on Disk" in cache_panel_source
         assert "SSM L2 Tokens" in cache_panel_source
 

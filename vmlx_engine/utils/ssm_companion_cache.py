@@ -151,6 +151,8 @@ class SSMCompanionCache:
             raise ValueError("max_bytes must be >= 1 when set")
         self._entry_nbytes: Dict[str, int] = {}
         self._total_nbytes = 0
+        self._evictions = 0
+        self._evicted_bytes = 0
         # Model identity prefix mixed into every key. Empty string is the
         # legacy "single-model" behavior — safe default.
         self._model_key = str(model_key or "")
@@ -194,6 +196,16 @@ class SSMCompanionCache:
     def total_nbytes(self) -> int:
         """Approximate resident bytes held by stored SSM states."""
         return self._total_nbytes
+
+    @property
+    def evictions(self) -> int:
+        """Number of LRU entries removed to satisfy count or byte budgets."""
+        return self._evictions
+
+    @property
+    def evicted_bytes(self) -> int:
+        """Resident bytes released by budget-driven LRU eviction."""
+        return self._evicted_bytes
 
     @property
     def model_key(self) -> str:
@@ -588,21 +600,25 @@ class SSMCompanionCache:
         """Evict LRU entries until both entry and byte budgets are satisfied."""
         while self._store and len(self._store) > self._max_entries:
             evict_key = next(iter(self._store))
-            self._drop_key(evict_key)
+            self._drop_key(evict_key, evicted=True)
         while (
             self._store
             and self._max_bytes is not None
             and self._total_nbytes > self._max_bytes
         ):
             evict_key = next(iter(self._store))
-            self._drop_key(evict_key)
+            self._drop_key(evict_key, evicted=True)
 
-    def _drop_key(self, key: str) -> None:
+    def _drop_key(self, key: str, *, evicted: bool = False) -> None:
         """Remove a stored entry and all auxiliary accounting."""
         self._store.pop(key, None)
-        self._total_nbytes -= self._entry_nbytes.pop(key, 0)
+        removed_nbytes = self._entry_nbytes.pop(key, 0)
+        self._total_nbytes -= removed_nbytes
         if self._total_nbytes < 0:
             self._total_nbytes = 0
+        if evicted:
+            self._evictions += 1
+            self._evicted_bytes += removed_nbytes
         self._index_remove(key)
 
     @staticmethod

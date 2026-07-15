@@ -111,6 +111,15 @@ export function registerSessionHandlers(getWindow: () => BrowserWindow | null): 
       }
     })
 
+    ipcMain.handle('sessions:availablePort', async () => {
+      try {
+        return await sessionManager.getAvailablePort()
+      } catch (error) {
+        console.error('[SESSION] Failed to find an available port:', error)
+        throw error
+      }
+    })
+
     ipcMain.handle('sessions:get', async (_, id: string) => {
       try {
         return sessionManager.getSession(id)

@@ -429,6 +429,7 @@ def check_and_inject_fallback_tools(
             direct_patterns = (
                 r'\brun\s+exactly:\s*`([^`\n]{1,240})`',
                 r'\brun\s+exactly:\s*([^\n]{1,240}?)(?:\s+\.\s+(?:After|Then)\b|$)',
+                r'\bto\s+run:\s*([^\n]{1,240}?)(?:\s*\.\s+(?:After|Then)\b|$)',
                 r'(?<![A-Za-z0-9_])command\s+`([^`\n]{1,240})`',
                 r'(?<![A-Za-z0-9_])command\s+["\u201c]([^"\u201d\n]{1,240})["\u201d]',
             )
@@ -537,6 +538,7 @@ def check_and_inject_fallback_tools(
             direct_patterns = (
                 r'\brun\s+exactly:\s*`([^`\n]{1,240})`',
                 r'\brun\s+exactly:\s*([^\n]{1,240}?)(?:\s+\.\s+(?:After|Then)\b|$)',
+                r'\bto\s+run:\s*([^\n]{1,240}?)(?:\s*\.\s+(?:After|Then)\b|$)',
                 r'(?<![A-Za-z0-9_])command\s+["“]([^"”\n]{1,240})["”]',
                 r"(?<![A-Za-z0-9_])command\s+`([^`\n]{1,240})`",
                 r"(?<![A-Za-z0-9_])command\s+([A-Za-z0-9_./:;|&%><=+,'\" -]{1,240})(?:[.\n]|$)",

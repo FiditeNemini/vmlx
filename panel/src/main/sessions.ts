@@ -3602,6 +3602,16 @@ export class SessionManager extends EventEmitter {
     return null
   }
 
+  /**
+   * Return a port that is absent from both persisted sessions and the live OS
+   * listener table. The renderer uses this for its initial form value so a
+   * launch does not fail just because an unrelated launchd service owns the
+   * next numerically-unused session port.
+   */
+  async getAvailablePort(): Promise<number> {
+    return this.findAvailablePort()
+  }
+
   private async findAvailablePort(): Promise<number> {
     const sessions = db.getSessions()
     // Check ALL session ports (DB has UNIQUE constraint on port column)

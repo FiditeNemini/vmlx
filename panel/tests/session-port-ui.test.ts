@@ -12,6 +12,7 @@
  *   - connectHost address rewriting (0.0.0.0 -> 127.0.0.1)
  *   - Menu bar button visibility (text/image, local/remote, per status)
  */
+import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 
 // ─── 1. Port Assignment Logic ────────────────────────────────────────────────
@@ -1052,5 +1053,23 @@ describe('Menu bar button state transitions', () => {
         expect(b).not.toContain(t)
       }
     }
+  })
+})
+
+describe('Create-session live port selection wiring', () => {
+  it('asks the main process for a bind-probed port instead of filtering only saved sessions', () => {
+    const manager = readFileSync('src/main/sessions.ts', 'utf8')
+    const ipc = readFileSync('src/main/ipc/sessions.ts', 'utf8')
+    const preload = readFileSync('src/preload/index.ts', 'utf8')
+    const env = readFileSync('src/env.d.ts', 'utf8')
+    const create = readFileSync('src/renderer/src/components/sessions/CreateSession.tsx', 'utf8')
+
+    expect(manager).toContain('async getAvailablePort(): Promise<number>')
+    expect(manager).toContain("server.listen(port, '127.0.0.1')")
+    expect(ipc).toContain("ipcMain.handle('sessions:availablePort'")
+    expect(preload).toContain("ipcRenderer.invoke('sessions:availablePort')")
+    expect(env).toContain('availablePort: () => Promise<number>')
+    expect(create).toContain('window.api.sessions.availablePort()')
+    expect(create).not.toContain('const usedPorts = new Set(sessions.map((s: any) => s.port))')
   })
 })

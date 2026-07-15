@@ -347,6 +347,7 @@ const api = {
   // Session management
   sessions: {
     list: () => ipcRenderer.invoke('sessions:list'),
+    availablePort: () => ipcRenderer.invoke('sessions:availablePort'),
     get: (id: string) => ipcRenderer.invoke('sessions:get', id),
     create: (modelPath: string, config: any) => ipcRenderer.invoke('sessions:create', modelPath, config),
     createRemote: (params: { remoteUrl: string; remoteApiKey?: string; remoteModel: string; remoteOrganization?: string }) =>

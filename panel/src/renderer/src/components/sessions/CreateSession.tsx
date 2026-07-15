@@ -182,10 +182,10 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
   useEffect(() => {
     const assignPort = async () => {
       try {
-        const sessions = await window.api.sessions.list()
-        const usedPorts = new Set(sessions.map((s: any) => s.port))
-        let port = 8000
-        while (usedPorts.has(port)) port++
+        // The main process checks both persisted session ports and real OS
+        // listeners with net.createServer. Renderer-only DB filtering can pick
+        // a port owned by launchd or another app and fail at model load time.
+        const port = await window.api.sessions.availablePort()
         setConfig(prev => ({ ...prev, port }))
       } catch (_) { }
     }

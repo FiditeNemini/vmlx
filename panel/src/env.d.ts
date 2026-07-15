@@ -578,6 +578,7 @@ declare global {
       };
       sessions: {
         list: () => Promise<any[]>;
+        availablePort: () => Promise<number>;
         get: (id: string) => Promise<any>;
         create: (modelPath: string, config: any) => Promise<any>;
         createRemote: (params: {

@@ -110,6 +110,33 @@ def test_qwen_explicit_run_exactly_binds_command_and_narrows_schema():
     assert "After the tool result" not in command
 
 
+def test_qwen_explicit_to_run_binds_command_and_narrows_schema():
+    """The live Electron prompt commonly says ``to run:`` rather than
+    ``run exactly:``; keep that command in the canonical Qwen example instead
+    of teaching the model an empty required argument.
+    """
+    tools = _qwen_test_tools()
+    user_request = (
+        "Use the run_command tool exactly once to run: printf Q36_TOOL_811. "
+        "After seeing the tool result, reply exactly Q36-TOOL=OK."
+    )
+
+    injected = check_and_inject_fallback_tools(
+        _qwen_prompt(),
+        [{"role": "user", "content": user_request}],
+        tools,
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="qwen",
+    )
+
+    assert "Tool: read_file" not in injected
+    assert "<function=read_file>" not in injected
+    assert "<parameter=command>\nprintf Q36_TOOL_811\n</parameter>" in injected
+    command = injected.split("<parameter=command>", 1)[1].split("</parameter>", 1)[0]
+    assert "After seeing the tool result" not in command
+
+
 def test_qwen_tool_result_continuation_prevents_duplicate_execution():
     tools = _qwen_test_tools()
     command = "printf B1TOOL > bonsai_native.txt"

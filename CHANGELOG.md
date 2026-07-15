@@ -12,12 +12,14 @@ All notable changes to vMLX Engine will be documented in this file.
 - Preserved coherent hybrid multi-turn generation across memory hits, restart boundaries, SSM async rederive, and paged attention-prefix reuse without promoting restored hybrid prefixes into unsafe longer entries.
 - Enforced the paged-cache RAM byte ceiling before disk promotion and restored valid partial paged prefixes across process restarts.
 - Stabilized Bonsai/Qwen and DeepSeek-V4 native tool prompts and Electron tool-result continuation; terminal DeepSeek-V4 cache hits can extend and store correctly.
+- Bound Qwen's canonical `run_command` fallback example for the natural `to run: ...` request form so required command arguments are not emitted empty, and moved create-session port selection to the main process so it rejects ports already owned by live OS listeners.
 - Added native MiniMax-M3 video preprocessing through the Responses route while preserving the model's typed sparse-attention cache (`attention_kv`, `msa_idx_keys`, and absolute block indices) instead of substituting generic KV.
 - Cache clear now removes hybrid SSM companion disk state as well as attention-prefix state.
 
 ### Verified
 - Real current-source Electron UI proof on the M5 Max covered Bonsai 27B 1-bit, Bonsai 27B ternary, DeepSeek-V4-Flash, Laguna-M.1, and MiniMax-M3: visual model loading, source-derived Chat Settings, Responses routing, reasoning Auto/Off/On, coherent multi-turn continuation, native tools, and visible cache telemetry.
 - Bonsai proof covered affine-1 and ternary loading, hybrid GDN/SSM execution, live TurboQuant KV, paged attention reuse, bounded RAM, SSM eviction, block-disk L2 writes, image, and video. MiniMax-M3 proof covered native video plus typed sparse-cache memory and disk hits; Laguna covered `paged+tq` and `paged+disk+tq`; DeepSeek-V4 covered native composite paged hits with no competing model resident.
+- Qwen3.6-27B hybrid proof covered Electron-selected live-port probing, Responses routing, Auto/Off/On reasoning, exact three-turn Off-mode continuation, native shell-tool execution, image understanding, paged+SSM hits, block-disk L2 hits and writes, SSM eviction under its byte ceiling, and model-RAM release after UI stop.
 - Current source passed the 876-test changed-engine suite, the 161-test focused cache suite, six block-disk LRU/restart tests, 2,209 Electron panel tests with three intentional skips, and TypeScript typecheck.
 
 ### Release boundary

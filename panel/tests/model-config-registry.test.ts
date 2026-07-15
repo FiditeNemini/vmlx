@@ -986,6 +986,43 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.forceTextOnly).toBe(true)
   })
 
+  it('keeps runtime-verified affine-JANG Qwen image/video bundles multimodal', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'qwen3_5',
+        architectures: ['Qwen3_5ForConditionalGeneration'],
+        text_config: {
+          model_type: 'qwen3_5_text',
+          layer_types: ['linear_attention', 'full_attention'],
+        },
+        vision_config: { hidden_size: 1152 },
+        image_token_id: 248056,
+        video_token_id: 248057,
+      },
+      {
+        format: 'jang',
+        architecture: { has_vision: true, has_ssm: true },
+        capabilities: {
+          family: 'qwen3_5',
+          modality: 'vision',
+          supports_vision: true,
+          supports_video: true,
+        },
+        runtime: {
+          status: 'runtime_verified',
+          vision_verified: true,
+          video_verified: true,
+        },
+      },
+    )
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('qwen3.5')
+    expect(detected.isMultimodal).toBe(true)
+    expect(detected.forceTextOnly).toBeUndefined()
+  })
+
   it('routes N2 Pro affine-JANG Qwen-MoE metadata text-only until VL is live-proven', () => {
     const dir = makeModelDir(
       {

@@ -144,7 +144,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
   enableDiskCache: true,
   diskCacheMaxGb: 10,
   diskCacheDir: '',
-  enableBlockDiskCache: false,
+  enableBlockDiskCache: true,
   blockDiskCacheMaxGb: 10,
   blockDiskCacheDir: '',
   streamInterval: 1,

@@ -111,7 +111,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         usePagedCache: detected?.family === 'deepseek-v4' ? true : detected?.usePagedCache,
         enableBlockDiskCache: detected?.family === 'deepseek-v4'
           ? true
-          : detected?.usePagedCache === true && prev.enableBlockDiskCache,
+          : detected?.usePagedCache === true,
         pagedCacheBlockSize: detected?.family === 'deepseek-v4' ? 256 : prev.pagedCacheBlockSize,
       }
       return applyGenerationDefaultsToConfig(next, gen)
@@ -226,7 +226,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             base.pagedCacheBlockSize = 256
           } else {
             base.usePagedCache = detected.usePagedCache
-            base.enableBlockDiskCache = detected.usePagedCache === true && base.enableBlockDiskCache
+            base.enableBlockDiskCache = detected.usePagedCache === true
           }
           setDetectedFamily(detected.family)
           setDetectedCacheSubtype(detected.cacheSubtype)

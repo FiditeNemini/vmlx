@@ -100,6 +100,7 @@ export function cacheControlUpdatesForPagedToggle(enabled: boolean, state: Cache
   const updates: CacheControlUpdate[] = []
   if (enabled && !state.enablePrefixCache) updates.push(['enablePrefixCache', true])
   if (enabled && state.enableDiskCache) updates.push(['enableDiskCache', false])
+  if (enabled && !state.enableBlockDiskCache) updates.push(['enableBlockDiskCache', true])
   if (!enabled && state.enableBlockDiskCache) updates.push(['enableBlockDiskCache', false])
   updates.push(['usePagedCache', enabled])
   return updates

@@ -124,7 +124,7 @@ const DEFAULT_CONFIG: SessionConfig = {
     enableDiskCache: true,
     diskCacheMaxGb: 10,
     diskCacheDir: '',
-    enableBlockDiskCache: false,
+    enableBlockDiskCache: true,
     blockDiskCacheMaxGb: 10,
     blockDiskCacheDir: '',
     streamInterval: 1,
@@ -456,6 +456,8 @@ function buildCommandPreview(
         if (config.blockDiskCacheDir) parts.push('--block-disk-cache-dir', config.blockDiskCacheDir)
         const blockDiskCacheMaxGb = finiteNonNegativeNumber(config.blockDiskCacheMaxGb)
         if (blockDiskCacheMaxGb != null) parts.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
+    } else if (cacheLaunchPolicy.effectiveUsePagedCache) {
+        parts.push('--disable-block-disk-cache')
     }
 
     const streamInterval = finitePositiveInteger(config.streamInterval)
@@ -1082,9 +1084,10 @@ describe('Block Disk Cache', () => {
         expect(getFlagValue(out, '--block-disk-cache-max-gb')).toBe('20')
     })
 
-    it('omits block disk cache when the block-disk toggle is off', () => {
+    it('emits an explicit opt-out when paged cache is active and block L2 is off', () => {
         const out = preview({ enablePrefixCache: true, usePagedCache: true, enableBlockDiskCache: false })
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(false)
+        expect(hasFlag(out, '--disable-block-disk-cache')).toBe(true)
     })
 
     it('prefix cache off suppresses stale block-disk cache at launch', () => {

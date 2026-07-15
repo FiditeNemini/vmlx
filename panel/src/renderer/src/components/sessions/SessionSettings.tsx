@@ -198,6 +198,7 @@ const TEXT_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--disk-cache-dir',
   '--disk-cache-max-gb',
   '--enable-block-disk-cache',
+  '--disable-block-disk-cache',
   '--block-disk-cache-dir',
   '--block-disk-cache-max-gb',
   '--smelt',
@@ -275,6 +276,7 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--disk-cache-dir',
   '--disk-cache-max-gb',
   '--enable-block-disk-cache',
+  '--disable-block-disk-cache',
   '--block-disk-cache-dir',
   '--block-disk-cache-max-gb',
   '--image-mode',
@@ -548,6 +550,10 @@ function buildCommandPreview(
     if (config.blockDiskCacheDir) parts.push('--block-disk-cache-dir', config.blockDiskCacheDir)
     const blockDiskCacheMaxGb = finiteNonNegativeNumber(config.blockDiskCacheMaxGb)
     if (blockDiskCacheMaxGb != null) parts.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
+  } else if (cacheLaunchPolicy.effectiveUsePagedCache) {
+    // The engine defaults paged-compatible L2 on. Emit the explicit negative
+    // flag so a user-disabled UI toggle remains a real opt-out.
+    parts.push('--disable-block-disk-cache')
   }
 
   // Performance
@@ -841,7 +847,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
           } else {
             base.usePagedCache = detected.usePagedCache
-            base.enableBlockDiskCache = detected.usePagedCache === true && base.enableBlockDiskCache
+            base.enableBlockDiskCache = detected.usePagedCache === true
           }
           // VLM models: set isMultimodal flag unless this model has a
           // runtime forceTextOnly policy (affine-JANG Qwen hybrid).

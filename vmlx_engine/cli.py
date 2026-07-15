@@ -296,6 +296,31 @@ def _apply_dsv4_cache_policy(args, logger):
     return tuple(changed)
 
 
+def _apply_paged_block_disk_default(args, logger):
+    """Default paged-cache SSD L2 on while preserving an explicit opt-out."""
+
+    explicit = getattr(args, "enable_block_disk_cache", None)
+    if explicit is not None:
+        return bool(explicit)
+
+    prefix_active = (
+        getattr(args, "enable_prefix_cache", True)
+        and not getattr(args, "disable_prefix_cache", False)
+    )
+    enabled = bool(
+        getattr(args, "continuous_batching", False)
+        and getattr(args, "use_paged_cache", False)
+        and prefix_active
+    )
+    args.enable_block_disk_cache = enabled
+    if enabled:
+        logger.info(
+            "Paged cache active — enabling block disk cache (SSD L2) by default. "
+            "Pass --disable-block-disk-cache for an explicit opt-out."
+        )
+    return enabled
+
+
 def _apply_dsv4_runtime_policy(args, logger, *, clamp_max_num_seqs: bool = False):
     """Apply DSV4 Flash runtime gates shared by serve and bench CLI paths."""
 
@@ -1502,6 +1527,8 @@ def serve_command(args):
             )
             args.max_num_seqs = 1
 
+    _apply_paged_block_disk_default(args, logger)
+
     # Build scheduler config for batched mode
     scheduler_config = None
     if args.continuous_batching:
@@ -1866,6 +1893,8 @@ def bench_command(args):
         from . import server as _server_module
         _server_module._smelt_enabled = True
         _server_module._smelt_experts = getattr(args, 'smelt_experts', 50)
+
+    _apply_paged_block_disk_default(args, logger)
 
     # Handle prefix cache flags
     enable_prefix_cache = args.enable_prefix_cache and not args.disable_prefix_cache
@@ -2661,13 +2690,22 @@ Examples:
              "when the limit is exceeded. 0 = unlimited. (default: 10)",
     )
     # Block-level disk cache (L2 for paged cache)
-    serve_parser.add_argument(
+    serve_block_disk_group = serve_parser.add_mutually_exclusive_group()
+    serve_block_disk_group.add_argument(
         "--enable-block-disk-cache",
+        dest="enable_block_disk_cache",
         action="store_true",
         help="Persist individual paged cache blocks to SSD. When a block is evicted from "
              "memory, it's saved to disk and reloaded on the next hit instead of recomputing. "
              "Requires --use-paged-cache. Great for large multi-user workloads.",
     )
+    serve_block_disk_group.add_argument(
+        "--disable-block-disk-cache",
+        dest="enable_block_disk_cache",
+        action="store_false",
+        help="Explicitly disable the default SSD L2 when paged cache is active.",
+    )
+    serve_parser.set_defaults(enable_block_disk_cache=None)
     serve_parser.add_argument(
         "--block-disk-cache-dir",
         type=str,
@@ -3248,11 +3286,20 @@ Examples:
         default=10.0,
         help="Maximum disk cache size in GB (default: 10)",
     )
-    bench_parser.add_argument(
+    bench_block_disk_group = bench_parser.add_mutually_exclusive_group()
+    bench_block_disk_group.add_argument(
         "--enable-block-disk-cache",
+        dest="enable_block_disk_cache",
         action="store_true",
         help="Enable block-level disk persistence (requires --use-paged-cache)",
     )
+    bench_block_disk_group.add_argument(
+        "--disable-block-disk-cache",
+        dest="enable_block_disk_cache",
+        action="store_false",
+        help="Explicitly disable the default SSD L2 when paged cache is active.",
+    )
+    bench_parser.set_defaults(enable_block_disk_cache=None)
     bench_parser.add_argument(
         "--block-disk-cache-dir",
         type=str,

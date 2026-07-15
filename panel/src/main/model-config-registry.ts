@@ -573,6 +573,17 @@ function isAffineJangQwenHybridVlm(parsedConfig: any, jangCfg: any): boolean {
   return !isMxtqJangConfig(jangCfg)
 }
 
+function affineJangRuntimeHasVerifiedVision(jangCfg: any): boolean {
+  if (!jangCfg || typeof jangCfg !== 'object') return false
+  const runtime = jangCfg.runtime
+  const capabilities = jangCfg.capabilities
+  if (!runtime || typeof runtime !== 'object') return false
+  if (!capabilities || typeof capabilities !== 'object') return false
+  return runtime.status === 'runtime_verified' &&
+    runtime.vision_verified === true &&
+    capabilities.supports_vision === true
+}
+
 function qwenNativeMtpVlArtifactReady(
   parsedConfig: any,
   jangCfg: any,
@@ -1041,7 +1052,7 @@ function resolveJangMultimodal(jangCfg: any, parsedConfig: any): boolean {
   }
 
   if (isAffineJangQwenHybridVlm(parsedConfig, jangCfg)) {
-    return false
+    return affineJangRuntimeHasVerifiedVision(jangCfg)
   }
 
   // Explicit converter stamps are authoritative. A JANG bundle may keep a
@@ -1149,7 +1160,11 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
                 detected.nativeMtp = nativeMtp
               }
               const nativeMtpVlReady = qwenNativeMtpVlArtifactReady(parsed, jangCfg, modelPath)
-              if (isAffineJangQwenHybridVlm(parsed, jangCfg) && !nativeMtpVlReady) {
+              if (
+                isAffineJangQwenHybridVlm(parsed, jangCfg) &&
+                !nativeMtpVlReady &&
+                !affineJangRuntimeHasVerifiedVision(jangCfg)
+              ) {
                 detected.forceTextOnly = true
               }
               if (isStep37TextBridge(parsed)) {

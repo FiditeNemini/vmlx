@@ -1439,6 +1439,49 @@ class TestCleanupFinishedCacheStore:
         assert "bookkeeping_ms=" in caplog.text
         assert "clear_memory_ms=" in caplog.text
 
+    def test_cleanup_releases_paged_request_refs_before_detach(self):
+        """Completed VLM prefixes must become cached-but-free LRU blocks.
+
+        Merely detaching the request table leaves ref_count=1 on every block,
+        permanently filling max_cache_blocks and preventing later prefixes
+        from being admitted or evicting older entries.
+        """
+        scheduler = MLLMScheduler.__new__(MLLMScheduler)
+        request = SimpleNamespace(
+            num_output_tokens=1,
+            _bypass_prefix_cache=True,
+            _extracted_cache=None,
+            _added_stop_tokens=set(),
+        )
+        block_table = object()
+        scheduler.running = {"paged-cleanup": request}
+        scheduler.block_aware_cache = SimpleNamespace(
+            _request_tables={
+                "paged-cleanup": SimpleNamespace(block_table=block_table)
+            }
+        )
+        scheduler.memory_aware_cache = None
+        scheduler.prefix_cache = None
+        scheduler.batch_generator = None
+        scheduler.stop_tokens = set()
+        scheduler.request_id_to_uid = {}
+        scheduler.uid_to_request_id = {}
+        scheduler.paged_cache_manager = MagicMock()
+        scheduler.requests = {"paged-cleanup": request}
+        scheduler.finished_req_ids = set()
+        scheduler._cleanup_detokenizer = MagicMock()
+
+        with patch("vmlx_engine.mllm_scheduler.clear_mlx_memory_cache"):
+            scheduler._cleanup_finished({"paged-cleanup"})
+
+        scheduler.paged_cache_manager.release_request_refs.assert_called_once_with(
+            block_table
+        )
+        scheduler.paged_cache_manager.detach_request.assert_called_once_with(
+            "paged-cleanup"
+        )
+        assert "paged-cleanup" not in scheduler.block_aware_cache._request_tables
+
     def test_mixed_swa_full_prefix_hit_skips_redundant_clean_store(self):
         scheduler = MLLMScheduler.__new__(MLLMScheduler)
         request = SimpleNamespace(

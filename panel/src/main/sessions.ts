@@ -385,6 +385,7 @@ const TEXT_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--disk-cache-dir',
   '--disk-cache-max-gb',
   '--enable-block-disk-cache',
+  '--disable-block-disk-cache',
   '--block-disk-cache-dir',
   '--block-disk-cache-max-gb',
   '--smelt',
@@ -462,6 +463,7 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--disk-cache-dir',
   '--disk-cache-max-gb',
   '--enable-block-disk-cache',
+  '--disable-block-disk-cache',
   '--block-disk-cache-dir',
   '--block-disk-cache-max-gb',
   '--image-mode',
@@ -3304,6 +3306,10 @@ export class SessionManager extends EventEmitter {
       if (blockDiskCacheMaxGb != null) {
         args.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
       }
+    } else if (cacheLaunchPolicy.effectiveUsePagedCache) {
+      // Paged cache defaults its SSD L2 on in the engine. Preserve an explicit
+      // UI opt-out instead of silently falling back to the engine default.
+      args.push('--disable-block-disk-cache')
     }
 
     // Performance

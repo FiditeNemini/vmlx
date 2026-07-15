@@ -165,6 +165,7 @@ def _prepare_runtime_weight_quantization(
     *,
     fallback_bits: list[int],
     context: str,
+    skip_shape_repair: bool = False,
 ) -> tuple[dict, int, int]:
     """Return ``(config, bits, group_size)`` safe for MLX model quantization."""
     qcfg = config.setdefault("quantization", {})
@@ -175,7 +176,8 @@ def _prepare_runtime_weight_quantization(
         qcfg.setdefault("group_size", jang_block_size)
     qcfg.setdefault("bits", _jang_default_bits(jang_cfg, fallback_bits))
 
-    config = _apply_runtime_quant_shape_repair(path, config, context=context)
+    if not skip_shape_repair:
+        config = _apply_runtime_quant_shape_repair(path, config, context=context)
     qcfg = config.setdefault("quantization", {})
     bits = int(qcfg.get("bits") or _jang_default_bits(jang_cfg, fallback_bits))
     if jang_block_size in _MLX_WEIGHT_QUANT_GROUP_SIZES:
@@ -2248,6 +2250,18 @@ def _load_jang_v2(
     _ensure_jang_family_runtime_supported(path, config)
     _normalize_step3p7_model_type(config)
 
+    from .jang_affine_storage import prepare_affine1_runtime_config
+
+    config, _affine1_storage_modules = prepare_affine1_runtime_config(
+        config, jang_cfg
+    )
+    if _affine1_storage_modules:
+        logger.info(
+            "  JANG affine-1 storage detected: %d modules will be widened "
+            "losslessly to native 2-bit MLX slots at load time",
+            len(_affine1_storage_modules),
+        )
+
     try:
         from ..native_mtp import maybe_apply_native_mtp
 
@@ -2264,11 +2278,12 @@ def _load_jang_v2(
     # bundle's safetensors here, infer the real (bits, gsz) per quantized
     # Linear from shape ratios, and patch the in-memory config when it
     # disagrees. Idempotent on already-good bundles.
-    config = _apply_runtime_quant_shape_repair(
-        path,
-        config,
-        context="JANG v2 pre-load",
-    )
+    if not _affine1_storage_modules:
+        config = _apply_runtime_quant_shape_repair(
+            path,
+            config,
+            context="JANG v2 pre-load",
+        )
 
     def _is_gemma4_unified_text_runtime_config(_cfg: dict) -> bool:
         return (
@@ -2336,6 +2351,7 @@ def _load_jang_v2(
         jang_cfg,
         fallback_bits=[4],
         context="JANG v2",
+        skip_shape_repair=bool(_affine1_storage_modules),
     )
     routed_block_size = _supported_routed_group_size(
         path,
@@ -2706,9 +2722,10 @@ def _load_jang_v2(
     # vmlx#114: cross-shard pre-fix for mixed-precision JANG (LLM v2 path).
     # Same rationale as the VLM site below: a module's .weight and .scales can
     # straddle a shard boundary, and per-shard pre-fix would silently skip it.
-    _shape_map_xshard = _collect_shard_shape_map(weight_files)
-    _pre_fix_bits_from_metadata(model, _shape_map_xshard, block_size)
-    del _shape_map_xshard
+    if not _affine1_storage_modules:
+        _shape_map_xshard = _collect_shard_shape_map(weight_files)
+        _pre_fix_bits_from_metadata(model, _shape_map_xshard, block_size)
+        del _shape_map_xshard
 
     _is_dsv4_model = str(config.get("model_type") or "") == "deepseek_v4"
     _dsv4_expert_pending = {}
@@ -2731,8 +2748,17 @@ def _load_jang_v2(
     )
     _mimo_v2_runtime_quantized_count = 0
 
+    _affine1_expanded_count = 0
     for sf in weight_files:
         weights = mx.load(str(sf))
+
+        if _affine1_storage_modules:
+            from .jang_affine_storage import expand_affine1_shard_mlx
+
+            weights, _expanded = expand_affine1_shard_mlx(
+                weights, _affine1_storage_modules
+            )
+            _affine1_expanded_count += _expanded
 
         # MXTQ dequant: detect tq_packed/tq_norms pairs, dequant to fp16,
         # then re-quantize to affine (uint32 .weight + .scales + .biases)
@@ -3074,6 +3100,20 @@ def _load_jang_v2(
         del _dsv4_ready_expert_weights
         gc.collect()
 
+    if _affine1_storage_modules:
+        if _affine1_expanded_count != len(_affine1_storage_modules):
+            raise RuntimeError(
+                "JANG affine-1 expansion count mismatch: "
+                f"expanded={_affine1_expanded_count}, "
+                f"manifest={len(_affine1_storage_modules)}"
+            )
+        logger.info(
+            "  JANG affine-1 expanded %d/%d packed weights without changing "
+            "codes, scales, or biases",
+            _affine1_expanded_count,
+            len(_affine1_storage_modules),
+        )
+
     if _dsv4_expert_pending:
         raise RuntimeError(
             "DSV4 routed expert shard staging ended with incomplete expert "
@@ -3235,6 +3275,18 @@ def _load_jang_v2_vlm(
     _normalize_gemma4_config_scalar_types(config)
     _ensure_jang_family_runtime_supported(path, config)
 
+    from .jang_affine_storage import prepare_affine1_runtime_config
+
+    config, _affine1_storage_modules = prepare_affine1_runtime_config(
+        config, jang_cfg
+    )
+    if _affine1_storage_modules:
+        logger.info(
+            "  JANG affine-1 VLM storage detected: %d modules will be widened "
+            "losslessly to native 2-bit MLX slots at load time",
+            len(_affine1_storage_modules),
+        )
+
     # JANG Gemma-4 VL bundles (E2B/E4B/26B-A4B/31B) are early-fusion
     # "gemma4_unified" architecture, but some converter revisions stamp the
     # top model_type as plain "gemma4". Upstream mlx_vlm.models.gemma4 is the
@@ -3267,6 +3319,7 @@ def _load_jang_v2_vlm(
         jang_cfg,
         fallback_bits=[4],
         context="JANG v2 VLM",
+        skip_shape_repair=bool(_affine1_storage_modules),
     )
     config["quantization"].setdefault("mode", _jang_quant_mode(jang_cfg, config))
     quant_mode = str(config["quantization"].get("mode") or "affine")
@@ -3696,19 +3749,23 @@ def _load_jang_v2_vlm(
         return None
 
     def get_class_predicate(p, m):
-        if skip_multimodal_module(p):
-            return False
         if not hasattr(m, "to_quantized"):
             return False
         # Path matches: same logic as before for "should this module be quantized?"
-        _matched = False
-        if _vlm_quant_module_path_candidates(
+        _candidates = _vlm_quant_module_path_candidates(
             p,
             str(config.get("model_type", "")),
-        ) & quantized_suffixes:
-            _matched = True
+        )
+        _matched = bool(_candidates & quantized_suffixes)
         if not _matched:
             return False
+        # mlx-vlm's generic predicate skips every vision/audio module because
+        # most upstream bundles leave those towers unquantized. JANG sidecars
+        # are authoritative: an explicitly matched .scales/.biases triplet
+        # must be materialized as a QuantizedLinear or its packed weight will
+        # otherwise land in a plain Linear and fail at the first media pass.
+        if skip_multimodal_module(p):
+            logger.debug("  Quantizing explicit JANG multimodal module: %s", p)
         # If quant_shape_inference patched a per-module override, return it as
         # a dict so nn.quantize honours the right bits/group_size for THIS
         # module. Otherwise fall back to True (uniform default_bits).
@@ -3745,9 +3802,10 @@ def _load_jang_v2_vlm(
     # headers (no data load) into a combined shape map so a module whose .weight
     # and .scales straddle a shard boundary still gets its bits pre-fixed before
     # load_weights. The per-shard call inside the loop below stays as a safety net.
-    _shape_map_xshard = _collect_shard_shape_map(weight_files)
-    _pre_fix_bits_from_metadata(model, _shape_map_xshard, block_size)
-    del _shape_map_xshard
+    if not _affine1_storage_modules:
+        _shape_map_xshard = _collect_shard_shape_map(weight_files)
+        _pre_fix_bits_from_metadata(model, _shape_map_xshard, block_size)
+        del _shape_map_xshard
 
     _gemma_ple_quantized_module_paths = {
         path
@@ -3757,8 +3815,16 @@ def _load_jang_v2_vlm(
         and hasattr(module, "group_size")
     }
     _gemma_ple_pending: dict[str, dict[str, mx.array]] = {}
+    _affine1_expanded_count = 0
     for sf in weight_files:
         shard_weights = mx.load(str(sf))
+        if _affine1_storage_modules:
+            from .jang_affine_storage import expand_affine1_shard_mlx
+
+            shard_weights, _expanded = expand_affine1_shard_mlx(
+                shard_weights, _affine1_storage_modules
+            )
+            _affine1_expanded_count += _expanded
         shard_weights = {
             k: v for k, v in shard_weights.items() if not k.endswith(".importance")
         }
@@ -4079,6 +4145,20 @@ def _load_jang_v2_vlm(
         model.load_weights(list(shard_weights.items()), strict=False)
         del shard_weights
         gc.collect()
+
+    if _affine1_storage_modules:
+        if _affine1_expanded_count != len(_affine1_storage_modules):
+            raise RuntimeError(
+                "JANG affine-1 VLM expansion count mismatch: "
+                f"expanded={_affine1_expanded_count}, "
+                f"manifest={len(_affine1_storage_modules)}"
+            )
+        logger.info(
+            "  JANG affine-1 VLM expanded %d/%d packed weights without "
+            "changing codes, scales, or biases",
+            _affine1_expanded_count,
+            len(_affine1_storage_modules),
+        )
 
     if _gemma_ple_pending:
         pending_keys = sorted(
@@ -5842,6 +5922,39 @@ def _post_load_quantization_overrides(
     """
     if not isinstance(config, dict):
         return None
+    jang_quantization = (
+        jang_cfg.get("quantization")
+        if isinstance(jang_cfg, dict)
+        and isinstance(jang_cfg.get("quantization"), dict)
+        else {}
+    )
+    manifest = jang_quantization.get("tensor_quantization_manifest")
+    manifest_schema = int(
+        jang_quantization.get("tensor_quantization_manifest_schema", 0) or 0
+    )
+    if (
+        manifest_schema >= 2
+        and jang_quantization.get("method") == "jang-affine-discrete"
+        and isinstance(manifest, dict)
+        and manifest
+    ):
+        # Schema-2 discrete-affine bundles make every module's physical layout
+        # explicit. That metadata resolves packed-shape ambiguities such as
+        # 2b/g128 versus 4b/g64 in a quantized vision tower. Affine-1 storage
+        # widens its codes to native two-bit slots before this post-load pass.
+        overrides = {}
+        for name, entry in manifest.items():
+            if not isinstance(entry, dict):
+                continue
+            bits = int(entry.get("bits", 0) or 0)
+            storage_bits = int(entry.get("storage_bits", bits) or bits)
+            group_size = int(entry.get("group_size", 0) or 0)
+            if storage_bits == 1:
+                bits = 2
+            if bits and group_size:
+                overrides[name] = {"bits": bits, "group_size": group_size}
+        if overrides:
+            return overrides
     text_config = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
     model_type = str(config.get("model_type") or text_config.get("model_type") or "")
     if model_type == "openpangu_v2" and isinstance(jang_cfg, dict):
@@ -5851,9 +5964,7 @@ def _post_load_quantization_overrides(
         # are shape-ambiguous (2-bit/gs128 packs to the same [24,640]+[24,80]
         # as 8-bit/gs32) and the shape walk mis-infers them — the Swift port
         # hit exactly this. The manifest is authoritative; trust it wholesale.
-        manifest = (jang_cfg.get("quantization") or {}).get(
-            "tensor_quantization_manifest"
-        )
+        manifest = jang_quantization.get("tensor_quantization_manifest")
         if isinstance(manifest, dict) and manifest:
             overrides = {
                 name: {"bits": entry["bits"], "group_size": entry["group_size"]}

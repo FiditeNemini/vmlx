@@ -55,6 +55,7 @@ describe('cache control policy', () => {
     expect(updates).toEqual([
       ['enablePrefixCache', true],
       ['enableDiskCache', false],
+      ['enableBlockDiskCache', true],
       ['usePagedCache', true],
     ])
   })

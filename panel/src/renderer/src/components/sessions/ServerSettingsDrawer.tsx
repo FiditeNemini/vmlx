@@ -201,7 +201,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
           } else {
             base.usePagedCache = detected.usePagedCache
-            base.enableBlockDiskCache = detected.usePagedCache === true && base.enableBlockDiskCache
+            base.enableBlockDiskCache = detected.usePagedCache === true
           }
           setDetectedFamily(detected.family)
           setDetectedCacheSubtype(detected.cacheSubtype)

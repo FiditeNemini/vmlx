@@ -2,6 +2,22 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.10] - 2026-07-14
+
+### Added
+- Added lossless runtime support for JANG discrete-affine 1-bit storage. One-bit codes stay compact on disk and widen only to MLX's native two-bit slots during load; schema-2 tensor manifests remain authoritative for per-module bits and group sizes across text and multimodal towers.
+- Runtime-verified affine-JANG Qwen hybrid bundles retain image and video routing instead of being forced text-only.
+
+### Changed
+- SSD block L2 now defaults on whenever compatible paged prefix caching is active in the engine and Electron UI. The visible toggle remains authoritative and emits an explicit `--disable-block-disk-cache` opt-out when disabled.
+
+### Fixed
+- Completed multimodal requests now release their paged-block references before detaching request state, restoring LRU eviction, new-prefix admission, and continued L2 writes after the in-memory block pool reaches capacity.
+
+### Verified
+- Real Electron UI proof on the M5 Max covered Bonsai 27B 1-bit and ternary text, reasoning modes, native shell tools, exact image and video prompts, multi-turn long-context recall, hybrid GDN/SSM companion state, q4 attention-cache storage, L2 restart hits, and forced block eviction/admission.
+- Release candidate gates passed 276 focused engine/cache tests, 2,206 panel tests with 3 intentional skips, and TypeScript typecheck.
+
 ## [1.6.8] - 2026-07-12
 
 ### Fixed

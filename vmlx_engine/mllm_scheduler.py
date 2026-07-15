@@ -3390,10 +3390,23 @@ class MLLMScheduler:
                     del self.uid_to_request_id[uid]
                 del self.request_id_to_uid[request_id]
 
-            # Clean up paged cache request tracking to free tensor references
+            # Release the completed request's paged-block refs before detaching
+            # its tracking table.  Detaching alone leaves every stored block at
+            # ref_count=1, so the free LRU queue stays empty forever once the
+            # pool reaches max_cache_blocks.  That prevents both LRU eviction
+            # and admission of newer prefixes in long-running VLM sessions.
+            paged_entry = None
             if self.block_aware_cache is not None:
-                self.block_aware_cache._request_tables.pop(request_id, None)
+                paged_entry = self.block_aware_cache._request_tables.pop(
+                    request_id, None
+                )
             if self.paged_cache_manager is not None:
+                block_table = (
+                    getattr(paged_entry, "block_table", None)
+                    if paged_entry is not None
+                    else self.paged_cache_manager.get_block_table(request_id)
+                )
+                self.paged_cache_manager.release_request_refs(block_table)
                 self.paged_cache_manager.detach_request(request_id)
 
             # Remove from master request dict to free output_tokens and cache refs

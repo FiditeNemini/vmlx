@@ -134,8 +134,8 @@ def test_plain_qwen3_moe_auto_mode_keeps_loader_turboquant_enabled(tmp_path, mon
     assert os.environ.get("VMLX_DISABLE_TQ_KV") is None
 
 
-def test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_stored_kv_q4(tmp_path, monkeypatch):
-    """Qwen3.5/3.6 hybrid SSM uses selective attention TQ and stored q4 KV."""
+def test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_lossless_stored_kv(tmp_path, monkeypatch):
+    """Qwen3.5/3.6 keeps live attention TQ without lossy stored KV/SSM restore."""
 
     (tmp_path / "config.json").write_text(json.dumps({
         "model_type": "qwen3_5_moe",
@@ -147,15 +147,18 @@ def test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_stored_kv_q4(t
     monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
     monkeypatch.delenv("VMLX_FORCE_TQ_AUTO", raising=False)
     monkeypatch.delenv("VMLX_ALLOW_HYBRID_KV_QUANT", raising=False)
+    monkeypatch.delenv("VMLX_DISABLE_SSM_DISK_RESTORE", raising=False)
+    monkeypatch.delenv("VMLX_ALLOW_UNSAFE_QWEN_SSM_DISK_RESTORE", raising=False)
 
     args = _serve_args(str(tmp_path), kv_cache_quantization=None)
 
     _run_serve_until_uvicorn(monkeypatch, args)
 
-    assert args.kv_cache_quantization == "q4"
+    assert args.kv_cache_quantization == "none"
     assert args.kv_cache_quantization_explicit is False
     assert os.environ.get("VMLX_DISABLE_TQ_KV") is None
     assert os.environ.get("VMLX_FORCE_TQ_AUTO") == "1"
+    assert os.environ.get("VMLX_DISABLE_SSM_DISK_RESTORE") == "1"
 
 
 def test_mimo_v2_auto_mode_keeps_prefix_cache_lossless_by_default(tmp_path, monkeypatch):

@@ -8,6 +8,7 @@ mixed built-in/MCP tool calls on DSV4.
 """
 
 from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
+from vmlx_engine.loaders.dsv4_chat_encoder import select_tools_for_explicit_request
 
 
 class DSV4LikeTokenizer:
@@ -29,6 +30,66 @@ class DSV4LikeTokenizer:
 class PlainTokenizer:
     def apply_chat_template(self, messages, **_kwargs):
         return "\n".join((message.get("content") or "") for message in messages)
+
+
+def test_dsv4_encoder_prompt_tools_narrow_to_explicit_latest_user_tool():
+    tools = [
+        {"type": "function", "function": {"name": "read_file"}},
+        {"type": "function", "function": {"name": "run_command"}},
+    ]
+    messages = [
+        {"role": "user", "content": "Use the run_command tool exactly once."},
+        {"role": "assistant", "content": "", "tool_calls": []},
+        {"role": "tool", "content": "prior result"},
+    ]
+
+    selected = select_tools_for_explicit_request(messages, tools)
+
+    assert selected == [tools[1]]
+
+
+def test_dsv4_encoder_prompt_tools_keep_all_when_no_registered_name_is_mentioned():
+    tools = [
+        {"type": "function", "function": {"name": "read_file"}},
+        {"type": "function", "function": {"name": "run_command"}},
+    ]
+
+    selected = select_tools_for_explicit_request(
+        [{"role": "user", "content": "Use the built-in shell tool."}],
+        tools,
+    )
+
+    assert selected == tools
+
+
+def test_dsv4_encoder_prompt_tools_preserve_recent_tool_schema_on_continuation():
+    tools = [
+        {"type": "function", "function": {"name": "read_file"}},
+        {"type": "function", "function": {"name": "run_command"}},
+    ]
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Use the run_command tool exactly once to create a file named "
+                "z.txt. Write the text Z7 into that file."
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "run_command", "arguments": {"command": "printf OK42"}}}
+            ],
+        },
+        {"role": "tool", "content": "$ printf OK42\n\nOK42"},
+        {"role": "assistant", "content": "OK42"},
+        {"role": "user", "content": "Add one to the previous number."},
+    ]
+
+    selected = select_tools_for_explicit_request(messages, tools)
+
+    assert selected == [tools[1]]
 
 
 def test_dsv4_fallback_does_not_invent_arg1_for_zero_arg_tool():
@@ -140,6 +201,165 @@ def test_dsv4_schema_only_prompt_gets_concrete_per_tool_examples():
     assert injected != schema_only
     assert '<｜DSML｜invoke name="get_current_datetime">' in injected
     assert '<｜DSML｜invoke name="smoke__echo">' in injected
+
+
+def test_dsv4_explicit_run_command_binds_exact_request_value_without_placeholder():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": "Run a shell command.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+    ]
+    user_request = (
+        "Use the run_command tool exactly once to create a file named "
+        "dsv4_ui_tool_probe.txt. Write the text DSV4_TOOL_OK into that file."
+    )
+
+    injected = check_and_inject_fallback_tools(
+        f"<｜User｜>{user_request}<｜Assistant｜>",
+        [{"role": "user", "content": user_request}],
+        tools,
+        DSV4LikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True},
+        tool_parser_id="dsml",
+    )
+
+    assert "The current user explicitly named an available tool." in injected
+    assert (
+        '<｜DSML｜parameter name="command" string="true">'
+        "printf %s DSV4_TOOL_OK > dsv4_ui_tool_probe.txt"
+        "</｜DSML｜parameter>"
+    ) in injected
+    assert "Tool: read_file" not in injected
+    assert '<｜DSML｜invoke name="read_file">' not in injected
+    assert "VALUE HERE" not in injected
+
+
+def test_dsv4_explicit_direct_command_binds_only_text_before_followup_sentence():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    user_request = (
+        "Use run_command to run exactly: printf DSV4_TOOL_OK . "
+        "After the tool returns, reply only: DSV4_TOOL_OK"
+    )
+
+    injected = check_and_inject_fallback_tools(
+        f"<｜User｜>{user_request}<｜Assistant｜>",
+        [{"role": "user", "content": user_request}],
+        tools,
+        DSV4LikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True},
+        tool_parser_id="dsml",
+    )
+
+    assert (
+        '<｜DSML｜parameter name="command" string="true">'
+        "printf DSV4_TOOL_OK</｜DSML｜parameter>"
+    ) in injected
+    assert "After the tool returns" not in injected.split(
+        '<｜DSML｜parameter name="command" string="true">', 1
+    )[1].split("</｜DSML｜parameter>", 1)[0]
+
+
+def test_dsv4_fallback_preserves_recent_tool_schema_on_later_user_turn():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        },
+    ]
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Use the run_command tool exactly once to create a file named "
+                "z.txt. Write the text Z7 into that file."
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "run_command",
+                        "arguments": {"command": "printf \"%s\" \"Z7\" > z.txt"},
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": "$ printf Z7\n\nZ7"},
+        {"role": "assistant", "content": "Z7"},
+        {"role": "user", "content": "Add one to the previous number."},
+    ]
+
+    injected = check_and_inject_fallback_tools(
+        "<｜User｜>Add one to the previous number.<｜Assistant｜>",
+        messages,
+        tools,
+        DSV4LikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True},
+        tool_parser_id="dsml",
+    )
+
+    assert "Tool: run_command" in injected
+    assert "The current user explicitly named an available tool." in injected
+    assert '<｜DSML｜invoke name="run_command">' in injected
+    assert (
+        '<｜DSML｜parameter name="command" string="true">'
+        "printf %s Z7 > z.txt</｜DSML｜parameter>"
+    ) in injected
+    assert "Tool: read_file" not in injected
+    assert '<｜DSML｜invoke name="read_file">' not in injected
 
 
 def test_lfm2_fallback_for_file_request_forbids_content_only_pseudo_call():

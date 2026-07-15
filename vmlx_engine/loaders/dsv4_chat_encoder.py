@@ -64,11 +64,93 @@ import copy
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def select_tools_for_explicit_request(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]],
+) -> Optional[List[Dict[str, Any]]]:
+    """Keep DSV4's prompt focused when the latest user names a tool.
+
+    The request may still authorize the full tool array for output parsing and
+    execution.  This helper only limits what the canonical DSV4 encoder places
+    in the prompt.  Without it, one explicit ``run_command`` request expands to
+    several thousand tokens of unrelated schemas/examples and live DSV4 copies
+    those schemas or emits an empty/no-op argument instead of the requested
+    value.
+    """
+    if not tools:
+        return tools
+
+    request_text = ""
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            request_text = content
+        elif isinstance(content, list):
+            request_text = "\n".join(
+                str(part.get("text") or part.get("content") or "")
+                for part in content
+                if isinstance(part, dict)
+            )
+        break
+    if not request_text:
+        return tools
+
+    selected: List[Dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        func = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        name = func.get("name") if isinstance(func, dict) else None
+        if not isinstance(name, str) or not name:
+            continue
+        if re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])",
+            request_text,
+        ):
+            selected.append(tool)
+    if selected:
+        return selected
+
+    # A later user turn normally stops naming the tool even though Responses
+    # history still carries the assistant function_call and its output. Keep
+    # the same schema set in that continuation prompt; expanding back to every
+    # enabled coding tool changes the DSV4 prefix and makes the terminal native
+    # composite disk block impossible to match after a restart.
+    recent_call_names: set[str] = set()
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        for tool_call in message.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            func = tool_call.get("function")
+            name = func.get("name") if isinstance(func, dict) else None
+            if isinstance(name, str) and name:
+                recent_call_names.add(name)
+        if recent_call_names:
+            break
+    if recent_call_names:
+        historical = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            func = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+            name = func.get("name") if isinstance(func, dict) else None
+            if name in recent_call_names:
+                historical.append(tool)
+        if historical:
+            return historical
+    return tools
 
 
 def _default_encoding_dirs() -> List[Path]:
@@ -269,6 +351,13 @@ def apply_chat_template(
     """
     thinking_mode, effort = _resolve_mode_and_effort(enable_thinking, reasoning_effort)
     messages = copy.deepcopy(messages)
+    prompt_tools = select_tools_for_explicit_request(messages, tools)
+    if prompt_tools and tools and len(prompt_tools) < len(tools):
+        logger.info(
+            "DSV4 explicit-tool prompt narrowed from %d schemas to %d",
+            len(tools),
+            len(prompt_tools),
+        )
 
     # DSV4's bundled encoder predates the strict-template normalization used
     # by the Responses adapter. It expects OpenAI tool-call
@@ -291,7 +380,7 @@ def apply_chat_template(
     # it, inject onto the first message. DSV4 encoder conventions require
     # `tools` to live on a system/developer message — see test_chat.py in
     # jang_tools.dsv4.
-    if tools and messages:
+    if prompt_tools and messages:
         # Ensure there's a system message first; tools go on it.
         has_system_with_tools = any(
             m.get("role") == "system" and m.get("tools") for m in messages
@@ -300,11 +389,11 @@ def apply_chat_template(
             msgs_out: List[Dict[str, Any]] = []
             if messages and messages[0].get("role") == "system":
                 sys_msg = dict(messages[0])
-                sys_msg["tools"] = tools
+                sys_msg["tools"] = prompt_tools
                 msgs_out.append(sys_msg)
                 msgs_out.extend(messages[1:])
             else:
-                msgs_out.append({"role": "system", "content": "", "tools": tools})
+                msgs_out.append({"role": "system", "content": "", "tools": prompt_tools})
                 msgs_out.extend(messages)
             messages = msgs_out
 

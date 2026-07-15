@@ -295,6 +295,63 @@ def check_and_inject_fallback_tools(
                 requested.append(tool)
         return requested or tools
 
+    def _recent_tool_call_arguments() -> dict[str, dict[str, Any]]:
+        calls: dict[str, dict[str, Any]] = {}
+        for message in reversed(messages or []):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                func = tool_call.get("function")
+                name = func.get("name") if isinstance(func, dict) else None
+                if isinstance(name, str) and name:
+                    args = func.get("arguments") if isinstance(func, dict) else {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except (json.JSONDecodeError, TypeError):
+                            args = {}
+                    calls[name] = args if isinstance(args, dict) else {}
+            if calls:
+                break
+        return calls
+
+    recent_tool_call_arguments = _recent_tool_call_arguments()
+
+    def _recently_called_tools(tools: list[dict]) -> list[dict]:
+        """Keep fallback schemas stable after a Responses tool round."""
+        if not recent_tool_call_arguments:
+            return tools
+        selected = [
+            tool
+            for tool in tools
+            if _tool_props(tool)[0] in recent_tool_call_arguments
+        ]
+        return selected or tools
+
+    def _historical_explicit_tool_request_text(tool_name: str) -> str:
+        for message in reversed(messages or []):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = "\n".join(
+                    str(part.get("text") or part.get("content") or "")
+                    for part in content
+                    if isinstance(part, dict)
+                )
+            else:
+                continue
+            if re.search(
+                rf"(?<![A-Za-z0-9_]){re.escape(tool_name)}(?![A-Za-z0-9_])",
+                text,
+            ):
+                return text
+        return ""
+
     zaya_prompt_tools = (
         _requested_tools(template_tools)
         if is_zaya_native_tool_prompt
@@ -309,23 +366,117 @@ def check_and_inject_fallback_tools(
         else template_tools
     )
 
+    def _derive_dsml_request_param_value(tool_name: str, param: str) -> str:
+        """Bind concrete DSML examples only to values present in this request.
+
+        DSV4 copies its fallback examples aggressively.  Empty invokes leave the
+        model to echo the surrounding schema, while placeholder values corrupt
+        real tool arguments.  Keep the safe empty-example default, but when the
+        user explicitly names a tool and supplies a value, carry that exact value
+        into the canonical DSML example.
+        """
+        normalized_tool = tool_name.strip().lower()
+        normalized_param = param.strip().lower()
+        binding_text = request_text
+        if not _request_mentions_tool_name(tool_name):
+            binding_text = (
+                _historical_explicit_tool_request_text(tool_name)
+                or request_text
+            )
+
+        if normalized_tool == "run_command" and normalized_param == "command":
+            direct_patterns = (
+                r'\brun\s+exactly:\s*`([^`\n]{1,240})`',
+                r'\brun\s+exactly:\s*([^\n]{1,240}?)(?:\s+\.\s+(?:After|Then)\b|$)',
+                r'(?<![A-Za-z0-9_])command\s+`([^`\n]{1,240})`',
+                r'(?<![A-Za-z0-9_])command\s+["\u201c]([^"\u201d\n]{1,240})["\u201d]',
+            )
+            for pattern in direct_patterns:
+                match = re.search(pattern, binding_text, flags=re.IGNORECASE)
+                if match:
+                    return match.group(1).strip().rstrip(".,;:")
+
+            create_file = re.search(
+                r"\bcreate\s+a\s+file\s+named\s+([A-Za-z0-9_.:/-]{1,120}).*?"
+                r"\bWrite(?:\s+the\s+text)?\s+([A-Za-z0-9_.:-]{1,120})\s+"
+                r"into\s+that\s+file",
+                binding_text,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if create_file:
+                path, text = (part.strip() for part in create_file.groups())
+                path = path.rstrip(".,;:!?")
+                return f"printf %s {shlex.quote(text)} > {shlex.quote(path)}"
+
+        for obj_match in re.finditer(r"\{[^{}]{1,400}\}", binding_text):
+            try:
+                obj = json.loads(obj_match.group(0))
+            except json.JSONDecodeError:
+                continue
+            value = obj.get(param) if isinstance(obj, dict) else None
+            if isinstance(value, str) and 0 < len(value) <= 240:
+                return value
+
+        name = re.escape(param)
+        patterns = (
+            rf"\b{name}\s+argument\s+must\s+be\s+(?:the\s+)?literal\s+string\s+[`'\"]?([A-Za-z0-9][A-Za-z0-9_.:-]{{0,119}})",
+            rf"\b{name}\s*(?:=|:|to|is)\s*[`'\"]?([A-Za-z0-9][A-Za-z0-9_.:-]{{0,119}})",
+            rf"\bwith\s+{name}\s+[`'\"]?([A-Za-z0-9][A-Za-z0-9_.:-]{{0,119}})",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, binding_text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).rstrip(".,;:!?`'\"")
+        historical = recent_tool_call_arguments.get(tool_name, {}).get(param)
+        if isinstance(historical, str):
+            return historical
+        if historical is not None:
+            return json.dumps(historical, ensure_ascii=False)
+        return ""
+
     def _render_dsml_tool_calls_example(tools: list[dict]) -> str:
         # DSV4 already has the generic DSML parameter grammar in its native
-        # template. Do not inject placeholder parameter values here: live DSV4
-        # copied `VALUE HERE` / `string=` into real tool arguments after a
-        # tool-result round. This example only binds concrete tool names to the
-        # canonical wrapper; the parameter list above supplies the arg names.
-        # Render one wrapper per tool so the prompt does not teach "call every
-        # available tool at once" during chained-tool requests.
+        # template. Never inject placeholder values: live DSV4 copied
+        # `VALUE HERE` / `string=` into real tool arguments after a tool-result
+        # round. Bind parameters only when the current request names that tool
+        # and supplies every required value; otherwise keep the safe empty
+        # invoke. Render one wrapper per tool so the prompt does not teach
+        # "call every available tool at once" during chained-tool requests.
         blocks: list[str] = []
         for tool in tools:
-            name, _props = _tool_props(tool)
-            blocks.append(
-                "<｜DSML｜tool_calls>\n"
-                f'<｜DSML｜invoke name="{name}">\n'
-                "</｜DSML｜invoke>\n"
-                "</｜DSML｜tool_calls>"
+            name, props = _tool_props(tool)
+            func = _tool_func(tool)
+            params = func.get("parameters", {}) or {}
+            schemas = params.get("properties", {}) if isinstance(params, dict) else {}
+            required = set(params.get("required", []) if isinstance(params, dict) else [])
+            explicitly_requested = (
+                _request_mentions_tool_name(name)
+                or name in recent_tool_call_arguments
             )
+            values = {
+                param: _derive_dsml_request_param_value(name, param)
+                for param in props
+            }
+            has_all_required = all(values.get(param) for param in required)
+
+            lines = [
+                "<｜DSML｜tool_calls>",
+                f'<｜DSML｜invoke name="{name}">',
+            ]
+            if explicitly_requested and has_all_required:
+                for param in props:
+                    value = values.get(param)
+                    if not value:
+                        continue
+                    schema = schemas.get(param, {}) if isinstance(schemas, dict) else {}
+                    is_string = not isinstance(schema, dict) or schema.get("type", "string") == "string"
+                    string_attr = "true" if is_string else "false"
+                    lines.append(
+                        f'<｜DSML｜parameter name="{param}" string="{string_attr}">'
+                        f"{value}</｜DSML｜parameter>"
+                    )
+            lines.extend(["</｜DSML｜invoke>", "</｜DSML｜tool_calls>"])
+            blocks.append("\n".join(lines))
         return "\n\n".join(blocks)
 
     def _render_xml_examples(
@@ -601,11 +752,24 @@ def check_and_inject_fallback_tools(
     # requests. Detect by the canonical DSV4 turn tokens already present in
     # the rendered prompt and inject the parser-matching format.
     if is_dsv4_prompt:
+        if explicit_tool_requested:
+            dsv4_prompt_tools = _requested_tools(template_tools)
+        else:
+            dsv4_prompt_tools = _recently_called_tools(template_tools)
         dsv4_lines = [
             "You have access to these tools. Call them using DSML format.",
             "",
         ]
-        for idx, tool in enumerate(template_tools):
+        if explicit_tool_requested or recent_tool_call_arguments:
+            dsv4_lines.extend(
+                [
+                    "The current user explicitly named an available tool.",
+                    "Your next assistant output must be exactly one canonical DSML tool call before any prose.",
+                    "Copy the concrete parameter value from the matching example below exactly; do not repeat the schema lines.",
+                    "",
+                ]
+            )
+        for idx, tool in enumerate(dsv4_prompt_tools):
             func = _tool_func(tool)
             name = func.get("name", "") or "unknown_tool"
             dsv4_lines.append(f"Tool: {name}")
@@ -637,12 +801,12 @@ def check_and_inject_fallback_tools(
             + "\n\nWhen you decide to call a tool, emit ONLY one canonical DSML tool_calls block for the next tool. "
             "Do not emit JSON, markdown, prose, generic XML tool tags, or bare invoke blocks outside the wrapper.\n"
             "Only use the tag name <｜DSML｜invoke>; never emit <｜DSML｜invuse>, <｜DSML｜invue>, <｜DSML｜inv>, or any shortened invoke tag.\n"
-            + _render_dsml_tool_calls_example(template_tools)
+            + _render_dsml_tool_calls_example(dsv4_prompt_tools)
             + "\n\n"
             "Do not combine every available tool just because it is listed. "
             + (
                 "For a request to list the current directory, set the path parameter to \".\" exactly. "
-                if _has_directory_path_tool(template_tools)
+                if _has_directory_path_tool(dsv4_prompt_tools)
                 else ""
             )
             + "Do not explain inability to call tools; emit the DSML call."

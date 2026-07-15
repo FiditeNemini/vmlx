@@ -1575,6 +1575,57 @@ def test_dsv4_generator_captures_prompt_snapshot_when_cache_store_enabled(monkey
     assert prompt_responses[0].prompt_cache_snapshot == ["snapshot"]
 
 
+def test_dsv4_cache_hit_extends_clean_snapshot_from_uncached_tail(monkeypatch):
+    """A DSV4 hit must donate the expanded N-1 terminal state.
+
+    Electron tool loops append function-call and function-output records after
+    a cached user prefix.  The generator must snapshot after feeding only that
+    new tail (except the final prompt token), so a later process can restore
+    the post-tool terminal state without a full prompt re-prefill.
+    """
+    import mlx.core as mx
+
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    monkeypatch.setenv("DSV4_PROMPT_SNAPSHOT_MIN_TOKENS", "0")
+
+    model_calls = []
+
+    class _Model:
+        def __call__(self, ids, cache=None):
+            model_calls.append(ids.tolist()[0])
+            return mx.array([[[0.0, 1.0, 0.0]]], dtype=mx.float32)
+
+    snapshots = []
+
+    def _snapshot(cache):
+        snapshots.append(cache)
+        return ["extended-snapshot"]
+
+    monkeypatch.setattr(
+        DSV4BatchGenerator,
+        "_snapshot_dsv4_cache",
+        staticmethod(_snapshot),
+    )
+    restored_cache = [object()]
+    gen = DSV4BatchGenerator(_Model(), capture_prompt_snapshot=True)
+    gen._warmed_up = True
+    gen.insert(
+        [[70, 71, 72]],
+        max_tokens=[2],
+        caches=[restored_cache],
+        all_tokens=[[10, 11, 12, 70, 71, 72]],
+    )
+
+    prompt_responses, generation_responses = gen.next()
+
+    assert prompt_responses
+    assert not generation_responses
+    assert model_calls == [[70, 71], [72]]
+    assert snapshots == [restored_cache]
+    assert prompt_responses[0].prompt_cache_snapshot == ["extended-snapshot"]
+
+
 def test_dsv4_generator_skips_prompt_snapshot_for_short_cache_store_prompt_by_default(monkeypatch):
     """Short DSV4 prompts must not pay the composite snapshot store cost.
 

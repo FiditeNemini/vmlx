@@ -781,17 +781,85 @@ class DSV4BatchGenerator:
                         r.finish_reason = "stop"
                         r.prompt_processed = True
                         continue
-                    _t_prefill_tail = time.perf_counter()
-                    last_logits = self._prefill_last_logits(
-                        r.prompt_tokens,
-                        r.cache,
-                        realize_before_clear=False,
+                    # Extend the restored terminal cache to the new N-1
+                    # prompt boundary before sampling.  A cache-hit request
+                    # may contain a substantial new tail (most notably the
+                    # function_call/output records in an Electron tool loop).
+                    # Previously we fed that entire tail in one pass, leaving
+                    # ``prompt_snapshot`` unset.  The scheduler then had to
+                    # keep the older terminal record forever because the live
+                    # cache was already contaminated by decode.  After a
+                    # process restart the next turn therefore restored only
+                    # the pre-tool prefix.
+                    #
+                    # The restored cache already represents the matched
+                    # prefix exactly.  Feed all remaining tokens except the
+                    # final one, snapshot that extended cache at the same N-1
+                    # boundary used by cold stores, then feed the final token
+                    # for first-token logits.  This is correctness-safe for
+                    # SWA + CSA/HCA and costs only the uncached tail; it never
+                    # re-prefills the matched prefix.
+                    should_capture_extension_snapshot = (
+                        self.capture_prompt_snapshot
+                        and len(r.context_tokens) >= 2
+                        and len(r.context_tokens) - 1
+                        >= self.prompt_snapshot_min_tokens
                     )
+                    _t_prefill_tail = time.perf_counter()
+                    if should_capture_extension_snapshot:
+                        tail_head = r.prompt_tokens[:-1]
+                        final_prompt_token = r.prompt_tokens[-1:]
+                        if tail_head:
+                            _ = self._prefill_last_logits(
+                                tail_head,
+                                r.cache,
+                                realize_before_clear=False,
+                            )
+                        try:
+                            _t_snapshot = time.perf_counter()
+                            r.prompt_snapshot = self._snapshot_dsv4_cache(r.cache)
+                            self._trace_timing(
+                                "cache_hit_extension_snapshot",
+                                _t_snapshot,
+                                r.uid,
+                                layers=len(r.prompt_snapshot or []),
+                                tail_tokens=len(tail_head),
+                            )
+                            if r.prompt_snapshot is not None:
+                                logger.info(
+                                    "DSV4Gen: captured cache-hit N-1 extension "
+                                    "snapshot (%d layers, uncached_head=%d, "
+                                    "full_N_minus_1=%d) for uid=%s",
+                                    len(r.prompt_snapshot),
+                                    len(tail_head),
+                                    len(r.context_tokens) - 1,
+                                    r.uid,
+                                )
+                        except Exception as _snap_err:
+                            logger.warning(
+                                "DSV4Gen: cache-hit extension snapshot failed: %s",
+                                _snap_err,
+                            )
+                            r.prompt_snapshot = None
+                        last_logits = self._prefill_last_logits(
+                            final_prompt_token,
+                            r.cache,
+                            realize_before_clear=False,
+                        )
+                    else:
+                        last_logits = self._prefill_last_logits(
+                            r.prompt_tokens,
+                            r.cache,
+                            realize_before_clear=False,
+                        )
                     self._trace_timing(
                         "cache_hit_tail_prefill",
                         _t_prefill_tail,
                         r.uid,
                         tokens=len(r.prompt_tokens),
+                        captured_extension_snapshot=(
+                            r.prompt_snapshot is not None
+                        ),
                     )
                     _t_sample = time.perf_counter()
                     sampled, logprobs = self._sample(

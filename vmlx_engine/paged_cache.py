@@ -804,7 +804,7 @@ class PagedCacheManager:
             return 0
         return total
 
-    def enforce_byte_budget(self) -> int:
+    def enforce_byte_budget(self, required_bytes: int = 0) -> int:
         """Evict free cached blocks until resident RAM is within the byte ceiling.
 
         Only blocks with ``ref_count == 0`` (not referenced by any in-flight
@@ -812,14 +812,24 @@ class PagedCacheManager:
         Eviction goes through ``_maybe_evict_cached_block``, which write-throughs
         to the L2 disk store (when present) before dropping the RAM mirror — so a
         later prefix hit re-promotes from disk instead of full-prefilling.
-        Evicts least-recently-used first. Returns the number of blocks evicted.
-        No-op when the ceiling is disabled (``max_resident_bytes <= 0``).
+        ``required_bytes`` reserves room for a payload that is about to be
+        admitted (for example an L2 disk promotion). This is important because
+        once a promoted block is referenced by the active request it is no
+        longer evictable; admission must therefore make room *before* the ref
+        becomes active. Evicts least-recently-used first and returns the number
+        of blocks evicted. No-op when the ceiling is disabled
+        (``max_resident_bytes <= 0``).
         """
         if self.max_resident_bytes <= 0:
             return 0
+        required_bytes = max(0, int(required_bytes or 0))
+        target_resident_bytes = max(
+            0,
+            self.max_resident_bytes - required_bytes,
+        )
         evicted = 0
         with self._lock:
-            if self.resident_bytes <= self.max_resident_bytes:
+            if self.resident_bytes <= target_resident_bytes:
                 return 0
             # LRU order: oldest access first. Only free (ref_count==0), still-cached
             # blocks are eligible; null block and in-flight blocks are excluded.
@@ -834,7 +844,7 @@ class PagedCacheManager:
             ]
             candidates.sort(key=lambda b: b.last_access)
             for block in candidates:
-                if self.resident_bytes <= self.max_resident_bytes:
+                if self.resident_bytes <= target_resident_bytes:
                     break
                 if self._maybe_evict_cached_block(block):
                     evicted += 1
@@ -1258,6 +1268,31 @@ class PagedCacheManager:
         Returns:
             The promoted CacheBlock, or None if allocation failed.
         """
+        resident_nbytes = self.estimate_block_nbytes(cache_data)
+        if self.max_resident_bytes > 0 and resident_nbytes > 0:
+            # L2 prefix lookup promotes blocks one at a time. Reserve room
+            # before assigning the request ref: after promotion ref_count=1,
+            # so normal byte-budget eviction must (correctly) leave the block
+            # alone. Without this gate a long disk prefix can promote far past
+            # the configured L1 ceiling and thrash during worker reconstruction.
+            # Returning None stops the chain at the largest admitted prefix;
+            # the scheduler safely prefills the remaining prompt tail.
+            self.enforce_byte_budget(required_bytes=resident_nbytes)
+            with self._lock:
+                if (
+                    resident_nbytes > self.max_resident_bytes
+                    or self.resident_bytes + resident_nbytes
+                    > self.max_resident_bytes
+                ):
+                    logger.info(
+                        "Skipping L2 block promotion: resident cache would "
+                        "exceed byte ceiling (%d + %d > %d bytes)",
+                        self.resident_bytes,
+                        resident_nbytes,
+                        self.max_resident_bytes,
+                    )
+                    return None
+
         if self.free_block_queue.num_free_blocks == 0:
             return None
 
@@ -1288,7 +1323,7 @@ class PagedCacheManager:
         block.token_count = token_count
         block.touch()
         if self.max_resident_bytes > 0:
-            self._note_resident(block, self.estimate_block_nbytes(cache_data))
+            self._note_resident(block, resident_nbytes)
         self.allocated_blocks[block.block_id] = block
 
         # Register in hash cache

@@ -89,6 +89,53 @@ def test_enforce_noop_when_within_budget():
     assert mgr.blocks[1].cache_data is not None
 
 
+def test_disk_promotion_reserves_budget_before_request_ref_is_pinned():
+    """A disk-prefix chain stops before active refs exceed the L1 cap."""
+
+    class _Arr:
+        def __init__(self, nbytes):
+            self.nbytes = nbytes
+
+    mgr = PagedCacheManager(
+        block_size=4,
+        max_blocks=10,
+        max_resident_bytes=1000,
+    )
+    first = mgr._promote_from_disk(b"a" * 32, [_Arr(600)], 4)
+    second = mgr._promote_from_disk(b"b" * 32, [_Arr(600)], 4)
+
+    assert first is not None
+    assert first.ref_count == 1
+    assert second is None
+    assert mgr.resident_bytes == 600
+    assert sum(b.cache_data is not None for b in mgr.blocks) == 1
+
+
+def test_disk_promotion_evicts_free_lru_mirror_to_make_room():
+    """Admission may evict an unreferenced L1 mirror before promoting L2."""
+
+    class _Arr:
+        def __init__(self, nbytes):
+            self.nbytes = nbytes
+
+    mgr = PagedCacheManager(
+        block_size=4,
+        max_blocks=10,
+        max_resident_bytes=1000,
+    )
+    old = mgr._promote_from_disk(b"a" * 32, [_Arr(700)], 4)
+    assert old is not None
+    old.ref_count = 0
+
+    new = mgr._promote_from_disk(b"b" * 32, [_Arr(600)], 4)
+
+    assert new is not None
+    assert old.cache_data is None
+    assert new.cache_data is not None
+    assert mgr.resident_bytes == 600
+    assert mgr.stats.evictions == 1
+
+
 def test_enforce_skips_keep_resident_native_state():
     """DSV4/ZAYA/rotating-SWA composite blocks are flagged keep_resident and must
     survive the byte ceiling — their RAM mirror has to outlive the async L2 write

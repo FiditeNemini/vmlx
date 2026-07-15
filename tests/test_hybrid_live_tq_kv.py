@@ -2,6 +2,53 @@ import json
 from types import SimpleNamespace
 
 
+def _qwen_hybrid_model_config():
+    return {
+        "model_type": "qwen3_5",
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "layer_types": [
+                "linear_attention",
+                "linear_attention",
+                "linear_attention",
+                "full_attention",
+            ],
+        },
+    }
+
+
+def test_qwen_hybrid_live_tq_has_conservative_family_default(monkeypatch):
+    from vmlx_engine.utils.turboquant_config import (
+        QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER,
+        resolve_compress_after,
+    )
+
+    monkeypatch.delenv("VMLINUX_TQ_COMPRESS_AFTER", raising=False)
+
+    assert resolve_compress_after({}, _qwen_hybrid_model_config()) == 256
+    assert QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER == 256
+
+
+def test_explicit_qwen_hybrid_live_tq_zero_remains_disabled(monkeypatch):
+    from vmlx_engine.utils.turboquant_config import resolve_compress_after
+
+    monkeypatch.delenv("VMLINUX_TQ_COMPRESS_AFTER", raising=False)
+
+    assert resolve_compress_after(
+        {"compress_after": 0}, _qwen_hybrid_model_config()
+    ) == 0
+
+
+def test_qwen_full_attention_only_does_not_take_hybrid_default(monkeypatch):
+    from vmlx_engine.utils.turboquant_config import resolve_compress_after
+
+    monkeypatch.delenv("VMLINUX_TQ_COMPRESS_AFTER", raising=False)
+    config = _qwen_hybrid_model_config()
+    config["text_config"]["layer_types"] = ["full_attention"] * 4
+
+    assert resolve_compress_after({}, config) == 0
+
+
 class NativeGatedDeltaState:
     """Sentinel for Qwen hybrid non-KV companion state."""
 

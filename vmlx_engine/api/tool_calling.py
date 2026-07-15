@@ -319,6 +319,36 @@ def check_and_inject_fallback_tools(
 
     recent_tool_call_arguments = _recent_tool_call_arguments()
 
+    def _tool_history_after_latest_user() -> tuple[set[str], bool]:
+        called: set[str] = set()
+        has_tool_result = False
+        for message in reversed(messages or []):
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") == "user":
+                break
+            if message.get("role") == "tool":
+                has_tool_result = True
+                continue
+            if message.get("role") != "assistant":
+                continue
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                func = tool_call.get("function")
+                name = func.get("name") if isinstance(func, dict) else None
+                if isinstance(name, str) and name:
+                    called.add(name)
+        return called, has_tool_result
+
+    tools_called_after_latest_user, tool_result_after_latest_user = (
+        _tool_history_after_latest_user()
+    )
+    qwen_tool_result_continuation = bool(
+        is_qwen_native_tool_prompt
+        and (tools_called_after_latest_user or tool_result_after_latest_user)
+    )
+
     def _recently_called_tools(tools: list[dict]) -> list[dict]:
         """Keep fallback schemas stable after a Responses tool round."""
         if not recent_tool_call_arguments:
@@ -365,6 +395,17 @@ def check_and_inject_fallback_tools(
         if is_lfm2_native_tool_prompt
         else template_tools
     )
+    qwen_prompt_tools = template_tools
+    if is_qwen_native_tool_prompt:
+        if qwen_tool_result_continuation:
+            if recent_tool_call_arguments:
+                qwen_prompt_tools = _recently_called_tools(template_tools)
+            elif explicit_tool_requested:
+                qwen_prompt_tools = _requested_tools(template_tools)
+        elif explicit_tool_requested:
+            qwen_prompt_tools = _requested_tools(template_tools)
+        elif recent_tool_call_arguments:
+            qwen_prompt_tools = _recently_called_tools(template_tools)
 
     def _derive_dsml_request_param_value(tool_name: str, param: str) -> str:
         """Bind concrete DSML examples only to values present in this request.
@@ -484,16 +525,24 @@ def check_and_inject_fallback_tools(
         wrapper_open: str,
         wrapper_close: str,
     ) -> str:
-        def _derive_run_command_value() -> str:
-            if not request_text:
+        def _derive_run_command_value(tool_name: str) -> str:
+            binding_text = request_text
+            if not _request_mentions_tool_name(tool_name):
+                binding_text = (
+                    _historical_explicit_tool_request_text(tool_name)
+                    or request_text
+                )
+            if not binding_text:
                 return ""
             direct_patterns = (
+                r'\brun\s+exactly:\s*`([^`\n]{1,240})`',
+                r'\brun\s+exactly:\s*([^\n]{1,240}?)(?:\s+\.\s+(?:After|Then)\b|$)',
                 r'(?<![A-Za-z0-9_])command\s+["“]([^"”\n]{1,240})["”]',
                 r"(?<![A-Za-z0-9_])command\s+`([^`\n]{1,240})`",
                 r"(?<![A-Za-z0-9_])command\s+([A-Za-z0-9_./:;|&%><=+,'\" -]{1,240})(?:[.\n]|$)",
             )
             for pattern in direct_patterns:
-                match = re.search(pattern, request_text, flags=re.IGNORECASE)
+                match = re.search(pattern, binding_text, flags=re.IGNORECASE)
                 if match:
                     return match.group(1).strip().rstrip(".,;:")
 
@@ -501,7 +550,7 @@ def check_and_inject_fallback_tools(
                 r"\bread\s+([A-Za-z0-9_.:/-]{1,120})\s+and\s+create\s+"
                 r"([A-Za-z0-9_.:/-]{1,120}).*?\bWrite(?:\s+the\s+text)?\s+"
                 r"([A-Za-z0-9_.:-]{1,120})\s+into\s+the\s+second\s+file",
-                request_text,
+                binding_text,
                 flags=re.IGNORECASE | re.DOTALL,
             )
             if read_then_create:
@@ -515,12 +564,15 @@ def check_and_inject_fallback_tools(
                 r"\bcreate\s+a\s+file\s+named\s+([A-Za-z0-9_.:/-]{1,120}).*?"
                 r"\bWrite(?:\s+the\s+text)?\s+([A-Za-z0-9_.:-]{1,120})\s+"
                 r"into\s+that\s+file",
-                request_text,
+                binding_text,
                 flags=re.IGNORECASE | re.DOTALL,
             )
             if create_file:
                 path, text = (part.strip() for part in create_file.groups())
                 return f"printf %s {shlex.quote(text)} > {shlex.quote(path)}"
+            historical = recent_tool_call_arguments.get(tool_name, {}).get("command")
+            if isinstance(historical, str):
+                return historical
             return ""
 
         def _request_param_value(tool_name: str, param: str) -> str:
@@ -530,7 +582,7 @@ def check_and_inject_fallback_tools(
                 normalized_tool == "run_command"
                 and normalized_param == "command"
             ):
-                command = _derive_run_command_value()
+                command = _derive_run_command_value(tool_name)
                 if command:
                     return command
             if not request_text:
@@ -877,12 +929,27 @@ def check_and_inject_fallback_tools(
             )
         )
     elif is_qwen_native_tool_prompt:
-        qwen_lines = [
-            "You have access to these tools. When a user asks you to use one, "
-            "you must call it instead of fabricating a result.",
-            "",
-        ]
-        if explicit_tool_requested and not tool_choice_required:
+        if qwen_tool_result_continuation:
+            completed_names = tools_called_after_latest_user or {
+                name
+                for name in (_tool_props(tool)[0] for tool in qwen_prompt_tools)
+                if name
+            }
+            completed = ", ".join(sorted(completed_names)) or "requested tool"
+            tool_prompt = (
+                "Native tool-result continuation: the requested tool already ran and its "
+                f"real result is present in the conversation. Completed tool(s): {completed}.\n"
+                "Do not emit another <tool_call>, do not repeat the command, and do not claim "
+                "that the tool still needs to run. Finish the user's requested visible answer "
+                "from the real tool result now."
+            )
+        else:
+            qwen_lines = [
+                "You have access to these tools. When a user asks you to use one, "
+                "you must call it instead of fabricating a result.",
+                "",
+            ]
+        if not qwen_tool_result_continuation and explicit_tool_requested and not tool_choice_required:
             qwen_lines.extend(
                 [
                     "The current user explicitly named an available tool.",
@@ -892,7 +959,7 @@ def check_and_inject_fallback_tools(
                     "",
                 ]
             )
-        if tool_choice_required:
+        if not qwen_tool_result_continuation and tool_choice_required:
             qwen_lines.extend(
                 [
                     "The current API request set tool_choice=required. You must emit exactly one native tool call before any prose.",
@@ -902,7 +969,7 @@ def check_and_inject_fallback_tools(
                     "",
                 ]
             )
-        for idx, tool in enumerate(template_tools):
+        for idx, tool in enumerate(qwen_prompt_tools if not qwen_tool_result_continuation else []):
             func = _tool_func(tool)
             name = func.get("name", "") or "unknown_tool"
             qwen_lines.append(f"Tool: {name}")
@@ -949,22 +1016,23 @@ def check_and_inject_fallback_tools(
                                 "it is file content or answer text."
                             )
             qwen_lines.append("")
-        tool_prompt = (
-            "\n".join(qwen_lines).rstrip()
-            + "\n\nWhen a tool call is needed, emit ONLY this native XML shape. "
-            "Do not emit JSON result data, markdown, prose, or a fake directory listing.\n"
-            + (
-                "Because tool_choice=required, the first assistant output for this turn must be one of the native tool calls below and nothing else.\n"
-                if tool_choice_required
-                else ""
+        if not qwen_tool_result_continuation:
+            tool_prompt = (
+                "\n".join(qwen_lines).rstrip()
+                + "\n\nWhen a tool call is needed, emit ONLY this native XML shape. "
+                "Do not emit JSON result data, markdown, prose, or a fake directory listing.\n"
+                + (
+                    "Because tool_choice=required, the first assistant output for this turn must be one of the native tool calls below and nothing else.\n"
+                    if tool_choice_required
+                    else ""
+                )
+                + _render_xml_examples(qwen_prompt_tools, "<tool_call>", "</tool_call>")
+                + (
+                    "\n\nFor a request to list the current directory, set path to \".\" exactly."
+                    if _has_directory_path_tool(qwen_prompt_tools)
+                    else ""
+                )
             )
-            + _render_xml_examples(template_tools, "<tool_call>", "</tool_call>")
-            + (
-                "\n\nFor a request to list the current directory, set path to \".\" exactly."
-                if _has_directory_path_tool(template_tools)
-                else ""
-            )
-        )
     elif is_xml_function_native_tool_prompt:
         xml_function_prompt_tools = _requested_tools(template_tools)
         xml_function_lines = [
@@ -1135,7 +1203,14 @@ def check_and_inject_fallback_tools(
                     for name in tool_names
                 )
             )
-        if not all(name in rendered for name in tool_names):
+        expected_tool_names = tool_names
+        if is_qwen_native_tool_prompt:
+            expected_tool_names = [
+                name
+                for name in (_tool_props(tool)[0] for tool in qwen_prompt_tools)
+                if name
+            ]
+        if not all(name in rendered for name in expected_tool_names):
             return False
         if is_dsv4_prompt:
             return "<｜DSML｜invoke" in rendered

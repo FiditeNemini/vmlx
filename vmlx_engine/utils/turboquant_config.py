@@ -12,6 +12,39 @@ from jang_tools.turboquant.config import TurboQuantConfig as _JangTurboQuantConf
 
 logger = logging.getLogger(__name__)
 
+QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER = 256
+_QWEN_HYBRID_MODEL_TYPES = frozenset(
+    {
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    }
+)
+
+
+def _is_qwen_hybrid_attention_config(model_config: dict | None) -> bool:
+    if not isinstance(model_config, dict):
+        return False
+    candidates = [model_config]
+    text_config = model_config.get("text_config")
+    if isinstance(text_config, dict):
+        candidates.append(text_config)
+    model_types = {
+        str(candidate.get("model_type") or "").lower()
+        for candidate in candidates
+    }
+    layer_types: list[str] = []
+    for candidate in candidates:
+        declared = candidate.get("layer_types")
+        if isinstance(declared, list) and declared:
+            layer_types = [str(value).lower() for value in declared]
+            break
+    return bool(model_types & _QWEN_HYBRID_MODEL_TYPES) and (
+        any(value in {"linear_attention", "gated_delta", "gated_delta_net"} for value in layer_types)
+        and any(value in {"full_attention", "attention"} for value in layer_types)
+    )
+
 
 def _layer_resident_bytes(layer) -> int:
     total = 0
@@ -70,9 +103,10 @@ def resolve_compress_after(tq_cfg: dict, model_config: dict | None = None) -> in
     """Resolve the live-encode threshold without silently widening numerics.
 
     ``VMLX_TQ_COMPRESS_AFTER`` is the explicit live-gate control. A bundle may
-    also own the setting in ``jang_config.turboquant``. There is intentionally
-    no implicit family default until that family passes the live coherence and
-    resident-memory gate documented in the issue ledger.
+    also own the setting in ``jang_config.turboquant`` (including an explicit
+    zero to disable live encode). Qwen3.5/3.6 hybrid attention/SSM models use a
+    conservative family default so attention KV is actually encoded while the
+    SSM/GatedDelta companion state remains native full precision.
     """
     override = os.environ.get("VMLX_TQ_COMPRESS_AFTER")
     if override is not None:
@@ -80,7 +114,11 @@ def resolve_compress_after(tq_cfg: dict, model_config: dict | None = None) -> in
             return max(0, int(override))
         except ValueError:
             raise ValueError("VMLINUX_TQ_COMPRESS_AFTER must be a non-negative integer")
-    return max(0, int(tq_cfg.get("compress_after", 0) or 0))
+    if "compress_after" in tq_cfg:
+        return max(0, int(tq_cfg.get("compress_after", 0) or 0))
+    if _is_qwen_hybrid_attention_config(model_config):
+        return QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER
+    return 0
 
 
 @dataclass

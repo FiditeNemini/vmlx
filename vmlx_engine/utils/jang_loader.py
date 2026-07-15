@@ -1665,7 +1665,6 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
                 "critical_value_bits": 4,
                 "critical_layers": [0, 1, 2, -3, -2, -1],
                 "seed": 42,
-                "compress_after": 0,
             }
             logger.info("  TurboQuant auto-enabled via VMLX_FORCE_TQ_AUTO=1")
         else:

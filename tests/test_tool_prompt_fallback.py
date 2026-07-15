@@ -32,6 +32,122 @@ class PlainTokenizer:
         return "\n".join((message.get("content") or "") for message in messages)
 
 
+def _qwen_prompt() -> str:
+    return """<|im_start|>system
+# Tools
+<tools>
+{"type":"function","function":{"name":"run_command"}}
+{"type":"function","function":{"name":"read_file"}}
+</tools>
+<tool_call>
+<function=example_function_name>
+<parameter=example_parameter_1>
+value_1
+</parameter>
+</function>
+</tool_call>
+<|im_end|>
+<|im_start|>user
+Use a tool.<|im_end|>
+<|im_start|>assistant
+""".strip()
+
+
+def _qwen_test_tools() -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": "Run a shell command.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+    ]
+
+
+def test_qwen_explicit_run_exactly_binds_command_and_narrows_schema():
+    tools = _qwen_test_tools()
+    user_request = (
+        "Use the run_command tool exactly once. Run exactly: "
+        "printf B1TOOL > bonsai_native.txt . "
+        "After the tool result, reply only: B1TOOL-OK"
+    )
+
+    injected = check_and_inject_fallback_tools(
+        _qwen_prompt(),
+        [{"role": "user", "content": user_request}],
+        tools,
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="qwen",
+    )
+
+    assert "run_command" in injected
+    assert "Tool: read_file" not in injected
+    assert "<function=read_file>" not in injected
+    assert (
+        "<parameter=command>\nprintf B1TOOL > bonsai_native.txt\n</parameter>"
+        in injected
+    )
+    command = injected.split("<parameter=command>", 1)[1].split("</parameter>", 1)[0]
+    assert "After the tool result" not in command
+
+
+def test_qwen_tool_result_continuation_prevents_duplicate_execution():
+    tools = _qwen_test_tools()
+    command = "printf B1TOOL > bonsai_native.txt"
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Use the run_command tool exactly once. Run exactly: "
+                f"{command} . After the tool result, reply only: B1TOOL-OK"
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "run_command", "arguments": {"command": command}}}
+            ],
+        },
+        {"role": "tool", "content": "B1TOOL"},
+    ]
+
+    injected = check_and_inject_fallback_tools(
+        _qwen_prompt(),
+        messages,
+        tools,
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="qwen",
+    )
+
+    assert "run_command" in injected
+    assert "already ran" in injected
+    assert "Do not emit another <tool_call>" in injected
+    assert "<function=run_command>" not in injected
+    assert f"<parameter=command>\n{command}\n</parameter>" not in injected
+    assert "Tool: read_file" not in injected
+
+
 def test_dsv4_encoder_prompt_tools_narrow_to_explicit_latest_user_tool():
     tools = [
         {"type": "function", "function": {"name": "read_file"}},

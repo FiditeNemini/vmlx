@@ -198,6 +198,7 @@ COMMANDS: dict[str, list[str]] = {
             "or cache_entries_endpoint_lists_paged_prefix_blocks "
             "or cache_warm_endpoint_prefills_and_stores_block_cache "
             "or clear_cache_prefix_clears_prefix_l2_without_multimodal "
+            "or clear_cache_ram_preserves_every_prefix_l2_store "
             "or native_cache_status_reports_dsv4_separately_from_tq_kv "
             "or native_cache_status_reports_zaya_typed_cca "
             "or native_cache_status_reports_plain_attention_kv "

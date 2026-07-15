@@ -715,6 +715,26 @@ class BlockDiskStore:
                 "disk_evictions": self.disk_evictions,
             }
 
+    def partial_token_counts(self, block_size: int) -> List[int]:
+        """Return persisted terminal block sizes smaller than ``block_size``.
+
+        ``PagedCacheManager`` keeps this set in memory for exact partial-prefix
+        lookup. Rehydrate it from the durable index on process restart so a
+        short first prompt can still seed a longer follow-up from L2.
+        """
+        limit = max(1, int(block_size))
+        conn = sqlite3.connect(str(self._db_path), timeout=1.0)
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT num_tokens FROM blocks "
+                "WHERE num_tokens > 0 AND num_tokens < ? "
+                "ORDER BY num_tokens DESC",
+                (limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [int(row[0]) for row in rows]
+
     def clear(self) -> None:
         """Clear all cached blocks from disk."""
         import shutil

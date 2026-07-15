@@ -1763,6 +1763,35 @@ class BlockAwarePrefixCache:
 
         # Determine tokens we need to cache (not already in block_table)
         existing_tokens = block_table.num_tokens
+        if existing_tokens % self.block_size:
+            # A cached terminal partial is a valid fetch boundary, but it must
+            # not become the parent of a new full-size block at a shifted token
+            # offset (for example 62 + 64 with block_size=64). Rebuild from the
+            # last complete block boundary so the durable chain remains
+            # discoverable after the in-memory prefix index is lost.
+            keep_ids: List[int] = []
+            aligned_tokens = 0
+            for block_id in block_table.block_ids:
+                block = self.paged_cache.allocated_blocks.get(block_id)
+                token_count = int(getattr(block, "token_count", 0) or 0)
+                if token_count != self.block_size:
+                    break
+                keep_ids.append(block_id)
+                aligned_tokens += token_count
+            trailing_ids = block_table.block_ids[len(keep_ids) :]
+            for block_id in trailing_ids:
+                self.paged_cache.decrement_ref(block_id)
+            logger.info(
+                "Realigning extended paged prefix for %s from %d to %d "
+                "tokens before store (%d partial block(s) released)",
+                request_id,
+                existing_tokens,
+                aligned_tokens,
+                len(trailing_ids),
+            )
+            block_table.block_ids = keep_ids
+            block_table.num_tokens = aligned_tokens
+            existing_tokens = aligned_tokens
         new_tokens = tokens[existing_tokens:]
 
         if not new_tokens:

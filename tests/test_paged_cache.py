@@ -643,6 +643,75 @@ class TestBlockAwarePrefixCache:
         assert block_table.num_tokens == len(prefix_tokens)
         assert remaining == long_tail
 
+    def test_restart_restores_short_partial_prefix_for_longer_prompt(self):
+        """L2 must discover a short root partial after process restart."""
+        from vmlx_engine.paged_cache import PagedCacheManager, compute_block_hash
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        partial_tokens = [10, 11, 12]
+        partial_hash = compute_block_hash(None, partial_tokens)
+
+        class _Disk:
+            def partial_token_counts(self, block_size):
+                assert block_size == 4
+                return [3]
+
+            def read_block(self, block_hash):
+                return ["disk-state"] if block_hash == partial_hash else None
+
+            def write_block_async(self, *_args, **_kwargs):
+                return None
+
+        paged = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=_Disk(),
+        )
+        cache = BlockAwarePrefixCache(
+            model=None,
+            paged_cache_manager=paged,
+        )
+
+        table, remaining = cache.fetch_cache(
+            "after-restart",
+            partial_tokens + [13, 14, 15],
+        )
+
+        assert table is not None
+        assert table.num_tokens == 3
+        assert remaining == [13, 14, 15]
+        assert paged.stats.disk_hits >= 1
+
+    def test_extending_partial_prefix_realigns_durable_block_chain(self):
+        """An extended partial tail must be replaced at block boundaries."""
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        paged = PagedCacheManager(block_size=4, max_blocks=16)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+        cache.store_cache("same-request", [1, 2, 3], ["short-state"])
+
+        extended = cache.store_cache(
+            "same-request",
+            [1, 2, 3, 4, 5, 6, 7],
+            ["extended-state"],
+        )
+
+        assert extended is not None
+        assert extended.num_tokens == 7
+        assert [
+            paged.allocated_blocks[block_id].token_count
+            for block_id in extended.block_ids
+        ] == [4, 3]
+
+        hit, remaining = cache.fetch_cache(
+            "follow-up",
+            [1, 2, 3, 4, 5, 6, 7, 8],
+        )
+        assert hit is not None
+        assert hit.num_tokens == 7
+        assert remaining == [8]
+
     def test_oversized_prompt_stores_capacity_limited_partial_prefix(self, caplog):
         """A prompt larger than Max Cache Blocks should degrade to partial reuse.
 

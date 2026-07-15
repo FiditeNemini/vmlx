@@ -611,6 +611,22 @@ class PagedCacheManager:
 
         # Track known partial block sizes for sub-prefix matching
         self._partial_block_sizes: set = set()
+        if self._disk_store is not None:
+            persisted_partial_sizes = getattr(
+                self._disk_store, "partial_token_counts", None
+            )
+            if callable(persisted_partial_sizes):
+                try:
+                    self._partial_block_sizes.update(
+                        int(size)
+                        for size in persisted_partial_sizes(self.block_size)
+                        if 0 < int(size) < self.block_size
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Unable to restore persisted partial block sizes: %s",
+                        exc,
+                    )
 
         # Statistics
         self.stats = CacheStats(
@@ -1094,6 +1110,61 @@ class PagedCacheManager:
                             self.touch([cached_block])
 
             if cached_block is None:
+                # A previous request may have ended in a partial block. After
+                # restart there is no in-memory prefix index, and a longer
+                # continuation probes a full block first. Fall back to the
+                # durable terminal sizes at this exact chain position before
+                # declaring a miss. Return after the partial hit: the caller
+                # can safely prefill the tail, while store_cache realigns the
+                # extended chain to block boundaries.
+                for partial_size in sorted(
+                    self._partial_block_sizes, reverse=True
+                ):
+                    if (
+                        partial_size <= 0
+                        or partial_size >= self.block_size
+                        or start + partial_size > len(token_ids)
+                    ):
+                        continue
+                    partial_tokens = token_ids[start : start + partial_size]
+                    partial_hash = compute_block_hash(
+                        parent_hash,
+                        partial_tokens,
+                        extra_keys=extra_keys,
+                    )
+                    with self._lock:
+                        partial_block = (
+                            self.cached_block_hash_to_block.get_block(
+                                partial_hash
+                            )
+                        )
+                        if partial_block is not None:
+                            self.touch([partial_block])
+                    if partial_block is None and self._disk_store is not None:
+                        disk_data = self._disk_store.read_block(partial_hash)
+                        if disk_data is not None:
+                            with self._lock:
+                                partial_block = (
+                                    self.cached_block_hash_to_block.get_block(
+                                        partial_hash
+                                    )
+                                )
+                                if partial_block is None:
+                                    partial_block = self._promote_from_disk(
+                                        partial_hash,
+                                        disk_data,
+                                        partial_size,
+                                    )
+                                    if partial_block is not None:
+                                        self.stats.disk_hits += 1
+                                else:
+                                    self.touch([partial_block])
+                    if partial_block is not None:
+                        cached_blocks.append(partial_block)
+                        num_cached_tokens += partial_size
+                        with self._lock:
+                            self.stats.cache_hits += 1
+                        return cached_blocks, num_cached_tokens
                 with self._lock:
                     self.stats.cache_misses += 1
                     if self._disk_store is not None:

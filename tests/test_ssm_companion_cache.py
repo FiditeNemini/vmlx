@@ -746,7 +746,9 @@ def test_disk_store_round_trips_across_cache_instances(tmp_path):
         model_key="ling|jangtq2|cache-schema-a",
         disk_store=disk1,
     )
-    cache1.store(tokens, 4, [_FakeSSMLayer(7.0, n_arrays=2)], is_complete=True)
+    source = _FakeSSMLayer(7.0, n_arrays=2)
+    source.left_padding = mx.array([3], dtype=mx.int32)
+    cache1.store(tokens, 4, [source], is_complete=True)
 
     disk2 = SSMCompanionDiskStore(directory=tmp_path, budget_bytes=32 * 1024 * 1024)
     cache2 = SSMCompanionCache(
@@ -761,6 +763,7 @@ def test_disk_store_round_trips_across_cache_instances(tmp_path):
     assert len(states) == 1
     assert len(states[0].cache) == 2
     assert states[0].cache[0].tolist() == [7.0, 7.0, 7.0, 7.0]
+    assert states[0].left_padding.tolist() == [3]
     assert cache2.size == 1
 
     disk3 = SSMCompanionDiskStore(directory=tmp_path, budget_bytes=32 * 1024 * 1024)
@@ -797,3 +800,27 @@ def test_disk_store_stats_include_tokens_and_io_counters(tmp_path):
     assert stats["stores"] == 1
     assert stats["hits"] == 1
     assert stats["misses"] == 1
+
+
+def test_disk_store_restore_quarantine_preserves_writes(monkeypatch, tmp_path):
+    """A quarantined family may keep bounded L2 records for diagnostics but
+    must treat restore attempts as misses instead of serving divergent state.
+    """
+    from vmlx_engine.utils.ssm_companion_disk_store import SSMCompanionDiskStore
+
+    disk = SSMCompanionDiskStore(directory=tmp_path, budget_bytes=32 * 1024 * 1024)
+    cache = SSMCompanionCache(
+        max_entries=2,
+        model_key="qwen36-hybrid|restore-quarantine",
+        disk_store=disk,
+    )
+    tokens = [1, 2, 3, 4]
+    cache.store(tokens, 4, [_FakeSSMLayer(2.0, n_arrays=2)], is_complete=True)
+    key = cache._key(tokens, 4)
+
+    monkeypatch.setenv("VMLX_DISABLE_SSM_DISK_RESTORE", "1")
+    assert disk.fetch(key) is None
+    stats = disk.stats()
+    assert stats["entries"] == 1
+    assert stats["restore_enabled"] is False
+    assert stats["restore_suppressed"] == 1

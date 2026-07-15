@@ -2791,14 +2791,30 @@ class MLLMScheduler:
             # explicit cache_salt / skip_prefix_cache bypass below.
             _output_len = getattr(request, 'num_output_tokens', 0) if request else 0
             _skip_cache_store = False
+            _skip_cache_store_reason = ""
             # Hard bypass from cache_salt / skip_prefix_cache — overrides
             # normal cache storage and suppresses every store site.
             if request is not None and getattr(request, '_bypass_prefix_cache', False):
                 _skip_cache_store = True
+                _skip_cache_store_reason = "explicit prefix-cache bypass"
+            # A hybrid cache restored for this request combines reconstructed
+            # attention KV with path-dependent SSM state.  The restored prefix
+            # is safe to consume, but promoting that live, extended cache into
+            # a new longer paged entry compounds reconstruction error across
+            # turns (Bonsai/Qwen3.5 eventually collapses into a token loop).
+            # Keep the cold-prefill blocks reusable and recompute the growing
+            # tail instead of recursively storing restored state.
+            if (
+                request is not None
+                and self._is_hybrid
+                and int(getattr(request, "_cached_tokens", 0) or 0) > 0
+            ):
+                _skip_cache_store = True
+                _skip_cache_store_reason = "hybrid restored-prefix promotion disabled"
             if _skip_cache_store:
                 logger.debug(
                     f"Skipping cache store for {request_id}: "
-                    f"output_len={_output_len}, explicit prefix-cache bypass"
+                    f"output_len={_output_len}, {_skip_cache_store_reason}"
                 )
                 if request is not None:
                     request._extracted_cache = None

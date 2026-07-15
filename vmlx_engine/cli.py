@@ -938,6 +938,22 @@ def serve_command(args):
     try:
         from .model_config_registry import get_model_config_registry
         _mc = get_model_config_registry().lookup(args.model)
+        if (
+            getattr(_mc, "cache_type", None) == "hybrid"
+            and _mc.family_name in {"qwen3_5", "qwen3_5_moe"}
+            and os.environ.get(
+                "VMLX_ALLOW_UNSAFE_QWEN_SSM_DISK_RESTORE", ""
+            ).lower() not in {"1", "true", "yes", "on"}
+        ):
+            os.environ["VMLX_DISABLE_SSM_DISK_RESTORE"] = "1"
+            logger.warning(
+                "Qwen3.6 hybrid SSM companion disk restore is quarantined: "
+                "live Electron multi-turn proof found cross-restart numeric "
+                "divergence after a safetensors round-trip. Same-process SSM "
+                "L1, async rederive, paged attention KV, and block-disk L2 "
+                "remain enabled; restart hits safely full-prefill until the "
+                "SSM L2 codec is release-cleared."
+            )
         # DSV4-Flash auto-config. DSV4_LONG_CTX=1 is the only supported
         # runtime mode (tri-mode SWA+CSA/HCA). The native composite prefix
         # cache and materialized CSA/HCA pool codec are the default path;
@@ -982,13 +998,23 @@ def serve_command(args):
                 "nemotron_h",
             }:
                 if _mc.family_name in {"qwen3_5", "qwen3_5_moe"}:
+                    # Lossy attention-KV storage is not numerically stable
+                    # enough for long hybrid resumes: live Bonsai/Qwen3.5
+                    # multi-turn proof diverged after several paged+SSM hits
+                    # with both q4 and q8, while lossless stored attention KV
+                    # remained coherent in-process. Keep live TQ on, but
+                    # disable only the auto-selected stored-prefix codec.
+                    # Explicit user choices never reach this auto-policy branch.
+                    if _old_kvq in {"q4", "q8"}:
+                        args.kv_cache_quantization = "none"
                     logger.info(
                         "Qwen3.6 hybrid/path-dependent cache model detected — "
                         "keeping auto live TurboQuant enabled for attention KVCache "
                         "layers only; SSM/GatedDelta companion state remains native "
-                        "full precision. Stored attention-KV quantization=%s remains "
-                        "active for prefix/paged/L2 boundaries.",
-                        _old_kvq,
+                        "full precision. Stored attention-KV quantization=%s is used "
+                        "for prefix/paged/L2 boundaries (auto lossy storage is disabled "
+                        "for multi-turn numeric parity).",
+                        args.kv_cache_quantization,
                     )
                 else:
                     logger.info(

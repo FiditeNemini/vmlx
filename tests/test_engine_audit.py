@@ -8170,9 +8170,14 @@ class TestStartupCompatibilityGuards:
         assert "Nemotron-H hybrid/path-dependent cache model detected" in cli_source
         hybrid_idx = cli_source.index('getattr(_mc, "cache_type", None) == "hybrid"')
         hybrid_block = cli_source[hybrid_idx : cli_source.index("if _mc.family_name !=", hybrid_idx)]
-        assert 'args.kv_cache_quantization = "none"' not in hybrid_block
         assert "args.kv_cache_quantization_explicit = True" not in hybrid_block
+        assert 'if _old_kvq in {"q4", "q8"}' in hybrid_block
+        assert 'args.kv_cache_quantization = "none"' in hybrid_block
+        assert "auto lossy storage is disabled" in hybrid_block
         assert "stored attention-KV" in hybrid_block
+        assert 'os.environ["VMLX_DISABLE_SSM_DISK_RESTORE"] = "1"' in cli_source
+        assert "VMLINUX_DISABLE_SSM_DISK_RESTORE" not in cli_source
+        assert "SSM companion disk restore is quarantined" in cli_source
 
         assert "Hybrid/path-dependent cache model detected — using q4/q8 only at cache storage boundaries" in scheduler_source
         assert "non-KV state is preserved full precision" in scheduler_source

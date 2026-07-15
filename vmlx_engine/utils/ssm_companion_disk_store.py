@@ -84,6 +84,7 @@ _ENV_BUDGET_GB = "VMLX_SSM_DISK_CACHE_MAX_GB"
 _ENV_NAMESPACE = "VMLX_SSM_DISK_CACHE_NAMESPACE"
 
 _DEFAULT_BUDGET_GB = 10.0
+_RECORD_VERSION = 2
 
 
 def _runtime_cache_fingerprint() -> str:
@@ -142,6 +143,7 @@ class SSMCompanionDiskStore:
         self._stores = 0
         self._hits = 0
         self._misses = 0
+        self._restore_suppressed = 0
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -179,6 +181,9 @@ class SSMCompanionDiskStore:
             meta["cache_len"] = len(layer.cache)
             meta["cache_present"] = [a is not None for a in layer.cache]
             meta["has_lengths"] = getattr(layer, "lengths", None) is not None
+            meta["has_left_padding"] = (
+                getattr(layer, "left_padding", None) is not None
+            )
             meta["class"] = type(layer).__name__
             return meta
         # MambaCache shape: .state tuple of mx arrays
@@ -202,6 +207,9 @@ class SSMCompanionDiskStore:
             lengths = getattr(layer, "lengths", None)
             if lengths is not None:
                 flat[f"{prefix}.lengths"] = lengths
+            left_padding = getattr(layer, "left_padding", None)
+            if left_padding is not None:
+                flat[f"{prefix}.left_padding"] = left_padding
             return flat
         state_attr = getattr(layer, "state", None)
         if isinstance(state_attr, tuple):
@@ -247,7 +255,7 @@ class SSMCompanionDiskStore:
                 flat.update(self._flatten_layer(f"L{n}", layer))
 
         sidecar = {
-            "version": 1,
+            "version": _RECORD_VERSION,
             "is_complete": bool(is_complete),
             "num_tokens": int(num_tokens),
             "stored_at": time.time(),
@@ -310,6 +318,19 @@ class SSMCompanionDiskStore:
             sidecar = json.loads(side_path.read_text())
         except (OSError, ValueError) as e:
             logger.debug("SSM disk store sidecar parse failed %s: %s", key, e)
+            return None
+
+        try:
+            record_version = int(sidecar.get("version") or 0)
+        except (TypeError, ValueError):
+            record_version = 0
+        if record_version != _RECORD_VERSION:
+            logger.info(
+                "SSM disk cache record version mismatch; treating as miss "
+                "(stored=%s current=%s)",
+                record_version,
+                _RECORD_VERSION,
+            )
             return None
 
         layer_metas: List[Dict[str, Any]] = sidecar.get("layer_metas", [])
@@ -388,12 +409,21 @@ class SSMCompanionDiskStore:
                 ac.cache = rebuilt_cache  # type: ignore[attr-defined]
                 if meta.get("has_lengths"):
                     lengths = flat.get(f"L{n}.lengths")
+                    if lengths is None:
+                        return None
                     ac.lengths = lengths  # type: ignore[attr-defined]
                 else:
                     try:
                         ac.lengths = None  # type: ignore[attr-defined]
                     except Exception:
                         pass
+                if meta.get("has_left_padding"):
+                    left_padding = flat.get(f"L{n}.left_padding")
+                    if left_padding is None:
+                        return None
+                    ac.left_padding = left_padding  # type: ignore[attr-defined]
+                else:
+                    ac.left_padding = None  # type: ignore[attr-defined]
                 states.append(ac)
             elif kind == "MambaCache" and MambaCache is not None:
                 state_len = int(meta.get("state_len", 0))
@@ -471,6 +501,15 @@ class SSMCompanionDiskStore:
 
     def fetch(self, key: str) -> Optional[Tuple[List[Any], bool]]:
         """Look up by key. Returns ``(states, is_complete)`` or ``None``."""
+        if os.environ.get("VMLX_DISABLE_SSM_DISK_RESTORE", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            with self._stats_lock:
+                self._restore_suppressed += 1
+            return None
         # Read path holds the lock briefly only to align with budget
         # enforcement; actual decode is independent of the lock.
         entry = self._load_entry(key)
@@ -549,6 +588,7 @@ class SSMCompanionDiskStore:
             stores = self._stores
             hits = self._hits
             misses = self._misses
+            restore_suppressed = self._restore_suppressed
         return {
             "enabled": True,
             "directory": str(self._dir),
@@ -562,6 +602,10 @@ class SSMCompanionDiskStore:
             "stores": stores,
             "hits": hits,
             "misses": misses,
+            "restore_enabled": os.environ.get(
+                "VMLX_DISABLE_SSM_DISK_RESTORE", ""
+            ).lower() not in {"1", "true", "yes", "on"},
+            "restore_suppressed": restore_suppressed,
             "hit_rate": round(hits / max(hits + misses, 1), 3),
         }
 

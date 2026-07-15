@@ -946,6 +946,25 @@ class TestHybridSSMResumeRemaining:
         assert "key_boundary = base_len + int(boundary_len)" in source
         assert "all_tokens[:key_boundary]" in source
 
+    def test_mllm_hybrid_cache_hit_is_not_promoted_into_longer_paged_state(self):
+        """A restored hybrid prefix may be consumed but must not be stored
+        again as a longer paged entry. Repeated restore/extend/store cycles
+        compound path-dependent cache error across multi-turn chats.
+        """
+        import inspect
+
+        from vmlx_engine.mllm_scheduler import MLLMScheduler
+
+        source = inspect.getsource(MLLMScheduler._cleanup_finished)
+        skip_idx = source.index("hybrid restored-prefix promotion disabled")
+        paged_store_idx = source.index("# --- Cache store: paged path ---")
+        guard = source[max(0, skip_idx - 700):skip_idx + 200]
+
+        assert skip_idx < paged_store_idx
+        assert "self._is_hybrid" in guard
+        assert 'getattr(request, "_cached_tokens", 0)' in guard
+        assert "_skip_cache_store = True" in guard
+
     def test_performance_timeout_sufficient(self):
         """Performance health check must use >= 30s timeout."""
         import re

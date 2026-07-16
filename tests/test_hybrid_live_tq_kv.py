@@ -141,6 +141,76 @@ def test_uncalibrated_qwen_cumulative_only_does_not_get_fake_tq_slots():
     assert resolved == original
 
 
+def test_uncalibrated_laguna_full_kv_auto_uses_tq8_on_all_attention_slots():
+    from vmlx_engine.utils.turboquant_config import (
+        apply_uncalibrated_auto_tq_policy,
+    )
+
+    layer_types = ["attention"] * 70
+    resolved = apply_uncalibrated_auto_tq_policy(
+        {
+            "enabled": True,
+            "default_key_bits": 3,
+            "default_value_bits": 3,
+            "critical_key_bits": 4,
+            "critical_value_bits": 4,
+            "critical_layers": [0, 1, 2, -3, -2, -1],
+            "sink_tokens": 4,
+            "seed": 42,
+        },
+        {"model_type": "laguna", "num_hidden_layers": 70},
+        layer_types,
+    )
+
+    assert resolved["default_key_bits"] == 8
+    assert resolved["default_value_bits"] == 8
+    assert resolved["critical_key_bits"] == 8
+    assert resolved["critical_value_bits"] == 8
+    assert resolved["critical_layers"] == list(range(70))
+    assert resolved["sink_tokens"] == 0
+    assert resolved["compress_after"] == 0
+    assert resolved["auto_policy"] == "uncalibrated_full_kv_storage_tq8"
+
+
+def test_tq_codec_signature_separates_bits_and_prefix_cache_namespaces():
+    from vmlx_engine.prefix_cache import compute_model_cache_key
+    from vmlx_engine.utils.turboquant_config import (
+        TurboQuantConfig,
+        turboquant_storage_signature,
+    )
+
+    class Model:
+        pass
+
+    def model_with_bits(bits):
+        config = TurboQuantConfig(
+            n_layers=4,
+            default_key_bits=bits,
+            default_value_bits=bits,
+            critical_key_bits=bits,
+            critical_value_bits=bits,
+            critical_layers=[0, 1, 2, 3],
+            sink_tokens=0,
+            seed=42,
+            compress_after=0,
+        )
+
+        def make_cache():
+            return []
+
+        make_cache._vmlx_tq_storage_signature = turboquant_storage_signature(
+            config, "uncalibrated_full_kv_storage_tq8"
+        )
+        model = Model()
+        model.make_cache = make_cache
+        return model
+
+    key3 = compute_model_cache_key(model_with_bits(3), tq_enabled=True)
+    key8 = compute_model_cache_key(model_with_bits(8), tq_enabled=True)
+
+    assert key3 != key8
+
+
 class NativeGatedDeltaState:
     """Sentinel for Qwen hybrid non-KV companion state."""
 

@@ -1746,6 +1746,7 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
             apply_uncalibrated_auto_tq_policy,
             make_turboquant_cache,
             resolve_compress_after,
+            turboquant_storage_signature,
         )
     except ImportError:
         logger.warning("  TurboQuant config found but turboquant module not available")
@@ -1918,6 +1919,9 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
     )
     _turboquant_make_cache._vmlx_tq_compress_after = int(
         getattr(tq_config, "compress_after", 0) or 0
+    )
+    _turboquant_make_cache._vmlx_tq_storage_signature = (
+        turboquant_storage_signature(tq_config, _tq_cfg.get("auto_policy"))
     )
     if tq_config.compress_after > 0:
         logger.info(

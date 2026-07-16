@@ -121,6 +121,7 @@ def _apply_turboquant_to_model(model, model_path: str):
             apply_uncalibrated_auto_tq_policy,
             make_turboquant_cache,
             resolve_compress_after,
+            turboquant_storage_signature,
         )
     except ImportError:
         return  # TQ not available
@@ -303,6 +304,9 @@ def _apply_turboquant_to_model(model, model_path: str):
         )
         _tq_make_cache._vmlx_tq_compress_after = int(
             tq_config.compress_after
+        )
+        _tq_make_cache._vmlx_tq_storage_signature = (
+            turboquant_storage_signature(tq_config, auto_tq.get("auto_policy"))
         )
 
         n_attn = sum(1 for t in layer_types if t == "attention")

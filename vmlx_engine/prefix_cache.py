@@ -200,9 +200,16 @@ def compute_model_cache_key(
     parts.append(f"tq={1 if tq_enabled else 0}")
     if tq_enabled:
         # TurboQuant's decoder emits float32 irrespective of the source cache
-        # dtype. dtype_v1 records the original attention dtype and restores it
-        # after decode. Keep legacy dtype-less L2 records outside this namespace.
-        parts.append("tq_storage_schema=dtype_v1")
+        # dtype. codec_config_v2 records the original attention dtype and keys
+        # the namespace by every model-owned/Auto codec field.  This also keeps
+        # legacy uncalibrated 3-bit L2 records outside the correctness-first
+        # 8-bit Auto namespace.
+        parts.append("tq_storage_schema=codec_config_v2")
+        make_cache = getattr(model, "make_cache", None)
+        tq_signature = getattr(
+            make_cache, "_vmlx_tq_storage_signature", "legacy_unspecified"
+        )
+        parts.append(f"tq_storage_signature={tq_signature}")
     parts.append(f"kvq={int(kv_quant_bits or 0)}")
 
     # DSV4 cache correctness depends on runtime cache shape. Keep these in

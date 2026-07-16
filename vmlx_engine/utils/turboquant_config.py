@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import logging
 import os
 from typing import Optional
@@ -13,7 +15,11 @@ from jang_tools.turboquant.config import TurboQuantConfig as _JangTurboQuantConf
 logger = logging.getLogger(__name__)
 
 QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER = 0
-QWEN_HYBRID_UNCALIBRATED_TQ_BITS = 8
+UNCALIBRATED_AUTO_TQ_BITS = 8
+# Compatibility name retained for downstream tests/imports.  The safety rule is
+# no longer Qwen-only: any bundle without model-owned TQ calibration starts at
+# loss-minimizing 8-bit storage and may opt into lower bits in jang_config.json.
+QWEN_HYBRID_UNCALIBRATED_TQ_BITS = UNCALIBRATED_AUTO_TQ_BITS
 _QWEN_HYBRID_MODEL_TYPES = frozenset(
     {
         "qwen3_5",
@@ -80,17 +86,15 @@ def apply_uncalibrated_auto_tq_policy(
     model_config: dict | None,
     layer_types: list[str] | tuple[str, ...],
 ) -> dict:
-    """Return a correctness-first Auto config for an uncalibrated Qwen bundle.
+    """Return a correctness-first Auto config for an uncalibrated bundle.
 
-    Qwen3.5/3.6 and Qwen3-Next mix cumulative GatedDelta/SSM state with
-    ordinary attention KV; Qwen2/Qwen3 and their MoE/VL text variants use
-    ordinary full KV.  The cumulative slots are never TQ candidates, while
-    every real attention slot is TQ-encodable.  An uncalibrated 3-bit storage
-    round-trip is not a safe family default: it has caused both Bonsai
-    tool/multi-turn loops and corrupted Qwen3 full-KV cache-hit output. Auto
-    therefore keeps live transition disabled and uses an 8-bit TQ storage
-    codec. A bundle-owned calibrated ``turboquant`` block or explicit operator
-    settings remain authoritative.
+    An uncalibrated 3-bit storage round-trip is not a safe family default: it
+    has caused Bonsai/Qwen tool loops and, on Laguna, a deterministic coherent
+    cold -> incoherent paged+TQ warm transition.  Auto therefore keeps the
+    mid-request live transition disabled and uses an 8-bit TQ storage codec on
+    real attention KV slots.  Cumulative SSM/GatedDelta companions remain
+    native and are never assigned fake TQ slots.  A bundle-owned calibrated
+    ``turboquant`` block or explicit operator settings remain authoritative.
     """
     resolved = dict(tq_cfg)
     from .hybrid_tq_cache import classify_qwen_cache_architecture
@@ -98,36 +102,61 @@ def apply_uncalibrated_auto_tq_policy(
     architecture = classify_qwen_cache_architecture(
         model_config or {}, list(layer_types)
     )
-    if architecture not in {
-        "qwen3_5_hybrid_gated_delta",
-        "qwen3_next_hybrid_gated_delta",
-        "qwen_full_kv",
-    }:
-        return resolved
-
     attention_layers = [
         index
         for index, layer_type in enumerate(layer_types)
         if str(layer_type).lower() == "attention"
     ]
+    if not attention_layers:
+        return resolved
+
+    if architecture == "qwen_full_kv":
+        auto_policy = "qwen_full_kv_storage_tq8"
+    elif architecture in {
+        "qwen3_5_hybrid_gated_delta",
+        "qwen3_next_hybrid_gated_delta",
+    }:
+        auto_policy = "qwen_hybrid_attention_kv_storage_tq8"
+    elif len(attention_layers) == len(layer_types):
+        auto_policy = "uncalibrated_full_kv_storage_tq8"
+    else:
+        auto_policy = "uncalibrated_selective_attention_kv_storage_tq8"
+
     resolved.update(
         {
-            "default_key_bits": QWEN_HYBRID_UNCALIBRATED_TQ_BITS,
-            "default_value_bits": QWEN_HYBRID_UNCALIBRATED_TQ_BITS,
-            "critical_key_bits": QWEN_HYBRID_UNCALIBRATED_TQ_BITS,
-            "critical_value_bits": QWEN_HYBRID_UNCALIBRATED_TQ_BITS,
+            "default_key_bits": UNCALIBRATED_AUTO_TQ_BITS,
+            "default_value_bits": UNCALIBRATED_AUTO_TQ_BITS,
+            "critical_key_bits": UNCALIBRATED_AUTO_TQ_BITS,
+            "critical_value_bits": UNCALIBRATED_AUTO_TQ_BITS,
             # Use real KV positions, not raw first/last transformer indices.
             "critical_layers": attention_layers,
             "sink_tokens": 0,
             "compress_after": QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER,
-            "auto_policy": (
-                "qwen_full_kv_storage_tq8"
-                if architecture == "qwen_full_kv"
-                else "qwen_hybrid_attention_kv_storage_tq8"
-            ),
+            "auto_policy": auto_policy,
         }
     )
     return resolved
+
+
+def turboquant_storage_signature(
+    config: "TurboQuantConfig", auto_policy: str | None = None
+) -> str:
+    """Stable identity for every field that changes a persisted TQ payload."""
+    payload = {
+        "schema": "tq_codec_config_v2",
+        "n_layers": int(config.n_layers),
+        "default_key_bits": int(config.default_key_bits),
+        "default_value_bits": int(config.default_value_bits),
+        "critical_key_bits": int(config.critical_key_bits),
+        "critical_value_bits": int(config.critical_value_bits),
+        "critical_layers": [int(value) for value in config.critical_layers],
+        "sink_tokens": int(config.sink_tokens),
+        "seed": int(config.seed),
+        "compress_after": int(getattr(config, "compress_after", 0) or 0),
+        "auto_policy": auto_policy or "bundle_calibrated_or_explicit",
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()[:24]
 
 
 def _layer_resident_bytes(layer) -> int:

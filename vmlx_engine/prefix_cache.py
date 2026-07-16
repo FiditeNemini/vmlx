@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 # rotating SWA layers. Older VLM extraction sliced all layers to the primary
 # count before storage, so old L2 blocks can restore invalid 4-head rotating
 # caches. Miss them cleanly.
-PAGED_CACHE_SCHEMA_VERSION = "paged_n1_keys_v7_external_companion"
+PAGED_CACHE_SCHEMA_VERSION = "paged_n1_keys_v8_external_companion"
 
 
 def runtime_cache_fingerprint() -> str:

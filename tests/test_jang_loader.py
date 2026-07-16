@@ -864,6 +864,72 @@ class TestJangDetection:
         vlm_return_idx = source.index("return _vlm_model, _vlm_processor", vlm_idx)
         assert "_prepare_jangtq_vlm_first_forward(" in source[vlm_idx:vlm_return_idx]
 
+    def test_step3p7_jangtq_restores_native_attention_when_p18_is_unsafe(self):
+        from mlx_lm.models.step3p5 import Step3p5Attention
+        from vmlx_engine.utils.jang_loader import (
+            _capture_step3p7_native_attention_call,
+            _restore_step3p7_native_attention_call,
+        )
+
+        def unsafe_hydrate():
+            # Deliberately lacks the fixed P18 semantic markers.
+            return None
+
+        native_call = Step3p5Attention.__call__
+        captured = _capture_step3p7_native_attention_call(
+            {
+                "model_type": "step3p5",
+                "architectures": ["Step3p7ForConditionalGeneration"],
+                "text_config": {"model_type": "step3p5"},
+            },
+            unsafe_hydrate,
+        )
+
+        def unsafe_p18_call(self, x, mask=None, cache=None):
+            return x
+
+        try:
+            Step3p5Attention.__call__ = unsafe_p18_call
+            assert _restore_step3p7_native_attention_call(captured) is True
+            assert Step3p5Attention.__call__ is native_call
+        finally:
+            Step3p5Attention.__call__ = native_call
+
+    def test_step3p7_jangtq_keeps_semantically_complete_p18(self):
+        from vmlx_engine.utils.jang_loader import (
+            _capture_step3p7_native_attention_call,
+            _jangtq_step_p18_preserves_attention_semantics,
+        )
+
+        def fixed_hydrate():
+            q_norm_dim = queries.shape[-1]
+            if q_norm_dim == queries.shape[-1]:
+                pass
+            use_head_wise_attn_gate = True
+            self.g_proj(x)
+            return use_head_wise_attn_gate
+
+        assert _jangtq_step_p18_preserves_attention_semantics(fixed_hydrate) is True
+        assert _capture_step3p7_native_attention_call(
+            {
+                "model_type": "step3p7",
+                "architectures": ["Step3p7ForConditionalGeneration"],
+            },
+            fixed_hydrate,
+        ) is None
+
+    def test_step3p7_jangtq_guard_wraps_hydration_before_warmup(self):
+        source = Path("vmlx_engine/utils/jang_loader.py").read_text()
+        start = source.index("_step_attention_restore =")
+        end = source.index("_prepare_jangtq_vlm_first_forward(", start)
+        block = source[start:end]
+
+        assert "try:" in block
+        assert "_hydrate_jangtq_model(" in block
+        assert "finally:" in block
+        assert "_restore_step3p7_native_attention_call(" in block
+        assert "_vmlx_step3p7_native_attention_restored" in block
+
     def test_detects_jang_affine_weight_format(self, tmp_path):
         from vmlx_engine.utils.jang_loader import is_jang_model
 

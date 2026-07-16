@@ -11,6 +11,7 @@ so existing models on HuggingFace continue to work.
 
 import gc
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -39,6 +40,66 @@ JANG_FORMAT_VALUES = ["jang", "jjqf", "mxq"]
 JANG_WEIGHT_FORMAT_VALUES = {"affine", "jang_affine", "mxtq", "mxfp4", "mxfp8"}
 _MLX_WEIGHT_QUANT_BITS = {2, 3, 4, 5, 6, 8}
 _MLX_WEIGHT_QUANT_GROUP_SIZES = {32, 64, 128}
+
+
+def _is_step3p7_runtime_config(config: dict | None) -> bool:
+    """Return whether a normalized VLM config still identifies Step-3.7."""
+    if not isinstance(config, dict):
+        return False
+    text_config = config.get("text_config")
+    text_config = text_config if isinstance(text_config, dict) else {}
+    architectures = config.get("architectures") or []
+    if isinstance(architectures, str):
+        architectures = [architectures]
+    identities = {
+        str(config.get("model_type") or "").lower(),
+        str(text_config.get("model_type") or "").lower(),
+        *(str(value or "").lower() for value in architectures),
+    }
+    return any("step3p7" in value for value in identities)
+
+
+def _jangtq_step_p18_preserves_attention_semantics(hydrate: Any) -> bool:
+    """Detect a jang_tools P18 implementation that preserves Step attention.
+
+    Step3p5 normalizes q/k after reshaping to per-head tensors and applies a
+    head-wise sigmoid gate before ``o_proj``. Older generic P18 patches did
+    neither, which makes an otherwise coherent pre-stacked JANGTQ_K bundle
+    generate deterministic soup. Fail closed when source inspection is not
+    available; the native mlx-lm attention path is slower but source-correct.
+    """
+    try:
+        source = inspect.getsource(hydrate)
+    except (OSError, TypeError):
+        return False
+    required = (
+        "q_norm_dim == queries.shape[-1]",
+        "use_head_wise_attn_gate",
+        "self.g_proj(x)",
+    )
+    return all(marker in source for marker in required)
+
+
+def _capture_step3p7_native_attention_call(config: dict | None, hydrate: Any):
+    """Capture Step's native attention call when installed P18 is unsafe."""
+    if not _is_step3p7_runtime_config(config):
+        return None
+    if _jangtq_step_p18_preserves_attention_semantics(hydrate):
+        return None
+    from mlx_lm.models.step3p5 import Step3p5Attention
+
+    return Step3p5Attention, Step3p5Attention.__call__
+
+
+def _restore_step3p7_native_attention_call(captured: Any) -> bool:
+    """Undo an unsafe generic P18 class patch after JANGTQ hydration."""
+    if captured is None:
+        return False
+    attention_class, native_call = captured
+    if attention_class.__call__ is native_call:
+        return False
+    attention_class.__call__ = native_call
+    return True
 
 
 def _jang_quant_block_size(jang_cfg: dict, default: int = 64) -> int:
@@ -3652,13 +3713,31 @@ def _load_jang_v2_vlm(
                 flush=True,
             )
             _vlm_model, _vlm_processor, _, _vlm_model_config = _jangtq_vlm_skeleton(path)
-            _hydrate_jangtq_model(
-                model=_vlm_model,
-                model_path=path,
-                mxtq_seed=_vlm_mxtq_seed,
-                mxtq_bits_map=_vlm_bits_map,
-                model_config=_vlm_model_config,
+            _step_attention_restore = _capture_step3p7_native_attention_call(
+                config,
+                _hydrate_jangtq_model,
             )
+            try:
+                _hydrate_jangtq_model(
+                    model=_vlm_model,
+                    model_path=path,
+                    mxtq_seed=_vlm_mxtq_seed,
+                    mxtq_bits_map=_vlm_bits_map,
+                    model_config=_vlm_model_config,
+                )
+            finally:
+                if _restore_step3p7_native_attention_call(_step_attention_restore):
+                    setattr(
+                        _vlm_model,
+                        "_vmlx_step3p7_native_attention_restored",
+                        True,
+                    )
+                    logger.warning(
+                        "Step-3.7 JANGTQ: installed jang_tools P18 does not "
+                        "preserve post-reshape q/k norms and the head-wise "
+                        "attention gate; restored the native mlx-lm Step3p5 "
+                        "attention path for correctness"
+                    )
         else:
             _vlm_model, _vlm_processor = _load_vlm(path)
 

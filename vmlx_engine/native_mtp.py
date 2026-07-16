@@ -125,6 +125,20 @@ def _normalize_family(name: str | None) -> str | None:
     return _FAMILY_ALIAS.get(value, value)
 
 
+def _bundle_name_declares_mtp(bundle_path: str | Path | None) -> bool:
+    """Return whether the user-facing bundle name explicitly opts into MTP.
+
+    Some upstream architecture configs retain ``mtp_num_hidden_layers`` even
+    when a converted runtime bundle intentionally does not ship an MTP head.
+    Treat that nested field as an architecture hint unless the bundle name,
+    JANG runtime sidecar, or tensor index independently declares MTP.
+    """
+    if not bundle_path:
+        return False
+    name = Path(bundle_path).name
+    return bool(re.search(r"(?:^|[-_.])mtp(?:$|[-_.])", name, re.IGNORECASE))
+
+
 def _bundle_family(cfg: dict[str, Any], jang_cfg: dict[str, Any]) -> str | None:
     capabilities = jang_cfg.get("capabilities") or {}
     for raw in (
@@ -606,12 +620,39 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
     has_mtp_tensors = bool(mtp_keys)
     indexed_layer_count = _mtp_layer_count_from_keys(mtp_keys)
 
+    bundle_name_declares_mtp = _bundle_name_declares_mtp(bundle_path)
+    sidecar_declares_mtp = bool(
+        runtime_bundle_has_mtp is True
+        or mtp_sidecar.get("enabled") is True
+        or mtp_sidecar.get("kept") is True
+        or (jang_layers is not None and jang_layers > 0)
+    )
+    nested_architecture_hint_only = bool(
+        config_layers is not None
+        and config_layers > 0
+        and layer_source
+        in {
+            "config.text_config.num_nextn_predict_layers",
+            "config.text_config.mtp_num_hidden_layers",
+        }
+        and not bundle_name_declares_mtp
+        and not sidecar_declares_mtp
+        and not has_mtp_tensors
+    )
+    mtp_declared = bool(
+        bundle_name_declares_mtp
+        or sidecar_declares_mtp
+        or has_mtp_tensors
+        or (config_layers and not nested_architecture_hint_only)
+    )
+
     if (
         config_layers is not None
         and config_layers > 0
         and drop_mtp is not True
         and not has_mtp_tensors
         and not openpangu_included_mtp_runtime_unwired
+        and not nested_architecture_hint_only
     ):
         issues.append(
             "config expects MTP next-token prediction layers, but the bundle "
@@ -721,6 +762,12 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
             "are intentionally dropped by the current openpangu_v2 runtime"
         )
         runtime_mtp_mode = "included_but_dropped_for_runtime"
+    elif nested_architecture_hint_only:
+        status = "not_configured"
+        runtime_reason = (
+            "nested architecture MTP field is inactive because the bundle "
+            "name, JANG runtime sidecar, and tensor index do not declare MTP"
+        )
     elif config_layers:
         status = "configured_without_runtime"
         runtime_reason = "config requests MTP but runtime requirements are incomplete"
@@ -752,6 +799,11 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
         "vl_runtime_available": vl_runtime_available,
         "runtime_bundle_has_mtp": runtime_bundle_has_mtp,
         "runtime_mtp_mode": runtime_mtp_mode,
+        "bundle_name_declares_mtp": bundle_name_declares_mtp,
+        "mtp_declared": mtp_declared,
+        "architecture_mtp_hint_layers": (
+            config_layers if nested_architecture_hint_only else None
+        ),
         "runtime_reason": runtime_reason,
         "status": status,
         "issues": issues,

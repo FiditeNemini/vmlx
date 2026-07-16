@@ -329,6 +329,60 @@ class TestNativeMtpAutodetect:
         assert status["status"] == "metadata_inconsistent"
         assert any("index has no mtp.* tensors" in issue for issue in status["issues"])
 
+    def test_non_mtp_qwen_bundle_treats_nested_layer_count_as_inactive_hint(
+        self, tmp_path
+    ):
+        from vmlx_engine.server import _model_mtp_status
+
+        model_dir = tmp_path / "Qwen3.6-35B-A3B-JANGTQ-CRACK"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "qwen3_5_moe",
+                    "text_config": {
+                        "model_type": "qwen3_5_moe_text",
+                        "mtp_num_hidden_layers": 1,
+                    },
+                }
+            )
+        )
+        (model_dir / "jang_config.json").write_text(
+            json.dumps(
+                {
+                    "format": "jangtq",
+                    "capabilities": {
+                        "family": "qwen3_5_moe",
+                        "cache_type": "hybrid",
+                    },
+                }
+            )
+        )
+        (model_dir / "model.safetensors.index.json").write_text(
+            json.dumps(
+                {
+                    "weight_map": {
+                        "language_model.model.embed_tokens.weight": "model.safetensors"
+                    }
+                }
+            )
+        )
+
+        status = _model_mtp_status(str(model_dir))
+
+        assert status["config_num_nextn_predict_layers"] == 1
+        assert status["config_mtp_layer_source"] == (
+            "config.text_config.mtp_num_hidden_layers"
+        )
+        assert status["bundle_name_declares_mtp"] is False
+        assert status["mtp_declared"] is False
+        assert status["architecture_mtp_hint_layers"] == 1
+        assert status["artifact_available"] is False
+        assert status["runtime_available"] is False
+        assert status["status"] == "not_configured"
+        assert status["issues"] == []
+        assert "inactive" in status["runtime_reason"]
+
     def test_config_only_mtp_bundle_does_not_activate_native_runtime(self, tmp_path):
         from vmlx_engine.server import _model_mtp_status
 

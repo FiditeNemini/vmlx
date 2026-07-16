@@ -1448,3 +1448,22 @@ describe('Audit Fix: ReasoningBox user toggle tracking', () => {
     expect(userToggled).toBe(false)
   })
 })
+
+describe('Regenerate prompt integrity', () => {
+  it('truncates from the last user turn before the normal send path persists its replacement', () => {
+    const source = readFileSync('src/renderer/src/components/chat/ChatInterface.tsx', 'utf8')
+    const regenerate = source.slice(
+      source.indexOf('const handleRegenerate = async () =>'),
+      source.indexOf('// Edit & resend:'),
+    )
+
+    expect(regenerate).toContain(
+      'await window.api.chat.deleteMessagesFrom(chatId, lastUser.timestamp)',
+    )
+    expect(regenerate).toContain(
+      'setMessages(prev => prev.filter(m => m.timestamp < lastUser.timestamp))',
+    )
+    expect(regenerate).toContain('await handleSend(content, attachments)')
+    expect(regenerate).not.toContain('deleteMessage(lastAssistant.id)')
+  })
+})

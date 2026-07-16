@@ -556,16 +556,15 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
     }
   }
 
-  // Regenerate: re-send the last user message
+  // Regenerate: truncate the original user turn and its response, then re-send
+  // that user content once. Calling handleSend after deleting only the assistant
+  // persisted a duplicate consecutive user message, so the regenerated prompt
+  // was not the prompt being regenerated (live DSV4 Max repro: duplicated user
+  // turn followed by a reasoning repetition loop).
   const handleRegenerate = async () => {
     if (!chatId || loading) return
     const lastUser = [...messages].reverse().find(m => m.role === 'user')
     if (!lastUser) return
-    const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant')
-    if (lastAssistant) {
-      try { await window.api.chat.deleteMessage(lastAssistant.id) } catch {}
-    }
-    setMessages(prev => prev.filter(m => m.id !== lastAssistant?.id))
     // Handle multimodal content (JSON array with text + image/video/audio)
     let content = lastUser.content
     let attachments: MediaAttachment[] | undefined
@@ -614,7 +613,18 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
         if (attachments && attachments.length === 0) attachments = undefined
       }
     } catch { /* not JSON, plain text */ }
-    handleSend(content, attachments)
+    // Delete the original user turn and everything after it in one DB operation.
+    // handleSend() will persist exactly one replacement user turn. This also
+    // removes any tool/assistant continuation rows belonging to the old turn.
+    try {
+      await window.api.chat.deleteMessagesFrom(chatId, lastUser.timestamp)
+    } catch (error) {
+      console.error('Failed to truncate chat for regeneration:', error)
+      showToast('error', 'Regenerate failed', 'Could not replace the previous response.')
+      return
+    }
+    setMessages(prev => prev.filter(m => m.timestamp < lastUser.timestamp))
+    await handleSend(content, attachments)
   }
 
   // Edit & resend: truncate conversation at the edited message, resend with new content

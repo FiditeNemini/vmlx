@@ -4769,7 +4769,7 @@ class TestMlxstudio78MetalWorkingSetGuard:
             # Must NOT raise
             asyncio.run(check_metal_working_set_pressure(MagicMock()))
 
-    def test_loaded_model_baseline_allows_low_transient_pressure(self):
+    def test_loaded_model_baseline_allows_low_transient_pressure_below_threshold(self):
         import asyncio
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch
@@ -4778,7 +4778,7 @@ class TestMlxstudio78MetalWorkingSetGuard:
 
         max_ws = 100 * 1024 ** 3
         active = int(max_ws * 0.995)
-        baseline = int(max_ws * 0.992)
+        baseline = int(max_ws * 0.988)
 
         async def run():
             with patch.dict(os.environ, {
@@ -4817,6 +4817,137 @@ class TestMlxstudio78MetalWorkingSetGuard:
             s._metal_ws_model_baseline_bytes = old_baseline
             s._metal_ws_model_baseline_max_ws_bytes = old_baseline_max
             s._metal_ws_model_baseline_model_key = old_baseline_key
+
+    def test_loaded_model_baseline_above_ceiling_never_bypasses_guard(self):
+        """A post-load baseline above Metal's ceiling must reject prefill.
+
+        This matches the live MiniMax-M3 REAP32 failure: health reported
+        107.94GB active against a 107.52GB ceiling, then the first Electron
+        request rebooted the host while the old baseline exception returned.
+        """
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+        import mlx.core as mx
+        from fastapi import HTTPException
+        import vmlx_engine.server as s
+
+        max_ws = 100 * 1024 ** 3
+        baseline = int(max_ws * 1.004)
+        active = baseline
+
+        async def run():
+            with patch.dict(os.environ, {
+                "VMLINUX_METAL_WS_GUARD": "1",
+                "VMLINUX_METAL_WS_REJECT_PCT": "99",
+            }):
+                with patch.object(mx, "device_info", lambda: {
+                    "max_recommended_working_set_size": max_ws
+                }, create=True), patch.object(
+                    mx, "get_active_memory", lambda: active, create=True
+                ), patch.object(
+                    mx, "get_cache_memory", lambda: 0, create=True
+                ), patch.object(
+                    mx, "clear_cache", lambda: None, create=True
+                ):
+                    return await s.check_metal_working_set_pressure(MagicMock())
+
+        old_engine = s._engine
+        old_model_path = s._model_path
+        old_model_name = s._model_name
+        old_baseline = s._metal_ws_model_baseline_bytes
+        old_baseline_max = s._metal_ws_model_baseline_max_ws_bytes
+        old_baseline_key = s._metal_ws_model_baseline_model_key
+        try:
+            s._engine = SimpleNamespace()
+            s._model_path = "/models/Oversized-Control"
+            s._model_name = "Oversized-Control"
+            s._metal_ws_model_baseline_bytes = baseline
+            s._metal_ws_model_baseline_max_ws_bytes = max_ws
+            s._metal_ws_model_baseline_model_key = s._model_path
+            with pytest.raises(HTTPException) as exc_info:
+                asyncio.run(run())
+            assert exc_info.value.status_code == 503
+            assert "working set" in str(exc_info.value.detail).lower()
+        finally:
+            s._engine = old_engine
+            s._model_path = old_model_path
+            s._model_name = old_model_name
+            s._metal_ws_model_baseline_bytes = old_baseline
+            s._metal_ws_model_baseline_max_ws_bytes = old_baseline_max
+            s._metal_ws_model_baseline_model_key = old_baseline_key
+
+    def test_minimax_m3_rejects_tight_prefill_headroom_below_generic_threshold(self):
+        """M3 needs fixed prefill workspace even when occupancy is under 99%."""
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        import mlx.core as mx
+        from fastapi import HTTPException
+        import vmlx_engine.server as s
+
+        max_ws = int(107.52 * 1024 ** 3)
+        active = int(105.4 * 1024 ** 3)
+
+        async def run():
+            with patch.dict(os.environ, {
+                "VMLINUX_METAL_WS_GUARD": "1",
+                "VMLINUX_METAL_WS_REJECT_PCT": "99",
+                "VMLINUX_M3_TIGHT_MEMORY_GUARD": "1",
+                "VMLINUX_M3_PREFILL_MIN_FREE_GB": "3",
+            }):
+                with patch.object(mx, "device_info", lambda: {
+                    "max_recommended_working_set_size": max_ws
+                }, create=True), patch.object(
+                    mx, "get_active_memory", lambda: active, create=True
+                ):
+                    return await s.check_metal_working_set_pressure(MagicMock())
+
+        old_model_path = s._model_path
+        old_model_name = s._model_name
+        try:
+            s._model_path = "/models/MiniMax-M3-REAP32-d3-Coder"
+            s._model_name = "MiniMax-M3-REAP32-d3-Coder"
+            with pytest.raises(HTTPException) as exc_info:
+                asyncio.run(run())
+            assert exc_info.value.status_code == 503
+            assert "safe first prefill" in str(exc_info.value.detail)
+            assert "host-reboot risk" in str(exc_info.value.detail)
+        finally:
+            s._model_path = old_model_path
+            s._model_name = old_model_name
+
+    def test_minimax_m3_prefill_guard_allows_sufficient_headroom(self):
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        import mlx.core as mx
+        import vmlx_engine.server as s
+
+        max_ws = int(107.52 * 1024 ** 3)
+        active = int(100 * 1024 ** 3)
+
+        async def run():
+            with patch.dict(os.environ, {
+                "VMLINUX_METAL_WS_GUARD": "1",
+                "VMLINUX_METAL_WS_REJECT_PCT": "99",
+                "VMLINUX_M3_TIGHT_MEMORY_GUARD": "1",
+                "VMLINUX_M3_PREFILL_MIN_FREE_GB": "3",
+            }):
+                with patch.object(mx, "device_info", lambda: {
+                    "max_recommended_working_set_size": max_ws
+                }, create=True), patch.object(
+                    mx, "get_active_memory", lambda: active, create=True
+                ):
+                    return await s.check_metal_working_set_pressure(MagicMock())
+
+        old_model_path = s._model_path
+        old_model_name = s._model_name
+        try:
+            s._model_path = "/models/MiniMax-M3-Coder-Small"
+            s._model_name = "MiniMax-M3-Coder-Small"
+            asyncio.run(run())
+        finally:
+            s._model_path = old_model_path
+            s._model_name = old_model_name
 
     def test_loaded_model_baseline_still_rejects_high_transient_pressure(self):
         import asyncio

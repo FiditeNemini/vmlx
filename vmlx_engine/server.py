@@ -4513,6 +4513,47 @@ async def check_metal_working_set_pressure(request: Request):
         return
 
     pct = (active / max_ws) * 100.0
+    free_bytes = max(0, max_ws - active)
+    model_identity = " ".join(
+        str(value or "").lower()
+        for value in (_model_path, _model_name)
+    )
+    is_minimax_m3 = "minimax-m3" in model_identity or "minimax_m3" in model_identity
+    if (
+        is_minimax_m3
+        and _projection_env("VMLX_M3_TIGHT_MEMORY_GUARD", "1") != "0"
+    ):
+        try:
+            m3_min_free_gb = float(
+                _projection_env("VMLX_M3_PREFILL_MIN_FREE_GB", "3.0")
+            )
+        except (TypeError, ValueError):
+            m3_min_free_gb = 3.0
+        m3_min_free_bytes = max(0, int(m3_min_free_gb * (1024**3)))
+        if m3_min_free_bytes and free_bytes < m3_min_free_bytes:
+            logger.warning(
+                "MiniMax-M3 tight-memory prefill reject: active=%.1fGB "
+                "max=%.1fGB free=%.1fGB minimum=%.1fGB model=%s",
+                active / (1024**3),
+                max_ws / (1024**3),
+                free_bytes / (1024**3),
+                m3_min_free_bytes / (1024**3),
+                _model_path or _model_name or "",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "MiniMax-M3 model load leaves too little Metal headroom "
+                    "for a safe first prefill "
+                    f"({free_bytes / (1024**3):.1f}GB free; "
+                    f"{m3_min_free_bytes / (1024**3):.1f}GB required). "
+                    "Stop the model and use a smaller quant/bundle. Set "
+                    "VMLX_M3_PREFILL_MIN_FREE_GB to tune, or "
+                    "VMLX_M3_TIGHT_MEMORY_GUARD=0 only for explicit "
+                    "developer diagnostics; disabling it accepts host-reboot risk."
+                ),
+                headers={"Retry-After": "5"},
+            )
     if pct < threshold_pct:
         return
 
@@ -4567,13 +4608,24 @@ async def check_metal_working_set_pressure(request: Request):
                 baseline = _metal_ws_model_baseline_bytes or active
             transient_bytes = max(0, active - int(baseline))
             transient_pct = (transient_bytes / max_ws) * 100.0
+            baseline_pct = (int(baseline) / max_ws) * 100.0
             allowed_transient_pct = max(0.5, 100.0 - threshold_pct)
-            if transient_pct <= allowed_transient_pct:
+            # Baseline forgiveness is only for a small request transient that
+            # crosses the threshold. Never forgive a model whose post-load
+            # baseline is itself at/above the threshold: REAP32 reached
+            # 107.94GB active against a 107.52GB Metal ceiling and the first
+            # Electron prefill rebooted the host before Python could recover.
+            if (
+                baseline_pct < threshold_pct
+                and transient_pct <= allowed_transient_pct
+            ):
                 logger.info(
                     "Metal working-set guard allowed loaded-model baseline pressure: "
-                    "active=%.1fGB baseline=%.1fGB transient=%.2f%% threshold=%.1f%%",
+                    "active=%.1fGB baseline=%.1fGB baseline_pct=%.2f%% "
+                    "transient=%.2f%% threshold=%.1f%%",
                     active / (1024**3),
                     int(baseline) / (1024**3),
+                    baseline_pct,
                     transient_pct,
                     threshold_pct,
                 )

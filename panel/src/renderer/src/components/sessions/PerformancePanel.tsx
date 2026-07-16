@@ -483,7 +483,11 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
             )}
             {health.native_cache?.generic_turboquant_kv && (
               <InfoCard
-                label="Generic TQ-KV"
+                label={
+                  health.native_cache.generic_turboquant_kv.reason === 'hybrid_attention_kv_only'
+                    ? 'Selective TQ-KV'
+                    : 'Generic TQ-KV'
+                }
                 value={
                   health.native_cache.generic_turboquant_kv.enabled
                     ? 'enabled'

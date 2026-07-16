@@ -393,7 +393,11 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
             )}
             {nativeCache?.generic_turboquant_kv && (
               <StatCard
-                label="Generic TQ-KV"
+                label={
+                  nativeCache.generic_turboquant_kv.reason === 'hybrid_attention_kv_only'
+                    ? 'Selective TQ-KV'
+                    : 'Generic TQ-KV'
+                }
                 value={
                   nativeCache.generic_turboquant_kv.enabled
                     ? 'enabled'

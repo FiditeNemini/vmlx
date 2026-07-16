@@ -3264,15 +3264,30 @@ class MLLMScheduler:
                                     if cache_blocks is not None:
                                         cache_states = self._extract_cache_states(cache_blocks)
                                         if cache_states:
+                                            _paged_store_kwargs = {
+                                                "cache_extra_keys": (
+                                                    getattr(
+                                                        request,
+                                                        "_cache_extra_keys",
+                                                        None,
+                                                    )
+                                                    if media_cache_allowed
+                                                    else None
+                                                ),
+                                            }
+                                            if (
+                                                self._is_hybrid
+                                                and not self._uses_zaya_cache
+                                                and not _uses_mixed_attention_cache
+                                            ):
+                                                _paged_store_kwargs[
+                                                    "store_cumulative_state"
+                                                ] = False
                                             self.block_aware_cache.store_cache(
                                                 request_id,
                                                 truncated_tokens,
                                                 cache_states,
-                                                cache_extra_keys=(
-                                                    getattr(request, "_cache_extra_keys", None)
-                                                    if media_cache_allowed
-                                                    else None
-                                                ),
+                                                **_paged_store_kwargs,
                                             )
                                             logger.info(
                                                 f"VLM Scheduler stored paged Prefix Cache for "

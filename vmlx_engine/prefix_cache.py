@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 # rotating SWA layers. Older VLM extraction sliced all layers to the primary
 # count before storage, so old L2 blocks can restore invalid 4-head rotating
 # caches. Miss them cleanly.
-PAGED_CACHE_SCHEMA_VERSION = "paged_n1_keys_v6"
+PAGED_CACHE_SCHEMA_VERSION = "paged_n1_keys_v7_external_companion"
 
 
 def runtime_cache_fingerprint() -> str:
@@ -917,7 +917,13 @@ def _positional_layer_slice_bounds(
 
 
 def _numpy_block_slice(
-    cache_data, np_sources, start_idx, end_idx, is_last_block, existing_tokens=0,
+    cache_data,
+    np_sources,
+    start_idx,
+    end_idx,
+    is_last_block,
+    existing_tokens=0,
+    store_cumulative_state=True,
 ):
     """Create per-block cache_data using numpy slicing (no MLX/Metal ops).
 
@@ -941,7 +947,7 @@ def _numpy_block_slice(
 
         if _is_dsv4_cache_class(cls):
             state = layer_state.get("state")
-            if is_last_block and state is not None:
+            if is_last_block and store_cumulative_state and state is not None:
                 block_slices.append((
                     "deepseek_v4",
                     _to_numpy_tree(state),
@@ -1739,6 +1745,7 @@ class BlockAwarePrefixCache:
         cache_data: List[Any],
         cache_type: str = "assistant",
         cache_extra_keys: Optional[Any] = None,
+        store_cumulative_state: bool = True,
     ) -> Optional[BlockTable]:
         """
         Store computed cache for future reuse.
@@ -1756,6 +1763,11 @@ class BlockAwarePrefixCache:
                 BlockCacheEntry for stats / future eviction prioritization.
                 Block-level eviction itself is governed by paged-cache reference
                 counts; this tag does not change current eviction order.
+            store_cumulative_state: Store path-dependent cumulative state in
+                the terminal block. Generic hybrid SSM/GDN schedulers set this
+                false because their separately keyed typed companion store is
+                authoritative; keeping a second copy in block L2 wastes space
+                and is never accepted without the companion hit.
 
         Returns:
             BlockTable for the stored cache, or None on failure
@@ -1857,7 +1869,8 @@ class BlockAwarePrefixCache:
         logger.info(
             f"Block disk write-through: disk_store={'present' if disk_store else 'None'}, "
             f"is_tensor_data={is_tensor_data}, new_tokens={len(new_tokens)}, "
-            f"num_new_blocks={num_new_blocks}, frugal={_paged_frugal}"
+            f"num_new_blocks={num_new_blocks}, frugal={_paged_frugal}, "
+            f"cumulative={'block' if store_cumulative_state else 'external-companion'}"
         )
 
         # Pre-convert source KV arrays to numpy for safe slicing.
@@ -2056,7 +2069,12 @@ class BlockAwarePrefixCache:
                         is_last
                         and is_tensor_data
                         and (
-                            _block_needs_cumulative_update(existing_block.cache_data)
+                            (
+                                store_cumulative_state
+                                and _block_needs_cumulative_update(
+                                    existing_block.cache_data
+                                )
+                            )
                             or (
                                 (has_dsv4_cache_data or has_zaya_cca_cache_data)
                                 and existing_block.cache_data is None
@@ -2190,6 +2208,7 @@ class BlockAwarePrefixCache:
                     is_last_block=is_last,
                     np_sources=np_sources if np_sources else None,
                     existing_tokens=existing_tokens,
+                    store_cumulative_state=store_cumulative_state,
                 )
                 if block_kv_data:
                     # DSV4, ZAYA CCA, and mixed-SWA rotating KV are not normal
@@ -2234,7 +2253,7 @@ class BlockAwarePrefixCache:
                         logger.debug(
                             f"Stored tensor slice for block {block.block_id}: "
                             f"tokens [{global_start}:{global_end}], {len(block_kv_data)} layers"
-                            f"{' (includes cumulative states)' if is_last else ''}"
+                            f"{' (includes cumulative states)' if is_last and store_cumulative_state else ''}"
                         )
 
                     # Defer disk write using numpy slices (no MLX ops)
@@ -2242,6 +2261,7 @@ class BlockAwarePrefixCache:
                         np_block = _numpy_block_slice(
                             cache_data, np_sources or {},
                             global_start, global_end, is_last, existing_tokens,
+                            store_cumulative_state,
                         )
                         if np_block:
                             # The numpy mirror is authoritative for ordinary KV
@@ -2446,6 +2466,7 @@ class BlockAwarePrefixCache:
         is_last_block: bool = False,
         np_sources: Optional[dict] = None,
         existing_tokens: int = 0,
+        store_cumulative_state: bool = True,
     ) -> Optional[List[Tuple]]:
         """
         Extract tensor slices for a single block from cache data.
@@ -2475,6 +2496,9 @@ class BlockAwarePrefixCache:
             np_sources: Optional dict of layer_idx → (np_keys, np_values)
                         pre-converted numpy arrays from the parent KV cache.
                         When present, slicing is done in numpy space.
+            store_cumulative_state: Whether terminal blocks own cumulative
+                        state. False when a typed external companion store is
+                        authoritative for hybrid SSM/GDN layers.
 
         Returns:
             List of tuples per layer. Each tuple is either:
@@ -2679,7 +2703,7 @@ class BlockAwarePrefixCache:
                         except Exception:
                             sub_slices.append(("skip",))
                     else:
-                        if is_last_block:
+                        if is_last_block and store_cumulative_state:
                             meta = sub.get("meta_state", "")
                             sub_slices.append((
                                 "cumulative",
@@ -2823,7 +2847,7 @@ class BlockAwarePrefixCache:
                 # Cumulative cache (MambaCache, ArraysCache, etc.)
                 # State is not position-indexed — it represents ALL tokens processed
                 # Only store in the last block (it encompasses all prior tokens)
-                if is_last_block and state is not None:
+                if is_last_block and store_cumulative_state and state is not None:
                     meta = layer_state.get("meta_state", "")
                     block_slices.append((
                         "cumulative",

@@ -7709,11 +7709,21 @@ class Scheduler:
                             # is especially visible with block disk L2 because
                             # full-key stale blocks survive process restarts.
                             _t_store = time.perf_counter()
+                            _paged_store_kwargs = {
+                                "cache_type": self._pick_cache_type_for_request(request),
+                            }
+                            if (
+                                self._is_hybrid
+                                and not self._uses_dsv4_cache
+                                and not self._uses_zaya_cache
+                                and not self._mixed_attention_cache_model
+                            ):
+                                _paged_store_kwargs["store_cumulative_state"] = False
                             self.block_aware_cache.store_cache(
                                 request_id,
                                 store_tokens,
                                 cache_data,
-                                cache_type=self._pick_cache_type_for_request(request),
+                                **_paged_store_kwargs,
                             )
                             self._dsv4_trace_timing(
                                 "store_cache",

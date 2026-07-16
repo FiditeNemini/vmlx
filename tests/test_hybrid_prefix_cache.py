@@ -304,6 +304,37 @@ class TestBlockSlicingHybrid:
         # KV layer -> kv
         assert slices[1][0] == "kv"
 
+    def test_external_companion_omits_ssm_from_last_block(self):
+        """Typed companion ownership must keep cumulative state out of block L2."""
+        cache = self._make_cache(block_size=64)
+        cache_data = [
+            {
+                "state": (mx.zeros((1, 16)), mx.ones((1, 16))),
+                "meta_state": ("0",),
+                "class_name": "ArraysCache",
+            },
+            {
+                "state": (
+                    mx.zeros((1, 8, 64, 64)),
+                    mx.ones((1, 8, 64, 64)),
+                ),
+                "meta_state": ("64",),
+                "class_name": "KVCache",
+            },
+        ]
+
+        slices = cache._extract_block_tensor_slice(
+            cache_data,
+            start_idx=0,
+            end_idx=64,
+            is_last_block=True,
+            store_cumulative_state=False,
+        )
+
+        assert slices is not None
+        assert slices[0] == ("skip",)
+        assert slices[1][0] == "kv"
+
     def test_ssm_none_state_always_skip(self):
         """SSM layers with None state should always be 'skip', even in last block."""
         cache = self._make_cache(block_size=64)
@@ -404,6 +435,35 @@ class TestReconstructHybrid:
         assert len(kv_layers) == 2, f"Expected 2 KV layers, got {len(kv_layers)}"
         for kv in kv_layers:
             assert kv.keys.shape == (1, 8, 64, 64), f"KV keys shape mismatch: {kv.keys.shape}"
+
+    def test_external_companion_store_reconstructs_kv_only_boundary(self):
+        """Generic hybrid block storage must not duplicate typed SSM companions."""
+        cache = self._make_cache(block_size=64)
+        kv_keys = mx.random.normal((1, 8, 64, 64))
+        kv_values = mx.random.normal((1, 8, 64, 64))
+        ssm_state = (mx.random.normal((1, 16)), mx.random.normal((1, 16)))
+        mx.synchronize()
+        cache_data = [
+            {"state": ssm_state, "meta_state": ("0",), "class_name": "ArraysCache"},
+            {"state": (kv_keys, kv_values), "meta_state": ("64",), "class_name": "KVCache"},
+            {"state": ssm_state, "meta_state": ("0",), "class_name": "ArraysCache"},
+            {"state": (kv_keys, kv_values), "meta_state": ("64",), "class_name": "KVCache"},
+        ]
+
+        cache.store_cache(
+            "external-companion-store",
+            list(range(64)),
+            cache_data,
+            store_cumulative_state=False,
+        )
+        block_table, _ = cache.fetch_cache(
+            "external-companion-fetch", list(range(64))
+        )
+        reconstructed = cache.reconstruct_cache(block_table)
+
+        assert reconstructed is not None
+        assert len(reconstructed) == 2
+        assert all(hasattr(layer, "keys") for layer in reconstructed)
 
 
 # ---------------------------------------------------------------------------

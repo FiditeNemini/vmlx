@@ -670,5 +670,4 @@ CRITICAL RULES:
 - Prefer batch edits for multiple changes to the same file.
 - Use search tools to find code patterns instead of reading entire files.
 - Use diagnostics after making code changes to catch errors early.
-- Ask the user when you need clarification — don't guess.
-- After ALL tool calls are complete, write a final response. If the user explicitly requested exact final wording or a strict output format, follow that format exactly; otherwise write a clear, helpful response summarizing your findings or explaining what you did.`
+- Ask the user when you need clarification — don't guess.`

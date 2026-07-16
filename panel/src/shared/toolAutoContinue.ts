@@ -25,3 +25,11 @@ export function shouldFinishZayaAppleScriptToolRound(
     toolNames.every((name) => name === 'run_applescript')
   )
 }
+
+export function requestsDirectAnswerAfterSingleTool(text: string): boolean {
+  return (
+    /\bexactly once\b/i.test(text) &&
+    /\bafter (?:the )?tool result\b/i.test(text) &&
+    /\breply exactly\b/i.test(text)
+  )
+}

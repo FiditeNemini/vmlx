@@ -28,6 +28,7 @@ import {
   visibleReasoningSegments,
 } from "../../shared/interleavedReasoning";
 import {
+  requestsDirectAnswerAfterSingleTool,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
 } from "../../shared/toolAutoContinue";
@@ -1374,7 +1375,14 @@ export function registerChatHandlers(
         ?.content || "";
       const suppressAgenticToolPromptForExactOutput =
         overrides?.builtinToolsEnabled === true &&
-        /\breply exactly\s*:/i.test(latestUserText);
+        // Exact-output probes usually say "reply exactly MARKER" without a
+        // colon. Injecting the broad coding-agent prompt in that case repeats
+        // the final-response instruction and made Nemotron emit the requested
+        // marker twice after a correct tool result.
+        /\breply exactly\b/i.test(latestUserText);
+      const directAnswerAfterSingleTool =
+        overrides?.builtinToolsEnabled === true &&
+        requestsDirectAnswerAfterSingleTool(latestUserText);
       const suppressGenericAgenticToolPromptForNativeTools =
         overrides?.builtinToolsEnabled === true &&
         shouldSuppressGenericAgenticPromptForNativeTools(
@@ -1694,6 +1702,11 @@ export function registerChatHandlers(
       // This is scoped to the recovery request; the normal tool loop keeps the
       // user's reasoning setting and supports additional tool calls.
       let finalAnswerRecovery = false;
+      // An explicit "exactly once; after the tool result, reply exactly ..."
+      // contract has no valid second tool round. Put only that planned
+      // follow-up on the same direct-answer rail as bounded recovery so native
+      // tool-tuned models cannot re-enter an unbounded tool-call prefix.
+      let plannedDirectAnswerPass = false;
       // Accumulates content across tool iterations so abort during tool execution can recover
       // earlier content that would otherwise be lost when fullContent is reset between iterations
       let allGeneratedContent = "";
@@ -1836,7 +1849,7 @@ export function registerChatHandlers(
             }
           };
           const applyFinalAnswerRecovery = (obj: Record<string, any>) => {
-            if (!finalAnswerRecovery) return;
+            if (!(finalAnswerRecovery || plannedDirectAnswerPass)) return;
             delete obj.tools;
             if (isRemote) return;
             obj.enable_thinking = false;
@@ -3515,6 +3528,8 @@ export function registerChatHandlers(
               break;
             }
             emitToolStatus("processing", "", undefined, toolIteration);
+            plannedDirectAnswerPass =
+              directAnswerAfterSingleTool && toolIteration === 1;
             // Reset idle timer before follow-up — tools may have consumed minutes
             if (chatSession) sessionManager.touchSession(chatSession.id);
             if (!(await sendFollowUp())) break;

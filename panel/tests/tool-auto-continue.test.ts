@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
+  requestsDirectAnswerAfterSingleTool,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
 } from '../src/shared/toolAutoContinue'
@@ -52,6 +53,24 @@ describe('tool auto-continue policy', () => {
     expect(shouldFinishZayaAppleScriptToolRound(true, [])).toBe(false)
   })
 
+  it('recognizes only explicit one-tool exact-final contracts', () => {
+    expect(
+      requestsDirectAnswerAfterSingleTool(
+        'Call file_info exactly once. After the tool result, reply exactly DONE and nothing else.',
+      ),
+    ).toBe(true)
+    expect(
+      requestsDirectAnswerAfterSingleTool(
+        'Use tools as needed, then reply exactly DONE.',
+      ),
+    ).toBe(false)
+    expect(
+      requestsDirectAnswerAfterSingleTool(
+        'Call file_info exactly once, then summarize the result.',
+      ),
+    ).toBe(false)
+  })
+
   it('checks the terminal AppleScript round before sending a follow-up', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
     const policy = source.indexOf('shouldFinishZayaAppleScriptToolRound(')
@@ -84,6 +103,17 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain(
       'The tool completed, but the model produced no visible answer after one direct-answer recovery.',
     )
+  })
+
+  it('removes tools for an explicit single-tool exact-final follow-up', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+    const planned = source.indexOf('plannedDirectAnswerPass =')
+    const followUp = source.indexOf('if (!(await sendFollowUp())) break;', planned)
+
+    expect(source).toContain('requestsDirectAnswerAfterSingleTool(latestUserText)')
+    expect(source).toContain('if (!(finalAnswerRecovery || plannedDirectAnswerPass)) return')
+    expect(planned).toBeGreaterThan(-1)
+    expect(followUp).toBeGreaterThan(planned)
   })
 
   it('resets token timing at follow-up stream boundaries and counts long in-stream gaps', () => {

@@ -837,9 +837,10 @@ describe('buildRequestBody — Tool format', () => {
 
         expect(registry).toContain('If the user explicitly requested exact final wording or a strict output format, follow that format exactly')
         expect(registry).not.toContain('MUST ALWAYS provide a substantive response')
+        expect(registry).not.toContain('After ALL tool calls are complete')
         expect(chat).toContain('If the user explicitly requested exact final wording or a strict output format, follow that format exactly')
         expect(chat).toContain('suppressAgenticToolPromptForExactOutput')
-        expect(chat).toContain('/\\breply exactly\\s*:/i.test(latestUserText)')
+        expect(chat).toContain('/\\breply exactly\\b/i.test(latestUserText)')
         expect(chat).toContain('!suppressAgenticToolPromptForExactOutput')
     })
 

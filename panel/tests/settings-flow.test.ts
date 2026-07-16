@@ -1136,7 +1136,9 @@ describe('Performance & Generation', () => {
         const helper = readFileSync(resolve(__dirname, '../src/shared/sessionConfigMigrations.ts'), 'utf8')
         expect(source).toContain('function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: string): boolean')
         expect(source).toContain('const bundleDefaultsChanged = applyBundleStartupDefaults(config, config.modelPath)')
-        expect(source).toContain('bundleDefaultsChanged || cacheDefaultsFilled || migrated || familyDefaultsChanged || markedCurrent')
+        expect(source).toContain(
+            'bundleDefaultsChanged || cacheDefaultsFilled || migrated || familyDefaultsChanged || normalized || markedCurrent'
+        )
         expect(helper).toContain('32768')
     })
 
@@ -2406,7 +2408,9 @@ describe('Default IP and New Settings', () => {
         expect(source).toContain('const cacheDefaultsFilled = applyMissingCacheStackStartupDefaults(config, config.modelPath)')
         expect(source).toContain('const markedCurrent = markCacheStackStartupDefaultsCurrent(config)')
         expect(source).toContain('const familyDefaultsChanged = applyFamilyStartupDefaults(config, config.modelPath)')
-        expect(source).toContain('if (bundleDefaultsChanged || cacheDefaultsFilled || migrated || familyDefaultsChanged || markedCurrent)')
+        expect(source).toContain(
+            'if (bundleDefaultsChanged || cacheDefaultsFilled || migrated || familyDefaultsChanged || normalized || markedCurrent)'
+        )
         expect(source).toContain('markCacheStackStartupDefaultsCurrent(merged as Partial<ServerConfig>)')
         expect(source).toContain('cacheStackStartupDefaultsVersion: CACHE_STACK_STARTUP_DEFAULTS_VERSION')
     })
@@ -2469,6 +2473,23 @@ describe('Default IP and New Settings', () => {
         expect(existingBlock).toContain('const merged = { ...existingConfig, ...config, modelPath, host, port }')
         expect(existingBlock).toContain('applyMissingCacheStackStartupDefaults(merged, modelPath)')
         expect(existingBlock).toContain('markCacheStackStartupDefaultsCurrent(merged)')
+    })
+
+    it('create-session UI persists the same paged plus block-L2 tuple that it displays', () => {
+        const source = readFileSync('src/renderer/src/components/sessions/CreateSession.tsx', 'utf8')
+        const detectStart = source.indexOf('const applyModelDefaults')
+        const detectEnd = source.indexOf('// Auto-detect image model type', detectStart)
+        const detectBlock = source.slice(detectStart, detectEnd)
+        const launchStart = source.indexOf('const handleLaunch = async')
+        const launchEnd = source.indexOf('const handleLaunchRemote', launchStart)
+        const launchBlock = source.slice(launchStart, launchEnd)
+
+        expect(detectBlock).toContain("detected?.usePagedCache === true")
+        expect(detectBlock).toContain('? false')
+        expect(detectBlock).toContain(': prev.enableDiskCache')
+        expect(launchBlock).toContain('const normalizedCacheConfig = config.usePagedCache')
+        expect(launchBlock).toContain('enableDiskCache: false, enableBlockDiskCache: true')
+        expect(launchBlock).toContain('window.api.sessions.create(selectedModel, launchConfig)')
     })
 
     it('fresh minimal session configs get visible paged-on + block-disk cache defaults (Phase-2)', () => {
@@ -2534,8 +2555,24 @@ describe('Default IP and New Settings', () => {
         expect(block).toContain('for (const session of db.getSessions())')
         expect(block).toContain('applyMissingCacheStackStartupDefaults(config, session.modelPath)')
         expect(block).toContain('applyCacheStackStartupDefaultMigration(config, session.modelPath)')
+        expect(block).toContain('normalizeCacheStackMutualExclusion(config)')
         expect(block).toContain('markCacheStackStartupDefaultsCurrent(config)')
         expect(block).toContain("db.updateSession(session.id, { config: JSON.stringify(config) })")
+    })
+
+    it('normalizes impossible paged and legacy-L2 tuples independent of migration version', () => {
+        const source = readFileSync('src/main/sessions.ts', 'utf8')
+        const helperStart = source.indexOf('function normalizeCacheStackMutualExclusion')
+        const helperEnd = source.indexOf('function applyMissingCacheStackStartupDefaults', helperStart)
+        const helper = source.slice(helperStart, helperEnd)
+        const updateStart = source.indexOf('async updateSessionConfig')
+        const updateEnd = source.indexOf('// Log sleep config changes', updateStart)
+        const updateBlock = source.slice(updateStart, updateEnd)
+
+        expect(helper).toContain('config.usePagedCache === true && config.enableDiskCache === true')
+        expect(helper).toContain('config.enableDiskCache = false')
+        expect(helper).toContain('config.enableBlockDiskCache = false')
+        expect(updateBlock).toContain('normalizeCacheStackMutualExclusion(merged as Partial<ServerConfig>)')
     })
 
     it('adopted paged sessions default to block L2 without legacy L2', () => {

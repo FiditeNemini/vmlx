@@ -109,6 +109,9 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         dsv4PoolQuant: detected?.family === 'deepseek-v4' ? true : prev.dsv4PoolQuant,
         enablePrefixCache: detected?.family === 'deepseek-v4' ? true : prev.enablePrefixCache,
         usePagedCache: detected?.family === 'deepseek-v4' ? true : detected?.usePagedCache,
+        enableDiskCache: detected?.family === 'deepseek-v4' || detected?.usePagedCache === true
+          ? false
+          : prev.enableDiskCache,
         enableBlockDiskCache: detected?.family === 'deepseek-v4'
           ? true
           : detected?.usePagedCache === true,
@@ -226,6 +229,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             base.pagedCacheBlockSize = 256
           } else {
             base.usePagedCache = detected.usePagedCache
+            base.enableDiskCache = detected.usePagedCache === true ? false : base.enableDiskCache
             base.enableBlockDiskCache = detected.usePagedCache === true
           }
           setDetectedFamily(detected.family)
@@ -310,7 +314,12 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
 
     try {
       // Set model type so buildArgs skips text-specific flags for image models
-      const launchConfig = (autoDetectedType || filterTypeProp) === 'image' ? { ...config, modelType: 'image' as const } : config
+      const normalizedCacheConfig = config.usePagedCache
+        ? { ...config, enableDiskCache: false, enableBlockDiskCache: true }
+        : config
+      const launchConfig = (autoDetectedType || filterTypeProp) === 'image'
+        ? { ...normalizedCacheConfig, modelType: 'image' as const }
+        : normalizedCacheConfig
       const createResult = await window.api.sessions.create(selectedModel, launchConfig)
       if (!mountedRef.current) return
       if (!createResult.success) {

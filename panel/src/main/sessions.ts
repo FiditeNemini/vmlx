@@ -629,6 +629,26 @@ function markCacheStackStartupDefaultsCurrent(config: Partial<ServerConfig>): bo
   return true
 }
 
+function normalizeCacheStackMutualExclusion(config: Partial<ServerConfig>): boolean {
+  // Persist the same mutually-exclusive L2 lane that buildArgs will launch.
+  // Paged cache uses block-disk L2; non-paged cache may use legacy prompt L2.
+  // Old/current-version rows can still contain both after UI detection changed,
+  // so this invariant must not depend on a one-time migration version.
+  if (config.usePagedCache === true && config.enableDiskCache === true) {
+    config.enableDiskCache = false
+    return true
+  }
+  if (
+    config.usePagedCache !== true &&
+    config.enableDiskCache === true &&
+    config.enableBlockDiskCache === true
+  ) {
+    config.enableBlockDiskCache = false
+    return true
+  }
+  return false
+}
+
 function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, modelPath?: string): boolean {
   const targetPath = modelPath || config.modelPath
   let detectedFamily: string | undefined
@@ -990,6 +1010,8 @@ export class SessionManager extends EventEmitter {
   private operationLocks = new Map<string, Promise<void>>()
   /** Global creation lock to prevent port assignment races between concurrent createSession calls */
   private creationLock: Promise<void> = Promise.resolve()
+  /** Serialize manual/UI starts while single-model mode is replacing another local engine. */
+  private singleModelStartTransitionPending: Promise<void> = Promise.resolve()
   /** Timestamp of last successful health check per session (used to skip redundant per-message checks) */
   private lastHealthyAt = new Map<string, number>()
   /** Per-session ring buffer for log lines (capped at LOG_BUFFER_MAX_LINES) */
@@ -1028,8 +1050,9 @@ export class SessionManager extends EventEmitter {
       }
       const cacheDefaultsFilled = applyMissingCacheStackStartupDefaults(config, session.modelPath)
       const migrated = applyCacheStackStartupDefaultMigration(config, session.modelPath)
+      const normalized = normalizeCacheStackMutualExclusion(config)
       const markedCurrent = markCacheStackStartupDefaultsCurrent(config)
-      if (cacheDefaultsFilled || migrated || markedCurrent) {
+      if (cacheDefaultsFilled || migrated || normalized || markedCurrent) {
         db.updateSession(session.id, { config: JSON.stringify(config) })
         console.log(`[SESSION] Persisted startup cache defaults for session ${session.id}`)
       }
@@ -1353,6 +1376,7 @@ export class SessionManager extends EventEmitter {
     applyBundleStartupDefaults(config, modelPath)
     applyMissingCacheStackStartupDefaults(config, modelPath)
     applyFamilyStartupDefaults(config, modelPath)
+    normalizeCacheStackMutualExclusion(config)
     markCacheStackStartupDefaultsCurrent(config)
 
     // Check if session already exists for this model path
@@ -1368,6 +1392,7 @@ export class SessionManager extends EventEmitter {
       applyBundleStartupDefaults(merged, modelPath)
       applyMissingCacheStackStartupDefaults(merged, modelPath)
       applyFamilyStartupDefaults(merged, modelPath)
+      normalizeCacheStackMutualExclusion(merged)
       markCacheStackStartupDefaultsCurrent(merged)
       db.updateSession(existing.id, {
         config: JSON.stringify(merged),
@@ -1462,8 +1487,45 @@ export class SessionManager extends EventEmitter {
       return this._connectRemoteSession(session)
     }
 
-    // Serialize start/stop operations per session to prevent races
-    await this.withSessionLock(sessionId, () => this._startSessionInner(sessionId))
+    const startLocalSession = async () => {
+      if (db.getSetting('gateway_single_model_mode') === 'true') {
+        const otherLocalSessions = db.getSessions().filter(other =>
+          other.id !== sessionId &&
+          other.type !== 'remote' &&
+          ['running', 'loading', 'standby'].includes(other.status)
+        )
+        for (const other of otherLocalSessions) {
+          console.log(
+            `[SESSIONS] single-model mode: stopping session ${other.id} before starting ${sessionId}`
+          )
+          // Fail closed: if an old engine cannot unload, do not start another
+          // one and silently violate the user-visible one-model RAM contract.
+          await this.stopSession(other.id)
+        }
+      }
+
+      // Serialize start/stop operations per session to prevent races.
+      await this.withSessionLock(sessionId, () => this._startSessionInner(sessionId))
+    }
+
+    if (db.getSetting('gateway_single_model_mode') !== 'true') {
+      await startLocalSession()
+      return
+    }
+
+    // Manual Start / Launch Session paths must obey the same replacement
+    // ordering as gateway routing. Two concurrent starts resolve in request
+    // order; the later target unloads the earlier one before it begins.
+    const previous = this.singleModelStartTransitionPending.catch(() => {})
+    let release: () => void = () => {}
+    const current = new Promise<void>(resolve => { release = resolve })
+    this.singleModelStartTransitionPending = previous.then(() => current)
+    await previous
+    try {
+      await startLocalSession()
+    } finally {
+      release()
+    }
   }
 
   private async _startSessionInner(sessionId: string): Promise<void> {
@@ -1483,8 +1545,9 @@ export class SessionManager extends EventEmitter {
     const cacheDefaultsFilled = applyMissingCacheStackStartupDefaults(config, config.modelPath)
     const migrated = applyCacheStackStartupDefaultMigration(config, config.modelPath)
     const familyDefaultsChanged = applyFamilyStartupDefaults(config, config.modelPath)
+    const normalized = normalizeCacheStackMutualExclusion(config)
     const markedCurrent = markCacheStackStartupDefaultsCurrent(config)
-    if (bundleDefaultsChanged || cacheDefaultsFilled || migrated || familyDefaultsChanged || markedCurrent) {
+    if (bundleDefaultsChanged || cacheDefaultsFilled || migrated || familyDefaultsChanged || normalized || markedCurrent) {
       // Persist the migrated config so the settings UI reflects the corrected
       // values on next render and the same migration doesn't have to re-fire
       // on every session start. Without this writeback the saved config keeps
@@ -2264,6 +2327,7 @@ export class SessionManager extends EventEmitter {
     applyCacheStackStartupDefaultMigration(migratedBaseline as Partial<ServerConfig>, (migratedBaseline.modelPath as string) || undefined)
     markCacheStackStartupDefaultsCurrent(migratedBaseline as Partial<ServerConfig>)
     const merged = { ...migratedBaseline, ...cleanConfig }
+    normalizeCacheStackMutualExclusion(merged as Partial<ServerConfig>)
     markCacheStackStartupDefaultsCurrent(merged as Partial<ServerConfig>)
 
     // Log sleep config changes

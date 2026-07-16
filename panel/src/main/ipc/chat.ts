@@ -1684,6 +1684,13 @@ export function registerChatHandlers(
       const currentReasoningSegments = () =>
         visibleReasoningSegments(reasoningSegments);
       let responseWarnings: string[] | null = null;
+      // A model can complete the first post-tool stream with reasoning but no
+      // visible answer. The one recovery request is intentionally answer-only:
+      // it preserves the completed tool result in history while removing tool
+      // schemas and putting local models on their direct (thinking-off) rail.
+      // This is scoped to the recovery request; the normal tool loop keeps the
+      // user's reasoning setting and supports additional tool calls.
+      let finalAnswerRecovery = false;
       // Accumulates content across tool iterations so abort during tool execution can recover
       // earlier content that would otherwise be lost when fullContent is reset between iterations
       let allGeneratedContent = "";
@@ -1825,6 +1832,19 @@ export function registerChatHandlers(
               };
             }
           };
+          const applyFinalAnswerRecovery = (obj: Record<string, any>) => {
+            if (!finalAnswerRecovery) return;
+            delete obj.tools;
+            if (isRemote) return;
+            obj.enable_thinking = false;
+            obj.thinking_mode = "instruct";
+            obj.chat_template_kwargs = {
+              ...(obj.chat_template_kwargs || {}),
+              enable_thinking: false,
+            };
+            delete obj.reasoning_effort;
+            delete obj.max_thinking_tokens;
+          };
           if (useResponsesApi) {
             const systemMessages = requestMessages.filter(
               (m: any) => m.role === "system",
@@ -1915,6 +1935,7 @@ export function registerChatHandlers(
             // Send timeout to server so streaming timeout matches client-side timeout
             if (!isRemote && timeoutSeconds !== 300)
               obj.timeout = timeoutSeconds;
+            applyFinalAnswerRecovery(obj);
             return obj;
           } else {
             const obj: Record<string, any> = {
@@ -2001,6 +2022,7 @@ export function registerChatHandlers(
             // Send timeout to server so streaming timeout matches client-side timeout
             if (!isRemote && timeoutSeconds !== 300)
               obj.timeout = timeoutSeconds;
+            applyFinalAnswerRecovery(obj);
             return obj;
           }
         };
@@ -2258,12 +2280,14 @@ export function registerChatHandlers(
             firstTokenTime = now;
             startPeriodicSave();
           }
-          // Track generation-only time: count time between consecutive tokens.
-          // Gaps > 5s (e.g., tool execution, follow-up PP) are excluded.
-          // Threshold is 5s (not 2s) to handle slow big models at ~0.5 tok/s.
+          // Track generation time between consecutive streamed deltas. Tool
+          // execution and follow-up prefill are excluded by resetting
+          // lastTokenTime at each HTTP stream boundary. Do not discard long
+          // intra-stream gaps: buffered answer passes and slow models still
+          // spent that time generating, and dropping it inflates final TPS.
           if (lastTokenTime !== null) {
             const gap = now - lastTokenTime;
-            if (gap < 5000) generationMs += gap;
+            if (gap > 0) generationMs += gap;
           }
           lastTokenTime = now;
 
@@ -3040,6 +3064,7 @@ export function registerChatHandlers(
           // Reset fetchStartTime so TTFT for follow-up is measured correctly
           fetchStartTime = Date.now();
           firstTokenTime = null;
+          lastTokenTime = null;
           // Use the same wire API format as the initial request
           const url = useResponsesApi
             ? `${baseUrl}/v1/responses`
@@ -3368,10 +3393,11 @@ export function registerChatHandlers(
         // ─── Unified Tool Execution + Auto-Continue Loop ───────────────────
         // Handles both tool call execution and auto-continuation for models
         // that stop after tool use without providing a response.
-        // Auto-continue is limited to MAX_AUTO_CONTINUES consecutive attempts.
-        // Resets after each successful tool call round.
+        // A reasoning-only/empty post-tool completion gets one direct-answer
+        // recovery. Repeating the same generic prompt three times created
+        // duplicate partial reasoning cards and misleading cumulative metrics.
         const AUTO_CONTINUE_TOKEN_THRESHOLD = 100;
-        const MAX_AUTO_CONTINUES = 3;
+        const MAX_AUTO_CONTINUES = 1;
         let autoContinueCount = 0;
         while (toolIteration < MAX_TOOL_ITERATIONS) {
           // Compact sparse array: parallel tool calls at non-contiguous indices create holes
@@ -3504,6 +3530,7 @@ export function registerChatHandlers(
             // 1. Model generated ZERO content after tool results (just stopped)
             // 2. Model hit the length limit with a brief/incomplete response
             autoContinueCount++;
+            finalAnswerRecovery = true;
             const hasContent = fullContent.trim().length > 0;
             console.log(
               `[CHAT] Auto-continue ${autoContinueCount}/${MAX_AUTO_CONTINUES}: model stopped with ${iterationTokenCount} tokens (iteration), content=${hasContent}`,
@@ -3524,7 +3551,7 @@ export function registerChatHandlers(
               }
             }
             const continuePrompt =
-              "Based on the tool results above, provide your complete response. Summarize what you found, explain the results, and address my original request.";
+              "The tool already ran and its real result is above. Complete the original request now. Return only the requested final answer; do not call another tool or summarize these instructions.";
             if (useResponsesApi) {
               requestMessages.push({
                 type: "message",
@@ -3586,6 +3613,24 @@ export function registerChatHandlers(
           }
         }
 
+        if (
+          toolIteration > 0 &&
+          !allGeneratedContent.trim() &&
+          !fullContent.trim()
+        ) {
+          const noVisibleAnswerWarning =
+            "The tool completed, but the model produced no visible answer after one direct-answer recovery.";
+          responseWarnings = Array.from(
+            new Set([...(responseWarnings || []), noVisibleAnswerWarning]),
+          );
+          emitToolStatus(
+            "error",
+            "",
+            noVisibleAnswerWarning,
+            toolIteration,
+          );
+        }
+
         if (toolIteration > 0 || collectedToolStatuses.length > 0) {
           if (toolIteration > 0) {
             console.log(
@@ -3624,7 +3669,18 @@ export function registerChatHandlers(
         const finalGenSec = genTimeSec > 0.05 ? genTimeSec : wallTimeSec;
         // Use cumulative total across all tool iterations (server restarts completion_tokens per request)
         const totalTokenCount = cumulativeTokenOffset + iterationTokenCount;
-        const finalTps = finalGenSec > 0 ? totalTokenCount / finalGenSec : 0;
+        // Prefer the rolling rate measured from actual streamed token deltas.
+        // Some Responses paths buffer reasoning/answer-pass output and flush a
+        // burst after generation; dividing cumulative usage by delta-arrival
+        // time then reports impossible rates (for example 261 t/s while the
+        // same live stream measured 42.9 t/s). Keep cumulative timing only as
+        // a fallback for endpoints that never supplied enough deltas.
+        const finalTps =
+          liveTps > 0
+            ? liveTps
+            : finalGenSec > 0
+              ? totalTokenCount / finalGenSec
+              : 0;
         // TTFT measured from fetchStartTime (excludes health check and message building overhead)
         const ttft = Math.max(
           0,

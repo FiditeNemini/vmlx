@@ -73,6 +73,39 @@ describe('tool auto-continue policy', () => {
     expect(branch.match(/autoContinueCount\+\+/g) || []).toHaveLength(1)
   })
 
+  it('uses one answer-only recovery instead of repeating reasoning-only tool follow-ups', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+
+    expect(source).toContain('const MAX_AUTO_CONTINUES = 1')
+    expect(source).toContain('let finalAnswerRecovery = false')
+    expect(source).toContain('finalAnswerRecovery = true')
+    expect(source).toContain('delete obj.tools')
+    expect(source).toContain('obj.enable_thinking = false')
+    expect(source).toContain(
+      'The tool completed, but the model produced no visible answer after one direct-answer recovery.',
+    )
+  })
+
+  it('resets token timing at follow-up stream boundaries and counts long in-stream gaps', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+    const followUp = source.slice(
+      source.indexOf('const sendFollowUp = async'),
+      source.indexOf('// ─── Helper: execute tool calls', source.indexOf('const sendFollowUp = async')),
+    )
+
+    expect(followUp).toContain('lastTokenTime = null')
+    expect(source).toContain('if (gap > 0) generationMs += gap')
+    expect(source).not.toContain('if (gap < 5000) generationMs += gap')
+  })
+
+  it('does not replace the measured live stream rate with a buffered usage burst', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+
+    expect(source).toContain('const finalTps =')
+    expect(source).toContain('liveTps > 0')
+    expect(source).toContain('? liveTps')
+  })
+
   it('resets text-chat tool streaming state before chained follow-up requests', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
     const branch = source.slice(

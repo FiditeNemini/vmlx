@@ -2847,6 +2847,133 @@ class TestOpenAILogprobsFormatting:
         }
 
     @pytest.mark.asyncio
+    async def test_streaming_responses_dsv4_tool_markup_never_leaks_into_reasoning(
+        self, monkeypatch
+    ):
+        """DSML parsed from the reasoning rail stays structured, not visible."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _ReasoningParser:
+            def reset_state(self, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, previous_text, current_text, delta_text):
+                assert delta_text.startswith("R:")
+                return SimpleNamespace(reasoning=delta_text[2:], content=None)
+
+            def extract_reasoning(self, text):
+                return text, None
+
+        dsml_call = (
+            '<｜DSML｜tool_calls>\n'
+            '<｜DSML｜invoke name="file_info">\n'
+            '<｜DSML｜parameter name="path" string="true">'
+            'panel/package.json</｜DSML｜parameter>\n'
+            '</｜DSML｜invoke>\n'
+            '</｜DSML｜tool_calls>'
+        )
+        deltas = ["R:I will call the requested tool.\n", f"R:{dsml_call}"]
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = ""
+                for idx, delta in enumerate(deltas, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=delta,
+                        tokens=[idx],
+                        prompt_tokens=8,
+                        completion_tokens=idx,
+                        finished=(idx == len(deltas)),
+                        finish_reason="stop" if idx == len(deltas) else None,
+                    )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "dsv4-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", _ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", "dsml")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+
+        request = ResponsesRequest(
+            model="dsv4-test",
+            input=(
+                "Call the built-in file_info tool exactly once with path "
+                "panel/package.json."
+            ),
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ],
+        )
+
+        events: list[dict] = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": request.input}],
+            request,
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        reasoning_deltas = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.reasoning_summary_text.delta"
+        )
+        reasoning_done = [
+            event.get("text", "")
+            for event in events
+            if event.get("type") == "response.reasoning_summary_text.done"
+        ]
+        function_items = [
+            event["item"]
+            for event in events
+            if event.get("type") == "response.output_item.done"
+            and event.get("item", {}).get("type") == "function_call"
+        ]
+        completed = next(
+            event["response"]
+            for event in events
+            if event.get("type") == "response.completed"
+        )
+
+        assert reasoning_deltas.strip() == "I will call the requested tool."
+        assert reasoning_done[-1] == "I will call the requested tool."
+        assert "DSML" not in reasoning_deltas
+        assert "DSML" not in reasoning_done[-1]
+        assert len(function_items) == 1
+        assert function_items[0]["name"] == "file_info"
+        assert json.loads(function_items[0]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+        reasoning_items = [
+            item for item in completed["output"] if item.get("type") == "reasoning"
+        ]
+        assert reasoning_items[-1]["content"][0]["text"] == (
+            "I will call the requested tool."
+        )
+        assert "DSML" not in json.dumps(completed)
+
+    @pytest.mark.asyncio
     async def test_nonstream_responses_minimax_tools_available_no_call_runs_answer_pass(
         self, monkeypatch
     ):

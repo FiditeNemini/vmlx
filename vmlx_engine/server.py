@@ -18070,6 +18070,7 @@ async def stream_responses_api(
     streamed_text = ""  # Text already sent as deltas (before tool call marker)
     accumulated_content = ""  # Content-only text for tool call marker detection
     accumulated_reasoning = ""  # Reasoning text for fallback
+    streamed_reasoning_text = ""  # Tool-safe reasoning already sent to the client
     content_was_emitted = False
     reasoning_was_streamed = False  # Whether reasoning was sent to client as deltas
     prompt_tokens = 0
@@ -18652,17 +18653,40 @@ async def stream_responses_api(
                                 and not suppress_reasoning
                                 and delta_msg.reasoning
                             ):
-                                reasoning_was_streamed = True
-                                yield _sse(
-                                    "response.reasoning_summary_text.delta",
-                                    {
-                                        "type": "response.reasoning_summary_text.delta",
-                                        "item_id": msg_id,
-                                        "output_index": 0,
-                                        "summary_index": 0,
-                                        "delta": delta_msg.reasoning,
-                                    },
+                                # Exact-once requests buffer from token one, so
+                                # genuine reasoning must still stream. DSV4 can
+                                # emit its canonical DSML call on that same
+                                # reasoning rail, however. Derive the visible
+                                # delta from the full reasoning prefix and stop
+                                # at the first native tool marker; never expose
+                                # the structured call as reasoning text.
+                                _safe_reasoning = (
+                                    _visible_prefix_before_unparsed_tool_markup(
+                                        accumulated_reasoning
+                                    )
                                 )
+                                if _safe_reasoning.startswith(streamed_reasoning_text):
+                                    _reasoning_delta = _safe_reasoning[
+                                        len(streamed_reasoning_text) :
+                                    ]
+                                else:
+                                    # The safe-prefix helper may trim whitespace
+                                    # immediately before a newly seen marker. SSE
+                                    # deltas cannot retract already-sent text.
+                                    _reasoning_delta = ""
+                                if _reasoning_delta:
+                                    streamed_reasoning_text += _reasoning_delta
+                                    reasoning_was_streamed = True
+                                    yield _sse(
+                                        "response.reasoning_summary_text.delta",
+                                        {
+                                            "type": "response.reasoning_summary_text.delta",
+                                            "item_id": msg_id,
+                                            "output_index": 0,
+                                            "summary_index": 0,
+                                            "delta": _reasoning_delta,
+                                        },
+                                    )
                             # Emit heartbeat during tool call buffering so the client
                             # sees activity (matches ChatCompletion heartbeat behavior).
                             yield _sse(
@@ -18706,6 +18730,7 @@ async def stream_responses_api(
 
                             # Emit reasoning as OpenAI Responses reasoning-summary events.
                             if emit_reasoning:
+                                streamed_reasoning_text += emit_reasoning
                                 reasoning_was_streamed = True
                                 yield _sse(
                                     "response.reasoning_summary_text.delta",
@@ -18886,8 +18911,17 @@ async def stream_responses_api(
         )
         return
 
+    # Tool calls may share the reasoning rail (DSV4 emits canonical DSML there).
+    # Preserve the raw accumulator for final tool parsing, but expose only the
+    # genuine reasoning prefix through summary events and completed output.
+    visible_reasoning_text = accumulated_reasoning
+    if tool_call_active and visible_reasoning_text:
+        visible_reasoning_text = _visible_prefix_before_unparsed_tool_markup(
+            visible_reasoning_text
+        )
+
     # Emit reasoning summary done event if reasoning was produced (skip when suppressed)
-    if accumulated_reasoning and not suppress_reasoning:
+    if visible_reasoning_text and not suppress_reasoning:
         yield _sse(
             "response.reasoning_summary_text.done",
             {
@@ -18895,7 +18929,7 @@ async def stream_responses_api(
                 "item_id": msg_id,
                 "output_index": 0,
                 "summary_index": 0,
-                "text": accumulated_reasoning,
+                "text": visible_reasoning_text,
             },
         )
 
@@ -19598,14 +19632,14 @@ async def stream_responses_api(
     _resp_extra: dict = {}
     if _resp_status == "incomplete":
         _resp_extra["incomplete_details"] = {"reason": "max_output_tokens"}
-    if accumulated_reasoning and not suppress_reasoning:
+    if visible_reasoning_text and not suppress_reasoning:
         all_output_items.append(
             {
                 "id": f"rs_{uuid.uuid4().hex[:12]}",
                 "type": "reasoning",
                 "status": "completed",
                 "role": "assistant",
-                "content": [{"type": "reasoning", "text": accumulated_reasoning}],
+                "content": [{"type": "reasoning", "text": visible_reasoning_text}],
             }
         )
 

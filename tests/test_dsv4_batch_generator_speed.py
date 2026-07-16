@@ -181,6 +181,9 @@ def test_dsv4_cache_hit_tail_prefill_uses_cross_thread_safe_realization():
     ]
     gen._stream = mx.default_stream(mx.default_device())
     gen._warmed_up = True
+    # This fixture intentionally bypasses __init__. Keep the original
+    # cross-thread tail-prefill scenario in no-snapshot mode explicitly.
+    gen.capture_prompt_snapshot = False
     gen.stop_tokens = set()
     gen._refresh_thread_stream = lambda: None
     gen._trace_timing = lambda *args, **kwargs: None

@@ -275,10 +275,11 @@ def test_panel_suppresses_generic_kv_quantization_controls_for_dsv4():
     settings = Path("panel/src/renderer/src/components/sessions/SessionSettings.tsx").read_text()
     sessions = Path("panel/src/main/sessions.ts").read_text()
 
-    assert "const effectiveStoredCacheQuantization = nativeTypedCacheOwnsStoredCodec ? 'auto'" in form
+    assert "const effectiveStoredCacheQuantization = openPanguExactTypedCache" in form
+    assert ": nativeTypedCacheOwnsStoredCodec ? 'auto' : config.kvCacheQuantization" in form
     assert "disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}" in form
-    assert "!dsv4Active && !m3Active && config.kvCacheQuantization" in settings
-    assert "detectedFamily !== 'deepseek-v4' && detectedFamily !== 'minimax_m3' && config.kvCacheQuantization" in sessions
+    assert "!dsv4Active && !m3Active && !openPanguExactTypedCache && config.kvCacheQuantization" in settings
+    assert "detectedFamily !== 'deepseek-v4' && detectedFamily !== 'minimax_m3' && detectedFamily !== 'openpangu_v2' && config.kvCacheQuantization" in sessions
     assert "if (family === 'deepseek_v4') return 'deepseek-v4'" in form
     assert "if (family === 'deepseek_v4') return 'deepseek-v4'" in settings
     assert "if (family === 'deepseek_v4') return 'deepseek-v4'" in sessions
@@ -341,7 +342,7 @@ def test_dsv4_ui_defaults_composite_cache_on_but_exposes_explicit_disable():
     assert "applyDsv4CompositeCacheToggle" in form
     assert "cacheControlUpdatesForDsv4PoolQuantToggle" in form
     assert "applyDsv4PoolQuantToggle" in form
-    assert "const genericPagedCacheToggleDisabled = m3Active || (!dsv4Active && cachePolicy.pagedCacheDisabled)" in form
+    assert "const genericPagedCacheToggleDisabled = !dsv4Active && (cachePolicy.pagedCacheDisabled || openPanguExactTypedCache)" in form
     assert "DSV4 Native Composite Prefix Cache" in form
     assert "checked={config.dsv4PrefixCache !== false}" in form
     assert "DSV4 Composite Prefix Cache" not in form
@@ -411,7 +412,8 @@ def test_dsv4_cache_ui_has_one_prefix_owner_and_no_stale_duplicate_labels():
     assert '!dsv4Active && (\n          <CheckField label="Enable Prefix Cache"' in form
     assert '<CheckField label="Use Paged KV Cache"' in form
     assert 'disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}' in form
-    assert "const effectiveStoredCacheQuantization = nativeTypedCacheOwnsStoredCodec ? 'auto'" in form
+    assert "const effectiveStoredCacheQuantization = openPanguExactTypedCache" in form
+    assert ": nativeTypedCacheOwnsStoredCodec ? 'auto' : config.kvCacheQuantization" in form
 
     for stale_label in (
         "DSV4 Native Cache",

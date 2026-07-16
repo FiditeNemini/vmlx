@@ -400,6 +400,33 @@ class Scheduler:
         self._ttft_alpha: float = 0.1
 
         self._model_type_for_runtime = self._detect_model_type_for_runtime(model)
+        self._uses_openpangu_cache = self._model_type_for_runtime == "openpangu_v2"
+        self._prefix_cache_requested = bool(self.config.enable_prefix_cache)
+        self._prompt_disk_cache_requested = bool(self.config.enable_disk_cache)
+        self._block_disk_cache_requested = bool(self.config.enable_block_disk_cache)
+        if self._uses_openpangu_cache:
+            # OpenPanguV2LayerCache contains path-dependent convolution state in
+            # addition to MLA latent KV, DSA indexer, and rotating SWA state.
+            # Until a typed prompt-boundary codec exists, every generic prefix
+            # backend is unsafe.  Leaving memory-aware cache enabled also makes
+            # request finalization try to clone/store the 46-layer live composite
+            # state before returning the final streaming event (live Electron
+            # symptom: model stopped after 68 tokens, Responses hung indefinitely).
+            if (
+                self.config.enable_prefix_cache
+                or self.config.use_paged_cache
+                or self.config.enable_disk_cache
+                or self.config.enable_block_disk_cache
+            ):
+                logger.warning(
+                    "openpangu_v2 path-dependent composite cache has no typed "
+                    "prefix codec; disabling prefix, paged, prompt-disk, and "
+                    "block-disk reuse for this runtime"
+                )
+            self.config.enable_prefix_cache = False
+            self.config.use_paged_cache = False
+            self.config.enable_disk_cache = False
+            self.config.enable_block_disk_cache = False
         # Track if model uses mixed cache types. DSV4's DeepseekV4Cache and
         # ZAYA's CCA CacheList are first-class typed cache contracts, not SSM
         # companion-cache rows.
@@ -1386,6 +1413,14 @@ class Scheduler:
                 if t == "KVCache" or t.endswith("KVCache") or t == "MiniMaxM3SparseCache"
             }
             if any(Scheduler._is_dsv4_cache_class_name(t) for t in cache_types):
+                return False
+            # openPangu v2 owns a path-dependent composite cache: MLA latent KV,
+            # DSA indexer state, rotating SWA state, and causal-convolution state.
+            # Its per-layer wrapper is intentionally not a KVCache subclass, but
+            # it is also not an SSM companion cache.  Classifying it as hybrid
+            # silently forces paged cache and advertises an inapplicable async
+            # SSM-rederive contract.
+            if "OpenPanguV2LayerCache" in cache_types:
                 return False
             if cache_types and cache_types == kv_types:
                 return False

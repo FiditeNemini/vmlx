@@ -2390,12 +2390,12 @@ describe('Default IP and New Settings', () => {
         expect(source).toContain('config.enableBlockDiskCache = true')
         expect(source).toContain('config.blockDiskCacheMaxGb = 10')
         expect(source).toContain('config.cacheMemoryPercent = 15')
-        // Phase-1: migration branches outcome by path-dependence.
-        // Generic (non-path-dependent) upgraders flip to paged-OFF + SSD prefix.
+        // Current migration branches outcome by detected cache capability.
+        // Generic upgraders inherit the detected paged/block-L2 tuple.
         expect(source).toContain('const staleV2GenericPagedOn =')
         expect(source).toContain('if (zayaCacheMigrationTarget) {')
         expect(source).toContain('config.usePagedCache = false')
-        expect(source).toContain('config.enableDiskCache = true')
+        expect(source).toContain('config.enableDiskCache = false')
         expect(source).toContain('config.enableBlockDiskCache = false')
     })
 
@@ -2456,6 +2456,40 @@ describe('Default IP and New Settings', () => {
         expect(block).not.toContain('config.enablePrefixCache = true')
     })
 
+    it('openPangu keeps unsupported prefix and disk cache lanes off in defaults, launch args, and every settings surface', () => {
+        const source = readFileSync('src/main/sessions.ts', 'utf8')
+        const familyStart = source.indexOf("} else if (detectedFamily === 'openpangu_v2')")
+        const familyBlock = source.slice(familyStart, source.indexOf('return changed', familyStart))
+        const launchStart = source.indexOf("const openPanguCompositeCacheUnsupported = detectedFamily === 'openpangu_v2'", 3000)
+        const launchBlock = source.slice(launchStart, source.indexOf('const prefixCacheOff', launchStart))
+
+        expect(familyBlock).toContain('config.enablePrefixCache = false')
+        expect(familyBlock).toContain('config.usePagedCache = false')
+        expect(familyBlock).toContain('config.enableDiskCache = false')
+        expect(familyBlock).toContain('config.enableBlockDiskCache = false')
+        expect(launchBlock).toContain('openPanguCompositeCacheUnsupported ? false')
+
+        for (const file of [
+            'src/renderer/src/components/sessions/CreateSession.tsx',
+            'src/renderer/src/components/sessions/ServerSettingsDrawer.tsx',
+            'src/renderer/src/components/sessions/SessionSettings.tsx',
+        ]) {
+            const ui = readFileSync(file, 'utf8')
+            const start = ui.indexOf("detected.family === 'openpangu_v2'")
+            const block = ui.slice(start, start + 450)
+            expect(start, file).toBeGreaterThanOrEqual(0)
+            expect(block, file).toContain('enablePrefixCache = false')
+            expect(block, file).toContain('usePagedCache = false')
+            expect(block, file).toContain('enableDiskCache = false')
+            expect(block, file).toContain('enableBlockDiskCache = false')
+        }
+
+        const form = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
+        expect(form).toContain("normalizedDetectedFamily === 'openpangu_v2'")
+        expect(form).toContain('openPangu v2 prefix reuse is disabled')
+        expect(form).toContain('disabled={openPanguCompositeCacheUnsupported}')
+    })
+
     it('create-session fills missing cache settings before stamping incoming settings current', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const start = source.indexOf('private async _createSessionInner')
@@ -2508,7 +2542,7 @@ describe('Default IP and New Settings', () => {
         // OFF for VL/MLLM (#98) and arch-incompatible families. DSV4 keeps its
         // prefix opt-in. SSD block-disk L2 is paged-coupled, so it follows paged.
         expect(helper).toContain('const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : (detectedUsePaged ?? false)')
-        expect(helper).toContain('const defaultEnableDiskCache = !dsv4Active && !defaultUsePagedCache')
+        expect(helper).toContain('const defaultEnableDiskCache = !dsv4Active && !openPanguCompositeCacheUnsupported && !defaultUsePagedCache')
         expect(helper).toContain('const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : !!defaultUsePagedCache')
     })
 
@@ -2581,7 +2615,7 @@ describe('Default IP and New Settings', () => {
         const end = source.indexOf('applyBundleStartupDefaults(defaultConfig', start)
         const block = source.slice(start, end)
 
-        expect(block).toContain("enableDiskCache: detectedFamily === 'deepseek-v4' || detected.usePagedCache === true ? false : true")
+        expect(block).toContain("enableDiskCache: detectedFamily === 'openpangu_v2' || detectedFamily === 'deepseek-v4' || detected.usePagedCache === true ? false : true")
         expect(block).toContain("enableBlockDiskCache: detectedFamily === 'deepseek-v4' ? dsv4DefaultCacheOptIn : detected.usePagedCache === true")
     })
 

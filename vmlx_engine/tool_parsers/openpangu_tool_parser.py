@@ -57,6 +57,12 @@ class OpenPanguToolParser(ToolParser):
     # into the <|tool_call_start|> list), so no text-format conversion needed.
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
+    # Do not let server-level generic repairs reinterpret malformed openPangu
+    # native fragments as another family's tool format. Live Electron proof on
+    # openPangu-2.0-Flash-JANG_2L showed partial <|tool_call_start|> debris
+    # being promoted to a wrong search_files call with malformed arguments.
+    STRICT_NATIVE_TOOL_FORMAT = True
+
     # openPangu's format is a single JSON LIST between <|tool_call_start|> and
     # <|tool_call_end|> — multiple calls form one list ("多个调用组成一个列表"),
     # so a closed tag pair IS the end of the tool-call turn by format contract.

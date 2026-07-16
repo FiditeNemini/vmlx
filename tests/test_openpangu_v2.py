@@ -156,6 +156,81 @@ def test_cache_contract_path_dependent(tiny_model):
     assert cache[0].trim(5) == 0
 
 
+def test_scheduler_does_not_misclassify_composite_cache_as_hybrid_ssm(tiny_model):
+    from types import SimpleNamespace
+
+    from vmlx_engine.scheduler import Scheduler, SchedulerConfig
+
+    assert {type(layer).__name__ for layer in tiny_model.make_cache()} == {
+        "OpenPanguV2LayerCache"
+    }
+    assert Scheduler._is_hybrid_model(tiny_model) is False
+
+    tokenizer = SimpleNamespace(eos_token_id=148900, eos_token_ids=[148900, 148902])
+    config = SchedulerConfig(
+        enable_prefix_cache=True,
+        use_paged_cache=True,
+        enable_disk_cache=True,
+        enable_block_disk_cache=True,
+    )
+    missing = object()
+    prior_config = getattr(tiny_model, "config", missing)
+    tiny_model.config = {"model_type": "openpangu_v2"}
+    scheduler = Scheduler(tiny_model, tokenizer, config)
+    try:
+        assert scheduler._uses_openpangu_cache is True
+        assert scheduler._prefix_cache_requested is True
+        assert scheduler._prompt_disk_cache_requested is True
+        assert scheduler._block_disk_cache_requested is True
+        assert scheduler.config.enable_prefix_cache is False
+        assert scheduler.config.use_paged_cache is False
+        assert scheduler.config.enable_disk_cache is False
+        assert scheduler.config.enable_block_disk_cache is False
+        assert scheduler.memory_aware_cache is None
+        assert scheduler.paged_cache_manager is None
+        assert scheduler.disk_cache is None
+    finally:
+        scheduler.shutdown()
+        if prior_config is missing:
+            del tiny_model.config
+        else:
+            tiny_model.config = prior_config
+
+
+def test_health_reports_openpangu_composite_policy_not_ssm_or_paged():
+    from types import SimpleNamespace
+
+    from vmlx_engine.server import _native_cache_status
+
+    scheduler = SimpleNamespace(
+        _model_type_for_runtime="openpangu_v2",
+        _is_hybrid=False,
+        _prefix_cache_requested=True,
+        _prompt_disk_cache_requested=True,
+        _block_disk_cache_requested=True,
+        config=SimpleNamespace(enable_prefix_cache=True),
+        block_aware_cache=object(),
+        paged_cache_manager=SimpleNamespace(_disk_store=object()),
+        disk_cache=object(),
+    )
+    cfg = SimpleNamespace(
+        cache_type="kv", cache_subtype="openpangu_v2_composite"
+    )
+
+    status = _native_cache_status(scheduler, family="openpangu_v2", cfg=cfg)
+
+    assert status["schema"] == "openpangu_v2_composite_v1"
+    assert status["cache_type"] == "native_path_dependent_composite"
+    assert status["prefix_configured"] is True
+    assert status["prefix"] is False
+    assert status["paged"] is False
+    assert status["prompt_disk_l2_configured"] is True
+    assert status["block_disk_l2_configured"] is True
+    assert status["prompt_disk_l2"] is False
+    assert status["block_disk_l2"] is False
+    assert "ssm_companion_state" not in status["components"]
+
+
 def test_prefill_vs_incremental_equivalence(tiny_model):
     """Decode one-token-at-a-time must match single prefill: proves conv-state
     carry, sink mask polarity, SWA rotation, and DSA indexer consistency."""

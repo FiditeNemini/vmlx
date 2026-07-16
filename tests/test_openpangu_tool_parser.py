@@ -185,6 +185,9 @@ class TestOpenPanguToolParser:
                 f"alias {alias!r} should resolve to OpenPanguToolParser, got {cls}"
             )
 
+    def test_parser_declares_strict_native_format(self):
+        assert OpenPanguToolParser.STRICT_NATIVE_TOOL_FORMAT is True
+
 
 class TestOpenPanguToolParserStreaming:
     def test_streaming_passthrough_then_buffer_then_emit(self, parser):

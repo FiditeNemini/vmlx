@@ -842,6 +842,11 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             base.enableDiskCache = false
             base.enableBlockDiskCache = true
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
+          } else if (detected.family === 'openpangu_v2') {
+            base.enablePrefixCache = false
+            base.usePagedCache = false
+            base.enableDiskCache = false
+            base.enableBlockDiskCache = false
           } else {
             const detectedPagedCache = detected.usePagedCache === true
             base.usePagedCache = detectedPagedCache

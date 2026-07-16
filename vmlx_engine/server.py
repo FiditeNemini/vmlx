@@ -5113,7 +5113,10 @@ def _parse_tool_calls_with_parser(
         logger.warning(f"Failed to initialize tool parser '{active_parser}': {e}")
         return parse_tool_calls(output_text)
 
-    # Use the configured parser, fall back to generic if it finds nothing
+    # Use the configured parser, fall back to generic if it finds nothing.
+    # Some native formats are strict: when their parser finds no valid call, a
+    # generic repair pass can promote malformed native-control debris into a
+    # wrong executable tool call.
     try:
         # Convert request to dict format for parsers that need schema info (e.g., Step3p5 type coercion)
         parser_request = None
@@ -5125,6 +5128,9 @@ def _parse_tool_calls_with_parser(
                     _model_path or _model_name or getattr(request, "model", None)
                 ),
             }
+        strict_native_format = bool(
+            getattr(parser_cls, "STRICT_NATIVE_TOOL_FORMAT", False)
+        )
         result = parser_instance.extract_tool_calls(output_text, request=parser_request)
         if result.tools_called:
             tool_calls = [
@@ -5147,11 +5153,24 @@ def _parse_tool_calls_with_parser(
             # list_directory().
             return output_text, None
         else:
+            if strict_native_format:
+                _record_tool_call_drop(
+                    f"The '{active_parser}' native tool parser did not produce "
+                    "a schema-valid function call; generic tool repair was "
+                    "skipped for this strict native format."
+                )
+                return output_text, None
             # Specific parser found nothing — try generic parser as fallback
             # (handles Nemotron, Llama, raw JSON, etc.)
             return _generic_parse_filtered(output_text)
     except Exception as e:
         logger.warning(f"Tool parser error: {e}")
+        if bool(getattr(locals().get("parser_cls", None), "STRICT_NATIVE_TOOL_FORMAT", False)):
+            _record_tool_call_drop(
+                f"The '{active_parser}' native tool parser failed; generic "
+                "tool repair was skipped for this strict native format."
+            )
+            return output_text, None
         return _generic_parse_filtered(output_text)
 
 
@@ -7684,6 +7703,56 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
         }
         status.update(layout)
         return status
+
+    if (
+        family_name == "openpangu_v2"
+        or scheduler_family == "openpangu_v2"
+        or cache_subtype == "openpangu_v2_composite"
+    ):
+        # openPangu's layer cache is path-dependent and composite.  It cannot
+        # truthfully use the generic trim-based prefix snapshot, block-paged
+        # cache, or SSM companion-rederive paths.  Keep configured intent
+        # visible separately from an active/reusable cache claim.
+        prefix_configured = bool(
+            getattr(
+                scheduler,
+                "_prefix_cache_requested",
+                getattr(getattr(scheduler, "config", None), "enable_prefix_cache", False),
+            )
+        )
+        return {
+            "family": "openpangu_v2",
+            "schema": "openpangu_v2_composite_v1",
+            "cache_type": "native_path_dependent_composite",
+            "cache_subtype": "openpangu_v2_composite",
+            "components": [
+                "mla_latent_kv",
+                "dsa_indexer_state",
+                "swa_rotating_window",
+                "path_dependent_conv_state",
+            ],
+            "generic_turboquant_kv": {
+                "enabled": False,
+                "reason": "mla_and_path_dependent_conv_state",
+            },
+            "cache_store_policy": {
+                "generic_prefix_snapshot": "unsupported",
+                "generic_paged_blocks": "unsupported",
+                "prompt_disk_l2": "unsupported",
+                "reuse": "clean_prefill_required_until_typed_composite_codec",
+            },
+            "prefix_configured": prefix_configured,
+            "prefix": False,
+            "paged": False,
+            "prompt_disk_l2_configured": bool(
+                getattr(scheduler, "_prompt_disk_cache_requested", disk_cache is not None)
+            ),
+            "block_disk_l2_configured": bool(
+                getattr(scheduler, "_block_disk_cache_requested", block_disk_store is not None)
+            ),
+            "prompt_disk_l2": False,
+            "block_disk_l2": False,
+        }
 
     family_probe_parts = [family_name, scheduler_family]
     if cfg is not None:

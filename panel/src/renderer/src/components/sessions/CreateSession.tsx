@@ -107,9 +107,9 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         reasoningParser: 'auto',
         dsv4PrefixCache: detected?.family === 'deepseek-v4' ? true : prev.dsv4PrefixCache,
         dsv4PoolQuant: detected?.family === 'deepseek-v4' ? true : prev.dsv4PoolQuant,
-        enablePrefixCache: detected?.family === 'deepseek-v4' ? true : prev.enablePrefixCache,
+        enablePrefixCache: detected?.family === 'openpangu_v2' ? false : detected?.family === 'deepseek-v4' ? true : prev.enablePrefixCache,
         usePagedCache: detected?.family === 'deepseek-v4' ? true : detected?.usePagedCache,
-        enableDiskCache: detected?.family === 'deepseek-v4' || detected?.usePagedCache === true
+        enableDiskCache: detected?.family === 'openpangu_v2' || detected?.family === 'deepseek-v4' || detected?.usePagedCache === true
           ? false
           : prev.enableDiskCache,
         enableBlockDiskCache: detected?.family === 'deepseek-v4'
@@ -227,6 +227,11 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             base.usePagedCache = true
             base.enableBlockDiskCache = true
             base.pagedCacheBlockSize = 256
+          } else if (detected.family === 'openpangu_v2') {
+            base.enablePrefixCache = false
+            base.usePagedCache = false
+            base.enableDiskCache = false
+            base.enableBlockDiskCache = false
           } else {
             base.usePagedCache = detected.usePagedCache
             base.enableDiskCache = detected.usePagedCache === true ? false : base.enableDiskCache

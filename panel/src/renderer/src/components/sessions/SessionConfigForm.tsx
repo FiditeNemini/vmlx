@@ -339,6 +339,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const normalizedDetectedFamily = normalizeDetectedFamilyName(detectedFamily)
   const dsv4Active = normalizedDetectedFamily === 'deepseek-v4'
   const m3Active = normalizedDetectedFamily === 'minimax_m3'
+  const openPanguCompositeCacheUnsupported = normalizedDetectedFamily === 'openpangu_v2'
   const effectiveSmeltActive = !!config.smelt && !dsv4Active
   const effectiveFlashMoeActive = !!config.flashMoe && !dsv4Active
   const effectiveDistributedActive = !!config.distributedEnabled && !dsv4Active
@@ -358,7 +359,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const effectivelyNoBatching = batchingOff
   const effectivePrefixCacheEnabled = dsv4Active
     ? dsv4CompositeCacheOptIn && config.enablePrefixCache !== false
-    : config.enablePrefixCache
+    : openPanguCompositeCacheUnsupported ? false : config.enablePrefixCache
   const prefixOff = !effectivePrefixCacheEnabled
   const isMambaCache =
     detectedCacheType === 'mamba' ||
@@ -381,9 +382,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const cacheControlState = {
     continuousBatching: effectiveContinuousBatching,
     enablePrefixCache: effectivePrefixCacheEnabled,
-    usePagedCache: dsv4Active ? dsv4CompositeCacheOptIn : config.usePagedCache,
-    enableDiskCache: config.enableDiskCache,
-    enableBlockDiskCache: dsv4Active ? dsv4CompositeCacheOptIn && config.enableBlockDiskCache : config.enableBlockDiskCache,
+    usePagedCache: dsv4Active ? dsv4CompositeCacheOptIn : openPanguCompositeCacheUnsupported ? false : config.usePagedCache,
+    enableDiskCache: openPanguCompositeCacheUnsupported ? false : config.enableDiskCache,
+    enableBlockDiskCache: dsv4Active ? dsv4CompositeCacheOptIn && config.enableBlockDiskCache : openPanguCompositeCacheUnsupported ? false : config.enableBlockDiskCache,
     architectureRequiresPagedCache,
   }
   const cachePolicy = resolveCacheControlPolicy(cacheControlState)
@@ -793,6 +794,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       <Section title={t('sessions.config.prefixCache')} expanded={expandedSections.prefixCache} onToggle={() => toggleSection('prefixCache')} hidden={isImage}>
         {!effectivelyNoBatching && <PerformanceHint text="Speeds up repeated conversations by remembering previous prompts. Makes follow-up messages much faster (lower time-to-first-token)." />}
         {dsv4Active && !dsv4CompositeCacheOptIn && <InfoNote text="DSV4 Flash native composite prefix cache is off for this session. Turn on the DSV4 Native Composite Prefix Cache switch below to use SWA+CSA/HCA prefix reuse, fixed 256-token paging, and optional L2 block storage." />}
+        {openPanguCompositeCacheUnsupported && <IncompatWarning text="openPangu v2 prefix reuse is disabled: its MLA + DSA/SWA + causal-convolution state is path-dependent and does not yet have a typed prompt-boundary codec. The server performs a clean prefill for every request; paged cache and both disk L2 modes stay off." />}
         {dsv4Active && (
           <>
             <InfoNote text="DeepSeek-V4 uses a native SWA+CSA/HCA composite cache. This one switch owns DSV4 prefix reuse; generic paged-KV and generic q4/q8 cache controls stay hidden because they are not the DSV4 cache format. Changes require a restart." />
@@ -806,7 +808,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         )}
         {batchingOff && <IncompatWarning text="Prefix cache requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above to enable prefix caching." />}
         {!dsv4Active && (
-          <CheckField label="Enable Prefix Cache" tooltip="Caches prompt prefixes in memory. If you send the same system prompt or document multiple times, the server reuses the cached internal states instead of recomputing them, drastically reducing Time-To-First-Token (TTFT) and saving GPU compute. Highly recommended for agents and tool calling." checked={effectivePrefixCacheEnabled} onChange={v => onChange('enablePrefixCache', v)} />
+          <CheckField label="Enable Prefix Cache" tooltip="Caches prompt prefixes in memory. If you send the same system prompt or document multiple times, the server reuses the cached internal states instead of recomputing them, drastically reducing Time-To-First-Token (TTFT) and saving GPU compute. Highly recommended for agents and tool calling." checked={effectivePrefixCacheEnabled} onChange={v => onChange('enablePrefixCache', v)} disabled={openPanguCompositeCacheUnsupported} />
         )}
         {effectivePrefixCacheEnabled && (
           <>

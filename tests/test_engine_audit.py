@@ -3835,6 +3835,65 @@ class TestToolParserConcurrency:
             "content": "REAL_UI_LIVE_TOOL_ONE",
         }
 
+    def test_openpangu_strict_parser_blocks_generic_repair_on_malformed_native_debris(
+        self, monkeypatch
+    ):
+        """Malformed openPangu native markers must not execute a generic repair.
+
+        Live Electron proof on openPangu-2.0-Flash-JANG_2L produced gibberish
+        containing <|tool_call_start|> debris; the generic fallback repaired it
+        into a wrong search_files call with malformed arguments. openPangu owns
+        a strict JSON-list tag format, so invalid native text remains text.
+        """
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+
+        monkeypatch.setattr(server, "_tool_call_parser", "openpangu")
+        request = ChatCompletionRequest(
+            model="openpangu-test",
+            messages=[Message(role="user", content="Call file_info for panel/package.json")],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_files",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "pattern": {"type": "string"},
+                                "path": {"type": "string"},
+                                "glob": {"type": "string"},
+                            },
+                            "required": ["pattern", "path"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                },
+            ],
+        )
+        malformed = (
+            'speak\nSearch\n", " in :\nfailed\n\nAnd then\n'
+            '<tool<go_user<|tool_call_start|>\n'
+            'OK, I need to call the `search_files` tool with the given arguments '
+            'according to the user instruction. { "pattern": ", ", "path": ": ", '
+            '"glob": ": []}}"'
+        )
+
+        cleaned, calls = server._parse_tool_calls_with_parser(malformed, request)
+
+        assert cleaned == malformed
+        assert calls is None
+
     def test_tool_markup_residue_strips_interrupted_non_dsml_fragments(self):
         """Interrupted marker fragments must not leak attribute/code tails."""
         from vmlx_engine.server import _strip_tool_markup_residue_for_display

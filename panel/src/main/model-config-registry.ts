@@ -825,6 +825,28 @@ function applyConfigMetadataOverrides(
   if (isQwen36 && configDeclaresMedia(parsedConfig) && !next.forceTextOnly) {
     next.isMultimodal = true
   }
+  // The current Mistral-Medium-3.5 loader instantiates the outer
+  // Mistral3/inner Ministral3 text decoder with a tokenizer only. It does not
+  // construct a Pixtral processor or expose a live VL prefill route. Treating
+  // the preserved vision tower as runnable made Electron launch --is-mllm,
+  // disable paged/L2 defaults, and advertise attachments even though the
+  // loaded BatchedEngine reported mllm=False and vl_runtime_available=false.
+  // Mistral Small 4 uses inner model_type=mistral4 and is intentionally not
+  // covered by this guard.
+  if (
+    next.family === 'mistral3' &&
+    String(parsedConfig?.model_type ?? '').toLowerCase() === 'mistral3' &&
+    String(parsedConfig?.text_config?.model_type ?? '').toLowerCase() === 'ministral3'
+  ) {
+    next.isMultimodal = false
+    next.forceTextOnly = true
+    next.usePagedCache = true
+    next.architectureHints = {
+      ...(next.architectureHints ?? {}),
+      runtimeScope: 'text_only_until_pixtral_processor_is_wired',
+      vlRuntimeAvailable: false,
+    }
+  }
   if (next.family === 'nemotron-h' && !configDeclaresMedia(parsedConfig)) {
     next.isMultimodal = false
   }

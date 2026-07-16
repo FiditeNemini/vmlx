@@ -1424,7 +1424,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           <IncompatWarning text="VLM is disabled when Smelt Mode is active. Smelt uses text-only loading for partial expert support." />
         )}
         {detectedForceTextOnly && (
-          <IncompatWarning text="This model has media metadata, but vMLX is using the text runtime because its current VLM language path is not production-safe. Use an MXFP4 or JANGTQ/MXTQ variant for image/video input." />
+          <IncompatWarning text="This bundle includes media metadata, but its detected vMLX runtime is currently text-only. Attachments stay disabled until that family's native media path is live-verified; changing quantization format alone does not make the media route available." />
         )}
         {!dsv4Active && !smeltActive && !detectedForceTextOnly && config.isMultimodal === true && (
           <InfoNote text="VLM mode is active — the MLLM scheduler handles image/video processing with full prefix cache, paged KV cache, and KV quantization support." />

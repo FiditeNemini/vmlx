@@ -1350,6 +1350,32 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detectModelConfigFromDir(dir).isMultimodal).toBe(false)
   })
 
+  it('routes Mistral Medium 3.5 through its implemented text runtime', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'mistral3',
+        architectures: ['Mistral3ForConditionalGeneration'],
+        text_config: { model_type: 'ministral3' },
+        vision_config: { model_type: 'pixtral' },
+      },
+      {
+        format: 'mxfp4',
+        architecture: { has_vision: true },
+      },
+    )
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('mistral3')
+    expect(detected.isMultimodal).toBe(false)
+    expect(detected.forceTextOnly).toBe(true)
+    expect(detected.usePagedCache).toBe(true)
+    expect(detected.architectureHints).toMatchObject({
+      runtimeScope: 'text_only_until_pixtral_processor_is_wired',
+      vlRuntimeAvailable: false,
+    })
+  })
+
   it('keeps Mistral Small 4 VLM multimodal while inheriting Mistral 4 reasoning defaults', () => {
     const dir = makeModelDir(
       {

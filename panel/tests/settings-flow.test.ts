@@ -2585,6 +2585,21 @@ describe('Default IP and New Settings', () => {
         expect(block).toContain("enableBlockDiskCache: detectedFamily === 'deepseek-v4' ? dsv4DefaultCacheOptIn : detected.usePagedCache === true")
     })
 
+    it('reset persists detected paged L2 and force-text-only values explicitly', () => {
+        const source = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf8')
+        const start = source.indexOf('const handleReset = async () =>')
+        const end = source.indexOf('if (!session)', start)
+        const block = source.slice(start, end)
+
+        expect(block).toContain('base.enableDiskCache = false')
+        expect(block).toContain('const detectedPagedCache = detected.usePagedCache === true')
+        expect(block).toContain('base.enableDiskCache = !detectedPagedCache')
+        expect(block).toContain('base.enableBlockDiskCache = detectedPagedCache')
+        expect(block).toContain('base.isMultimodal = detected.forceTextOnly === true')
+        expect(block).toContain('? false')
+        expect(block).toContain(': detected.isMultimodal === true')
+    })
+
     it('adopted running sessions apply bundle generation defaults before saving config', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const start = source.indexOf('async detectAndAdoptAll()')

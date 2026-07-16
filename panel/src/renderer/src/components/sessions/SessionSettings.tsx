@@ -839,17 +839,23 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             base.dsv4PoolQuant = true
             base.enablePrefixCache = true
             base.usePagedCache = true
+            base.enableDiskCache = false
             base.enableBlockDiskCache = true
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
           } else {
-            base.usePagedCache = detected.usePagedCache
-            base.enableBlockDiskCache = detected.usePagedCache === true
+            const detectedPagedCache = detected.usePagedCache === true
+            base.usePagedCache = detectedPagedCache
+            base.enableDiskCache = !detectedPagedCache
+            base.enableBlockDiskCache = detectedPagedCache
           }
           // VLM models: set isMultimodal flag unless this model has a
-          // runtime forceTextOnly policy (affine-JANG Qwen hybrid).
-          if (detected.isMultimodal && !detected.forceTextOnly) {
-            base.isMultimodal = true
-          }
+          // runtime forceTextOnly policy. Set both sides explicitly: leaving
+          // this undefined lets updateSessionConfig merge an old Force On
+          // value back into the reset configuration even though the preview
+          // and launch detector are text-only.
+          base.isMultimodal = detected.forceTextOnly === true
+            ? false
+            : detected.isMultimodal === true
         }
         Object.assign(base, await applyBundleGenerationDefaults(base, session.modelPath))
       } catch (_) { }

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   appendReasoningDelta,
   markReasoningToolBoundary,
+  reconcileReasoningSummaryDone,
   reasoningSegmentsForDisplay,
   visibleReasoningSegments,
 } from '../src/shared/interleavedReasoning'
@@ -50,5 +51,62 @@ describe('interleaved reasoning segments', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatInterface.tsx', 'utf8')
 
     expect(source).toContain('setReasoningDoneMap(prev => ({ ...prev, [data.messageId]: false }))')
+  })
+
+  it('adopts a longer authoritative Responses reasoning summary', () => {
+    const segments = reconcileReasoningSummaryDone(
+      ['The user wants me to call the'],
+      'The user wants me to call the file_info tool exactly once.\nPlan: execute it.',
+    )
+
+    expect(segments).toEqual([
+      'The user wants me to call the file_info tool exactly once.\nPlan: execute it.',
+    ])
+  })
+
+  it('updates only the current segment after a tool boundary', () => {
+    const segments = reconcileReasoningSummaryDone(
+      ['First tool plan.', '', 'Inspect'],
+      'Inspect the first tool result before answering.',
+    )
+
+    expect(segments).toEqual([
+      'First tool plan.',
+      '',
+      'Inspect the first tool result before answering.',
+    ])
+  })
+
+  it('fills an empty tool boundary when only the terminal summary arrived', () => {
+    expect(
+      reconcileReasoningSummaryDone(
+        ['First tool plan.', ''],
+        'Inspect the tool result.',
+      ),
+    ).toEqual(['First tool plan.', 'Inspect the tool result.'])
+  })
+
+  it('rejects terminal reasoning that contains raw tool-control markup', () => {
+    const streamed = ['Safe planning prefix.']
+
+    expect(
+      reconcileReasoningSummaryDone(
+        streamed,
+        'Safe planning prefix.<tool_call>{"name":"file_info"}</tool_call>',
+      ),
+    ).toBe(streamed)
+    expect(
+      reconcileReasoningSummaryDone(
+        streamed,
+        'Safe planning prefix.<function=file_info><parameter=path>x</parameter></function>',
+      ),
+    ).toBe(streamed)
+  })
+
+  it('does not replace a streamed segment with unrelated terminal text', () => {
+    const streamed = ['Keep this streamed reasoning.']
+    expect(
+      reconcileReasoningSummaryDone(streamed, 'A different summary.'),
+    ).toBe(streamed)
   })
 })

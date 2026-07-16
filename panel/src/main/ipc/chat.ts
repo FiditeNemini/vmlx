@@ -25,6 +25,7 @@ import {
   appendReasoningDelta,
   joinReasoningSegments,
   markReasoningToolBoundary,
+  reconcileReasoningSummaryDone,
   visibleReasoningSegments,
 } from "../../shared/interleavedReasoning";
 import {
@@ -35,6 +36,7 @@ import {
 import { buildToolMediaFollowupContent } from "../../shared/toolMediaFollowup";
 import { dsv4OutputBudget } from "../../shared/dsv4RequestBudget";
 import { projectedMetalHeadroomChatErrorContent } from "../../shared/chatErrorDisplay";
+import { reconcileResponsesToolBufferAtStreamEnd } from "../../shared/responsesStreamRecovery";
 import {
   buildNewChatInheritedOverrides,
   sanitizeChatOverrides,
@@ -2155,6 +2157,7 @@ export function registerChatHandlers(
         // assistant message is blank and history rebuilds skip it,
         // causing wrong-prompt replay on next turn.
         let _sawResponsesTextDelta = false;
+        let responsesFinalText = "";
 
         // Track tool calls received during streaming for MCP auto-execution
         let receivedToolCalls: Array<{
@@ -2497,6 +2500,15 @@ export function registerChatHandlers(
                 responsesEventType === "response.reasoning_summary_text.done" ||
                 responsesEventType === "response.reasoning.done"
               ) {
+                reasoningSegments = reconcileReasoningSummaryDone(
+                  reasoningSegments,
+                  parsed.text,
+                );
+                const visibleSegments = currentReasoningSegments();
+                reasoningContent =
+                  visibleSegments.length > 0
+                    ? visibleSegments[visibleSegments.length - 1]
+                    : "";
                 // Force the reasoning→content transition so reasoningDone fires
                 if (isReasoning) {
                   isReasoning = false;
@@ -2536,22 +2548,24 @@ export function registerChatHandlers(
               // it replays the LAST coherent user turn (e.g. "testing").
               if (
                 responsesEventType === "response.output_text.done" &&
-                typeof parsed.text === "string" &&
-                parsed.text.length > 0 &&
-                !_sawResponsesTextDelta
+                typeof parsed.text === "string"
               ) {
-                emitDelta(parsed.text, false);
-                _sawResponsesTextDelta = true;
+                responsesFinalText = parsed.text;
+                if (parsed.text.length > 0 && !_sawResponsesTextDelta) {
+                  emitDelta(parsed.text, false);
+                  _sawResponsesTextDelta = true;
+                }
               }
               if (
                 responsesEventType === "response.content_part.done" &&
                 parsed.part?.type === "output_text" &&
-                typeof parsed.part?.text === "string" &&
-                parsed.part.text.length > 0 &&
-                !_sawResponsesTextDelta
+                typeof parsed.part?.text === "string"
               ) {
-                emitDelta(parsed.part.text, false);
-                _sawResponsesTextDelta = true;
+                responsesFinalText = parsed.part.text;
+                if (parsed.part.text.length > 0 && !_sawResponsesTextDelta) {
+                  emitDelta(parsed.part.text, false);
+                  _sawResponsesTextDelta = true;
+                }
               }
               if (
                 responsesEventType === "response.completed" &&
@@ -2560,6 +2574,7 @@ export function registerChatHandlers(
                 // Walk parsed.response.output[*].content[*].text and
                 // emit any output_text we find.
                 const outputs = parsed.response?.output || [];
+                const completedTextParts: string[] = [];
                 for (const item of outputs) {
                   if (item?.type !== "message") continue;
                   for (const part of item?.content || []) {
@@ -2568,10 +2583,14 @@ export function registerChatHandlers(
                       typeof part.text === "string" &&
                       part.text.length > 0
                     ) {
+                      completedTextParts.push(part.text);
                       emitDelta(part.text, false);
                       _sawResponsesTextDelta = true;
                     }
                   }
+                }
+                if (completedTextParts.length > 0) {
+                  responsesFinalText = completedTextParts.join("");
                 }
               }
 
@@ -3070,13 +3089,39 @@ export function registerChatHandlers(
           }
         };
 
+        const reconcileResponsesToolBuffer = () => {
+          const reconciliation = reconcileResponsesToolBufferAtStreamEnd({
+            useResponsesApi,
+            clientToolCallBuffering,
+            receivedToolCallCount: receivedToolCalls.filter(Boolean).length,
+            finalText: responsesFinalText,
+          });
+          if (!reconciliation.clearSpeculativeBuffering) return;
+
+          clientToolCallBuffering = false;
+          if (reconciliation.authoritativeText === null) return;
+
+          console.log(
+            `[CHAT] Restoring ${reconciliation.authoritativeText.length} authoritative Responses text chars after zero-tool speculative buffering`,
+          );
+          // Replace only the current iteration. allGeneratedContent owns text
+          // from completed tool iterations and emitDelta will prepend it for UI.
+          fullContent = "";
+          rawAccumulated = "";
+          emitDelta(reconciliation.authoritativeText, false);
+          _sawResponsesTextDelta = true;
+        };
+
         await streamSSE(reader);
+        reconcileResponsesToolBuffer();
 
         // ─── Helper: send follow-up request and stream response ────────────
         const sendFollowUp = async (): Promise<boolean> => {
           // Reset SSE parser state from previous stream
           currentEventType = "";
           seenResponsesApiEvents.clear();
+          _sawResponsesTextDelta = false;
+          responsesFinalText = "";
           // Reset fetchStartTime so TTFT for follow-up is measured correctly
           fetchStartTime = Date.now();
           firstTokenTime = null;
@@ -3112,6 +3157,7 @@ export function registerChatHandlers(
           const followUpReader = res.body?.getReader();
           if (!followUpReader) return false;
           await streamSSE(followUpReader);
+          reconcileResponsesToolBuffer();
           return true;
         };
 

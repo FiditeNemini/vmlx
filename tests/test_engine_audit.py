@@ -8224,6 +8224,9 @@ class TestStartupCompatibilityGuards:
         cli_source = Path("./vmlx_engine/cli.py").read_text()
         scheduler_source = Path("./vmlx_engine/scheduler.py").read_text()
         tokenizer_source = Path("./vmlx_engine/utils/tokenizer.py").read_text()
+        hybrid_tq_source = Path(
+            "./vmlx_engine/utils/hybrid_tq_cache.py"
+        ).read_text()
 
         assert 'getattr(_mc, "cache_type", None) == "hybrid"' in cli_source
         assert "Qwen3.6 hybrid/path-dependent cache model detected" in cli_source
@@ -8244,7 +8247,10 @@ class TestStartupCompatibilityGuards:
         assert "Hybrid/path-dependent cache model detected — using q4/q8 only at cache storage boundaries" in scheduler_source
         assert "non-KV state is preserved full precision" in scheduler_source
         assert "build_hybrid_turboquant_make_cache" in tokenizer_source
-        assert "is_qwen36_hybrid_tq_supported" in tokenizer_source
+        assert "is_selective_hybrid_tq_supported" in tokenizer_source
+        assert "is_qwen36_hybrid_tq_supported" in hybrid_tq_source
+        assert "classify_qwen_cache_architecture" in hybrid_tq_source
+        assert '"qwen_full_kv"' in hybrid_tq_source
         assert "model.make_cache()" in tokenizer_source
 
     def test_generic_turboquant_patcher_honors_disable_env(self, tmp_path, monkeypatch):
@@ -15048,6 +15054,169 @@ class TestStreamUsagePropagatesCacheDetail:
             "cached_tokens": 17,
             "cache_detail": "memory",
         }
+
+    @pytest.mark.asyncio
+    async def test_qwen35_tools_enabled_reasoning_only_rearms_visible_answer_pass(
+        self, monkeypatch
+    ):
+        """Offered tools must not leave an ordinary Qwen answer reasoning-only."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.model_config_registry as registry
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import (
+            ChatCompletionRequest,
+            Message,
+            ResponsesRequest,
+            StreamOptions,
+        )
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.qwen3_parser import Qwen3ReasoningParser
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            def __init__(self):
+                self.calls = []
+
+            async def stream_chat(self, *, messages, **kwargs):
+                self.calls.append((messages, dict(kwargs)))
+                if kwargs.get("enable_thinking") is False:
+                    assert "tools" not in kwargs
+                    assert "_vmlx_tools_present" not in kwargs
+                    assert "_vmlx_template_tools" not in kwargs
+                    yield GenerationOutput(
+                        text="VISIBLE_QWEN_TOOLS_ANSWER",
+                        new_text="VISIBLE_QWEN_TOOLS_ANSWER",
+                        prompt_tokens=13,
+                        completion_tokens=4,
+                        finished=True,
+                        finish_reason="stop",
+                    )
+                    return
+                yield GenerationOutput(
+                    text="<think>internal-only Qwen plan",
+                    new_text="<think>internal-only Qwen plan",
+                    prompt_tokens=12,
+                    completion_tokens=8,
+                    cached_tokens=9,
+                    cache_detail="memory",
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        class _Registry:
+            def lookup(self, _key):
+                return SimpleNamespace(
+                    family_name="qwen3_5",
+                    think_in_template=True,
+                    reasoning_parser="qwen3",
+                    tool_parser="qwen",
+                    supports_thinking=True,
+                )
+
+        def _response_payloads(events, event_type):
+            payloads = []
+            prefix = f"event: {event_type}\n"
+            for event in events:
+                if event.startswith(prefix):
+                    data_line = next(
+                        line for line in event.splitlines() if line.startswith("data: ")
+                    )
+                    payloads.append(json.loads(data_line.removeprefix("data: ")))
+            return payloads
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "qwen35-tools-answer-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", Qwen3ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+        monkeypatch.setattr(registry, "get_model_config_registry", lambda: _Registry())
+
+        response_engine = _Engine()
+        response_request = ResponsesRequest(
+            model="qwen35-tools-answer-test",
+            input="answer without a tool",
+            stream=True,
+            enable_thinking=True,
+            stream_options=StreamOptions(include_usage=True),
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ],
+        )
+        response_events = [
+            event
+            async for event in server.stream_responses_api(
+                response_engine,
+                [{"role": "user", "content": "answer without a tool"}],
+                response_request,
+                fastapi_request=None,
+            )
+        ]
+
+        response_content = _response_payloads(
+            response_events, "response.output_text.delta"
+        )
+        response_completed = _response_payloads(
+            response_events, "response.completed"
+        )[-1]["response"]
+        assert len(response_engine.calls) == 2
+        assert response_engine.calls[1][1].get("enable_thinking") is False
+        assert [row["delta"] for row in response_content] == [
+            "VISIBLE_QWEN_TOOLS_ANSWER"
+        ]
+        assert response_completed["output_text"] == "VISIBLE_QWEN_TOOLS_ANSWER"
+
+        chat_engine = _Engine()
+        chat_request = ChatCompletionRequest(
+            model="qwen35-tools-answer-test",
+            messages=[Message(role="user", content="answer without a tool")],
+            stream=True,
+            enable_thinking=True,
+            stream_options=StreamOptions(include_usage=True),
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ],
+        )
+        chat_chunks = []
+        async for line in server.stream_chat_completion(
+            chat_engine,
+            [message.model_dump(exclude_none=True) for message in chat_request.messages],
+            chat_request,
+            fastapi_request=None,
+            max_tokens=256,
+        ):
+            if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                chat_chunks.append(json.loads(line.removeprefix("data: ")))
+
+        chat_content = [
+            choice["delta"].get("content")
+            for chunk in chat_chunks
+            for choice in chunk.get("choices", [])
+            if choice.get("delta", {}).get("content")
+        ]
+        assert len(chat_engine.calls) == 2
+        assert chat_engine.calls[1][1].get("enable_thinking") is False
+        assert chat_content == ["VISIBLE_QWEN_TOOLS_ANSWER"]
 
     @pytest.mark.asyncio
     async def test_minimax_m3_chat_stream_reasoning_only_runs_visible_answer_pass(

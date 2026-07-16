@@ -1799,7 +1799,9 @@ _THINKING_BUDGET_CAP_FAMILIES = _REASONING_ANSWER_PASS_FAMILIES - {
 
 def _reasoning_answer_pass_family_label(family_name: str) -> str:
     return {
+        "gemma4": "Gemma4",
         "hy_v3": "Hy3",
+        "laguna": "Laguna",
         "minimax": "MiniMax-M2",
         "minimax_m2": "MiniMax-M2",
         "openpangu_v2": "openPangu",
@@ -16511,6 +16513,7 @@ async def stream_chat_completion(
     reasoning_only_answer_budget: int | None = None
     reasoning_only_answer_enabled = False
     reasoning_only_answer_family = ""
+    reasoning_tools_fallback_answer_budget: int | None = None
     if (
         _is_minimax_m3
         and (
@@ -16566,7 +16569,6 @@ async def stream_chat_completion(
         not reasoning_only_answer_enabled
         and _family_name in _REASONING_ANSWER_PASS_FAMILIES
         and _effective_thinking is not False
-        and not _stream_tools_available
     ):
         # Degraded qwen3.5/3.6 quants (e.g. MXFP4-CRACK) can run their thinking
         # block away without ever closing </think>, yielding empty content. Arm
@@ -16576,23 +16578,36 @@ async def stream_chat_completion(
         # family, so the answer pass is reliable.
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            reasoning_only_answer_budget = max(0, _requested_output_budget)
-            reasoning_only_answer_enabled = True
             reasoning_only_answer_family = _reasoning_answer_pass_family_label(
                 _family_name
             )
-            _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
-            if _requested_thinking_budget is not None:
-                _requested_thinking_budget = max(1, int(_requested_thinking_budget))
-                kwargs = dict(kwargs)
-                kwargs["max_tokens"] = min(
-                    _requested_output_budget,
-                    _requested_thinking_budget,
+            if _stream_tools_available:
+                # Preserve the native tool-capable first pass. If final parsing
+                # finds neither a valid call nor visible content, the post-stream
+                # path re-arms this same direct-answer pass without tool schemas.
+                reasoning_tools_fallback_answer_budget = max(
+                    0, _requested_output_budget
                 )
+            else:
+                reasoning_only_answer_budget = max(0, _requested_output_budget)
+                reasoning_only_answer_enabled = True
+                _requested_thinking_budget = getattr(
+                    request, "max_thinking_tokens", None
+                )
+                if _requested_thinking_budget is not None:
+                    _requested_thinking_budget = max(
+                        1, int(_requested_thinking_budget)
+                    )
+                    kwargs = dict(kwargs)
+                    kwargs["max_tokens"] = min(
+                        _requested_output_budget,
+                        _requested_thinking_budget,
+                    )
         except Exception:
             reasoning_only_answer_budget = None
             reasoning_only_answer_enabled = False
             reasoning_only_answer_family = ""
+            reasoning_tools_fallback_answer_budget = None
 
     # Track token counts for usage reporting
     prompt_tokens = 0
@@ -17378,6 +17393,25 @@ async def stream_chat_completion(
         m3_reasoning_only_answer_enabled = True
 
     if (
+        not tool_calls_emitted
+        and not content_was_emitted
+        and not reasoning_only_answer_enabled
+        and reasoning_tools_fallback_answer_budget is not None
+        and accumulated_reasoning.strip()
+    ):
+        # Tool availability alone must not disable the never-empty contract.
+        # The real parser has now found no function call, so the same bounded
+        # direct rail used by tools-free requests is safe and cannot shadow a
+        # genuine tool stream.
+        logger.info(
+            "%s tools-enabled stream produced no valid tool call or visible "
+            "content; re-arming bounded thinking-off answer pass",
+            reasoning_only_answer_family or "reasoning model",
+        )
+        reasoning_only_answer_budget = reasoning_tools_fallback_answer_budget
+        reasoning_only_answer_enabled = True
+
+    if (
         not content_was_emitted
         and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
         and deferred_reasoning_visible_content.strip()
@@ -17612,6 +17646,18 @@ async def stream_chat_completion(
                 )
                 _full_delta, _ans_sent = _answer_pass_visible_delta(
                     _ans_raw, "", request, True, holdback=0
+                )
+                logger.debug(
+                    "%s buffered Chat Completions answer pass result: "
+                    "finish=%s ct=%d/%d raw_chars=%d visible_chars=%d "
+                    "thinking_reentry=%s",
+                    _answer_family,
+                    getattr(_ans_last_out, "finish_reason", None),
+                    _ans_ct,
+                    _ans_budget_cap,
+                    len(_ans_raw),
+                    len(_full_delta),
+                    _answer_pass_thinking_reentry(_ans_raw),
                 )
                 # 2026-07-12 (live-proven on Qwen3.6-27B-MXFP4-CRACK-MTP): the
                 # W2-1 blanket discard-on-truncation threw away a CLEAN, usable
@@ -18137,6 +18183,7 @@ async def stream_responses_api(
     reasoning_only_answer_budget: int | None = None
     reasoning_only_answer_enabled = False
     reasoning_only_answer_family = ""
+    reasoning_tools_fallback_answer_budget: int | None = None
     if (
         _is_minimax_m3
         and (
@@ -18185,7 +18232,6 @@ async def stream_responses_api(
         not reasoning_only_answer_enabled
         and _family_name in _REASONING_ANSWER_PASS_FAMILIES
         and _effective_thinking is not False
-        and not _stream_tools_available
     ):
         # Degraded qwen3.5/3.6 quants (e.g. MXFP4-CRACK) can run their thinking
         # block away without ever closing </think>, yielding empty content. Arm
@@ -18195,23 +18241,46 @@ async def stream_responses_api(
         # family, so the answer pass is reliable.
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            reasoning_only_answer_budget = max(0, _requested_output_budget)
-            reasoning_only_answer_enabled = True
             reasoning_only_answer_family = _reasoning_answer_pass_family_label(
                 _family_name
             )
-            _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
-            if _requested_thinking_budget is not None:
-                _requested_thinking_budget = max(1, int(_requested_thinking_budget))
-                kwargs = dict(kwargs)
-                kwargs["max_tokens"] = min(
-                    _requested_output_budget,
-                    _requested_thinking_budget,
+            if _stream_tools_available:
+                # Preserve the native tool-capable first pass. Re-arm the
+                # tools-free direct rail only after final parsing rejects every
+                # tool-call candidate and visible content is still empty.
+                reasoning_tools_fallback_answer_budget = max(
+                    0, _requested_output_budget
                 )
+            else:
+                reasoning_only_answer_budget = max(0, _requested_output_budget)
+                reasoning_only_answer_enabled = True
+                _requested_thinking_budget = getattr(
+                    request, "max_thinking_tokens", None
+                )
+                if _requested_thinking_budget is not None:
+                    _requested_thinking_budget = max(
+                        1, int(_requested_thinking_budget)
+                    )
+                    kwargs = dict(kwargs)
+                    kwargs["max_tokens"] = min(
+                        _requested_output_budget,
+                        _requested_thinking_budget,
+                    )
         except Exception:
             reasoning_only_answer_budget = None
             reasoning_only_answer_enabled = False
             reasoning_only_answer_family = ""
+            reasoning_tools_fallback_answer_budget = None
+
+    logger.debug(
+        "Responses reasoning-answer fallback init: family=%s "
+        "effective_thinking=%r tools_available=%s enabled=%s fallback_budget=%s",
+        _family_name,
+        _effective_thinking,
+        _stream_tools_available,
+        reasoning_only_answer_enabled,
+        reasoning_tools_fallback_answer_budget,
+    )
 
     # Create a per-request parser instance to avoid mutable-state conflicts
     # when multiple requests stream concurrently.
@@ -18883,6 +18952,20 @@ async def stream_responses_api(
             accumulated_content = _safe_visible_prefix
             cleaned_text = _safe_visible_prefix
 
+    logger.debug(
+        "Responses reasoning-answer fallback gate: family=%s "
+        "effective_thinking=%r tools_available=%s enabled=%s "
+        "fallback_budget=%s content_chars=%d reasoning_chars=%d tool_calls=%s",
+        _family_name,
+        _effective_thinking,
+        _stream_tools_available,
+        reasoning_only_answer_enabled,
+        reasoning_tools_fallback_answer_budget,
+        len(accumulated_content),
+        len(accumulated_reasoning),
+        len(tool_calls or []),
+    )
+
     if (
         not tool_calls
         and not accumulated_content.strip()
@@ -18899,6 +18982,24 @@ async def stream_responses_api(
         )
         m3_reasoning_only_answer_budget = m3_tools_fallback_answer_budget
         m3_reasoning_only_answer_enabled = True
+
+    if (
+        not tool_calls
+        and not accumulated_content.strip()
+        and not reasoning_only_answer_enabled
+        and reasoning_tools_fallback_answer_budget is not None
+        and accumulated_reasoning.strip()
+    ):
+        # Tools were offered, but the finalized parser found no call. Re-arm
+        # the established bounded direct-answer pass so an ordinary no-tool
+        # answer cannot end as a reasoning-only/blank assistant row.
+        logger.info(
+            "%s tools-enabled Responses stream produced no valid tool call or "
+            "visible content; re-arming bounded thinking-off answer pass",
+            reasoning_only_answer_family or "reasoning model",
+        )
+        reasoning_only_answer_budget = reasoning_tools_fallback_answer_budget
+        reasoning_only_answer_enabled = True
 
     display_text = ""
 
@@ -19220,6 +19321,18 @@ async def stream_responses_api(
                     )
                     _full_delta, _ans_sent = _answer_pass_visible_delta(
                         _ans_raw, "", request, True, holdback=0
+                    )
+                    logger.debug(
+                        "%s buffered Responses answer pass result: "
+                        "finish=%s ct=%d/%d raw_chars=%d visible_chars=%d "
+                        "thinking_reentry=%s",
+                        _answer_family,
+                        getattr(_ans_last_out, "finish_reason", None),
+                        _ans_ct,
+                        _ans_budget_cap,
+                        len(_ans_raw),
+                        len(_full_delta),
+                        _answer_pass_thinking_reentry(_ans_raw),
                     )
                     # Parity with the Chat Completions site (2026-07-12): emit a
                     # length-truncated but CLEAN answer instead of discarding to

@@ -836,7 +836,10 @@ class TestFallbackToolPromptFormat:
         from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
 
         class FakeTokenizer:
+            last_kwargs = None
+
             def apply_chat_template(self, messages, **kwargs):
+                self.last_kwargs = kwargs
                 return "\n".join(str(m.get("content", "")) for m in messages)
 
         prompt = (
@@ -2771,7 +2774,7 @@ class TestFallbackToolPromptFormat:
         assert "<function=run_command>" in rendered
         assert rendered.startswith("<|im_start|>user")
 
-    def test_zaya_fallback_skips_when_concrete_native_example_present(self):
+    def test_zaya_fallback_skips_when_no_tool_is_explicitly_requested(self):
         from unittest.mock import MagicMock
 
         from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
@@ -2800,7 +2803,7 @@ class TestFallbackToolPromptFormat:
 
         rendered = check_and_inject_fallback_tools(
             prompt,
-            [{"role": "user", "content": "Use list_directory"}],
+            [{"role": "user", "content": "Show me what is in the folder"}],
             tools,
             tokenizer,
             {"tokenize": False, "tools": tools},
@@ -2808,6 +2811,79 @@ class TestFallbackToolPromptFormat:
 
         assert rendered == prompt
         tokenizer.apply_chat_template.assert_not_called()
+
+    def test_zaya_explicit_tool_refreshes_unbound_broad_catalog_example(self):
+        from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
+
+        class FakeTokenizer:
+            last_kwargs = None
+
+            def apply_chat_template(self, messages, **kwargs):
+                self.last_kwargs = kwargs
+                rendered = "\n".join(str(m.get("content", "")) for m in messages)
+                template_tools = kwargs.get("tools") or []
+                if template_tools:
+                    rendered += "\n<tools>\n" + "\n".join(
+                        f"<function><name>{tool['function']['name']}</name></function>"
+                        for tool in template_tools
+                    ) + "\n</tools>"
+                return rendered
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_info",
+                    "description": "Inspect one file.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_applescript",
+                    "description": "Run AppleScript.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"script": {"type": "string"}},
+                        "required": ["script"],
+                    },
+                },
+            },
+        ]
+        prompt = (
+            "<tools><function><name>file_info</name></function>"
+            "<function><name>run_applescript</name></function></tools>\n"
+            "<zyphra_tool_call><function=file_info><parameter=path>VALUE_HERE"
+            "</parameter></function></zyphra_tool_call>\n"
+            "<zyphra_tool_call><function=run_applescript><parameter=script>"
+            "choose folder</parameter></function></zyphra_tool_call>"
+        )
+        request = (
+            "Call the built-in file_info tool exactly once with path "
+            "panel/package.json."
+        )
+
+        tokenizer = FakeTokenizer()
+        rendered = check_and_inject_fallback_tools(
+            prompt,
+            [{"role": "user", "content": request}],
+            tools,
+            tokenizer,
+            {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+            tool_parser_id="zaya_xml",
+        )
+
+        assert "<function=file_info>" in rendered
+        assert "<parameter=path>\npanel/package.json\n</parameter>" in rendered
+        assert "<function=run_applescript>" not in rendered
+        assert [
+            tool["function"]["name"] for tool in tokenizer.last_kwargs["tools"]
+        ] == ["file_info"]
 
     def test_dsml_parser_repairs_schema_gated_malformed_old_dsv4_tool_call(self):
         from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser

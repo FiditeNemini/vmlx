@@ -213,6 +213,12 @@ def check_and_inject_fallback_tools(
     )
     _zaya_has_concrete_tool_examples = (
         is_zaya_native_tool_prompt
+        # Zaya's shipped scaffold may contain parser-shaped examples for every
+        # advertised tool, but those examples are not bound to the current
+        # request. In the broad Electron tool catalog this let an unrelated
+        # run_applescript example win over an explicit file_info request. Force
+        # the request-scoped fallback below whenever the user names a tool.
+        and not explicit_tool_requested
         and all(f"<function={name}>" in instruction_prompt for name in tool_names)
     )
     _lfm2_has_concrete_tool_examples = (
@@ -1456,6 +1462,13 @@ def check_and_inject_fallback_tools(
     # ZAYA templates that already exposed the native scaffold keep `tools` so
     # their own <tools>/<IMPORTANT> rules survive while concrete examples are added.
     safe_kwargs = dict(template_kwargs)
+    if is_zaya_native_tool_prompt and explicit_tool_requested:
+        # Keep the native Zaya scaffold, but do not leave unrelated broad-catalog
+        # schemas beside the request-bound example. The JANG_4M text model copied
+        # a run_applescript schema even while the user explicitly requested
+        # file_info. Requested tools may contain more than one name, so preserve
+        # every explicitly named tool rather than assuming a single-tool turn.
+        safe_kwargs["tools"] = zaya_prompt_tools
     if is_lfm2_native_tool_prompt:
         # Liquid's native template should retain its trained JSON tool schema,
         # but an explicit single-tool request must not re-expand to every

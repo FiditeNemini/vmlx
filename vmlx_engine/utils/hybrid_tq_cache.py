@@ -6,14 +6,20 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
-QWEN36_HYBRID_MODEL_TYPES = frozenset(
+QWEN_HYBRID_MODEL_TYPES = frozenset(
     {
         "qwen3_5",
         "qwen3_5_text",
         "qwen3_5_moe",
         "qwen3_5_moe_text",
+        "qwen3_next",
     }
 )
+
+# Backward-compatible export for existing imports/tests.  Qwen3.5 is the
+# runtime model_type used by Qwen3.6 bundles, but Qwen3-Next is a distinct
+# hybrid architecture and is classified explicitly below.
+QWEN36_HYBRID_MODEL_TYPES = QWEN_HYBRID_MODEL_TYPES
 
 NEMOTRON_OMNI_HYBRID_MODEL_TYPES = frozenset(
     {
@@ -48,20 +54,69 @@ def _model_types(config: dict[str, Any]) -> set[str]:
     return values
 
 
+def classify_qwen_cache_architecture(
+    model_config: dict[str, Any],
+    layer_types: list[str] | tuple[str, ...],
+) -> str:
+    """Classify Qwen cache topology from nested model type plus layer layout.
+
+    Do not route from a name containing ``qwen``.  Qwen3/Qwen3-MoE are ordinary
+    full-KV models, Qwen3.5/3.6 and Qwen3-Next are hybrid only when their actual
+    layout contains both cumulative and attention slots, and Qwen-Mamba is
+    cumulative-only.
+    """
+    model_types = _model_types(model_config)
+    kinds = {str(item).lower() for item in layer_types}
+    has_ssm = "ssm" in kinds
+    has_attention = "attention" in kinds
+    if model_types & {
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    }:
+        return "qwen3_5_hybrid_gated_delta" if has_ssm and has_attention else "unsupported"
+    if "qwen3_next" in model_types:
+        return "qwen3_next_hybrid_gated_delta" if has_ssm and has_attention else "unsupported"
+    if model_types & {"qwen_mamba"}:
+        return "qwen_cumulative_only"
+    if model_types & {
+        "qwen",
+        "qwen2",
+        "qwen2_moe",
+        "qwen2_vl",
+        "qwen2_5_vl",
+        "qwen3",
+        "qwen3_moe",
+        "qwen3_vl",
+        "qwen3_vl_text",
+        "qwen3_vl_moe",
+    }:
+        return "qwen_full_kv" if has_attention and not has_ssm else "unsupported"
+    return "not_qwen"
+
+
 def is_qwen36_hybrid_tq_supported(
     model_config: dict[str, Any],
     layer_types: list[str] | tuple[str, ...],
 ) -> bool:
-    """Return True for live-gated hybrid attention-KV TQ families.
+    """Return True only for Qwen hybrid layouts with standard KV slots."""
+    return classify_qwen_cache_architecture(model_config, layer_types) in {
+        "qwen3_5_hybrid_gated_delta",
+        "qwen3_next_hybrid_gated_delta",
+    }
 
-    Qwen3.6 and Nemotron-Omni both retain native cumulative SSM/Mamba state and
-    replace only native KVCache attention slots. Unknown hybrid families stay
-    fail-closed.
-    """
-    if "ssm" not in layer_types:
+
+def is_selective_hybrid_tq_supported(
+    model_config: dict[str, Any],
+    layer_types: list[str] | tuple[str, ...],
+) -> bool:
+    """Return True for allow-listed hybrid families with native KV companions."""
+    if "ssm" not in layer_types or "attention" not in layer_types:
         return False
-    supported = QWEN36_HYBRID_MODEL_TYPES | NEMOTRON_OMNI_HYBRID_MODEL_TYPES
-    return bool(_model_types(model_config) & supported)
+    if is_qwen36_hybrid_tq_supported(model_config, layer_types):
+        return True
+    return bool(_model_types(model_config) & NEMOTRON_OMNI_HYBRID_MODEL_TYPES)
 
 
 def is_turboquant_make_cache(make_cache: Any) -> bool:

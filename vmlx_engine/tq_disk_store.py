@@ -30,6 +30,7 @@ Format:
   - __tq_{i}_key_dim__ / __tq_{i}_value_dim__ — TQ dimensions
   - __tq_{i}_key_bits__ / __tq_{i}_value_bits__ — TQ compression bits
   - __tq_{i}_sink_tokens__ — number of sink tokens
+  - __tq_{i}_seed__ — codebook seed used by both encoders
 """
 
 from __future__ import annotations
@@ -49,6 +50,103 @@ except ImportError:
 _TQ_CLASS_NAME = "TurboQuantKVCache"
 
 
+def encode_tq_block(
+    keys: Any,
+    values: Any,
+    config: Dict[str, Any],
+) -> Tuple[str, Any, Any, Dict[str, int]]:
+    """Encode one positional paged-cache block as native TurboQuant data."""
+    if not HAS_MLX:
+        raise RuntimeError("MLX required for TQ block encoding")
+    if not hasattr(keys, "shape") or not hasattr(values, "shape"):
+        raise ValueError("TQ block keys/values must be tensors")
+    if len(keys.shape) != 4 or len(values.shape) != 4:
+        raise ValueError(
+            f"TQ block requires rank-4 KV tensors, got {keys.shape}/{values.shape}"
+        )
+    token_count = int(keys.shape[-2])
+    if token_count <= 0 or int(values.shape[-2]) != token_count:
+        raise ValueError("TQ block key/value token lengths must match and be nonzero")
+
+    from jang_tools.turboquant.cache import TurboQuantKVCache
+
+    key_bits = int(config.get("key_bits", 8) or 8)
+    value_bits = int(config.get("value_bits", 8) or 8)
+    seed = int(config.get("seed", 42) or 42)
+    if key_bits not in (2, 3, 4, 8) or value_bits not in (2, 3, 4, 8):
+        raise ValueError(
+            f"unsupported TQ block codec bits key={key_bits} value={value_bits}"
+        )
+    tq = TurboQuantKVCache(
+        key_dim=int(keys.shape[-1]),
+        value_dim=int(values.shape[-1]),
+        key_bits=key_bits,
+        value_bits=value_bits,
+        seed=seed,
+        compress_after=0,
+        sink_tokens=0,
+    )
+    tq.keys = mx.contiguous(keys)
+    tq.values = mx.contiguous(values)
+    tq.offset = token_count
+    tq.compress()
+    ck = tq._compressed_keys
+    cv = tq._compressed_values
+    if (
+        ck is None
+        or cv is None
+        or int(getattr(tq, "_compressed_tokens", 0) or 0) != token_count
+        or int(ck.shape[-2]) != token_count
+        or int(cv.shape[-2]) != token_count
+    ):
+        raise ValueError("TQ block encoder did not produce a complete packed payload")
+    return (
+        "turboquant_kv",
+        ck,
+        cv,
+        {
+            "key_dim": int(keys.shape[-1]),
+            "value_dim": int(values.shape[-1]),
+            "key_bits": key_bits,
+            "value_bits": value_bits,
+            "seed": seed,
+            "offset": token_count,
+        },
+    )
+
+
+def decode_tq_block(entry: Tuple[Any, ...]) -> Tuple[Any, Any]:
+    """Decode one native TurboQuant paged-cache block to attention KV tensors."""
+    if not HAS_MLX:
+        raise RuntimeError("MLX required for TQ block decoding")
+    if not isinstance(entry, (tuple, list)) or len(entry) != 4:
+        raise ValueError("malformed TQ block entry")
+    tag, encoded_keys, encoded_values, config = entry
+    if tag != "turboquant_kv" or not isinstance(config, dict):
+        raise ValueError("malformed TQ block tag/config")
+    from jang_tools.turboquant.cache import TurboQuantKVCache
+    from jang_tools.turboquant.pipeline import decode_keys, decode_values
+
+    tq = TurboQuantKVCache(
+        key_dim=int(config["key_dim"]),
+        value_dim=int(config["value_dim"]),
+        key_bits=int(config["key_bits"]),
+        value_bits=int(config["value_bits"]),
+        seed=int(config["seed"]),
+        compress_after=0,
+        sink_tokens=0,
+    )
+    keys = decode_keys(encoded_keys, tq.key_encoder)
+    values = decode_values(encoded_values, tq.value_encoder)
+    expected = int(config["offset"])
+    if int(keys.shape[-2]) != expected or int(values.shape[-2]) != expected:
+        raise ValueError(
+            f"decoded TQ block length mismatch: expected={expected}, "
+            f"keys={keys.shape[-2]}, values={values.shape[-2]}"
+        )
+    return keys, values
+
+
 def is_tq_compressed_cache(cache: List[Any]) -> bool:
     """Check if any layer is TurboQuantKVCache with compressed data available.
 
@@ -61,6 +159,85 @@ def is_tq_compressed_cache(cache: List[Any]) -> bool:
                 and getattr(c, '_compressed_values', None) is not None):
             return True
     return False
+
+
+def has_turboquant_layers(cache: List[Any]) -> bool:
+    """Return whether the cache contains any native TQ KV layer."""
+    def _has(layer: Any) -> bool:
+        if type(layer).__name__ == _TQ_CLASS_NAME:
+            return True
+        sub_caches = getattr(layer, "caches", None)
+        return isinstance(sub_caches, (list, tuple)) and any(
+            _has(sub) for sub in sub_caches
+        )
+
+    return any(_has(layer) for layer in cache or [])
+
+
+def canonicalize_tq_cache_for_storage(cache: List[Any]) -> List[Any]:
+    """Return a storage-owned cache with every TQ layer fully encoded.
+
+    A live TQ cache may have encoded only ``compress_after`` old tokens while
+    retaining sink tokens and a later float window.  Serializing only its
+    ``_compressed_*`` fields with the full offset creates a truncated, corrupt
+    disk record.  Storage uses a clone with ``sink_tokens=0`` and encodes the
+    complete readable state exactly once; non-TQ companion layers are preserved.
+    """
+    if not HAS_MLX:
+        raise RuntimeError("MLX required for TQ storage canonicalization")
+    from jang_tools.turboquant.cache import TurboQuantKVCache
+
+    def _canonicalize(layer: Any, label: str) -> Any:
+        sub_caches = getattr(layer, "caches", None)
+        if (
+            type(layer).__name__ != _TQ_CLASS_NAME
+            and isinstance(sub_caches, (list, tuple))
+        ):
+            canonical_subs = [
+                _canonicalize(sub, f"{label}/{sub_index}")
+                for sub_index, sub in enumerate(sub_caches)
+            ]
+            try:
+                return type(layer)(*canonical_subs)
+            except Exception as exc:
+                raise ValueError(
+                    f"TQ cache list {label} could not be reconstructed: {exc}"
+                ) from exc
+        if type(layer).__name__ != _TQ_CLASS_NAME:
+            return layer
+        state = getattr(layer, "state", None)
+        if not isinstance(state, (tuple, list)) or len(state) != 2:
+            raise ValueError(f"TQ layer {label} has no readable KV state")
+        keys, values = state
+        if keys is None or values is None:
+            raise ValueError(f"TQ layer {label} has empty KV state")
+        offset = int(getattr(layer, "offset", 0) or 0)
+        seq_len = int(keys.shape[-2])
+        if offset != seq_len:
+            raise ValueError(
+                f"TQ layer {label} offset/state mismatch: offset={offset}, "
+                f"state_tokens={seq_len}"
+            )
+        clone = TurboQuantKVCache(
+            key_dim=int(keys.shape[-1]),
+            value_dim=int(values.shape[-1]),
+            key_bits=int(getattr(layer, "key_bits", 8) or 8),
+            value_bits=int(getattr(layer, "value_bits", 8) or 8),
+            seed=int(getattr(layer, "_seed", 42) or 42),
+            compress_after=0,
+            # Sink tokens are a live-attention policy. Disk records must contain
+            # one complete packed payload, so encode them with the rest.
+            sink_tokens=0,
+        )
+        clone.keys = mx.contiguous(keys)
+        clone.values = mx.contiguous(values)
+        clone.offset = offset
+        clone.compress()
+        return clone
+
+    return [
+        _canonicalize(layer, str(index)) for index, layer in enumerate(cache or [])
+    ]
 
 
 def serialize_tq_cache(
@@ -220,6 +397,25 @@ def _serialize_tq_layer(
     """Serialize a single TurboQuantKVCache layer's compressed data."""
     ck = layer._compressed_keys   # EncodedKeys namedtuple
     cv = layer._compressed_values  # EncodedValues namedtuple
+    offset = int(getattr(layer, "offset", 0) or 0)
+    compressed_tokens = int(
+        getattr(layer, "_compressed_tokens", 0) or 0
+    )
+    encoded_key_tokens = int(ck.shape[-2]) if len(ck.shape) >= 2 else 0
+    encoded_value_tokens = int(cv.shape[-2]) if len(cv.shape) >= 2 else 0
+    if not (
+        offset > 0
+        and compressed_tokens == offset
+        and encoded_key_tokens == offset
+        and encoded_value_tokens == offset
+        and int(getattr(layer, "sink_tokens", 0) or 0) == 0
+    ):
+        raise ValueError(
+            "TQ layer is not a complete canonical storage payload: "
+            f"offset={offset}, compressed={compressed_tokens}, "
+            f"key_tokens={encoded_key_tokens}, value_tokens={encoded_value_tokens}, "
+            f"sink_tokens={getattr(layer, 'sink_tokens', 0)}"
+        )
 
     # Store EncodedKeys tensors (4 mx.array fields)
     tensors[f"tq_{i}_ck_indices_packed"] = ck.indices_packed
@@ -236,7 +432,7 @@ def _serialize_tq_layer(
     meta[f"__tq_{i}_ck_bits__"] = str(ck.index_bits)
     meta[f"__tq_{i}_cv_shape__"] = json.dumps(list(cv.shape))
     meta[f"__tq_{i}_cv_bits__"] = str(cv.index_bits)
-    meta[f"__tq_{i}_offset__"] = str(layer.offset)
+    meta[f"__tq_{i}_offset__"] = str(offset)
     meta[f"__tq_{i}_compressed_tokens__"] = str(
         getattr(layer, '_compressed_tokens', layer.offset)
     )
@@ -245,6 +441,7 @@ def _serialize_tq_layer(
     meta[f"__tq_{i}_key_bits__"] = str(layer.key_bits)
     meta[f"__tq_{i}_value_bits__"] = str(layer.value_bits)
     meta[f"__tq_{i}_sink_tokens__"] = str(getattr(layer, 'sink_tokens', 0))
+    meta[f"__tq_{i}_seed__"] = str(getattr(layer, '_seed', 42))
 
 
 def _serialize_standard_layer(
@@ -336,6 +533,26 @@ def _serialize_cache_list_layer(
             ck = sub._compressed_keys
             cv = sub._compressed_values
             prefix = f"cl_{i}_{j}"
+            offset = int(getattr(sub, "offset", 0) or 0)
+            compressed_tokens = int(
+                getattr(sub, "_compressed_tokens", 0) or 0
+            )
+            key_tokens = int(ck.shape[-2]) if len(ck.shape) >= 2 else 0
+            value_tokens = int(cv.shape[-2]) if len(cv.shape) >= 2 else 0
+            if not (
+                offset > 0
+                and compressed_tokens == offset
+                and key_tokens == offset
+                and value_tokens == offset
+                and int(getattr(sub, "sink_tokens", 0) or 0) == 0
+            ):
+                raise ValueError(
+                    f"CacheList TQ layer {i}/{j} is not a complete canonical "
+                    f"storage payload: offset={offset}, "
+                    f"compressed={compressed_tokens}, key_tokens={key_tokens}, "
+                    f"value_tokens={value_tokens}, "
+                    f"sink_tokens={getattr(sub, 'sink_tokens', 0)}"
+                )
             tensors[f"{prefix}_ck_indices_packed"] = ck.indices_packed
             tensors[f"{prefix}_ck_qjl_packed"] = ck.qjl_packed
             tensors[f"{prefix}_ck_residual_norms"] = ck.residual_norms
@@ -346,12 +563,14 @@ def _serialize_cache_list_layer(
             meta[f"__{prefix}_ck_bits__"] = str(ck.index_bits)
             meta[f"__{prefix}_cv_shape__"] = json.dumps(list(cv.shape))
             meta[f"__{prefix}_cv_bits__"] = str(cv.index_bits)
-            meta[f"__{prefix}_offset__"] = str(sub.offset)
+            meta[f"__{prefix}_offset__"] = str(offset)
+            meta[f"__{prefix}_compressed_tokens__"] = str(compressed_tokens)
             meta[f"__{prefix}_key_dim__"] = str(sub.key_dim)
             meta[f"__{prefix}_value_dim__"] = str(sub.value_dim)
             meta[f"__{prefix}_key_bits__"] = str(sub.key_bits)
             meta[f"__{prefix}_value_bits__"] = str(sub.value_bits)
             meta[f"__{prefix}_sink_tokens__"] = str(getattr(sub, 'sink_tokens', 0))
+            meta[f"__{prefix}_seed__"] = str(getattr(sub, '_seed', 42))
         elif hasattr(sub, 'state') and hasattr(sub, 'meta_state'):
             # Standard sub-cache (KVCache or cumulative)
             state = sub.state
@@ -424,8 +643,16 @@ def _deserialize_cache_list_layer(
                 _val_dim = _parse_bounded_int(metadata, f"__{prefix}_value_dim__", default=128, lo=1, hi=262144)
                 _key_bits = _parse_bounded_int(metadata, f"__{prefix}_key_bits__", default=3, lo=1, hi=8)
                 _val_bits = _parse_bounded_int(metadata, f"__{prefix}_value_bits__", default=3, lo=1, hi=8)
+                _seed = _parse_bounded_int(
+                    metadata,
+                    f"__{prefix}_seed__",
+                    default=42,
+                    lo=0,
+                    hi=2_147_483_647,
+                )
                 _tq_cl = _TQ_CL(key_dim=_key_dim, value_dim=_val_dim,
-                                 key_bits=_key_bits, value_bits=_val_bits)
+                                 key_bits=_key_bits, value_bits=_val_bits,
+                                 seed=_seed)
                 kv.keys = decode_keys(encoded_keys, _tq_cl.key_encoder)
                 kv.values = decode_values(encoded_values, _tq_cl.value_encoder)
                 kv.offset = _parse_bounded_int(metadata, f"__{prefix}_offset__", default=0, lo=0, hi=2_000_000)
@@ -452,7 +679,7 @@ def _deserialize_cache_list_layer(
     # Try to wrap in CacheList if available
     try:
         from mlx_lm.models.cache import CacheList as _CL
-        cl = _CL(sub_caches)
+        cl = _CL(*sub_caches)
         return cl
     except ImportError:
         # CacheList not available — return raw list
@@ -547,6 +774,9 @@ def _deserialize_tq_layer(
     key_bits = _parse_bounded_int(metadata, f"__{prefix}_key_bits__", default=3, lo=1, hi=8)
     value_bits = _parse_bounded_int(metadata, f"__{prefix}_value_bits__", default=3, lo=1, hi=8)
     sink_tokens = _parse_bounded_int(metadata, f"__{prefix}_sink_tokens__", default=0, lo=0, hi=2_000_000)
+    seed = _parse_bounded_int(
+        metadata, f"__{prefix}_seed__", default=42, lo=0, hi=2_147_483_647
+    )
 
     try:
         from jang_tools.turboquant.cache import TurboQuantKVCache as _TQ
@@ -554,6 +784,7 @@ def _deserialize_tq_layer(
         tq = _TQ(
             key_dim=key_dim, value_dim=value_dim,
             key_bits=key_bits, value_bits=value_bits,
+            seed=seed,
             sink_tokens=sink_tokens,
         )
         # Access the encoder (triggers lazy initialization)

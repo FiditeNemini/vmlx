@@ -295,6 +295,64 @@ class TestTQDiskStore:
         assert tensors["tq_0_ck_vector_norms"].dtype == mx.float16
         assert tensors["tq_0_cv_vector_norms"].dtype == mx.float16
 
+    def test_partial_tq_payload_is_rejected_instead_of_mislabeled_full(self):
+        """A partial live prefix may not be written with the full cache offset."""
+        from vmlx_engine.tq_disk_store import serialize_tq_cache
+
+        cache = _create_tq_cache(n_layers=1, n_tokens=32)
+        cache[0]._compressed_tokens = 16
+
+        with pytest.raises(ValueError, match="complete canonical storage payload"):
+            serialize_tq_cache(cache)
+
+    def test_real_tq_canonical_roundtrip_preserves_layer_seed_and_full_state(self):
+        """Storage owns a full packed clone and decodes with its original seed."""
+        from jang_tools.turboquant.cache import TurboQuantKVCache as RealTQ
+        from vmlx_engine.tq_disk_store import (
+            canonicalize_tq_cache_for_storage,
+            deserialize_tq_cache,
+            serialize_tq_cache,
+        )
+
+        live = RealTQ(
+            key_dim=64,
+            value_dim=64,
+            key_bits=8,
+            value_bits=8,
+            seed=73,
+            compress_after=8,
+            sink_tokens=2,
+        )
+        live.keys = mx.random.normal(shape=(1, 2, 16, 64)).astype(mx.float16)
+        live.values = mx.random.normal(shape=(1, 2, 16, 64)).astype(mx.float16)
+        live.offset = 16
+        live.compress(8)
+
+        canonical = canonicalize_tq_cache_for_storage([live])
+        stored = canonical[0]
+        assert stored is not live
+        assert stored.offset == 16
+        assert stored._compressed_tokens == 16
+        assert stored._compressed_keys.shape[-2] == 16
+        assert stored._compressed_values.shape[-2] == 16
+        assert stored.sink_tokens == 0
+        assert stored._seed == 73
+
+        tensors, metadata = serialize_tq_cache(canonical)
+        assert metadata["__tq_0_seed__"] == "73"
+        restored = deserialize_tq_cache(tensors, metadata)[0]
+        expected_keys, expected_values = stored.state
+        mx.eval(
+            expected_keys,
+            expected_values,
+            restored.keys,
+            restored.values,
+        )
+        key_mae = float(mx.mean(mx.abs(restored.keys - expected_keys)).item())
+        value_mae = float(mx.mean(mx.abs(restored.values - expected_values)).item())
+        assert key_mae <= 1e-5
+        assert value_mae <= 1e-5
+
     def test_tq_file_size_vs_float16(self):
         """TQ-native files should be dramatically smaller than float16 state files.
 

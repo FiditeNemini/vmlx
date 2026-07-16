@@ -1711,6 +1711,7 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         return
 
     _tq_cfg = jang_cfg.get("turboquant")
+    _tq_auto_generated = False
     if not _tq_cfg:
         # Auto mode is selected by the CLI/panel when the user has not
         # explicitly disabled TQ. Bundles with a calibrated turboquant block
@@ -1718,6 +1719,7 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         # Explicit `--kv-cache-quantization ...` sets VMLX_DISABLE_TQ_KV=1
         # before load if the user wants generic q4/q8 storage without live TQ.
         if _os_tq.environ.get("VMLX_FORCE_TQ_AUTO") == "1":
+            _tq_auto_generated = True
             _tq_cfg = {
                 "enabled": True,
                 "default_key_bits": 3,
@@ -1741,6 +1743,7 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
     try:
         from .turboquant_config import (
             TurboQuantConfig,
+            apply_uncalibrated_auto_tq_policy,
             make_turboquant_cache,
             resolve_compress_after,
         )
@@ -1751,7 +1754,7 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         build_hybrid_turboquant_make_cache,
         build_mixed_swa_layer_types,
         is_mixed_swa_tq_supported,
-        is_qwen36_hybrid_tq_supported,
+        is_selective_hybrid_tq_supported,
     )
 
     # Use the model's native cache contract, not `len(model.layers)`.
@@ -1794,11 +1797,6 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         )
         return
     _tq_cfg = dict(_tq_cfg)
-    _tq_cfg["compress_after"] = resolve_compress_after(_tq_cfg, model_config)
-    # Use _tq_cfg (which may be auto-generated defaults) instead of re-reading jang_cfg
-    tq_config = TurboQuantConfig.from_jang_config({"turboquant": _tq_cfg}, n_layers)
-    if not tq_config:
-        return
 
     # Get text config (may be nested under text_config for VLM wrappers)
     _text_cfg = model_config.get("text_config", model_config)
@@ -1847,6 +1845,20 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
             )
             return
 
+    if _tq_auto_generated:
+        _tq_cfg = apply_uncalibrated_auto_tq_policy(
+            _tq_cfg,
+            model_config,
+            _layer_types,
+        )
+    _tq_cfg["compress_after"] = resolve_compress_after(_tq_cfg, model_config)
+    # Use _tq_cfg (which may be auto-generated defaults) instead of re-reading jang_cfg.
+    # This happens only after the real native layer layout is known so hybrid
+    # critical layers map to actual KV slots rather than cumulative SSM slots.
+    tq_config = TurboQuantConfig.from_jang_config({"turboquant": _tq_cfg}, n_layers)
+    if not tq_config:
+        return
+
     _n_attn = sum(1 for t in _layer_types if t == "attention")
     _n_ssm = sum(1 for t in _layer_types if t == "ssm")
     _n_cache = len(_layer_types)
@@ -1875,7 +1887,7 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
             _layer_types,
         )
     elif _n_ssm > 0:
-        if not is_qwen36_hybrid_tq_supported(model_config, _layer_types):
+        if not is_selective_hybrid_tq_supported(model_config, _layer_types):
             logger.info(
                 "  TurboQuant KV skipped: hybrid/path-dependent cache family "
                 "is not on the live-gated selective attention-KV allow-list; "
@@ -1897,6 +1909,13 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
             return make_turboquant_cache(_cfg, _n, [_kd] * _n, [_vd] * _n, _lt)
 
     model.make_cache = _turboquant_make_cache
+    _turboquant_make_cache._vmlx_tq_auto_policy = _tq_cfg.get("auto_policy")
+    _turboquant_make_cache._vmlx_tq_default_key_bits = int(
+        tq_config.default_key_bits
+    )
+    _turboquant_make_cache._vmlx_tq_default_value_bits = int(
+        tq_config.default_value_bits
+    )
     _turboquant_make_cache._vmlx_tq_compress_after = int(
         getattr(tq_config, "compress_after", 0) or 0
     )
@@ -1913,8 +1932,10 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         )
     else:
         logger.info(
-            "  TurboQuant objects active; live encode disabled; stored prefix q4 "
-            "remains scheduler-owned (%d critical layers)",
+            "  TurboQuant objects active; live encode disabled; storage codec=%d-bit "
+            "attention KV, policy=%s (%d mapped KV layers)",
+            tq_config.default_key_bits,
+            _tq_cfg.get("auto_policy", "bundle_calibrated_or_explicit"),
             len(tq_config.critical_layers),
         )
 

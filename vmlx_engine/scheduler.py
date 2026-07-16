@@ -464,6 +464,15 @@ class Scheduler:
         self._hybrid_live_tq_compress_after = int(
             getattr(_model_make_cache, "_vmlx_tq_compress_after", 0) or 0
         )
+        self._hybrid_tq_auto_policy = getattr(
+            _model_make_cache, "_vmlx_tq_auto_policy", None
+        )
+        self._hybrid_tq_default_key_bits = int(
+            getattr(_model_make_cache, "_vmlx_tq_default_key_bits", 0) or 0
+        )
+        self._hybrid_tq_default_value_bits = int(
+            getattr(_model_make_cache, "_vmlx_tq_default_value_bits", 0) or 0
+        )
         self._tq_batch_api = self._turboquant_cache_supports_batch_api(model)
         self._log_runtime_cache_contract(model)
         if self._tq_active and self._tq_batch_api:
@@ -890,7 +899,18 @@ class Scheduler:
                 f"requested via VMLX_ALLOW_MLA_KV_QUANT=1 — running double-lossy KV quant "
                 f"on compressed latents. Expect some output drift; turn off if quality matters."
             )
-        if self.config.kv_cache_quantization != "none":
+        if (
+            self._tq_active
+            and not getattr(self.config, "kv_cache_quantization_explicit", False)
+        ):
+            # Auto mode uses the model's native TurboQuant codec at prefix/paged
+            # storage boundaries. Applying generic q4 first would double-quantize
+            # the same attention KV and erase the per-layer TQ seed/bit policy.
+            logger.info(
+                "KV cache auto mode: native TurboQuant owns stored attention KV; "
+                "generic q4/q8 prefix quantization is suppressed"
+            )
+        elif self.config.kv_cache_quantization != "none":
             if self.config.enable_prefix_cache:
                 bits = 4 if self.config.kv_cache_quantization == "q4" else 8
                 self._wrap_make_cache_quantized(bits, self.config.kv_cache_group_size)
@@ -3274,7 +3294,7 @@ class Scheduler:
                 return "mixed_swa_kv"
         except Exception:
             pass
-        if self._tq_active:
+        if getattr(self, "_tq_active", False):
             return "turboquant_kv"
         return "plain_kv"
 
@@ -3631,8 +3651,12 @@ class Scheduler:
         if cached_tokens <= 0:
             return
         detail = str(getattr(request, "_cache_detail", "") or "unknown")
-        if detail != "unknown" and getattr(self, "_tq_active", False) and "+tq" not in detail:
-            detail = f"{detail}+tq"
+        if (
+            detail != "unknown"
+            and getattr(request, "_tq_native_cache_hit", False)
+            and "+tq-native" not in detail
+        ):
+            detail = f"{detail}+tq-native"
             request._cache_detail = detail
         execution = getattr(request, "_cache_execution", None)
         if isinstance(execution, dict):
@@ -4413,6 +4437,18 @@ class Scheduler:
                                     "state": sub_state,
                                     "meta_state": sub_cache.meta_state,
                                     "class_name": type(sub_cache).__name__,
+                                    **(
+                                        {
+                                            "tq_config": {
+                                                "key_bits": int(sub_cache.key_bits),
+                                                "value_bits": int(sub_cache.value_bits),
+                                                "seed": int(getattr(sub_cache, "_seed", 42)),
+                                            }
+                                        }
+                                        if type(sub_cache).__name__
+                                        == "TurboQuantKVCache"
+                                        else {}
+                                    ),
                                 }
                             )
                         else:
@@ -4562,6 +4598,12 @@ class Scheduler:
                         "meta_state": meta,
                         "class_name": cls_name,
                     }
+                    if cls_name == "TurboQuantKVCache":
+                        entry["tq_config"] = {
+                            "key_bits": int(getattr(layer_cache, "key_bits", 8)),
+                            "value_bits": int(getattr(layer_cache, "value_bits", 8)),
+                            "seed": int(getattr(layer_cache, "_seed", 42)),
+                        }
                     if self._is_dsv4_cache_class_name(cls_name):
                         entry["compress_ratio"] = getattr(
                             layer_cache, "compress_ratio", None
@@ -5053,6 +5095,7 @@ class Scheduler:
                         hasattr(self.disk_cache, "_last_fetch_tq_native")
                         and self.disk_cache._last_fetch_tq_native
                     )
+                    request._tq_native_cache_hit = bool(_tq_disk)
                     request._cache_detail = "disk+tq" if _tq_disk else "disk"
                     # Recover the original cache_type so the L1 backfill keeps
                     # the same priority (system entries stay pinned across the
@@ -5557,12 +5600,31 @@ class Scheduler:
             if layer_i not in kv_set and ssm_idx < len(ssm_states):
                 full_cache[layer_i] = ssm_states[ssm_idx]
                 ssm_idx += 1
+        tq_native_blocks = int(
+            getattr(self.block_aware_cache, "_last_reconstruct_tq_blocks", 0) or 0
+        )
+        if getattr(self, "_tq_active", False):
+            try:
+                from .mllm_batch_generator import _recompress_to_tq
+
+                full_cache = _recompress_to_tq(full_cache, self.model)
+            except Exception as exc:
+                logger.warning(
+                    "Request %s: failed to restore TurboQuant cache objects after "
+                    "paged reconstruction: %s",
+                    request.request_id,
+                    exc,
+                )
+                return None
+        request._tq_native_cache_hit = tq_native_blocks > 0
         request.prompt_cache = full_cache
         request._cache_detail = (
             "paged+ssm+disk"
             if getattr(request, "_paged_disk_hit", False)
             else "paged+ssm"
         )
+        if request._tq_native_cache_hit:
+            request._cache_detail += "+tq-native"
         request._cache_detail_ssm_layers = ssm_idx
         logger.info(
             f"Request {request.request_id}: hybrid paged HIT — "
@@ -6271,9 +6333,12 @@ class Scheduler:
                     request.output_logprobs.append(token_logprobs)
 
             _detail = getattr(request, "_cache_detail", "")
-            # Annotate TQ if active (skip if already annotated, e.g. "disk+tq")
-            if _detail and getattr(self, "_tq_active", False) and "+tq" not in _detail:
-                _detail += "+tq"
+            if (
+                _detail
+                and getattr(request, "_tq_native_cache_hit", False)
+                and "+tq-native" not in _detail
+            ):
+                _detail += "+tq-native"
             execution = getattr(request, "_cache_execution", None)
             if isinstance(execution, dict) and _detail:
                 execution["cache_detail"] = _detail

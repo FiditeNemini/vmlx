@@ -24,6 +24,8 @@ Integration points:
 Supported cache_data tuple types (from prefix_cache.py):
 - ("kv", keys_slice, values_slice) — standard KVCache
 - ("quantized_kv", keys_tuple, values_tuple, meta) — QuantizedKVCache
+- ("turboquant_kv", encoded_keys, encoded_values, config) — native
+  TurboQuant codebook payload with the exact per-layer seed and codec bits
 - ("rotating_kv", keys_slice, values_slice, max_size, keep[, offset, idx])
   — RotatingKVCache
 - ("cumulative", state_list, meta, class_name) — MambaCache/ArraysCache
@@ -128,6 +130,55 @@ def _unpack_tree(node: Any, data: Dict[str, Any]) -> Any:
     return None
 
 
+def _cache_data_has_tq(cache_data: Any) -> bool:
+    for entry in cache_data or []:
+        if not isinstance(entry, (tuple, list)) or not entry:
+            continue
+        if entry[0] == "turboquant_kv":
+            return True
+        if entry[0] == "cache_list" and len(entry) > 1:
+            if _cache_data_has_tq(entry[1]):
+                return True
+    return False
+
+
+def _restore_tq_block_entry(
+    data: Dict[str, Any],
+    tensor_prefix: str,
+    tq_meta: Any,
+) -> Tuple[Any, ...]:
+    if not isinstance(tq_meta, dict):
+        raise ValueError("missing TQ block metadata")
+    from jang_tools.turboquant.cache import EncodedKeys, EncodedValues
+
+    encoded_keys = EncodedKeys(
+        indices_packed=data[f"{tensor_prefix}_tq_ck_indices_packed"],
+        qjl_packed=data[f"{tensor_prefix}_tq_ck_qjl_packed"],
+        residual_norms=data[f"{tensor_prefix}_tq_ck_residual_norms"],
+        vector_norms=data[f"{tensor_prefix}_tq_ck_vector_norms"],
+        shape=tuple(tq_meta["ck_shape"]),
+        index_bits=int(tq_meta["ck_bits"]),
+    )
+    encoded_values = EncodedValues(
+        indices_packed=data[f"{tensor_prefix}_tq_cv_indices_packed"],
+        vector_norms=data[f"{tensor_prefix}_tq_cv_vector_norms"],
+        shape=tuple(tq_meta["cv_shape"]),
+        index_bits=int(tq_meta["cv_bits"]),
+    )
+    config = {
+        key: int(tq_meta[key])
+        for key in (
+            "key_dim",
+            "value_dim",
+            "key_bits",
+            "value_bits",
+            "seed",
+            "offset",
+        )
+    }
+    return ("turboquant_kv", encoded_keys, encoded_values, config)
+
+
 
 class BlockDiskStore:
     """
@@ -171,6 +222,8 @@ class BlockDiskStore:
         self.disk_misses = 0
         self.disk_writes = 0
         self.disk_evictions = 0
+        self.tq_native_writes = 0
+        self.tq_native_hits = 0
 
         # Per-thread read connections (thread-local storage).
         # MLLM batch generator runs fetch_cache on a worker thread — SQLite
@@ -392,6 +445,8 @@ class BlockDiskStore:
                     return None
             with self._stats_lock:
                 self.disk_hits += 1
+                if _cache_data_has_tq(cache_data):
+                    self.tq_native_hits += 1
             # Queue access metadata update to background (non-blocking)
             self._queue_access_update(hash_hex)
             logger.debug(f"Disk cache hit: {hash_hex[:12]} ({dtype}, {len(cache_data)} layers)")
@@ -496,6 +551,9 @@ class BlockDiskStore:
             self._write_queue.put_nowait(
                 (block_hash, str(tmp_path), dtype, num_layers, token_count)
             )
+            if _cache_data_has_tq(cache_data):
+                with self._stats_lock:
+                    self.tq_native_writes += 1
         except queue.Full:
             # Clean up the temp file since background won't process it
             try:
@@ -713,6 +771,8 @@ class BlockDiskStore:
                 "disk_misses": self.disk_misses,
                 "disk_writes": self.disk_writes,
                 "disk_evictions": self.disk_evictions,
+                "tq_native_writes": self.tq_native_writes,
+                "tq_native_hits": self.tq_native_hits,
             }
 
     def partial_token_counts(self, block_size: int) -> List[int]:
@@ -754,6 +814,9 @@ class BlockDiskStore:
             conn.commit()
         finally:
             conn.close()
+        with self._stats_lock:
+            self.tq_native_writes = 0
+            self.tq_native_hits = 0
         logger.info("Disk cache cleared")
 
     def shutdown(self) -> None:
@@ -868,6 +931,24 @@ def _serialize_block(
             if layer_meta:
                 meta[str(i)] = {"quant_meta": layer_meta}
 
+        elif tag == "turboquant_kv":
+            _, encoded_keys, encoded_values, tq_config = layer_data
+            tensors[f"layer_{i}_tq_ck_indices_packed"] = encoded_keys.indices_packed
+            tensors[f"layer_{i}_tq_ck_qjl_packed"] = encoded_keys.qjl_packed
+            tensors[f"layer_{i}_tq_ck_residual_norms"] = encoded_keys.residual_norms
+            tensors[f"layer_{i}_tq_ck_vector_norms"] = encoded_keys.vector_norms
+            tensors[f"layer_{i}_tq_cv_indices_packed"] = encoded_values.indices_packed
+            tensors[f"layer_{i}_tq_cv_vector_norms"] = encoded_values.vector_norms
+            meta[str(i)] = {
+                "tq": {
+                    **_json_safe(tq_config),
+                    "ck_shape": list(encoded_keys.shape),
+                    "ck_bits": int(encoded_keys.index_bits),
+                    "cv_shape": list(encoded_values.shape),
+                    "cv_bits": int(encoded_values.index_bits),
+                }
+            }
+
         elif tag == "minimax_m3":
             _, keys, values, idx_keys = layer_data
             tensors[f"layer_{i}_keys"] = keys
@@ -906,6 +987,25 @@ def _serialize_block(
                     tensors[f"layer_{i}_sub_{j}_values"] = sv
                     if hasattr(sk, "dtype"):
                         meta.setdefault("__orig_dtypes__", {})[f"{i}_sub_{j}"] = str(sk.dtype)
+                    sub_count += 1
+                elif sub_tag == "turboquant_kv":
+                    _, sck, scv, stq = sub_entry
+                    tensors[f"layer_{i}_sub_{j}_tq_ck_indices_packed"] = sck.indices_packed
+                    tensors[f"layer_{i}_sub_{j}_tq_ck_qjl_packed"] = sck.qjl_packed
+                    tensors[f"layer_{i}_sub_{j}_tq_ck_residual_norms"] = sck.residual_norms
+                    tensors[f"layer_{i}_sub_{j}_tq_ck_vector_norms"] = sck.vector_norms
+                    tensors[f"layer_{i}_sub_{j}_tq_cv_indices_packed"] = scv.indices_packed
+                    tensors[f"layer_{i}_sub_{j}_tq_cv_vector_norms"] = scv.vector_norms
+                    meta.setdefault(str(i), {}).setdefault("subs", {})[str(j)] = {
+                        "type": "turboquant_kv",
+                        "tq": {
+                            **_json_safe(stq),
+                            "ck_shape": list(sck.shape),
+                            "ck_bits": int(sck.index_bits),
+                            "cv_shape": list(scv.shape),
+                            "cv_bits": int(scv.index_bits),
+                        },
+                    }
                     sub_count += 1
                 elif sub_tag == "cumulative":
                     _, sub_state, sub_meta, sub_cls = sub_entry
@@ -1151,6 +1251,20 @@ def _deserialize_block(
             except KeyError:
                 cache_data.append(("skip",))
 
+        elif layer_type == "turboquant_kv":
+            try:
+                layer_meta_dict = meta.get(str(i), {})
+                cache_data.append(
+                    _restore_tq_block_entry(
+                        data,
+                        f"layer_{i}",
+                        layer_meta_dict.get("tq"),
+                    )
+                )
+            except Exception as exc:
+                logger.warning("TQ block layer %d metadata decode failed: %s", i, exc)
+                cache_data.append(("skip",))
+
         elif layer_type == "rotating_kv":
             keys = data.get(f"layer_{i}_keys")
             values = data.get(f"layer_{i}_values")
@@ -1193,6 +1307,24 @@ def _deserialize_block(
                             sk = sk.astype(target)
                             sv = sv.astype(target)
                     sub_slices.append(("kv", sk, sv))
+                elif subs_meta.get(str(j), {}).get("type") == "turboquant_kv":
+                    try:
+                        sub_slices.append(
+                            _restore_tq_block_entry(
+                                data,
+                                f"layer_{i}_sub_{j}",
+                                subs_meta.get(str(j), {}).get("tq"),
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "TQ block CacheList layer %d/%d metadata decode "
+                            "failed: %s",
+                            i,
+                            j,
+                            exc,
+                        )
+                        sub_slices.append(("skip",))
                 elif f"layer_{i}_sub_{j}_cumulative_0" in data:
                     sub_meta_dict = subs_meta.get(str(j), {})
                     sub_cls = sub_meta_dict.get("class_name", "")
@@ -1308,15 +1440,22 @@ def _infer_layer_type(data: Dict[str, Any], layer_idx: int, fallback_dtype: str)
     """Infer a layer's type from its tensor keys (backward compat for old blocks)."""
     prefix = f"layer_{layer_idx}_"
     has_keys_data = f"{prefix}keys_data" in data
+    has_tq = f"{prefix}tq_ck_indices_packed" in data
     has_cumulative = f"{prefix}cumulative_0" in data
     has_dsv4 = f"{prefix}dsv4_state_0" in data
     has_dsv4_pending = f"{prefix}dsv4_pending" in data
     has_max_size = f"{prefix}max_size" in data
     has_keys = f"{prefix}keys" in data
-    has_sub = f"{prefix}sub_0_keys" in data or f"{prefix}sub_0_cumulative_0" in data
+    has_sub = (
+        f"{prefix}sub_0_keys" in data
+        or f"{prefix}sub_0_cumulative_0" in data
+        or f"{prefix}sub_0_tq_ck_indices_packed" in data
+    )
 
     if has_sub:
         return "cache_list"
+    if has_tq:
+        return "turboquant_kv"
     if has_keys_data:
         return "quantized_kv"
     if has_cumulative:

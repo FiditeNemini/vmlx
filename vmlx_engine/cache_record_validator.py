@@ -293,7 +293,7 @@ def validate_cache_record(
         cache_data: The list of per-layer entries returned by
             ``_deserialize_block`` or ``_extract_block_tensor_slice``. Each entry
             is a tuple whose first element is a tag string (``"kv"``,
-            ``"quantized_kv"``, ``"rotating_kv"``, ``"cumulative"``,
+            ``"quantized_kv"``, ``"turboquant_kv"``, ``"rotating_kv"``, ``"cumulative"``,
             ``"deepseek_v4"``, ``"deepseek_v4_pending"``, ``"cache_list"``,
             ``"zaya_cca"``, ``"minimax_m3"``, ``"no_state"``, ``"skip"``).
         expected_num_layers: If not None, ``len(cache_data)`` must match.
@@ -419,6 +419,104 @@ def validate_cache_record(
                 )
                 if not ok:
                     return False, reason, total_bytes
+
+        elif tag == "turboquant_kv":
+            if len(entry) != 4:
+                return False, (
+                    f"layer {i} 'turboquant_kv': len={len(entry)} != 4"
+                ), total_bytes
+            encoded_keys, encoded_values, tq_config = entry[1], entry[2], entry[3]
+            if not isinstance(tq_config, dict):
+                return False, (
+                    f"layer {i} 'turboquant_kv': config is "
+                    f"{type(tq_config).__name__}, expected dict"
+                ), total_bytes
+            for label, obj, fields in (
+                (
+                    "encoded_keys",
+                    encoded_keys,
+                    (
+                        "indices_packed",
+                        "qjl_packed",
+                        "residual_norms",
+                        "vector_norms",
+                    ),
+                ),
+                (
+                    "encoded_values",
+                    encoded_values,
+                    ("indices_packed", "vector_norms"),
+                ),
+            ):
+                for field in fields:
+                    value = getattr(obj, field, None)
+                    ok, nb, reason = _validate_tensor(
+                        value,
+                        label=f"{label}.{field}",
+                        layer_idx=i,
+                    )
+                    if not ok:
+                        return False, reason, total_bytes
+                    total_bytes += nb
+                shape = getattr(obj, "shape", None)
+                ok_shape, shape_reason, _ = _validate_shape_list(
+                    shape,
+                    label=f"layer {i} 'turboquant_kv'.{label}.shape",
+                    bytes_per_elem=2,
+                )
+                if not ok_shape:
+                    return False, shape_reason, total_bytes
+                ok_index, _, index_reason = _validate_int_range(
+                    getattr(obj, "index_bits", None),
+                    label=f"layer {i} 'turboquant_kv'.{label}.index_bits",
+                    lo=1,
+                    hi=16,
+                )
+                if not ok_index:
+                    return False, index_reason, total_bytes
+            for key in ("key_bits", "value_bits"):
+                ok_bits, bits, reason = _validate_int_range(
+                    tq_config.get(key),
+                    label=f"layer {i} 'turboquant_kv'.{key}",
+                    lo=1,
+                    hi=16,
+                )
+                if not ok_bits:
+                    return False, reason, total_bytes
+                if bits not in ALLOWED_CACHE_BITS:
+                    return False, (
+                        f"layer {i} 'turboquant_kv'.{key}: {bits} not in "
+                        f"{sorted(ALLOWED_CACHE_BITS)}"
+                    ), total_bytes
+            for key, lo, hi in (
+                ("key_dim", 1, MAX_TENSOR_DIM),
+                ("value_dim", 1, MAX_TENSOR_DIM),
+                ("seed", 0, 2_147_483_647),
+                ("offset", 1, MAX_CACHE_OFFSET),
+            ):
+                ok_int, _, reason = _validate_int_range(
+                    tq_config.get(key),
+                    label=f"layer {i} 'turboquant_kv'.{key}",
+                    lo=lo,
+                    hi=hi,
+                )
+                if not ok_int:
+                    return False, reason, total_bytes
+            key_shape = tuple(getattr(encoded_keys, "shape", ()))
+            value_shape = tuple(getattr(encoded_values, "shape", ()))
+            offset = int(tq_config["offset"])
+            if (
+                len(key_shape) != 4
+                or len(value_shape) != 4
+                or int(key_shape[-2]) != offset
+                or int(value_shape[-2]) != offset
+                or int(key_shape[-1]) != int(tq_config["key_dim"])
+                or int(value_shape[-1]) != int(tq_config["value_dim"])
+            ):
+                return False, (
+                    f"layer {i} 'turboquant_kv': shape/config mismatch "
+                    f"keys={key_shape}, values={value_shape}, config={tq_config}"
+                ), total_bytes
 
         elif tag == "cumulative":
             # ("cumulative", state_arrays, meta, class_name)
@@ -1236,6 +1334,7 @@ def validate_tq_native_metadata(
         if missing:
             return False, f"{label}: missing compressed tensors {missing}"
 
+        decoded_shapes: dict[str, list[int]] = {}
         for suffix in ("ck_shape", "cv_shape"):
             raw = metadata.get(f"__{prefix}_{suffix}__", "[]")
             try:
@@ -1247,6 +1346,7 @@ def validate_tq_native_metadata(
             )
             if not ok_shape:
                 return False, shape_reason
+            decoded_shapes[suffix] = shape
             total_decoded += nbytes
             if total_decoded > MAX_TOTAL_RECORD_BYTES:
                 return False, (
@@ -1254,7 +1354,19 @@ def validate_tq_native_metadata(
                     f"> {MAX_TOTAL_RECORD_BYTES}"
                 )
 
-        for suffix in ("ck_bits", "cv_bits", "key_bits", "value_bits"):
+        # Encoded codebook index widths are an implementation detail and need
+        # not equal the user-facing TQ codec width (TQ8 currently uses 7-bit
+        # packed indices). Validate their bounds independently.
+        for suffix in ("ck_bits", "cv_bits"):
+            key = f"__{prefix}_{suffix}__"
+            if key in metadata:
+                ok_bits, _, bit_reason = _validate_int_range(
+                    metadata[key], label=f"{label}.{suffix}", lo=1, hi=16
+                )
+                if not ok_bits:
+                    return False, bit_reason
+
+        for suffix in ("key_bits", "value_bits"):
             key = f"__{prefix}_{suffix}__"
             if key in metadata:
                 ok_bits, bits, bit_reason = _validate_int_range(
@@ -1278,6 +1390,40 @@ def validate_tq_native_metadata(
                 )
                 if not ok_int:
                     return False, int_reason
+
+        seed_key = f"__{prefix}_seed__"
+        if seed_key in metadata:
+            ok_seed, _, seed_reason = _validate_int_range(
+                metadata[seed_key],
+                label=f"{label}.seed",
+                lo=0,
+                hi=2_147_483_647,
+            )
+            if not ok_seed:
+                return False, seed_reason
+
+        offset_key = f"__{prefix}_offset__"
+        compressed_key = f"__{prefix}_compressed_tokens__"
+        sink_key = f"__{prefix}_sink_tokens__"
+        if offset_key in metadata:
+            offset = int(metadata[offset_key])
+            compressed = int(metadata.get(compressed_key, offset))
+            sink = int(metadata.get(sink_key, "0"))
+            key_tokens = decoded_shapes.get("ck_shape", [0, 0])[-2]
+            value_tokens = decoded_shapes.get("cv_shape", [0, 0])[-2]
+            if not (
+                offset > 0
+                and compressed == offset
+                and key_tokens == offset
+                and value_tokens == offset
+                and sink == 0
+            ):
+                return False, (
+                    f"{label}: incomplete TQ storage payload "
+                    f"offset={offset}, compressed={compressed}, "
+                    f"key_tokens={key_tokens}, value_tokens={value_tokens}, "
+                    f"sink_tokens={sink}"
+                )
 
         for suffix in ("key_dim", "value_dim"):
             key = f"__{prefix}_{suffix}__"

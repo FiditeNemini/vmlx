@@ -118,6 +118,7 @@ def _apply_turboquant_to_model(model, model_path: str):
     try:
         from .turboquant_config import (
             TurboQuantConfig,
+            apply_uncalibrated_auto_tq_policy,
             make_turboquant_cache,
             resolve_compress_after,
         )
@@ -237,11 +238,11 @@ def _apply_turboquant_to_model(model, model_path: str):
 
         from .hybrid_tq_cache import (
             build_hybrid_turboquant_make_cache,
-            is_qwen36_hybrid_tq_supported,
+            is_selective_hybrid_tq_supported,
         )
 
         _is_hybrid = "ssm" in layer_types
-        _supports_selective_hybrid_tq = is_qwen36_hybrid_tq_supported(
+        _supports_selective_hybrid_tq = is_selective_hybrid_tq_supported(
             config, layer_types
         )
         if _is_hybrid and not _supports_selective_hybrid_tq:
@@ -253,17 +254,26 @@ def _apply_turboquant_to_model(model, model_path: str):
             )
             return
 
-        # Default TQ config
-        tq_config = TurboQuantConfig(
-            n_layers=n_layers,
-            default_key_bits=3,
-            default_value_bits=3,
-            critical_key_bits=4,
-            critical_value_bits=4,
-            critical_layers=[0, 1, 2, -3, -2, -1],
-            seed=42,
-            compress_after=resolve_compress_after({}, config),
+        auto_tq = apply_uncalibrated_auto_tq_policy(
+            {
+                "enabled": True,
+                "default_key_bits": 3,
+                "default_value_bits": 3,
+                "critical_key_bits": 4,
+                "critical_value_bits": 4,
+                "critical_layers": [0, 1, 2, -3, -2, -1],
+                "sink_tokens": 4,
+                "seed": 42,
+            },
+            config,
+            layer_types,
         )
+        auto_tq["compress_after"] = resolve_compress_after(auto_tq, config)
+        tq_config = TurboQuantConfig.from_jang_config(
+            {"turboquant": auto_tq}, n_layers
+        )
+        if tq_config is None:
+            return
 
         n_cache = len(layer_types)
 
@@ -284,6 +294,16 @@ def _apply_turboquant_to_model(model, model_path: str):
                 return make_turboquant_cache(_cfg, _n, [_kd] * _n, [_vd] * _n, _lt)
 
         model.make_cache = _tq_make_cache
+        _tq_make_cache._vmlx_tq_auto_policy = auto_tq.get("auto_policy")
+        _tq_make_cache._vmlx_tq_default_key_bits = int(
+            tq_config.default_key_bits
+        )
+        _tq_make_cache._vmlx_tq_default_value_bits = int(
+            tq_config.default_value_bits
+        )
+        _tq_make_cache._vmlx_tq_compress_after = int(
+            tq_config.compress_after
+        )
 
         n_attn = sum(1 for t in layer_types if t == "attention")
         n_ssm = sum(1 for t in layer_types if t == "ssm")

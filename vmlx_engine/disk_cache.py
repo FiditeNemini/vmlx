@@ -687,15 +687,25 @@ class DiskCacheManager:
             return False
 
         # ─── Check for TQ-native serialization ───
-        # TurboQuantKVCache layers with compressed data can be stored at 26x
-        # compression vs float16. We check BEFORE the .state/.meta_state
-        # verification because TQ layers might not need the standard protocol
-        # for our native serialization.
+        # TurboQuantKVCache layers are canonicalized into a complete packed
+        # storage clone before serialization. Live caches may contain only an
+        # old compressed prefix plus sink/window float state; writing those raw
+        # private fields with a full offset creates a truncated disk record.
         try:
-            from .tq_disk_store import is_tq_compressed_cache, serialize_tq_cache
+            from .tq_disk_store import (
+                canonicalize_tq_cache_for_storage,
+                has_turboquant_layers,
+                is_tq_compressed_cache,
+                serialize_tq_cache,
+            )
+            if has_turboquant_layers(cache):
+                cache = canonicalize_tq_cache_for_storage(cache)
             use_tq_native = is_tq_compressed_cache(cache)
         except ImportError:
             use_tq_native = False
+        except Exception as exc:
+            logger.warning("Refusing incomplete TurboQuant disk payload: %s", exc)
+            return False
 
         if cache_type not in ("system", "user", "assistant"):
             cache_type = "assistant"

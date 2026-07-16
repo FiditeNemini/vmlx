@@ -12,38 +12,107 @@ from jang_tools.turboquant.config import TurboQuantConfig as _JangTurboQuantConf
 
 logger = logging.getLogger(__name__)
 
-QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER = 256
+QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER = 0
+QWEN_HYBRID_UNCALIBRATED_TQ_BITS = 8
 _QWEN_HYBRID_MODEL_TYPES = frozenset(
     {
         "qwen3_5",
         "qwen3_5_text",
         "qwen3_5_moe",
         "qwen3_5_moe_text",
+        "qwen3_next",
     }
 )
 
 
-def _is_qwen_hybrid_attention_config(model_config: dict | None) -> bool:
+def _model_types(model_config: dict | None) -> set[str]:
+    if not isinstance(model_config, dict):
+        return set()
+    candidates = [model_config]
+    text_config = model_config.get("text_config")
+    if isinstance(text_config, dict):
+        candidates.append(text_config)
+    return {
+        str(candidate.get("model_type") or "").lower()
+        for candidate in candidates
+    }
+
+
+def _is_qwen_hybrid_attention_config(
+    model_config: dict | None,
+    detected_layer_types: list[str] | tuple[str, ...] | None = None,
+) -> bool:
     if not isinstance(model_config, dict):
         return False
     candidates = [model_config]
     text_config = model_config.get("text_config")
     if isinstance(text_config, dict):
         candidates.append(text_config)
-    model_types = {
-        str(candidate.get("model_type") or "").lower()
-        for candidate in candidates
-    }
     layer_types: list[str] = []
-    for candidate in candidates:
-        declared = candidate.get("layer_types")
-        if isinstance(declared, list) and declared:
-            layer_types = [str(value).lower() for value in declared]
-            break
-    return bool(model_types & _QWEN_HYBRID_MODEL_TYPES) and (
-        any(value in {"linear_attention", "gated_delta", "gated_delta_net"} for value in layer_types)
-        and any(value in {"full_attention", "attention"} for value in layer_types)
+    if detected_layer_types:
+        layer_types = [str(value).lower() for value in detected_layer_types]
+    else:
+        for candidate in candidates:
+            declared = candidate.get("layer_types")
+            if isinstance(declared, list) and declared:
+                layer_types = [str(value).lower() for value in declared]
+                break
+    has_companion = any(
+        value in {
+            "ssm",
+            "linear_attention",
+            "gated_delta",
+            "gated_delta_net",
+            "gated_linear_attention",
+            "mamba",
+            "mamba2",
+        }
+        for value in layer_types
     )
+    has_kv = any(value in {"full_attention", "attention"} for value in layer_types)
+    return bool(_model_types(model_config) & _QWEN_HYBRID_MODEL_TYPES) and (
+        has_companion and has_kv
+    )
+
+
+def apply_uncalibrated_auto_tq_policy(
+    tq_cfg: dict,
+    model_config: dict | None,
+    layer_types: list[str] | tuple[str, ...],
+) -> dict:
+    """Return a correctness-first Auto config for an uncalibrated bundle.
+
+    Qwen3.5/3.6 and Qwen3-Next mix cumulative GatedDelta/SSM state with
+    ordinary attention KV.  The cumulative slots are never TQ candidates.
+    For the attention slots, an uncalibrated 3-bit live transition is not a
+    safe family default: it changes decode numerics mid-request and has caused
+    real Bonsai tool/multi-turn loops.  Auto therefore keeps live transition
+    disabled and uses an 8-bit TQ storage codec.  A bundle-owned calibrated
+    ``turboquant`` block or explicit operator settings remain authoritative.
+    """
+    resolved = dict(tq_cfg)
+    if not _is_qwen_hybrid_attention_config(model_config, layer_types):
+        return resolved
+
+    attention_layers = [
+        index
+        for index, layer_type in enumerate(layer_types)
+        if str(layer_type).lower() == "attention"
+    ]
+    resolved.update(
+        {
+            "default_key_bits": QWEN_HYBRID_UNCALIBRATED_TQ_BITS,
+            "default_value_bits": QWEN_HYBRID_UNCALIBRATED_TQ_BITS,
+            "critical_key_bits": QWEN_HYBRID_UNCALIBRATED_TQ_BITS,
+            "critical_value_bits": QWEN_HYBRID_UNCALIBRATED_TQ_BITS,
+            # Use real KV positions, not raw first/last transformer indices.
+            "critical_layers": attention_layers,
+            "sink_tokens": 0,
+            "compress_after": QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER,
+            "auto_policy": "qwen_hybrid_attention_kv_storage_tq8",
+        }
+    )
+    return resolved
 
 
 def _layer_resident_bytes(layer) -> int:
@@ -104,9 +173,9 @@ def resolve_compress_after(tq_cfg: dict, model_config: dict | None = None) -> in
 
     ``VMLX_TQ_COMPRESS_AFTER`` is the explicit live-gate control. A bundle may
     also own the setting in ``jang_config.turboquant`` (including an explicit
-    zero to disable live encode). Qwen3.5/3.6 hybrid attention/SSM models use a
-    conservative family default so attention KV is actually encoded while the
-    SSM/GatedDelta companion state remains native full precision.
+    zero to disable live encode). Uncalibrated hybrid Qwen Auto mode keeps this
+    zero and performs TQ at the paged/L2 storage boundary; a mid-request lossy
+    transition must be bundle-calibrated or explicitly requested.
     """
     override = os.environ.get("VMLX_TQ_COMPRESS_AFTER")
     if override is not None:

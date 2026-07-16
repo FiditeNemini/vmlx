@@ -7611,6 +7611,9 @@ def _turboquant_kv_cache_status(engine=None, scheduler=None) -> dict:
     if tq_active:
         compress_after = 0
         template_layers = []
+        auto_policy = None
+        configured_key_bits = 0
+        configured_value_bits = 0
         if engine is not None:
             _seen = set()
             _stack = []
@@ -7627,6 +7630,15 @@ def _turboquant_kv_cache_status(engine=None, scheduler=None) -> dict:
                 if _check_make_cache(_value):
                     compress_after = int(
                         getattr(make_cache, "_vmlx_tq_compress_after", 0) or 0
+                    )
+                    auto_policy = getattr(
+                        make_cache, "_vmlx_tq_auto_policy", None
+                    )
+                    configured_key_bits = int(
+                        getattr(make_cache, "_vmlx_tq_default_key_bits", 0) or 0
+                    )
+                    configured_value_bits = int(
+                        getattr(make_cache, "_vmlx_tq_default_value_bits", 0) or 0
                     )
                     try:
                         template_layers = list(make_cache() or [])
@@ -7646,6 +7658,18 @@ def _turboquant_kv_cache_status(engine=None, scheduler=None) -> dict:
                 compress_after,
                 max(int(getattr(layer, "compress_after", 0) or 0) for layer in tq_layers),
             )
+        key_bits_values = sorted(
+            {int(getattr(layer, "key_bits", 0) or 0) for layer in tq_layers}
+            - {0}
+        )
+        value_bits_values = sorted(
+            {int(getattr(layer, "value_bits", 0) or 0) for layer in tq_layers}
+            - {0}
+        )
+        if not configured_key_bits and key_bits_values:
+            configured_key_bits = key_bits_values[0]
+        if not configured_value_bits and value_bits_values:
+            configured_value_bits = value_bits_values[0]
         live_encode_enabled = compress_after > 0
         live_telemetry = None
         try:
@@ -7657,16 +7681,35 @@ def _turboquant_kv_cache_status(engine=None, scheduler=None) -> dict:
         except Exception:
             live_telemetry = None
         kv_bits = int(getattr(scheduler, "_kv_cache_bits", 0) or 0) if scheduler else 0
-        stored_prefix = f"q{kv_bits}" if kv_bits > 0 else "native"
+        native_tq_storage = bool(
+            tq_layers
+            and scheduler is not None
+            and any(
+                getattr(scheduler, attr, None) is not None
+                for attr in ("block_aware_cache", "memory_aware_cache", "prefix_cache")
+            )
+        )
+        stored_prefix = (
+            f"turboquant-q{configured_key_bits}"
+            if native_tq_storage and configured_key_bits > 0
+            else (f"q{kv_bits}" if kv_bits > 0 else "native")
+        )
         status = {
             "enabled": True,
             "objects_active": True,
             "live_encode_enabled": live_encode_enabled,
             "compress_after": compress_after,
             "stored_prefix_quantization": stored_prefix,
-            "default_bits": 3,
-            "critical_bits": 4,
-            "critical_layers": "first 3 + last 3",
+            "storage_encode_enabled": native_tq_storage,
+            "storage_key_bits": configured_key_bits or None,
+            "storage_value_bits": configured_value_bits or None,
+            "key_bits_values": key_bits_values,
+            "value_bits_values": value_bits_values,
+            "auto_policy": auto_policy,
+            # Compatibility fields, now derived from the real cache template.
+            "default_bits": configured_key_bits or 3,
+            "critical_bits": max(key_bits_values, default=configured_key_bits or 3),
+            "critical_layers": "model-configured",
             "resident_memory_reduction_claimed": False,
             "description": (
                 f"TQ objects active; live encode enabled after {compress_after} tokens; "
@@ -7992,6 +8035,18 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
             getattr(scheduler, "_hybrid_live_tq_compress_after", 0) or 0
         )
         hybrid_tq_live_encode = hybrid_tq_enabled and hybrid_tq_compress_after > 0
+        hybrid_tq_storage_enabled = bool(
+            hybrid_tq_enabled and block_aware_cache is not None
+        )
+        hybrid_tq_key_bits = int(
+            getattr(scheduler, "_hybrid_tq_default_key_bits", 0) or 0
+        )
+        hybrid_tq_value_bits = int(
+            getattr(scheduler, "_hybrid_tq_default_value_bits", 0) or 0
+        )
+        hybrid_tq_auto_policy = getattr(
+            scheduler, "_hybrid_tq_auto_policy", None
+        )
         try:
             stored_kv_bits = int(getattr(scheduler, "_kv_cache_bits", 0) or 0)
         except (TypeError, ValueError):
@@ -8030,20 +8085,38 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
                 "attention_layers": hybrid_tq_attention_layers,
                 "companion_layers": hybrid_tq_companion_layers,
             },
-            "attention_kv_storage_quantization": {
-                "enabled": stored_kv_bits > 0,
-                "mode": "storage_boundary",
-                "bits": stored_kv_bits if stored_kv_bits > 0 else None,
-                "group_size": stored_kv_group if stored_kv_bits > 0 else None,
-                "applies_to": "attention_kv_layers_only",
-                "ssm_policy": "native_companion_state",
-                "rederive": "async_clean_prefill_on_miss_or_warm_pass",
-            },
+            "attention_kv_storage_quantization": (
+                {
+                    "enabled": True,
+                    "mode": "storage_boundary",
+                    "codec": "turboquant_native",
+                    "bits": hybrid_tq_key_bits or None,
+                    "value_bits": hybrid_tq_value_bits or None,
+                    "group_size": None,
+                    "auto_policy": hybrid_tq_auto_policy,
+                    "applies_to": "attention_kv_layers_only",
+                    "ssm_policy": "native_companion_state",
+                    "rederive": "async_clean_prefill_on_miss_or_warm_pass",
+                }
+                if hybrid_tq_storage_enabled
+                else {
+                    "enabled": stored_kv_bits > 0,
+                    "mode": "storage_boundary",
+                    "bits": stored_kv_bits if stored_kv_bits > 0 else None,
+                    "group_size": stored_kv_group if stored_kv_bits > 0 else None,
+                    "applies_to": "attention_kv_layers_only",
+                    "ssm_policy": "native_companion_state",
+                    "rederive": "async_clean_prefill_on_miss_or_warm_pass",
+                }
+            ),
             "prefix": bool(block_aware_cache is not None),
             "paged": bool(block_aware_cache is not None and paged_cache_manager is not None),
             "block_disk_l2": bool(block_disk_store is not None),
             "ssm_entries": ssm_entries,
-            "kv_layer_indices": list(getattr(scheduler, "_hybrid_kv_positions", []) or []),
+            "kv_layer_indices": list(
+                getattr(scheduler, "_hybrid_kv_positions", [])
+                or hybrid_tq_attention_layers
+            ),
         }
 
     if (

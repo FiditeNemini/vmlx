@@ -1096,6 +1096,17 @@ def _numpy_block_slice(
     return block_slices if block_slices else None
 
 
+def _entry_has_native_tq(entry) -> bool:
+    """Return whether one typed block entry contains packed TQ attention KV."""
+    if not isinstance(entry, (tuple, list)) or not entry:
+        return False
+    if entry[0] == "turboquant_kv":
+        return True
+    if entry[0] == "cache_list" and len(entry) > 1:
+        return any(_entry_has_native_tq(sub) for sub in entry[1] or [])
+    return False
+
+
 def _block_needs_cumulative_update(cache_data) -> bool:
     """Check if a block's cache_data is missing cumulative SSM state.
 
@@ -2221,6 +2232,19 @@ class BlockAwarePrefixCache:
                             global_start, global_end, is_last, existing_tokens,
                         )
                         if np_block:
+                            # The numpy mirror is authoritative for ordinary KV
+                            # and cumulative/path-dependent state, but it cannot
+                            # represent native TurboQuant metadata: its generic
+                            # branch emits ("kv", ...) and silently discards the
+                            # per-layer seed/bit policy.  The main-thread block
+                            # extractor above has already created independent,
+                            # fully packed TQ entries, so splice only those back
+                            # into the otherwise numpy-safe disk payload.
+                            for _idx, _entry in enumerate(block_kv_data):
+                                if _idx < len(np_block) and _entry_has_native_tq(
+                                    _entry
+                                ):
+                                    np_block[_idx] = _entry
                             # Count non-skip entries. DSV4 intentionally logs
                             # only two plain KV layers plus native composite
                             # markers/state for the remaining layers; showing
@@ -2630,7 +2654,16 @@ class BlockAwarePrefixCache:
                                 else:
                                     ks = keys[:, start_idx:actual_end, :]
                                     vs = values[:, start_idx:actual_end, :]
-                                sub_slices.append(("kv", ks, vs))
+                                if sub_cls == "TurboQuantKVCache" and isinstance(
+                                    sub.get("tq_config"), dict
+                                ):
+                                    from .tq_disk_store import encode_tq_block
+
+                                    sub_slices.append(
+                                        encode_tq_block(ks, vs, sub["tq_config"])
+                                    )
+                                else:
+                                    sub_slices.append(("kv", ks, vs))
                         except Exception:
                             sub_slices.append(("skip",))
                     else:
@@ -2722,8 +2755,19 @@ class BlockAwarePrefixCache:
                         ks = keys[:, slice_start:actual_end, :]
                         vs = values[:, slice_start:actual_end, :]
 
+                    # Native TQ paged storage: encode each independent block with
+                    # the layer's exact seed/bit policy. The cumulative SSM/GDN
+                    # companion state remains on its typed full-precision path.
+                    if class_name == "TurboQuantKVCache" and isinstance(
+                        layer_state.get("tq_config"), dict
+                    ):
+                        from .tq_disk_store import encode_tq_block
+
+                        block_slices.append(
+                            encode_tq_block(ks, vs, layer_state["tq_config"])
+                        )
                     # Use rotating_kv tag for RotatingKVCache to preserve params
-                    if "Rotating" in class_name:
+                    elif "Rotating" in class_name:
                         # Extract max_size/keep from meta_state tuple
                         # RotatingKVCache.meta_state returns
                         # (keep, max_size, offset, _idx).
@@ -3073,6 +3117,7 @@ class BlockAwarePrefixCache:
             List of reconstructed cache objects (one per layer),
             or None if reconstruction fails
         """
+        self._last_reconstruct_tq_blocks = 0
         if not block_table or not block_table.block_ids:
             return None
 
@@ -3197,6 +3242,7 @@ class BlockAwarePrefixCache:
             reconstructed_indices: set = set()  # tracks which layer_idx values were rebuilt
             kv_count = 0
             cumulative_count = 0
+            tq_native_entry_count = 0
 
             for layer_idx in range(num_layers):
                 # Collect this layer's data from all blocks
@@ -3220,6 +3266,7 @@ class BlockAwarePrefixCache:
                 quantized_kv_slices_keys = []  # list of tuples of (data, scales, zeros)
                 quantized_kv_slices_values = []
                 quantized_meta = None
+                tq_block_entries = []
 
                 cache_list_entries = []  # sub-slice lists from CacheList blocks
                 zaya_cca_entries = []
@@ -3240,6 +3287,9 @@ class BlockAwarePrefixCache:
                         quantized_kv_slices_values.append(entry[2])  # tuple of 3
                         if len(entry) > 3 and quantized_meta is None:
                             quantized_meta = entry[3]
+                    elif tag == "turboquant_kv":
+                        tq_block_entries.append(tuple(entry))
+                        tq_native_entry_count += 1
                     elif tag == "rotating_kv":
                         rotating_kv_slices_keys.append(entry[1])
                         rotating_kv_slices_values.append(entry[2])
@@ -3408,6 +3458,39 @@ class BlockAwarePrefixCache:
                     reconstructed_caches.append(cl)
                     reconstructed_indices.add(layer_idx)
                     cumulative_count += 1
+
+                elif tq_block_entries:
+                    from .tq_disk_store import decode_tq_block
+
+                    decoded_keys = []
+                    decoded_values = []
+                    for tq_entry in tq_block_entries:
+                        block_keys, block_values = decode_tq_block(tq_entry)
+                        decoded_keys.append(block_keys)
+                        decoded_values.append(block_values)
+                    concat_keys = mx.concatenate(decoded_keys, axis=2)
+                    concat_values = mx.concatenate(decoded_values, axis=2)
+                    mx.eval(concat_keys, concat_values)
+                    if len(decoded_keys) == 1:
+                        concat_keys = concat_keys * 1
+                        concat_values = concat_values * 1
+                        mx.eval(concat_keys, concat_values)
+
+                    allowed_kv = self._get_allowed_n_kv_heads()
+                    if allowed_kv and concat_keys.shape[1] not in allowed_kv:
+                        logger.warning(
+                            f"TurboQuant head count mismatch in layer {layer_idx}: "
+                            f"got {concat_keys.shape[1]}, expected one of "
+                            f"{sorted(allowed_kv)} — forcing cache miss"
+                        )
+                        return None
+                    cache = KVCache()
+                    cache.keys = concat_keys
+                    cache.values = concat_values
+                    cache.offset = concat_keys.shape[2]
+                    reconstructed_caches.append(cache)
+                    reconstructed_indices.add(layer_idx)
+                    kv_count += 1
 
                 elif quantized_kv_slices_keys:
                     # QuantizedKVCache: concatenate each component of the tuple
@@ -3780,6 +3863,7 @@ class BlockAwarePrefixCache:
                         sub_qkv_keys = []  # quantized KV
                         sub_qkv_vals = []
                         sub_qkv_meta = None
+                        sub_tq_entries = []
                         sub_cumulative = None
                         for block_entry in cache_list_entries:
                             if sub_idx >= len(block_entry):
@@ -3796,10 +3880,38 @@ class BlockAwarePrefixCache:
                                 sub_qkv_vals.append(sub[2])
                                 if len(sub) > 3 and sub_qkv_meta is None:
                                     sub_qkv_meta = sub[3]
+                            elif st == "turboquant_kv":
+                                sub_tq_entries.append(tuple(sub))
+                                tq_native_entry_count += 1
                             elif st == "cumulative":
                                 sub_cumulative = sub
 
-                        if sub_qkv_keys:
+                        if sub_tq_entries:
+                            from .tq_disk_store import decode_tq_block
+
+                            tq_keys = []
+                            tq_values = []
+                            for sub_tq in sub_tq_entries:
+                                tk, tv = decode_tq_block(sub_tq)
+                                tq_keys.append(tk)
+                                tq_values.append(tv)
+                            ck = mx.concatenate(tq_keys, axis=2)
+                            cv = mx.concatenate(tq_values, axis=2)
+                            mx.eval(ck, cv)
+                            allowed_kv = self._get_allowed_n_kv_heads()
+                            if allowed_kv and ck.shape[1] not in allowed_kv:
+                                logger.warning(
+                                    f"CacheList TQ sub {sub_idx} head mismatch: "
+                                    f"got {ck.shape[1]}, expected one of "
+                                    f"{sorted(allowed_kv)}"
+                                )
+                                return None
+                            sc = KVCache()
+                            sc.keys = ck
+                            sc.values = cv
+                            sc.offset = ck.shape[2]
+                            sub_caches_rebuilt.append(sc)
+                        elif sub_qkv_keys:
                             # Quantized sub-cache: concatenate each component
                             n_comp = len(sub_qkv_keys[0])
                             ck = tuple(
@@ -3931,6 +4043,8 @@ class BlockAwarePrefixCache:
                 f"({kv_count} KV + {cumulative_count} cumulative), "
                 f"{block_table.num_tokens} tokens from {len(block_table.block_ids)} blocks"
             )
+
+            self._last_reconstruct_tq_blocks = tq_native_entry_count
 
             return reconstructed_caches
 

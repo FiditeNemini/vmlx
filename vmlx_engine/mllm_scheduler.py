@@ -466,6 +466,9 @@ class MLLMScheduler:
         self._hybrid_live_tq_attention_layers = []
         self._hybrid_live_tq_companion_layers = []
         self._hybrid_live_tq_compress_after = 0
+        self._hybrid_tq_auto_policy = None
+        self._hybrid_tq_default_key_bits = 0
+        self._hybrid_tq_default_value_bits = 0
 
         # Detect hybrid models (mixed KVCache + MambaCache layers)
         lang_model = self.model.language_model if hasattr(self.model, "language_model") else self.model
@@ -807,6 +810,16 @@ class MLLMScheduler:
         self._tq_active = self._detect_turboquant_make_cache()
         self._tq_batch_api = self._detect_turboquant_batch_api()
         self._capture_hybrid_turboquant_policy()
+        if (
+            self._tq_active
+            and not getattr(self.config, "kv_cache_quantization_explicit", False)
+            and getattr(self, "_kv_cache_bits", 0)
+        ):
+            self._kv_cache_bits = 0
+            logger.info(
+                "VLM KV cache auto mode: native TurboQuant owns stored attention "
+                "KV; generic q4/q8 prefix quantization is suppressed"
+            )
         self._enforce_turboquant_single_sequence()
 
         # Get stop tokens from tokenizer
@@ -1212,6 +1225,15 @@ class MLLMScheduler:
                 self._hybrid_live_tq_compress_after = int(
                     getattr(make_cache, "_vmlx_tq_compress_after", 0) or 0
                 )
+                self._hybrid_tq_auto_policy = getattr(
+                    make_cache, "_vmlx_tq_auto_policy", None
+                )
+                self._hybrid_tq_default_key_bits = int(
+                    getattr(make_cache, "_vmlx_tq_default_key_bits", 0) or 0
+                )
+                self._hybrid_tq_default_value_bits = int(
+                    getattr(make_cache, "_vmlx_tq_default_value_bits", 0) or 0
+                )
                 return
             for attr in ("model", "language_model"):
                 nxt = _safe_attr(obj, attr)
@@ -1452,6 +1474,49 @@ class MLLMScheduler:
                     return None
                 truncated.append(new_cache)
                 continue
+            if type(layer_cache).__name__ == "TurboQuantKVCache":
+                # Keep the architecture-selected TQ type/config through the
+                # prompt-boundary truncation.  Demoting this object to KVCache
+                # loses the per-layer bit policy and seed immediately before
+                # _extract_cache_states(), so paged/L2 storage silently falls
+                # back to unencoded float blocks.
+                try:
+                    from jang_tools.turboquant.cache import TurboQuantKVCache
+
+                    full_k, full_v = layer_cache._get_full_cache()
+                    if full_k is None or full_v is None:
+                        return None
+                    safe_target = min(target_len, int(full_k.shape[-2]))
+                    if safe_target <= 0:
+                        return None
+                    new_cache = TurboQuantKVCache(
+                        key_dim=int(full_k.shape[-1]),
+                        value_dim=int(full_v.shape[-1]),
+                        key_bits=int(layer_cache.key_bits),
+                        value_bits=int(layer_cache.value_bits),
+                        seed=int(getattr(layer_cache, "_seed", 42)),
+                        compress_after=int(
+                            getattr(layer_cache, "compress_after", 0) or 0
+                        ),
+                        sink_tokens=int(
+                            getattr(layer_cache, "sink_tokens", 0) or 0
+                        ),
+                    )
+                    new_cache.keys = full_k[..., :safe_target, :]
+                    new_cache.values = full_v[..., :safe_target, :]
+                    new_cache.offset = safe_target
+                    new_cache.step = int(
+                        getattr(layer_cache, "step", safe_target) or safe_target
+                    )
+                    truncated.append(new_cache)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to preserve TurboQuant cache during hybrid "
+                        "prompt truncation: %s",
+                        e,
+                    )
+                    return None
+                continue
             if hasattr(layer_cache, "keys") and layer_cache.keys is not None:
                 try:
                     k = layer_cache.keys
@@ -1554,6 +1619,42 @@ class MLLMScheduler:
                 truncated.append(layer_cache)
 
         return truncated
+
+    def _prepare_tq_cache_for_storage(
+        self, raw_cache: List[Any]
+    ) -> Optional[List[Any]]:
+        """Restore TQ cache identity before a storage-boundary encode.
+
+        MLLMBatch.extract_cache() deliberately returns float KV objects so the
+        scheduler can slice the prompt boundary safely.  When the loaded model
+        owns an architecture-selected TurboQuant make_cache, re-wrap only those
+        attention slots before truncation/extraction.  Otherwise the paged,
+        memory-aware, and legacy paths all lose the TQ class/config and silently
+        store float blocks.
+        """
+        if not getattr(self, "_tq_active", False):
+            return raw_cache
+        language_model = getattr(
+            getattr(self, "batch_generator", None), "language_model", None
+        )
+        if language_model is None:
+            logger.warning(
+                "Skipping TQ cache store: active TQ model has no language_model"
+            )
+            return None
+        try:
+            from .mllm_batch_generator import _recompress_to_tq
+
+            prepared = _recompress_to_tq(raw_cache, language_model)
+        except Exception as e:
+            logger.warning("Skipping TQ cache store: TQ re-wrap failed: %s", e)
+            return None
+        if not any(type(layer).__name__ == "TurboQuantKVCache" for layer in prepared):
+            logger.warning(
+                "Skipping TQ cache store: active TQ model produced no TQ attention slots"
+            )
+            return None
+        return prepared
 
     def _model_has_mixed_attention(self, lang_model) -> bool:
         """Return True for models that interleave sliding-window and full
@@ -1834,6 +1935,17 @@ class MLLMScheduler:
                                 "state": sub_state,
                                 "meta_state": sc.meta_state,
                                 "class_name": type(sc).__name__,
+                                **(
+                                    {
+                                        "tq_config": {
+                                            "key_bits": int(sc.key_bits),
+                                            "value_bits": int(sc.value_bits),
+                                            "seed": int(getattr(sc, "_seed", 42)),
+                                        }
+                                    }
+                                    if type(sc).__name__ == "TurboQuantKVCache"
+                                    else {}
+                                ),
                             })
                     if sub_caches:
                         extracted.append({
@@ -1882,6 +1994,17 @@ class MLLMScheduler:
                         "state": state,
                         "meta_state": meta,
                         "class_name": cls_name,
+                        **(
+                            {
+                                "tq_config": {
+                                    "key_bits": int(layer_cache.key_bits),
+                                    "value_bits": int(layer_cache.value_bits),
+                                    "seed": int(getattr(layer_cache, "_seed", 42)),
+                                }
+                            }
+                            if cls_name == "TurboQuantKVCache"
+                            else {}
+                        ),
                     })
                 else:
                     logger.debug(
@@ -2806,7 +2929,7 @@ class MLLMScheduler:
             # tail instead of recursively storing restored state.
             if (
                 request is not None
-                and self._is_hybrid
+                and getattr(self, "_is_hybrid", False)
                 and int(getattr(request, "_cached_tokens", 0) or 0) > 0
             ):
                 _skip_cache_store = True
@@ -3060,9 +3183,13 @@ class MLLMScheduler:
                                 if _uses_zaya_cache or _uses_mixed_attention_cache:
                                     cache_blocks = list(cache_blocks)
                                 else:
-                                    cache_blocks = self._truncate_hybrid_cache(
-                                        cache_blocks, prompt_len
+                                    cache_blocks = self._prepare_tq_cache_for_storage(
+                                        cache_blocks
                                     )
+                                    if cache_blocks is not None:
+                                        cache_blocks = self._truncate_hybrid_cache(
+                                            cache_blocks, prompt_len
+                                        )
                                 if cache_blocks is None:
                                     logger.debug(
                                         f"Cache truncation failed for {request_id}"
@@ -3251,8 +3378,11 @@ class MLLMScheduler:
                                         prompt_len,
                                     )
                             else:
-                                cache_to_store = self._truncate_hybrid_cache(
-                                    raw_cache, prompt_len
+                                raw_cache = self._prepare_tq_cache_for_storage(raw_cache)
+                                cache_to_store = (
+                                    self._truncate_hybrid_cache(raw_cache, prompt_len)
+                                    if raw_cache is not None
+                                    else None
                                 )
                             if cache_to_store is not None and self._validate_cache(
                                 cache_to_store,
@@ -3341,7 +3471,12 @@ class MLLMScheduler:
                         if callable(raw_cache):
                             raw_cache = raw_cache()
                         if raw_cache:
-                            cache_to_store = self._truncate_hybrid_cache(raw_cache, prompt_len)
+                            raw_cache = self._prepare_tq_cache_for_storage(raw_cache)
+                            cache_to_store = (
+                                self._truncate_hybrid_cache(raw_cache, prompt_len)
+                                if raw_cache is not None
+                                else None
+                            )
                             if cache_to_store is not None and self._validate_cache(
                                 cache_to_store,
                                 source=f"mllm-prefix-store:{request_id}",

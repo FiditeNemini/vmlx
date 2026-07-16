@@ -197,6 +197,7 @@ class BlockDiskStore:
         cache_dir: str,
         max_size_gb: float = 10.0,
         expected_num_layers: Optional[int] = None,
+        allow_tq_native: Optional[bool] = None,
         **kwargs,
     ):
         self.cache_dir = Path(cache_dir)
@@ -211,6 +212,21 @@ class BlockDiskStore:
         # a generic store without model context); per-tensor + total
         # byte caps still apply.
         self._expected_num_layers: Optional[int] = expected_num_layers
+        if allow_tq_native is None:
+            allow_tq_native = os.environ.get("VMLX_DISABLE_TQ_KV", "").lower() not in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        # An explicit non-TQ cache mode must also govern persisted blocks.  It is
+        # not sufficient to disable creation of live TurboQuant cache objects:
+        # an old L2 directory can still contain native TQ blocks from an Auto
+        # run, and silently decoding those blocks makes the UI's None setting
+        # untrue.  The hash index admits only one representation per token
+        # chain, so remove an incompatible record on read; otherwise it would
+        # also prevent this Off run from writing a standard replacement.
+        self._allow_tq_native = bool(allow_tq_native)
 
         # SQLite index
         self._db_path = self.cache_dir / "block_index.db"
@@ -329,7 +345,7 @@ class BlockDiskStore:
         hash_hex = block_hash.hex()
         try:
             row = self._read_conn.execute(
-                "SELECT file_name FROM blocks WHERE block_hash = ?",
+                "SELECT file_name, dtype FROM blocks WHERE block_hash = ?",
                 (hash_hex,),
             ).fetchone()
         except sqlite3.OperationalError:
@@ -338,12 +354,67 @@ class BlockDiskStore:
                 timeout=1.0,
             )
             row = self._read_conn.execute(
-                "SELECT file_name FROM blocks WHERE block_hash = ?",
+                "SELECT file_name, dtype FROM blocks WHERE block_hash = ?",
                 (hash_hex,),
             ).fetchone()
         if row is None:
             return False
-        return (self.cache_dir / row[0]).exists()
+        file_path = self.cache_dir / row[0]
+        if not file_path.exists():
+            return False
+        if not self._allow_tq_native:
+            # Allocation consults has_block() before read_block().  If an old
+            # TQ record is reported as present here, the paged manager reuses
+            # its hash slot and the Off run never gets a chance to write a
+            # standard replacement after read_block() rejects it.  Inspect the
+            # typed payload in the explicit Off mode and evict it up front.
+            try:
+                data = mx.load(str(file_path))
+                if self._evict_incompatible_tq_block(
+                    hash_hex,
+                    file_path,
+                    _deserialize_block(data, row[1]),
+                ):
+                    return False
+            except Exception as exc:
+                logger.warning(
+                    "Failed to inspect block %s for non-TQ compatibility: %s",
+                    hash_hex[:12],
+                    exc,
+                )
+                return False
+        return True
+
+    def _evict_incompatible_tq_block(
+        self,
+        hash_hex: str,
+        file_path: Path,
+        cache_data: List[Tuple],
+    ) -> bool:
+        """Evict a TQ representation that conflicts with explicit non-TQ mode."""
+        if self._allow_tq_native or not _cache_data_has_tq(cache_data):
+            return False
+        try:
+            self._read_conn.execute(
+                "DELETE FROM blocks WHERE block_hash = ?", (hash_hex,)
+            )
+            self._read_conn.commit()
+            file_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning(
+                "Failed to evict incompatible TQ-native block %s: %s",
+                hash_hex[:12],
+                exc,
+            )
+            # The record is still incompatible even if cleanup lost a race or
+            # the index is temporarily locked.  Fail closed for this request;
+            # never turn an eviction failure into a TQ read under explicit Off.
+            return True
+        logger.info(
+            "Evicted TQ-native block %s because persisted TQ reads are disabled",
+            hash_hex[:12],
+        )
+        return True
 
     # =========================================================================
     # Read
@@ -428,6 +499,12 @@ class BlockDiskStore:
 
             data = mx.load(str(file_path))
             cache_data = _deserialize_block(data, dtype)
+            if self._evict_incompatible_tq_block(
+                hash_hex, file_path, cache_data
+            ):
+                with self._stats_lock:
+                    self.disk_misses += 1
+                return None
             # Post-load validator (defense in depth): the header validator
             # only sees declared shapes, not the deserialized cache_data
             # tag/shape coherence. This catch covers bugs the header check
@@ -501,6 +578,10 @@ class BlockDiskStore:
             token_count: Number of tokens in this block
         """
         if not HAS_MLX:
+            return
+
+        if _cache_data_has_tq(cache_data) and not self._allow_tq_native:
+            logger.debug("Skipping TQ-native block write because persisted TQ is disabled")
             return
 
         hash_hex = block_hash.hex()
@@ -773,6 +854,7 @@ class BlockDiskStore:
                 "disk_evictions": self.disk_evictions,
                 "tq_native_writes": self.tq_native_writes,
                 "tq_native_hits": self.tq_native_hits,
+                "tq_native_enabled": self._allow_tq_native,
             }
 
     def partial_token_counts(self, block_size: int) -> List[int]:

@@ -452,6 +452,47 @@ class TestDiskCacheManagerTQ:
         finally:
             mgr.shutdown()
 
+    def test_none_mode_skips_existing_tq_native_prompt_cache(self):
+        """A prior Auto record must not bypass an explicit non-TQ session."""
+        tokens = list(range(32))
+        writer = self._make_manager()
+        try:
+            cache = _create_tq_cache(n_layers=1, n_tokens=32)
+            assert writer.store(tokens, cache) is True
+            for _ in range(50):
+                if writer.stats().get("tq_native_stores", 0) == 1:
+                    break
+                time.sleep(0.1)
+        finally:
+            writer.shutdown()
+
+        from vmlx_engine.disk_cache import DiskCacheManager
+
+        disabled = DiskCacheManager(
+            self.cache_dir,
+            max_size_gb=1.0,
+            allow_tq_native=False,
+        )
+        try:
+            assert disabled.fetch(tokens) is None
+            stats = disabled.stats()
+            assert stats["tq_native_enabled"] is False
+            assert stats.get("tq_native_hits", 0) == 0
+            assert stats["misses"] == 1
+            assert stats["entries"] == 0
+        finally:
+            disabled.shutdown()
+
+    def test_manager_derives_native_tq_disable_from_cli_environment(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("VMLX_DISABLE_TQ_KV", "1")
+        mgr = self._make_manager()
+        try:
+            assert mgr.stats()["tq_native_enabled"] is False
+        finally:
+            mgr.shutdown()
+
     def test_fetch_standard_cache(self):
         """fetch() should return standard cache correctly."""
         mgr = self._make_manager()

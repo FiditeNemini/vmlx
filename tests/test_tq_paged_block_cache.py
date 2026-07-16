@@ -190,3 +190,60 @@ def test_tq_paged_numpy_disk_path_keeps_native_entries(tmp_path):
             assert restored[0][3]["seed"] == 149
     finally:
         store.shutdown()
+
+
+def test_tq_paged_disk_none_mode_skips_existing_native_blocks(tmp_path):
+    from vmlx_engine.block_disk_store import BlockDiskStore
+    from vmlx_engine.tq_disk_store import encode_tq_block
+
+    cache_dir = str(tmp_path / "shared")
+    state = _tq_state(tokens=8, seed=173)
+    tq_entry = encode_tq_block(
+        state["state"][0],
+        state["state"][1],
+        state["tq_config"],
+    )
+    block_hash = bytes.fromhex("17" * 32)
+
+    writer = BlockDiskStore(cache_dir, max_size_gb=0.1, allow_tq_native=True)
+    try:
+        writer.write_block_async(block_hash, [tq_entry], token_count=8)
+        for _ in range(50):
+            if writer.get_stats()["blocks_on_disk"] == 1:
+                break
+            time.sleep(0.1)
+        assert writer.get_stats()["tq_native_writes"] == 1
+    finally:
+        writer.shutdown()
+
+    disabled = BlockDiskStore(cache_dir, max_size_gb=0.1, allow_tq_native=False)
+    try:
+        assert disabled.has_block(block_hash) is False
+        assert disabled.read_block(block_hash) is None
+        stats = disabled.get_stats()
+        assert stats["tq_native_enabled"] is False
+        assert stats["tq_native_hits"] == 0
+        assert stats["disk_misses"] == 1
+        assert stats["blocks_on_disk"] == 0
+    finally:
+        disabled.shutdown()
+
+    restored = BlockDiskStore(cache_dir, max_size_gb=0.1, allow_tq_native=True)
+    try:
+        assert restored.read_block(block_hash) is None
+        assert restored.get_stats()["tq_native_hits"] == 0
+    finally:
+        restored.shutdown()
+
+
+def test_block_disk_store_derives_native_tq_disable_from_cli_environment(
+    tmp_path, monkeypatch
+):
+    from vmlx_engine.block_disk_store import BlockDiskStore
+
+    monkeypatch.setenv("VMLX_DISABLE_TQ_KV", "1")
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0.1)
+    try:
+        assert store.get_stats()["tq_native_enabled"] is False
+    finally:
+        store.shutdown()

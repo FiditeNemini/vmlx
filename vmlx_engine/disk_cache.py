@@ -157,6 +157,7 @@ class DiskCacheManager:
         max_size_gb: float = 10.0,
         expected_num_layers: Optional[int] = None,
         required_cache_class: Optional[str] = None,
+        allow_tq_native: Optional[bool] = None,
     ):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -168,6 +169,19 @@ class DiskCacheManager:
         # Families with first-class cache subclasses (MiniMax-M3 MSA, DSV4, etc.)
         # must not accept stale legacy KV-only files from the same prompt hash.
         self._required_cache_class: Optional[str] = required_cache_class
+        if allow_tq_native is None:
+            allow_tq_native = os.environ.get("VMLX_DISABLE_TQ_KV", "").lower() not in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        # None/q4/q8 explicitly disable the native TurboQuant route.  That
+        # choice must apply to existing L2 records too, not only newly-created
+        # live cache objects.  The token hash has one index slot, so an
+        # incompatible TQ record is evicted to let the Off run write a standard
+        # replacement after its clean prefill.
+        self._allow_tq_native = bool(allow_tq_native)
 
         # SQLite index for fast token hash → file lookup
         self._db_path = str(self.cache_dir / "cache_index.db")
@@ -411,6 +425,32 @@ class DiskCacheManager:
                     isinstance(file_metadata, dict)
                     and file_metadata.get("__tq_native__") == "true"
                 )
+
+                if (
+                    not self._allow_tq_native
+                    and (is_tq_native or "TurboQuantKVCache" in cache_classes)
+                ):
+                    self._last_fetch_tq_native = False
+                    try:
+                        conn.execute(
+                            "DELETE FROM cache_entries WHERE token_hash = ?",
+                            (token_hash,),
+                        )
+                        conn.commit()
+                        file_path.unlink(missing_ok=True)
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to evict incompatible TQ-native disk cache %s: %s",
+                            file_name,
+                            exc,
+                        )
+                    with self._stats_lock:
+                        self.misses += 1
+                    logger.info(
+                        "Evicted TQ-native disk cache %s because persisted TQ reads are disabled",
+                        file_name,
+                    )
+                    return None
 
                 if is_tq_native:
                     # TQ-native: decode compressed data → KVCache objects.
@@ -698,9 +738,9 @@ class DiskCacheManager:
                 is_tq_compressed_cache,
                 serialize_tq_cache,
             )
-            if has_turboquant_layers(cache):
+            if has_turboquant_layers(cache) and self._allow_tq_native:
                 cache = canonicalize_tq_cache_for_storage(cache)
-            use_tq_native = is_tq_compressed_cache(cache)
+            use_tq_native = self._allow_tq_native and is_tq_compressed_cache(cache)
         except ImportError:
             use_tq_native = False
         except Exception as exc:
@@ -1237,6 +1277,7 @@ class DiskCacheManager:
                     self.hits / max(self.hits + self.misses, 1), 3
                 ),
                 "pending_writes": self._write_queue.qsize(),
+                "tq_native_enabled": self._allow_tq_native,
             }
             # Include TQ-native stats if any TQ operations occurred
             if self.tq_native_stores > 0 or self.tq_native_hits > 0:

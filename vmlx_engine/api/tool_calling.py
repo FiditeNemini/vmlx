@@ -217,6 +217,10 @@ def check_and_inject_fallback_tools(
     )
     _lfm2_has_concrete_tool_examples = (
         is_lfm2_native_tool_prompt
+        # A native scaffold can still contain placeholder arguments. For an
+        # explicitly named tool, force the request-bound fallback below so a
+        # concrete path/command reaches the small Liquid tool model.
+        and not explicit_tool_requested
         and "<|tool_call_start|>" in instruction_prompt
         and "<|tool_call_end|>" in instruction_prompt
         and all(f"{name}(" in instruction_prompt for name in tool_names)
@@ -755,6 +759,45 @@ def check_and_inject_fallback_tools(
             blocks.append("\n".join(lines))
         return "\n\n".join(blocks)
 
+    def _derive_lfm2_request_param_value(tool_name: str, param: str) -> str:
+        """Bind a scalar LFM2 example to a value explicitly named by the user.
+
+        Liquid's smaller tool models copy native Python-call examples closely.
+        Leaving ``VALUE_HERE`` in a requested ``file_info(path=...)`` example
+        produced malformed live calls such as ``path=': '``. Only bind values
+        from an explicit request for that tool; otherwise retain the generic
+        placeholder rather than guessing.
+        """
+        binding_text = request_text
+        if not _request_mentions_tool_name(tool_name):
+            binding_text = (
+                _historical_explicit_tool_request_text(tool_name)
+                or request_text
+            )
+        if not binding_text:
+            return ""
+
+        escaped = re.escape(param.strip())
+        quoted_patterns = (
+            rf"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])\s*(?:=|:)\s*`([^`\n]{{1,240}})`",
+            rf'(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])\s*(?:=|:)\s*"([^"\n]{{1,240}})"',
+            rf"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])\s*(?:=|:)\s*'([^'\n]{{1,240}})'",
+        )
+        for pattern in quoted_patterns:
+            match = re.search(pattern, binding_text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+
+        bare_patterns = (
+            rf"\bwith\s+{escaped}\s+([A-Za-z0-9_~@%+=:,./-]{{1,240}})",
+            rf"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])\s+([A-Za-z0-9_~@%+=:,./-]{{1,240}})",
+        )
+        for pattern in bare_patterns:
+            match = re.search(pattern, binding_text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip().rstrip(".,;")
+        return ""
+
     def _render_lfm2_examples(tools: list[dict]) -> str:
         def _derive_run_command_value() -> str:
             if not request_text:
@@ -806,6 +849,8 @@ def check_and_inject_fallback_tools(
                     and param.strip().lower() == "command"
                 ):
                     value = _derive_run_command_value()
+                if not value:
+                    value = _derive_lfm2_request_param_value(name, param)
                 arg_parts.append(f"{param}={(value or 'VALUE_HERE')!r}")
             calls.append(f"{name}({', '.join(arg_parts)})")
         return (
@@ -1145,6 +1190,14 @@ def check_and_inject_fallback_tools(
                             lfm2_lines.append(
                                 f"Do not use {token} itself as a shell command; "
                                 "it is file content or answer text."
+                            )
+                else:
+                    for param in props:
+                        exact_value = _derive_lfm2_request_param_value(name, param)
+                        if exact_value:
+                            lfm2_lines.append(
+                                f"For this request, {name}.{param} must be exactly: "
+                                f"{exact_value}"
                             )
             tool_prompt = (
                 "\n".join(lfm2_lines).rstrip()

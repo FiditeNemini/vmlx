@@ -593,6 +593,50 @@ def test_lfm2_direct_run_exactly_binds_command_without_placeholder():
     )[1].split("<|tool_call_end|>", 1)[0]
 
 
+def test_lfm2_direct_file_info_binds_explicit_path_without_placeholder():
+    """Named scalar parameters must not leave VALUE_HERE for LFM2 to copy."""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "file_info",
+                "description": "Return information for a filesystem path.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    user_request = (
+        "Call the built-in file_info tool exactly once with path "
+        "panel/package.json. After the tool result, reply exactly DONE."
+    )
+
+    injected = check_and_inject_fallback_tools(
+        (
+            "<|im_start|>system\n"
+            "<|tool_call_start|>[file_info(path='VALUE_HERE')]"
+            "<|tool_call_end|><|im_end|>\n"
+            "<|im_start|>user\ninspect a file<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        ),
+        [{"role": "user", "content": user_request}],
+        tools,
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="lfm2",
+    )
+
+    assert (
+        "<|tool_call_start|>[file_info(path='panel/package.json')]"
+        "<|tool_call_end|>"
+    ) in injected
+    assert "For this request, file_info.path must be exactly: panel/package.json" in injected
+    assert "file_info(path='VALUE_HERE')" not in injected
+
+
 def test_lfm2_tool_result_continuation_removes_schema_and_requires_final_answer():
     class CaptureTokenizer:
         last_kwargs = None

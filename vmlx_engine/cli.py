@@ -229,6 +229,30 @@ def _apply_zaya_cca_cache_policy(args, logger):
     return True, tuple(changed)
 
 
+def _apply_openpangu_cache_policy(args, logger):
+    """Force openPangu's native composite cache and reject every TQ-KV lane."""
+
+    changed = []
+    if getattr(args, "use_paged_cache", False):
+        changed.append("paged=off")
+    if getattr(args, "enable_block_disk_cache", False):
+        changed.append("block_l2=off")
+    if getattr(args, "kv_cache_quantization", None) not in (None, "none"):
+        changed.append(f"kv_quant={args.kv_cache_quantization}->none")
+    args.use_paged_cache = False
+    args.enable_block_disk_cache = False
+    args.kv_cache_quantization = "none"
+    args._openpangu_force_no_kv_cache_quantization = True
+    os.environ["VMLX_DISABLE_TQ_KV"] = "1"
+    os.environ.pop("VMLX_FORCE_TQ_AUTO", None)
+    logger.info(
+        "openPangu native cache policy: TurboQuantKVCache and generic q4/q8 "
+        "are forced off. Exact typed snapshots preserve MLA KV, DSA indexer, "
+        "rotating-SWA metadata, and causal-conv state; paged/block reuse is off."
+    )
+    return True, tuple(changed)
+
+
 def _apply_dsv4_cache_policy(args, logger):
     """Apply DSV4's composite SWA+CSA/HCA prefix-cache contract.
 
@@ -559,6 +583,7 @@ def serve_command(args):
         if _op_os.path.isfile(_op_cfgp):
             _op_c = _op_json.load(open(_op_cfgp))
             if str(_op_c.get("model_type", "")).lower() == "openpangu_v2":
+                _apply_openpangu_cache_policy(args, logger)
                 _op_jit_forced_off = bool(getattr(args, "enable_jit", False))
                 if _op_jit_forced_off:
                     args.enable_jit = False
@@ -568,8 +593,6 @@ def serve_command(args):
                         "step and untraceable by mx.compile; staying on the "
                         "uncompiled scheduler path."
                     )
-                if not getattr(args, "kv_cache_quantization_explicit", False):
-                    args.kv_cache_quantization = "none"
                 if getattr(args, "is_mllm", False):
                     args.is_mllm = False
                     logger.warning(
@@ -577,22 +600,11 @@ def serve_command(args):
                     )
                 logger.info(
                     "openPangu-2.0 AUTODETECTED (openpangu_v2) -> auto-settings: "
-                    "paged_cache=%s, tq_kv=SKIP(MLA kv_lora_rank), prefix_store="
-                    "path-dependent-skip (conv states, Phase-2 typed lane), "
+                    "paged_cache=%s, tq_kv=SKIP(MLA + conv state), prefix_store="
+                    "exact-typed N-1 (KV + DSA indexer + SWA metadata + conv), "
                     "mtp=detection-only(depth 3), tool_parser=%s, "
                     "reasoning_parser=%s, jit=%s",
-                    # OpenPanguV2LayerCache is neither plain-KV nor SSM: the
-                    # scheduler's class-based hybrid detection routes it to the
-                    # paged BACKEND on purpose (memory-aware cache must never
-                    # truncate conv-state caches), while warm record stores
-                    # still skip (detect_cache_type=UNKNOWN). Say so instead of
-                    # claiming OFF and having the scheduler "auto-switch" a
-                    # line later — the two logs looked contradictory live.
-                    (
-                        "structural-auto(paged backend; warm stores skip)"
-                        if not getattr(args, "use_paged_cache", False)
-                        else "ON(explicit)"
-                    ),
+                    "OFF(typed exact memory/L2 lane; blocks unsupported)",
                     # This transparency block runs BEFORE the registry
                     # auto-config, so args.tool_call_parser/reasoning_parser are
                     # still None here — the fallbacks must name what the
@@ -696,11 +708,24 @@ def serve_command(args):
     # Explicit values remain exact: q4/q8/none disable loader-level TQ so the
     # user's requested stored-cache codec is the only active cache codec.
     _m3_forced_no_kvq = bool(getattr(args, "_m3_force_no_kv_cache_quantization", False))
+    _openpangu_forced_no_kvq = bool(
+        getattr(args, "_openpangu_force_no_kv_cache_quantization", False)
+    )
     _kv_quant_explicit = (
         getattr(args, "kv_cache_quantization", None) is not None
         and not _m3_forced_no_kvq
+        and not _openpangu_forced_no_kvq
     )
-    if _m3_forced_no_kvq:
+    if _openpangu_forced_no_kvq:
+        args.kv_cache_quantization = "none"
+        args.kv_cache_quantization_explicit = False
+        os.environ["VMLX_DISABLE_TQ_KV"] = "1"
+        os.environ.pop("VMLX_FORCE_TQ_AUTO", None)
+        logger.info(
+            "KV cache auto mode: openPangu native composite cache detected; "
+            "TurboQuantKVCache and generic stored KV quantization remain disabled."
+        )
+    elif _m3_forced_no_kvq:
         args.kv_cache_quantization = "none"
         args.kv_cache_quantization_explicit = False
         os.environ.pop("VMLX_FORCE_TQ_AUTO", None)

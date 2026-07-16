@@ -221,11 +221,10 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         changed = true
       }
     } else if (detectedFamily === 'openpangu_v2') {
-      // openPangu-2.0-Flash: path-dependent conv-state cache — warm prefix/
-      // paged reuse is engine-skipped until the typed lane lands. Persist that
-      // effective runtime policy instead of showing a checked prefix/disk tuple
-      // that the engine cannot safely use; JIT off (dynamic DSA top-k selection,
-      // same mx.compile hazard class as M3 MSA — engine cli also force-ignores).
+      // openPangu-2.0-Flash: exact typed N-1 prompt snapshots preserve MLA KV,
+      // DSA indexer, rotating-SWA metadata and all causal-conv states. Memory
+      // prefix + prompt L2 are safe; generic paged/block reuse and legacy
+      // entry-count sharing remain off. JIT stays off for dynamic DSA top-k.
       if (config.timeout == null || config.timeout === GENERIC_DEFAULT_TIMEOUT_SECONDS) {
         config.timeout = OPENPANGU_V2_DEFAULT_TIMEOUT_SECONDS
         changed = true
@@ -234,20 +233,28 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         config.maxTokens = 0
         changed = true
       }
-      if (config.enablePrefixCache !== false) {
-        config.enablePrefixCache = false
+      if (config.enablePrefixCache !== true) {
+        config.enablePrefixCache = true
         changed = true
       }
       if (config.usePagedCache !== false) {
         config.usePagedCache = false
         changed = true
       }
-      if (config.enableDiskCache !== false) {
-        config.enableDiskCache = false
+      if (config.enableDiskCache !== true) {
+        config.enableDiskCache = true
         changed = true
       }
       if (config.enableBlockDiskCache !== false) {
         config.enableBlockDiskCache = false
+        changed = true
+      }
+      if (config.noMemoryAwareCache !== false) {
+        config.noMemoryAwareCache = false
+        changed = true
+      }
+      if (config.kvCacheQuantization !== 'none') {
+        config.kvCacheQuantization = 'none'
         changed = true
       }
       if (config.enableJit !== false) {
@@ -667,7 +674,7 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
   }
 
   const dsv4Active = detectedFamily === 'deepseek-v4'
-  const openPanguCompositeCacheUnsupported = detectedFamily === 'openpangu_v2'
+  const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
   const dsv4PrefixOptIn = dsv4Active && config.dsv4PrefixCache !== false
   // 2026-07-12 (paged default ON): fresh sessions inherit the detected per-family
   // paged default so the UI shows — and the engine launches with — paged ON for
@@ -677,7 +684,7 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
   const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : (detectedUsePaged ?? false)
   // Every prefix-cache lane gets one appropriate L2 by default: block L2 for
   // paged families, prompt L2 for non-paged families. Never default both on.
-  const defaultEnableDiskCache = !dsv4Active && !openPanguCompositeCacheUnsupported && !defaultUsePagedCache
+  const defaultEnableDiskCache = !dsv4Active && !defaultUsePagedCache
   const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : !!defaultUsePagedCache
   const mutable = config as Record<string, any>
   let changed = false
@@ -685,20 +692,20 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
   // Fill only missing values. Explicit user toggles and family-specific overrides
   // must survive, while fresh IPC-created sessions still need a complete config
   // for the Settings UI and live proof harness.
-  if (mutable.enablePrefixCache === undefined) changed = setConfigValue(mutable, 'enablePrefixCache', openPanguCompositeCacheUnsupported ? false : (dsv4Active ? dsv4PrefixOptIn : true)) || changed
+  if (mutable.enablePrefixCache === undefined) changed = setConfigValue(mutable, 'enablePrefixCache', dsv4Active ? dsv4PrefixOptIn : true) || changed
   if (mutable.prefixCacheSize === undefined) changed = setConfigValue(mutable, 'prefixCacheSize', 100) || changed
   if (mutable.prefixCacheMaxBytes === undefined) changed = setConfigValue(mutable, 'prefixCacheMaxBytes', 0) || changed
   if (mutable.cacheMemoryMb === undefined) changed = setConfigValue(mutable, 'cacheMemoryMb', 0) || changed
   if (mutable.cacheMemoryPercent === undefined) changed = setConfigValue(mutable, 'cacheMemoryPercent', 15) || changed
-  if (mutable.noMemoryAwareCache === undefined) changed = setConfigValue(mutable, 'noMemoryAwareCache', false) || changed
-  if (mutable.usePagedCache === undefined) changed = setConfigValue(mutable, 'usePagedCache', defaultUsePagedCache) || changed
+  if (mutable.noMemoryAwareCache === undefined || openPanguExactTypedCache) changed = setConfigValue(mutable, 'noMemoryAwareCache', false) || changed
+  if (mutable.usePagedCache === undefined || openPanguExactTypedCache) changed = setConfigValue(mutable, 'usePagedCache', openPanguExactTypedCache ? false : defaultUsePagedCache) || changed
   if (mutable.enableDiskCache === undefined) changed = setConfigValue(mutable, 'enableDiskCache', defaultEnableDiskCache) || changed
   if (mutable.diskCacheMaxGb === undefined) changed = setConfigValue(mutable, 'diskCacheMaxGb', 10) || changed
   if (mutable.pagedCacheBlockSize === undefined) changed = setConfigValue(mutable, 'pagedCacheBlockSize', dsv4Active ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64) || changed
   if (mutable.maxCacheBlocks === undefined) changed = setConfigValue(mutable, 'maxCacheBlocks', 1000) || changed
   if (mutable.enableBlockDiskCache === undefined) changed = setConfigValue(mutable, 'enableBlockDiskCache', defaultEnableBlockDiskCache) || changed
   if (mutable.blockDiskCacheMaxGb === undefined) changed = setConfigValue(mutable, 'blockDiskCacheMaxGb', 10) || changed
-  if (mutable.kvCacheQuantization === undefined) changed = setConfigValue(mutable, 'kvCacheQuantization', 'auto') || changed
+  if (mutable.kvCacheQuantization === undefined || openPanguExactTypedCache) changed = setConfigValue(mutable, 'kvCacheQuantization', openPanguExactTypedCache ? 'none' : 'auto') || changed
 
   return changed
 }
@@ -1749,6 +1756,25 @@ export class SessionManager extends EventEmitter {
                 ? '[INFO] MiniMax-M3 detected; using typed MSA paged prefix cache + block-disk L2 with idx_keys, generic KV quantization off, and JIT off'
                 : '[INFO] MiniMax-M3 detected; native typed prefix/paged/L2 cache explicitly disabled for this session')
             }
+          } else if (freshFamily === 'openpangu_v2') {
+            const panguChanged =
+              config.enablePrefixCache !== true ||
+              config.usePagedCache !== false ||
+              config.enableDiskCache !== true ||
+              config.enableBlockDiskCache !== false ||
+              config.noMemoryAwareCache !== false ||
+              config.kvCacheQuantization !== 'none' ||
+              config.enableJit === true
+            config.enablePrefixCache = true
+            config.usePagedCache = false
+            config.enableDiskCache = true
+            config.enableBlockDiskCache = false
+            config.noMemoryAwareCache = false
+            config.kvCacheQuantization = 'none'
+            config.enableJit = false
+            if (panguChanged) {
+              this.pushLog(sessionId, '[INFO] openPangu detected; exact full-precision typed prefix + prompt-L2 cache enabled, generic paged/block/TurboQuant KV codecs disabled')
+            }
           }
           // Refresh multimodal detection from disk. A detected VLM must win
           // over stale saved `isMultimodal=false` from older sessions, while a
@@ -2407,7 +2433,7 @@ export class SessionManager extends EventEmitter {
           prefillStepSize: 2048,
           completionBatchSize: 512,
           continuousBatching: true,
-          enablePrefixCache: detectedFamily === 'openpangu_v2' ? false : detectedFamily === 'deepseek-v4' ? dsv4DefaultCacheOptIn : true,
+          enablePrefixCache: true,
           prefixCacheSize: 100,
           prefixCacheMaxBytes: 0, // 0 = unlimited (bounded by cacheMemoryPercent)
           cacheMemoryMb: 0,
@@ -2418,12 +2444,12 @@ export class SessionManager extends EventEmitter {
           // (hybrid/mamba/rotating-qwen/zaya/step3p7/dsv4) still set detected.usePagedCache=true
           // explicitly in the capability detector and stay paged until Phase-2 SSD typed-lane work.
           usePagedCache: detectedFamily === 'deepseek-v4' ? dsv4DefaultCacheOptIn : detected.usePagedCache ?? false,
-          enableDiskCache: detectedFamily === 'openpangu_v2' || detectedFamily === 'deepseek-v4' || detected.usePagedCache === true ? false : true,
+          enableDiskCache: detectedFamily === 'openpangu_v2' ? true : detectedFamily === 'deepseek-v4' || detected.usePagedCache === true ? false : true,
           pagedCacheBlockSize: detectedFamily === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64,
           maxCacheBlocks: 1000,
           enableBlockDiskCache: detectedFamily === 'deepseek-v4' ? dsv4DefaultCacheOptIn : detected.usePagedCache === true,
           blockDiskCacheMaxGb: 10,
-          kvCacheQuantization: 'auto',
+          kvCacheQuantization: detectedFamily === 'openpangu_v2' ? 'none' : 'auto',
           cacheStackStartupDefaultsVersion: CACHE_STACK_STARTUP_DEFAULTS_VERSION,
           streamInterval: 1,
           maxTokens: 0,
@@ -3297,7 +3323,7 @@ export class SessionManager extends EventEmitter {
     // Tool sessions benefit from prefix reuse, but an explicit user opt-out must
     // stay an opt-out; do not silently re-enable cache because tools are present.
     const zayaCcaActive = isZayaCcaFamily(detectedFamily)
-    const openPanguCompositeCacheUnsupported = detectedFamily === 'openpangu_v2'
+    const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
     const hybridCacheActive = cacheTypeRequiresPaged(detected.cacheType)
     const subtypePagedCacheActive = cacheSubtypeRequiresPaged(detected.cacheSubtype)
     const architectureRequiresPagedCache =
@@ -3308,14 +3334,14 @@ export class SessionManager extends EventEmitter {
       continuousBatching: cacheStackActive,
       enablePrefixCache: dsv4Active
         ? dsv4PrefixCacheOptIn && config.enablePrefixCache !== false
-        : openPanguCompositeCacheUnsupported ? false : config.enablePrefixCache !== false,
+        : config.enablePrefixCache !== false,
       usePagedCache: dsv4Active
         ? dsv4PrefixCacheOptIn
-        : openPanguCompositeCacheUnsupported ? false : config.usePagedCache ?? detected.usePagedCache ?? false,
-      enableDiskCache: openPanguCompositeCacheUnsupported ? false : !!config.enableDiskCache,
+        : openPanguExactTypedCache ? false : config.usePagedCache ?? detected.usePagedCache ?? false,
+      enableDiskCache: !!config.enableDiskCache,
       enableBlockDiskCache: dsv4Active
         ? dsv4PrefixCacheOptIn && !!config.enableBlockDiskCache
-        : openPanguCompositeCacheUnsupported ? false : !!config.enableBlockDiskCache,
+        : openPanguExactTypedCache ? false : !!config.enableBlockDiskCache,
       architectureRequiresPagedCache,
     })
     const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
@@ -3324,7 +3350,7 @@ export class SessionManager extends EventEmitter {
     if (prefixCacheOff) {
       args.push('--disable-prefix-cache')
     } else if (!dsv4Active) {
-      if (config.noMemoryAwareCache) {
+      if (config.noMemoryAwareCache && !openPanguExactTypedCache) {
         args.push('--no-memory-aware-cache')
         const prefixCacheSize = finitePositiveInteger(config.prefixCacheSize)
         if (prefixCacheSize != null) {
@@ -3385,15 +3411,19 @@ export class SessionManager extends EventEmitter {
     }
 
     // KV cache quantization for stored prefix cache entries
-    // TurboQuant handles live generation cache compression (always active).
-    // q8/q4 here is ADDITIONAL compression for stored cache entries.
+    // Compatible plain-KV families may use TurboQuant for live generation;
+    // typed/path-dependent families own their complete cache state instead.
+    // q8/q4 here is additional compression only where the generic codec is valid.
     if (!prefixCacheOff && detectedFamily === 'deepseek-v4' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
       console.log(`[SESSION] DSV4-Flash detected: ignoring generic kvCacheQuantization=${config.kvCacheQuantization}; native SWA+CSA/HCA cache policy owns compression`)
     }
     if (!prefixCacheOff && detectedFamily === 'minimax_m3' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
       console.log(`[SESSION] MiniMax-M3 detected: ignoring generic kvCacheQuantization=${config.kvCacheQuantization}; native MSA cache stores keys/values/idx_keys without generic KV codecs`)
     }
-    if (!prefixCacheOff && detectedFamily !== 'deepseek-v4' && detectedFamily !== 'minimax_m3' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
+    if (!prefixCacheOff && detectedFamily === 'openpangu_v2' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
+      console.log(`[SESSION] openPangu detected: ignoring generic kvCacheQuantization=${config.kvCacheQuantization}; exact typed cache owns MLA KV, DSA indexer, SWA metadata, and causal-conv state`)
+    }
+    if (!prefixCacheOff && detectedFamily !== 'deepseek-v4' && detectedFamily !== 'minimax_m3' && detectedFamily !== 'openpangu_v2' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
       args.push('--kv-cache-quantization', config.kvCacheQuantization)
       const kvCacheGroupSize = finitePositiveInteger(config.kvCacheGroupSize)
       if (config.kvCacheQuantization !== 'none' && kvCacheGroupSize != null && kvCacheGroupSize !== 64) {

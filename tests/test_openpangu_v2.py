@@ -65,6 +65,11 @@ def test_runtime_registers_under_mlx_lm_namespace():
 
     mod = importlib.import_module("mlx_lm.models.openpangu_v2")
     assert hasattr(mod, "Model") and hasattr(mod, "ModelArgs")
+    import mlx_lm.models.cache as mlx_cache
+
+    from vmlx_engine.models.openpangu_v2.cache import OpenPanguV2LayerCache
+
+    assert mlx_cache.OpenPanguV2LayerCache is OpenPanguV2LayerCache
 
 
 def test_registry_resolves_openpangu_family(tmp_path):
@@ -107,6 +112,32 @@ def test_registry_resolves_openpangu_family(tmp_path):
     assert "<|message_end|>" in mc.eos_tokens
 
 
+def test_cli_policy_forces_turboquant_and_generic_kv_quant_off(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from vmlx_engine.cli import _apply_openpangu_cache_policy
+
+    monkeypatch.setenv("VMLX_FORCE_TQ_AUTO", "1")
+    monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
+    args = SimpleNamespace(
+        use_paged_cache=True,
+        enable_block_disk_cache=True,
+        kv_cache_quantization="q4",
+    )
+
+    applied, changed = _apply_openpangu_cache_policy(args, Mock())
+
+    assert applied is True
+    assert args.kv_cache_quantization == "none"
+    assert args._openpangu_force_no_kv_cache_quantization is True
+    assert args.use_paged_cache is False
+    assert args.enable_block_disk_cache is False
+    assert "kv_quant=q4->none" in changed
+    assert __import__("os").environ["VMLX_DISABLE_TQ_KV"] == "1"
+    assert "VMLX_FORCE_TQ_AUTO" not in __import__("os").environ
+
+
 def test_sanitize_conv_transpose_and_mtp_drop(tiny_model):
     w = {
         "model.layers.0.self_attn.qa_conv.weight": mx.zeros((32, 1, 3)),
@@ -118,12 +149,107 @@ def test_sanitize_conv_transpose_and_mtp_drop(tiny_model):
         "model.rotary_emb.inv_freq": mx.zeros((4,)),
     }
     out = tiny_model.sanitize(w)
-    assert out["model.layers.0.self_attn.qa_conv.weight"].shape == (32, 3, 1)
-    assert out["model.layers.0.self_attn.o_conv.weight"].shape == (64, 3, 1)
+    assert out["model.layers.0.self_attn.qa_conv.conv.weight"].shape == (32, 3, 1)
+    assert out["model.layers.0.self_attn.o_conv.conv.weight"].shape == (64, 3, 1)
+    assert "model.layers.0.self_attn.qa_conv.weight" not in out
+    assert "model.layers.0.self_attn.o_conv.weight" not in out
     assert "model.layers.4.eh_proj.weight" not in out
     assert "model.layers.6.shared_head.head.weight" not in out
     assert "model.rotary_emb.inv_freq" not in out
     assert "model.layers.1.input_layernorm.weight" in out
+
+
+def test_sanitized_conv_keys_land_on_real_model_parameters(tiny_model):
+    """All three checkpoint conv names must resolve to the nested MLX modules."""
+    from mlx.utils import tree_flatten
+
+    incoming = {
+        "model.layers.0.self_attn.qa_conv.weight": mx.zeros((32, 1, 3)),
+        "model.layers.0.self_attn.compresskv_conv.weight": mx.zeros((16, 1, 3)),
+        "model.layers.0.self_attn.o_conv.weight": mx.zeros((64, 1, 3)),
+    }
+    sanitized = tiny_model.sanitize(incoming)
+    parameter_names = {name for name, _ in tree_flatten(tiny_model.parameters())}
+
+    assert set(sanitized) <= parameter_names
+    assert set(sanitized) == {
+        "model.layers.0.self_attn.qa_conv.conv.weight",
+        "model.layers.0.self_attn.compresskv_conv.conv.weight",
+        "model.layers.0.self_attn.o_conv.conv.weight",
+    }
+
+
+def test_openpangu_weight_landing_audit_fails_closed():
+    from vmlx_engine.utils.jang_loader import (
+        _finalize_openpangu_weight_landing,
+        _needs_renamed_key_requantization,
+        _record_openpangu_weight_landing,
+    )
+
+    expected = {"model.embed_tokens.weight", "lm_head.weight"}
+    for layer in range(2):
+        expected.update(
+            {
+                f"model.layers.{layer}.input_layernorm.weight",
+                f"model.layers.{layer}.self_attn.qa_conv.conv.weight",
+                f"model.layers.{layer}.self_attn.compresskv_conv.conv.weight",
+                f"model.layers.{layer}.self_attn.o_conv.conv.weight",
+            }
+        )
+    seen = set()
+    _record_openpangu_weight_landing(
+        expected, seen, {name: object() for name in expected}, shard_name="unit"
+    )
+    stats = _finalize_openpangu_weight_landing(
+        expected, seen, layer_count=2
+    )
+    assert stats == {"parameter_leaves": 10, "layers": 2, "causal_convs": 6}
+
+    with pytest.raises(RuntimeError, match="unmatched checkpoint leaves"):
+        _record_openpangu_weight_landing(
+            expected,
+            set(),
+            {"model.layers.0.self_attn.qa_conv.weight": object()},
+            shard_name="bad",
+        )
+
+    with pytest.raises(RuntimeError, match="incomplete"):
+        _finalize_openpangu_weight_landing(
+            expected, seen - {"lm_head.weight"}, layer_count=2
+        )
+
+    assert not _needs_renamed_key_requantization(
+        {"model_type": "openpangu_v2"},
+        {"architecture": {"attention": "mla"}},
+        loader_name="load_model",
+    )
+    assert _needs_renamed_key_requantization(
+        {"model_type": "mistral4"},
+        {"architecture": {"attention": "mla"}},
+        loader_name="load_model",
+    )
+
+
+def test_dsa_indexer_uses_checkpoint_exact_rmsnorm(tiny_model):
+    from mlx.utils import tree_flatten
+
+    parameter_names = {name for name, _ in tree_flatten(tiny_model.parameters())}
+    assert "model.layers.0.self_attn.indexer.k_norm.weight" in parameter_names
+    assert "model.layers.0.self_attn.indexer.k_norm.bias" not in parameter_names
+
+
+def test_dsa_sparse_indexer_reports_real_over_threshold_activation(tiny_model, caplog):
+    indexer = tiny_model.model.layers[0].self_attn.indexer
+    assert indexer is not None
+    x = mx.random.normal((1, 13, 64))
+    qr = mx.random.normal((1, 13, 32))
+
+    with caplog.at_level("INFO"):
+        indices = indexer(x, qr, None, cache=None)
+        mx.eval(indices)
+
+    assert indices.shape == (1, 1, 13, 12)
+    assert "openPangu DSA sparse indexer active: layer=0 key_length=13 topk=12" in caplog.text
 
 
 def test_moe_gate_selects_biased_weights_unbiased(tiny_model):
@@ -156,7 +282,13 @@ def test_cache_contract_path_dependent(tiny_model):
     assert cache[0].trim(5) == 0
 
 
-def test_scheduler_does_not_misclassify_composite_cache_as_hybrid_ssm(tiny_model):
+def test_forward_refuses_silent_cache_layer_truncation(tiny_model):
+    tokens = mx.array([[1, 2]], dtype=mx.int32)
+    with pytest.raises(ValueError, match=r"cache=3 layers=4"):
+        tiny_model.model(tokens, cache=tiny_model.make_cache()[:-1])
+
+
+def test_scheduler_routes_composite_cache_to_exact_typed_lane(tiny_model, tmp_path):
     from types import SimpleNamespace
 
     from vmlx_engine.scheduler import Scheduler, SchedulerConfig
@@ -172,6 +304,8 @@ def test_scheduler_does_not_misclassify_composite_cache_as_hybrid_ssm(tiny_model
         use_paged_cache=True,
         enable_disk_cache=True,
         enable_block_disk_cache=True,
+        disk_cache_dir=str(tmp_path / "prompt-l2"),
+        block_disk_cache_dir=str(tmp_path / "block-l2"),
     )
     missing = object()
     prior_config = getattr(tiny_model, "config", missing)
@@ -182,13 +316,15 @@ def test_scheduler_does_not_misclassify_composite_cache_as_hybrid_ssm(tiny_model
         assert scheduler._prefix_cache_requested is True
         assert scheduler._prompt_disk_cache_requested is True
         assert scheduler._block_disk_cache_requested is True
-        assert scheduler.config.enable_prefix_cache is False
+        assert scheduler.config.enable_prefix_cache is True
         assert scheduler.config.use_paged_cache is False
-        assert scheduler.config.enable_disk_cache is False
+        assert scheduler.config.enable_disk_cache is True
         assert scheduler.config.enable_block_disk_cache is False
-        assert scheduler.memory_aware_cache is None
+        assert scheduler.config.use_memory_aware_cache is True
+        assert scheduler.memory_aware_cache is not None
         assert scheduler.paged_cache_manager is None
-        assert scheduler.disk_cache is None
+        assert scheduler.disk_cache is not None
+        assert scheduler.disk_cache._required_cache_class == "OpenPanguV2LayerCache"
     finally:
         scheduler.shutdown()
         if prior_config is missing:
@@ -209,8 +345,9 @@ def test_health_reports_openpangu_composite_policy_not_ssm_or_paged():
         _prompt_disk_cache_requested=True,
         _block_disk_cache_requested=True,
         config=SimpleNamespace(enable_prefix_cache=True),
-        block_aware_cache=object(),
-        paged_cache_manager=SimpleNamespace(_disk_store=object()),
+        memory_aware_cache=object(),
+        block_aware_cache=None,
+        paged_cache_manager=None,
         disk_cache=object(),
     )
     cfg = SimpleNamespace(
@@ -219,15 +356,21 @@ def test_health_reports_openpangu_composite_policy_not_ssm_or_paged():
 
     status = _native_cache_status(scheduler, family="openpangu_v2", cfg=cfg)
 
-    assert status["schema"] == "openpangu_v2_composite_v1"
+    assert status["schema"] == "openpangu_v2_composite_v2"
     assert status["cache_type"] == "native_path_dependent_composite"
     assert status["prefix_configured"] is True
-    assert status["prefix"] is False
+    assert status["prefix"] is True
     assert status["paged"] is False
     assert status["prompt_disk_l2_configured"] is True
     assert status["block_disk_l2_configured"] is True
-    assert status["prompt_disk_l2"] is False
+    assert status["prompt_disk_l2"] is True
     assert status["block_disk_l2"] is False
+    assert status["cache_store_policy"]["prompt_boundary_snapshot"] == (
+        "exact_typed_n_minus_1"
+    )
+    assert status["cache_store_policy"]["reverse_truncation"] == (
+        "unsupported_clean_miss"
+    )
     assert "ssm_companion_state" not in status["components"]
 
 
@@ -263,14 +406,127 @@ def test_cache_state_roundtrip(tiny_model):
     for layer_cache in (cache[0], cache[1]):
         st = layer_cache.state
         meta = layer_cache.meta_state
-        fresh = type(layer_cache)(
-            window=layer_cache.window, is_dsa=layer_cache.is_dsa
-        )
-        fresh.state = st
-        fresh.meta_state = meta
+        fresh = type(layer_cache).from_state(st, meta)
         assert fresh.kv.offset == layer_cache.kv.offset
+        assert fresh.is_dsa == layer_cache.is_dsa
+        assert fresh.window == layer_cache.window
         assert fresh.conv_states[0] is not None
         mx.eval(fresh.conv_states[0])
+
+
+def test_exact_cache_clone_preserves_all_typed_state_without_aliasing(tiny_model):
+    from vmlx_engine.models.openpangu_v2.cache import clone_openpangu_layer_cache
+
+    cache = tiny_model.make_cache()
+    tiny_model(mx.array([[1, 2, 3, 4]]), cache=cache)
+
+    def copy_array(value):
+        copied = value + mx.zeros_like(value)
+        mx.eval(copied)
+        return copied
+
+    for source in (cache[0], cache[1]):
+        cloned = clone_openpangu_layer_cache(source, copy_fn=copy_array)
+        assert cloned.offset == source.offset == 4
+        assert cloned.meta_state == source.meta_state
+        assert cloned.kv.keys is not source.kv.keys
+        assert cloned.conv_states[0] is not source.conv_states[0]
+        if source.is_dsa:
+            assert cloned.indexer_kv is not None
+            assert cloned.indexer_kv.offset == source.indexer_kv.offset
+            assert cloned.indexer_kv.keys is not source.indexer_kv.keys
+        cloned.kv.trim(1)
+        assert cloned.kv.offset == 3
+        assert source.kv.offset == 4
+
+
+def test_single_batch_snapshot_is_exact_n_minus_one(tiny_model):
+    from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
+
+    generator = SingleBatchGenerator(tiny_model, max_tokens=1)
+    generator.insert([[10, 11, 12, 13]])
+    prompt_responses, generation_responses = generator.next()
+
+    assert generation_responses == []
+    assert len(prompt_responses) == 1
+    response = prompt_responses[0]
+    assert response.prompt_cache_snapshot is not None
+    assert {layer.offset for layer in response.prompt_cache_snapshot} == {3}
+    # The live cache has consumed the last prompt token and one-token lookahead
+    # generation, while the stored boundary remains immutable at N-1.
+    assert min(layer.offset for layer in response.prompt_cache) >= 4
+
+
+def test_memory_cache_clones_exact_composite_and_rejects_reverse_trim(tiny_model):
+    from vmlx_engine.memory_cache import MemoryAwarePrefixCache, MemoryCacheConfig
+    from vmlx_engine.models.openpangu_v2.cache import clone_openpangu_layer_cache
+
+    live = tiny_model.make_cache()
+    tiny_model(mx.array([[1, 2, 3]]), cache=live)
+    stored = [
+        clone_openpangu_layer_cache(
+            layer,
+            copy_fn=lambda value: value + mx.zeros_like(value),
+        )
+        for layer in live
+    ]
+    cache = MemoryAwarePrefixCache(
+        model=tiny_model,
+        config=MemoryCacheConfig(max_memory_mb=64),
+    )
+    assert cache.store([1, 2, 3], stored)
+
+    fetched, remaining = cache.fetch([1, 2, 3, 4])
+    assert fetched is not None
+    assert remaining == [4]
+    assert {layer.offset for layer in fetched} == {3}
+    fetched[0].kv.trim(1)
+    assert stored[0].offset == 3
+
+    reverse, reverse_remaining = cache.fetch([1, 2])
+    assert reverse is None
+    assert reverse_remaining == [1, 2]
+
+
+def test_disk_cache_roundtrip_restores_typed_composite(tiny_model, tmp_path):
+    from vmlx_engine.disk_cache import DiskCacheManager
+    from vmlx_engine.models.openpangu_v2.cache import clone_openpangu_layer_cache
+
+    live = tiny_model.make_cache()
+    tiny_model(mx.array([[1, 2, 3]]), cache=live)
+    payload = [
+        clone_openpangu_layer_cache(
+            layer,
+            copy_fn=lambda value: value + mx.zeros_like(value),
+        )
+        for layer in live
+    ]
+    cache_dir = tmp_path / "openpangu-l2"
+    writer = DiskCacheManager(
+        str(cache_dir),
+        expected_num_layers=4,
+        required_cache_class="OpenPanguV2LayerCache",
+    )
+    assert writer.store([1, 2, 3, 4], payload)
+    writer.shutdown()
+
+    reader = DiskCacheManager(
+        str(cache_dir),
+        expected_num_layers=4,
+        required_cache_class="OpenPanguV2LayerCache",
+    )
+    try:
+        restored = reader.fetch([1, 2, 3, 4])
+        assert restored is not None
+        assert {type(layer).__name__ for layer in restored} == {
+            "OpenPanguV2LayerCache"
+        }
+        assert {layer.offset for layer in restored} == {3}
+        assert restored[0].is_dsa and restored[0].indexer_kv.offset == 3
+        assert not restored[1].is_dsa and restored[1].kv._idx == 3
+        assert all(layer.conv_states[0] is not None for layer in restored)
+    finally:
+        reader.shutdown()
 
 
 def test_quant_overrides_use_jang_manifest():

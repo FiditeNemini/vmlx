@@ -5368,9 +5368,12 @@ class TestC3BlockDiskCacheQuantScoping:
         from vmlx_engine.scheduler import Scheduler
 
         source = inspect.getsource(Scheduler.__init__)
-        # Find the block disk cache section
-        block_section = source[source.find("enable_block_disk_cache"):]
-        assert "quant" in block_section[:500], (
+        # Anchor on the owning block-store scope key, not the first family
+        # policy that happens to mention enable_block_disk_cache. Typed cache
+        # guards may legitimately appear much earlier in __init__.
+        start = source.index("block_scope_key = (")
+        block_section = source[start : start + 500]
+        assert 'f"{self.config.model_path}:quant={quant_tag}"' in block_section, (
             "Block disk cache hash must include quantization in scope key"
         )
 
@@ -8568,7 +8571,8 @@ class TestStartupCompatibilityGuards:
             "            return _splice_tool_prompt_into_rendered_chatml(prompt, tool_prompt)"
             in source
         )
-        assert ") and not is_xml_function_native_tool_prompt:" in source
+        assert "and (not is_xml_function_native_tool_prompt or _xml_function_has_native_tool_schema)" in source
+        assert "or is_xml_function_native_tool_prompt" in source
         assert server_source.count("raw_preview={tool_required_preview!r}") >= 2
         assert "def _drop_tool_visible_channel_marker(" in server_source
         assert 'text.strip().lower() in {"thought", "analysis"}' in server_source

@@ -400,6 +400,11 @@ class MemoryAwarePrefixCache:
             _CacheList = ()
 
         def _safe(layer) -> bool:
+            # openPangu exact-boundary composite: safe only because
+            # _truncate_cache has a dedicated full-length clone that preserves
+            # inner KV, DSA indexer, rotating metadata, and all conv states.
+            if type(layer).__name__ == "OpenPanguV2LayerCache":
+                return True
             # MiniMax-M3 MSA cache (KVCache subclass + idx_keys lane): _truncate_cache
             # now rebuilds it AS a fresh isolated MiniMaxM3SparseCache with
             # keys/values/idx_keys all sliced, so cloning fully isolates the stored
@@ -538,6 +543,15 @@ class MemoryAwarePrefixCache:
         arrays: list[Any] = []
 
         def _collect(obj) -> None:
+            if type(obj).__name__ == "OpenPanguV2LayerCache":
+                _collect(getattr(obj, "kv", None))
+                indexer = getattr(obj, "indexer_kv", None)
+                if indexer is not None:
+                    _collect(indexer)
+                for state in getattr(obj, "conv_states", ()):
+                    if isinstance(state, mx.array):
+                        arrays.append(state)
+                return
             subs = getattr(obj, "caches", None)
             if subs:
                 for sub in subs:
@@ -682,6 +696,30 @@ class MemoryAwarePrefixCache:
 
         truncated = []
         for layer_cache in cache:
+            if type(layer_cache).__name__ == "OpenPanguV2LayerCache":
+                # This class is cumulative/path-dependent.  Only a faithful copy
+                # at the stored logical boundary is valid; reverse-prefix
+                # truncation must become a clean miss.
+                current_len = int(getattr(layer_cache, "offset", 0) or 0)
+                if not allow_cumulative_clone or target_len != current_len:
+                    return None
+                try:
+                    from .models.openpangu_v2.cache import (
+                        clone_openpangu_layer_cache,
+                    )
+
+                    cloned = clone_openpangu_layer_cache(
+                        layer_cache,
+                        copy_fn=_copy_positional_slice,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "openPangu composite cache clone failed (%s); forcing miss",
+                        exc,
+                    )
+                    return None
+                truncated.append(cloned)
+                continue
             if type(layer_cache).__name__ == "TurboQuantKVCache":
                 tq_clone = _clone_turboquant_layer(layer_cache, target_len)
                 if tq_clone is None:

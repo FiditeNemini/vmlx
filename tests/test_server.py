@@ -2845,6 +2845,129 @@ class TestOpenAILogprobsFormatting:
         )
 
     @pytest.mark.asyncio
+    async def test_streaming_responses_without_tools_skips_native_tool_parser(
+        self, monkeypatch
+    ):
+        """A normal no-tools turn must not produce a native-parser warning."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                yield GenerationOutput(
+                    text="45",
+                    new_text="45",
+                    tokens=[],
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "openpangu-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", "openpangu")
+
+        request = ResponsesRequest(
+            model="openpangu-test",
+            input="What is 17 + 28?",
+            stream=True,
+        )
+        events = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": "What is 17 + 28?"}],
+            request,
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        completed = next(
+            event["response"]
+            for event in events
+            if event.get("type") == "response.completed"
+        )
+        assert completed["output_text"] == "45"
+        assert completed.get("warnings", []) == []
+
+    @pytest.mark.asyncio
+    async def test_streaming_responses_strict_native_plain_final_with_tools_has_no_drop_warning(
+        self, monkeypatch
+    ):
+        """Available tools do not turn a normal final answer into a parser failure."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                yield GenerationOutput(
+                    text="PG-DONE",
+                    new_text="PG-DONE",
+                    tokens=[],
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "openpangu-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", "openpangu")
+
+        request = ResponsesRequest(
+            model="openpangu-test",
+            input="finish after the tool result",
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ],
+        )
+        events = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": "finish after the tool result"}],
+            request,
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        completed = next(
+            event["response"]
+            for event in events
+            if event.get("type") == "response.completed"
+        )
+        assert completed["output_text"] == "PG-DONE"
+        assert completed.get("warnings", []) == []
+
+    @pytest.mark.asyncio
     async def test_streaming_responses_tool_call_uses_next_output_index_without_text(
         self, monkeypatch
     ):

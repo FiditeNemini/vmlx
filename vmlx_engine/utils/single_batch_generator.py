@@ -229,6 +229,16 @@ class SingleBatchGenerator:
                 copy_fn=cls._clone_array,
                 require_idx_keys=True,
             )
+        if type(cache_obj).__name__ == "OpenPanguV2LayerCache":
+            try:
+                from ..models.openpangu_v2.cache import clone_openpangu_layer_cache
+
+                return clone_openpangu_layer_cache(
+                    cache_obj,
+                    copy_fn=cls._clone_array,
+                )
+            except Exception:
+                return None
         if isinstance(cache_obj, mlx_cache.KVCache):
             cloned = type(cache_obj)()
             if cache_obj.keys is not None:
@@ -254,7 +264,16 @@ class SingleBatchGenerator:
         return type(cache_obj).__name__ in {
             "DeepseekV4Cache",
             "MiniMaxM3SparseCache",
+            "OpenPanguV2LayerCache",
         }
+
+    @classmethod
+    def _cache_uses_openpangu(cls, cache_obj) -> bool:
+        if isinstance(cache_obj, mlx_cache.CacheList):
+            return any(cls._cache_uses_openpangu(c) for c in cache_obj.caches)
+        if isinstance(cache_obj, (list, tuple)):
+            return any(cls._cache_uses_openpangu(c) for c in cache_obj)
+        return type(cache_obj).__name__ == "OpenPanguV2LayerCache"
 
     @classmethod
     def _cache_uses_m3_msa(cls, cache_obj) -> bool:
@@ -735,6 +754,17 @@ class SingleBatchGenerator:
             )
         if len(req.prompt_tokens) > 1:
             self._prefill(req.prompt_tokens[:-1], req)
+        uses_openpangu = self._cache_uses_openpangu(req.cache)
+        # openPangu's KV, DSA-indexer, rotating-SWA and causal-conv states are a
+        # single path-dependent unit.  Capture the immutable N-1 boundary BEFORE
+        # the last prompt token is consumed; the post-decode live cache cannot be
+        # rewound safely.  This also works on a cache hit whose remaining prompt
+        # is only the final token because the restored cache already owns N-1.
+        openpangu_prompt_snapshot = None
+        if uses_openpangu and any(
+            int(getattr(layer, "offset", 0) or 0) > 0 for layer in req.cache
+        ):
+            openpangu_prompt_snapshot = self._clone_prompt_cache_snapshot(req.cache)
         last_token = int(req.prompt_tokens[-1])
         req.prompt_processed = True
         self._compute_next_from_input(req, last_token)
@@ -744,7 +774,11 @@ class SingleBatchGenerator:
         # extract_cache() context would skip the final prompt token entirely
         # (e.g., prompt [11,12] -> sampled 3 would yield [11,3]).
         req.context_tokens.append(last_token)
-        prompt_cache_snapshot = self._clone_prompt_cache_snapshot(req.cache)
+        prompt_cache_snapshot = (
+            openpangu_prompt_snapshot
+            if uses_openpangu
+            else self._clone_prompt_cache_snapshot(req.cache)
+        )
         req.prompt_cache_snapshot = prompt_cache_snapshot
         return self._yield_current_and_schedule_next(
             req,

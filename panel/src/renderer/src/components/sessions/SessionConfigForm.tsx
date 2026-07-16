@@ -339,7 +339,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const normalizedDetectedFamily = normalizeDetectedFamilyName(detectedFamily)
   const dsv4Active = normalizedDetectedFamily === 'deepseek-v4'
   const m3Active = normalizedDetectedFamily === 'minimax_m3'
-  const openPanguCompositeCacheUnsupported = normalizedDetectedFamily === 'openpangu_v2'
+  const openPanguExactTypedCache = normalizedDetectedFamily === 'openpangu_v2'
   const effectiveSmeltActive = !!config.smelt && !dsv4Active
   const effectiveFlashMoeActive = !!config.flashMoe && !dsv4Active
   const effectiveDistributedActive = !!config.distributedEnabled && !dsv4Active
@@ -359,7 +359,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const effectivelyNoBatching = batchingOff
   const effectivePrefixCacheEnabled = dsv4Active
     ? dsv4CompositeCacheOptIn && config.enablePrefixCache !== false
-    : openPanguCompositeCacheUnsupported ? false : config.enablePrefixCache
+    : config.enablePrefixCache
   const prefixOff = !effectivePrefixCacheEnabled
   const isMambaCache =
     detectedCacheType === 'mamba' ||
@@ -382,14 +382,14 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const cacheControlState = {
     continuousBatching: effectiveContinuousBatching,
     enablePrefixCache: effectivePrefixCacheEnabled,
-    usePagedCache: dsv4Active ? dsv4CompositeCacheOptIn : openPanguCompositeCacheUnsupported ? false : config.usePagedCache,
-    enableDiskCache: openPanguCompositeCacheUnsupported ? false : config.enableDiskCache,
-    enableBlockDiskCache: dsv4Active ? dsv4CompositeCacheOptIn && config.enableBlockDiskCache : openPanguCompositeCacheUnsupported ? false : config.enableBlockDiskCache,
+    usePagedCache: dsv4Active ? dsv4CompositeCacheOptIn : openPanguExactTypedCache ? false : config.usePagedCache,
+    enableDiskCache: config.enableDiskCache,
+    enableBlockDiskCache: dsv4Active ? dsv4CompositeCacheOptIn && config.enableBlockDiskCache : openPanguExactTypedCache ? false : config.enableBlockDiskCache,
     architectureRequiresPagedCache,
   }
   const cachePolicy = resolveCacheControlPolicy(cacheControlState)
   const effectiveUsePagedCache = cachePolicy.effectiveUsePagedCache
-  const genericPagedCacheToggleDisabled = !dsv4Active && cachePolicy.pagedCacheDisabled
+  const genericPagedCacheToggleDisabled = !dsv4Active && (cachePolicy.pagedCacheDisabled || openPanguExactTypedCache)
   const effectivePagedCacheBlockSize = dsv4CompositeRequiresPaged
     ? DSV4_PAGED_CACHE_BLOCK_SIZE
     : config.pagedCacheBlockSize
@@ -401,8 +401,13 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     defaultMaxBlocks: DEFAULT_CONFIG.maxCacheBlocks,
   })
   const pagedCacheSectionTitle = t('sessions.config.pagedKVCache')
-  const nativeTypedCacheOwnsStoredCodec = dsv4Active || m3Active
-  const effectiveStoredCacheQuantization = nativeTypedCacheOwnsStoredCodec ? 'auto' : config.kvCacheQuantization
+  const nativeTypedCacheOwnsStoredCodec = dsv4Active || m3Active || openPanguExactTypedCache
+  // openPangu's typed snapshot stays full precision and explicitly opts out of
+  // generic live/stored KV codecs. Do not leave the disabled selector saying
+  // "Auto / TurboQuant" when the runtime contract is intentionally "None".
+  const effectiveStoredCacheQuantization = openPanguExactTypedCache
+    ? 'none'
+    : nativeTypedCacheOwnsStoredCodec ? 'auto' : config.kvCacheQuantization
   const effectiveMaxNumSeqs = dsv4Active ? 1 : config.maxNumSeqs
   const effectivePrefillBatchSize = dsv4Active ? 1 : config.prefillBatchSize
   const effectiveCompletionBatchSize = dsv4Active ? 1 : config.completionBatchSize
@@ -794,7 +799,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       <Section title={t('sessions.config.prefixCache')} expanded={expandedSections.prefixCache} onToggle={() => toggleSection('prefixCache')} hidden={isImage}>
         {!effectivelyNoBatching && <PerformanceHint text="Speeds up repeated conversations by remembering previous prompts. Makes follow-up messages much faster (lower time-to-first-token)." />}
         {dsv4Active && !dsv4CompositeCacheOptIn && <InfoNote text="DSV4 Flash native composite prefix cache is off for this session. Turn on the DSV4 Native Composite Prefix Cache switch below to use SWA+CSA/HCA prefix reuse, fixed 256-token paging, and optional L2 block storage." />}
-        {openPanguCompositeCacheUnsupported && <IncompatWarning text="openPangu v2 prefix reuse is disabled: its MLA + DSA/SWA + causal-convolution state is path-dependent and does not yet have a typed prompt-boundary codec. The server performs a clean prefill for every request; paged cache and both disk L2 modes stay off." />}
+        {openPanguExactTypedCache && <InfoNote text="openPangu v2 uses exact typed N-1 prompt snapshots. Memory and prompt-disk L2 preserve MLA KV, DSA indexer state, rotating-SWA metadata, and all three causal-convolution states together. Generic paged blocks, reverse truncation, and generic KV q4/q8 stay off." />}
         {dsv4Active && (
           <>
             <InfoNote text="DeepSeek-V4 uses a native SWA+CSA/HCA composite cache. This one switch owns DSV4 prefix reuse; generic paged-KV and generic q4/q8 cache controls stay hidden because they are not the DSV4 cache format. Changes require a restart." />
@@ -808,7 +813,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         )}
         {batchingOff && <IncompatWarning text="Prefix cache requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above to enable prefix caching." />}
         {!dsv4Active && (
-          <CheckField label="Enable Prefix Cache" tooltip="Caches prompt prefixes in memory. If you send the same system prompt or document multiple times, the server reuses the cached internal states instead of recomputing them, drastically reducing Time-To-First-Token (TTFT) and saving GPU compute. Highly recommended for agents and tool calling." checked={effectivePrefixCacheEnabled} onChange={v => onChange('enablePrefixCache', v)} disabled={openPanguCompositeCacheUnsupported} />
+          <CheckField label="Enable Prefix Cache" tooltip="Caches prompt prefixes in memory. If you send the same system prompt or document multiple times, the server reuses the cached internal states instead of recomputing them, drastically reducing Time-To-First-Token (TTFT) and saving GPU compute. Highly recommended for agents and tool calling." checked={effectivePrefixCacheEnabled} onChange={v => onChange('enablePrefixCache', v)} />
         )}
         {effectivePrefixCacheEnabled && (
           <>
@@ -816,8 +821,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               <InfoNote text="DSV4 Flash stores native SWA+CSA/HCA prompt-boundary state through the paged prefix path. Generic memory-aware and legacy entry-count prefix-cache controls are not used." />
             ) : (
             <>
-            <CheckField label="Legacy Entry-Count Cache" tooltip="Switches from memory-aware cache (which uses Cache Memory %, Cache Memory Limit, and Cache TTL controls) to a simpler entry-count cache. When ON: you control cache by max entries only. When OFF: you get fine-grained memory budget controls (% of RAM, MB limit, TTL expiration). Memory-aware mode is recommended for most users." checked={config.noMemoryAwareCache} onChange={v => onChange('noMemoryAwareCache', v)} disabled={dsv4Active} />
-            {config.noMemoryAwareCache ? (
+            {openPanguExactTypedCache && <InfoNote text="Memory-aware mode is required for openPangu's non-aliasing typed cache clone. The legacy entry-count backend is unavailable for this family." />}
+            <CheckField label="Legacy Entry-Count Cache" tooltip="Switches from memory-aware cache (which uses Cache Memory %, Cache Memory Limit, and Cache TTL controls) to a simpler entry-count cache. When ON: you control cache by max entries only. When OFF: you get fine-grained memory budget controls (% of RAM, MB limit, TTL expiration). Memory-aware mode is recommended for most users." checked={openPanguExactTypedCache ? false : config.noMemoryAwareCache} onChange={v => onChange('noMemoryAwareCache', v)} disabled={dsv4Active || openPanguExactTypedCache} />
+            {!openPanguExactTypedCache && config.noMemoryAwareCache ? (
               <>
                 <InfoNote text="Legacy mode active — Cache Memory %, Cache Memory Limit, and Cache TTL are hidden. Turn off 'Legacy Entry-Count Cache' above to use memory-aware caching with those controls." />
                 <SliderField
@@ -964,6 +970,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {nativeCacheRequiresPaged && !zayaTypedCacheRequiresPaged && !dsv4CompositeRequiresPaged && <InfoNote text="Hybrid/Mamba cache models require paged cache while prefix cache is enabled so KV blocks and path-dependent state stay in the same cache contract." />}
         {dsv4CompositeRequiresPaged && <InfoNote text="DSV4 uses native SWA+CSA/HCA composite cache snapshots, so paged cache stays on and block size is fixed to 256 tokens for diagnostic decode-cache testing." />}
         {m3Active && <InfoNote text="MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets. Block Disk Cache provides its persistent L2; generic KV q4/q8 remains disabled." />}
+        {openPanguExactTypedCache && <InfoNote text="openPangu does not use generic paged blocks: causal-convolution state is cumulative and cannot be reconstructed from an arbitrary block. Use Prefix Cache plus prompt-level Disk Cache (L2) instead." />}
         {!dsv4Active && (
           <CheckField label="Use Paged KV Cache" tooltip="Manages the KV cache in fixed-size pages instead of contiguous memory. Greatly reduces memory fragmentation and allows serving larger batches or larger contexts on limited GPU RAM. Extremely recommended for long conversations." checked={effectiveUsePagedCache} onChange={v => applyCacheControlUpdates(cacheControlUpdatesForPagedToggle(v, cacheControlState))} disabled={genericPagedCacheToggleDisabled} />
         )}
@@ -1004,7 +1011,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             : "Persist individual paged cache blocks to SSD. When a block is evicted from RAM, it's saved to disk and can be reloaded later without recomputation. Dramatically speeds up cache warm-up for repeated system prompts and common prefixes. Uses content-addressable storage with background writes so disk I/O doesn't block inference. Compatible runtimes store compressed blocks in their native codec; path-dependent architectures use typed cache records instead of generic TurboQuant."}
           checked={cachePolicy.blockDiskCacheChecked}
           onChange={v => applyCacheControlUpdates(dsv4Active ? cacheControlUpdatesForDsv4BlockDiskToggle(v) : cacheControlUpdatesForBlockDiskToggle(v, cacheControlState))}
-          disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled}
+          disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || openPanguExactTypedCache}
         />}
         {cachePolicy.blockDiskCacheChecked && (
           <>
@@ -1050,6 +1057,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!effectivelyNoBatching && !prefixOff && isMambaCache && <PerformanceHint text="Hybrid stateful cache detected — the engine keeps SSM/GLA state native and only uses cache codecs proven for that architecture. Generic TurboQuant KV is disabled unless a tested override exists." />}
         {!effectivelyNoBatching && dsv4Active && <PerformanceHint text="DeepSeek-V4 keeps generic KV q4/q8 disabled. Its prefix reuse uses native SWA+CSA/HCA snapshots through the DSV4 Native Composite Prefix Cache switch, not the generic stored-KV codec." />}
         {!effectivelyNoBatching && m3Active && <PerformanceHint text="MiniMax-M3 keeps generic KV q4/q8 disabled. Prefix reuse uses native MSA snapshots with keys, values, idx_keys, and absolute offsets; generic stored-KV codecs cannot preserve that cache format." />}
+        {!effectivelyNoBatching && openPanguExactTypedCache && <PerformanceHint text="openPangu keeps generic KV q4/q8 disabled. Its exact typed snapshot owns MLA KV, DSA indexer, rotating-SWA metadata, and causal-convolution state as one full-precision record." />}
         {dsv4Active && (
           <CheckField
             label="DSV4 CSA/HCA Pool Codec"
@@ -1066,8 +1074,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             <Tooltip text="Auto mode leaves the CLI flag unset so the engine can choose per architecture: calibrated TurboQuant for compatible plain KV/JANGTQ caches, native composite or typed caches for DSV4/ZAYA/hybrid SSM, and stored-prefix fallback only where that codec is valid." />
           </span>
           <div className="cfg-input flex items-center justify-between" style={{ background: 'var(--card)', cursor: 'default' }}>
-            <span>Engine-selected native cache</span>
-            <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'var(--success-bg, rgba(34,197,94,0.15))', color: 'var(--success-fg, rgb(34,197,94))' }}>AUTO</span>
+            <span>{openPanguExactTypedCache ? 'openPangu typed composite cache' : 'Engine-selected native cache'}</span>
+            <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'var(--success-bg, rgba(34,197,94,0.15))', color: 'var(--success-fg, rgb(34,197,94))' }}>
+              {openPanguExactTypedCache ? 'TURBOQUANT OFF' : 'AUTO'}
+            </span>
           </div>
         </div>
 
@@ -1108,6 +1118,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         ) : (
           <InfoNote text="Legacy disk cache works with memory-aware prefix cache. Block disk cache (in the Paged KV Cache section) works with paged cache. Only one can be active at a time." />
         )}
+        {openPanguExactTypedCache && <InfoNote text="For openPangu this prompt-level disk cache stores the exact typed N-1 composite and restores it across process restarts. Block Disk Cache remains unavailable." />}
         {batchingOff && <IncompatWarning text="Disk cache requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above." />}
         {!effectivelyNoBatching && cachePolicy.legacyDiskCacheUnavailableReason === 'paged-cache-active' && <IncompatWarning text="Legacy disk cache is not compatible with paged cache. To use disk-based persistence with paged cache, use 'Block Disk Cache (L2)' in the Paged KV Cache section instead. To use this legacy disk cache, disable 'Use Paged KV Cache' first." />}
         {!effectivelyNoBatching && cachePolicy.legacyDiskCacheUnavailableReason === 'architecture-requires-paged-cache' && <IncompatWarning text="This architecture requires native/paged cache when Prefix Cache is enabled. Use 'Block Disk Cache (L2)' in the Paged KV Cache section for persistent cache storage." />}

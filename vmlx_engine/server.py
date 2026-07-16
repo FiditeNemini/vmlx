@@ -5154,11 +5154,23 @@ def _parse_tool_calls_with_parser(
             return output_text, None
         else:
             if strict_native_format:
-                _record_tool_call_drop(
-                    f"The '{active_parser}' native tool parser did not produce "
-                    "a schema-valid function call; generic tool repair was "
-                    "skipped for this strict native format."
-                )
+                # Tools being available does not make every assistant answer a
+                # dropped function call. In auto mode, a strict-native model may
+                # legitimately answer in plain text after a successful tool
+                # continuation. Only surface a diagnostic when native control
+                # markup was actually present (possibly truncated), or when the
+                # request explicitly required a tool call.
+                if _has_tool_marker_or_partial_suffix(output_text) or (
+                    request is not None
+                    and _is_required_tool_choice(
+                        getattr(request, "tool_choice", None)
+                    )
+                ):
+                    _record_tool_call_drop(
+                        f"The '{active_parser}' native tool parser did not produce "
+                        "a schema-valid function call; generic tool repair was "
+                        "skipped for this strict native format."
+                    )
                 return output_text, None
             # Specific parser found nothing — try generic parser as fallback
             # (handles Nemotron, Llama, raw JSON, etc.)
@@ -5166,10 +5178,14 @@ def _parse_tool_calls_with_parser(
     except Exception as e:
         logger.warning(f"Tool parser error: {e}")
         if bool(getattr(locals().get("parser_cls", None), "STRICT_NATIVE_TOOL_FORMAT", False)):
-            _record_tool_call_drop(
-                f"The '{active_parser}' native tool parser failed; generic "
-                "tool repair was skipped for this strict native format."
-            )
+            if _has_tool_marker_or_partial_suffix(output_text) or (
+                request is not None
+                and _is_required_tool_choice(getattr(request, "tool_choice", None))
+            ):
+                _record_tool_call_drop(
+                    f"The '{active_parser}' native tool parser failed; generic "
+                    "tool repair was skipped for this strict native format."
+                )
             return output_text, None
         return _generic_parse_filtered(output_text)
 
@@ -7709,10 +7725,9 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
         or scheduler_family == "openpangu_v2"
         or cache_subtype == "openpangu_v2_composite"
     ):
-        # openPangu's layer cache is path-dependent and composite.  It cannot
-        # truthfully use the generic trim-based prefix snapshot, block-paged
-        # cache, or SSM companion-rederive paths.  Keep configured intent
-        # visible separately from an active/reusable cache claim.
+        # openPangu's layer cache is path-dependent and composite.  Exact N-1
+        # prompt-boundary snapshots now round-trip the full typed state, while
+        # generic trim-based paged/block reuse remains unsupported.
         prefix_configured = bool(
             getattr(
                 scheduler,
@@ -7722,7 +7737,7 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
         )
         return {
             "family": "openpangu_v2",
-            "schema": "openpangu_v2_composite_v1",
+            "schema": "openpangu_v2_composite_v2",
             "cache_type": "native_path_dependent_composite",
             "cache_subtype": "openpangu_v2_composite",
             "components": [
@@ -7736,13 +7751,17 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
                 "reason": "mla_and_path_dependent_conv_state",
             },
             "cache_store_policy": {
-                "generic_prefix_snapshot": "unsupported",
+                "prompt_boundary_snapshot": "exact_typed_n_minus_1",
+                "state_roundtrip": "kv_indexer_swa_meta_and_three_conv_states",
+                "reverse_truncation": "unsupported_clean_miss",
                 "generic_paged_blocks": "unsupported",
-                "prompt_disk_l2": "unsupported",
-                "reuse": "clean_prefill_required_until_typed_composite_codec",
+                "prompt_disk_l2": "exact_typed_full_precision",
+                "reuse": "exact_or_forward_prefix_from_typed_boundary",
             },
             "prefix_configured": prefix_configured,
-            "prefix": False,
+            "prefix": bool(
+                getattr(scheduler, "memory_aware_cache", None) is not None
+            ),
             "paged": False,
             "prompt_disk_l2_configured": bool(
                 getattr(scheduler, "_prompt_disk_cache_requested", disk_cache is not None)
@@ -7750,7 +7769,7 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
             "block_disk_l2_configured": bool(
                 getattr(scheduler, "_block_disk_cache_requested", block_disk_store is not None)
             ),
-            "prompt_disk_l2": False,
+            "prompt_disk_l2": bool(disk_cache is not None),
             "block_disk_l2": False,
         }
 
@@ -18619,7 +18638,7 @@ async def stream_responses_api(
     tool_calls = None
     cleaned_text = full_text
     _tool_parse_from_reasoning_only = False
-    if not _suppress_tools:
+    if tool_call_active:
         # Use content-only text when reasoning parser separated it (avoids losing
         # tool calls that appear inside <think> blocks during regex stripping).
         # If content is empty but reasoning has tool markers, check reasoning too.
@@ -18638,7 +18657,7 @@ async def stream_responses_api(
             # not actually a tool call, never recycle it as visible output_text;
             # that creates hidden-only/empty UI rows or pollutes chat history.
             cleaned_text = ""
-    else:
+    elif _suppress_tools:
         cleaned_text = _clean_suppressed_tool_markup_for_display(
             full_text,
             request,

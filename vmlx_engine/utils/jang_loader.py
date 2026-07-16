@@ -2274,6 +2274,104 @@ def _filter_by_layer_range(weights: dict, start: int, end: int) -> dict:
     return filtered
 
 
+def _record_openpangu_weight_landing(
+    expected_names: set[str],
+    seen_names: set[str],
+    weights: dict,
+    *,
+    shard_name: str,
+) -> None:
+    """Fail closed when an openPangu checkpoint leaf cannot bind to the model.
+
+    The general JANG loader intentionally uses ``strict=False`` because several
+    distributed/model-family lanes filter or synthesize parameters.  That is
+    unsafe for openPangu's source-owned runtime: a miss leaves initialized
+    weights in a live 92B model.  Validate each sanitized shard against the
+    actual post-quantization MLX parameter tree before loading it.
+    """
+    incoming = set(weights)
+    unexpected = sorted(incoming - expected_names)
+    if unexpected:
+        preview = ", ".join(unexpected[:12])
+        extra = f" (+{len(unexpected) - 12} more)" if len(unexpected) > 12 else ""
+        raise RuntimeError(
+            "openPangu weight landing rejected unmatched checkpoint leaves in "
+            f"{shard_name}: {preview}{extra}"
+        )
+    seen_names.update(incoming)
+
+
+def _finalize_openpangu_weight_landing(
+    expected_names: set[str],
+    seen_names: set[str],
+    *,
+    layer_count: int,
+) -> dict[str, int]:
+    """Require complete base-model, layer, and causal-conv checkpoint coverage."""
+    missing = sorted(expected_names - seen_names)
+    if missing:
+        preview = ", ".join(missing[:12])
+        extra = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
+        raise RuntimeError(
+            "openPangu weight landing is incomplete; model parameters would "
+            f"retain initialization: {preview}{extra}"
+        )
+
+    layers = sorted(
+        {
+            int(match.group(1))
+            for name in seen_names
+            if (match := _LAYER_INDEX_RE.search(name)) is not None
+        }
+    )
+    expected_layers = list(range(layer_count))
+    if layers != expected_layers:
+        raise RuntimeError(
+            "openPangu weight landing layer coverage mismatch: "
+            f"seen={layers} expected={expected_layers}"
+        )
+
+    conv_suffixes = (
+        ".self_attn.qa_conv.conv.weight",
+        ".self_attn.compresskv_conv.conv.weight",
+        ".self_attn.o_conv.conv.weight",
+    )
+    conv_count = sum(name.endswith(conv_suffixes) for name in seen_names)
+    expected_convs = layer_count * len(conv_suffixes)
+    if conv_count != expected_convs:
+        raise RuntimeError(
+            "openPangu causal-conv landing mismatch: "
+            f"seen={conv_count} expected={expected_convs}"
+        )
+    return {
+        "parameter_leaves": len(seen_names),
+        "layers": len(layers),
+        "causal_convs": conv_count,
+    }
+
+
+def _needs_renamed_key_requantization(
+    config: dict,
+    jang_cfg: dict,
+    *,
+    loader_name: str,
+) -> bool:
+    """Limit the LM-prefix promotion repair to wrapper/promotion runtimes.
+
+    openPangu is a source-owned MLA model whose checkpoint and module paths
+    already match. Treating every ``architecture.attention=mla`` bundle as a
+    Mistral-4 promotion added 98 synthetic split-module names and reported 782
+    re-quantized modules for a 684-entry manifest.
+    """
+    model_type = str(config.get("model_type", ""))
+    if model_type == "openpangu_v2":
+        return False
+    return loader_name == "load_model" and (
+        (jang_cfg.get("architecture") or {}).get("attention", "") == "mla"
+        or "mistral4" in model_type
+    )
+
+
 def _load_jang_v2(
     path: Path,
     jang_cfg: dict,
@@ -2605,10 +2703,10 @@ def _load_jang_v2(
     # safetensors HEADERS (no data load) and applies the LM-strip rename to
     # the keys before checking. Cheap (~10ms per shard).
     if (
-        _is_mistral4_promoted := (
-            getattr(_load_model_skeleton, "__name__", "") == "load_model"
-            and ((jang_cfg.get("architecture") or {}).get("attention", "") == "mla"
-                 or "mistral4" in str(config.get("model_type", "")))
+        _is_mistral4_promoted := _needs_renamed_key_requantization(
+            config,
+            jang_cfg,
+            loader_name=getattr(_load_model_skeleton, "__name__", ""),
         )
     ):
         try:
@@ -2670,6 +2768,14 @@ def _load_jang_v2(
         ".switch_mlp.down_proj.": ".switch_mlp.fc2.",
     }
     _model_type = config.get("model_type", "")
+    _openpangu_expected_names: set[str] | None = None
+    _openpangu_seen_names: set[str] = set()
+    if _model_type == "openpangu_v2" and layer_range is None:
+        from mlx.utils import tree_flatten
+
+        _openpangu_expected_names = {
+            name for name, _ in tree_flatten(model.parameters())
+        }
     _needs_fc_rename = _model_type in ("nemotron_h", "nemotron")
     # Gate dequant needed for any MoE model with quantized gate weights (MoEGate is
     # nn.Module not nn.Linear, so nn.quantize skips it but JANG still quantizes raw weights).
@@ -3143,6 +3249,13 @@ def _load_jang_v2(
         # ValueError on JANG mixed-precision models (fixes #62, #63).
         if weights:
             _pre_fix_bits_from_shard(model, weights, block_size)
+            if _openpangu_expected_names is not None:
+                _record_openpangu_weight_landing(
+                    _openpangu_expected_names,
+                    _openpangu_seen_names,
+                    weights,
+                    shard_name=getattr(sf, "name", str(sf)),
+                )
             model.load_weights(list(weights.items()), strict=False)
         if _dsv4_ready_expert_weights:
             if layer_range is not None:
@@ -3159,6 +3272,21 @@ def _load_jang_v2(
         del weights
         del _dsv4_ready_expert_weights
         gc.collect()
+
+    if _openpangu_expected_names is not None:
+        _openpangu_landing = _finalize_openpangu_weight_landing(
+            _openpangu_expected_names,
+            _openpangu_seen_names,
+            layer_count=int(_text_cfg.get("num_hidden_layers", 0) or 0),
+        )
+        logger.info(
+            "  openPangu strict weight landing: %d/%d parameter leaves, "
+            "%d decoder layers, %d causal convs",
+            _openpangu_landing["parameter_leaves"],
+            len(_openpangu_expected_names),
+            _openpangu_landing["layers"],
+            _openpangu_landing["causal_convs"],
+        )
 
     if _affine1_storage_modules:
         if _affine1_expanded_count != len(_affine1_storage_modules):

@@ -200,10 +200,12 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             base.enableBlockDiskCache = true
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
           } else if (detected.family === 'openpangu_v2') {
-            base.enablePrefixCache = false
+            base.enablePrefixCache = true
             base.usePagedCache = false
-            base.enableDiskCache = false
+            base.enableDiskCache = true
             base.enableBlockDiskCache = false
+            base.noMemoryAwareCache = false
+            base.kvCacheQuantization = 'none'
           } else {
             base.usePagedCache = detected.usePagedCache
             base.enableBlockDiskCache = detected.usePagedCache === true

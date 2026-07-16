@@ -390,6 +390,7 @@ function buildCommandPreview(
   const detectedFamily = normalizeDetectedFamilyName(detected?.family)
   const dsv4Active = detectedFamily === 'deepseek-v4'
   const m3Active = detectedFamily === 'minimax_m3'
+  const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
   const dsv4PrefixCacheOptIn = dsv4Active && config.dsv4PrefixCache !== false
   const omniBackendActive = detectedFamily === 'nemotron-h' && detected?.isMultimodal === true
   const effectiveSmelt = !!(config as any).smelt && !dsv4Active
@@ -524,7 +525,7 @@ function buildCommandPreview(
 
   // KV cache quantization — requires prefix cache ON (works for both LLM and VLM)
   // Hybrid/Mamba models allowed — Python scheduler only quantizes KVCache layers
-  if (!prefixCacheOff && !dsv4Active && !m3Active && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
+  if (!prefixCacheOff && !dsv4Active && !m3Active && !openPanguExactTypedCache && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
     parts.push('--kv-cache-quantization', config.kvCacheQuantization)
     const kvCacheGroupSize = finitePositiveInteger(config.kvCacheGroupSize)
     if (config.kvCacheQuantization !== 'none' && kvCacheGroupSize != null && kvCacheGroupSize !== 64) {
@@ -843,10 +844,12 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             base.enableBlockDiskCache = true
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
           } else if (detected.family === 'openpangu_v2') {
-            base.enablePrefixCache = false
+            base.enablePrefixCache = true
             base.usePagedCache = false
-            base.enableDiskCache = false
+            base.enableDiskCache = true
             base.enableBlockDiskCache = false
+            base.noMemoryAwareCache = false
+            base.kvCacheQuantization = 'none'
           } else {
             const detectedPagedCache = detected.usePagedCache === true
             base.usePagedCache = detectedPagedCache

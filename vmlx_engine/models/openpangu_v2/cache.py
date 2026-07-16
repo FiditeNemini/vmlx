@@ -9,16 +9,17 @@ MUST round-trip with the KV or a KV-only prefix-cache reuse is a silent false
 hit (garbled turn-2). Mirrors the proven vmlx-swift OpenPanguV2Cache contract.
 
 is_trimmable() is False on purpose: trimming KV without re-deriving the conv
-states corrupts the path-dependent state, so speculative/trim-based reuse must
-re-prefill instead. detect_cache_type() resolves this class to UNKNOWN, which
-makes the prefix/paged stores skip it safely until a typed lane exists.
+states corrupts the path-dependent state.  Exact prompt-boundary reuse is safe
+only through the typed clone/from_state lane below, which round-trips the inner
+KV, DSA indexer, rotating-SWA metadata, and all three convolution states as one
+unit.  Generic paged/block truncation remains unsupported.
 
 Created by Jinho Jang (eric@jangq.ai).
 """
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 import mlx.core as mx
 from mlx_lm.models.cache import KVCache, RotatingKVCache
@@ -61,6 +62,12 @@ class OpenPanguV2LayerCache:
     def offset(self) -> int:
         return self.kv.offset
 
+    def size(self) -> int:
+        return int(self.offset)
+
+    def empty(self) -> bool:
+        return int(self.offset) == 0
+
     def is_trimmable(self) -> bool:
         # Path-dependent conv state cannot survive a trim.
         return False
@@ -81,6 +88,10 @@ class OpenPanguV2LayerCache:
     @state.setter
     def state(self, value):
         value = list(value)
+        if len(value) < 3:
+            raise ValueError(
+                "openPangu cache state is missing the three causal-conv slots"
+            )
         conv = value[-3:]
         rest = value[: len(value) - 3]
         if self.indexer_kv is not None:
@@ -152,3 +163,47 @@ class OpenPanguV2LayerCache:
                 self.kv.meta_state = value
             except Exception:
                 pass
+
+    @classmethod
+    def from_state(cls, state, meta_state) -> "OpenPanguV2LayerCache":
+        """Rebuild the exact typed composite from prompt-cache metadata.
+
+        mlx-lm's generic implementation constructs cache classes via ``__new__``.
+        That cannot work here because the state setter needs to know whether the
+        layer owns a DSA indexer and whether its inner KV is rotating.  The typed
+        trailer supplies those constructor invariants before any tensors land.
+        """
+
+        meta = tuple(meta_state or ())
+        if len(meta) < 3 or meta[-3] != "openpangu_v2_cache_v1":
+            raise ValueError("openPangu cache metadata is missing its typed trailer")
+        mode = str(meta[-2])
+        if mode not in {"dsa", "swa"}:
+            raise ValueError(f"invalid openPangu cache mode: {mode}")
+        try:
+            window = int(meta[-1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid openPangu cache window metadata") from exc
+
+        rebuilt = cls(window=window, is_dsa=(mode == "dsa"))
+        rebuilt.state = state
+        rebuilt.meta_state = meta
+        return rebuilt
+
+
+def clone_openpangu_layer_cache(
+    source: OpenPanguV2LayerCache,
+    *,
+    copy_fn: Callable[[mx.array], mx.array],
+) -> OpenPanguV2LayerCache:
+    """Return a non-aliasing exact-boundary copy of one composite layer.
+
+    There is intentionally no length argument: shortening a causal-convolution
+    state is undefined.  Callers must prove they are cloning the full logical
+    boundary before invoking this helper.
+    """
+
+    if type(source).__name__ != "OpenPanguV2LayerCache":
+        raise TypeError(f"unexpected cache class: {type(source).__name__}")
+    copied_state = [copy_fn(value) for value in source.state]
+    return OpenPanguV2LayerCache.from_state(copied_state, source.meta_state)

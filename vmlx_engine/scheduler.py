@@ -407,26 +407,26 @@ class Scheduler:
         if self._uses_openpangu_cache:
             # OpenPanguV2LayerCache contains path-dependent convolution state in
             # addition to MLA latent KV, DSA indexer, and rotating SWA state.
-            # Until a typed prompt-boundary codec exists, every generic prefix
-            # backend is unsafe.  Leaving memory-aware cache enabled also makes
-            # request finalization try to clone/store the 46-layer live composite
-            # state before returning the final streaming event (live Electron
-            # symptom: model stopped after 68 tokens, Responses hung indefinitely).
-            if (
-                self.config.enable_prefix_cache
-                or self.config.use_paged_cache
-                or self.config.enable_disk_cache
-                or self.config.enable_block_disk_cache
-            ):
+            # Exact N-1 prompt-boundary snapshots now have a typed clone/disk
+            # codec. Generic block paging is still unsafe because an arbitrary
+            # block cannot reconstruct cumulative conv state. Force the exact
+            # memory-aware lane while preserving the user's prefix + prompt-L2
+            # choices, and fail closed on paged/block L2.
+            if self.config.use_paged_cache or self.config.enable_block_disk_cache:
                 logger.warning(
-                    "openpangu_v2 path-dependent composite cache has no typed "
-                    "prefix codec; disabling prefix, paged, prompt-disk, and "
-                    "block-disk reuse for this runtime"
+                    "openpangu_v2 exact typed cache does not support generic "
+                    "paged/block reuse; disabling paged and block-disk while "
+                    "preserving exact memory/prompt-disk reuse"
                 )
-            self.config.enable_prefix_cache = False
             self.config.use_paged_cache = False
-            self.config.enable_disk_cache = False
             self.config.enable_block_disk_cache = False
+            self.config.use_memory_aware_cache = True
+            if self.config.enable_prefix_cache:
+                logger.info(
+                    "openpangu_v2 exact typed prefix cache enabled: N-1 snapshots "
+                    "round-trip MLA KV, DSA indexer, rotating SWA metadata, and "
+                    "all causal-conv states; reverse truncation remains disabled"
+                )
         # Track if model uses mixed cache types. DSV4's DeepseekV4Cache and
         # ZAYA's CCA CacheList are first-class typed cache contracts, not SSM
         # companion-cache rows.
@@ -843,6 +843,17 @@ class Scheduler:
         _allow_mla_kvq = _mla_kvq_env in ("1", "true", "True", "yes", "on")
         _is_dsv4_composite = self._uses_dsv4_cache
         if (
+            self._uses_openpangu_cache
+            and self.config.kv_cache_quantization != "none"
+        ):
+            logger.info(
+                "openPangu composite cache detected — forcing generic KV cache "
+                "quantization off (was: %s). MLA latents and path-dependent conv "
+                "state must round-trip through the typed full-precision codec.",
+                self.config.kv_cache_quantization,
+            )
+            self.config.kv_cache_quantization = "none"
+        elif (
             self.config.kv_cache_quantization != "none"
             and _is_dsv4_composite
         ):
@@ -1149,10 +1160,10 @@ class Scheduler:
             # Scope disk cache per model, quantization, AND layer count to prevent
             # stale cross-config hits. Without this, restarting with a different model
             # at the same path could load tensors with wrong layer count or head dims.
+            n_layers = self._expected_cache_layer_count() or 0
             if self.config.model_path:
                 quant_tag = self.config.kv_cache_quantization or "none"
-                # Include layer count to invalidate on architecture change
-                n_layers = self._expected_cache_layer_count() or 0
+                # Include layer count to invalidate on architecture change.
                 scope_key = (
                     f"{self.config.model_path}:quant={quant_tag}:layers={n_layers}"
                     f":prefix_cache_schema={PAGED_CACHE_SCHEMA_VERSION}"
@@ -1172,7 +1183,11 @@ class Scheduler:
                 # multi-hundred-GB metal::malloc.
                 expected_num_layers=int(n_layers) if n_layers else None,
                 required_cache_class=(
-                    "MiniMaxM3SparseCache" if self._uses_m3_msa_cache else None
+                    "OpenPanguV2LayerCache"
+                    if self._uses_openpangu_cache
+                    else "MiniMaxM3SparseCache"
+                    if self._uses_m3_msa_cache
+                    else None
                 ),
             )
         elif self.config.enable_disk_cache and not self.config.enable_prefix_cache:
@@ -4707,7 +4722,10 @@ class Scheduler:
         # template trailer (e.g. `<|im_start|>assistant\n<think>\n`) during prefill.
         _full_tokens_list = list(request.prompt_token_ids)
         _gpl_fetch = getattr(request, "_gen_prompt_len", 0) or 0
-        if getattr(self, "_mixed_attention_cache_model", False):
+        if (
+            getattr(self, "_mixed_attention_cache_model", False)
+            or self._uses_openpangu_cache
+        ):
             # Mixed full/SWA models must use the full effective prompt as the
             # cache key for strict logprob equivalence. Stripping the generation
             # prompt replays several suffix tokens from an earlier RotatingKV
@@ -4971,6 +4989,11 @@ class Scheduler:
         ):
             _disk_fetch_tokens = list(request.prompt_token_ids)
             _gpl = getattr(request, "_gen_prompt_len", 0) or 0
+            if self._uses_openpangu_cache:
+                # The typed snapshot is the exact full effective prompt's N-1
+                # state.  Do not strip/replay template trailer tokens against a
+                # different causal-conv boundary.
+                _gpl = 0
             if _gpl > 0 and _gpl < len(_disk_fetch_tokens):
                 _disk_fetch_tokens = _disk_fetch_tokens[:-_gpl]
                 _disk_suffix_tokens = list(request.prompt_token_ids[-_gpl:])
@@ -5101,7 +5124,11 @@ class Scheduler:
                                     )
                         except Exception:
                             pass
-                    elif self.memory_aware_cache is not None and not _disk_needs_worker_dequant:
+                    elif (
+                        self.memory_aware_cache is not None
+                        and not _disk_needs_worker_dequant
+                        and not self._uses_openpangu_cache
+                    ):
                         try:
                             _l1_store_tokens = (
                                 _disk_matched_tokens[:-1]
@@ -6838,6 +6865,30 @@ class Scheduler:
                                             request._extracted_cache = None
                                     else:
                                         request._extracted_cache = None
+                                elif self._uses_openpangu_cache:
+                                    # SingleBatchGenerator captured this exact N-1
+                                    # typed boundary before consuming the final
+                                    # prompt token.  Never fall back to the live
+                                    # post-decode composite: it contains output-side
+                                    # convolution/indexer state and cannot be rewound.
+                                    if snapshot_cache is not None:
+                                        request._extracted_cache = snapshot_cache
+                                        request._extracted_cache_key_tokens = list(
+                                            request.prompt_token_ids[:-1]
+                                        )
+                                        request._extracted_cache_from_prompt_snapshot = True
+                                        logger.info(
+                                            "openPangu prefix store using exact typed "
+                                            "N-1 prompt snapshot (%d layers, %d key tokens)",
+                                            len(snapshot_cache),
+                                            len(request._extracted_cache_key_tokens),
+                                        )
+                                    else:
+                                        request._extracted_cache = None
+                                        logger.warning(
+                                            "openPangu request produced no exact N-1 "
+                                            "typed snapshot; skipping cache store"
+                                        )
                                 elif getattr(self, "_uses_m3_msa_cache", False):
                                     # MiniMax-M3 MSA is path-dependent: a cache
                                     # hit restores K/V/idx_keys, then tail replay
@@ -7542,6 +7593,8 @@ class Scheduler:
                             # append role trailer tokens that differ on every turn;
                             # without this strip, fetches on later turns miss 100%.
                             _gpl_store = getattr(request, "_gen_prompt_len", 0) or 0
+                            if self._uses_openpangu_cache:
+                                _gpl_store = 0
                             if 0 < _gpl_store < len(prompt_tokens):
                                 prompt_tokens = prompt_tokens[:-_gpl_store]
                             prompt_len = len(prompt_tokens)
@@ -7613,12 +7666,22 @@ class Scheduler:
                                     cache_type=cache_type,
                                 )
                                 if stored:
-                                    logger.info(
-                                        f"Stored cache for request {request_id} "
-                                        f"({len(cache_key_tokens)} cache-key tokens "
-                                        f"from {prompt_len} prompt tokens, "
-                                        f"KV truncated to {prompt_len - 1})"
-                                    )
+                                    if self._uses_openpangu_cache:
+                                        logger.info(
+                                            "Stored openPangu exact typed cache for "
+                                            "%s (%d N-1 key tokens from %d prompt "
+                                            "tokens; composite state not truncated)",
+                                            request_id,
+                                            len(cache_key_tokens),
+                                            prompt_len,
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"Stored cache for request {request_id} "
+                                            f"({len(cache_key_tokens)} cache-key tokens "
+                                            f"from {prompt_len} prompt tokens, "
+                                            f"KV truncated to {prompt_len - 1})"
+                                        )
                                 else:
                                     logger.warning(
                                         f"Cache store rejected for request {request_id} "

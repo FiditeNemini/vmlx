@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import sys
+import logging
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
@@ -67,6 +68,7 @@ except ImportError:  # direct file execution fallback
 from jang_tools.dsv4.mlx_model import hc_split_sinkhorn
 
 _HC_EPS = 1e-6  # sigmoid/softmax/sinkhorn epsilon (NOT rms_norm_eps)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -182,16 +184,20 @@ class OpenPanguV2Indexer(nn.Module):
     indexer with openpangu tensor names (wq_b / wk / k_norm / weights_proj).
     """
 
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_idx: int):
         super().__init__()
+        self.layer_idx = layer_idx
         self.n_heads = args.index_n_heads
         self.head_dim = args.index_head_dim
         self.index_topk = args.index_topk
         self.wq_b = nn.Linear(args.q_lora_rank, self.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(args.hidden_size, self.head_dim, bias=False)
-        self.k_norm = nn.LayerNorm(self.head_dim)
+        # Official NPUPanguIndexer uses RMSNorm here. LayerNorm invents a bias
+        # leaf that the checkpoint does not contain and changes indexer scores.
+        self.k_norm = nn.RMSNorm(self.head_dim, eps=args.rms_norm_eps)
         self.weights_proj = nn.Linear(args.hidden_size, self.n_heads, bias=False)
         self.softmax_scale = self.head_dim**-0.5
+        self._logged_sparse_activation = False
         self.rope = initialize_rope(
             dims=args.qk_rope_head_dim,
             base=args.rope_theta,
@@ -219,6 +225,16 @@ class OpenPanguV2Indexer(nn.Module):
             k, _ = cache.update_and_fetch(k, mx.zeros((b, 1, s, 0), dtype=k.dtype))
         if k.shape[2] <= self.index_topk:
             return None
+        if not self._logged_sparse_activation:
+            logger.info(
+                "openPangu DSA sparse indexer active: layer=%d key_length=%d "
+                "topk=%d index_heads=%d",
+                self.layer_idx,
+                k.shape[2],
+                self.index_topk,
+                self.n_heads,
+            )
+            self._logged_sparse_activation = True
         scores = q @ k.swapaxes(-1, -2)
         scores = mx.maximum(scores, 0)
         weights = self.weights_proj(x) * (self.n_heads**-0.5 * self.softmax_scale)
@@ -275,7 +291,7 @@ class OpenPanguV2Attention(nn.Module):
         )
         self.param_sink_k_pe = mx.zeros((self.sink_count, self.qk_rope_head_dim))
 
-        self.indexer = OpenPanguV2Indexer(args) if self.is_dsa else None
+        self.indexer = OpenPanguV2Indexer(args, layer_idx) if self.is_dsa else None
 
         self.rope = initialize_rope(
             dims=self.qk_rope_head_dim,
@@ -661,8 +677,15 @@ class OpenPanguV2Model(nn.Module):
         ]
         self.merge_mhc_module = OpenPanguV2MergeMHC(args)
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+        self._logged_full_layer_traversal = False
 
     def __call__(self, inputs: mx.array, cache=None) -> mx.array:
+        if cache is not None and len(cache) != len(self.layers):
+            raise ValueError(
+                "openPangu cache/layer count mismatch: "
+                f"cache={len(cache)} layers={len(self.layers)}. Refusing to "
+                "silently truncate decoder execution."
+            )
         # Embed, cast to bf16 (256-expert MoE safety), tile to 4 mHC streams.
         h = self.embed_tokens(inputs)
         if h.dtype == mx.float32:
@@ -671,8 +694,32 @@ class OpenPanguV2Model(nn.Module):
 
         if cache is None:
             cache = [None] * len(self.layers)
-        for layer, c in zip(self.layers, cache):
+        for layer_idx in range(len(self.layers)):
+            layer = self.layers[layer_idx]
+            c = cache[layer_idx]
             h = layer(h, None, c)  # per-layer masks built inside attention
+        if not self._logged_full_layer_traversal:
+            runtime_swa_windows = sorted(
+                {
+                    int(window)
+                    for i in range(len(self.layers))
+                    if (window := self.args.window_for(i))
+                }
+            )
+            logger.info(
+                "openPangu forward graph traversed all %d decoder layers "
+                "(DSA=%d, SWA=%d, mHC_streams=%d, attention_sinks=%d, "
+                "MLA_kv_rank=%d, SWA_windows=%s, max_context=%d)",
+                len(self.layers),
+                len(self.args.dsa_layers),
+                sum(1 for i in range(len(self.layers)) if self.args.window_for(i)),
+                self.args.mhc_num_stream,
+                self.args.param_sink_number,
+                self.args.kv_lora_rank,
+                runtime_swa_windows,
+                self.args.max_position_embeddings,
+            )
+            self._logged_full_layer_traversal = True
         merged = self.merge_mhc_module(h)
         return self.norm(merged)
 
@@ -721,9 +768,16 @@ class Model(nn.Module):
             if "rotary_emb.inv_freq" in key:
                 continue
             # Depthwise conv weight: PyTorch [C, 1, k] -> MLX Conv1d [C, k, 1].
+            # OpenPanguCausalConv wraps the MLX Conv1d as ``self.conv``, so its
+            # parameter path has an additional ``.conv`` component.  The
+            # checkpoint does not: it stores ``qa_conv.weight`` (and the two
+            # sibling convs).  Leaving the checkpoint key unchanged while
+            # loading with strict=False silently preserves randomly initialized
+            # conv weights in every layer.
             if key.endswith(conv_suffixes):
                 if value.ndim == 3 and value.shape[1] == 1:
                     value = value.transpose(0, 2, 1)
+                key = key[: -len(".weight")] + ".conv.weight"
                 out[key] = value
                 continue
             out[key] = value

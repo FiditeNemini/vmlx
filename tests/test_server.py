@@ -2598,6 +2598,216 @@ class TestOpenAILogprobsFormatting:
         assert function_items[-1]["name"] == "lookup"
         assert json.loads(function_items[-1]["arguments"]) == expected_args
 
+    def test_explicit_tool_parser_none_skips_registry_and_generic_parse(
+        self, monkeypatch
+    ):
+        """The CLI/UI parser-off setting must survive request auto-detection."""
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+
+        raw = (
+            "<tool_call><function=file_info>"
+            "<parameter=path>README.md</parameter>"
+            "</function></tool_call>"
+        )
+        request = ResponsesRequest(
+            model="bonsai-test",
+            input="Call file_info once for README.md",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ],
+        )
+
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", True)
+        monkeypatch.setattr(server, "_model_name", "bonsai-test")
+        monkeypatch.setattr(server, "_model_path", None)
+
+        cleaned, calls = server._parse_tool_calls_with_parser(raw, request)
+
+        assert cleaned == raw
+        assert calls is None
+
+    @pytest.mark.asyncio
+    async def test_streaming_responses_explicit_tool_parser_none_keeps_raw_output(
+        self, monkeypatch
+    ):
+        """Parser-off streams raw model text instead of buffering a fake call."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+
+        raw = (
+            "<tool_call><function=file_info>"
+            "<parameter=path>README.md</parameter>"
+            "</function></tool_call>"
+        )
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                yield GenerationOutput(
+                    text=raw,
+                    new_text=raw,
+                    tokens=[1],
+                    prompt_tokens=8,
+                    completion_tokens=1,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "bonsai-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", True)
+
+        request = ResponsesRequest(
+            model="bonsai-test",
+            input="Call file_info once for README.md",
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ],
+        )
+
+        events = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": request.input}],
+            request,
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        visible = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        )
+        function_items = [
+            event["item"]
+            for event in events
+            if event.get("type") == "response.output_item.done"
+            and event.get("item", {}).get("type") == "function_call"
+        ]
+        completed = next(
+            event["response"]
+            for event in events
+            if event.get("type") == "response.completed"
+        )
+
+        assert visible == raw
+        assert completed["output_text"] == raw
+        assert completed.get("warnings", []) == []
+        assert function_items == []
+
+    @pytest.mark.asyncio
+    async def test_streaming_chat_explicit_tool_parser_none_keeps_raw_output(
+        self, monkeypatch
+    ):
+        """Chat Completions honors the same parser-off stream contract."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+        from vmlx_engine.engine.base import GenerationOutput
+
+        raw = (
+            "<tool_call><function=file_info>"
+            "<parameter=path>README.md</parameter>"
+            "</function></tool_call>"
+        )
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                yield GenerationOutput(
+                    text=raw,
+                    new_text=raw,
+                    tokens=[1],
+                    prompt_tokens=8,
+                    completion_tokens=1,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "bonsai-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", True)
+
+        request = ChatCompletionRequest(
+            model="bonsai-test",
+            messages=[Message(role="user", content="Call file_info for README.md")],
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ],
+        )
+
+        chunks = []
+        async for line in server.stream_chat_completion(
+            _Engine(),
+            [m.model_dump(exclude_none=True) for m in request.messages],
+            request,
+            fastapi_request=None,
+        ):
+            if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                chunks.append(json.loads(line.removeprefix("data: ")))
+
+        visible = "".join(
+            choice.get("delta", {}).get("content") or ""
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+        )
+        tool_deltas = [
+            choice["delta"]["tool_calls"]
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+            if choice.get("delta", {}).get("tool_calls")
+        ]
+
+        assert visible == raw
+        assert tool_deltas == []
+
     @pytest.mark.asyncio
     async def test_streaming_responses_qwen_exact_once_stops_after_first_valid_call(
         self, monkeypatch

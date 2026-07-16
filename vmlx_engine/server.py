@@ -4747,6 +4747,13 @@ def _parse_tool_calls_with_parser(
     Returns:
         Tuple of (cleaned_text, tool_calls)
     """
+    # ``--tool-call-parser none`` is an explicit user opt-out.  Do not fall
+    # through to request/model registry auto-detection or the generic repair
+    # parser: both paths would silently re-enable structured tool calls even
+    # though the launched argv and UI say parsing is disabled.
+    if _tool_call_parser_disabled_explicitly:
+        return output_text, None
+
     def _allowed_tool_names() -> set[str]:
         effective_tools = _effective_tools_for_tool_parsing(request)
         if not request or not effective_tools:
@@ -16499,7 +16506,11 @@ async def stream_chat_completion(
     # even if server wasn't started with --enable-auto-tool-choice
     _request_has_tools = bool(getattr(request, "tools", None))
     _stream_tools_available = bool(kwargs.get("tools")) or _request_has_tools
-    tool_call_active = _stream_tools_available and not _suppress_tools
+    tool_call_active = (
+        _stream_tools_available
+        and not _suppress_tools
+        and not _tool_call_parser_disabled_explicitly
+    )
     # Early-stop after a complete tool-call turn (opt-in per tool parser via
     # STREAM_STOPS_AFTER_COMPLETE_CALL). Live-proven need: degraded 2-bit
     # openPangu keeps narrating after <|tool_call_end|> instead of emitting
@@ -18051,7 +18062,11 @@ async def stream_responses_api(
     _suppress_tools = getattr(request, "tool_choice", None) == "none"
     _request_has_tools = bool(getattr(request, "tools", None))
     _stream_tools_available = bool(kwargs.get("tools")) or _request_has_tools
-    tool_call_active = _stream_tools_available and not _suppress_tools
+    tool_call_active = (
+        _stream_tools_available
+        and not _suppress_tools
+        and not _tool_call_parser_disabled_explicitly
+    )
     # An explicit single-call contract has no legitimate visible prose before
     # the function call. Buffer the content rail from the first token so a
     # model that closes </think> early and continues meta-reasoning cannot leak

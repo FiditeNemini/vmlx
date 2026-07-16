@@ -335,6 +335,48 @@ class TestBlockSlicingHybrid:
         assert slices[0] == ("skip",)
         assert slices[1][0] == "kv"
 
+    def test_numpy_disk_writer_omits_external_companion_state(self):
+        """The disk writer must mirror the MLX extractor's companion policy."""
+        import numpy as np
+
+        from vmlx_engine.prefix_cache import _numpy_block_slice
+
+        cache_data = [
+            {
+                "state": (mx.zeros((1, 16)), mx.ones((1, 16))),
+                "meta_state": ("0",),
+                "class_name": "ArraysCache",
+            },
+            {
+                "state": (
+                    mx.zeros((1, 8, 64, 64)),
+                    mx.ones((1, 8, 64, 64)),
+                ),
+                "meta_state": ("64",),
+                "class_name": "KVCache",
+            },
+        ]
+        np_sources = {
+            1: (
+                np.zeros((1, 8, 64, 64), dtype=np.float32),
+                np.ones((1, 8, 64, 64), dtype=np.float32),
+                mx.float32,
+            )
+        }
+
+        slices = _numpy_block_slice(
+            cache_data,
+            np_sources,
+            0,
+            64,
+            True,
+            store_cumulative_state=False,
+        )
+
+        assert slices is not None
+        assert slices[0] == ("skip",)
+        assert slices[1][0] == "kv"
+
     def test_ssm_none_state_always_skip(self):
         """SSM layers with None state should always be 'skip', even in last block."""
         cache = self._make_cache(block_size=64)

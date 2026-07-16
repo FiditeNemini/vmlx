@@ -947,7 +947,7 @@ def _numpy_block_slice(
 
         if _is_dsv4_cache_class(cls):
             state = layer_state.get("state")
-            if is_last_block and store_cumulative_state and state is not None:
+            if is_last_block and state is not None:
                 block_slices.append((
                     "deepseek_v4",
                     _to_numpy_tree(state),
@@ -1095,7 +1095,7 @@ def _numpy_block_slice(
         else:
             # Cumulative / non-positional layer
             state = layer_state.get("state")
-            if is_last_block and state is not None:
+            if is_last_block and store_cumulative_state and state is not None:
                 meta = layer_state.get("meta_state", "")
                 # Convert cumulative state to numpy
                 if isinstance(state, (list, tuple)):

@@ -322,6 +322,60 @@ class TestQwenToolParser:
         assert result.tool_calls[0]["name"] == "get_weather"
         assert json.loads(result.tool_calls[0]["arguments"])["city"] == "Paris"
 
+    def test_exact_once_stream_stop_finds_first_schema_valid_call(self, parser):
+        parser._stream_stop_request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        call = (
+            "<tool_call>\n<function=file_info>\n"
+            "<parameter=path>panel/package.json</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+        buffered = "reasoning before\n" + call + "\npost-call reasoning " * 20
+
+        assert parser.STREAM_STOPS_AFTER_COMPLETE_CALL is False
+        assert parser.stream_tool_calls_complete(buffered) is True
+        assert parser.stream_tool_call_stop_truncate(buffered) == (
+            "reasoning before\n" + call
+        )
+
+    def test_exact_once_stream_stop_rejects_missing_required_argument(self, parser):
+        parser._stream_stop_request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        malformed = (
+            "<tool_call><function=file_info>"
+            "<parameter>path</parameter>panel/package.json</parameter>"
+            "</function></tool_call>"
+        )
+
+        assert parser.stream_tool_calls_complete(malformed) is False
+        assert parser.stream_tool_call_stop_truncate(malformed) == malformed
+
     def test_parameter_colon_variant(self, parser):
         """Qwen3.6-27B-JANG_4M under reasoning-on + multi-parameter tools emits a
         COLON name separator: <parameter:city>Tokyo</parameter>. Observed live

@@ -70,6 +70,10 @@ class QwenToolParser(ToolParser):
         re.DOTALL,
     )
     BARE_ARG_PATTERN = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</\1>", re.DOTALL)
+    TOOL_BLOCK_PATTERN = re.compile(
+        r"<tool_call>\s*.*?\s*</tool_call>",
+        re.DOTALL,
+    )
 
     # Residual tool-scaffolding strip. Some off-format / quant-degraded models
     # (observed live on Holo3-35B-A3B-mxfp4, 2026-07-08) emit ORPHAN scaffolding
@@ -305,3 +309,69 @@ class QwenToolParser(ToolParser):
                 }
 
         return None
+
+    def _stream_stop_candidate_valid(self, candidate: str) -> bool:
+        """Return whether a closed candidate is executable for this request.
+
+        Qwen remains globally non-early-stop because ordinary Qwen turns may
+        contain multiple/interleaved calls. The server consults these helpers
+        only for an actual user request that explicitly requires one tool
+        exactly once. Keep the candidate schema-aware so an empty/malformed
+        first attempt cannot terminate generation before the model repairs it.
+        """
+        request = getattr(self, "_stream_stop_request", None)
+        result = self.extract_tool_calls(candidate, request=request)
+        if not result.tools_called or len(result.tool_calls) != 1:
+            return False
+
+        tool_call = result.tool_calls[0]
+        name = tool_call.get("name")
+        if not isinstance(name, str) or not name:
+            return False
+        schema = self._function_schema_for_tool(request, name)
+        if request and schema is None:
+            return False
+        if not isinstance(schema, dict):
+            return True
+
+        try:
+            arguments = json.loads(tool_call.get("arguments") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(arguments, dict):
+            return False
+        required = schema.get("required") or []
+        for key in required:
+            value = arguments.get(key)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                return False
+        return True
+
+    def _first_complete_stream_call_end(self, buffered_text: str) -> int | None:
+        candidates: list[tuple[int, str]] = []
+        candidates.extend(
+            (match.end(), match.group(0))
+            for match in self.TOOL_BLOCK_PATTERN.finditer(buffered_text)
+        )
+        candidates.extend(
+            (match.end(), match.group(0))
+            for match in self.BRACKET_PATTERN.finditer(buffered_text)
+        )
+        for end, candidate in sorted(candidates, key=lambda item: item[0]):
+            if self._stream_stop_candidate_valid(candidate):
+                return end
+        return None
+
+    def stream_tool_calls_complete(self, buffered_text: str) -> bool:
+        """Detect the first closed, schema-valid call for exact-once requests.
+
+        ``STREAM_STOPS_AFTER_COMPLETE_CALL`` deliberately remains ``False``.
+        The server opts into this method per request only when the user names a
+        single available tool and explicitly says to call it exactly once.
+        """
+        return self._first_complete_stream_call_end(buffered_text) is not None
+
+    def stream_tool_call_stop_truncate(self, buffered_text: str) -> str:
+        """Drop Qwen's post-call reasoning after the first exact-once call."""
+        end = self._first_complete_stream_call_end(buffered_text)
+        return buffered_text if end is None else buffered_text[:end]

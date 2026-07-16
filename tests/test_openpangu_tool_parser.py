@@ -445,6 +445,62 @@ class TestOpenPanguStreamEarlyStop:
         monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", True)
         assert server._stream_tool_call_early_stop_parser(None) is None
 
+    def test_qwen_exact_once_request_gets_scoped_early_stop(self, monkeypatch):
+        from vmlx_engine import server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.tool_parsers.qwen_tool_parser import QwenToolParser
+
+        monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        request = ResponsesRequest(
+            model="bonsai-test",
+            input=(
+                "Call the built-in file_info tool exactly once with path "
+                "panel/package.json."
+            ),
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ],
+        )
+
+        resolved = server._stream_tool_call_early_stop_parser(request)
+
+        assert isinstance(resolved, QwenToolParser)
+        assert resolved.STREAM_STOPS_AFTER_COMPLETE_CALL is False
+        assert resolved.stream_tool_calls_complete(
+            "<tool_call><function=file_info>"
+            "<parameter=path>panel/package.json</parameter>"
+            "</function></tool_call>"
+        )
+
+    def test_qwen_ordinary_request_keeps_multi_call_stream_open(self, monkeypatch):
+        from vmlx_engine import server
+        from vmlx_engine.api.models import ResponsesRequest
+
+        monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        request = ResponsesRequest(
+            model="qwen-test",
+            input="Use file_info when useful and continue with any other needed tools.",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        )
+
+        assert server._stream_tool_call_early_stop_parser(request) is None
+
     # ── End-to-end streaming regression ─────────────────────────────────
 
     @pytest.mark.asyncio

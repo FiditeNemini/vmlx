@@ -5248,18 +5248,114 @@ def _stream_tool_call_early_stop_parser(
         parser_cls = ToolParserManager.get_tool_parser(active_parser)
     except KeyError:
         return None
-    if not getattr(parser_cls, "STREAM_STOPS_AFTER_COMPLETE_CALL", False):
+    qwen_exact_once = (
+        active_parser in {"qwen", "qwen3"}
+        and _request_explicitly_requires_one_tool_once(request)
+    )
+    if not (
+        getattr(parser_cls, "STREAM_STOPS_AFTER_COMPLETE_CALL", False)
+        or qwen_exact_once
+    ):
         return None
     try:
         tokenizer = None
         if _engine is not None and hasattr(_engine, "_tokenizer"):
             tokenizer = _engine._tokenizer
-        return parser_cls(tokenizer)
+        parser = parser_cls(tokenizer)
+        if qwen_exact_once:
+            effective_tools = _effective_tools_for_tool_parsing(request)
+            parser._stream_stop_request = {
+                "tools": convert_tools_for_template(effective_tools),
+                "model_path": (
+                    _model_path
+                    or _model_name
+                    or getattr(request, "model", None)
+                ),
+            }
+        return parser
     except Exception as e:
         logger.warning(
             f"Failed to initialize early-stop tool parser '{active_parser}': {e}"
         )
         return None
+
+
+def _request_explicitly_requires_one_tool_once(
+    request: ChatCompletionRequest | ResponsesRequest | None,
+) -> bool:
+    """Narrow Qwen early-stop gate for an explicit single-call user contract.
+
+    Qwen can legitimately emit sequential or interleaved calls, so it must not
+    opt into parser-wide early stopping. Live Bonsai-27B-1bit evidence showed a
+    different bounded case: the user named ``file_info`` and said "exactly
+    once", the model emitted a complete schema-valid call, then repeated the
+    call dozens of times for thousands of hidden reasoning tokens. Stop only
+    when the latest user text itself requires exactly one invocation and names
+    exactly one tool exposed by the request.
+    """
+    if request is None:
+        return False
+
+    def _content_text(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            return _content_text(value.get("text") or value.get("content"))
+        if isinstance(value, list):
+            return "\n".join(
+                part for part in (_content_text(item) for item in value) if part
+            )
+        return ""
+
+    latest_user_text = ""
+    raw_input = getattr(request, "input", None)
+    if isinstance(raw_input, str):
+        latest_user_text = raw_input
+    elif isinstance(raw_input, list):
+        for item in raw_input:
+            if isinstance(item, dict) and item.get("role") == "user":
+                text = _content_text(item.get("content"))
+                if text:
+                    latest_user_text = text
+    for message in getattr(request, "messages", None) or []:
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
+        if role == "user":
+            content = (
+                message.get("content")
+                if isinstance(message, dict)
+                else getattr(message, "content", None)
+            )
+            text = _content_text(content)
+            if text:
+                latest_user_text = text
+
+    if not latest_user_text or not re.search(
+        r"\b(?:exactly\s+once|exactly\s+one(?:\s+native)?\s+(?:tool|function)\s+call)\b",
+        latest_user_text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+
+    tool_names: list[str] = []
+    try:
+        for tool in convert_tools_for_template(
+            _effective_tools_for_tool_parsing(request)
+        ) or []:
+            function = tool.get("function") if isinstance(tool, dict) else None
+            name = function.get("name") if isinstance(function, dict) else None
+            if isinstance(name, str) and name:
+                tool_names.append(name)
+    except Exception:
+        return False
+    named_tools = {
+        name
+        for name in tool_names
+        if re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])",
+            latest_user_text,
+        )
+    }
+    return len(named_tools) == 1
 
 
 def _clean_suppressed_tool_markup_for_display(

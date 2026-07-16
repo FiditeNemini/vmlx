@@ -213,6 +213,7 @@ class TestDiskCacheUnit:
         - stores
         - hit_rate
         - pending_writes
+        - tq_native_enabled
         """
         tmpdir = tempfile.mkdtemp(prefix="vmlx_disk_cache_test_")
         mgr = _create_manager(tmpdir)
@@ -231,6 +232,7 @@ class TestDiskCacheUnit:
                 "stores",
                 "hit_rate",
                 "pending_writes",
+                "tq_native_enabled",
             }
             assert set(stats.keys()) == expected_keys
 
@@ -242,6 +244,7 @@ class TestDiskCacheUnit:
             assert stats["total_cached_tokens"] == stats["total_tokens_on_disk"]
             assert isinstance(stats["max_size_gb"], (int, float))
             assert isinstance(stats["hit_rate"], (int, float))
+            assert isinstance(stats["tq_native_enabled"], bool)
 
             # NOTE: The field is "entries" not "count" -- the task description
             # mentioned "count" but the actual code uses "entries".

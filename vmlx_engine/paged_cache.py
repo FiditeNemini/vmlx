@@ -200,6 +200,11 @@ class CacheBlock:
         self.block_hash = None
         self.hash_value = None
         self.cache_data_from_disk = False
+        # Protection is scoped to the native composite payload currently held
+        # by this block. Once the hash/payload is evicted, carrying the flag
+        # into a later ordinary KV/TQ allocation makes that unrelated block
+        # permanently ineligible for byte-budget eviction.
+        self.keep_resident = False
 
     def touch(self) -> None:
         """Update last access time."""
@@ -764,6 +769,21 @@ class PagedCacheManager:
         if block.resident_bytes:
             self.resident_bytes = max(0, self.resident_bytes - block.resident_bytes)
             block.resident_bytes = 0
+
+    def release_resident_payload(self, block: CacheBlock) -> None:
+        """Atomically drop a block's RAM mirror and its byte attribution.
+
+        Disk reconstruction uses a temporary L1 promotion. Clearing only
+        ``cache_data`` releases the arrays but leaves ``resident_bytes`` as a
+        phantom positive, causing health to over-report RAM and the byte
+        budget to evict unrelated blocks. The native keep-resident guard also
+        expires once the corresponding disk payload is readable and removed.
+        """
+        with self._lock:
+            block.cache_data = None
+            block.cache_data_from_disk = False
+            block.keep_resident = False
+            self._release_resident(block)
 
     @staticmethod
     def estimate_block_nbytes(cache_data: Any) -> int:

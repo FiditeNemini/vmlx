@@ -4069,8 +4069,7 @@ class BlockAwarePrefixCache:
             for block_id in disk_backed_block_ids | l2_readable_block_ids:
                 block = self.paged_cache.allocated_blocks.get(block_id)
                 if block is not None:
-                    block.cache_data = None
-                    block.cache_data_from_disk = False
+                    self.paged_cache.release_resident_payload(block)
 
     def _find_best_prefix_match(
         self,

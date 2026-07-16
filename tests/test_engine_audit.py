@@ -11254,7 +11254,11 @@ class TestTurboQuantKVTelemetry:
         from vmlx_engine.paged_cache import PagedCacheManager, BlockTable
         from vmlx_engine.prefix_cache import BlockAwarePrefixCache
 
-        manager = PagedCacheManager(block_size=4, max_blocks=4)
+        manager = PagedCacheManager(
+            block_size=4,
+            max_blocks=4,
+            max_resident_bytes=10_000,
+        )
         prefix = BlockAwarePrefixCache(object(), manager)
         keys = mx.ones((1, 1, 4, 2), dtype=mx.float16)
         values = mx.ones((1, 1, 4, 2), dtype=mx.float16)
@@ -11262,6 +11266,8 @@ class TestTurboQuantKVTelemetry:
         assert block is not None
         assert block.cache_data is not None
         assert block.cache_data_from_disk is True
+        assert block.resident_bytes > 0
+        assert manager.resident_bytes == block.resident_bytes
 
         table = BlockTable(
             request_id="hit",
@@ -11275,6 +11281,8 @@ class TestTurboQuantKVTelemetry:
         assert restored[0].offset == 4
         assert block.cache_data is None
         assert block.cache_data_from_disk is False
+        assert block.resident_bytes == 0
+        assert manager.resident_bytes == 0
 
     def test_paged_cache_reconstruct_drops_readable_l2_write_through_mirror(
         self,

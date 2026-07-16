@@ -50,6 +50,34 @@ def test_note_and_release_accounting():
     assert b1.resident_bytes == 0
 
 
+def test_release_resident_payload_clears_bytes_flags_and_data():
+    """Disk reconstruction cleanup must not leave phantom RAM attribution."""
+    mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=100_000)
+    block = mgr.blocks[1]
+    _cache_a_block(mgr, block, 111, 4000)
+    block.cache_data_from_disk = True
+    block.keep_resident = True
+
+    mgr.release_resident_payload(block)
+
+    assert block.cache_data is None
+    assert block.cache_data_from_disk is False
+    assert block.keep_resident is False
+    assert block.resident_bytes == 0
+    assert mgr.resident_bytes == 0
+
+
+def test_hash_reset_does_not_leak_keep_resident_to_reused_block():
+    block = PagedCacheManager(block_size=4, max_blocks=4).blocks[1]
+    block.block_hash = 111
+    block.keep_resident = True
+
+    block.reset_hash()
+
+    assert block.block_hash is None
+    assert block.keep_resident is False
+
+
 def test_enforce_evicts_lru_until_under_budget():
     mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=1000)
     # 3 free cached blocks, 400 each = 1200 > 1000 budget.

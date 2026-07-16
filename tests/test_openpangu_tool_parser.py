@@ -50,6 +50,60 @@ class TestOpenPanguToolParser:
         assert tc["id"].startswith("call_")
         assert out.content is None
 
+    def test_repairs_live_openpangu_missing_list_close_only(self, parser):
+        """Recover the bounded live truncation: complete object, missing `]`.
+
+        This is intentionally narrower than generic malformed-JSON repair. The
+        parser must see the native start tag plus a JSON list prefix whose object
+        is already complete; it may synthesize only the missing list bracket.
+        """
+        text = (
+            '<|tool_call_start|>\n'
+            '[{"name": "file_info", "arguments": {"path": "panel/package.json"}}'
+        )
+
+        out = parser.extract_tool_calls(text)
+
+        assert out.tools_called is True
+        assert len(out.tool_calls) == 1
+        assert out.tool_calls[0]["name"] == "file_info"
+        assert json.loads(out.tool_calls[0]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+        assert out.content is None
+
+    def test_repairs_detagged_native_list_payload(self, parser):
+        """Tokenizer decode can drop openPangu sentinels and leave the list."""
+        text = '[{"name": "file_info", "arguments": {"path": "panel/package.json"}}'
+
+        out = parser.extract_tool_calls(text)
+
+        assert out.tools_called is True
+        assert out.tool_calls[0]["name"] == "file_info"
+        assert json.loads(out.tool_calls[0]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+        assert out.content is None
+
+    def test_does_not_repair_unterminated_object_or_trailing_prose(self, parser):
+        missing_object_close = (
+            '<|tool_call_start|>\n'
+            '[{"name": "file_info", "arguments": {"path": "panel/package.json"}'
+        )
+        detagged_embedded_prose = (
+            'I will call it: '
+            '[{"name": "file_info", "arguments": {"path": "panel/package.json"}}'
+        )
+        trailing_prose = (
+            '<|tool_call_start|>\n'
+            '[{"name": "file_info", "arguments": {"path": "panel/package.json"}}'
+            " now I will answer"
+        )
+
+        assert parser.extract_tool_calls(missing_object_close).tools_called is False
+        assert parser.extract_tool_calls(detagged_embedded_prose).tools_called is False
+        assert parser.extract_tool_calls(trailing_prose).tools_called is False
+
     def test_multiple_calls_in_one_list(self, parser):
         text = (
             '<|tool_call_start|>\n'
@@ -205,13 +259,17 @@ class TestOpenPanguToolParserStreaming:
         delta = '<|tool_call_start|>\n[{"name": "get_weather",'
         assert parser.extract_tool_calls_streaming(prev, cur, delta) is None
 
-        # Mid-JSON delta — still buffering
+        # Complete JSON-list payload before the end sentinel — emit now. Live
+        # openPangu tokenizer paths can drop the sentinel, and waiting for it
+        # leaves the Electron stream stuck in "Generating tool call...".
         prev = cur
         cur = prev + ' "arguments": {"location": "Paris"}}]\n'
         delta = ' "arguments": {"location": "Paris"}}]\n'
-        assert parser.extract_tool_calls_streaming(prev, cur, delta) is None
+        early = parser.extract_tool_calls_streaming(prev, cur, delta)
+        assert early is not None
+        assert early["tool_calls"][0]["function"]["name"] == "get_weather"
 
-        # Close tag arrives — emit the tool_calls payload
+        # Close tag arriving later still emits the same shape.
         prev = cur
         cur = prev + "<|tool_call_end|>"
         delta = "<|tool_call_end|>"
@@ -223,6 +281,38 @@ class TestOpenPanguToolParserStreaming:
         assert tc["type"] == "function"
         assert tc["function"]["name"] == "get_weather"
         assert json.loads(tc["function"]["arguments"]) == {"location": "Paris"}
+
+    def test_streaming_emits_bounded_unterminated_openpangu_call(self, parser):
+        cur = (
+            '<|tool_call_start|>\n'
+            '[{"name": "file_info", "arguments": {"path": "panel/package.json"}}'
+        )
+
+        result = parser.extract_tool_calls_streaming("", cur, cur)
+
+        assert result is not None
+        tc = result["tool_calls"][0]
+        assert tc["function"]["name"] == "file_info"
+        assert json.loads(tc["function"]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+
+    def test_streaming_emits_detagged_native_list_payload(self, parser):
+        cur = '[{"name": "file_info", "arguments": {"path": "panel/package.json"}}'
+
+        result = parser.extract_tool_calls_streaming("", cur, cur)
+
+        assert result is not None
+        tc = result["tool_calls"][0]
+        assert tc["function"]["name"] == "file_info"
+        assert json.loads(tc["function"]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+
+    def test_streaming_buffers_partial_detagged_control_json(self, parser):
+        cur = '[{"name": "file_info", "arguments": {"path": "panel/package.json"}'
+
+        assert parser.extract_tool_calls_streaming("", cur, cur) is None
 
     def test_streaming_ids_stable_and_unique_per_call(self, parser):
         """#219 contract: every streaming delta for one tool_call must carry

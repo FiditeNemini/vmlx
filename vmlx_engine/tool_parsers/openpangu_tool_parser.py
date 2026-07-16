@@ -104,7 +104,10 @@ class OpenPanguToolParser(ToolParser):
             data = json.loads(payload)
         except json.JSONDecodeError:
             return []
+        return cls._tool_calls_from_data(data)
 
+    @classmethod
+    def _tool_calls_from_data(cls, data: Any) -> list[dict[str, Any]]:
         # Canonical shape is a list; tolerate a bare single object.
         if isinstance(data, dict):
             data = [data]
@@ -128,6 +131,31 @@ class OpenPanguToolParser(ToolParser):
             )
         return tool_calls
 
+    @classmethod
+    def _tool_calls_from_unterminated_payload(
+        cls, payload: str,
+    ) -> list[dict[str, Any]]:
+        """Parse a bounded live openPangu truncation shape.
+
+        Some quantized openPangu JANG bundles emit the canonical list prefix and
+        a complete JSON object but stop before the closing list bracket and
+        <|tool_call_end|>. Accept only that exact list-prefix repair:
+
+            [{"name": "file_info", "arguments": {...}}
+
+        Do not repair missing object braces, invalid strings, trailing prose, or
+        arbitrary JSON fragments. That keeps STRICT_NATIVE_TOOL_FORMAT intact
+        while recovering a tool call whose name/arguments are already complete.
+        """
+        payload = payload.strip()
+        if not payload.startswith("[") or payload.endswith("]"):
+            return []
+        try:
+            data = json.loads(payload + "]")
+        except json.JSONDecodeError:
+            return []
+        return cls._tool_calls_from_data(data)
+
     def extract_tool_calls(
         self, model_output: str, request: dict[str, Any] | None = None
     ) -> ExtractedToolCallInformation:
@@ -135,6 +163,20 @@ class OpenPanguToolParser(ToolParser):
         Extract tool calls from a complete openPangu model response.
         """
         if self.START_TAG not in model_output:
+            # Some tokenizer paths decode the special start/end sentinels away
+            # while leaving the native JSON-list payload. Accept only a whole
+            # assistant turn that is a canonical/bounded openPangu list, never a
+            # list embedded in prose.
+            bare = model_output.strip()
+            tool_calls = self._tool_calls_from_payload(bare)
+            if not tool_calls:
+                tool_calls = self._tool_calls_from_unterminated_payload(bare)
+            if tool_calls:
+                return ExtractedToolCallInformation(
+                    tools_called=True,
+                    tool_calls=tool_calls,
+                    content=None,
+                )
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
@@ -156,6 +198,8 @@ class OpenPanguToolParser(ToolParser):
             tail = model_output[start + len(self.START_TAG):]
             if self.END_TAG not in tail:
                 tool_calls.extend(self._tool_calls_from_payload(tail))
+                if not tool_calls:
+                    tool_calls.extend(self._tool_calls_from_unterminated_payload(tail))
 
         # Content = think-stripped text with tool call blocks removed.
         content_text = self.strip_think_tags(model_output)
@@ -187,8 +231,31 @@ class OpenPanguToolParser(ToolParser):
         """
         Extract tool calls from streaming openPangu model output.
         """
-        # No tool call marker yet — pass through as content
+        # Tokenizer decode can strip the special sentinels and leave only the
+        # native JSON-list payload. Once that whole-turn payload is parseable,
+        # emit the call immediately; otherwise keep buffering to avoid showing
+        # partial control JSON as assistant prose.
         if self.START_TAG not in current_text:
+            result = self.extract_tool_calls(current_text, request)
+            if result.tools_called:
+                return {
+                    "tool_calls": [
+                        {
+                            "index": i,
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": tc["arguments"],
+                            },
+                        }
+                        for i, tc in enumerate(result.tool_calls)
+                    ]
+                }
+            stripped = current_text.strip()
+            if stripped.startswith("[") or previous_text.strip().startswith("["):
+                return None
+            # No tool call marker yet — pass through as content
             return {"content": delta_text}
 
         # Tool call block just completed — parse the full accumulated text.
@@ -212,6 +279,26 @@ class OpenPanguToolParser(ToolParser):
                         for i, tc in enumerate(result.tool_calls)
                     ]
                 }
+
+        # Bounded live repair: openPangu JANG 2L often emits a complete native
+        # JSON object but omits the closing list bracket / end sentinel. Once
+        # the complete call can be parsed, emit it instead of buffering forever.
+        result = self.extract_tool_calls(current_text, request)
+        if result.tools_called:
+            return {
+                "tool_calls": [
+                    {
+                        "index": i,
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"],
+                        },
+                    }
+                    for i, tc in enumerate(result.tool_calls)
+                ]
+            }
 
         # Still accumulating tool call content — suppress output
         return None

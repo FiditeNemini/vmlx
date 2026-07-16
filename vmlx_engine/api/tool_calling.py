@@ -136,6 +136,28 @@ def check_and_inject_fallback_tools(
 
     request_text = _latest_user_request_text() or _message_request_text()
 
+    def _requested_exact_visible_answer() -> str:
+        """Extract a short exact final-answer target from the user's request."""
+        candidates = [request_text, _message_request_text()]
+        patterns = (
+            r"\breply\s+exactly\s+(.+?)(?:\s+and\s+nothing\s+else|[.!?]\s*$|$)",
+            r"\breply\s+only\s*:?\s+(.+?)(?:\s+and\s+nothing\s+else|[.!?]\s*$|$)",
+            r"\banswer\s+exactly\s*:?\s+(.+?)(?:\s+and\s+nothing\s+else|[.!?]\s*$|$)",
+            r"\banswer\s+only\s*:?\s+(.+?)(?:\s+and\s+nothing\s+else|[.!?]\s*$|$)",
+        )
+        for text in candidates:
+            if not text:
+                continue
+            for pattern in patterns:
+                match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+                if not match:
+                    continue
+                value = match.group(1).strip().strip("`'\" \n\t")
+                value = re.sub(r"\s+", " ", value)
+                if 0 < len(value) <= 160:
+                    return value.rstrip(".,;:")
+        return ""
+
     def _request_mentions_tool_name(name: str) -> bool:
         normalized = name.strip()
         if not normalized or not request_text:
@@ -1281,12 +1303,19 @@ def check_and_inject_fallback_tools(
                 if name
             }
             completed = ", ".join(sorted(completed_names)) or "requested tool"
+            exact_visible_answer = _requested_exact_visible_answer()
             tool_prompt = (
                 "Native openPangu tool-result continuation: the requested tool "
                 "already ran and its real result is present in the conversation. "
                 f"Completed tool(s): {completed}.\n"
                 "Do not emit another <|tool_call_start|> block. Finish the "
                 "user's requested visible answer from the real tool result now."
+                + (
+                    "\nThe user requested an exact final visible answer. "
+                    f"Your next assistant message must be exactly: {exact_visible_answer}"
+                    if exact_visible_answer
+                    else ""
+                )
             )
         else:
             openpangu_lines = [

@@ -160,7 +160,13 @@ def test_openpangu_explicit_file_info_uses_native_json_list_with_bound_path():
 def test_openpangu_tool_result_continuation_finishes_visible_answer():
     tools = _file_info_tool()
     messages = [
-        {"role": "user", "content": "Call file_info with path panel/package.json."},
+        {
+            "role": "user",
+            "content": (
+                "Call file_info with path panel/package.json. "
+                "After the tool result, reply exactly PG2-FINAL-DONE and nothing else."
+            ),
+        },
         {
             "role": "assistant",
             "content": None,
@@ -189,6 +195,7 @@ def test_openpangu_tool_result_continuation_finishes_visible_answer():
 
     assert "Native openPangu tool-result continuation" in injected
     assert "Do not emit another <|tool_call_start|> block" in injected
+    assert "Your next assistant message must be exactly: PG2-FINAL-DONE" in injected
     assert "<|message_start|>tool\nPath: panel/package.json" in injected
 
 

@@ -134,6 +134,7 @@ class Gemma4ToolParser(ToolParser):
     """
 
     SUPPORTS_NATIVE_TOOL_FORMAT = True
+    STREAM_STOPS_AFTER_COMPLETE_CALL = True
 
     # Also match Hermes format as fallback
     HERMES_PATTERN = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
@@ -310,6 +311,32 @@ class Gemma4ToolParser(ToolParser):
         """
         self._gemma4_emitted_count = 0
         self._gemma4_emitted_ids = []
+
+    def stream_tool_calls_complete(self, buffered_text: str) -> bool:
+        """True once a complete native Gemma tool call has closed.
+
+        Gemma 4 can continue by hallucinating a client-owned
+        ``<|tool_response>`` block after the real call. Once the native call is
+        parseable and no new call is opening in the tail, the server should stop
+        generation and execute the tool itself.
+        """
+        matches = list(_TOOL_CALL_PATTERN.finditer(buffered_text))
+        if not matches:
+            return False
+        tail = buffered_text[matches[-1].end():]
+        if _STC in tail:
+            return False
+        for n in range(len(_STC) - 1, 0, -1):
+            if tail.endswith(_STC[:n]):
+                return False
+        return True
+
+    def stream_tool_call_stop_truncate(self, buffered_text: str) -> str:
+        """Drop hallucinated post-call text after the last complete call."""
+        matches = list(_TOOL_CALL_PATTERN.finditer(buffered_text))
+        if not matches:
+            return buffered_text
+        return buffered_text[: matches[-1].end()]
 
     @staticmethod
     def _strip_hallucinated_tool_response(text: str) -> str:

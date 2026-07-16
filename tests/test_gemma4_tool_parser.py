@@ -137,6 +137,32 @@ class TestGemma4ToolParser:
         for marker in ("thought", "<|tool_response>", "<audio", "14°C", "clear skies"):
             assert marker not in content, f"{marker!r} leaked: {content!r}"
 
+    def test_stream_complete_call_requests_early_stop_before_hallucinated_response(self, parser):
+        text = (
+            "<|channel>thought\n<channel|>"
+            '<|tool_call>call:file_info{path:<|"|>README.md<|"|>}<tool_call|>'
+            "<|tool_response>response:{value:<|\"|>fabricated<|\"|>}<tool_call|>"
+            "<|channel>thought\n<channel|>G4-DONE"
+        )
+
+        assert Gemma4ToolParser.STREAM_STOPS_AFTER_COMPLETE_CALL is True
+        assert parser.stream_tool_calls_complete(text) is True
+        truncated = parser.stream_tool_call_stop_truncate(text)
+        assert truncated == (
+            "<|channel>thought\n<channel|>"
+            '<|tool_call>call:file_info{path:<|"|>README.md<|"|>}<tool_call|>'
+        )
+        assert "<|tool_response>" not in truncated
+        assert "G4-DONE" not in truncated
+
+    def test_stream_complete_call_waits_when_new_call_is_opening(self, parser):
+        text = (
+            '<|tool_call>call:first{path:<|"|>a<|"|>}<tool_call|>'
+            "<|tool"
+        )
+
+        assert parser.stream_tool_calls_complete(text) is False
+
     def test_legit_prose_before_call_preserved_with_hallucinated_response(self, parser):
         """The tool-response strip must only drop the hallucinated tail, never
         legitimate prose the model emitted BEFORE the tool call."""

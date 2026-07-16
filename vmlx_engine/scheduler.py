@@ -8938,6 +8938,17 @@ class Scheduler:
                 "max_num_seqs": self.config.max_num_seqs,
             },
         }
+        if generator_cls == "BatchGenerator":
+            try:
+                from .patches.mlx_lm_mtp.batch_generator import (
+                    native_mtp_stats_snapshot,
+                )
+
+                native_mtp_stats = native_mtp_stats_snapshot()
+                if native_mtp_stats.get("last_native_mtp") is not None:
+                    stats["batch_generator"].update(native_mtp_stats)
+            except Exception as exc:
+                logger.debug("Native MTP telemetry snapshot unavailable: %s", exc)
         # Include cache stats
         if self.block_aware_cache is not None:
             stats["paged_cache"] = self.block_aware_cache.get_stats()

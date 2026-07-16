@@ -66,10 +66,13 @@ buffer's ``_size`` by 1 to discard the rejected draft.
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import os
 import random
+import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, List, Optional, Tuple
@@ -88,6 +91,19 @@ _MTP_PROFILE = bool(os.environ.get("VMLX_MTP_PROFILE"))
 # autoregressive step. This isolates the MTP algorithm from the head's memory
 # cost, giving a footprint-controlled baseline for A/B on a variance-prone box.
 _MTP_BYPASS = bool(os.environ.get("VMLX_MTP_BYPASS"))
+
+# Process-local, read-only telemetry surface for /health. The generation loop
+# runs on the scheduler worker while health is served from the API loop, so
+# publish complete snapshots under a lock instead of exposing the mutable
+# per-request dataclass. A process restart intentionally resets these totals.
+_MTP_TELEMETRY_LOCK = threading.Lock()
+_LAST_NATIVE_MTP: Optional[dict] = None
+_NATIVE_MTP_TOTALS = {
+    "requests": 0,
+    "cycles": 0,
+    "drafted_tokens": 0,
+    "accepted_tokens": 0,
+}
 
 
 def _pbar(*arrays) -> None:
@@ -299,6 +315,11 @@ class _MtpStats:
     depth: int = 1  # resolved draft depth for this sequence
     draft_tokens_proposed: int = 0  # sum of chain lengths across cycles
     draft_tokens_accepted: int = 0  # sum of accepted prefix lengths
+    accepted_by_depth: List[int] = field(default_factory=lambda: [0, 0, 0])
+    drafted_by_depth: List[int] = field(default_factory=lambda: [0, 0, 0])
+    seed_main_forwards: int = 0
+    verify_main_forwards: int = 0
+    mtp_forwards: int = 0
     # Component-level timings. Help diagnose where MTP overhead comes from
     # when accept rate is healthy but wall-clock throughput isn't.
     backbone_ms: float = 0.0  # cumulative time inside the 2-token verify forward
@@ -340,6 +361,96 @@ class _MtpState:
 
     # Accept-rate / throughput counters. Surfaced via logger.info on finish.
     stats: _MtpStats = field(default_factory=_MtpStats)
+
+
+def _mtp_rate(accepted: int, drafted: int) -> Optional[float]:
+    if drafted <= 0:
+        return None
+    return accepted / drafted
+
+
+def _native_mtp_payload(
+    uid: Any, stats: _MtpStats, finish_reason: str
+) -> dict:
+    timings = {
+        "verify": float(stats.backbone_ms),
+        "sample": float(stats.sample_ms),
+        "draft": float(stats.mtp_head_ms),
+        "cache": float(stats.cache_ops_ms),
+    }
+    timing_total = sum(timings.values())
+    timings["total"] = timing_total
+    timings["avg_cycle"] = timing_total / max(1, int(stats.cycles or 0))
+    depth_rates = {
+        label: _mtp_rate(
+            int(stats.accepted_by_depth[index]),
+            int(stats.drafted_by_depth[index]),
+        )
+        for index, label in enumerate(("d1", "d2", "d3"))
+    }
+    return {
+        "request_id": str(uid),
+        "finish_reason": finish_reason,
+        "final_depth": int(stats.depth or 1),
+        "cycles": int(stats.cycles),
+        "accepts": int(stats.accepts),
+        "rejects": int(stats.rejects),
+        "init_emits": int(stats.init_emits),
+        "draft_emits": int(stats.draft_emits),
+        "bonus_emits": int(stats.bonus_emits),
+        "verify_emits": int(stats.verify_emits),
+        "drafted_tokens": int(stats.draft_tokens_proposed),
+        "accepted_tokens": int(stats.draft_tokens_accepted),
+        "acceptance_rate": _mtp_rate(
+            int(stats.draft_tokens_accepted),
+            int(stats.draft_tokens_proposed),
+        ),
+        "accepted_by_depth": list(stats.accepted_by_depth),
+        "drafted_by_depth": list(stats.drafted_by_depth),
+        "depth_acceptance_rates": depth_rates,
+        "forwards": {
+            "seed_main": int(stats.seed_main_forwards),
+            "verify_main": int(stats.verify_main_forwards),
+            "replay_main": 0,
+            "mtp": int(stats.mtp_forwards),
+        },
+        "timings_ms": timings,
+        "profiled_phase_timing": bool(_MTP_PROFILE),
+        "published_at": time.time(),
+        "fallback_reason": None,
+    }
+
+
+def _publish_native_mtp_stats(
+    uid: Any, stats: _MtpStats, finish_reason: str
+) -> dict:
+    global _LAST_NATIVE_MTP
+
+    payload = _native_mtp_payload(uid, stats, finish_reason)
+    with _MTP_TELEMETRY_LOCK:
+        _LAST_NATIVE_MTP = payload
+        _NATIVE_MTP_TOTALS["requests"] += 1
+        _NATIVE_MTP_TOTALS["cycles"] += int(stats.cycles)
+        _NATIVE_MTP_TOTALS["drafted_tokens"] += int(
+            stats.draft_tokens_proposed
+        )
+        _NATIVE_MTP_TOTALS["accepted_tokens"] += int(
+            stats.draft_tokens_accepted
+        )
+    return payload
+
+
+def native_mtp_stats_snapshot() -> dict:
+    """Return immutable process-local BatchGenerator MTP acceptance telemetry."""
+    with _MTP_TELEMETRY_LOCK:
+        totals = dict(_NATIVE_MTP_TOTALS)
+        totals["acceptance_rate"] = _mtp_rate(
+            int(totals["accepted_tokens"]), int(totals["drafted_tokens"])
+        )
+        return {
+            "last_native_mtp": copy.deepcopy(_LAST_NATIVE_MTP),
+            "native_mtp_totals": totals,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +695,7 @@ def _post_init_mtp(gen_batch: Any) -> None:
     state.mtp_cache = gen_batch.model.make_mtp_cache()
     state.depth = _effective_depth(gen_batch)
     state.stats.depth = state.depth
+    state.stats.seed_main_forwards = 1
     state.next_main = _ensure_uint32(next_main_tok)
     state.queue.append((int(main_tok.tolist()[0]), main_lp, "init"))
     state.queue.append(
@@ -634,6 +746,7 @@ def _log_mtp_stats(uid: Any, stats: "_MtpStats", finish_reason: str) -> None:
         emits[init=<i>,draft=<d>,bonus=<b>,verify=<v>]
         timing[backbone=<X>ms mtp=<Y>ms sample=<S>ms cache=<C>ms]
     """
+    payload = _publish_native_mtp_stats(uid, stats, finish_reason)
     total_emits = (
         stats.init_emits + stats.draft_emits + stats.bonus_emits + stats.verify_emits
     )
@@ -641,10 +754,8 @@ def _log_mtp_stats(uid: Any, stats: "_MtpStats", finish_reason: str) -> None:
         rate_str = f"{stats.accepts / stats.cycles * 100:.1f}%"
     else:
         rate_str = "n/a"
-    if stats.draft_tokens_proposed > 0:
-        tok_rate_str = (
-            f"{stats.draft_tokens_accepted / stats.draft_tokens_proposed * 100:.1f}%"
-        )
+    if payload["acceptance_rate"] is not None:
+        tok_rate_str = f"{payload['acceptance_rate'] * 100:.1f}%"
     else:
         tok_rate_str = "n/a"
     logger.info(
@@ -788,8 +899,13 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
     state.stats.sample_ms += (time.perf_counter() - t0) * 1000
 
     state.stats.cycles += 1
+    state.stats.verify_main_forwards += 1
     state.stats.draft_tokens_proposed += n
     state.stats.draft_tokens_accepted += k
+    for index in range(n):
+        state.stats.drafted_by_depth[index] += 1
+        if index < k:
+            state.stats.accepted_by_depth[index] += 1
     full_accept = k == n
     if full_accept:
         state.stats.accepts += 1
@@ -885,6 +1001,7 @@ def _draft_chain(
     cur_tok = t0_tok
     proc_ctx = prev_buf
     for _ in range(max(1, state.depth)):
+        state.stats.mtp_forwards += 1
         next_ids = cur_tok.reshape(1, 1)
         with mx.stream(_get_generation_stream()):
             mtp_logits, mtp_hidden = gen_batch.model.mtp_forward(

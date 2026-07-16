@@ -104,6 +104,60 @@ def test_native_mtp_light_timing_records_without_sync_trace(monkeypatch):
     assert stats.draft_ms > 0
 
 
+def test_omlx_native_mtp_stats_publish_acceptance_depth_and_forwards():
+    from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+        _MtpStats,
+        _publish_native_mtp_stats,
+        native_mtp_stats_snapshot,
+    )
+
+    stats = _MtpStats(
+        cycles=5,
+        accepts=3,
+        rejects=2,
+        init_emits=2,
+        draft_emits=3,
+        bonus_emits=3,
+        verify_emits=2,
+        depth=1,
+        draft_tokens_proposed=5,
+        draft_tokens_accepted=3,
+        accepted_by_depth=[3, 0, 0],
+        drafted_by_depth=[5, 0, 0],
+        seed_main_forwards=1,
+        verify_main_forwards=5,
+        mtp_forwards=6,
+        backbone_ms=20.0,
+        mtp_head_ms=5.0,
+        sample_ms=2.0,
+        cache_ops_ms=1.0,
+    )
+
+    published = _publish_native_mtp_stats("hy3-test", stats, "stop")
+    snapshot = native_mtp_stats_snapshot()
+
+    assert published["request_id"] == "hy3-test"
+    assert published["final_depth"] == 1
+    assert published["accepted_tokens"] == 3
+    assert published["drafted_tokens"] == 5
+    assert published["acceptance_rate"] == pytest.approx(0.6)
+    assert published["depth_acceptance_rates"] == {
+        "d1": pytest.approx(0.6),
+        "d2": None,
+        "d3": None,
+    }
+    assert published["forwards"] == {
+        "seed_main": 1,
+        "verify_main": 5,
+        "replay_main": 0,
+        "mtp": 6,
+    }
+    assert published["timings_ms"]["total"] == pytest.approx(28.0)
+    assert snapshot["last_native_mtp"] == published
+    assert snapshot["native_mtp_totals"]["requests"] >= 1
+    assert snapshot["native_mtp_totals"]["accepted_tokens"] >= 3
+
+
 class TestMtpTelemetryEdgeCases:
     def test_negative_layer_count_flagged_metadata_inconsistent(self, tmp_path):
         from vmlx_engine.server import _model_mtp_status

@@ -4846,7 +4846,7 @@ class Scheduler:
         _gpl_fetch = getattr(request, "_gen_prompt_len", 0) or 0
         if (
             getattr(self, "_mixed_attention_cache_model", False)
-            or self._uses_openpangu_cache
+            or getattr(self, "_uses_openpangu_cache", False)
         ):
             # Mixed full/SWA models must use the full effective prompt as the
             # cache key for strict logprob equivalence. Stripping the generation
@@ -5111,7 +5111,7 @@ class Scheduler:
         ):
             _disk_fetch_tokens = list(request.prompt_token_ids)
             _gpl = getattr(request, "_gen_prompt_len", 0) or 0
-            if self._uses_openpangu_cache:
+            if getattr(self, "_uses_openpangu_cache", False):
                 # The typed snapshot is the exact full effective prompt's N-1
                 # state.  Do not strip/replay template trailer tokens against a
                 # different causal-conv boundary.
@@ -5250,7 +5250,7 @@ class Scheduler:
                     elif (
                         self.memory_aware_cache is not None
                         and not _disk_needs_worker_dequant
-                        and not self._uses_openpangu_cache
+                        and not getattr(self, "_uses_openpangu_cache", False)
                     ):
                         try:
                             _l1_store_tokens = (
@@ -7010,7 +7010,7 @@ class Scheduler:
                                             request._extracted_cache = None
                                     else:
                                         request._extracted_cache = None
-                                elif self._uses_openpangu_cache:
+                                elif getattr(self, "_uses_openpangu_cache", False):
                                     # SingleBatchGenerator captured this exact N-1
                                     # typed boundary before consuming the final
                                     # prompt token.  Never fall back to the live
@@ -7738,7 +7738,7 @@ class Scheduler:
                             # append role trailer tokens that differ on every turn;
                             # without this strip, fetches on later turns miss 100%.
                             _gpl_store = getattr(request, "_gen_prompt_len", 0) or 0
-                            if self._uses_openpangu_cache:
+                            if getattr(self, "_uses_openpangu_cache", False):
                                 _gpl_store = 0
                             if 0 < _gpl_store < len(prompt_tokens):
                                 prompt_tokens = prompt_tokens[:-_gpl_store]
@@ -7811,7 +7811,7 @@ class Scheduler:
                                     cache_type=cache_type,
                                 )
                                 if stored:
-                                    if self._uses_openpangu_cache:
+                                    if getattr(self, "_uses_openpangu_cache", False):
                                         logger.info(
                                             "Stored openPangu exact typed cache for "
                                             "%s (%d N-1 key tokens from %d prompt "

@@ -107,7 +107,9 @@ export function ApiDashboard() {
     try {
       const host = lanEnabled ? "0.0.0.0" : "127.0.0.1";
       const status = await window.api.gateway?.setHostAndPort?.(port, host);
-      setGwPort(String(port));
+      const activePort = status?.port ?? port;
+      setGwPort(String(activePort));
+      setPortInput(String(activePort));
       setGwHost(status?.host || host);
       setGwLanHost(status?.lanHost ?? null);
     } catch (err: any) {
@@ -121,6 +123,10 @@ export function ApiDashboard() {
     setLanEnabled(newLan);
     try {
       const status = await window.api.gateway?.setHostAndPort?.(parseInt(gwPort, 10), host);
+      if (status?.port) {
+        setGwPort(String(status.port));
+        setPortInput(String(status.port));
+      }
       setGwHost(status?.host || host);
       setGwLanHost(status?.lanHost ?? null);
     } catch (err: any) {

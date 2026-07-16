@@ -433,6 +433,18 @@ describe("Ollama gateway parity contracts", () => {
     expect(dashboardSource).toContain("const gatewayUrl = `http://${gatewayDisplayHost}:${gwPort}`");
   });
 
+  it("shows the gateway port that actually bound after a restart fallback", () => {
+    const dashboardSource = readFileSync(
+      resolve(process.cwd(), "src/renderer/src/components/api/ApiDashboard.tsx"),
+      "utf8",
+    );
+    expect(dashboardSource).toContain("const activePort = status?.port ?? port");
+    expect(dashboardSource).toContain("setGwPort(String(activePort))");
+    expect(dashboardSource).toContain("setPortInput(String(activePort))");
+    expect(dashboardSource).toContain("setGwPort(String(status.port))");
+    expect(dashboardSource).not.toContain("setGwPort(String(port));");
+  });
+
   it("exposes a synchronized single-loaded-model gateway mode in main, preload, API dashboard, server settings, and tray", () => {
     const mainSource = readFileSync(
       resolve(process.cwd(), "src/main/index.ts"),

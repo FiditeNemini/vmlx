@@ -176,6 +176,8 @@ def _restore_tq_block_entry(
             "offset",
         )
     }
+    config["key_dtype"] = str(tq_meta["key_dtype"])
+    config["value_dtype"] = str(tq_meta["value_dtype"])
     return ("turboquant_kv", encoded_keys, encoded_values, config)
 
 

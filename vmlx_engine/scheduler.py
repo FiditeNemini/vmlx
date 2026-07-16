@@ -5864,6 +5864,64 @@ class Scheduler:
                 else:
                     request.prompt_cache = cache_to_use
 
+                # TQ-native paged/L2 records are decoded to ordinary KVCache
+                # objects by BlockAwarePrefixCache so the packed storage codec
+                # never leaks into attention.  A model whose native live cache
+                # is TurboQuantKVCache still needs the decoded arrays re-wrapped
+                # in that class before generation.  The storage-only policy has
+                # compress_after=0, so this does not re-encode or change the
+                # restored values; it restores the model's proven allocation and
+                # update path.  Leaving Laguna/Qwen full-KV hits as plain KVCache
+                # made identical 48-token warm prompts decode at 7-8 tok/s after
+                # a 24.5 tok/s cold pass even though reconstruction took 0.11s.
+                _tq_native_blocks = int(
+                    getattr(
+                        self.block_aware_cache,
+                        "_last_reconstruct_tq_blocks",
+                        0,
+                    )
+                    or 0
+                )
+                if (
+                    cache_to_use is not None
+                    and _tq_native_blocks > 0
+                    and getattr(self, "_tq_active", False)
+                    and not getattr(self, "_is_hybrid", False)
+                ):
+                    _t_tq_rewrap = time.perf_counter()
+                    _tq_rewrapped = False
+                    try:
+                        from .mllm_batch_generator import _recompress_to_tq
+
+                        _rewrapped_cache = _recompress_to_tq(
+                            cache_to_use,
+                            self.model,
+                        )
+                        _tq_rewrapped = any(
+                            type(layer).__name__ == "TurboQuantKVCache"
+                            for layer in (_rewrapped_cache or [])
+                        )
+                        if _tq_rewrapped:
+                            cache_to_use = _rewrapped_cache
+                            request.prompt_cache = cache_to_use
+                            request._tq_native_cache_hit = True
+                    except Exception as exc:
+                        logger.warning(
+                            "Request %s: failed to re-wrap %d decoded TQ-native "
+                            "paged blocks for live cache-class parity; continuing "
+                            "with decoded KVCache: %s",
+                            request.request_id,
+                            _tq_native_blocks,
+                            exc,
+                        )
+                    if cache_execution is not None:
+                        cache_execution["tq_native_blocks"] = _tq_native_blocks
+                        cache_execution["tq_rewrapped"] = _tq_rewrapped
+                        cache_execution["tq_rewrap_seconds"] = round(
+                            time.perf_counter() - _t_tq_rewrap,
+                            6,
+                        )
+
             # DSV4 q4/q8 prefix cache restore must happen on the llm-worker
             # that owns the MLX stream. add_request() runs on the API/event
             # loop thread, so only block lookup and lightweight object

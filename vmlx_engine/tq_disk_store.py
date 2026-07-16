@@ -48,13 +48,35 @@ except ImportError:
     HAS_MLX = False
 
 _TQ_CLASS_NAME = "TurboQuantKVCache"
+_TQ_RESTORE_DTYPES = {
+    "bfloat16": mx.bfloat16 if HAS_MLX else None,
+    "float16": mx.float16 if HAS_MLX else None,
+    "float32": mx.float32 if HAS_MLX else None,
+}
+
+
+def _canonical_tq_dtype(dtype: Any) -> str:
+    """Return the stable wire name for a supported decoded KV dtype."""
+    name = str(dtype).rsplit(".", 1)[-1]
+    if name not in _TQ_RESTORE_DTYPES:
+        raise ValueError(f"unsupported TQ decoded KV dtype: {dtype}")
+    return name
+
+
+def _restore_tq_dtype(value: Any, dtype_name: Any, label: str) -> Any:
+    """Restore the attention dtype lost by TurboQuant's float32 decoder."""
+    name = str(dtype_name or "")
+    target = _TQ_RESTORE_DTYPES.get(name)
+    if target is None:
+        raise ValueError(f"invalid or missing {label} TQ dtype: {name!r}")
+    return value if value.dtype == target else value.astype(target)
 
 
 def encode_tq_block(
     keys: Any,
     values: Any,
     config: Dict[str, Any],
-) -> Tuple[str, Any, Any, Dict[str, int]]:
+) -> Tuple[str, Any, Any, Dict[str, Any]]:
     """Encode one positional paged-cache block as native TurboQuant data."""
     if not HAS_MLX:
         raise RuntimeError("MLX required for TQ block encoding")
@@ -109,6 +131,8 @@ def encode_tq_block(
             "value_dim": int(values.shape[-1]),
             "key_bits": key_bits,
             "value_bits": value_bits,
+            "key_dtype": _canonical_tq_dtype(keys.dtype),
+            "value_dtype": _canonical_tq_dtype(values.dtype),
             "seed": seed,
             "offset": token_count,
         },
@@ -136,8 +160,16 @@ def decode_tq_block(entry: Tuple[Any, ...]) -> Tuple[Any, Any]:
         compress_after=0,
         sink_tokens=0,
     )
-    keys = decode_keys(encoded_keys, tq.key_encoder)
-    values = decode_values(encoded_values, tq.value_encoder)
+    keys = _restore_tq_dtype(
+        decode_keys(encoded_keys, tq.key_encoder),
+        config.get("key_dtype"),
+        "key",
+    )
+    values = _restore_tq_dtype(
+        decode_values(encoded_values, tq.value_encoder),
+        config.get("value_dtype"),
+        "value",
+    )
     expected = int(config["offset"])
     if int(keys.shape[-2]) != expected or int(values.shape[-2]) != expected:
         raise ValueError(
@@ -231,6 +263,8 @@ def canonicalize_tq_cache_for_storage(cache: List[Any]) -> List[Any]:
         )
         clone.keys = mx.contiguous(keys)
         clone.values = mx.contiguous(values)
+        clone._vmlx_tq_key_dtype = _canonical_tq_dtype(keys.dtype)
+        clone._vmlx_tq_value_dtype = _canonical_tq_dtype(values.dtype)
         clone.offset = offset
         clone.compress()
         return clone
@@ -440,6 +474,12 @@ def _serialize_tq_layer(
     meta[f"__tq_{i}_value_dim__"] = str(layer.value_dim)
     meta[f"__tq_{i}_key_bits__"] = str(layer.key_bits)
     meta[f"__tq_{i}_value_bits__"] = str(layer.value_bits)
+    meta[f"__tq_{i}_key_dtype__"] = _canonical_tq_dtype(
+        getattr(layer, "_vmlx_tq_key_dtype", "")
+    )
+    meta[f"__tq_{i}_value_dtype__"] = _canonical_tq_dtype(
+        getattr(layer, "_vmlx_tq_value_dtype", "")
+    )
     meta[f"__tq_{i}_sink_tokens__"] = str(getattr(layer, 'sink_tokens', 0))
     meta[f"__tq_{i}_seed__"] = str(getattr(layer, '_seed', 42))
 
@@ -569,6 +609,12 @@ def _serialize_cache_list_layer(
             meta[f"__{prefix}_value_dim__"] = str(sub.value_dim)
             meta[f"__{prefix}_key_bits__"] = str(sub.key_bits)
             meta[f"__{prefix}_value_bits__"] = str(sub.value_bits)
+            meta[f"__{prefix}_key_dtype__"] = _canonical_tq_dtype(
+                getattr(sub, "_vmlx_tq_key_dtype", "")
+            )
+            meta[f"__{prefix}_value_dtype__"] = _canonical_tq_dtype(
+                getattr(sub, "_vmlx_tq_value_dtype", "")
+            )
             meta[f"__{prefix}_sink_tokens__"] = str(getattr(sub, 'sink_tokens', 0))
             meta[f"__{prefix}_seed__"] = str(getattr(sub, '_seed', 42))
         elif hasattr(sub, 'state') and hasattr(sub, 'meta_state'):
@@ -653,8 +699,16 @@ def _deserialize_cache_list_layer(
                 _tq_cl = _TQ_CL(key_dim=_key_dim, value_dim=_val_dim,
                                  key_bits=_key_bits, value_bits=_val_bits,
                                  seed=_seed)
-                kv.keys = decode_keys(encoded_keys, _tq_cl.key_encoder)
-                kv.values = decode_values(encoded_values, _tq_cl.value_encoder)
+                kv.keys = _restore_tq_dtype(
+                    decode_keys(encoded_keys, _tq_cl.key_encoder),
+                    metadata.get(f"__{prefix}_key_dtype__"),
+                    f"CacheList {i}/{j} key",
+                )
+                kv.values = _restore_tq_dtype(
+                    decode_values(encoded_values, _tq_cl.value_encoder),
+                    metadata.get(f"__{prefix}_value_dtype__"),
+                    f"CacheList {i}/{j} value",
+                )
                 kv.offset = _parse_bounded_int(metadata, f"__{prefix}_offset__", default=0, lo=0, hi=2_000_000)
             except Exception as e:
                 logger.warning("CacheList sub-cache %d/%d TQ decode failed: %s", i, j, e)
@@ -696,9 +750,9 @@ def _deserialize_tq_layer(
     metadata: Dict[str, str],
     i: int,
 ) -> Optional[Any]:
-    """Decode a TQ compressed layer to float16 KVCache.
+    """Decode a TQ compressed layer to its original attention dtype.
 
-    The returned KVCache has decoded float16 keys/values. The caller should
+    The returned KVCache has decoded keys/values in the recorded dtype. The caller should
     use _recompress_to_tq() with the model's make_cache() template to convert
     back to TurboQuantKVCache.
     """
@@ -791,8 +845,16 @@ def _deserialize_tq_layer(
         key_enc = tq.key_encoder
         val_enc = tq.value_encoder
 
-        decoded_keys = decode_keys(encoded_keys, key_enc)
-        decoded_values = decode_values(encoded_values, val_enc)
+        decoded_keys = _restore_tq_dtype(
+            decode_keys(encoded_keys, key_enc),
+            metadata.get(f"__{prefix}_key_dtype__"),
+            f"layer {i} key",
+        )
+        decoded_values = _restore_tq_dtype(
+            decode_values(encoded_values, val_enc),
+            metadata.get(f"__{prefix}_value_dtype__"),
+            f"layer {i} value",
+        )
     except Exception as e:
         logger.warning("TQ layer %d decode failed: %s", i, e)
         return None

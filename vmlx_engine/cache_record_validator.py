@@ -52,6 +52,7 @@ MAX_CACHE_OFFSET = 2_000_000
 MAX_CACHE_LAYERS = 1024
 MAX_CACHE_GROUP_SIZE = 4096
 ALLOWED_CACHE_BITS = {2, 3, 4, 8}
+ALLOWED_TQ_DTYPES = {"bfloat16", "float16", "float32"}
 
 
 class CacheValidationError(ValueError):
@@ -487,6 +488,13 @@ def validate_cache_record(
                     return False, (
                         f"layer {i} 'turboquant_kv'.{key}: {bits} not in "
                         f"{sorted(ALLOWED_CACHE_BITS)}"
+                    ), total_bytes
+            for key in ("key_dtype", "value_dtype"):
+                dtype = tq_config.get(key)
+                if dtype not in ALLOWED_TQ_DTYPES:
+                    return False, (
+                        f"layer {i} 'turboquant_kv'.{key}: {dtype!r} not in "
+                        f"{sorted(ALLOWED_TQ_DTYPES)}"
                     ), total_bytes
             for key, lo, hi in (
                 ("key_dim", 1, MAX_TENSOR_DIM),
@@ -1378,6 +1386,15 @@ def validate_tq_native_metadata(
                     return False, (
                         f"{label}.{suffix}: {bits} not in {sorted(ALLOWED_CACHE_BITS)}"
                     )
+
+        for suffix in ("key_dtype", "value_dtype"):
+            key = f"__{prefix}_{suffix}__"
+            dtype = metadata.get(key)
+            if dtype not in ALLOWED_TQ_DTYPES:
+                return False, (
+                    f"{label}.{suffix}: {dtype!r} not in "
+                    f"{sorted(ALLOWED_TQ_DTYPES)}"
+                )
 
         for suffix in ("offset", "compressed_tokens", "sink_tokens"):
             key = f"__{prefix}_{suffix}__"

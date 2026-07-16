@@ -198,6 +198,11 @@ def compute_model_cache_key(
     if smelt_enabled and smelt_pct is not None:
         parts.append(f"smelt_pct={float(smelt_pct):.4f}")
     parts.append(f"tq={1 if tq_enabled else 0}")
+    if tq_enabled:
+        # TurboQuant's decoder emits float32 irrespective of the source cache
+        # dtype. dtype_v1 records the original attention dtype and restores it
+        # after decode. Keep legacy dtype-less L2 records outside this namespace.
+        parts.append("tq_storage_schema=dtype_v1")
     parts.append(f"kvq={int(kv_quant_bits or 0)}")
 
     # DSV4 cache correctness depends on runtime cache shape. Keep these in

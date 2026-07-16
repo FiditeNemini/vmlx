@@ -115,6 +115,8 @@ class TurboQuantKVCache:
             shape=(1, n_heads, n_tokens, value_dim),
             index_bits=value_bits,
         )
+        self._vmlx_tq_key_dtype = "float16"
+        self._vmlx_tq_value_dtype = "float16"
 
     @property
     def state(self):
@@ -256,6 +258,8 @@ class TestTQDiskStore:
             assert f"__tq_{i}_cv_shape__" in meta
             assert f"__tq_{i}_ck_bits__" in meta
             assert f"__tq_{i}_offset__" in meta
+            assert meta[f"__tq_{i}_key_dtype__"] == "float16"
+            assert meta[f"__tq_{i}_value_dtype__"] == "float16"
 
     def test_serialize_tq_cache_mixed_hybrid(self):
         """serialize_tq_cache handles mixed TQ + SSM layers (hybrid model)."""
@@ -340,6 +344,8 @@ class TestTQDiskStore:
 
         tensors, metadata = serialize_tq_cache(canonical)
         assert metadata["__tq_0_seed__"] == "73"
+        assert metadata["__tq_0_key_dtype__"] == "float16"
+        assert metadata["__tq_0_value_dtype__"] == "float16"
         restored = deserialize_tq_cache(tensors, metadata)[0]
         expected_keys, expected_values = stored.state
         mx.eval(
@@ -352,6 +358,42 @@ class TestTQDiskStore:
         value_mae = float(mx.mean(mx.abs(restored.values - expected_values)).item())
         assert key_mae <= 1e-5
         assert value_mae <= 1e-5
+        assert restored.keys.dtype == mx.float16
+        assert restored.values.dtype == mx.float16
+
+    def test_cache_list_tq_roundtrip_restores_bfloat16_attention_dtype(self):
+        """Hybrid CacheList TQ slots keep dtype; cumulative peers stay excluded."""
+        from jang_tools.turboquant.cache import TurboQuantKVCache as RealTQ
+        from mlx_lm.models.cache import CacheList
+        from vmlx_engine.tq_disk_store import (
+            canonicalize_tq_cache_for_storage,
+            deserialize_tq_cache,
+            serialize_tq_cache,
+        )
+
+        live = RealTQ(
+            key_dim=64,
+            value_dim=64,
+            key_bits=8,
+            value_bits=8,
+            seed=79,
+            compress_after=0,
+            sink_tokens=0,
+        )
+        live.keys = mx.random.normal(shape=(1, 2, 8, 64)).astype(mx.bfloat16)
+        live.values = mx.random.normal(shape=(1, 2, 8, 64)).astype(mx.bfloat16)
+        live.offset = 8
+
+        canonical = canonicalize_tq_cache_for_storage([CacheList(live)])
+        tensors, metadata = serialize_tq_cache(canonical)
+        assert metadata["__cl_0_0_key_dtype__"] == "bfloat16"
+        assert metadata["__cl_0_0_value_dtype__"] == "bfloat16"
+
+        restored = deserialize_tq_cache(tensors, metadata)[0]
+        restored_tq_slot = restored.caches[0]
+        mx.eval(restored_tq_slot.keys, restored_tq_slot.values)
+        assert restored_tq_slot.keys.dtype == mx.bfloat16
+        assert restored_tq_slot.values.dtype == mx.bfloat16
 
     def test_tq_file_size_vs_float16(self):
         """TQ-native files should be dramatically smaller than float16 state files.

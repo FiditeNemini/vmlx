@@ -83,6 +83,8 @@ def test_tq_paged_blocks_encode_each_slice_and_reconstruct():
     assert [entry[0] for entry in entries] == ["turboquant_kv", "turboquant_kv"]
     assert [entry[3]["seed"] for entry in entries] == [73, 73]
     assert [entry[3]["offset"] for entry in entries] == [16, 16]
+    assert [entry[3]["key_dtype"] for entry in entries] == ["float16", "float16"]
+    assert [entry[3]["value_dtype"] for entry in entries] == ["float16", "float16"]
 
     expected_keys = []
     expected_values = []
@@ -97,6 +99,8 @@ def test_tq_paged_blocks_encode_each_slice_and_reconstruct():
     assert restored is not None
     assert len(restored) == 1
     assert cache._last_reconstruct_tq_blocks == 2
+    assert restored[0].keys.dtype == mx.float16
+    assert restored[0].values.dtype == mx.float16
     mx.eval(restored[0].keys, restored[0].values, expected_keys, expected_values)
     assert float(mx.max(mx.abs(restored[0].keys - expected_keys)).item()) == 0.0
     assert float(mx.max(mx.abs(restored[0].values - expected_values)).item()) == 0.0
@@ -128,6 +132,8 @@ def test_tq_block_safetensors_record_preserves_seed_and_decodes():
     assert restored[3]["seed"] == 91
     assert restored[3]["key_bits"] == 8
     assert restored[3]["value_bits"] == 8
+    assert restored[3]["key_dtype"] == "float16"
+    assert restored[3]["value_dtype"] == "float16"
     original_keys, original_values = decode_tq_block(original)
     restored_keys, restored_values = decode_tq_block(restored)
     mx.eval(original_keys, original_values, restored_keys, restored_values)
@@ -154,6 +160,29 @@ def test_tq_block_validator_rejects_wrong_seed_or_offset():
     ok, reason, _ = validate_cache_record([bad_offset], source="bad-offset")
     assert not ok
     assert "shape/config mismatch" in reason
+
+    bad_dtype = (entry[0], entry[1], entry[2], {**entry[3], "key_dtype": "float64"})
+    ok, reason, _ = validate_cache_record([bad_dtype], source="bad-dtype")
+    assert not ok
+    assert "key_dtype" in reason
+
+
+def test_tq_block_decode_restores_bfloat16_attention_dtype():
+    from vmlx_engine.tq_disk_store import decode_tq_block, encode_tq_block
+
+    keys = mx.random.normal(shape=(1, 2, 8, 64)).astype(mx.bfloat16)
+    values = mx.random.normal(shape=(1, 2, 8, 64)).astype(mx.bfloat16)
+    entry = encode_tq_block(
+        keys,
+        values,
+        {"key_bits": 8, "value_bits": 8, "seed": 113},
+    )
+    assert entry[3]["key_dtype"] == "bfloat16"
+    assert entry[3]["value_dtype"] == "bfloat16"
+    restored_keys, restored_values = decode_tq_block(entry)
+    mx.eval(restored_keys, restored_values)
+    assert restored_keys.dtype == mx.bfloat16
+    assert restored_values.dtype == mx.bfloat16
 
 
 def test_nested_cache_list_tq_block_roundtrip_preserves_seed():

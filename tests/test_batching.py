@@ -1115,6 +1115,85 @@ class TestSchedulerBasic:
         assert execution["dequantization_seconds"] >= 0
         assert execution["total_worker_cache_seconds"] >= execution["reconstruction_seconds"]
 
+    def test_worker_paged_tq_hit_rewraps_decoded_full_kv_for_live_cache_parity(
+        self,
+        mock_model,
+        mock_tokenizer,
+        monkeypatch,
+    ):
+        """Storage-only TQ restores must use the model's native live cache class."""
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        scheduler._tq_active = True
+        scheduler._is_hybrid = False
+        scheduler._validate_cache = lambda cache: True
+
+        class _BlockAwareCache:
+            _last_reconstruct_tq_blocks = 1
+
+            def reconstruct_cache(self, block_table):
+                assert block_table.num_tokens == 48
+                return ["decoded-kv"]
+
+            def get_stats(self):
+                return {}
+
+        class _BatchGenerator:
+            stop_tokens = set()
+
+            def insert(self, tokens, max_tokens, caches=None, **_kwargs):
+                self.tokens = tokens
+                self.caches = caches
+                return [17]
+
+        seen = {}
+
+        def _rewrap(cache, model):
+            seen["cache"] = cache
+            seen["model"] = model
+
+            class TurboQuantKVCache:
+                pass
+
+            return [TurboQuantKVCache()]
+
+        import vmlx_engine.mllm_batch_generator as mllm_batch_generator
+
+        monkeypatch.setattr(mllm_batch_generator, "_recompress_to_tq", _rewrap)
+
+        sampling = SamplingParams(max_tokens=4)
+        request = Request("req-tq-live-parity", "x", sampling)
+        request.prompt_token_ids = list(range(52))
+        request.num_prompt_tokens = 52
+        request.block_table = BlockTable("req-tq-live-parity", [1], 48)
+        request.cached_tokens = 48
+        request.remaining_tokens = request.prompt_token_ids[48:]
+        request._cache_detail = "paged"
+        request._paged_block_table_needs_worker_reconstruct = True
+
+        batch_generator = _BatchGenerator()
+        scheduler.block_aware_cache = _BlockAwareCache()
+        scheduler.batch_generator = batch_generator
+        scheduler._current_sampler_params = (
+            sampling.temperature,
+            sampling.top_p,
+            sampling.min_p,
+            sampling.top_k,
+            sampling.repetition_penalty,
+        )
+        scheduler.waiting.append(request)
+        scheduler.requests[request.request_id] = request
+
+        scheduled = scheduler._schedule_waiting()
+
+        assert scheduled == [request]
+        assert seen == {"cache": ["decoded-kv"], "model": mock_model}
+        assert type(batch_generator.caches[0][0]).__name__ == "TurboQuantKVCache"
+        assert request._tq_native_cache_hit is True
+        execution = scheduler.get_stats()["last_cache_execution"]
+        assert execution["tq_native_blocks"] == 1
+        assert execution["tq_rewrapped"] is True
+        assert execution["tq_rewrap_seconds"] >= 0
+
     def test_memory_pressure_partial_reuse_preserves_generation_prompt_suffix(
         self, mock_model, mock_tokenizer
     ):

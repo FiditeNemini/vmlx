@@ -1751,9 +1751,13 @@ def _recompress_to_tq(cache: List[Any], language_model) -> List[Any]:
             compress_after=int(getattr(tpl, "compress_after", 0) or 0),
             sink_tokens=tpl.sink_tokens,
         )
-        # Copy reconstructed float16 data into TQ
+        # Copy reconstructed data without changing the model's attention dtype.
+        # These attributes also let TQ-native prompt serialization preserve the
+        # dtype even when the cache has not crossed its live compression limit.
         tq.keys = layer.keys
         tq.values = layer.values
+        tq._vmlx_tq_key_dtype = layer.keys.dtype
+        tq._vmlx_tq_value_dtype = layer.values.dtype
         tq.offset = layer.offset
         tq.step = getattr(layer, 'step', layer.keys.shape[2]) if layer.keys.ndim >= 3 else layer.offset
         resident_before += int(layer.keys.nbytes + layer.values.nbytes)

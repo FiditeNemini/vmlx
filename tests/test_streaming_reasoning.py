@@ -263,6 +263,29 @@ class TestEnableThinkingTriState:
         assert "thinking_mode\"] = \"disabled\"" in source
         assert "Responses API MiniMax-M3 visible answer pass" in source
 
+    def test_minimax_m3_tools_enabled_blank_turn_late_arms_answer_pass(self):
+        """Rejected speculative tool markup must not leave M3 reasoning-only."""
+        import vmlx_engine.server as server_mod
+
+        chat_source = inspect.getsource(server_mod.stream_chat_completion)
+        responses_source = inspect.getsource(server_mod.stream_responses_api)
+
+        for source in (chat_source, responses_source):
+            assert "m3_tools_fallback_answer_budget" in source
+            assert "re-arming bounded thinking-off answer pass" in source
+            assert "or _effective_thinking is True" in source
+            assert (
+                "m3_reasoning_only_answer_budget = "
+                "m3_tools_fallback_answer_budget"
+            ) in source
+
+        # Responses must arm only after schema-valid tool parsing has failed.
+        assert responses_source.index(
+            "if tool_call_buffering and not tool_calls:"
+        ) < responses_source.index(
+            "MiniMax-M3 tools-enabled Responses stream produced no valid tool"
+        )
+
     def test_minimax_m3_responses_never_falls_back_reasoning_as_visible(self):
         """M3 Auto can reason without tags; do not publish that as output_text."""
         import vmlx_engine.server as server_mod

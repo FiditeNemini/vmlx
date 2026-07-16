@@ -2599,6 +2599,252 @@ class TestOpenAILogprobsFormatting:
         assert json.loads(function_items[-1]["arguments"]) == expected_args
 
     @pytest.mark.asyncio
+    async def test_nonstream_responses_minimax_tools_available_no_call_runs_answer_pass(
+        self, monkeypatch
+    ):
+        """Tools being available must not suppress M3's no-call answer pass."""
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.minimax_m3_parser import MiniMaxM3ReasoningParser
+
+        class _Engine:
+            is_mllm = False
+            preserve_native_tool_format = False
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, *, messages, **kwargs):
+                self.calls.append({"messages": messages, "kwargs": kwargs})
+                text = (
+                    "<mm:think>No function is needed for this answer."
+                    if len(self.calls) == 1
+                    else "MM3-NONSTREAM-RESPONSES-DONE"
+                )
+                return GenerationOutput(
+                    text=text,
+                    raw_text=text,
+                    prompt_tokens=8,
+                    completion_tokens=8,
+                    finish_reason="stop",
+                )
+
+        engine = _Engine()
+        monkeypatch.setattr(server, "_engine", engine)
+        monkeypatch.setattr(server, "_served_model_name", "jangq-ai/MiniMax-M3-Coder-Small")
+        monkeypatch.setattr(server, "_model_name", "jangq-ai/MiniMax-M3-Coder-Small")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_model_type", "llm")
+        monkeypatch.setattr(server, "_reasoning_parser", MiniMaxM3ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", "minimax_m3")
+        monkeypatch.setattr(server, "_mcp_manager", None)
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+
+        response = await server.create_response(
+            ResponsesRequest(
+                model="jangq-ai/MiniMax-M3-Coder-Small",
+                input="answer without a tool",
+                max_output_tokens=64,
+                enable_thinking=True,
+                tools=[
+                    {
+                        "type": "function",
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    }
+                ],
+            ),
+            fastapi_request=None,
+        )
+
+        assert response.output_text == "MM3-NONSTREAM-RESPONSES-DONE"
+        assert len(engine.calls) == 2
+        assert "tools" not in engine.calls[1]["kwargs"]
+        assert engine.calls[1]["kwargs"]["chat_template_kwargs"]["thinking_mode"] == "disabled"
+
+    @pytest.mark.asyncio
+    async def test_nonstream_chat_minimax_tools_available_no_call_runs_answer_pass(
+        self, monkeypatch
+    ):
+        """Chat Completions must share the M3 no-call non-stream fallback."""
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.minimax_m3_parser import MiniMaxM3ReasoningParser
+
+        class _Engine:
+            is_mllm = False
+            preserve_native_tool_format = False
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, *, messages, **kwargs):
+                self.calls.append({"messages": messages, "kwargs": kwargs})
+                text = (
+                    "<mm:think>No function is needed for this answer."
+                    if len(self.calls) == 1
+                    else "MM3-NONSTREAM-CHAT-DONE"
+                )
+                return GenerationOutput(
+                    text=text,
+                    raw_text=text,
+                    prompt_tokens=8,
+                    completion_tokens=8,
+                    finish_reason="stop",
+                )
+
+        engine = _Engine()
+        monkeypatch.setattr(server, "_engine", engine)
+        monkeypatch.setattr(server, "_served_model_name", "jangq-ai/MiniMax-M3-Coder-Small")
+        monkeypatch.setattr(server, "_model_name", "jangq-ai/MiniMax-M3-Coder-Small")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_model_type", "llm")
+        monkeypatch.setattr(server, "_reasoning_parser", MiniMaxM3ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", "minimax_m3")
+        monkeypatch.setattr(server, "_mcp_manager", None)
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+
+        response = await server.create_chat_completion(
+            ChatCompletionRequest(
+                model="jangq-ai/MiniMax-M3-Coder-Small",
+                messages=[Message(role="user", content="answer without a tool")],
+                max_tokens=64,
+                enable_thinking=True,
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "file_info",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                                "required": ["path"],
+                            },
+                        },
+                    }
+                ],
+            ),
+            fastapi_request=None,
+        )
+
+        assert response.choices[0].message.content == "MM3-NONSTREAM-CHAT-DONE"
+        assert len(engine.calls) == 2
+        assert "tools" not in engine.calls[1]["kwargs"]
+        assert engine.calls[1]["kwargs"]["chat_template_kwargs"]["thinking_mode"] == "disabled"
+
+    @pytest.mark.asyncio
+    async def test_streaming_responses_invalid_minimax_xml_keeps_only_visible_prefix(
+        self, monkeypatch
+    ):
+        """A speculative M3 XML marker must not become text or a zero-tool success."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+
+        visible_prefix = "Based on the screenshot: Completion marker:"
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                chunks = (
+                    (visible_prefix, False, None),
+                    ("\n<tool_call>", True, "stop"),
+                )
+                text = ""
+                for idx, (delta, finished, reason) in enumerate(chunks, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=delta,
+                        tokens=[],
+                        prompt_tokens=7,
+                        completion_tokens=idx,
+                        finished=finished,
+                        finish_reason=reason,
+                    )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "minimax-m3-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", "minimax_m3")
+
+        request = ResponsesRequest(
+            model="minimax-m3-test",
+            input="read the screenshot",
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ],
+        )
+
+        events = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": "read the screenshot"}],
+            request,
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        visible = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        )
+        done = [
+            event.get("text", "")
+            for event in events
+            if event.get("type") == "response.output_text.done"
+        ]
+        function_items = [
+            event["item"]
+            for event in events
+            if event.get("type") == "response.output_item.done"
+            and event.get("item", {}).get("type") == "function_call"
+        ]
+        completed = next(
+            event["response"]
+            for event in events
+            if event.get("type") == "response.completed"
+        )
+
+        assert visible == visible_prefix
+        assert done[-1] == visible_prefix
+        assert function_items == []
+        assert "<tool_call" not in json.dumps(completed)
+        assert any(
+            "schema-valid function call" in warning
+            for warning in completed.get("warnings", [])
+        )
+
+    @pytest.mark.asyncio
     async def test_streaming_responses_tool_call_uses_next_output_index_without_text(
         self, monkeypatch
     ):

@@ -86,6 +86,13 @@ describe('tool status responsiveness contract', () => {
     expect(source).toContain("const isGenerating = isActive && lastStatus.phase === 'generating'")
   })
 
+  it('does not render a speculative buffering heartbeat as a completed zero-tool call', () => {
+    const source = readPanelSource('src/renderer/src/components/chat/ToolCallStatus.tsx')
+
+    expect(source).toContain('const hasStandaloneError')
+    expect(source).toContain('if (!isActive && toolCount === 0 && !hasStandaloneError) return null')
+  })
+
   it('executes Responses function calls from completed output items with final arguments', () => {
     const source = readPanelSource('src/main/ipc/chat.ts')
     const doneIdx = source.indexOf('responsesEventType === "response.output_item.done"')

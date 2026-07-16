@@ -3364,6 +3364,44 @@ def _strip_tool_markup_residue_for_display(text: str) -> str:
     return re.sub(r"[ \t]*\n[ \t]*\n[ \t]*", "\n", cleaned).strip()
 
 
+def _visible_prefix_before_unparsed_tool_markup(text: str) -> str:
+    """Return only text that safely preceded a buffered but invalid tool call.
+
+    Streaming stops exposing content as soon as a native tool marker begins. If
+    the completed parser then rejects the call (truncated XML, unavailable tool,
+    or schema-invalid arguments), the raw buffered suffix must not be recycled
+    into ``output_text``. Doing so leaks control markup and leaves Electron
+    showing a completed ``Used 0 tools`` pseudo-call. Preserve the prose that
+    was already visible before the marker and discard only the speculative
+    control suffix.
+    """
+    if not text:
+        return ""
+
+    marker_positions = [
+        pos for marker in _TOOL_CALL_MARKERS if (pos := text.find(marker)) >= 0
+    ]
+    raw_json_pos = text.find(_RAW_JSON_TOOL_ANCHOR)
+    if raw_json_pos >= 0:
+        marker_positions.append(raw_json_pos)
+    harmony_match = re.search(r"\bto=\w[\w.]*\s+code\{", text)
+    if harmony_match:
+        marker_positions.append(harmony_match.start())
+    if marker_positions:
+        return text[: min(marker_positions)].rstrip()
+
+    # The buffer can activate on a marker split at the final token. Remove the
+    # longest such partial suffix without touching an ordinary earlier '<'.
+    partial_len = 0
+    for marker in _TOOL_CALL_MARKERS:
+        max_prefix = min(len(marker) - 1, len(text))
+        for n in range(max_prefix, 0, -1):
+            if text.endswith(marker[:n]):
+                partial_len = max(partial_len, n)
+                break
+    return text[:-partial_len].rstrip() if partial_len else text
+
+
 def _parser_routes_tools_via_reasoning_channel(request_parser, harmony_active: bool) -> bool:
     """GPT-OSS/Harmony emit tool calls through the commentary channel that the
     reasoning parser surfaces alongside reasoning text, so the reasoning tail must
@@ -5063,6 +5101,32 @@ def _parse_tool_calls_with_parser(
     except Exception as e:
         logger.warning(f"Tool parser error: {e}")
         return _generic_parse_filtered(output_text)
+
+
+def _has_schema_valid_tool_call_candidate(
+    content_text: str | None,
+    reasoning_text: str | None,
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> bool:
+    """Probe finalized non-stream output before an M3 visible-answer retry.
+
+    A tools-enabled request must preserve a real function call, including the
+    MiniMax-M3 case where native XML lands in the reasoning channel. Merely
+    making tools available must not suppress the bounded direct-answer pass
+    when the model emitted reasoning only and no schema-valid call.
+    """
+    candidates: list[str] = []
+    visible_candidate = _strip_think_for_tool_parse(content_text or "").strip()
+    if visible_candidate:
+        candidates.append(visible_candidate)
+    if reasoning_text and any(marker in reasoning_text for marker in _TOOL_CALL_MARKERS):
+        candidates.append(reasoning_text.strip())
+
+    for candidate in candidates:
+        _cleaned, calls = _parse_tool_calls_with_parser(candidate, request)
+        if calls:
+            return True
+    return False
 
 
 def _stream_tool_call_early_stop_parser(
@@ -13004,6 +13068,27 @@ async def create_chat_completion(
     # (coherent for these families) so non-streaming clients still get an
     # answer. No-op for healthy reasoners (only fires on reasoning + no
     # content) and for non-reasoning models (reasoning_text is None).
+    try:
+        from .model_config_registry import get_model_config_registry as _ns_mcr
+        _ns_family = getattr(
+            _ns_mcr().lookup(_model_path or _model_name or request.model),
+            "family_name", None,
+        )
+    except Exception:
+        _ns_family = None
+    _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
+    _ns_tools_available = bool(
+        getattr(request, "tools", None) or chat_kwargs.get("tools")
+    )
+    _ns_m3_valid_tool_call = (
+        _ns_is_m3
+        and not _suppress_tools
+        and _has_schema_valid_tool_call_candidate(
+            content_for_parsing,
+            reasoning_text,
+            request,
+        )
+    )
     _ns_thinking_off = (
         chat_kwargs.get("enable_thinking") is False
         or getattr(request, "enable_thinking", None) is False
@@ -13017,21 +13102,15 @@ async def create_chat_completion(
         (not content_for_parsing or _ns_reasoning_truncated)
         and reasoning_text
         and not _ns_thinking_off
-        and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
+        and (
+            not _ns_tools_available
+            or (_ns_is_m3 and not _ns_m3_valid_tool_call)
+        )
         and _remaining_answer_pass_budget(
             _ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256,
             getattr(output, "completion_tokens", 0),
         ) > 0
     ):
-        try:
-            from .model_config_registry import get_model_config_registry as _ns_mcr
-            _ns_family = getattr(
-                _ns_mcr().lookup(_model_path or _model_name or request.model),
-                "family_name", None,
-            )
-        except Exception:
-            _ns_family = None
-        _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
         if _ns_family in _REASONING_ANSWER_PASS_FAMILIES or _ns_is_m3:
             _ns_cap = int(_ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
@@ -15222,6 +15301,27 @@ async def create_response(
 
     # Reasoning-runaway backstop (non-streaming responses): mirror the
     # streaming bounded thinking-off answer pass for degraded reasoners.
+    try:
+        from .model_config_registry import get_model_config_registry as _ns_mcr
+        _ns_family = getattr(
+            _ns_mcr().lookup(_model_path or _model_name or request.model),
+            "family_name", None,
+        )
+    except Exception:
+        _ns_family = None
+    _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
+    _ns_tools_available = bool(
+        getattr(request, "tools", None) or chat_kwargs.get("tools")
+    )
+    _ns_m3_valid_tool_call = (
+        _ns_is_m3
+        and not _suppress_tools
+        and _has_schema_valid_tool_call_candidate(
+            content_for_parsing,
+            reasoning_text,
+            request,
+        )
+    )
     _ns_thinking_off = (
         chat_kwargs.get("enable_thinking") is False
         or getattr(request, "enable_thinking", None) is False
@@ -15235,21 +15335,15 @@ async def create_response(
         (not content_for_parsing or _ns_reasoning_truncated)
         and reasoning_text
         and not _ns_thinking_off
-        and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
+        and (
+            not _ns_tools_available
+            or (_ns_is_m3 and not _ns_m3_valid_tool_call)
+        )
         and _remaining_answer_pass_budget(
             _ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256,
             getattr(output, "completion_tokens", 0),
         ) > 0
     ):
-        try:
-            from .model_config_registry import get_model_config_registry as _ns_mcr
-            _ns_family = getattr(
-                _ns_mcr().lookup(_model_path or _model_name or request.model),
-                "family_name", None,
-            )
-        except Exception:
-            _ns_family = None
-        _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
         if _ns_family in _REASONING_ANSWER_PASS_FAMILIES or _ns_is_m3:
             _ns_cap = int(_ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
@@ -16095,29 +16189,39 @@ async def stream_chat_completion(
     _tc_stop_complete_chunks = 0
     m3_reasoning_only_answer_budget: int | None = None
     m3_reasoning_only_answer_enabled = False
+    m3_tools_fallback_answer_budget: int | None = None
     reasoning_only_answer_budget: int | None = None
     reasoning_only_answer_enabled = False
     reasoning_only_answer_family = ""
     if (
         _is_minimax_m3
-        and _m3_thinking_mode in ("enabled", "adaptive")
-        and not _stream_tools_available
+        and (
+            _m3_thinking_mode in ("enabled", "adaptive")
+            or _effective_thinking is True
+        )
     ):
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            m3_reasoning_only_answer_budget = max(0, _requested_output_budget)
-            m3_reasoning_only_answer_enabled = True
-            _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
-            if _requested_thinking_budget is not None:
-                _requested_thinking_budget = max(1, int(_requested_thinking_budget))
-                kwargs = dict(kwargs)
-                kwargs["max_tokens"] = min(
-                    _requested_output_budget,
-                    _requested_thinking_budget,
-                )
+            if _stream_tools_available:
+                # Keep the native tool-capable first pass untouched. If final
+                # parsing finds no valid call, the post-stream path re-arms the
+                # direct visible-answer pass from this original request budget.
+                m3_tools_fallback_answer_budget = max(0, _requested_output_budget)
+            else:
+                m3_reasoning_only_answer_budget = max(0, _requested_output_budget)
+                m3_reasoning_only_answer_enabled = True
+                _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
+                if _requested_thinking_budget is not None:
+                    _requested_thinking_budget = max(1, int(_requested_thinking_budget))
+                    kwargs = dict(kwargs)
+                    kwargs["max_tokens"] = min(
+                        _requested_output_budget,
+                        _requested_thinking_budget,
+                    )
         except Exception:
             m3_reasoning_only_answer_budget = None
             m3_reasoning_only_answer_enabled = False
+            m3_tools_fallback_answer_budget = None
     if (
         _family_name == "gemma4"
         and _effective_thinking is not False
@@ -16937,6 +17041,25 @@ async def stream_chat_completion(
                 yield f"data: {_dump_sse_json(flush_chunk)}\n\n"
 
     if (
+        not tool_calls_emitted
+        and not content_was_emitted
+        and not m3_reasoning_only_answer_enabled
+        and m3_tools_fallback_answer_budget is not None
+        and accumulated_reasoning.strip()
+    ):
+        # A tools-enabled M3 turn can finish after reasoning with only a false
+        # or incomplete native-tool prefix. The real tool parser has now run
+        # and found no function call, so a tools-free direct answer pass is safe.
+        # Arming this only after parsing avoids deferring or shadowing genuine
+        # tool-call streams.
+        logger.info(
+            "MiniMax-M3 tools-enabled stream produced no valid tool call or "
+            "visible content; re-arming bounded thinking-off answer pass"
+        )
+        m3_reasoning_only_answer_budget = m3_tools_fallback_answer_budget
+        m3_reasoning_only_answer_enabled = True
+
+    if (
         not content_was_emitted
         and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
         and deferred_reasoning_visible_content.strip()
@@ -17692,26 +17815,35 @@ async def stream_responses_api(
     suppress_reasoning = _effective_thinking is False
     m3_reasoning_only_answer_budget: int | None = None
     m3_reasoning_only_answer_enabled = False
+    m3_tools_fallback_answer_budget: int | None = None
     reasoning_only_answer_budget: int | None = None
     reasoning_only_answer_enabled = False
     reasoning_only_answer_family = ""
     if (
         _is_minimax_m3
-        and _m3_thinking_mode in ("enabled", "adaptive")
-        and not _stream_tools_available
+        and (
+            _m3_thinking_mode in ("enabled", "adaptive")
+            or _effective_thinking is True
+        )
     ):
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            m3_reasoning_only_answer_budget = max(0, _requested_output_budget)
-            m3_reasoning_only_answer_enabled = True
-            _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
-            if _requested_thinking_budget is not None:
-                _requested_thinking_budget = max(1, int(_requested_thinking_budget))
-                kwargs = dict(kwargs)
-                kwargs["max_tokens"] = min(_requested_output_budget, _requested_thinking_budget)
+            if _stream_tools_available:
+                # Preserve the normal native tool stream. The budget is used
+                # only if final parsing proves the turn produced no valid call.
+                m3_tools_fallback_answer_budget = max(0, _requested_output_budget)
+            else:
+                m3_reasoning_only_answer_budget = max(0, _requested_output_budget)
+                m3_reasoning_only_answer_enabled = True
+                _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
+                if _requested_thinking_budget is not None:
+                    _requested_thinking_budget = max(1, int(_requested_thinking_budget))
+                    kwargs = dict(kwargs)
+                    kwargs["max_tokens"] = min(_requested_output_budget, _requested_thinking_budget)
         except Exception:
             m3_reasoning_only_answer_budget = None
             m3_reasoning_only_answer_enabled = False
+            m3_tools_fallback_answer_budget = None
     if (
         _family_name == "gemma4"
         and _effective_thinking is not False
@@ -18408,6 +18540,47 @@ async def stream_responses_api(
         if _tc_calls:
             cleaned_text = (_tc_cleaned or "").strip()
             tool_calls = _tc_calls
+
+    if tool_call_buffering and not tool_calls:
+        # The stream advertised only a speculative buffering heartbeat. A
+        # malformed/truncated or schema-rejected native call is not a function
+        # call and its raw XML/JSON control suffix is not assistant prose.
+        # Reconcile the final Responses text to the already-visible safe prefix.
+        _buffered_candidate = accumulated_content or cleaned_text or full_text
+        _safe_visible_prefix = _visible_prefix_before_unparsed_tool_markup(
+            _buffered_candidate
+        )
+        if _safe_visible_prefix != _buffered_candidate:
+            logger.warning(
+                "Request %s: buffered tool markup produced no valid call; "
+                "discarding %d unsafe control characters after the visible prefix",
+                response_id,
+                len(_buffered_candidate) - len(_safe_visible_prefix),
+            )
+            _record_tool_call_drop(
+                "Buffered native tool markup did not produce a schema-valid "
+                "function call. The incomplete control suffix was hidden; try a "
+                "clearer tool-use prompt or raise max_output_tokens."
+            )
+            accumulated_content = _safe_visible_prefix
+            cleaned_text = _safe_visible_prefix
+
+    if (
+        not tool_calls
+        and not accumulated_content.strip()
+        and not m3_reasoning_only_answer_enabled
+        and m3_tools_fallback_answer_budget is not None
+        and accumulated_reasoning.strip()
+    ):
+        # The native parser has rejected the speculative tool prefix. Re-run
+        # M3 on its direct rail without tools so a reasoning-only turn cannot
+        # finalize as a blank assistant message.
+        logger.info(
+            "MiniMax-M3 tools-enabled Responses stream produced no valid tool "
+            "call or visible content; re-arming bounded thinking-off answer pass"
+        )
+        m3_reasoning_only_answer_budget = m3_tools_fallback_answer_budget
+        m3_reasoning_only_answer_enabled = True
 
     display_text = ""
 

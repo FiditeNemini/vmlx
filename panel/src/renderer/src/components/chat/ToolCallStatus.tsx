@@ -87,6 +87,13 @@ export function ToolCallStatus({ statuses, isStreaming }: ToolCallStatusProps) {
   ).length
   const lastStatus = statuses[statuses.length - 1]
   const isActive = isStreaming && lastStatus.phase !== 'done'
+  const hasStandaloneError = statuses.some(s => s.phase === 'error')
+
+  // A buffering heartbeat is speculative, not a tool call. If the server's
+  // final parser found no concrete function_call, do not turn that heartbeat
+  // into a completed "Used 0 tools / Tool call generated" success card. Keep
+  // real standalone errors visible (for example, the stall watchdog).
+  if (!isActive && toolCount === 0 && !hasStandaloneError) return null
 
   // Check if any tool calls were interrupted (not completed)
   const hasInterrupted = !isActive && toolCallGroups.some(g => {

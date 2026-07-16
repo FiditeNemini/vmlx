@@ -887,6 +887,56 @@ class TestFallbackToolPromptFormat:
         assert "</minimax:tool_call>" in rendered
         assert "<function=record_fact>" not in rendered
 
+    def test_minimax_fallback_preserves_slash_in_explicit_file_info_path(self):
+        from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
+
+        class FakeTokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                return "\n".join(str(m.get("content", "")) for m in messages)
+
+        prompt = (
+            "]~b]system\nTools available: file_info\n"
+            "]~b]user\nUse file_info.\n]~b]ai\n<think>\n"
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Call the built-in file_info tool exactly once with path "
+                    "panel/package.json. After the tool result, reply exactly DONE."
+                ),
+            }
+        ]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_info",
+                    "description": "Return information for a filesystem path.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                },
+            }
+        ]
+
+        rendered = check_and_inject_fallback_tools(
+            prompt,
+            messages,
+            tools,
+            FakeTokenizer(),
+            {"tokenize": False, "add_generation_prompt": True},
+            tool_parser_id="minimax",
+        )
+
+        assert "<minimax:tool_call>" in rendered
+        assert '<invoke name="file_info">' in rendered
+        assert (
+            '<parameter name="path">panel/package.json</parameter>' in rendered
+        )
+
     def test_dsv4_fallback_ignores_historical_dsml_when_checking_examples(self):
         from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
 

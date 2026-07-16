@@ -614,6 +614,24 @@ def check_and_inject_fallback_tools(
                     )
                     if write_file:
                         return write_file.group(1).rstrip(".,;:!?`'\"")
+                # Preserve directory separators for generic path-bearing tools
+                # such as file_info. The scalar fallback below intentionally
+                # uses a narrower token alphabet and previously truncated
+                # `panel/package.json` to `panel` in live MiniMax-M2.7 calls.
+                path_name = re.escape(param)
+                path_patterns = (
+                    rf"\bwith\s+{path_name}\s+[`'\"]?([A-Za-z0-9_~@%+=:,./-]{{1,240}})",
+                    rf"\b{path_name}\s*(?:=|:|to|is)\s*[`'\"]?([A-Za-z0-9_~@%+=:,./-]{{1,240}})",
+                    rf"\b{path_name}\s+[`'\"]?([A-Za-z0-9_~@%+=:,./-]{{1,240}})",
+                )
+                for pattern in path_patterns:
+                    path_match = re.search(
+                        pattern,
+                        request_text,
+                        flags=re.IGNORECASE,
+                    )
+                    if path_match:
+                        return path_match.group(1).rstrip(".,;:!?`'\"")
             for obj_match in re.finditer(r"\{[^{}]{1,400}\}", request_text):
                 try:
                     obj = json.loads(obj_match.group(0))

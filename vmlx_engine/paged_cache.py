@@ -785,6 +785,19 @@ class PagedCacheManager:
             block.keep_resident = False
             self._release_resident(block)
 
+    def make_resident_payload_evictable(self, block: CacheBlock) -> None:
+        """Retain a restored L1 payload but return it to normal LRU policy.
+
+        Path-dependent native cache records are protected while their async L2
+        write becomes readable. After a successful reconstruction, the payload
+        should remain a genuine RAM-tier hit, while the byte ceiling must be able
+        to evict it later. Clear only the provenance/protection flags; preserve
+        ``cache_data`` and its resident-byte attribution.
+        """
+        with self._lock:
+            block.cache_data_from_disk = False
+            block.keep_resident = False
+
     @staticmethod
     def estimate_block_nbytes(cache_data: Any) -> int:
         """Best-effort resident RAM (bytes) of a block's KV mirror.

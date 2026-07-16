@@ -400,8 +400,8 @@ function buildCommandPreview(
 
     if (prefixCacheOff) {
         parts.push('--disable-prefix-cache')
-    } else if (!dsv4Active) {
-        if (config.noMemoryAwareCache) {
+    } else {
+        if (!dsv4Active && config.noMemoryAwareCache) {
             parts.push('--no-memory-aware-cache')
             const prefixCacheSize = finitePositiveInteger(config.prefixCacheSize)
             if (prefixCacheSize != null) parts.push('--prefix-cache-size', prefixCacheSize.toString())
@@ -2186,7 +2186,7 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(enabled, '--kv-cache-quantization')).toBe(false)
         expect(hasFlag(enabled, '--no-memory-aware-cache')).toBe(false)
         expect(hasFlag(enabled, '--prefix-cache-size')).toBe(false)
-        expect(hasFlag(enabled, '--cache-memory-percent')).toBe(false)
+        expect(getFlagValue(enabled, '--cache-memory-percent')).toBe('0.25')
 
         const disabled = preview(
             {
@@ -2496,7 +2496,8 @@ describe('Default IP and New Settings', () => {
         const form = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
         expect(form).toContain("normalizedDetectedFamily === 'openpangu_v2'")
         expect(form).toContain('openPangu v2 uses exact typed N-1 prompt snapshots')
-        expect(form).toContain('disabled={dsv4Active || openPanguExactTypedCache}')
+        expect(form).toContain('disabled={openPanguExactTypedCache}')
+        expect(form).toContain('Cache Memory Limit / % controls its real L1 RAM byte ceiling')
         expect(form).toContain('cachePolicy.blockDiskCacheDisabled || openPanguExactTypedCache')
     })
 
@@ -3329,6 +3330,36 @@ describe('Feature Interaction', () => {
         expect(getFlagValue(out, '--cache-memory-mb')).toBe('4096')
         expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.35')
         expect(hasFlag(out, '--cache-ttl-minutes')).toBe(false)
+    })
+
+    it('DSV4 native composite paged L1 receives the visible cache memory budget', () => {
+        const out = preview({
+            enablePrefixCache: true,
+            dsv4PrefixCache: true,
+            usePagedCache: true,
+            cacheMemoryMb: 4096,
+            cacheMemoryPercent: 15,
+        }, { family: 'deepseek-v4' })
+
+        expect(hasFlag(out, '--dsv4-enable-prefix-cache')).toBe(true)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        expect(getFlagValue(out, '--cache-memory-mb')).toBe('4096')
+        expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.15')
+    })
+
+    it('DSV4 launch and preview source do not suppress paged L1 memory flags', () => {
+        const previewSource = readFileSync(
+            resolve(__dirname, '../src/renderer/src/components/sessions/SessionSettings.tsx'),
+            'utf-8',
+        )
+        const launchSource = readFileSync(
+            resolve(__dirname, '../src/main/sessions.ts'),
+            'utf-8',
+        )
+        for (const source of [previewSource, launchSource]) {
+            expect(source).not.toContain('} else if (!dsv4Active) {')
+            expect(source).toContain('!dsv4Active && config.noMemoryAwareCache')
+        }
     })
 
     it('settings form renders effective paged capacity and ignored memory-budget state', () => {

@@ -791,6 +791,24 @@ def _cache_data_has_dsv4(cache_data) -> bool:
     return False
 
 
+def _block_payload_has_dsv4(cache_data) -> bool:
+    """Return True for a serialized DSV4 native composite block payload.
+
+    This is intentionally separate from ``_cache_data_has_dsv4``: that helper
+    receives extracted live-cache dictionaries, while reconstruction receives
+    the per-layer tuple records stored in paged L1/L2.
+    """
+    try:
+        return any(
+            isinstance(entry, (tuple, list))
+            and bool(entry)
+            and entry[0] in ("deepseek_v4", "deepseek_v4_pending")
+            for entry in cache_data or []
+        )
+    except Exception:
+        return False
+
+
 def _to_numpy_tree(obj):
     """Convert nested MLX-array state to numpy, preserving tuple/list shape."""
     import numpy as np
@@ -3185,6 +3203,8 @@ class BlockAwarePrefixCache:
 
         disk_backed_block_ids: set[int] = set()
         l2_readable_block_ids: set[int] = set()
+        dsv4_resident_block_ids: set[int] = set()
+        reconstruction_succeeded = False
         try:
             # Collect cache data from all blocks
             all_block_data = []
@@ -3250,6 +3270,8 @@ class BlockAwarePrefixCache:
                         except Exception:
                             pass
                 all_block_data.append(block.cache_data)
+                if _block_payload_has_dsv4(block.cache_data):
+                    dsv4_resident_block_ids.add(block_id)
 
             if not all_block_data:
                 return None
@@ -4103,7 +4125,7 @@ class BlockAwarePrefixCache:
             )
 
             self._last_reconstruct_tq_blocks = tq_native_entry_count
-
+            reconstruction_succeeded = True
             return reconstructed_caches
 
         except Exception as e:
@@ -4115,7 +4137,16 @@ class BlockAwarePrefixCache:
             for block_id in disk_backed_block_ids | l2_readable_block_ids:
                 block = self.paged_cache.allocated_blocks.get(block_id)
                 if block is not None:
-                    self.paged_cache.release_resident_payload(block)
+                    if reconstruction_succeeded and block_id in dsv4_resident_block_ids:
+                        # DSV4's restored SWA+CSA/HCA state is a real L1 payload,
+                        # not a throwaway reconstruction buffer. Keep it in RAM
+                        # after a successful L2 restore so subsequent same-process
+                        # hits are RAM-first. Once L2 is readable it no longer needs
+                        # the async-write protection flag, so normal byte-budget LRU
+                        # eviction can spill it back to disk under pressure.
+                        self.paged_cache.make_resident_payload_evictable(block)
+                    else:
+                        self.paged_cache.release_resident_payload(block)
 
     def _find_best_prefix_match(
         self,

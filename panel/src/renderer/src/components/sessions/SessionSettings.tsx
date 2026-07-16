@@ -486,8 +486,8 @@ function buildCommandPreview(
 
   if (prefixCacheOff) {
     parts.push('--disable-prefix-cache')
-  } else if (!dsv4Active) {
-    if (config.noMemoryAwareCache) {
+  } else {
+    if (!dsv4Active && config.noMemoryAwareCache) {
       parts.push('--no-memory-aware-cache')
       const prefixCacheSize = finitePositiveInteger(config.prefixCacheSize)
       if (prefixCacheSize != null) parts.push('--prefix-cache-size', prefixCacheSize.toString())
@@ -497,7 +497,8 @@ function buildCommandPreview(
       // H1 parity: --cache-memory-mb/--cache-memory-percent set the paged L1 RAM
       // byte ceiling and DO reach the engine under paged (sessions.ts emits them
       // unconditionally). The preview must show them in both modes or it lies
-      // about the launch. Only --cache-ttl-minutes is genuinely inert under paged.
+      // about the launch, including DSV4 native composite L1. Only
+      // --cache-ttl-minutes is genuinely inert under paged.
       const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
       if (cacheMemoryMb != null) parts.push('--cache-memory-mb', cacheMemoryMb.toString())
       const cacheMemoryPercent = finitePositiveNumber(config.cacheMemoryPercent)

@@ -3358,8 +3358,8 @@ export class SessionManager extends EventEmitter {
 
     if (prefixCacheOff) {
       args.push('--disable-prefix-cache')
-    } else if (!dsv4Active) {
-      if (config.noMemoryAwareCache && !openPanguExactTypedCache) {
+    } else {
+      if (!dsv4Active && config.noMemoryAwareCache && !openPanguExactTypedCache) {
         args.push('--no-memory-aware-cache')
         const prefixCacheSize = finitePositiveInteger(config.prefixCacheSize)
         if (prefixCacheSize != null) {
@@ -3370,12 +3370,14 @@ export class SessionManager extends EventEmitter {
           args.push('--prefix-cache-max-bytes', prefixCacheMaxBytes.toString())
         }
       } else {
-        // --cache-memory-mb / --cache-memory-percent bound RAM in BOTH modes:
+        // --cache-memory-mb / --cache-memory-percent bound RAM in BOTH modes,
+        // including DSV4's native composite paged L1:
         // for memory-aware cache they cap the prefix store, and for paged cache
         // (#98) they set the L1 RAM byte ceiling for the block KV mirror that
         // evicts free blocks. Emit them regardless of usePagedCache so the UI
         // value actually reaches the engine (previously they were dropped under
-        // paged, so the app's default silently fell back to the engine's 20%).
+        // paged and DSV4, so the app's visible value silently fell back to the
+        // engine's 20%).
         const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
         if (cacheMemoryMb != null) {
           args.push('--cache-memory-mb', cacheMemoryMb.toString())

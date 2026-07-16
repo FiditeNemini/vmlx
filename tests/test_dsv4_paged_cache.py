@@ -808,6 +808,9 @@ def test_dsv4_frugal_store_keeps_terminal_composite_block_in_ram(monkeypatch):
         def write_block_async(self, *_args, **_kwargs):
             return None
 
+        def has_block(self, _block_hash):
+            return True
+
     monkeypatch.delenv("VMLX_PAGED_FRUGAL", raising=False)
     paged = PagedCacheManager(block_size=4, max_blocks=8, disk_store=_DummyDisk())
     pc = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
@@ -825,6 +828,14 @@ def test_dsv4_frugal_store_keeps_terminal_composite_block_in_ram(monkeypatch):
     terminal_block = paged.allocated_blocks[table.block_ids[-1]]
     assert terminal_block.cache_data[0][0] == "deepseek_v4"
     assert pc.reconstruct_cache(table) is not None
+    # Once the L2 write is readable, reconstruction keeps the native composite
+    # payload as a genuine RAM-tier entry but removes its temporary protection so
+    # the configured byte-budget LRU can evict it later.
+    for block_id in table.block_ids:
+        block = paged.allocated_blocks[block_id]
+        assert block.cache_data is not None
+        assert block.cache_data_from_disk is False
+        assert block.keep_resident is False
 
 
 def test_dsv4_store_does_not_reuse_legacy_content_hash_for_repeated_blocks():

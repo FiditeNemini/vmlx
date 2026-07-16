@@ -817,13 +817,16 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         )}
         {effectivePrefixCacheEnabled && (
           <>
-            {dsv4Active ? (
-              <InfoNote text="DSV4 Flash stores native SWA+CSA/HCA prompt-boundary state through the paged prefix path. Generic memory-aware and legacy entry-count prefix-cache controls are not used." />
-            ) : (
-            <>
-            {openPanguExactTypedCache && <InfoNote text="Memory-aware mode is required for openPangu's non-aliasing typed cache clone. The legacy entry-count backend is unavailable for this family." />}
-            <CheckField label="Legacy Entry-Count Cache" tooltip="Switches from memory-aware cache (which uses Cache Memory %, Cache Memory Limit, and Cache TTL controls) to a simpler entry-count cache. When ON: you control cache by max entries only. When OFF: you get fine-grained memory budget controls (% of RAM, MB limit, TTL expiration). Memory-aware mode is recommended for most users." checked={openPanguExactTypedCache ? false : config.noMemoryAwareCache} onChange={v => onChange('noMemoryAwareCache', v)} disabled={dsv4Active || openPanguExactTypedCache} />
-            {!openPanguExactTypedCache && config.noMemoryAwareCache ? (
+            {dsv4Active && (
+              <InfoNote text="DSV4 Flash stores native SWA+CSA/HCA prompt-boundary state through the paged prefix path. Cache Memory Limit / % controls its real L1 RAM byte ceiling; Max Cache Blocks controls indexed token capacity; L2 remains the durable spill tier." />
+            )}
+            {!dsv4Active && (
+              <>
+                {openPanguExactTypedCache && <InfoNote text="Memory-aware mode is required for openPangu's non-aliasing typed cache clone. The legacy entry-count backend is unavailable for this family." />}
+                <CheckField label="Legacy Entry-Count Cache" tooltip="Switches from memory-aware cache (which uses Cache Memory %, Cache Memory Limit, and Cache TTL controls) to a simpler entry-count cache. When ON: you control cache by max entries only. When OFF: you get fine-grained memory budget controls (% of RAM, MB limit, TTL expiration). Memory-aware mode is recommended for most users." checked={openPanguExactTypedCache ? false : config.noMemoryAwareCache} onChange={v => onChange('noMemoryAwareCache', v)} disabled={openPanguExactTypedCache} />
+              </>
+            )}
+            {!dsv4Active && !openPanguExactTypedCache && config.noMemoryAwareCache ? (
               <>
                 <InfoNote text="Legacy mode active — Cache Memory %, Cache Memory Limit, and Cache TTL are hidden. Turn off 'Legacy Entry-Count Cache' above to use memory-aware caching with those controls." />
                 <SliderField
@@ -874,7 +877,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                 />
                 <SliderField
                   label="Cache Memory %"
-                  tooltip="Percentage of available system RAM to allocate for the prefix cache. Only used when Cache Memory Limit is set to 'Auto-detect'. Default 20% is a balanced cache budget — lower this for large models that leave little headroom (e.g. 10-15% for 120GB+ models on 256GB systems). Higher values cache more prefixes but risk memory pressure during long generations."
+                  tooltip="Percentage of available system RAM to allocate for the prefix cache. Only used when Cache Memory Limit is set to 'Auto-detect'. Default 15% leaves headroom for model weights and active generation. Higher values cache more prefixes but risk memory pressure during long generations."
                   value={config.cacheMemoryPercent}
                   onChange={v => onChange('cacheMemoryPercent', v)}
                   min={1}
@@ -900,8 +903,6 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   disabled={pagedCacheUiState.cacheTtlDisabled}
                 />
               </>
-            )}
-            </>
             )}
 
             {/* Caching Help Modal */}

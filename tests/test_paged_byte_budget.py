@@ -67,6 +67,23 @@ def test_release_resident_payload_clears_bytes_flags_and_data():
     assert mgr.resident_bytes == 0
 
 
+def test_make_resident_payload_evictable_keeps_data_and_accounting():
+    """A restored native payload becomes a normal RAM-tier LRU entry."""
+    mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=100_000)
+    block = mgr.blocks[1]
+    _cache_a_block(mgr, block, 111, 4000)
+    block.cache_data_from_disk = True
+    block.keep_resident = True
+
+    mgr.make_resident_payload_evictable(block)
+
+    assert block.cache_data is not None
+    assert block.cache_data_from_disk is False
+    assert block.keep_resident is False
+    assert block.resident_bytes == 4000
+    assert mgr.resident_bytes == 4000
+
+
 def test_hash_reset_does_not_leak_keep_resident_to_reused_block():
     block = PagedCacheManager(block_size=4, max_blocks=4).blocks[1]
     block.block_hash = 111

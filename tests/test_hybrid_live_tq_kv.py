@@ -97,6 +97,50 @@ def test_uncalibrated_qwen_hybrid_auto_uses_tq8_on_real_kv_positions():
     assert resolved["auto_policy"] == "qwen_hybrid_attention_kv_storage_tq8"
 
 
+def test_uncalibrated_qwen_full_kv_auto_uses_tq8_on_all_attention_slots():
+    from vmlx_engine.utils.turboquant_config import (
+        apply_uncalibrated_auto_tq_policy,
+    )
+
+    layer_types = ["attention"] * 28
+    resolved = apply_uncalibrated_auto_tq_policy(
+        {
+            "enabled": True,
+            "default_key_bits": 3,
+            "default_value_bits": 3,
+            "critical_key_bits": 4,
+            "critical_value_bits": 4,
+            "seed": 42,
+        },
+        {"model_type": "qwen3"},
+        layer_types,
+    )
+
+    assert resolved["default_key_bits"] == 8
+    assert resolved["default_value_bits"] == 8
+    assert resolved["critical_key_bits"] == 8
+    assert resolved["critical_value_bits"] == 8
+    assert resolved["critical_layers"] == list(range(28))
+    assert resolved["sink_tokens"] == 0
+    assert resolved["compress_after"] == 0
+    assert resolved["auto_policy"] == "qwen_full_kv_storage_tq8"
+
+
+def test_uncalibrated_qwen_cumulative_only_does_not_get_fake_tq_slots():
+    from vmlx_engine.utils.turboquant_config import (
+        apply_uncalibrated_auto_tq_policy,
+    )
+
+    original = {"enabled": True, "default_key_bits": 3, "seed": 42}
+    resolved = apply_uncalibrated_auto_tq_policy(
+        original,
+        {"model_type": "qwen_mamba"},
+        ["ssm"] * 8,
+    )
+
+    assert resolved == original
+
+
 class NativeGatedDeltaState:
     """Sentinel for Qwen hybrid non-KV companion state."""
 

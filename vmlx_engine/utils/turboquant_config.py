@@ -80,18 +80,29 @@ def apply_uncalibrated_auto_tq_policy(
     model_config: dict | None,
     layer_types: list[str] | tuple[str, ...],
 ) -> dict:
-    """Return a correctness-first Auto config for an uncalibrated bundle.
+    """Return a correctness-first Auto config for an uncalibrated Qwen bundle.
 
     Qwen3.5/3.6 and Qwen3-Next mix cumulative GatedDelta/SSM state with
-    ordinary attention KV.  The cumulative slots are never TQ candidates.
-    For the attention slots, an uncalibrated 3-bit live transition is not a
-    safe family default: it changes decode numerics mid-request and has caused
-    real Bonsai tool/multi-turn loops.  Auto therefore keeps live transition
-    disabled and uses an 8-bit TQ storage codec.  A bundle-owned calibrated
-    ``turboquant`` block or explicit operator settings remain authoritative.
+    ordinary attention KV; Qwen2/Qwen3 and their MoE/VL text variants use
+    ordinary full KV.  The cumulative slots are never TQ candidates, while
+    every real attention slot is TQ-encodable.  An uncalibrated 3-bit storage
+    round-trip is not a safe family default: it has caused both Bonsai
+    tool/multi-turn loops and corrupted Qwen3 full-KV cache-hit output. Auto
+    therefore keeps live transition disabled and uses an 8-bit TQ storage
+    codec. A bundle-owned calibrated ``turboquant`` block or explicit operator
+    settings remain authoritative.
     """
     resolved = dict(tq_cfg)
-    if not _is_qwen_hybrid_attention_config(model_config, layer_types):
+    from .hybrid_tq_cache import classify_qwen_cache_architecture
+
+    architecture = classify_qwen_cache_architecture(
+        model_config or {}, list(layer_types)
+    )
+    if architecture not in {
+        "qwen3_5_hybrid_gated_delta",
+        "qwen3_next_hybrid_gated_delta",
+        "qwen_full_kv",
+    }:
         return resolved
 
     attention_layers = [
@@ -109,7 +120,11 @@ def apply_uncalibrated_auto_tq_policy(
             "critical_layers": attention_layers,
             "sink_tokens": 0,
             "compress_after": QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER,
-            "auto_policy": "qwen_hybrid_attention_kv_storage_tq8",
+            "auto_policy": (
+                "qwen_full_kv_storage_tq8"
+                if architecture == "qwen_full_kv"
+                else "qwen_hybrid_attention_kv_storage_tq8"
+            ),
         }
     )
     return resolved

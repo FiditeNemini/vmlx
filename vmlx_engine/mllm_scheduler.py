@@ -485,6 +485,13 @@ class MLLMScheduler:
         except Exception as e:
             logger.warning(f"Failed to detect hybrid cache model: {e}")
 
+        # Detect native TQ before cache-directory construction. Auto and an
+        # explicit None setting can otherwise hash to the same ``quant=none``
+        # directory (Auto is represented by an omitted q4/q8 flag), allowing
+        # one persisted representation to shadow the other after a UI restart.
+        self._tq_active = self._detect_turboquant_make_cache()
+        self._capture_hybrid_turboquant_policy()
+
         # Detect mixed-attention models (e.g. Gemma 4 = 25 sliding + 5 full).
         # Detection is diagnostic only. The cache path must preserve
         # RotatingKVCache metadata instead of bypassing all prefix tiers.
@@ -544,9 +551,19 @@ class MLLMScheduler:
                         # Include quant config and paged-cache schema in hash
                         # to prevent cross-config / stale L2 cache poisoning.
                         quant_tag = self.config.kv_cache_quantization or "none"
+                        tq_native_tag = (
+                            "on"
+                            f"-k{self._hybrid_tq_default_key_bits or 0}"
+                            f"-v{self._hybrid_tq_default_value_bits or 0}"
+                            f"-after{self._hybrid_live_tq_compress_after or 0}"
+                            f"-policy{self._hybrid_tq_auto_policy or 'bundle'}"
+                            if self._tq_active
+                            else "off"
+                        )
                         from .prefix_cache import PAGED_CACHE_SCHEMA_VERSION
                         block_scope_key = (
                             f"{self.config.model_path}:quant={quant_tag}"
+                            f":tq_native={tq_native_tag}"
                             f":paged_cache_schema={PAGED_CACHE_SCHEMA_VERSION}"
                             f":{runtime_cache_fingerprint()}"
                         )
@@ -726,6 +743,15 @@ class MLLMScheduler:
             )
             if self.config.model_path:
                 quant_tag = self.config.kv_cache_quantization or "none"
+                tq_native_tag = (
+                    "on"
+                    f"-k{self._hybrid_tq_default_key_bits or 0}"
+                    f"-v{self._hybrid_tq_default_value_bits or 0}"
+                    f"-after{self._hybrid_live_tq_compress_after or 0}"
+                    f"-policy{self._hybrid_tq_auto_policy or 'bundle'}"
+                    if self._tq_active
+                    else "off"
+                )
                 # Include layer count to invalidate on architecture change
                 n_layers = 0
                 lm = self.model.language_model if hasattr(self.model, 'language_model') else self.model
@@ -738,6 +764,7 @@ class MLLMScheduler:
                 from .prefix_cache import PAGED_CACHE_SCHEMA_VERSION
                 scope_key = (
                     f"{self.config.model_path}:quant={quant_tag}:layers={n_layers}"
+                    f":tq_native={tq_native_tag}"
                     f":prefix_cache_schema={PAGED_CACHE_SCHEMA_VERSION}"
                     f":{runtime_cache_fingerprint()}"
                 )
@@ -1213,9 +1240,10 @@ class MLLMScheduler:
                 continue
             seen.add(id(obj))
             make_cache = _safe_attr(obj, "make_cache")
-            policy = getattr(make_cache, "_vmlx_hybrid_tq_policy", None)
-            if policy:
-                self._hybrid_live_tq_policy = policy
+            if make_cache is not None and is_turboquant_make_cache(make_cache):
+                self._hybrid_live_tq_policy = getattr(
+                    make_cache, "_vmlx_hybrid_tq_policy", None
+                )
                 self._hybrid_live_tq_attention_layers = list(
                     getattr(make_cache, "_vmlx_hybrid_tq_attention_layers", ()) or []
                 )

@@ -159,12 +159,12 @@ def test_capabilities_alias_uses_active_model(monkeypatch):
 
 
 def test_nemotron_omni_is_selective_attention_kv_allowlisted():
-    from vmlx_engine.utils.hybrid_tq_cache import is_qwen36_hybrid_tq_supported
+    from vmlx_engine.utils.hybrid_tq_cache import is_selective_hybrid_tq_supported
 
-    assert is_qwen36_hybrid_tq_supported(
+    assert is_selective_hybrid_tq_supported(
         {"model_type": "nemotron_h"}, ["ssm", "attention"]
     )
-    assert not is_qwen36_hybrid_tq_supported(
+    assert not is_selective_hybrid_tq_supported(
         {"model_type": "unknown_hybrid"}, ["ssm", "attention"]
     )
     cli = open("vmlx_engine/cli.py").read()

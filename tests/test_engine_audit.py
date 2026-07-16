@@ -5376,6 +5376,9 @@ class TestC3BlockDiskCacheQuantScoping:
         assert 'f"{self.config.model_path}:quant={quant_tag}"' in block_section, (
             "Block disk cache hash must include quantization in scope key"
         )
+        assert 'f":tq_native={tq_native_tag}"' in block_section, (
+            "Block disk cache hash must separate native TQ Auto from explicit Off"
+        )
 
     def test_mllm_scheduler_block_cache_includes_quant(self):
         import inspect
@@ -5385,6 +5388,21 @@ class TestC3BlockDiskCacheQuantScoping:
         block_section = source[source.find("enable_block_disk_cache"):]
         assert "quant" in block_section[:500], (
             "MLLM block disk cache hash must include quantization in scope key"
+        )
+        assert 'f":tq_native={tq_native_tag}"' in source, (
+            "MLLM disk cache hashes must separate native TQ Auto from explicit Off"
+        )
+
+    def test_prompt_cache_scopes_include_native_tq_mode(self):
+        import inspect
+        from vmlx_engine.mllm_scheduler import MLLMScheduler
+        from vmlx_engine.scheduler import Scheduler
+
+        assert 'f":tq_native={tq_native_tag}"' in inspect.getsource(
+            Scheduler.__init__
+        )
+        assert 'f":tq_native={tq_native_tag}"' in inspect.getsource(
+            MLLMScheduler.__init__
         )
 
 

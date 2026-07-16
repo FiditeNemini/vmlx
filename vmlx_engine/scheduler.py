@@ -948,6 +948,15 @@ class Scheduler:
                         # cross-config cache poisoning (same fix as prompt disk
                         # cache — C3, extended for DSV4 tri-mode cache schema).
                         quant_tag = self.config.kv_cache_quantization or "none"
+                        tq_native_tag = (
+                            "on"
+                            f"-k{self._hybrid_tq_default_key_bits or 0}"
+                            f"-v{self._hybrid_tq_default_value_bits or 0}"
+                            f"-after{self._hybrid_live_tq_compress_after or 0}"
+                            f"-policy{self._hybrid_tq_auto_policy or 'bundle'}"
+                            if self._tq_active
+                            else "off"
+                        )
                         dsv4_scope = ""
                         zaya_scope = ""
                         if self._uses_dsv4_cache:
@@ -973,6 +982,7 @@ class Scheduler:
                             zaya_scope = ":zaya_cache_schema=zaya_cca_v1"
                         block_scope_key = (
                             f"{self.config.model_path}:quant={quant_tag}"
+                            f":tq_native={tq_native_tag}"
                             f":paged_cache_schema={PAGED_CACHE_SCHEMA_VERSION}"
                             f":{runtime_cache_fingerprint()}"
                             f"{dsv4_scope}"
@@ -1183,9 +1193,19 @@ class Scheduler:
             n_layers = self._expected_cache_layer_count() or 0
             if self.config.model_path:
                 quant_tag = self.config.kv_cache_quantization or "none"
+                tq_native_tag = (
+                    "on"
+                    f"-k{self._hybrid_tq_default_key_bits or 0}"
+                    f"-v{self._hybrid_tq_default_value_bits or 0}"
+                    f"-after{self._hybrid_live_tq_compress_after or 0}"
+                    f"-policy{self._hybrid_tq_auto_policy or 'bundle'}"
+                    if self._tq_active
+                    else "off"
+                )
                 # Include layer count to invalidate on architecture change.
                 scope_key = (
                     f"{self.config.model_path}:quant={quant_tag}:layers={n_layers}"
+                    f":tq_native={tq_native_tag}"
                     f":prefix_cache_schema={PAGED_CACHE_SCHEMA_VERSION}"
                     f":{runtime_cache_fingerprint()}"
                 )
@@ -4142,6 +4162,66 @@ class Scheduler:
                     return None
                 truncated.append(new_cache)
                 continue
+            if cls_name == "TurboQuantKVCache":
+                # Preserve the native TQ identity and exact codec policy across
+                # the N-1 prompt-boundary copy. The generic positional branch
+                # below intentionally creates KVCache, which used to erase
+                # key/value bits and seed before paged-block extraction. That
+                # made Auto write full-precision block L2 records even though
+                # live health truthfully reported TurboQuant objects active.
+                # ``state`` returns the complete decoded KV view, including a
+                # compressed prefix when live encoding is enabled; ``keys`` by
+                # itself may contain only the active float window.
+                try:
+                    from jang_tools.turboquant.cache import TurboQuantKVCache
+
+                    k, v = layer_cache.state
+                    if not hasattr(k, "ndim") or not hasattr(v, "ndim"):
+                        return None
+                    if k.ndim == 4:
+                        safe_target = min(target_len, int(k.shape[2]))
+                        np_k, np_v = _to_numpy(k), _to_numpy(v)
+                        tk = _from_numpy(
+                            np_k[:, :, :safe_target, :], getattr(k, "dtype", None)
+                        )
+                        tv = _from_numpy(
+                            np_v[:, :, :safe_target, :], getattr(v, "dtype", None)
+                        )
+                    elif k.ndim == 3:
+                        safe_target = min(target_len, int(k.shape[1]))
+                        np_k, np_v = _to_numpy(k), _to_numpy(v)
+                        tk = _from_numpy(
+                            np_k[:, :safe_target, :], getattr(k, "dtype", None)
+                        )
+                        tv = _from_numpy(
+                            np_v[:, :safe_target, :], getattr(v, "dtype", None)
+                        )
+                    else:
+                        return None
+                    if safe_target <= 0:
+                        return None
+                    new_cache = TurboQuantKVCache(
+                        key_dim=int(k.shape[-1]),
+                        value_dim=int(v.shape[-1]),
+                        key_bits=int(getattr(layer_cache, "key_bits", 8)),
+                        value_bits=int(getattr(layer_cache, "value_bits", 8)),
+                        seed=int(getattr(layer_cache, "_seed", 42)),
+                        compress_after=int(
+                            getattr(layer_cache, "compress_after", 0) or 0
+                        ),
+                        sink_tokens=int(getattr(layer_cache, "sink_tokens", 0) or 0),
+                    )
+                    new_cache.keys = tk
+                    new_cache.values = tv
+                    new_cache.offset = safe_target
+                    new_cache.step = safe_target
+                    truncated.append(new_cache)
+                    continue
+                except Exception as exc:
+                    logger.warning(
+                        "TurboQuant prompt-boundary truncation failed: %s", exc
+                    )
+                    return None
             if Scheduler._is_dsv4_cache_class_name(cls_name):
                 try:
                     from jang_tools.dsv4.mlx_model import DeepseekV4Cache

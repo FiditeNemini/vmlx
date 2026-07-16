@@ -28,6 +28,39 @@ def _tq_state(tokens=32, seed=73):
     }
 
 
+def test_scheduler_prompt_boundary_truncation_preserves_tq_policy():
+    from jang_tools.turboquant.cache import TurboQuantKVCache
+    from vmlx_engine.scheduler import Scheduler
+
+    cache = TurboQuantKVCache(
+        key_dim=64,
+        value_dim=64,
+        key_bits=3,
+        value_bits=4,
+        seed=211,
+        compress_after=0,
+        sink_tokens=2,
+    )
+    cache.keys = mx.random.normal(shape=(1, 2, 10, 64)).astype(mx.float16)
+    cache.values = mx.random.normal(shape=(1, 2, 10, 64)).astype(mx.float16)
+    cache.offset = 10
+
+    truncated = Scheduler._truncate_cache_to_prompt_length([cache], prompt_len=7)
+
+    assert truncated is not None
+    assert len(truncated) == 1
+    restored = truncated[0]
+    assert type(restored).__name__ == "TurboQuantKVCache"
+    assert restored.key_bits == 3
+    assert restored.value_bits == 4
+    assert restored._seed == 211
+    assert restored.sink_tokens == 2
+    assert restored.offset == 6
+    keys, values = restored.state
+    assert keys.shape == (1, 2, 6, 64)
+    assert values.shape == (1, 2, 6, 64)
+
+
 def test_tq_paged_blocks_encode_each_slice_and_reconstruct():
     from vmlx_engine.prefix_cache import BlockAwarePrefixCache, PagedCacheManager
     from vmlx_engine.tq_disk_store import decode_tq_block

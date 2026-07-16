@@ -473,14 +473,10 @@ function buildCommandPreview(
       : config.enablePrefixCache !== false,
     usePagedCache: dsv4Active
       ? dsv4PrefixCacheOptIn
-      : m3Active
-      ? false
       : config.usePagedCache ?? detected?.usePagedCache ?? false,
     enableDiskCache: !!config.enableDiskCache,
     enableBlockDiskCache: dsv4Active
       ? dsv4PrefixCacheOptIn && !!config.enableBlockDiskCache
-      : m3Active
-      ? false
       : !!config.enableBlockDiskCache,
     architectureRequiresPagedCache,
   })

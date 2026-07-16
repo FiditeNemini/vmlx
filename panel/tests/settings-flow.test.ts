@@ -385,14 +385,10 @@ function buildCommandPreview(
             : config.enablePrefixCache !== false,
         usePagedCache: dsv4Active
             ? dsv4PrefixCacheOptIn
-            : m3Active
-            ? false
             : config.usePagedCache ?? detected?.usePagedCache ?? false,
         enableDiskCache: !!config.enableDiskCache,
         enableBlockDiskCache: dsv4Active
             ? dsv4PrefixCacheOptIn && !!config.enableBlockDiskCache
-            : m3Active
-            ? false
             : !!config.enableBlockDiskCache,
         architectureRequiresPagedCache:
             zayaCcaActive ||
@@ -1059,7 +1055,7 @@ describe('Disk Cache', () => {
         expect(source).toContain('cacheControlUpdatesForDiskToggle')
         expect(source).toContain('cacheControlUpdatesForPagedToggle')
         expect(source).toContain('cacheControlUpdatesForBlockDiskToggle')
-        expect(source).toContain('const genericPagedCacheToggleDisabled = m3Active || (!dsv4Active && cachePolicy.pagedCacheDisabled)')
+        expect(source).toContain('const genericPagedCacheToggleDisabled = !dsv4Active && cachePolicy.pagedCacheDisabled')
         expect(source).toContain('disabled={genericPagedCacheToggleDisabled}')
         expect(source).toContain('disabled={cachePolicy.legacyDiskCacheDisabled}')
         expect(source).toContain('checked={cachePolicy.legacyDiskCacheChecked}')
@@ -1350,12 +1346,12 @@ describe('Tool Integration', () => {
         expect(getFlagValue(out, '--reasoning-parser')).toBe('minimax_m3')
     })
 
-    it('keeps MiniMax-M3 on paged-off SSD prefix cache with no generic KV quantization or JIT', () => {
+    it('uses MiniMax-M3 typed paged plus block-L2 without generic KV quantization or JIT', () => {
         const out = preview(
             {
                 enablePrefixCache: true,
                 usePagedCache: true,
-                enableDiskCache: true,
+                enableDiskCache: false,
                 enableBlockDiskCache: true,
                 kvCacheQuantization: 'q4',
                 enableJit: true,
@@ -1365,13 +1361,13 @@ describe('Tool Integration', () => {
                 reasoningParser: 'minimax_m3',
                 toolParser: 'minimax_m3',
                 enableAutoToolChoice: true,
-                usePagedCache: false,
+                usePagedCache: true,
             },
         )
 
-        expect(hasFlag(out, '--enable-disk-cache')).toBe(true)
-        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
-        expect(hasFlag(out, '--enable-block-disk-cache')).toBe(false)
+        expect(hasFlag(out, '--enable-disk-cache')).toBe(false)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
         expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
         expect(hasFlag(out, '--enable-jit')).toBe(false)
     })
@@ -2372,7 +2368,7 @@ describe('Default IP and New Settings', () => {
     it('session manager migrates the exact stale continuous-cache default tuple', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         expect(source).toContain('function applyCacheStackStartupDefaultMigration')
-        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 9')
+        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 10')
         expect(source).toContain('function markCacheStackStartupDefaultsCurrent')
         expect(source).toContain('config.cacheStackStartupDefaultsVersion = CACHE_STACK_STARTUP_DEFAULTS_VERSION')
         expect(source).toContain('config.continuousBatching === true')
@@ -2434,6 +2430,28 @@ describe('Default IP and New Settings', () => {
         expect(adoptCreateBlock).toContain('maxTokens: 0')
     })
 
+    it('MiniMax-M3 start refresh defaults cache on but preserves an explicit prefix-cache opt-out', () => {
+        const source = readFileSync('src/main/sessions.ts', 'utf8')
+        const familyStart = source.indexOf("} else if (detectedFamily === 'minimax_m3')")
+        const familyEnd = source.indexOf("} else if (detectedFamily === 'openpangu_v2')", familyStart)
+        const familyBlock = source.slice(familyStart, familyEnd)
+        const start = source.indexOf("} else if (freshFamily === 'minimax_m3')")
+        const end = source.indexOf('// Refresh multimodal detection from disk', start)
+        const block = source.slice(start, end)
+
+        expect(familyBlock).toContain('const m3PrefixOptIn = config.enablePrefixCache !== false')
+        expect(familyBlock).toContain('config.enablePrefixCache = m3PrefixOptIn')
+        expect(familyBlock).toContain('config.usePagedCache = m3PrefixOptIn')
+        expect(familyBlock).toContain('config.enableBlockDiskCache = m3PrefixOptIn')
+        expect(familyBlock).toContain('config.enableDiskCache = false')
+        expect(block).toContain('const m3PrefixOptIn = config.enablePrefixCache !== false')
+        expect(block).toContain('config.enablePrefixCache = m3PrefixOptIn')
+        expect(block).toContain('config.usePagedCache = m3PrefixOptIn')
+        expect(block).toContain('config.enableBlockDiskCache = m3PrefixOptIn')
+        expect(block).toContain('native typed prefix/paged/L2 cache explicitly disabled for this session')
+        expect(block).not.toContain('config.enablePrefixCache = true')
+    })
+
     it('create-session fills missing cache settings before stamping incoming settings current', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const start = source.indexOf('private async _createSessionInner')
@@ -2473,21 +2491,51 @@ describe('Default IP and New Settings', () => {
         expect(helper).toContain('const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : !!defaultUsePagedCache')
     })
 
-    it('v9 migrates only the stale impossible paged plus legacy-L2 tuple to block L2', () => {
+    it('v9 migrates only the pre-v9 stale impossible paged plus legacy-L2 tuple to block L2', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
-        const start = source.indexOf('const staleV8PagedLegacyDiskWithoutBlockL2 =')
+        const start = source.indexOf('const stalePreV9PagedLegacyDiskWithoutBlockL2 =')
         const end = source.indexOf('// v8 (2026-07-12)', start)
         const block = source.slice(start, end)
 
-        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 9')
-        expect(block).toContain('Number(config.cacheStackStartupDefaultsVersion || 0) === 8')
+        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 10')
+        expect(block).toContain('Number(config.cacheStackStartupDefaultsVersion || 0) < 9')
         expect(block).toContain('migrationDetectedUsePaged === true')
         expect(block).toContain('config.usePagedCache === true')
         expect(block).toContain('config.enableDiskCache === true')
         expect(block).toContain('config.enableBlockDiskCache === false')
-        expect(source).toContain('!staleV8PagedLegacyDiskWithoutBlockL2')
+        expect(source).toContain('!stalePreV9PagedLegacyDiskWithoutBlockL2')
         expect(source).toContain('config.enableDiskCache = false')
         expect(source).toContain('config.enableBlockDiskCache = true')
+    })
+
+    it('v10 migrates only the exact v9 MiniMax-M3 legacy-L2 tuple to typed paged block L2', () => {
+        const source = readFileSync('src/main/sessions.ts', 'utf8')
+        const start = source.indexOf('const staleV9M3PagedOffWithLegacyL2 =')
+        const end = source.indexOf('// v8 (2026-07-12)', start)
+        const block = source.slice(start, end)
+
+        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 10')
+        expect(block).toContain("migrationDetectedFamily === 'minimax_m3'")
+        expect(block).toContain('Number(config.cacheStackStartupDefaultsVersion || 0) === 9')
+        expect(block).toContain('config.usePagedCache === false')
+        expect(block).toContain('config.enableDiskCache === true')
+        expect(block).toContain('config.enableBlockDiskCache === false')
+        expect(source).toContain('!staleV9M3PagedOffWithLegacyL2')
+        expect(source).toContain('config.usePagedCache = migratedGenericPaged')
+        expect(source).toContain('config.enableBlockDiskCache = migratedGenericPaged')
+    })
+
+    it('migrates persisted cache defaults before the renderer first lists sessions', () => {
+        const source = readFileSync('src/main/sessions.ts', 'utf8')
+        const start = source.indexOf('constructor() {')
+        const end = source.indexOf('/** Get timestamp', start)
+        const block = source.slice(start, end)
+
+        expect(block).toContain('for (const session of db.getSessions())')
+        expect(block).toContain('applyMissingCacheStackStartupDefaults(config, session.modelPath)')
+        expect(block).toContain('applyCacheStackStartupDefaultMigration(config, session.modelPath)')
+        expect(block).toContain('markCacheStackStartupDefaultsCurrent(config)')
+        expect(block).toContain("db.updateSession(session.id, { config: JSON.stringify(config) })")
     })
 
     it('adopted paged sessions default to block L2 without legacy L2', () => {
@@ -2905,7 +2953,7 @@ describe('JIT Toggle', () => {
         expect(form).not.toContain('DSV4 Flash composite prefix cache is disabled')
         expect(form).not.toContain("dsv4Active ? applyDsv4CompositeCacheToggle(v) : applyCacheControlUpdates(cacheControlUpdatesForPagedToggle")
         expect(form).toContain("dsv4Active ? cacheControlUpdatesForDsv4BlockDiskToggle(v) : cacheControlUpdatesForBlockDiskToggle")
-        expect(form).toContain('const genericPagedCacheToggleDisabled = m3Active || (!dsv4Active && cachePolicy.pagedCacheDisabled)')
+        expect(form).toContain('const genericPagedCacheToggleDisabled = !dsv4Active && cachePolicy.pagedCacheDisabled')
         expect(form).toContain('disabled={genericPagedCacheToggleDisabled}')
         expect(form).toContain('block size is fixed to 256 tokens')
         expect(form).toContain('checked={config.dsv4PrefixCache !== false}')
@@ -2928,9 +2976,8 @@ describe('JIT Toggle', () => {
         expect(countOccurrences(form, 'label="DSV4 CSA/HCA Pool Codec"')).toBe(1)
         expect(countOccurrences(form, 'label={dsv4Active ? "DSV4 Block Disk Cache (L2)" : "Block Disk Cache (L2)"}')).toBe(1)
         expect(countOccurrences(form, 'label="Use Paged KV Cache"')).toBe(1)
-        expect(form).toContain('!dsv4Active && m3Active ? (')
-        expect(form).toContain('LOCKED OFF')
-        expect(form).toContain(') : !dsv4Active && (')
+        expect(form).toContain('{!dsv4Active && (')
+        expect(form).not.toContain('LOCKED OFF')
         expect(form).toContain('<CheckField label="Use Paged KV Cache"')
         expect(form).toContain('disabled={dsv4CompositeRequiresPaged}')
         expect(form).toContain('disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}')
@@ -2952,17 +2999,16 @@ describe('JIT Toggle', () => {
         expect(form).toContain('disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}')
     })
 
-    it('settings form disables the ignored generic paged-cache toggle for MiniMax-M3', () => {
+    it('settings form exposes MiniMax-M3 typed paged cache while keeping its native codec', () => {
         const form = readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
             'utf-8',
         )
 
-        expect(form).toContain('const genericPagedCacheToggleDisabled = m3Active || (!dsv4Active && cachePolicy.pagedCacheDisabled)')
-        expect(form).toContain('MiniMax-M3 uses native MSA SSD prefix cache with keys, values, idx_keys, and absolute offsets')
-        expect(form).toContain('Generic paged KV cache is locked OFF')
-        expect(form).toContain('LOCKED OFF')
-        expect(form).toContain('m3Active ? (')
+        expect(form).toContain('const genericPagedCacheToggleDisabled = !dsv4Active && cachePolicy.pagedCacheDisabled')
+        expect(form).toContain('MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets')
+        expect(form).toContain('Block Disk Cache provides its persistent L2')
+        expect(form).not.toContain('LOCKED OFF')
         expect(form).toContain('disabled={genericPagedCacheToggleDisabled}')
     })
 

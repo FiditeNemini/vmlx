@@ -381,14 +381,14 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const cacheControlState = {
     continuousBatching: effectiveContinuousBatching,
     enablePrefixCache: effectivePrefixCacheEnabled,
-    usePagedCache: dsv4Active ? dsv4CompositeCacheOptIn : m3Active ? false : config.usePagedCache,
+    usePagedCache: dsv4Active ? dsv4CompositeCacheOptIn : config.usePagedCache,
     enableDiskCache: config.enableDiskCache,
-    enableBlockDiskCache: dsv4Active ? dsv4CompositeCacheOptIn && config.enableBlockDiskCache : m3Active ? false : config.enableBlockDiskCache,
+    enableBlockDiskCache: dsv4Active ? dsv4CompositeCacheOptIn && config.enableBlockDiskCache : config.enableBlockDiskCache,
     architectureRequiresPagedCache,
   }
   const cachePolicy = resolveCacheControlPolicy(cacheControlState)
   const effectiveUsePagedCache = cachePolicy.effectiveUsePagedCache
-  const genericPagedCacheToggleDisabled = m3Active || (!dsv4Active && cachePolicy.pagedCacheDisabled)
+  const genericPagedCacheToggleDisabled = !dsv4Active && cachePolicy.pagedCacheDisabled
   const effectivePagedCacheBlockSize = dsv4CompositeRequiresPaged
     ? DSV4_PAGED_CACHE_BLOCK_SIZE
     : config.pagedCacheBlockSize
@@ -961,13 +961,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {zayaTypedCacheRequiresPaged && <InfoNote text="ZAYA typed CCA cache requires paged cache while prefix cache is enabled. Turn off Prefix Cache to disable this cache stack for ZAYA." />}
         {nativeCacheRequiresPaged && !zayaTypedCacheRequiresPaged && !dsv4CompositeRequiresPaged && <InfoNote text="Hybrid/Mamba cache models require paged cache while prefix cache is enabled so KV blocks and path-dependent state stay in the same cache contract." />}
         {dsv4CompositeRequiresPaged && <InfoNote text="DSV4 uses native SWA+CSA/HCA composite cache snapshots, so paged cache stays on and block size is fixed to 256 tokens for diagnostic decode-cache testing." />}
-        {m3Active && <InfoNote text="MiniMax-M3 uses native MSA SSD prefix cache with keys, values, idx_keys, and absolute offsets. Generic paged KV cache is locked OFF because it cannot preserve that cache format." />}
-        {!dsv4Active && m3Active ? (
-          <div className="cfg-input flex items-center justify-between" style={{ background: 'var(--card)', cursor: 'not-allowed', opacity: 0.75 }}>
-            <span>Use Paged KV Cache</span>
-            <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'rgba(148,163,184,0.18)', color: 'var(--muted-foreground)' }}>LOCKED OFF</span>
-          </div>
-        ) : !dsv4Active && (
+        {m3Active && <InfoNote text="MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets. Block Disk Cache provides its persistent L2; generic KV q4/q8 remains disabled." />}
+        {!dsv4Active && (
           <CheckField label="Use Paged KV Cache" tooltip="Manages the KV cache in fixed-size pages instead of contiguous memory. Greatly reduces memory fragmentation and allows serving larger batches or larger contexts on limited GPU RAM. Extremely recommended for long conversations." checked={effectiveUsePagedCache} onChange={v => applyCacheControlUpdates(cacheControlUpdatesForPagedToggle(v, cacheControlState))} disabled={genericPagedCacheToggleDisabled} />
         )}
         {effectiveUsePagedCache && (

@@ -211,10 +211,10 @@ registerFamily('functionary', { cacheType: 'kv', toolParser: 'functionary', enab
 // registry and diagnostics instead of relying on a generic qwen3 alias.
 registerFamily('minimax', { cacheType: 'kv', toolParser: 'minimax', reasoningParser: 'minimax_m2', supportsThinkingBudget: true, enableAutoToolChoice: true, description: 'MiniMax', priority: 20 })
 // MiniMax-M3 sparse MSA (MiniMaxM3SparseCache: GQA K/V + append-only idx_keys).
-// M3 must stay paged-OFF by default: the engine stores prefix snapshots through
-// the memory-aware L1 + SSD prompt disk cache, preserving keys/values/idx_keys as
-// a first-class M3 cache. The paged block-disk lane is not the default M3 path.
-registerFamily('minimax_m3', { cacheType: 'kv', toolParser: 'minimax_m3', reasoningParser: 'minimax_m3', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: false, description: 'MiniMax-M3 (sparse MSA + Lightning-Indexer, VL)', priority: 5 })
+// The engine's typed paged serializer preserves K/V/idx_keys and absolute offsets,
+// so M3 uses the paged L1 + block-disk L2 path by default. Generic KV q4/q8 stays
+// disabled because only the native M3 codec understands the full sparse state.
+registerFamily('minimax_m3', { cacheType: 'kv', toolParser: 'minimax_m3', reasoningParser: 'minimax_m3', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'MiniMax-M3 (sparse MSA + Lightning-Indexer, VL)', priority: 5 })
 
 // openPangu-2.0-Flash: 92B MoE (6B active) MLA + DSA/SWA hybrid + 3 stateful
 // causal convs + mHC hyper-connections. Mirrors the engine registry entry
@@ -859,6 +859,7 @@ function applyConfigMetadataOverrides(
   if (
     next.isMultimodal === true &&
     !next.forceTextOnly &&
+    next.family !== 'minimax_m3' &&
     (next.cacheType === 'kv' || next.cacheType === 'rotating_kv') &&
     next.cacheSubtype !== 'step3p7_full_sliding_kv'
   ) {
@@ -887,7 +888,7 @@ function configToDetected(family: string, config: Omit<ModelConfig, 'pattern' | 
     cacheSubtype: config.cacheSubtype,
     architectureHints: config.architectureHints,
     // 2026-07-12 (paged default ON, UI<->engine parity): families that declare
-    // usePagedCache keep their value (hybrid/SSM = true, M3/openPangu = false).
+    // usePagedCache keep their value (hybrid/SSM/M3 = true, openPangu = false).
     // Undeclared families default ON for TEXT and OFF for multimodal/VL — VL
     // stays on the memory-aware path until the MLLM paged byte-ceiling (#98)
     // lands. gemma mixed-SWA is separately forced OFF in applyConfigMetadataOverrides.

@@ -38,6 +38,40 @@ def _assert_m3_cache(c, seq: int) -> None:
     assert state[0].shape[2] == state[1].shape[2] == state[2].shape[2] == seq
 
 
+def test_paged_gen_prompt_strip_truncates_all_minimax_m3_cache_lanes():
+    """The paged key and M3's K/V/index state must represent one token count."""
+    from vmlx_engine.scheduler import _truncate_minimax_m3_state_dict
+
+    cache = _m3_cache(seq=9)
+    state_dict = {
+        "class_name": "MiniMaxM3SparseCache",
+        "state": cache.state,
+        "meta_state": ("9",),
+    }
+
+    trimmed = _truncate_minimax_m3_state_dict(state_dict, target=6)
+
+    assert trimmed is not None
+    keys, values, idx_keys = trimmed["state"]
+    assert keys.shape[2] == values.shape[2] == idx_keys.shape[2] == 6
+    assert trimmed["meta_state"] == ("6",)
+    assert keys[0, 0, -1, 0].item() == cache.keys[0, 0, 5, 0].item()
+    assert idx_keys[0, 0, -1, 0].item() == cache.idx_keys[0, 0, 5, 0].item()
+
+
+def test_paged_gen_prompt_strip_rejects_minimax_m3_without_index_lane():
+    from vmlx_engine.scheduler import _truncate_minimax_m3_state_dict
+
+    cache = _m3_cache(seq=9)
+    state_dict = {
+        "class_name": "MiniMaxM3SparseCache",
+        "state": (cache.keys, cache.values, None),
+        "meta_state": ("9",),
+    }
+
+    assert _truncate_minimax_m3_state_dict(state_dict, target=6) is None
+
+
 def test_llm_scheduler_truncation_preserves_minimax_m3_idx_keys():
     from vmlx_engine.scheduler import Scheduler
 
@@ -287,6 +321,78 @@ def test_scheduler_m3_cache_hit_store_rederives_clean_prompt_cache(monkeypatch):
     assert request._extracted_cache_key_tokens == [11, 12, 13, 14, 15, 16]
     assert request._extracted_cache_from_prompt_snapshot is True
     _assert_m3_cache(request._extracted_cache[0], seq=6)
+
+
+def test_scheduler_paged_m3_cache_hit_store_rederives_clean_prompt_cache(monkeypatch):
+    """Paged M3 must not persist a snapshot extended from reconstructed MSA."""
+    from vmlx_engine.request import Request, RequestStatus, SamplingParams
+    from vmlx_engine.scheduler import Scheduler
+
+    raw_post_decode = [_m3_cache(seq=10)]
+    hit_derived_snapshot = [_m3_cache(seq=7)]
+    clean_rederived = [_m3_cache(seq=6)]
+    extracted = [{"class_name": "MiniMaxM3SparseCache", "state": clean_rederived[0].state}]
+    rederive_calls = []
+
+    request = Request(
+        request_id="m3-paged-cache-hit-store-test",
+        prompt=[11, 12, 13, 14, 15, 16, 17],
+        sampling_params=SamplingParams(max_tokens=8),
+    )
+    request.prompt_token_ids = list(request.prompt)
+    request.num_prompt_tokens = len(request.prompt_token_ids)
+    request.cached_tokens = 4
+    request.status = RequestStatus.RUNNING
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.uid_to_request_id = {1: request.request_id}
+    scheduler.running = {request.request_id: request}
+    scheduler.batch_generator = None
+    scheduler.stop_tokens = {0}
+    scheduler._pld_spec_enabled = False
+    scheduler._tq_active = False
+    scheduler.block_aware_cache = object()
+    scheduler.disk_cache = None
+    scheduler._is_hybrid = False
+    scheduler._kv_cache_bits = 0
+    scheduler._mixed_attention_cache_model = False
+    scheduler._uses_m3_msa_cache = True
+    scheduler._uses_dsv4_cache = False
+    scheduler._uses_zaya_cache = False
+    scheduler.total_completion_tokens = 0
+    scheduler.num_requests_processed = 0
+    scheduler._dsv4_trace_timing = lambda *_args, **_kwargs: None
+
+    class _Detok:
+        text = ""
+
+        def finalize(self):
+            return None
+
+    def _fake_rederive(_tokens):
+        rederive_calls.append(list(_tokens))
+        return clean_rederived
+
+    scheduler._prefill_for_prompt_only_cache = _fake_rederive
+    scheduler._extract_cache_states = lambda cache: extracted if cache is clean_rederived else None
+
+    monkeypatch.setattr(Scheduler, "_get_detokenizer", lambda _self, _rid: _Detok())
+
+    response = SimpleNamespace(
+        uid=1,
+        token=0,
+        finish_reason="stop",
+        prompt_cache=raw_post_decode,
+        prompt_cache_snapshot=hit_derived_snapshot,
+    )
+
+    _outputs, finished_ids = Scheduler._process_batch_responses(scheduler, [response])
+
+    assert request.request_id in finished_ids
+    assert rederive_calls == [[11, 12, 13, 14, 15, 16]]
+    assert request._extracted_cache is extracted
+    assert request._extracted_cache_key_tokens == [11, 12, 13, 14, 15, 16]
+    assert request._extracted_cache_from_prompt_snapshot is True
 
 
 def test_scheduler_memory_aware_m3_store_also_writes_prompt_disk_l2(monkeypatch):

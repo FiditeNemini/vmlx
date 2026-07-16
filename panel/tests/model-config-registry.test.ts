@@ -704,7 +704,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.isMultimodal).toBe(false)
   })
 
-  it('autodetects MiniMax-M3 (minimax_m3_vl) as minimax_m3 with mm3 parsers, VL, and paged-off SSD prefix cache', () => {
+  it('autodetects MiniMax-M3 (minimax_m3_vl) with typed paged/block-L2 support', () => {
     const dir = makeModelDir(
       { model_type: 'minimax_m3_vl', text_config: { model_type: 'minimax_m3' }, vision_config: { hidden_size: 1024 } },
       {
@@ -726,9 +726,9 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.reasoningParser).toBe('minimax_m3')
     expect(detected.toolParser).toBe('minimax_m3')
     expect(detected.isMultimodal).toBe(true)
-    // M3 MSA snapshots preserve keys/values/idx_keys through the prompt disk
-    // cache, so paged/block-disk cache is not the default path.
-    expect(detected.usePagedCache).toBe(false)
+    // The typed M3 serializer preserves keys/values/idx_keys through paged L1
+    // and block-disk L2; generic stored-KV quantization remains a separate opt-out.
+    expect(detected.usePagedCache).toBe(true)
   })
 
   it('autodetects openPangu-2.0-Flash (openpangu_v2) with openpangu tool parser and kv/composite cache despite the stamped hybrid/qwen sidecar', () => {

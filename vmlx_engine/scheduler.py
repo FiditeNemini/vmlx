@@ -136,6 +136,58 @@ def _rebuild_meta_state_after_truncation(
     return (str(safe_len),)
 
 
+def _truncate_minimax_m3_state_dict(
+    state_dict: Dict[str, Any],
+    target: int,
+) -> Optional[Dict[str, Any]]:
+    """Slice all three MiniMax-M3 MSA cache lanes to ``target`` tokens.
+
+    MiniMax-M3 sparse layers persist ``(keys, values, idx_keys)``.  The paged
+    store removes the chat template's generation trailer from its token key;
+    leaving this three-tensor state untouched stores more positional cache
+    entries than the key represents.  A later prefix hit then replays the tool
+    result/user tail at the wrong positions and can continue an older task.
+
+    Return ``None`` rather than storing a partial/malformed MSA state.  The
+    caller treats that as a cache-store miss and the next request prefills
+    safely.
+    """
+    if state_dict.get("class_name") != "MiniMaxM3SparseCache":
+        return None
+    state = state_dict.get("state")
+    if not (isinstance(state, (tuple, list)) and len(state) == 3):
+        return None
+    keys, values, idx_keys = state
+    if any(value is None or not hasattr(value, "shape") for value in state):
+        return None
+    if any(len(value.shape) != 4 for value in state):
+        return None
+    safe = min(
+        int(target),
+        int(keys.shape[2]),
+        int(values.shape[2]),
+        int(idx_keys.shape[2]),
+    )
+    if safe <= 0:
+        return None
+    meta = _rebuild_meta_state_after_truncation(
+        "MiniMaxM3SparseCache",
+        state_dict.get("meta_state", ()),
+        safe,
+    )
+    if meta is None:
+        return None
+    return {
+        **state_dict,
+        "state": (
+            keys[:, :, :safe, :],
+            values[:, :, :safe, :],
+            idx_keys[:, :, :safe, :],
+        ),
+        "meta_state": meta,
+    }
+
+
 class SchedulingPolicy(Enum):
     """Scheduling policy for request ordering."""
 
@@ -6257,7 +6309,13 @@ class Scheduler:
                                     pass  # Already cached, nothing to do
                                 else:
                                     prompt_len = len(request.prompt_token_ids)
-                                    if snapshot_cache is not None:
+                                    if snapshot_cache is not None and not (
+                                        getattr(self, "_uses_m3_msa_cache", False)
+                                        and int(
+                                            getattr(request, "cached_tokens", 0) or 0
+                                        )
+                                        > 0
+                                    ):
                                         # Snapshot was captured at the
                                         # prompt boundary — use it
                                         # DIRECTLY. No truncation, no
@@ -6497,6 +6555,73 @@ class Scheduler:
                                                 request._extracted_cache_from_prompt_snapshot = True
                                         else:
                                             cache_for_extract = None
+                                    elif getattr(
+                                        self, "_uses_m3_msa_cache", False
+                                    ):
+                                        # A SingleBatchGenerator snapshot captured
+                                        # after replaying an M3 paged hit is at the
+                                        # prompt boundary, but it was extended from
+                                        # reconstructed sparse MSA state.  Live
+                                        # deterministic tool loops showed that
+                                        # persisting this hit-derived extension can
+                                        # make the next post-tool hit repeat the tool
+                                        # call.  The object-cache path already
+                                        # rederives M3 hit extensions; paged/L2 must
+                                        # use the same clean full-prefill contract.
+                                        m3_prompt_tokens = list(
+                                            request.prompt_token_ids
+                                        )
+                                        _gpl_m3 = (
+                                            getattr(request, "_gen_prompt_len", 0)
+                                            or 0
+                                        )
+                                        if 0 < _gpl_m3 < len(m3_prompt_tokens):
+                                            m3_prompt_tokens = m3_prompt_tokens[
+                                                :-_gpl_m3
+                                            ]
+                                        m3_key_tokens = (
+                                            m3_prompt_tokens[:-1]
+                                            if len(m3_prompt_tokens) > 1
+                                            else []
+                                        )
+                                        if (
+                                            int(
+                                                getattr(
+                                                    request, "cached_tokens", 0
+                                                )
+                                                or 0
+                                            )
+                                            > 0
+                                            and m3_key_tokens
+                                        ):
+                                            logger.info(
+                                                "MiniMax-M3 paged prefix store using "
+                                                "clean prompt-boundary re-prefill "
+                                                "(%d cache-key tokens from %d prompt "
+                                                "tokens) after cache-hit tail replay.",
+                                                len(m3_key_tokens),
+                                                len(m3_prompt_tokens),
+                                            )
+                                            cache_for_extract = (
+                                                self._prefill_for_prompt_only_cache(
+                                                    m3_key_tokens
+                                                )
+                                            )
+                                            if cache_for_extract is not None:
+                                                request._extracted_cache_key_tokens = (
+                                                    list(m3_key_tokens)
+                                                )
+                                                request._extracted_cache_from_prompt_snapshot = True
+                                        else:
+                                            # Cold M3 requests may safely use the
+                                            # generator's clean prompt snapshot.
+                                            cache_for_extract = (
+                                                snapshot_cache
+                                                if snapshot_cache is not None
+                                                else self._truncate_cache_to_prompt_length(
+                                                    raw_cache, prompt_len
+                                                )
+                                            )
                                     else:
                                         # Paged cache: truncate to N-1 tokens so the
                                         # last prompt token can be re-fed on cache hit.
@@ -7160,6 +7285,24 @@ class Scheduler:
                                             ):
                                                 # CacheList/skip: pass through
                                                 truncated_dicts.append(sd)
+                                                continue
+                                            if cls_name == "MiniMaxM3SparseCache":
+                                                truncated_m3 = (
+                                                    _truncate_minimax_m3_state_dict(
+                                                        sd, target
+                                                    )
+                                                )
+                                                if truncated_m3 is None:
+                                                    logger.info(
+                                                        "Skipping paged cache store for %s: "
+                                                        "cannot align MiniMax-M3 K/V/idx_keys "
+                                                        "to generation-prompt-stripped target=%d",
+                                                        request_id,
+                                                        target,
+                                                    )
+                                                    trunc_ok = False
+                                                    break
+                                                truncated_dicts.append(truncated_m3)
                                                 continue
                                             if isinstance(state, tuple) and len(state) == 2:
                                                 keys, values = state

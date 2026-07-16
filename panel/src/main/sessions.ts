@@ -199,20 +199,21 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         config.maxTokens = 0
         changed = true
       }
-      if (config.enablePrefixCache !== true) {
-        config.enablePrefixCache = true
+      const m3PrefixOptIn = config.enablePrefixCache !== false
+      if (config.enablePrefixCache !== m3PrefixOptIn) {
+        config.enablePrefixCache = m3PrefixOptIn
         changed = true
       }
-      if (config.usePagedCache !== false) {
-        config.usePagedCache = false
+      if (config.usePagedCache !== m3PrefixOptIn) {
+        config.usePagedCache = m3PrefixOptIn
         changed = true
       }
-      if (config.enableDiskCache !== true) {
-        config.enableDiskCache = true
+      if (config.enableDiskCache !== false) {
+        config.enableDiskCache = false
         changed = true
       }
-      if (config.enableBlockDiskCache !== false) {
-        config.enableBlockDiskCache = false
+      if (config.enableBlockDiskCache !== m3PrefixOptIn) {
+        config.enableBlockDiskCache = m3PrefixOptIn
         changed = true
       }
       if (config.enableJit !== false) {
@@ -620,7 +621,7 @@ function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   return changed
 }
 
-const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 9
+const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 10
 
 function markCacheStackStartupDefaultsCurrent(config: Partial<ServerConfig>): boolean {
   if (config.cacheStackStartupDefaultsVersion === CACHE_STACK_STARTUP_DEFAULTS_VERSION) return false
@@ -636,8 +637,8 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
     try {
       const detected = detectModelConfigFromDir(targetPath)
       detectedFamily = normalizeDetectedFamilyName(detected.family)
-      // Fully-resolved per-family paged capability (registry default-on for
-      // text, OFF for VL/M3/openPangu/gemma-mixed-SWA via config overrides).
+      // Fully-resolved per-family paged capability (registry default-on when
+      // the engine has a safe generic or typed paged serializer).
       detectedUsePaged = detected.usePagedCache
     } catch {
       /* detection is best-effort here; buildArgs repeats detection at launch */
@@ -648,8 +649,8 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
   const dsv4PrefixOptIn = dsv4Active && config.dsv4PrefixCache !== false
   // 2026-07-12 (paged default ON): fresh sessions inherit the detected per-family
   // paged default so the UI shows — and the engine launches with — paged ON for
-  // autodetected TEXT families, OFF for VL/MLLM (pending #98) and arch-incompatible
-  // families. DSV4 uses its prefix opt-in. Block-disk L2 (paged-compatible) follows
+  // autodetected families with a safe generic or typed serializer. DSV4 uses its
+  // prefix opt-in. Block-disk L2 (paged-compatible) follows
   // paged; non-paged families use the prompt-level L2 instead.
   const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : (detectedUsePaged ?? false)
   // Every prefix-cache lane gets one appropriate L2 by default: block L2 for
@@ -709,7 +710,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
   const isM3MigrateTarget = /minimax.?m3/i.test((modelPath || config.modelPath || "").toLowerCase())
   // v8 paged-default-ON: resolve the detected per-family paged capability so the
   // generic-family migration branch flips existing paged-OFF sessions to the new
-  // default (text ON; VL/MLLM/M3/openPangu/gemma-mixed-SWA stay OFF). Best-effort.
+  // detected default. Best-effort.
   let migrationDetectedFamily: string | undefined
   let migrationDetectedUsePaged: boolean | undefined
   try {
@@ -719,16 +720,6 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
   } catch {
     /* detection best-effort; leave undefined -> paged-off in the generic branch */
   }
-  const staleM3PagedOn =
-    isM3MigrateTarget &&
-    config.usePagedCache === true &&
-    config.continuousBatching === true
-  const staleM3BlockDiskOn =
-    isM3MigrateTarget &&
-    config.continuousBatching === true &&
-    config.enablePrefixCache === true &&
-    config.usePagedCache === false &&
-    config.enableBlockDiskCache === true
   const staleContinuousDefaults =
     config.continuousBatching === true &&
     config.enablePrefixCache === true &&
@@ -797,13 +788,14 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     config.usePagedCache === true &&
     config.enableBlockDiskCache === true &&
     config.kvCacheQuantization === 'none'
-  // v8 could stamp an adopted/pre-existing session current while preserving an
+  // A pre-v9 launch could preserve an adopted/pre-existing session with an
   // impossible UI tuple from older defaults: paged ON + legacy prompt L2 ON +
   // block L2 OFF. The UI cache policy cannot create that combination because
   // enabling paged clears legacy L2 and enables block L2. Migrate only this
-  // exact stale tuple so a valid explicit block-L2 opt-out remains untouched.
-  const staleV8PagedLegacyDiskWithoutBlockL2 =
-    Number(config.cacheStackStartupDefaultsVersion || 0) === 8 &&
+  // exact stale tuple from any pre-v9 version so a valid explicit block-L2
+  // opt-out (paged ON + both disk caches OFF) remains untouched.
+  const stalePreV9PagedLegacyDiskWithoutBlockL2 =
+    Number(config.cacheStackStartupDefaultsVersion || 0) < 9 &&
     migrationDetectedFamily !== 'deepseek-v4' &&
     migrationDetectedUsePaged === true &&
     config.continuousBatching === true &&
@@ -819,10 +811,29 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     Number(config.maxCacheBlocks) === 1000 &&
     Number(config.pagedCacheBlockSize) === 64 &&
     Number(config.blockDiskCacheMaxGb) === 10
-  // v8 (2026-07-12): flip generic TEXT families that the v7 default left paged-OFF
-  // to the new paged-ON default. Only fires when detection says this family should
-  // be paged (text) — VL/M3/openPangu/gemma-mixed-SWA resolve to false and are left
-  // untouched. Scoped to prefix-cache-on continuous-batching sessions.
+  // v10: M3 gained a typed paged/block-L2 serializer that preserves sparse MSA
+  // keys, values, idx_keys, and absolute offsets. Migrate only the exact v9 M3
+  // default tuple; any deviation is treated as an explicit user choice.
+  const staleV9M3PagedOffWithLegacyL2 =
+    isM3MigrateTarget &&
+    migrationDetectedFamily === 'minimax_m3' &&
+    migrationDetectedUsePaged === true &&
+    Number(config.cacheStackStartupDefaultsVersion || 0) === 9 &&
+    config.continuousBatching === true &&
+    config.enablePrefixCache === true &&
+    Number(config.maxNumSeqs) === 1 &&
+    Number(config.prefillBatchSize) === 512 &&
+    Number(config.prefillStepSize) === 2048 &&
+    Number(config.completionBatchSize) === 512 &&
+    config.usePagedCache === false &&
+    config.enableDiskCache === true &&
+    config.enableBlockDiskCache === false &&
+    config.kvCacheQuantization === 'auto' &&
+    Number(config.maxCacheBlocks) === 1000 &&
+    Number(config.pagedCacheBlockSize) === 64 &&
+    Number(config.blockDiskCacheMaxGb) === 10
+  // v8 (2026-07-12): flip families that the v7 default left paged-OFF to their
+  // detected paged default. Scoped to prefix-cache-on continuous-batching sessions.
   const staleV7GenericPagedOff =
     !zayaCacheMigrationTarget &&
     !isM3MigrateTarget &&
@@ -855,12 +866,11 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     !staleNoPrefixBatchDefaults &&
     !stalePartialPagedCacheDefaults &&
     !staleExplicitNoneCacheCodecDefaults &&
-    !staleV8PagedLegacyDiskWithoutBlockL2 &&
+    !stalePreV9PagedLegacyDiskWithoutBlockL2 &&
+    !staleV9M3PagedOffWithLegacyL2 &&
     !staleV2GenericPagedOn &&
     !stalePhase1GenericPagedOff &&
     !stalePhase2GenericPagedOn &&
-    !staleM3PagedOn &&
-    !staleM3BlockDiskOn &&
     !staleV7GenericPagedOff
   ) return false
 
@@ -891,8 +901,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     // through cacheTypeRequiresPaged/cacheSubtypeRequiresPaged at spawn time
     // and stay paged-required — that's a runtime constraint, not a default.
     // v8 (Eric 2026-07-12, reverses v7): paged cache defaults ON for autodetected
-    // TEXT families and OFF for VL/MLLM (pending #98) + arch-incompatible families
-    // (M3/openPangu/gemma mixed-SWA carry usePagedCache:false in the registry).
+    // families whose registry declares a safe generic or typed paged serializer.
     // Derive from the fully-resolved detected capability so existing generic
     // sessions inherit the new default; block-disk L2 (paged-compatible) follows.
     const migratedGenericPaged = migrationDetectedUsePaged ?? false
@@ -1006,6 +1015,25 @@ export class SessionManager extends EventEmitter {
 
   constructor() {
     super()
+    // Migrate persisted cache defaults before the renderer first lists sessions.
+    // Start-time migration alone makes the engine argv correct, but leaves the
+    // Settings UI showing a stale cache stack until the model is launched. The
+    // UI must reflect the configuration that launch will actually use.
+    for (const session of db.getSessions()) {
+      let config: Partial<ServerConfig>
+      try {
+        config = JSON.parse(session.config || '{}')
+      } catch {
+        continue
+      }
+      const cacheDefaultsFilled = applyMissingCacheStackStartupDefaults(config, session.modelPath)
+      const migrated = applyCacheStackStartupDefaultMigration(config, session.modelPath)
+      const markedCurrent = markCacheStackStartupDefaultsCurrent(config)
+      if (cacheDefaultsFilled || migrated || markedCurrent) {
+        db.updateSession(session.id, { config: JSON.stringify(config) })
+        console.log(`[SESSION] Persisted startup cache defaults for session ${session.id}`)
+      }
+    }
   }
 
   /** Get timestamp of last successful health check for a session (0 if never checked) */
@@ -1637,21 +1665,24 @@ export class SessionManager extends EventEmitter {
                 : '[INFO] DSV4-Flash detected; native composite prefix/paged/L2 cache explicitly disabled for this session')
             }
           } else if (freshFamily === 'minimax_m3') {
+            const m3PrefixOptIn = config.enablePrefixCache !== false
             const m3Changed =
-              config.enablePrefixCache !== true ||
-              config.usePagedCache !== false ||
-              config.enableDiskCache !== true ||
-              config.enableBlockDiskCache !== false ||
+              config.enablePrefixCache !== m3PrefixOptIn ||
+              config.usePagedCache !== m3PrefixOptIn ||
+              config.enableDiskCache !== false ||
+              config.enableBlockDiskCache !== m3PrefixOptIn ||
               config.kvCacheQuantization !== 'auto' ||
               config.enableJit === true
-            config.enablePrefixCache = true
-            config.usePagedCache = false
-            config.enableDiskCache = true
-            config.enableBlockDiskCache = false
+            config.enablePrefixCache = m3PrefixOptIn
+            config.usePagedCache = m3PrefixOptIn
+            config.enableDiskCache = false
+            config.enableBlockDiskCache = m3PrefixOptIn
             config.kvCacheQuantization = 'auto'
             config.enableJit = false
             if (m3Changed) {
-              this.pushLog(sessionId, '[INFO] MiniMax-M3 detected; using paged-off SSD prefix cache with native MSA idx_keys, generic KV quantization off, and JIT off')
+              this.pushLog(sessionId, m3PrefixOptIn
+                ? '[INFO] MiniMax-M3 detected; using typed MSA paged prefix cache + block-disk L2 with idx_keys, generic KV quantization off, and JIT off'
+                : '[INFO] MiniMax-M3 detected; native typed prefix/paged/L2 cache explicitly disabled for this session')
             }
           }
           // Refresh multimodal detection from disk. A detected VLM must win
@@ -3213,14 +3244,10 @@ export class SessionManager extends EventEmitter {
         : config.enablePrefixCache !== false,
       usePagedCache: dsv4Active
         ? dsv4PrefixCacheOptIn
-        : m3Active
-        ? false
         : config.usePagedCache ?? detected.usePagedCache ?? false,
       enableDiskCache: !!config.enableDiskCache,
       enableBlockDiskCache: dsv4Active
         ? dsv4PrefixCacheOptIn && !!config.enableBlockDiskCache
-        : m3Active
-        ? false
         : !!config.enableBlockDiskCache,
       architectureRequiresPagedCache,
     })

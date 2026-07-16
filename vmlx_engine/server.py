@@ -5264,7 +5264,9 @@ def _stream_tool_call_early_stop_parser(
         if _engine is not None and hasattr(_engine, "_tokenizer"):
             tokenizer = _engine._tokenizer
         parser = parser_cls(tokenizer)
-        if qwen_exact_once:
+        if qwen_exact_once or getattr(
+            parser_cls, "STREAM_STOPS_AFTER_COMPLETE_CALL", False
+        ):
             effective_tools = _effective_tools_for_tool_parsing(request)
             parser._stream_stop_request = {
                 "tools": convert_tools_for_template(effective_tools),

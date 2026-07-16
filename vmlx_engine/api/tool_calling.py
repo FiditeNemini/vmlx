@@ -397,6 +397,10 @@ def check_and_inject_fallback_tools(
         is_qwen_native_tool_prompt
         and (tools_called_after_latest_user or tool_result_after_latest_user)
     )
+    dsv4_tool_result_continuation = bool(
+        is_dsv4_prompt
+        and (tools_called_after_latest_user or tool_result_after_latest_user)
+    )
     lfm2_tool_result_continuation = bool(
         is_lfm2_native_tool_prompt
         and (tools_called_after_latest_user or tool_result_after_latest_user)
@@ -953,65 +957,91 @@ def check_and_inject_fallback_tools(
     # requests. Detect by the canonical DSV4 turn tokens already present in
     # the rendered prompt and inject the parser-matching format.
     if is_dsv4_prompt:
-        if explicit_tool_requested:
+        if dsv4_tool_result_continuation and recent_tool_call_arguments:
+            dsv4_prompt_tools = _recently_called_tools(template_tools)
+        elif explicit_tool_requested:
             dsv4_prompt_tools = _requested_tools(template_tools)
         else:
             dsv4_prompt_tools = _recently_called_tools(template_tools)
-        dsv4_lines = [
-            "You have access to these tools. Call them using DSML format.",
-            "",
-        ]
-        if explicit_tool_requested or recent_tool_call_arguments:
-            dsv4_lines.extend(
-                [
-                    "The current user explicitly named an available tool.",
-                    "Your next assistant output must be exactly one canonical DSML tool call before any prose.",
-                    "Copy the concrete parameter value from the matching example below exactly; do not repeat the schema lines.",
-                    "",
-                ]
+        if dsv4_tool_result_continuation:
+            completed_names = tools_called_after_latest_user or {
+                name
+                for name in (_tool_props(tool)[0] for tool in dsv4_prompt_tools)
+                if name
+            }
+            completed = ", ".join(sorted(completed_names)) or "requested tool"
+            exact_visible_answer = _requested_exact_visible_answer()
+            tool_prompt = (
+                "Native DSV4 tool-result continuation: the requested tool already "
+                "ran and its real result is present in the conversation. "
+                f"Completed tool(s): {completed}.\n"
+                "Do not emit another <｜DSML｜tool_calls> block and do not copy, "
+                "fabricate, or expose a <tool_result> block as assistant content. "
+                "Finish the user's requested visible answer from the real tool "
+                "result now."
+                + (
+                    "\nThe user requested an exact final visible answer. "
+                    f"Your next assistant message must be exactly: {exact_visible_answer}"
+                    if exact_visible_answer
+                    else ""
+                )
             )
-        for idx, tool in enumerate(dsv4_prompt_tools):
-            func = _tool_func(tool)
-            name = func.get("name", "") or "unknown_tool"
-            dsv4_lines.append(f"Tool: {name}")
-            desc = func.get("description", "")
-            if desc:
-                dsv4_lines.append(f"  description: {desc}")
-            params = func.get("parameters", {}) or {}
-            props = params.get("properties", {}) if isinstance(params, dict) else {}
-            required = set(params.get("required", []) if isinstance(params, dict) else [])
-            if props:
-                dsv4_lines.append("  parameters:")
-                for p_name, p_schema in props.items():
-                    p_type = (
-                        p_schema.get("type", "string")
-                        if isinstance(p_schema, dict)
-                        else "string"
-                    )
-                    req = "required" if p_name in required else "optional"
-                    p_desc = (
-                        p_schema.get("description", "")
-                        if isinstance(p_schema, dict)
-                        else ""
-                    )
-                    suffix = f": {p_desc}" if p_desc else ""
-                    dsv4_lines.append(f"    - {p_name} ({p_type}, {req}){suffix}")
-            dsv4_lines.append("")
-        tool_prompt = (
-            "\n".join(dsv4_lines).rstrip()
-            + "\n\nWhen you decide to call a tool, emit ONLY one canonical DSML tool_calls block for the next tool. "
-            "Do not emit JSON, markdown, prose, generic XML tool tags, or bare invoke blocks outside the wrapper.\n"
-            "Only use the tag name <｜DSML｜invoke>; never emit <｜DSML｜invuse>, <｜DSML｜invue>, <｜DSML｜inv>, or any shortened invoke tag.\n"
-            + _render_dsml_tool_calls_example(dsv4_prompt_tools)
-            + "\n\n"
-            "Do not combine every available tool just because it is listed. "
-            + (
-                "For a request to list the current directory, set the path parameter to \".\" exactly. "
-                if _has_directory_path_tool(dsv4_prompt_tools)
-                else ""
+        else:
+            dsv4_lines = [
+                "You have access to these tools. Call them using DSML format.",
+                "",
+            ]
+            if explicit_tool_requested or recent_tool_call_arguments:
+                dsv4_lines.extend(
+                    [
+                        "The current user explicitly named an available tool.",
+                        "Your next assistant output must be exactly one canonical DSML tool call before any prose.",
+                        "Copy the concrete parameter value from the matching example below exactly; do not repeat the schema lines.",
+                        "",
+                    ]
+                )
+            for idx, tool in enumerate(dsv4_prompt_tools):
+                func = _tool_func(tool)
+                name = func.get("name", "") or "unknown_tool"
+                dsv4_lines.append(f"Tool: {name}")
+                desc = func.get("description", "")
+                if desc:
+                    dsv4_lines.append(f"  description: {desc}")
+                params = func.get("parameters", {}) or {}
+                props = params.get("properties", {}) if isinstance(params, dict) else {}
+                required = set(params.get("required", []) if isinstance(params, dict) else [])
+                if props:
+                    dsv4_lines.append("  parameters:")
+                    for p_name, p_schema in props.items():
+                        p_type = (
+                            p_schema.get("type", "string")
+                            if isinstance(p_schema, dict)
+                            else "string"
+                        )
+                        req = "required" if p_name in required else "optional"
+                        p_desc = (
+                            p_schema.get("description", "")
+                            if isinstance(p_schema, dict)
+                            else ""
+                        )
+                        suffix = f": {p_desc}" if p_desc else ""
+                        dsv4_lines.append(f"    - {p_name} ({p_type}, {req}){suffix}")
+                dsv4_lines.append("")
+            tool_prompt = (
+                "\n".join(dsv4_lines).rstrip()
+                + "\n\nWhen you decide to call a tool, emit ONLY one canonical DSML tool_calls block for the next tool. "
+                "Do not emit JSON, markdown, prose, generic XML tool tags, or bare invoke blocks outside the wrapper.\n"
+                "Only use the tag name <｜DSML｜invoke>; never emit <｜DSML｜invuse>, <｜DSML｜invue>, <｜DSML｜inv>, or any shortened invoke tag.\n"
+                + _render_dsml_tool_calls_example(dsv4_prompt_tools)
+                + "\n\n"
+                "Do not combine every available tool just because it is listed. "
+                + (
+                    "For a request to list the current directory, set the path parameter to \".\" exactly. "
+                    if _has_directory_path_tool(dsv4_prompt_tools)
+                    else ""
+                )
+                + "Do not explain inability to call tools; emit the DSML call."
             )
-            + "Do not explain inability to call tools; emit the DSML call."
-        )
     elif is_zaya_native_tool_prompt:
         zaya_lines = [
             "You have access to native Zyphra tools. When the user asks for one, "
@@ -1602,6 +1632,31 @@ def check_and_inject_fallback_tools(
         for msg in reversed(messages_copy):
             if msg.get("role") == "user":
                 _append_tool_prompt_to_message(msg, qwen_required_reminder)
+                break
+
+    if (
+        is_dsv4_prompt
+        and explicit_tool_requested
+        and recent_tool_call_arguments
+        and not dsv4_tool_result_continuation
+    ):
+        # A new explicit DSV4 tool request can immediately follow an earlier
+        # native tool/result/final-answer transcript. Live Electron testing
+        # showed the model copying that nearby <tool_result> envelope instead
+        # of executing the new call even though the opening system instruction
+        # carried the correct DSML example. Keep the new-turn boundary adjacent
+        # to the latest user message. This is prompt-side native DSML guidance;
+        # it does not repair, synthesize, or execute a model-emitted fake result.
+        dsv4_new_turn_reminder = (
+            "Current-turn DSV4 tool contract: earlier <tool_result> blocks belong "
+            "only to earlier turns and do not satisfy this request. Do not copy, "
+            "fabricate, or output a <tool_result> block. Your next assistant "
+            "output must be exactly this new native DSML call and no prose:\n"
+            + _render_dsml_tool_calls_example(dsv4_prompt_tools)
+        )
+        for msg in reversed(messages_copy):
+            if msg.get("role") == "user":
+                _append_tool_prompt_to_message(msg, dsv4_new_turn_reminder)
                 break
 
     # Re-apply template with modified messages

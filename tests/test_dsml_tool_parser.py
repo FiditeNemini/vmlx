@@ -243,6 +243,117 @@ class TestDSMLToolParser:
         generic JSON-tools instructions block."""
         assert DSMLToolParser.supports_native_format() is True
 
+    def test_complete_dsml_wrapper_opts_into_stream_early_stop(self, parser):
+        parser._stream_stop_request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        call = (
+            f"<{DSML_PREFIX}tool_calls>\n"
+            f'<{DSML_PREFIX}invoke name="file_info">\n'
+            f'<{DSML_PREFIX}parameter name="path" string="true">README.md'
+            f"</{DSML_PREFIX}parameter>\n"
+            f"</{DSML_PREFIX}invoke>\n"
+            f"</{DSML_PREFIX}tool_calls>"
+        )
+        buffered = "reasoning before\n" + call + "\npost-call rambling " * 20
+
+        assert DSMLToolParser.STREAM_STOPS_AFTER_COMPLETE_CALL is True
+        assert parser.stream_tool_calls_complete(buffered) is True
+        assert parser.stream_tool_call_stop_truncate(buffered) == (
+            "reasoning before\n" + call
+        )
+
+    def test_stream_early_stop_waits_for_wrapper_close(self, parser):
+        parser._stream_stop_request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        incomplete = (
+            f"<{DSML_PREFIX}tool_calls>\n"
+            f'<{DSML_PREFIX}invoke name="file_info">\n'
+            f'<{DSML_PREFIX}parameter name="path" string="true">README.md'
+            f"</{DSML_PREFIX}parameter>\n"
+            f"</{DSML_PREFIX}invoke>"
+        )
+
+        assert parser.stream_tool_calls_complete(incomplete) is False
+        assert parser.stream_tool_call_stop_truncate(incomplete) == incomplete
+
+    def test_stream_early_stop_rejects_missing_required_argument(self, parser):
+        parser._stream_stop_request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        malformed = (
+            f"<{DSML_PREFIX}tool_calls>\n"
+            f'<{DSML_PREFIX}invoke name="file_info">\n'
+            f"</{DSML_PREFIX}invoke>\n"
+            f"</{DSML_PREFIX}tool_calls>"
+        )
+
+        assert parser.stream_tool_calls_complete(malformed) is False
+        assert parser.stream_tool_call_stop_truncate(malformed) == malformed
+
+    def test_stream_early_stop_allows_schema_valid_bare_invoke(self, parser):
+        parser._stream_stop_request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        call = (
+            f'<{DSML_PREFIX}invoke name="file_info">\n'
+            f'<{DSML_PREFIX}parameter name="path" string="true">README.md'
+            f"</{DSML_PREFIX}parameter>\n"
+            f"</{DSML_PREFIX}invoke>"
+        )
+
+        assert parser.stream_tool_calls_complete(call) is True
+        assert parser.stream_tool_call_stop_truncate(call + " trailing") == call
+
     def test_tools_called_implies_no_dsml_in_content(self, parser):
         """Cross-cutting invariant: whenever tools_called=True the visible
         content field must be free of every DSML token form. Regression guard

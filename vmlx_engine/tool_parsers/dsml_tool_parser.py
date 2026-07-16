@@ -61,11 +61,20 @@ class DSMLToolParser(ToolParser):
 
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
+    # A canonical DSV4 tool turn is complete once its DSML wrapper (or a
+    # schema-valid bare invoke used by older bundles) closes. Some low-bit DSV4
+    # bundles keep generating after that boundary instead of emitting EOS. The
+    # server may stop those streams after its grace window and execute the call;
+    # it must not burn the remainder of max_tokens behind a buffering heartbeat.
+    STREAM_STOPS_AFTER_COMPLETE_CALL = True
+
     # Streaming state markers — we buffer until we see a complete `<invoke …>…</invoke>`
     # and stop emitting content between the opening `<｜DSML｜invoke` and its close.
     INVOKE_OPEN_PREFIX = f"<{DSML_PREFIX}invoke "
     INVOKE_CLOSE = f"</{DSML_PREFIX}invoke>"
     DSML_OPEN_PREFIX = f"<{DSML_PREFIX}"
+    TOOL_CALLS_OPEN = f"<{DSML_PREFIX}tool_calls>"
+    TOOL_CALLS_CLOSE = f"</{DSML_PREFIX}tool_calls>"
 
     # Top-level regex: find every <｜DSML｜invoke name="…">…</｜DSML｜invoke> block.
     _INVOKE_RE = re.compile(
@@ -758,6 +767,78 @@ class DSMLToolParser(ToolParser):
                 )
             )
         return self._pack_stream_tool_calls(new_calls)
+
+    @staticmethod
+    def _tail_starts_marker(tail: str, marker: str) -> bool:
+        """True when a token-split suffix may be opening another marker."""
+        if marker in tail:
+            return True
+        return any(tail.endswith(marker[:n]) for n in range(len(marker) - 1, 0, -1))
+
+    def _stream_tool_call_stop_end(self, buffered_text: str) -> int | None:
+        """Return the safe end offset of a complete schema-valid DSML turn."""
+        matches = list(self._INVOKE_RE.finditer(buffered_text))
+        if not matches:
+            return None
+
+        request = getattr(self, "_stream_stop_request", None)
+        schemas = self._tool_schemas(request)
+        for match in matches:
+            name, body = match.group(1), match.group(2)
+            schema = schemas.get(name) if schemas else None
+            if schemas and schema is None:
+                return None
+            args = self._parse_params(body)
+            if schema and not self._required_satisfied(args, schema):
+                plain_args = self._parse_plain_params(body, schema)
+                if plain_args:
+                    args.update(plain_args)
+            if schema and not self._required_satisfied(args, schema):
+                return None
+
+        first_match = matches[0]
+        last_match = matches[-1]
+        wrapper_start = buffered_text.rfind(
+            self.TOOL_CALLS_OPEN, 0, first_match.start() + 1
+        )
+        if wrapper_start >= 0:
+            wrapper_end_start = buffered_text.find(
+                self.TOOL_CALLS_CLOSE, last_match.end()
+            )
+            if wrapper_end_start < 0:
+                return None
+            wrapper_end = wrapper_end_start + len(self.TOOL_CALLS_CLOSE)
+            wrapper_text = buffered_text[wrapper_start:wrapper_end]
+            # Do not stop on the first valid invoke if another canonical invoke
+            # has opened but is still incomplete inside the same multi-call
+            # wrapper.
+            if wrapper_text.count(self.INVOKE_OPEN_PREFIX) != len(
+                list(self._INVOKE_RE.finditer(wrapper_text))
+            ):
+                return None
+            tail = buffered_text[wrapper_end:]
+            if self._tail_starts_marker(tail, self.TOOL_CALLS_OPEN):
+                return None
+            return wrapper_end
+
+        # Older DSV4 encoders may emit a bare invoke without tool_calls wrapper.
+        # The server grace window gives an immediately following invoke time to
+        # open; once no new marker is opening, the last complete invoke is the
+        # native turn boundary.
+        bare_end = last_match.end()
+        tail = buffered_text[bare_end:]
+        if self._tail_starts_marker(tail, self.INVOKE_OPEN_PREFIX):
+            return None
+        return bare_end
+
+    def stream_tool_calls_complete(self, buffered_text: str) -> bool:
+        """True once a complete, request-schema-valid DSML turn has closed."""
+        return self._stream_tool_call_stop_end(buffered_text) is not None
+
+    def stream_tool_call_stop_truncate(self, buffered_text: str) -> str:
+        """Drop post-call rambling after the native DSML turn boundary."""
+        end = self._stream_tool_call_stop_end(buffered_text)
+        return buffered_text if end is None else buffered_text[:end]
 
     # ── Abstract-parser-compatible shims ────────────────────────────────
     # The base ToolParser class in this codebase has varied signatures across

@@ -622,6 +622,116 @@ def test_dsv4_fallback_preserves_recent_tool_schema_on_later_user_turn():
     assert '<｜DSML｜invoke name="read_file">' not in injected
 
 
+def test_dsv4_new_explicit_tool_turn_does_not_reuse_prior_tool_result():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "file_info",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    messages = [
+        {"role": "user", "content": "Call file_info with path panel/package.json."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "file_info",
+                        "arguments": {"path": "panel/package.json"},
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": "Path: panel/package.json"},
+        {"role": "assistant", "content": "FIRST-DONE"},
+        {
+            "role": "user",
+            "content": "Call file_info exactly once with path README.md.",
+        },
+    ]
+
+    injected = check_and_inject_fallback_tools(
+        "<｜User｜>Call file_info exactly once with path README.md.<｜Assistant｜>",
+        messages,
+        tools,
+        DSV4LikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="dsml",
+    )
+
+    current_turn = injected.rsplit("<｜User｜>", 1)[1]
+    assert "earlier <tool_result> blocks" in current_turn
+    assert "do not satisfy this request" in current_turn
+    assert "Do not copy, fabricate, or output a <tool_result> block" in current_turn
+    assert '<｜DSML｜invoke name="file_info">' in current_turn
+    assert (
+        '<｜DSML｜parameter name="path" string="true">README.md'
+        '</｜DSML｜parameter>'
+    ) in current_turn
+    assert "panel/package.json" not in current_turn
+
+
+def test_dsv4_tool_result_continuation_finishes_instead_of_calling_again():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "file_info",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Call file_info exactly once with path README.md. After the tool "
+                "result, reply exactly DSV4-HEAD2-DONE and nothing else."
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "file_info",
+                        "arguments": {"path": "README.md"},
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": "Path: README.md"},
+    ]
+
+    injected = check_and_inject_fallback_tools(
+        "<｜User｜>Call file_info.<｜Assistant｜>",
+        messages,
+        tools,
+        DSV4LikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="dsml",
+    )
+
+    assert "Native DSV4 tool-result continuation" in injected
+    assert "requested tool already ran" in injected
+    assert "Do not emit another <｜DSML｜tool_calls> block" in injected
+    assert "Your next assistant message must be exactly: DSV4-HEAD2-DONE" in injected
+    assert "Your next assistant output must be exactly one canonical DSML tool call" not in injected
+
+
 def test_lfm2_fallback_for_file_request_forbids_content_only_pseudo_call():
     """LFM2 must not treat a JSON content blob as a tool call substitute.
 

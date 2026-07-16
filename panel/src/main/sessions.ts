@@ -14,7 +14,12 @@ import { resolveCacheLaunchPolicy } from '../shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../shared/mcpPolicy'
 import { canonicalizeToolParserId } from '../shared/toolParserAliases'
 import { canonicalizeReasoningParserForCli } from '../shared/reasoningParserAliases'
-import { GENERATION_STARTUP_DEFAULTS_VERSION, LEGACY_GENERIC_MAX_OUTPUT_TOKENS } from '../shared/sessionConfigMigrations'
+import {
+  GENERATION_STARTUP_DEFAULTS_VERSION,
+  LEGACY_GENERIC_MAX_OUTPUT_TOKENS,
+  MODEL_PARSER_DEFAULTS_VERSION,
+  migrateModelParserDefaults,
+} from '../shared/sessionConfigMigrations'
 import { appendMetalWiredLimitGuidance, classifyLargeModelMemoryPreflight } from '../shared/metalWiredLimit'
 import { sessionMatchesModelPath } from '../shared/sessionUtils'
 import {
@@ -146,7 +151,10 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   try {
     const detected = detectModelConfigFromDir(modelPath)
     const detectedFamily = normalizeDetectedFamilyName(detected.family)
-    let changed = false
+    let changed = migrateModelParserDefaults(
+      config as Record<string, any>,
+      detectedFamily,
+    )
     if (
       detectedFamily === 'deepseek-v4' &&
       (config.timeout == null || config.timeout === GENERIC_DEFAULT_TIMEOUT_SECONDS)
@@ -2451,6 +2459,7 @@ export class SessionManager extends EventEmitter {
           blockDiskCacheMaxGb: 10,
           kvCacheQuantization: detectedFamily === 'openpangu_v2' ? 'none' : 'auto',
           cacheStackStartupDefaultsVersion: CACHE_STACK_STARTUP_DEFAULTS_VERSION,
+          modelParserDefaultsVersion: MODEL_PARSER_DEFAULTS_VERSION,
           streamInterval: 1,
           maxTokens: 0,
           maxContextLength: 0,

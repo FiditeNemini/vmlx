@@ -1415,7 +1415,7 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
     { modelType: 'got_ocr2', family: 'got-ocr', cacheType: 'kv', isMultimodal: true },
     { modelType: 'granitemoehybrid', family: 'granitemoehybrid', cacheType: 'hybrid', toolParser: 'granite' },
     { modelType: 'kimi_k25', family: 'kimi-k25', cacheType: 'kv', toolParser: 'kimi', reasoningParser: 'deepseek_r1', isMultimodal: true },
-    { modelType: 'laguna', family: 'laguna', cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3' },
+    { modelType: 'laguna', family: 'laguna', cacheType: 'kv', toolParser: 'glm47', reasoningParser: 'qwen3' },
     { modelType: 'lfm2', family: 'lfm2', cacheType: 'hybrid', cacheSubtype: 'lfm2_moe_hybrid_ssm', toolParser: 'lfm2', reasoningParser: 'qwen3' },
     { modelType: 'lfm2_moe', family: 'lfm2', cacheType: 'hybrid', cacheSubtype: 'lfm2_moe_hybrid_ssm', toolParser: 'lfm2', reasoningParser: 'qwen3' },
     { modelType: 'ministral3', family: 'ministral3', cacheType: 'kv', toolParser: 'mistral' },

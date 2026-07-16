@@ -1,7 +1,39 @@
 import { describe, expect, it } from 'vitest'
-import { migrateLegacySessionStartupConfig } from '../src/shared/sessionConfigMigrations'
+import {
+  migrateLegacySessionStartupConfig,
+  migrateModelParserDefaults,
+  MODEL_PARSER_DEFAULTS_VERSION,
+} from '../src/shared/sessionConfigMigrations'
 
 describe('database startup migrations', () => {
+  it('migrates the stale auto-derived Laguna qwen tool parser exactly once', () => {
+    const config: Record<string, any> = { toolCallParser: 'qwen' }
+
+    expect(migrateModelParserDefaults(config, 'laguna')).toBe(true)
+    expect(config.toolCallParser).toBe('glm47')
+    expect(config.modelParserDefaultsVersion).toBe(MODEL_PARSER_DEFAULTS_VERSION)
+
+    config.toolCallParser = 'qwen'
+    expect(migrateModelParserDefaults(config, 'laguna')).toBe(false)
+    expect(config.toolCallParser).toBe('qwen')
+  })
+
+  it('versions parser defaults without changing unrelated family choices', () => {
+    const config: Record<string, any> = { toolCallParser: 'qwen' }
+
+    expect(migrateModelParserDefaults(config, 'qwen3')).toBe(true)
+    expect(config.toolCallParser).toBe('qwen')
+    expect(config.modelParserDefaultsVersion).toBe(MODEL_PARSER_DEFAULTS_VERSION)
+  })
+
+  it('preserves an explicit non-stale Laguna parser while versioning defaults', () => {
+    const config: Record<string, any> = { toolCallParser: 'none' }
+
+    expect(migrateModelParserDefaults(config, 'laguna')).toBe(true)
+    expect(config.toolCallParser).toBe('none')
+    expect(config.modelParserDefaultsVersion).toBe(MODEL_PARSER_DEFAULTS_VERSION)
+  })
+
   it.each([4096, 12000, 12068, 32768])(
     'clears legacy session maxTokens=%i before launch can reuse it',
     maxTokens => {

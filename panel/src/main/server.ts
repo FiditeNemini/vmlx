@@ -45,6 +45,7 @@ export interface ServerConfig {
   kvCacheQuantization?: string
   kvCacheGroupSize?: number
   cacheStackStartupDefaultsVersion?: number
+  modelParserDefaultsVersion?: number
 
   // Disk cache (L2 persistent cache)
   enableDiskCache?: boolean

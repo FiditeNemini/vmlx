@@ -3662,6 +3662,21 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         expect(sliderBody).toContain("aria-label={`${label}: ${unlimitedLabel} ${isUnlimited ? 'active' : 'inactive'}`}")
     })
 
+    it('typed slider values are committed before either settings surface saves', () => {
+        const formSource = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
+        const drawerSource = readFileSync('src/renderer/src/components/sessions/ServerSettingsDrawer.tsx', 'utf8')
+        const settingsSource = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf8')
+        const inputChangeStart = formSource.indexOf('const handleInputChange')
+        const inputFocusStart = formSource.indexOf('const handleInputFocus', inputChangeStart)
+        const inputChangeBody = formSource.slice(inputChangeStart, inputFocusStart)
+
+        expect(inputChangeBody).toContain('setLocalInput(raw)')
+        expect(inputChangeBody).toContain('onChange(parsed)')
+        expect(formSource).toContain('export function commitActiveSettingsInput()')
+        expect(drawerSource.match(/onPointerDown=\{commitActiveSettingsInput\}/g)).toHaveLength(2)
+        expect(settingsSource.match(/onPointerDown=\{commitActiveSettingsInput\}/g)).toHaveLength(2)
+    })
+
     it('Gemma live stress harness checks actual settings input values, not body text labels', () => {
         const source = readFileSync('scripts/live-gemma4-media-stress-proof.mjs', 'utf8')
 

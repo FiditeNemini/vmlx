@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { ArrowLeft, ChevronRight } from 'lucide-react'
-import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG } from './SessionConfigForm'
+import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG, commitActiveSettingsInput } from './SessionConfigForm'
 import { useTranslation } from '../../i18n'
 import { resolveCacheLaunchPolicy } from '../../../../shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../../../../shared/mcpPolicy'
@@ -954,6 +954,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             {t('common.back')}
           </button>
           <button
+            onPointerDown={commitActiveSettingsInput}
             onClick={handleSave}
             disabled={!dirty || saving || restarting}
             className="px-6 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 font-medium disabled:opacity-40"
@@ -962,6 +963,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
           </button>
           {isRunning && (
             <button
+              onPointerDown={commitActiveSettingsInput}
               onClick={handleSaveAndRestart}
               disabled={saving || restarting}
               className="px-6 py-2 bg-success text-success-foreground rounded hover:bg-success/90 font-medium disabled:opacity-40"

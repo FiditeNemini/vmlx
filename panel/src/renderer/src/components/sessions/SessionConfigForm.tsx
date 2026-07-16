@@ -2118,8 +2118,18 @@ export function SliderField({
   }
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // Store raw typed value locally — no clamping until blur
-    setLocalInput(e.target.value)
+    // Keep raw text locally so partially typed values are never clamped
+    // mid-keystroke. Once it is already a valid in-range number, publish it
+    // immediately so Save cannot observe the previous parent value.
+    const raw = e.target.value
+    setLocalInput(raw)
+    if (raw === '') return
+
+    const parsed = Math.round(Number(raw))
+    const withinHardMaximum = maxInput == null || parsed <= maxInput
+    if (Number.isFinite(parsed) && parsed >= min && withinHardMaximum) {
+      onChange(parsed)
+    }
   }
 
   const handleInputFocus = () => {
@@ -2221,4 +2231,12 @@ export function SliderField({
       </div>
     </div>
   )
+}
+
+/** Commit a pending number edit before a settings action reads parent state. */
+export function commitActiveSettingsInput() {
+  const active = document.activeElement
+  if (active instanceof HTMLInputElement && active.type === 'number') {
+    active.blur()
+  }
 }

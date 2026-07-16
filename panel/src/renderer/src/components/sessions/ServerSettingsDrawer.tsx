@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
-import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG, SliderField, DSV4_PAGED_CACHE_BLOCK_SIZE } from './SessionConfigForm'
+import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG, SliderField, DSV4_PAGED_CACHE_BLOCK_SIZE, commitActiveSettingsInput } from './SessionConfigForm'
 import { useInferenceMode } from '../layout/InferenceMode'
 import { useTranslation } from '../../i18n'
 
@@ -324,6 +324,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
       {/* Footer Actions */}
       <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-t border-border flex-shrink-0">
         <button
+          onPointerDown={commitActiveSettingsInput}
           onClick={handleSave}
           disabled={!dirty || saving || restarting}
           className="flex-1 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-40"
@@ -332,6 +333,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         </button>
         {isRunning && !isRemote && (
           <button
+            onPointerDown={commitActiveSettingsInput}
             onClick={handleSaveAndRestart}
             disabled={saving || restarting}
             className="flex-1 px-3 py-1.5 text-sm bg-success text-success-foreground rounded hover:bg-success/90 disabled:opacity-40"

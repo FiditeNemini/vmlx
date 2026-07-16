@@ -2696,6 +2696,11 @@ class TestOpenAILogprobsFormatting:
             for event in events
             if event.get("type") == "response.completed"
         )
+        output_deltas = [
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        ]
 
         assert engine.aborted
         assert engine.chunks_consumed < len(deltas)
@@ -2704,7 +2709,142 @@ class TestOpenAILogprobsFormatting:
         assert json.loads(function_items[0]["arguments"]) == {
             "path": "panel/package.json"
         }
+        assert output_deltas == []
+        assert completed["output_text"] == ""
+        assert "reasoning before the call" not in json.dumps(completed)
         assert "POST_CALL_REPEAT" not in json.dumps(completed)
+
+    @pytest.mark.asyncio
+    async def test_streaming_responses_qwen_exact_once_streams_reasoning_not_pretool_prose(
+        self, monkeypatch
+    ):
+        """Premature post-think meta prose stays hidden before an exact-one call."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _ReasoningParser:
+            def reset_state(self, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, previous_text, current_text, delta_text):
+                if delta_text.startswith("R:"):
+                    return SimpleNamespace(reasoning=delta_text[2:], content=None)
+                if delta_text.startswith("C:"):
+                    return SimpleNamespace(reasoning=None, content=delta_text[2:])
+                return SimpleNamespace(reasoning=None, content=delta_text)
+
+            def extract_reasoning(self, text):
+                return None, text
+
+        deltas = [
+            "R:plan the requested call",
+            "C:visible meta-reasoning that must stay hidden ",
+            "C:<tool_call>",
+            "C:<function=file_info>",
+            "C:<parameter=path>panel/package.json</parameter>",
+            "C:</function>",
+            "C:</tool_call>",
+            "C: POST_CALL_REPEAT",
+        ]
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            def __init__(self):
+                self.aborted: list[str] = []
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = ""
+                for idx, delta in enumerate(deltas, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=delta,
+                        tokens=[idx],
+                        prompt_tokens=8,
+                        completion_tokens=idx,
+                        finished=(idx == len(deltas)),
+                        finish_reason="length" if idx == len(deltas) else None,
+                    )
+
+            async def abort_request(self, request_id):
+                self.aborted.append(request_id)
+                return True
+
+        engine = _Engine()
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "bonsai-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", _ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+
+        request = ResponsesRequest(
+            model="bonsai-test",
+            input=(
+                "Call the built-in file_info tool exactly once with path "
+                "panel/package.json."
+            ),
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ],
+        )
+
+        events: list[dict] = []
+        async for chunk in server.stream_responses_api(
+            engine,
+            [{"role": "user", "content": request.input}],
+            request,
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        reasoning = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.reasoning_summary_text.delta"
+        )
+        visible = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        )
+        function_items = [
+            event["item"]
+            for event in events
+            if event.get("type") == "response.output_item.done"
+            and event.get("item", {}).get("type") == "function_call"
+        ]
+        completed = next(
+            event["response"]
+            for event in events
+            if event.get("type") == "response.completed"
+        )
+
+        assert reasoning == "plan the requested call"
+        assert visible == ""
+        assert completed["output_text"] == ""
+        assert "visible meta-reasoning" not in json.dumps(completed)
+        assert len(function_items) == 1
+        assert function_items[0]["name"] == "file_info"
+        assert json.loads(function_items[0]["arguments"]) == {
+            "path": "panel/package.json"
+        }
 
     @pytest.mark.asyncio
     async def test_nonstream_responses_minimax_tools_available_no_call_runs_answer_pass(

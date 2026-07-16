@@ -18050,7 +18050,15 @@ async def stream_responses_api(
     _request_has_tools = bool(getattr(request, "tools", None))
     _stream_tools_available = bool(kwargs.get("tools")) or _request_has_tools
     tool_call_active = _stream_tools_available and not _suppress_tools
-    tool_call_buffering = False
+    # An explicit single-call contract has no legitimate visible prose before
+    # the function call. Buffer the content rail from the first token so a
+    # model that closes </think> early and continues meta-reasoning cannot leak
+    # that text through output_text.done. Genuine reasoning-summary deltas are
+    # still emitted below; general multi-tool turns keep normal streaming.
+    _exact_once_tool_contract = bool(
+        tool_call_active and _request_explicitly_requires_one_tool_once(request)
+    )
+    tool_call_buffering = _exact_once_tool_contract
     # Early-stop after a complete tool-call turn (opt-in per tool parser via
     # STREAM_STOPS_AFTER_COMPLETE_CALL) — mirrors stream_chat_completion.
     _tc_stop_parser = (
@@ -18639,6 +18647,22 @@ async def stream_responses_api(
                                     tool_call_buffering = True
 
                         if tool_call_buffering:
+                            if (
+                                _exact_once_tool_contract
+                                and not suppress_reasoning
+                                and delta_msg.reasoning
+                            ):
+                                reasoning_was_streamed = True
+                                yield _sse(
+                                    "response.reasoning_summary_text.delta",
+                                    {
+                                        "type": "response.reasoning_summary_text.delta",
+                                        "item_id": msg_id,
+                                        "output_index": 0,
+                                        "summary_index": 0,
+                                        "delta": delta_msg.reasoning,
+                                    },
+                                )
                             # Emit heartbeat during tool call buffering so the client
                             # sees activity (matches ChatCompletion heartbeat behavior).
                             yield _sse(
@@ -19005,7 +19029,13 @@ async def stream_responses_api(
 
     if tool_calls:
         # Apply reasoning parser to the cleaned (pre-tool-call) text
-        if request_parser and cleaned_text:
+        if _exact_once_tool_contract:
+            # The user explicitly required one native call before any prose.
+            # Any content preceding the valid call is model meta-commentary,
+            # not assistant output. It may already be represented correctly on
+            # the reasoning rail, so never duplicate it into output_text.
+            cleaned_text = ""
+        elif request_parser and cleaned_text:
             reasoning_text, content_text = request_parser.extract_reasoning(
                 cleaned_text
             )

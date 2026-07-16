@@ -306,3 +306,58 @@ def test_native_mtp_stays_runtime_unwired():
 
     assert "openpangu_v2" not in native_mtp._RUNTIME_SUPPORTED_FAMILIES
     assert "openpangu_v2" not in native_mtp._EAGLE3_NATIVE_MTP_FAMILIES
+
+
+def test_native_mtp_status_accepts_openpangu_included_layers_runtime_unwired(tmp_path):
+    """openPangu stores MTP as extra model.layers entries, not mtp.* keys."""
+    import json
+
+    from vmlx_engine.native_mtp import inspect_native_mtp_bundle
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "openpangu_v2",
+                "num_nextn_predict_layers": 3,
+            }
+        )
+    )
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps(
+            {
+                "capabilities": {"family": "openpangu_v2"},
+                "runtime": {
+                    "bundle_has_mtp": True,
+                    "mtp_layers": 3,
+                    "mtp_mode": "included",
+                },
+                "mtp": {
+                    "kept": True,
+                    "enabled": True,
+                    "num_layers": 3,
+                    "layer_indices": [46, 47, 48],
+                },
+            }
+        )
+    )
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.layers.46.eh_proj.weight": "shard.safetensors",
+                    "model.layers.47.shared_head.head.weight": "shard.safetensors",
+                    "model.layers.48.shared_head.head.weight": "shard.safetensors",
+                }
+            }
+        )
+    )
+
+    status = inspect_native_mtp_bundle(str(tmp_path))
+
+    assert status["family"] == "openpangu_v2"
+    assert status["index_has_mtp_tensors"] is False
+    assert status["runtime_supported"] is False
+    assert status["runtime_available"] is False
+    assert status["status"] == "weights_present_runtime_unwired"
+    assert status["runtime_mtp_mode"] == "included_but_dropped_for_runtime"
+    assert status["issues"] == []

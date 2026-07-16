@@ -590,6 +590,12 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
         and isinstance(runtime_mtp_mode, str)
         and "drop" in runtime_mtp_mode.lower()
     )
+    openpangu_included_mtp_runtime_unwired = (
+        _normalize_family(family) == "openpangu_v2"
+        and runtime_bundle_has_mtp is True
+        and isinstance(runtime_mtp_mode, str)
+        and runtime_mtp_mode.lower() == "included"
+    )
     if runtime_declares_dropped_mtp:
         drop_mtp = True
 
@@ -605,6 +611,7 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
         and config_layers > 0
         and drop_mtp is not True
         and not has_mtp_tensors
+        and not openpangu_included_mtp_runtime_unwired
     ):
         issues.append(
             "config expects MTP next-token prediction layers, but the bundle "
@@ -707,6 +714,13 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
             "this family is not currently on the JangMTP support map / native "
             "MTP runtime map yet"
         )
+    elif openpangu_included_mtp_runtime_unwired and config_layers:
+        status = "weights_present_runtime_unwired"
+        runtime_reason = (
+            "openPangu MTP heads are stored as extra model.layers entries and "
+            "are intentionally dropped by the current openpangu_v2 runtime"
+        )
+        runtime_mtp_mode = "included_but_dropped_for_runtime"
     elif config_layers:
         status = "configured_without_runtime"
         runtime_reason = "config requests MTP but runtime requirements are incomplete"

@@ -180,6 +180,14 @@ def check_and_inject_fallback_tools(
     ):
         return prompt
     is_lfm2_native_tool_prompt = parser_id in {"lfm2", "liquid"}
+    is_openpangu_native_tool_prompt = (
+        parser_id in {"openpangu", "openpangu_v2"}
+        or (
+            "<|pangu_text_start|>" in prompt
+            and "<|tool_call_start|>" in prompt
+            and "<tools>" in prompt
+        )
+    )
     is_minimax_native_tool_prompt = parser_id in {"minimax", "minimax_m2"}
     is_xml_function_native_tool_prompt = parser_id in {
         "xml_function",
@@ -231,6 +239,14 @@ def check_and_inject_fallback_tools(
         and "<|tool_call_end|>" in instruction_prompt
         and all(f"{name}(" in instruction_prompt for name in tool_names)
     )
+    _openpangu_has_concrete_tool_examples = (
+        is_openpangu_native_tool_prompt
+        and not explicit_tool_requested
+        and not tool_choice_required
+        and "<|tool_call_start|>" in instruction_prompt
+        and "<|tool_call_end|>" in instruction_prompt
+        and all(name in instruction_prompt for name in tool_names)
+    )
     _minimax_has_concrete_tool_examples = (
         is_minimax_native_tool_prompt
         and "<minimax:tool_call>" in instruction_prompt
@@ -252,6 +268,7 @@ def check_and_inject_fallback_tools(
         and (not is_qwen_native_tool_prompt or _qwen_has_concrete_tool_examples)
         and (not is_zaya_native_tool_prompt or _zaya_has_concrete_tool_examples)
         and (not is_lfm2_native_tool_prompt or _lfm2_has_concrete_tool_examples)
+        and (not is_openpangu_native_tool_prompt or _openpangu_has_concrete_tool_examples)
         and (not is_minimax_native_tool_prompt or _minimax_has_concrete_tool_examples)
         and (not is_xml_function_native_tool_prompt or _xml_function_has_native_tool_schema)
         and (not is_step3p5_native_tool_prompt or _step3p5_has_concrete_tool_examples)
@@ -362,6 +379,10 @@ def check_and_inject_fallback_tools(
         is_lfm2_native_tool_prompt
         and (tools_called_after_latest_user or tool_result_after_latest_user)
     )
+    openpangu_tool_result_continuation = bool(
+        is_openpangu_native_tool_prompt
+        and (tools_called_after_latest_user or tool_result_after_latest_user)
+    )
 
     def _recently_called_tools(tools: list[dict]) -> list[dict]:
         """Keep fallback schemas stable after a Responses tool round."""
@@ -409,6 +430,12 @@ def check_and_inject_fallback_tools(
         if is_lfm2_native_tool_prompt
         else template_tools
     )
+    if is_openpangu_native_tool_prompt and openpangu_tool_result_continuation and recent_tool_call_arguments:
+        openpangu_prompt_tools = _recently_called_tools(template_tools)
+    elif is_openpangu_native_tool_prompt and explicit_tool_requested:
+        openpangu_prompt_tools = _requested_tools(template_tools)
+    else:
+        openpangu_prompt_tools = template_tools
     qwen_prompt_tools = template_tools
     if is_qwen_native_tool_prompt:
         if qwen_tool_result_continuation:
@@ -883,6 +910,21 @@ def check_and_inject_fallback_tools(
             + "]<|tool_call_end|>"
         )
 
+    def _render_openpangu_examples(tools: list[dict]) -> str:
+        calls: list[dict[str, Any]] = []
+        for tool in tools:
+            name, props = _tool_props(tool)
+            arguments: dict[str, Any] = {}
+            for param in props:
+                value = _derive_lfm2_request_param_value(name, param)
+                arguments[param] = value or "VALUE_HERE"
+            calls.append({"name": name, "arguments": arguments})
+        return (
+            "<|tool_call_start|>\n"
+            + json.dumps(calls, ensure_ascii=False)
+            + "\n<|tool_call_end|>"
+        )
+
     # DSV4's native parser is DSML, not generic <tool_call> JSON. Its shipped
     # templates currently do not render tool schemas, so this fallback is the
     # only place the model sees tool instructions on OpenAI/Responses tool
@@ -1231,6 +1273,66 @@ def check_and_inject_fallback_tools(
                 "not a tool call.\n"
                 + _render_lfm2_examples(lfm2_prompt_tools)
             )
+    elif is_openpangu_native_tool_prompt:
+        if openpangu_tool_result_continuation:
+            completed_names = tools_called_after_latest_user or {
+                name
+                for name in (_tool_props(tool)[0] for tool in openpangu_prompt_tools)
+                if name
+            }
+            completed = ", ".join(sorted(completed_names)) or "requested tool"
+            tool_prompt = (
+                "Native openPangu tool-result continuation: the requested tool "
+                "already ran and its real result is present in the conversation. "
+                f"Completed tool(s): {completed}.\n"
+                "Do not emit another <|tool_call_start|> block. Finish the "
+                "user's requested visible answer from the real tool result now."
+            )
+        else:
+            openpangu_lines = [
+                "You have access to openPangu native tools. When the user asks "
+                "to use one, call it instead of fabricating a result.",
+                "",
+            ]
+            if explicit_tool_requested or tool_choice_required:
+                openpangu_lines.extend(
+                    [
+                        "The current user explicitly requested an available tool.",
+                        "Your next assistant output must be exactly one native "
+                        "openPangu tool-call JSON list before any prose.",
+                        "Do not answer as if the tool already ran. Do not emit "
+                        "another family's <tool_call> XML format.",
+                        "Every required parameter below must be present and non-empty.",
+                        "",
+                    ]
+                )
+            for tool in openpangu_prompt_tools:
+                func = _tool_func(tool)
+                name = func.get("name", "") or "unknown_tool"
+                openpangu_lines.append(f"Tool: {name}")
+                desc = func.get("description", "")
+                if desc:
+                    openpangu_lines.append(f"  description: {desc}")
+                params = func.get("parameters", {}) or {}
+                props = params.get("properties", {}) if isinstance(params, dict) else {}
+                required = set(params.get("required", []) if isinstance(params, dict) else [])
+                if props:
+                    openpangu_lines.append("  parameters:")
+                    for p_name, p_schema in props.items():
+                        p_type = (
+                            p_schema.get("type", "string")
+                            if isinstance(p_schema, dict)
+                            else "string"
+                        )
+                        req = "required" if p_name in required else "optional"
+                        openpangu_lines.append(f"    - {p_name} ({p_type}, {req})")
+            tool_prompt = (
+                "\n".join(openpangu_lines).rstrip()
+                + "\n\nWhen a tool call is needed, emit ONLY this native "
+                "openPangu JSON-list shape. Do not emit prose, markdown, "
+                "generic XML <tool_call> tags, Python-call syntax, or a fake result.\n"
+                + _render_openpangu_examples(openpangu_prompt_tools)
+            )
     elif is_minimax_native_tool_prompt:
         minimax_prompt_tools = _requested_tools(template_tools)
         minimax_lines = [
@@ -1299,6 +1401,22 @@ def check_and_inject_fallback_tools(
                 and all(
                     name in rendered
                     for name in (_tool_props(tool)[0] for tool in lfm2_prompt_tools)
+                    if name
+                )
+            )
+        if is_openpangu_native_tool_prompt:
+            if openpangu_tool_result_continuation:
+                return (
+                    "<|message_start|>tool\n" in rendered
+                    and "<|tool_call_start|>" in rendered
+                    and "<|tool_call_end|>" in rendered
+                )
+            return (
+                "<|tool_call_start|>" in rendered
+                and "<|tool_call_end|>" in rendered
+                and all(
+                    name in rendered
+                    for name in (_tool_props(tool)[0] for tool in openpangu_prompt_tools)
                     if name
                 )
             )
@@ -1476,6 +1594,10 @@ def check_and_inject_fallback_tools(
         # coding-tool catalog overwhelms small LFM2 variants and encourages a
         # prose simulation of the requested command instead of a native call.
         safe_kwargs["tools"] = lfm2_prompt_tools
+    if is_openpangu_native_tool_prompt:
+        # Keep openPangu's own <tools> block and narrow explicit requests to the
+        # requested tool so the native template and the concrete fallback agree.
+        safe_kwargs["tools"] = openpangu_prompt_tools
     if not (
         (
             is_zaya_native_tool_prompt
@@ -1483,6 +1605,7 @@ def check_and_inject_fallback_tools(
             and not has_flat_responses_function_tools
         )
         or is_lfm2_native_tool_prompt
+        or is_openpangu_native_tool_prompt
         or is_xml_function_native_tool_prompt
     ):
         safe_kwargs.pop("tools", None)

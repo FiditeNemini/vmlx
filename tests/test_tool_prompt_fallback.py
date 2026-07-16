@@ -7,6 +7,8 @@ models copy those examples, and a fake arg on a zero-argument tool corrupts
 mixed built-in/MCP tool calls on DSV4.
 """
 
+import json
+
 from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
 from vmlx_engine.loaders.dsv4_chat_encoder import select_tools_for_explicit_request
 
@@ -30,6 +32,35 @@ class DSV4LikeTokenizer:
 class PlainTokenizer:
     def apply_chat_template(self, messages, **_kwargs):
         return "\n".join((message.get("content") or "") for message in messages)
+
+
+class OpenPanguLikeTokenizer:
+    def apply_chat_template(self, messages, **kwargs):
+        tools = kwargs.get("tools") or []
+        rendered = ["<|pangu_text_start|><|message_start|>system"]
+        if tools:
+            rendered.append("<tools>")
+            rendered.append(json.dumps(tools, ensure_ascii=False))
+            rendered.append("</tools>")
+            rendered.append(
+                "<|tool_call_start|>\n"
+                '[{"name": "<函数名1>", "arguments": <args1 json对象>}]\n'
+                "<|tool_call_end|>"
+            )
+        rendered.append("<|message_end|>")
+        for message in messages:
+            role = message.get("role")
+            content = message.get("content") or ""
+            if role == "system":
+                rendered.append(f"<|message_start|>system\n{content}<|message_end|>")
+            elif role == "user":
+                rendered.append(f"<|message_start|>user\n{content}<|message_end|>")
+            elif role == "assistant":
+                rendered.append(f"<|message_start|>assistant\n{content}<|message_end|>")
+            elif role == "tool":
+                rendered.append(f"<|message_start|>tool\n{content}<|message_end|>")
+        rendered.append("<|message_start|>assistant\n")
+        return "\n".join(rendered)
 
 
 def _qwen_prompt() -> str:
@@ -80,6 +111,85 @@ def _qwen_test_tools() -> list[dict]:
             },
         },
     ]
+
+
+def _file_info_tool() -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "file_info",
+                "description": "Return information for a filesystem path.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+
+
+def test_openpangu_explicit_file_info_uses_native_json_list_with_bound_path():
+    tools = _file_info_tool()
+    user_request = (
+        "Call the built-in file_info tool exactly once with path "
+        "panel/package.json. After the tool result, reply exactly DONE."
+    )
+    prompt = OpenPanguLikeTokenizer().apply_chat_template(
+        [{"role": "user", "content": user_request}],
+        tools=tools,
+    )
+
+    injected = check_and_inject_fallback_tools(
+        prompt,
+        [{"role": "user", "content": user_request}],
+        tools,
+        OpenPanguLikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="openpangu",
+    )
+
+    assert "native openPangu JSON-list shape" in injected
+    assert "<tool_call>\n" not in injected
+    assert '"name": "file_info"' in injected
+    assert '"path": "panel/package.json"' in injected
+    assert '"path": "VALUE_HERE"' not in injected
+
+
+def test_openpangu_tool_result_continuation_finishes_visible_answer():
+    tools = _file_info_tool()
+    messages = [
+        {"role": "user", "content": "Call file_info with path panel/package.json."},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "arguments": '{"path":"panel/package.json"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "content": "Path: panel/package.json\nType: file"},
+    ]
+    prompt = OpenPanguLikeTokenizer().apply_chat_template(messages, tools=tools)
+
+    injected = check_and_inject_fallback_tools(
+        prompt,
+        messages,
+        tools,
+        OpenPanguLikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="openpangu",
+    )
+
+    assert "Native openPangu tool-result continuation" in injected
+    assert "Do not emit another <|tool_call_start|> block" in injected
+    assert "<|message_start|>tool\nPath: panel/package.json" in injected
 
 
 def test_qwen_explicit_run_exactly_binds_command_and_narrows_schema():

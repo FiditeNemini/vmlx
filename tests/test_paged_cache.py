@@ -617,6 +617,45 @@ class TestBlockAwarePrefixCache:
         # Should hit the prefix
         assert remaining == [999, 1000]
 
+    def test_fetched_block_table_is_registered_for_completion_ref_release(self):
+        """A paged hit must not leave one permanent request ref behind.
+
+        Live agent loops fetch a prefix, generate, and then store the refreshed
+        prompt snapshot under the same request ID.  Scheduler completion cleanup
+        finds the fetched ownership through ``_request_tables``.  If fetch does
+        not register its table, every hit pins its blocks and a small pool can no
+        longer evict or allocate after the first tool iteration.
+        """
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        paged = PagedCacheManager(block_size=4, max_blocks=4)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+        tokens = list(range(12))
+
+        stored = cache.store_cache("write", tokens, ["cache-data"])
+        assert stored is not None
+
+        # Mirror scheduler post-store cleanup: keep the hash entries, release
+        # the request ownership, and make all three usable blocks reclaimable.
+        write_entry = cache._request_tables.pop("write")
+        assert paged.release_request_refs(write_entry.block_table) == 3
+        paged.detach_request("write")
+        assert [paged.blocks[i].ref_count for i in stored.block_ids] == [0, 0, 0]
+
+        hit, remaining = cache.fetch_cache("read", tokens + [99])
+
+        assert hit is not None
+        assert remaining == [99]
+        assert cache._request_tables["read"].block_table is hit
+        assert [paged.blocks[i].ref_count for i in hit.block_ids] == [1, 1, 1]
+
+        read_entry = cache._request_tables.pop("read")
+        assert paged.release_request_refs(read_entry.block_table) == 3
+        paged.detach_request("read")
+        assert [paged.blocks[i].ref_count for i in hit.block_ids] == [0, 0, 0]
+        assert paged.free_block_queue.num_free_blocks == 3
+
     def test_fetch_prefers_exact_partial_prefix_over_shorter_block_hit(self):
         """A cached terminal partial block must win over a shorter full-block hit.
 

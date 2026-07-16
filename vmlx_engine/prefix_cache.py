@@ -1484,6 +1484,8 @@ class BlockAwarePrefixCache:
         Ref ownership:
             get_computed_blocks() increments request refs through touch();
             fallback prefix-index matches call increment_ref explicitly.
+            Every returned table is registered in _request_tables so the
+            scheduler's normal completion cleanup can release those refs.
         """
         if not tokens:
             return None, tokens
@@ -1618,6 +1620,18 @@ class BlockAwarePrefixCache:
                 f"Paged cache hit for {request_id}: "
                 f"{len(cached_blocks)} blocks, {block_table.num_tokens} tokens"
             )
+            # fetch_cache() owns one request ref for every returned block.  The
+            # scheduler releases completed hits through _request_tables before
+            # storing the refreshed prompt snapshot.  Without registering the
+            # fetched table here, successful L1/L2 hits retain one ref forever;
+            # a small block pool then fills with non-evictable blocks after the
+            # first agent/tool iteration.
+            self._request_tables[request_id] = BlockCacheEntry(
+                block_table=block_table,
+                cache_data=None,
+                last_access=time.time(),
+                cache_type="assistant",
+            )
             return block_table, remaining
 
         # Try prefix index for longer matches
@@ -1665,6 +1679,14 @@ class BlockAwarePrefixCache:
                 f"{len(matched_tokens)} tokens matched"
             )
 
+            # Prefix-index hits acquire refs with increment_ref(), so they need
+            # the same completion ownership registration as chain-hash hits.
+            self._request_tables[request_id] = BlockCacheEntry(
+                block_table=block_table,
+                cache_data=None,
+                last_access=time.time(),
+                cache_type="assistant",
+            )
             return block_table, remaining
 
         # No cache hit

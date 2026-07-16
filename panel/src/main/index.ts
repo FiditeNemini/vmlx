@@ -29,6 +29,8 @@ import { createTray, destroyTray, hasTray } from './tray'
 import { startMemoryEnforcer, stopMemoryEnforcer } from './memory-enforcer'
 import { registerModelSettingsHandlers } from './db/model-settings'
 import { registerImageHandlers } from './ipc/image'
+import { networkInterfaces } from 'os'
+import { selectLanAddress, type NetworkInterfaceMap } from './network-address'
 
 // Dev-only: expose Chrome DevTools Protocol for live UI automation when
 // VMLX_REMOTE_DEBUG_PORT is set. No-op in normal/production launches.
@@ -45,15 +47,7 @@ let isQuitting = false
 const processManager = new ProcessManager()
 
 function getLanAddress(): string | undefined {
-  const nets = require('os').networkInterfaces() as Record<string, Array<{ address?: string; family?: string; internal?: boolean }> | undefined>
-  for (const addrs of Object.values(nets)) {
-    for (const addr of addrs || []) {
-      if (addr.family === 'IPv4' && !addr.internal && addr.address) {
-        return addr.address
-      }
-    }
-  }
-  return undefined
+  return selectLanAddress(networkInterfaces() as NetworkInterfaceMap)
 }
 
 function gatewayStatusPayload() {

@@ -2446,6 +2446,9 @@ export function registerChatHandlers(
             const parsed = JSON.parse(data);
             const responsesEventType =
               typeof parsed.type === "string" ? parsed.type : currentEventType;
+            const isResponsesTerminalEvent =
+              responsesEventType === "response.completed" ||
+              responsesEventType === "response.incomplete";
 
             if (useResponsesApi && responsesEventType) {
               const seq = parsed.sequence_number;
@@ -2539,7 +2542,7 @@ export function registerChatHandlers(
               // Codex 2026-05-06 #2: SSE final-text fallback. If a stream
               // never emitted any response.output_text.delta events but
               // the server sends final text via response.output_text.done
-              // or response.content_part.done or response.completed
+              // or response.content_part.done or a terminal Responses event
               // wrapping output[*].content[*].text, we MUST consume that
               // final text — otherwise the assistant message is blank,
               // gets skipped on next-turn rebuild (empty skip in
@@ -2568,8 +2571,7 @@ export function registerChatHandlers(
                 }
               }
               if (
-                responsesEventType === "response.completed" &&
-                !_sawResponsesTextDelta
+                isResponsesTerminalEvent && !_sawResponsesTextDelta
               ) {
                 // Walk parsed.response.output[*].content[*].text and
                 // emit any output_text we find.
@@ -2701,10 +2703,10 @@ export function registerChatHandlers(
                 }
               }
 
-              // Final usage from response.completed event
+              // Final usage from response.completed / response.incomplete.
               // Server wraps in { response: { usage: { input_tokens, output_tokens } } }
               const respUsage = parsed.response?.usage || parsed.usage;
-              if (responsesEventType === "response.completed") {
+              if (isResponsesTerminalEvent) {
                 const completedWarnings = extractResponsesWarnings(
                   parsed.response || parsed,
                 );
@@ -2719,7 +2721,7 @@ export function registerChatHandlers(
                 else if (respStatus === "completed") lastFinishReason = "stop";
                 else if (respStatus) lastFinishReason = respStatus;
               }
-              if (responsesEventType === "response.completed" && respUsage) {
+              if (isResponsesTerminalEvent && respUsage) {
                 if (respUsage.output_tokens != null) {
                   tokenCount = respUsage.output_tokens;
                   if (tokenCount < iterationTokenBase) iterationTokenBase = 0;

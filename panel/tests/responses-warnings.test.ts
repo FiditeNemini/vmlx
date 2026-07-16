@@ -144,12 +144,16 @@ describe('categorizeResponsesWarning', () => {
 })
 
 describe('Responses warnings panel wiring', () => {
-  it('main chat IPC extracts response.completed warnings and forwards them on chat:complete', () => {
+  it('main chat IPC handles completed and incomplete terminal warnings and usage', () => {
     const source = readFileSync(new URL('../src/main/ipc/chat.ts', import.meta.url), 'utf8')
     expect(source).toContain('dropSupersededRecoveryWarnings,')
     expect(source).toContain('extractResponsesWarnings,')
     expect(source).toContain('from "../../shared/responsesWarnings"')
     expect(source).toContain('responsesEventType === "response.warning"')
+    expect(source).toContain('responsesEventType === "response.completed" ||')
+    expect(source).toContain('responsesEventType === "response.incomplete"')
+    expect(source).toContain('if (isResponsesTerminalEvent)')
+    expect(source).toContain('if (isResponsesTerminalEvent && respUsage)')
     expect(source).toContain('const eventWarnings = extractResponsesWarnings(parsed)')
     expect(source).toContain('const completedWarnings = extractResponsesWarnings(')
     expect(source).toContain('const chatWarnings = extractResponsesWarnings(parsed)')

@@ -19643,7 +19643,10 @@ async def stream_responses_api(
             },
         )
 
-    # Emit response.completed — use "incomplete" status when max_tokens was hit
+    # Emit the terminal event that matches the final response status. OpenAI's
+    # Responses stream uses response.incomplete when max_output_tokens is hit;
+    # a response.completed envelope with status=incomplete breaks clients that
+    # dispatch terminal handling by event type.
     _resp_finish = getattr(last_output, "finish_reason", None) if last_output else None
     _resp_status = "incomplete" if _resp_finish == "length" else "completed"
     _resp_extra: dict = {}
@@ -19707,10 +19710,13 @@ async def stream_responses_api(
         messages + _responses_output_to_assistant_messages(all_output_items),
         reasoning_only=_stream_reasoning_only,
     )
+    _terminal_response_event = (
+        "response.incomplete" if _resp_status == "incomplete" else "response.completed"
+    )
     yield _sse(
-        "response.completed",
+        _terminal_response_event,
         {
-            "type": "response.completed",
+            "type": _terminal_response_event,
             "response": completed_response,
         },
     )

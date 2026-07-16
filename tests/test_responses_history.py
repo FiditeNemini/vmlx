@@ -323,6 +323,52 @@ async def test_responses_streaming_stores_history_for_previous_response_id():
 
 
 @pytest.mark.asyncio
+async def test_responses_streaming_length_finish_emits_incomplete_terminal_event():
+    """A length-capped stream must not masquerade as response.completed."""
+    from vmlx_engine.api.models import ResponsesRequest
+    from vmlx_engine import server
+
+    class FakeEngine:
+        tokenizer = SimpleNamespace(has_thinking=False)
+
+        async def stream_chat(self, messages, **kwargs):
+            yield SimpleNamespace(
+                new_text="partial answer",
+                prompt_tokens=3,
+                completion_tokens=4,
+                finish_reason="length",
+                finished=True,
+            )
+
+    original_parser = server._reasoning_parser
+    server._reasoning_parser = None
+    try:
+        request = ResponsesRequest(
+            model="unit-test-model",
+            input="hello",
+            stream=True,
+            max_output_tokens=4,
+        )
+        events = [
+            event
+            async for event in server.stream_responses_api(
+                FakeEngine(),
+                [{"role": "user", "content": "hello"}],
+                request,
+            )
+        ]
+
+        assert _sse_payloads(events, "response.completed") == []
+        incomplete = _sse_payloads(events, "response.incomplete")
+        assert len(incomplete) == 1
+        response = incomplete[0]["response"]
+        assert response["status"] == "incomplete"
+        assert response["incomplete_details"] == {"reason": "max_output_tokens"}
+    finally:
+        server._reasoning_parser = original_parser
+
+
+@pytest.mark.asyncio
 async def test_responses_streaming_reasoning_only_stores_placeholder_and_marker():
     from vmlx_engine.api.models import ResponsesRequest
     from vmlx_engine.reasoning.base import DeltaMessage

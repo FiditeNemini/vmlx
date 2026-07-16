@@ -3040,16 +3040,18 @@ class TestOpenAILogprobsFormatting:
             if event.get("type") == "response.output_item.done"
             and event.get("item", {}).get("type") == "function_call"
         ]
-        completed = next(
+        terminal = next(
             event["response"]
             for event in events
-            if event.get("type") == "response.completed"
+            if event.get("type") == "response.incomplete"
         )
 
         assert reasoning == "plan the requested call"
         assert visible == ""
-        assert completed["output_text"] == ""
-        assert "visible meta-reasoning" not in json.dumps(completed)
+        assert terminal["status"] == "incomplete"
+        assert terminal["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert terminal["output_text"] == ""
+        assert "visible meta-reasoning" not in json.dumps(terminal)
         assert len(function_items) == 1
         assert function_items[0]["name"] == "file_info"
         assert json.loads(function_items[0]["arguments"]) == {

@@ -10778,6 +10778,56 @@ class TestJangVLMFallbacks:
 class TestTurboQuantKVTelemetry:
     """Cache telemetry must agree for nested MLLM language models."""
 
+    def test_storage_only_compress_telemetry_is_not_labeled_live(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        from jang_tools.turboquant.cache import TurboQuantKVCache as RuntimeTQCache
+        from vmlx_engine.server import _turboquant_kv_cache_status
+
+        class TurboQuantKVCache:
+            compress_after = 0
+            key_bits = 8
+            value_bits = 8
+
+        def _turboquant_make_cache():
+            return [TurboQuantKVCache()]
+
+        _turboquant_make_cache._vmlx_tq_compress_after = 0
+        _turboquant_make_cache._vmlx_tq_default_key_bits = 8
+        _turboquant_make_cache._vmlx_tq_default_value_bits = 8
+        monkeypatch.setattr(
+            RuntimeTQCache,
+            "_vmlx_last_compress",
+            {"calls": 3, "compressed_tokens_after": 154},
+            raising=False,
+        )
+
+        engine = SimpleNamespace(
+            _model=SimpleNamespace(make_cache=_turboquant_make_cache)
+        )
+        scheduler = SimpleNamespace(
+            _tq_active=True,
+            _kv_cache_bits=0,
+            block_aware_cache=object(),
+            memory_aware_cache=None,
+            prefix_cache=None,
+            config=SimpleNamespace(
+                max_num_seqs=1,
+                prefill_batch_size=512,
+                completion_batch_size=512,
+            ),
+        )
+
+        status = _turboquant_kv_cache_status(engine=engine, scheduler=scheduler)
+
+        assert status["live_encode_enabled"] is False
+        assert status["storage_encode_enabled"] is True
+        assert status["storage_encode_telemetry"]["calls"] == 3
+        assert status["codec_compress_telemetry"]["compressed_tokens_after"] == 154
+        assert "live_encode_telemetry" not in status
+
     def test_detects_nested_mllm_turboquant_make_cache(self):
         from vmlx_engine.server import _turboquant_kv_cache_status
 

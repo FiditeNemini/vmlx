@@ -29,7 +29,11 @@ export function shouldFinishZayaAppleScriptToolRound(
 export function requestsDirectAnswerAfterSingleTool(text: string): boolean {
   return (
     /\bexactly once\b/i.test(text) &&
-    /\bafter (?:the )?tool result\b/i.test(text) &&
+    // Keep this bounded to one clause, but allow ordinary modifiers from the
+    // user's exact contract (for example "after the real tool result"). The
+    // previous literal-only match left tools enabled on that follow-up and a
+    // live Bonsai turn executed the same file_info call five times.
+    /\bafter\b[^.!?\n]{0,64}\btool result\b/i.test(text) &&
     /\breply exactly\b/i.test(text)
   )
 }

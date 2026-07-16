@@ -61,12 +61,22 @@ describe('tool auto-continue policy', () => {
     ).toBe(true)
     expect(
       requestsDirectAnswerAfterSingleTool(
+        'Continue this same chat. Call the built-in file_info tool exactly once with path pyproject.toml. After the real tool result, reply exactly B1-NONE-MT2-DONE and nothing else.',
+      ),
+    ).toBe(true)
+    expect(
+      requestsDirectAnswerAfterSingleTool(
         'Use tools as needed, then reply exactly DONE.',
       ),
     ).toBe(false)
     expect(
       requestsDirectAnswerAfterSingleTool(
         'Call file_info exactly once, then summarize the result.',
+      ),
+    ).toBe(false)
+    expect(
+      requestsDirectAnswerAfterSingleTool(
+        'Call file_info exactly once. After checking prerequisites. The tool result may be long; reply exactly DONE.',
       ),
     ).toBe(false)
   })

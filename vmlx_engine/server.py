@@ -7720,7 +7720,16 @@ def _turboquant_kv_cache_status(engine=None, scheduler=None) -> dict:
             ),
         }
         if live_telemetry is not None:
-            status["live_encode_telemetry"] = dict(live_telemetry)
+            # TurboQuantKVCache.compress() is also the storage-boundary codec
+            # entry point. Do not label those calls as live mid-decode encoding
+            # when compress_after=0; that made a correct storage-only Qwen Auto
+            # run look like live lossy transitions had occurred.
+            telemetry = dict(live_telemetry)
+            status["codec_compress_telemetry"] = telemetry
+            if live_encode_enabled:
+                status["live_encode_telemetry"] = telemetry
+            elif native_tq_storage:
+                status["storage_encode_telemetry"] = telemetry
         cfg = getattr(scheduler, "config", None) if scheduler is not None else None
         if cfg is not None:
             batch_api = bool(getattr(scheduler, "_tq_batch_api", False))

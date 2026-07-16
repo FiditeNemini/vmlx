@@ -540,6 +540,30 @@ class SSMCompanionCache:
                 "reason": "non_positive_max_len",
             }
             return None
+        # A fresh process has no in-memory ``_length_index`` yet, even when
+        # the scheduler's block-disk tier has selected an exact cached block
+        # boundary. Probe that boundary directly first so ``fetch()`` can
+        # restore the matching SSM companion from disk and backfill L1. Without
+        # this probe, restart reuse was limited to exact whole-prompt lookups;
+        # longer multi-turn prompts saw KV disk hits but unnecessarily fell
+        # back to a full hybrid prefill because only L1 checkpoint lengths were
+        # considered below.
+        exact_boundary = self.fetch(
+            token_ids,
+            max_len,
+            cache_extra_keys=cache_extra_keys,
+        )
+        if exact_boundary is not None:
+            states, is_complete = exact_boundary
+            self.last_prefix_lookup = {
+                "max_len": int(max_len),
+                "candidate_lengths": [int(max_len)],
+                "matched": True,
+                "checkpoint_tokens": int(max_len),
+                "is_complete": bool(is_complete),
+                "source": "exact_boundary_l1_or_l2",
+            }
+            return (max_len, states, is_complete)
         # Scan lengths in descending order so we find the longest match
         # first.  Typical cache sizes are small (<=20 entries), so the
         # walk is O(entries) per request — negligible vs a 50K prefill.

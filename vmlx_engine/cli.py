@@ -963,22 +963,12 @@ def serve_command(args):
     try:
         from .model_config_registry import get_model_config_registry
         _mc = get_model_config_registry().lookup(args.model)
-        if (
-            getattr(_mc, "cache_type", None) == "hybrid"
-            and _mc.family_name in {"qwen3_5", "qwen3_5_moe"}
-            and os.environ.get(
-                "VMLX_ALLOW_UNSAFE_QWEN_SSM_DISK_RESTORE", ""
-            ).lower() not in {"1", "true", "yes", "on"}
-        ):
-            os.environ["VMLX_DISABLE_SSM_DISK_RESTORE"] = "1"
-            logger.warning(
-                "Qwen3.6 hybrid SSM companion disk restore is quarantined: "
-                "live Electron multi-turn proof found cross-restart numeric "
-                "divergence after a safetensors round-trip. Same-process SSM "
-                "L1, async rederive, paged attention KV, and block-disk L2 "
-                "remain enabled; restart hits safely full-prefill until the "
-                "SSM L2 codec is release-cleared."
-            )
+        # SSM disk restore remains governed by the explicit
+        # VMLX_DISABLE_SSM_DISK_RESTORE opt-out in the disk store. Do not
+        # silently disable it by family here: current Qwen hybrid records are
+        # runtime-fingerprinted and preserve ArraysCache lengths/left-padding,
+        # so the real codec must be exercised by the same CLI and Electron
+        # settings instead of being bypassed before it can be validated.
         # DSV4-Flash auto-config. DSV4_LONG_CTX=1 is the only supported
         # runtime mode (tri-mode SWA+CSA/HCA). The native composite prefix
         # cache and materialized CSA/HCA pool codec are the default path;

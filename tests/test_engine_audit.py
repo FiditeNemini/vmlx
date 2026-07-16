@@ -8258,9 +8258,8 @@ class TestStartupCompatibilityGuards:
         assert 'args.kv_cache_quantization = "none"' in hybrid_block
         assert "auto lossy storage is disabled" in hybrid_block
         assert "stored attention-KV" in hybrid_block
-        assert 'os.environ["VMLX_DISABLE_SSM_DISK_RESTORE"] = "1"' in cli_source
-        assert "VMLINUX_DISABLE_SSM_DISK_RESTORE" not in cli_source
-        assert "SSM companion disk restore is quarantined" in cli_source
+        assert 'os.environ["VMLX_DISABLE_SSM_DISK_RESTORE"] = "1"' not in cli_source
+        assert "Do not\n        # silently disable it by family" in cli_source
 
         assert "Hybrid/path-dependent cache model detected — using q4/q8 only at cache storage boundaries" in scheduler_source
         assert "non-KV state is preserved full precision" in scheduler_source

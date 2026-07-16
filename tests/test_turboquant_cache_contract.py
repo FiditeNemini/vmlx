@@ -134,8 +134,8 @@ def test_plain_qwen3_moe_auto_mode_keeps_loader_turboquant_enabled(tmp_path, mon
     assert os.environ.get("VMLX_DISABLE_TQ_KV") is None
 
 
-def test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_lossless_stored_kv(tmp_path, monkeypatch):
-    """Qwen3.5/3.6 keeps live attention TQ without lossy stored KV/SSM restore."""
+def test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore(tmp_path, monkeypatch):
+    """Qwen hybrid Auto keeps selective TQ and does not disable SSM L2."""
 
     (tmp_path / "config.json").write_text(json.dumps({
         "model_type": "qwen3_5_moe",
@@ -158,7 +158,7 @@ def test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_lossless_store
     assert args.kv_cache_quantization_explicit is False
     assert os.environ.get("VMLX_DISABLE_TQ_KV") is None
     assert os.environ.get("VMLX_FORCE_TQ_AUTO") == "1"
-    assert os.environ.get("VMLX_DISABLE_SSM_DISK_RESTORE") == "1"
+    assert os.environ.get("VMLX_DISABLE_SSM_DISK_RESTORE") is None
 
 
 def test_mimo_v2_auto_mode_keeps_prefix_cache_lossless_by_default(tmp_path, monkeypatch):

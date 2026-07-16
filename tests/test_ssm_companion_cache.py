@@ -775,6 +775,56 @@ def test_disk_store_round_trips_across_cache_instances(tmp_path):
     assert cache3.fetch(tokens, 4) is None
 
 
+def test_disk_store_restores_selected_boundary_without_l1_length_index(tmp_path):
+    """Restarted hybrid cache must probe the scheduler-selected disk boundary.
+
+    A new cache instance starts with an empty in-memory checkpoint index. The
+    block cache still knows the shared prefix length, so fetch_longest_prefix
+    must try that exact boundary in L2 before giving up or scanning L1-only
+    checkpoint lengths.
+    """
+    from vmlx_engine.utils.ssm_companion_disk_store import SSMCompanionDiskStore
+
+    prefix = [10, 20, 30, 40]
+    model_key = "qwen-hybrid|restart-boundary-v1"
+    disk1 = SSMCompanionDiskStore(
+        directory=tmp_path, budget_bytes=32 * 1024 * 1024
+    )
+    cache1 = SSMCompanionCache(
+        max_entries=2,
+        model_key=model_key,
+        disk_store=disk1,
+    )
+    cache1.store(prefix, 4, [_FakeSSMLayer(11.0, n_arrays=2)], is_complete=True)
+
+    disk2 = SSMCompanionDiskStore(
+        directory=tmp_path, budget_bytes=32 * 1024 * 1024
+    )
+    cache2 = SSMCompanionCache(
+        max_entries=2,
+        model_key=model_key,
+        disk_store=disk2,
+    )
+    assert cache2._length_index == {}
+
+    hit = cache2.fetch_longest_prefix(prefix + [50, 60], max_len=4)
+
+    assert hit is not None
+    checkpoint_len, states, is_complete = hit
+    assert checkpoint_len == 4
+    assert is_complete is True
+    assert states[0].cache[0].tolist() == [11.0, 11.0, 11.0, 11.0]
+    assert cache2.last_prefix_lookup == {
+        "max_len": 4,
+        "candidate_lengths": [4],
+        "matched": True,
+        "checkpoint_tokens": 4,
+        "is_complete": True,
+        "source": "exact_boundary_l1_or_l2",
+    }
+    assert disk2.stats()["hits"] == 1
+
+
 def test_disk_store_stats_include_tokens_and_io_counters(tmp_path):
     """Hybrid SSM L2 telemetry must expose persistent token and hit counts."""
     from vmlx_engine.utils.ssm_companion_disk_store import SSMCompanionDiskStore

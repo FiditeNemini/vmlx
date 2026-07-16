@@ -88,6 +88,7 @@ async function main() {
     const r = await page.evaluate(a1)
     console.log(JSON.stringify(r, null, 2))
   }
-  await browser.close().catch(() => {})
+  // Intentionally do not call browser.close(): over CDP that may terminate the
+  // live Electron app. Process exit disconnects this short-lived client.
 }
 main().catch(e => { console.error('DRV_ERR', e.message); process.exit(1) })

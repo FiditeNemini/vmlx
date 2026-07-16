@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   extractResponsesWarnings,
+  dropSupersededRecoveryWarnings,
   categorizeResponsesWarning,
 } from '../src/renderer/src/lib/responsesWarnings'
 
@@ -81,6 +82,32 @@ describe('extractResponsesWarnings', () => {
   })
 })
 
+describe('dropSupersededRecoveryWarnings', () => {
+  const INTERMEDIATE_EMPTY =
+    'This response produced reasoning only (no visible message, no tool calls). ' +
+    'The reasoning was preserved separately, but the visible answer is empty. ' +
+    'Consider raising max_output_tokens or sending enable_thinking=false for the final synthesis turn.'
+
+  it('drops current-response empty diagnostics after visible recovery', () => {
+    expect(dropSupersededRecoveryWarnings([INTERMEDIATE_EMPTY])).toBeNull()
+    expect(
+      dropSupersededRecoveryWarnings(['The model produced no visible response.']),
+    ).toBeNull()
+  })
+
+  it('preserves unrelated and previous-response warnings', () => {
+    const previous =
+      'previous_response_id chained a response that produced reasoning only (no visible message, no tool calls).'
+    expect(
+      dropSupersededRecoveryWarnings([
+        INTERMEDIATE_EMPTY,
+        'Schema coercion was required.',
+        previous,
+      ]),
+    ).toEqual(['Schema coercion was required.', previous])
+  })
+})
+
 describe('categorizeResponsesWarning', () => {
   it('categorizes the reasoning-only chain warning', () => {
     expect(
@@ -119,7 +146,9 @@ describe('categorizeResponsesWarning', () => {
 describe('Responses warnings panel wiring', () => {
   it('main chat IPC extracts response.completed warnings and forwards them on chat:complete', () => {
     const source = readFileSync(new URL('../src/main/ipc/chat.ts', import.meta.url), 'utf8')
-    expect(source).toContain('import { extractResponsesWarnings } from "../../shared/responsesWarnings"')
+    expect(source).toContain('dropSupersededRecoveryWarnings,')
+    expect(source).toContain('extractResponsesWarnings,')
+    expect(source).toContain('from "../../shared/responsesWarnings"')
     expect(source).toContain('responsesEventType === "response.warning"')
     expect(source).toContain('const eventWarnings = extractResponsesWarnings(parsed)')
     expect(source).toContain('const completedWarnings = extractResponsesWarnings(')

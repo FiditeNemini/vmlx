@@ -106,6 +106,17 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('? liveTps')
   })
 
+  it('drops only superseded empty-response warnings after a successful recovery', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+    const start = source.indexOf('if (\n          finalAnswerRecovery &&')
+    const end = source.indexOf('if (\n          toolIteration > 0 &&', start)
+    const branch = source.slice(start, end)
+
+    expect(start).toBeGreaterThan(-1)
+    expect(branch).toContain('allGeneratedContent.trim() || fullContent.trim()')
+    expect(branch).toContain('dropSupersededRecoveryWarnings(responseWarnings)')
+  })
+
   it('resets text-chat tool streaming state before chained follow-up requests', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
     const branch = source.slice(

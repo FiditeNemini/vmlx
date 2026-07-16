@@ -17,7 +17,10 @@ import {
 import { executeBuiltinTool } from "../tools/executor";
 import { detectModelConfigFromDir } from "../model-config-registry";
 import { getAuthHeaders } from "./utils";
-import { extractResponsesWarnings } from "../../shared/responsesWarnings";
+import {
+  dropSupersededRecoveryWarnings,
+  extractResponsesWarnings,
+} from "../../shared/responsesWarnings";
 import {
   appendReasoningDelta,
   joinReasoningSegments,
@@ -3611,6 +3614,16 @@ export function registerChatHandlers(
           } else {
             break;
           }
+        }
+
+        if (
+          finalAnswerRecovery &&
+          (allGeneratedContent.trim() || fullContent.trim())
+        ) {
+          // A successful bounded recovery supersedes only the intermediate
+          // empty/reasoning-only diagnostic. Preserve parser, schema, cache,
+          // tool-drop, and previous_response_id warnings.
+          responseWarnings = dropSupersededRecoveryWarnings(responseWarnings);
         }
 
         if (

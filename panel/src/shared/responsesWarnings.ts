@@ -50,6 +50,32 @@ export function extractResponsesWarnings(
 }
 
 /**
+ * Remove warnings that describe an intermediate empty/reasoning-only response
+ * after the panel's bounded post-tool recovery produced visible content.
+ *
+ * This is intentionally narrow. Cache, parser, schema, tool-drop, and
+ * previous_response_id warnings remain visible. Only the current-response
+ * empty-answer diagnostics are superseded by a successful recovery turn.
+ */
+export function dropSupersededRecoveryWarnings(
+  warnings: string[] | null,
+): string[] | null {
+  if (!warnings) return null
+  const kept = warnings.filter((warning) => {
+    const normalized = warning.trim().toLowerCase()
+    if (
+      normalized.startsWith(
+        'this response produced reasoning only (no visible message, no tool calls).',
+      ) && normalized.includes('visible answer is empty')
+    ) {
+      return false
+    }
+    return normalized !== 'the model produced no visible response.'
+  })
+  return kept.length > 0 ? kept : null
+}
+
+/**
  * Map a Responses warning to a stable category key, useful for UI styling
  * or analytics. Falls back to "other" for unrecognized warnings so the UI
  * always has something to render.

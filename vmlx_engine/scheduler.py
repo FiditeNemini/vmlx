@@ -1236,6 +1236,8 @@ class Scheduler:
                     else None
                 ),
             )
+            if self.config.step_executor is not None:
+                self.disk_cache.set_load_executor(self.config.step_executor)
         elif self.config.enable_disk_cache and not self.config.enable_prefix_cache:
             logger.warning(
                 "Disk cache requires prefix cache to be enabled — disk cache disabled"
@@ -5203,7 +5205,16 @@ class Scheduler:
                             l1_data = self._quantize_cache_for_storage(disk_cache)
                         except Exception:
                             pass  # Store full-precision on quant failure
-                    if self.block_aware_cache is not None and not _disk_needs_worker_dequant:
+                    if _tq_disk and self.block_aware_cache is not None:
+                        # A TQ-native prompt file has already paid the packed ->
+                        # attention-KV restore cost. Synchronously extracting and
+                        # re-slicing every decoded layer into paged blocks here
+                        # delayed first-token delivery and stored those blocks as
+                        # plain KV. Serve this request from the restored prompt
+                        # cache; the normal completion path will populate the
+                        # paged cache from the model's re-wrapped TQ cache.
+                        request._tq_disk_direct_restore = True
+                    elif self.block_aware_cache is not None and not _disk_needs_worker_dequant:
                         try:
                             extracted = self._extract_cache_states(l1_data)
                             if extracted:
@@ -5823,6 +5834,8 @@ class Scheduler:
                     "dequantization_seconds": 0.0,
                     "total_worker_cache_seconds": 0.0,
                 }
+                if getattr(request, "_tq_disk_direct_restore", False):
+                    cache_execution["tq_disk_direct_restore"] = True
                 _cache_worker_start = time.perf_counter()
             else:
                 _cache_worker_start = 0.0
@@ -5979,6 +5992,45 @@ class Scheduler:
                 )
                 if len(tokens_to_process) == 0:
                     tokens_to_process = request.prompt_token_ids[-1:]
+
+            # Prompt-level TQ L2 restores arrive as decoded KVCache objects.
+            # Restore the model's native live cache class on the worker without
+            # the synchronous API-thread paged backfill that previously delayed
+            # SSE/Electron TTFT and lost the TQ storage policy.
+            if (
+                cache_to_use is not None
+                and getattr(request, "_tq_disk_direct_restore", False)
+                and getattr(self, "_tq_active", False)
+                and not any(
+                    type(layer).__name__ == "TurboQuantKVCache"
+                    for layer in (cache_to_use or [])
+                )
+            ):
+                _t_tq_rewrap = time.perf_counter()
+                _tq_rewrapped = False
+                try:
+                    from .mllm_batch_generator import _recompress_to_tq
+
+                    rewrapped = _recompress_to_tq(cache_to_use, self.model)
+                    _tq_rewrapped = any(
+                        type(layer).__name__ == "TurboQuantKVCache"
+                        for layer in (rewrapped or [])
+                    )
+                    if _tq_rewrapped:
+                        cache_to_use = rewrapped
+                        request.prompt_cache = rewrapped
+                except Exception as exc:
+                    logger.warning(
+                        "Request %s: failed to re-wrap direct TQ disk restore: %s",
+                        request.request_id,
+                        exc,
+                    )
+                if cache_execution is not None:
+                    cache_execution["tq_rewrapped"] = _tq_rewrapped
+                    cache_execution["tq_rewrap_seconds"] = round(
+                        time.perf_counter() - _t_tq_rewrap,
+                        6,
+                    )
 
             # Validate cache before using it
             if cache_to_use is not None:

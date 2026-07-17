@@ -361,6 +361,59 @@ class TestTQDiskStore:
         assert restored.keys.dtype == mx.float16
         assert restored.values.dtype == mx.float16
 
+    def test_prompt_tq_roundtrip_batches_compatible_layers(self):
+        """Prompt L2 restore batches codecs without merging layer boundaries."""
+        from jang_tools.turboquant.cache import TurboQuantKVCache as RealTQ
+        from vmlx_engine.tq_disk_store import (
+            _tq_decoder_pair,
+            canonicalize_tq_cache_for_storage,
+            deserialize_tq_cache,
+            serialize_tq_cache,
+        )
+
+        layers = []
+        for _ in range(2):
+            live = RealTQ(
+                key_dim=64,
+                value_dim=64,
+                key_bits=4,
+                value_bits=4,
+                seed=83,
+                compress_after=0,
+                sink_tokens=0,
+            )
+            live.keys = mx.random.normal(shape=(1, 2, 8, 64)).astype(mx.float16)
+            live.values = mx.random.normal(shape=(1, 2, 8, 64)).astype(mx.float16)
+            live.offset = 8
+            layers.append(live)
+
+        canonical = canonicalize_tq_cache_for_storage(layers)
+        tensors, metadata = serialize_tq_cache(canonical)
+        expected = [layer.state for layer in canonical]
+        _tq_decoder_pair.cache_clear()
+
+        with mock.patch(
+            "vmlx_engine.tq_disk_store._stack_tq_block_entries",
+            wraps=__import__(
+                "vmlx_engine.tq_disk_store", fromlist=["_stack_tq_block_entries"]
+            )._stack_tq_block_entries,
+        ) as stack_entries:
+            restored = deserialize_tq_cache(tensors, metadata)
+        mx.eval(
+            *(item for pair in expected for item in pair),
+            *(item for layer in restored for item in (layer.keys, layer.values)),
+        )
+
+        decoder_stats = _tq_decoder_pair.cache_info()
+        assert decoder_stats.misses == 1
+        assert decoder_stats.hits == 0
+        stack_entries.assert_called_once()
+        assert all(layer.keys.shape == (1, 2, 8, 64) for layer in restored)
+        assert all(layer.values.shape == (1, 2, 8, 64) for layer in restored)
+        for layer, (expected_keys, expected_values) in zip(restored, expected):
+            assert float(mx.max(mx.abs(layer.keys - expected_keys)).item()) <= 1e-5
+            assert float(mx.max(mx.abs(layer.values - expected_values)).item()) <= 1e-5
+
     def test_cache_list_tq_roundtrip_restores_bfloat16_attention_dtype(self):
         """Hybrid CacheList TQ slots keep dtype; cumulative peers stay excluded."""
         from jang_tools.turboquant.cache import TurboQuantKVCache as RealTQ
@@ -446,6 +499,51 @@ class TestDiskCacheManagerTQ:
         """Create a DiskCacheManager for testing."""
         from vmlx_engine.disk_cache import DiskCacheManager
         return DiskCacheManager(self.cache_dir, max_size_gb=max_gb)
+
+    def test_fetch_dispatches_mlx_load_to_stream_owner_executor(self):
+        """API-thread fetch must construct restored arrays on the LLM worker."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        mgr = self._make_manager()
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tq-load-owner")
+        try:
+            mgr.set_load_executor(executor)
+            seen = []
+
+            def _fetch_impl(tokens):
+                seen.append((threading.current_thread().name, list(tokens)))
+                return ["worker-cache"]
+
+            with mock.patch.object(mgr, "_fetch_impl", side_effect=_fetch_impl):
+                assert mgr.fetch([1, 2, 3]) == ["worker-cache"]
+
+            assert len(seen) == 1
+            assert seen[0][1] == [1, 2, 3]
+            assert seen[0][0].startswith("tq-load-owner")
+        finally:
+            executor.shutdown(wait=True)
+            mgr.shutdown()
+
+    def test_fetch_on_stream_owner_executes_inline_without_deadlock(self):
+        """A worker-side lookup must not submit back into its one-thread executor."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        mgr = self._make_manager()
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tq-load-inline")
+        try:
+            mgr.set_load_executor(executor)
+
+            def _fetch_impl(tokens):
+                return [threading.current_thread().name, list(tokens)]
+
+            with mock.patch.object(mgr, "_fetch_impl", side_effect=_fetch_impl):
+                result = executor.submit(mgr.fetch, [4, 5]).result(timeout=5)
+
+            assert result[0].startswith("tq-load-inline")
+            assert result[1] == [4, 5]
+        finally:
+            executor.shutdown(wait=True)
+            mgr.shutdown()
 
     def test_store_detects_tq_and_uses_native(self):
         """store() should detect TQ cache and use TQ-native serialization."""

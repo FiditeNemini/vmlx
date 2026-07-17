@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Iterable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,10 @@ MAX_TENSOR_DIM = 65536 * 4  # 256K — defensive 4x
 # Maximum tensor rank (ndim). KV caches are at most rank-4
 # (batch, heads, seq, head_dim). State trees with >6 ndim are corruption.
 MAX_TENSOR_NDIM = 6
+
+_TQ_PACKED_HEADER_NAME = re.compile(
+    r"^(?:tq_\d+|cl_\d+_\d+)_(?:ck|cv)_(?:indices_packed|qjl_packed)$"
+)
 
 # Metadata/scalar ceilings. These catch the corruption class where the tensor
 # header is small enough to pass pre-load validation, but metadata later drives
@@ -1213,6 +1218,12 @@ def validate_safetensors_header(
     if not isinstance(header, dict):
         return False, f"header is {type(header).__name__}, expected dict"
 
+    file_metadata = header.get("__metadata__")
+    is_tq_native_header = (
+        isinstance(file_metadata, dict)
+        and file_metadata.get("__tq_native__") == "true"
+    )
+
     # safetensors keeps optional metadata under "__metadata__" (separate from
     # tensor entries). Skip it during shape validation.
     layer_keys = []
@@ -1247,7 +1258,19 @@ def validate_safetensors_header(
         for axis, dim in enumerate(shape):
             if not isinstance(dim, int) or dim < 0:
                 return False, f"header entry {name!r}: bad dim[{axis}]={dim!r}"
-            if dim > MAX_TENSOR_DIM:
+            # Prompt-level TQ snapshots flatten packed indices/signs into one
+            # uint32 vector.  A legitimate long-context vector can exceed the
+            # generic 256K axis ceiling while remaining far below the 4GB
+            # per-tensor and 32GB per-file safety caps below.  Only relax the
+            # axis cap for exact packed-field names in an explicitly TQ-native
+            # file; decoded KV shapes are still validated separately by
+            # validate_tq_native_metadata() before any decode allocation.
+            packed_tq_vector = (
+                is_tq_native_header
+                and len(shape) == 1
+                and _TQ_PACKED_HEADER_NAME.fullmatch(name) is not None
+            )
+            if dim > MAX_TENSOR_DIM and not packed_tq_vector:
                 return False, (
                     f"header entry {name!r}: dim[{axis}]={dim} > {MAX_TENSOR_DIM}"
                 )

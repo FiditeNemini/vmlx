@@ -201,6 +201,8 @@ class DiskCacheManager:
         # Flag set by fetch() to indicate last fetch was TQ-native.
         # Checked by scheduler to annotate cache_detail as "disk+tq".
         self._last_fetch_tq_native = False
+        self._load_executor = None
+        self._load_worker_prefix = "llm-worker"
 
         # Background writer thread
         self._write_queue: queue.Queue = queue.Queue(maxsize=1000)
@@ -303,7 +305,44 @@ class DiskCacheManager:
         finally:
             self._pool.put(conn)
 
+    def set_load_executor(
+        self,
+        executor: Any,
+        worker_name_prefix: Optional[str] = None,
+    ) -> None:
+        """Run MLX-backed disk loads on the model-owning worker thread.
+
+        Safetensors load, TQ decode, and cache-class reconstruction create MLX
+        arrays. Those arrays retain the creating thread's stream identity, so a
+        cache loaded on the API/event-loop thread cannot safely be consumed by
+        the dedicated LLM/MLLM worker. The executor is single-threaded; execute
+        inline when fetch already runs on that worker to avoid self-deadlock.
+        """
+        self._load_executor = executor
+        if worker_name_prefix is None:
+            worker_name_prefix = (
+                getattr(executor, "_thread_name_prefix", "") or "llm-worker"
+            )
+        self._load_worker_prefix = worker_name_prefix
+
     def fetch(self, tokens: List[int]) -> Optional[List[Any]]:
+        """Load a disk cache on the thread that owns the model's MLX stream."""
+        executor = getattr(self, "_load_executor", None)
+        prefix = getattr(self, "_load_worker_prefix", "llm-worker")
+        if executor is None or threading.current_thread().name.startswith(prefix):
+            return self._fetch_impl(tokens)
+        try:
+            return executor.submit(self._fetch_impl, tokens).result()
+        except Exception as exc:
+            logger.warning(
+                "Disk cache worker-owned load failed; treating as miss: %s",
+                exc,
+            )
+            with self._stats_lock:
+                self.misses += 1
+            return None
+
+    def _fetch_impl(self, tokens: List[int]) -> Optional[List[Any]]:
         """
         Look up a cached KV state for the given token sequence.
 

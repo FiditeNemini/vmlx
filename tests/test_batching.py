@@ -1429,7 +1429,7 @@ class TestSchedulerBasic:
             "hybrid_ssm"
         )
 
-    def test_prompt_disk_l2_hit_backfills_paged_cache_for_partial_reuse(
+    def test_prompt_tq_disk_l2_hit_skips_synchronous_plain_paged_backfill(
         self, mock_model, mock_tokenizer
     ):
         scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
@@ -1488,15 +1488,81 @@ class TestSchedulerBasic:
         scheduler.add_request(request)
 
         assert disk.fetch_tokens == request.prompt_token_ids
-        assert block_cache.store_calls == [
-            ("req-disk-l2", request.prompt_token_ids[:-1], ["state-dict"], "assistant")
-        ]
-        assert request.prompt_cache is None
-        assert request.block_table is not None
+        assert block_cache.store_calls == []
+        assert request.prompt_cache == ["disk-cache"]
+        assert request.block_table is None
         assert request.cached_tokens == 256
-        assert request.remaining_tokens == [256]
-        assert request._paged_block_table_needs_worker_reconstruct is True
-        assert request._cache_detail == "paged+disk+tq"
+        assert request.remaining_tokens == []
+        assert not getattr(
+            request, "_paged_block_table_needs_worker_reconstruct", False
+        )
+        assert request._tq_disk_direct_restore is True
+        assert request._cache_detail == "disk+tq"
+
+    def test_worker_direct_tq_disk_restore_rewraps_native_cache_before_insert(
+        self,
+        mock_model,
+        mock_tokenizer,
+        monkeypatch,
+    ):
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        scheduler._tq_active = True
+        scheduler._is_hybrid = False
+        scheduler._validate_cache = lambda cache: True
+
+        class _BatchGenerator:
+            stop_tokens = set()
+
+            def insert(self, tokens, max_tokens, caches=None, **_kwargs):
+                self.tokens = tokens
+                self.caches = caches
+                return [23]
+
+        class TurboQuantKVCache:
+            pass
+
+        seen = {}
+
+        def _rewrap(cache, model):
+            seen["cache"] = cache
+            seen["model"] = model
+            return [TurboQuantKVCache()]
+
+        import vmlx_engine.mllm_batch_generator as mllm_batch_generator
+
+        monkeypatch.setattr(mllm_batch_generator, "_recompress_to_tq", _rewrap)
+
+        request = Request("req-direct-tq-l2", "x", SamplingParams(max_tokens=4))
+        request.prompt_token_ids = list(range(52))
+        request.num_prompt_tokens = 52
+        request.prompt_cache = ["decoded-disk-kv"]
+        request.cached_tokens = 48
+        request.remaining_tokens = request.prompt_token_ids[48:]
+        request._cache_detail = "disk+tq"
+        request._tq_native_cache_hit = True
+        request._tq_disk_direct_restore = True
+
+        batch_generator = _BatchGenerator()
+        scheduler.batch_generator = batch_generator
+        scheduler._current_sampler_params = (
+            request.sampling_params.temperature,
+            request.sampling_params.top_p,
+            request.sampling_params.min_p,
+            request.sampling_params.top_k,
+            request.sampling_params.repetition_penalty,
+        )
+        scheduler.waiting.append(request)
+        scheduler.requests[request.request_id] = request
+
+        scheduled = scheduler._schedule_waiting()
+
+        assert scheduled == [request]
+        assert seen == {"cache": ["decoded-disk-kv"], "model": mock_model}
+        assert type(batch_generator.caches[0][0]).__name__ == "TurboQuantKVCache"
+        execution = scheduler.get_stats()["last_cache_execution"]
+        assert execution["tq_disk_direct_restore"] is True
+        assert execution["tq_rewrapped"] is True
+        assert execution["tq_rewrap_seconds"] >= 0
 
     def test_cold_paged_hit_can_yield_to_warm_prefix_cache(
         self, mock_model, mock_tokenizer

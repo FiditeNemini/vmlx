@@ -356,12 +356,22 @@ def _stack_tq_block_entries(entries: List[Tuple[Any, ...]]) -> Optional[Tuple[An
     )
 
 
-def decode_tq_blocks(entries: List[Tuple[Any, ...]]) -> Tuple[Any, Any]:
-    """Decode a sequence of paged TQ entries with a guarded batched fast path."""
+def decode_tq_entries(
+    entries: List[Tuple[Any, ...]],
+    *,
+    max_run_entries: Optional[int] = None,
+) -> List[Tuple[Any, Any]]:
+    """Decode independent TQ entries while preserving every entry boundary.
+
+    Compatible prompt-cache layers and paged blocks share the same packed
+    layout. Decode those entries as an outer batch, then split the decoded
+    tensors back into their original entries. Mixed dimensions/codecs and
+    malformed layouts keep the scalar compatibility path.
+    """
     if not entries:
         raise ValueError("cannot decode an empty TQ block sequence")
     if len(entries) == 1:
-        return decode_tq_block(entries[0])
+        return [decode_tq_block(entries[0])]
 
     decoded = []
     start = 0
@@ -371,6 +381,7 @@ def decode_tq_blocks(entries: List[Tuple[Any, ...]]) -> Tuple[Any, Any]:
         while (
             signature is not None
             and end < len(entries)
+            and (max_run_entries is None or end - start < max_run_entries)
             and _tq_block_batch_signature(entries[end]) == signature
         ):
             end += 1
@@ -380,16 +391,17 @@ def decode_tq_blocks(entries: List[Tuple[Any, ...]]) -> Tuple[Any, Any]:
             decoded.extend(decode_tq_block(entry) for entry in run)
         else:
             keys, values = decode_tq_block(stacked)
-            # [pages, batch, heads, tokens, dim] ->
-            # [batch, heads, pages * tokens, dim]
-            keys = mx.transpose(keys, (1, 2, 0, 3, 4)).reshape(
-                keys.shape[1], keys.shape[2], -1, keys.shape[-1]
+            decoded.extend(
+                (keys[index], values[index]) for index in range(len(run))
             )
-            values = mx.transpose(values, (1, 2, 0, 3, 4)).reshape(
-                values.shape[1], values.shape[2], -1, values.shape[-1]
-            )
-            decoded.append((keys, values))
         start = end
+
+    return decoded
+
+
+def decode_tq_blocks(entries: List[Tuple[Any, ...]]) -> Tuple[Any, Any]:
+    """Decode paged TQ entries and join the independent pages by token axis."""
+    decoded = decode_tq_entries(entries)
 
     return (
         mx.concatenate([keys for keys, _ in decoded], axis=2),
@@ -593,12 +605,48 @@ def deserialize_tq_cache(
     tq_decoded = 0
     standard_loaded = 0
 
+    # Prompt L2 files commonly contain dozens of attention layers with one
+    # identical TQ codec/layout. Decoding them one at a time launches the same
+    # transform pipeline once per layer and can cost more than cold prefill.
+    # Batch compatible layers in bounded runs while preserving each layer's
+    # independent packed payload and output position.
+    tq_layers: Dict[int, Any] = {}
+    tq_entries: List[Tuple[Any, ...]] = []
+    tq_entry_indices: List[int] = []
+    for i in range(num_layers):
+        if metadata.get(f"__layer_{i}_class__", "") != _TQ_CLASS_NAME:
+            continue
+        entry = _serialized_tq_layer_entry(tensors, metadata, i)
+        if entry is not None:
+            tq_entries.append(entry)
+            tq_entry_indices.append(i)
+    if tq_entries:
+        try:
+            decoded_entries = decode_tq_entries(tq_entries)
+            for i, entry, (keys, values) in zip(
+                tq_entry_indices,
+                tq_entries,
+                decoded_entries,
+            ):
+                kv = KVCache()
+                kv.keys = keys
+                kv.values = values
+                kv.offset = int(entry[3]["offset"])
+                tq_layers[i] = kv
+        except Exception as exc:
+            logger.warning(
+                "Batched prompt TQ decode failed; using scalar layer restore: %s",
+                exc,
+            )
+
     for i in range(num_layers):
         cls_name = metadata.get(f"__layer_{i}_class__", "")
 
         if cls_name == _TQ_CLASS_NAME:
             # ─── TQ layer: decode compressed → KVCache ───
-            kv = _deserialize_tq_layer(tensors, metadata, i)
+            kv = tq_layers.get(i)
+            if kv is None:
+                kv = _deserialize_tq_layer(tensors, metadata, i)
             if kv is not None:
                 cache.append(kv)
                 tq_decoded += 1
@@ -901,8 +949,6 @@ def _deserialize_cache_list_layer(
                     vector_norms=tensors[f"{prefix}_cv_vector_norms"],
                     shape=cv_shape, index_bits=cv_bits,
                 )
-                # Create TQ cache for encoder access (decode needs encoder)
-                from jang_tools.turboquant.cache import TurboQuantKVCache as _TQ_CL
                 _key_dim = _parse_bounded_int(metadata, f"__{prefix}_key_dim__", default=128, lo=1, hi=262144)
                 _val_dim = _parse_bounded_int(metadata, f"__{prefix}_value_dim__", default=128, lo=1, hi=262144)
                 _key_bits = _parse_bounded_int(metadata, f"__{prefix}_key_bits__", default=3, lo=1, hi=8)
@@ -914,16 +960,20 @@ def _deserialize_cache_list_layer(
                     lo=0,
                     hi=2_147_483_647,
                 )
-                _tq_cl = _TQ_CL(key_dim=_key_dim, value_dim=_val_dim,
-                                 key_bits=_key_bits, value_bits=_val_bits,
-                                 seed=_seed)
+                _key_encoder, _value_encoder = _tq_decoder_pair(
+                    _key_dim,
+                    _val_dim,
+                    _key_bits,
+                    _val_bits,
+                    _seed,
+                )
                 kv.keys = _restore_tq_dtype(
-                    decode_keys(encoded_keys, _tq_cl.key_encoder),
+                    decode_keys(encoded_keys, _key_encoder),
                     metadata.get(f"__{prefix}_key_dtype__"),
                     f"CacheList {i}/{j} key",
                 )
                 kv.values = _restore_tq_dtype(
-                    decode_values(encoded_values, _tq_cl.value_encoder),
+                    decode_values(encoded_values, _value_encoder),
                     metadata.get(f"__{prefix}_value_dtype__"),
                     f"CacheList {i}/{j} value",
                 )
@@ -963,23 +1013,16 @@ def _deserialize_cache_list_layer(
 # Internal: TQ layer deserialization
 # =============================================================================
 
-def _deserialize_tq_layer(
+def _serialized_tq_layer_entry(
     tensors: Dict[str, Any],
     metadata: Dict[str, str],
     i: int,
-) -> Optional[Any]:
-    """Decode a TQ compressed layer to its original attention dtype.
-
-    The returned KVCache has decoded keys/values in the recorded dtype. The caller should
-    use _recompress_to_tq() with the model's make_cache() template to convert
-    back to TurboQuantKVCache.
-    """
+) -> Optional[Tuple[Any, ...]]:
+    """Reconstruct one serialized TQ entry without decoding it."""
     try:
         from jang_tools.turboquant.cache import EncodedKeys, EncodedValues
-        from jang_tools.turboquant.pipeline import decode_keys, decode_values
-        from mlx_lm.models.cache import KVCache
     except ImportError:
-        logger.warning("jang_tools not available — cannot decode TQ layer %d", i)
+        logger.warning("jang_tools not available — cannot restore TQ layer %d", i)
         return None
 
     prefix = f"tq_{i}"
@@ -1036,45 +1079,50 @@ def _deserialize_tq_layer(
         index_bits=cv_bits,
     )
 
-    # Decode compressed data to float16 using a TurboQuantKVCache's encoder.
-    # decode_keys/decode_values require (encoded, encoder) — the encoder
-    # contains codebook tables needed for dequantization. We create a
-    # TurboQuantKVCache to get the encoder, then decode.
     offset = _parse_bounded_int(metadata, f"__{prefix}_offset__", default=0, lo=0, hi=2_000_000)
     key_dim = _parse_bounded_int(metadata, f"__{prefix}_key_dim__", default=128, lo=1, hi=262144)
     value_dim = _parse_bounded_int(metadata, f"__{prefix}_value_dim__", default=128, lo=1, hi=262144)
     key_bits = _parse_bounded_int(metadata, f"__{prefix}_key_bits__", default=3, lo=1, hi=8)
     value_bits = _parse_bounded_int(metadata, f"__{prefix}_value_bits__", default=3, lo=1, hi=8)
-    sink_tokens = _parse_bounded_int(metadata, f"__{prefix}_sink_tokens__", default=0, lo=0, hi=2_000_000)
     seed = _parse_bounded_int(
         metadata, f"__{prefix}_seed__", default=42, lo=0, hi=2_147_483_647
     )
 
-    try:
-        from jang_tools.turboquant.cache import TurboQuantKVCache as _TQ
-        # Create TQ cache to get access to the encoder objects
-        tq = _TQ(
-            key_dim=key_dim, value_dim=value_dim,
-            key_bits=key_bits, value_bits=value_bits,
-            seed=seed,
-            sink_tokens=sink_tokens,
-        )
-        # Access the encoder (triggers lazy initialization)
-        key_enc = tq.key_encoder
-        val_enc = tq.value_encoder
+    return (
+        "turboquant_kv",
+        encoded_keys,
+        encoded_values,
+        {
+            "key_dim": key_dim,
+            "value_dim": value_dim,
+            "key_bits": key_bits,
+            "value_bits": value_bits,
+            "key_dtype": metadata.get(f"__{prefix}_key_dtype__"),
+            "value_dtype": metadata.get(f"__{prefix}_value_dtype__"),
+            "seed": seed,
+            "offset": offset,
+        },
+    )
 
-        decoded_keys = _restore_tq_dtype(
-            decode_keys(encoded_keys, key_enc),
-            metadata.get(f"__{prefix}_key_dtype__"),
-            f"layer {i} key",
-        )
-        decoded_values = _restore_tq_dtype(
-            decode_values(encoded_values, val_enc),
-            metadata.get(f"__{prefix}_value_dtype__"),
-            f"layer {i} value",
-        )
-    except Exception as e:
-        logger.warning("TQ layer %d decode failed: %s", i, e)
+
+def _deserialize_tq_layer(
+    tensors: Dict[str, Any],
+    metadata: Dict[str, str],
+    i: int,
+) -> Optional[Any]:
+    """Decode one TQ layer through the scalar compatibility path."""
+    try:
+        from mlx_lm.models.cache import KVCache
+    except ImportError:
+        return None
+
+    entry = _serialized_tq_layer_entry(tensors, metadata, i)
+    if entry is None:
+        return None
+    try:
+        decoded_keys, decoded_values = decode_tq_block(entry)
+    except Exception as exc:
+        logger.warning("TQ layer %d decode failed: %s", i, exc)
         return None
 
     # Wrap in KVCache — the caller's _recompress_to_tq() will
@@ -1082,7 +1130,7 @@ def _deserialize_tq_layer(
     kv = KVCache()
     kv.keys = decoded_keys
     kv.values = decoded_values
-    kv.offset = offset
+    kv.offset = int(entry[3]["offset"])
 
     return kv
 

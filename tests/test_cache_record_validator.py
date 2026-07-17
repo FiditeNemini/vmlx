@@ -334,6 +334,8 @@ def test_tq_native_metadata_huge_decode_shape_rejected():
         "__tq_0_value_dim__": "128",
         "__tq_0_key_bits__": "3",
         "__tq_0_value_bits__": "3",
+        "__tq_0_key_dtype__": "float16",
+        "__tq_0_value_dtype__": "float16",
         "__tq_0_sink_tokens__": "0",
     }
     ok, reason = validate_tq_native_metadata(tensors, metadata, expected_num_layers=1)
@@ -365,6 +367,8 @@ def test_tq_native_metadata_huge_offset_rejected():
         "__tq_0_value_dim__": "128",
         "__tq_0_key_bits__": "3",
         "__tq_0_value_bits__": "3",
+        "__tq_0_key_dtype__": "float16",
+        "__tq_0_value_dtype__": "float16",
         "__tq_0_sink_tokens__": "0",
     }
     ok, reason = validate_tq_native_metadata(tensors, metadata, expected_num_layers=1)
@@ -564,6 +568,50 @@ def test_header_validator_rejects_dim_overflow(tmp_path):
     }
     _write_safetensors_header(p, header)
     ok, reason = validate_safetensors_header(str(p))
+    assert not ok
+    assert "dim" in reason.lower()
+
+
+def test_header_validator_accepts_large_tq_native_packed_vector(tmp_path):
+    """Long-context TQ indices are flat packed vectors, not decoded KV axes."""
+    from vmlx_engine.cache_record_validator import validate_safetensors_header
+
+    packed_elements = 382_362
+    packed_bytes = packed_elements * 4
+    header = {
+        "__metadata__": {"__tq_native__": "true"},
+        "tq_0_ck_indices_packed": {
+            "dtype": "U32",
+            "shape": [packed_elements],
+            "data_offsets": [0, packed_bytes],
+        },
+    }
+    path = tmp_path / "long_tq.safetensors"
+    _write_safetensors_header(path, header, total_data_size=packed_bytes)
+
+    ok, reason = validate_safetensors_header(str(path))
+
+    assert ok, reason
+
+
+def test_header_validator_rejects_large_packed_name_without_tq_metadata(tmp_path):
+    """A field name alone must not bypass the generic dimension guard."""
+    from vmlx_engine.cache_record_validator import validate_safetensors_header
+
+    packed_elements = 382_362
+    packed_bytes = packed_elements * 4
+    header = {
+        "tq_0_ck_indices_packed": {
+            "dtype": "U32",
+            "shape": [packed_elements],
+            "data_offsets": [0, packed_bytes],
+        },
+    }
+    path = tmp_path / "spoofed_tq.safetensors"
+    _write_safetensors_header(path, header, total_data_size=packed_bytes)
+
+    ok, reason = validate_safetensors_header(str(path))
+
     assert not ok
     assert "dim" in reason.lower()
 

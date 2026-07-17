@@ -1001,20 +1001,6 @@ def _drop_tool_visible_channel_marker(
     return text
 
 
-_RESPONSES_EXACT_REPLY_RE = re.compile(
-    r"reply exactly:\s*[\"'“”`]?([A-Za-z0-9_=-]+)[\"'“”`]?",
-    re.IGNORECASE,
-)
-
-
-def _responses_exact_reply_target(request: Any) -> str | None:
-    text = "\n".join(_request_text_fragments(request))
-    matches = list(_RESPONSES_EXACT_REPLY_RE.finditer(text))
-    if not matches:
-        return None
-    return matches[-1].group(1)
-
-
 def _responses_messages_have_tool_result_after_latest_user(messages: list[dict]) -> bool:
     for message in reversed(messages or []):
         if not isinstance(message, dict):
@@ -1026,18 +1012,6 @@ def _responses_messages_have_tool_result_after_latest_user(messages: list[dict])
         if message.get("type") == "function_call_output":
             return True
     return False
-
-
-def _responses_fast_path_visible_text(output: Any, request: Any) -> str:
-    text = getattr(output, "raw_text", "") or getattr(output, "text", "") or ""
-    if getattr(request, "enable_thinking", None) is False and "</think>" in text:
-        text = text.rsplit("</think>", 1)[1]
-    else:
-        text = getattr(output, "text", "") or text
-    return _finalize_visible_text_for_request(
-        clean_output_text(text),
-        request,
-    )
 
 
 def _answer_pass_visible_delta(
@@ -3482,10 +3456,8 @@ def _has_tool_marker_or_partial_suffix(text: str) -> bool:
         if marker in text:
             return True
     for marker in _TOOL_CALL_MARKERS:
-        max_prefix = min(len(marker) - 1, len(text))
-        for n in range(max_prefix, 0, -1):
-            if text.endswith(marker[:n]):
-                return True
+        if _tool_marker_partial_suffix_length(text, marker, minimum=4):
+            return True
     return False
 
 
@@ -3502,11 +3474,53 @@ def _text_ends_with_tool_marker(text: str) -> bool:
     for marker in _TOOL_CALL_MARKERS:
         if text.endswith(marker):
             return True
-        max_prefix = min(len(marker) - 1, len(text))
-        for n in range(max_prefix, 0, -1):
-            if text.endswith(marker[:n]):
-                return True
+        if _tool_marker_partial_suffix_length(text, marker, minimum=4):
+            return True
     return False
+
+
+def _tool_marker_partial_suffix_length(
+    text: str,
+    marker: str,
+    *,
+    minimum: int = 1,
+    maximum: int | None = None,
+) -> int:
+    """Length of a trailing proper prefix of one native tool marker.
+
+    A single ``<``, ``[``, or backtick is ordinary prose/Markdown and must not
+    switch an entire stream into tool buffering. Four characters are enough to
+    distinguish every current native marker family (``<too``, ``<fun``,
+    ``[TOO``, ``[Cal``, `````t``). The shorter ambiguous suffix is withheld by
+    ``_tool_safe_stream_prefix`` until the next delta resolves it, so split
+    markers still never leak to visible content or reasoning.
+    """
+    if not text or len(marker) <= 1:
+        return 0
+    max_prefix = min(len(marker) - 1, len(text))
+    if maximum is not None:
+        max_prefix = min(max_prefix, maximum)
+    for length in range(max_prefix, max(1, minimum) - 1, -1):
+        if text.endswith(marker[:length]):
+            return length
+    return 0
+
+
+def _tool_safe_stream_prefix(text: str, *, finished: bool = False) -> str:
+    """Hold back an ambiguous 1-3 character native-marker prefix.
+
+    Once generation finishes without entering tool buffering, the suffix is
+    proven to be ordinary text and must be flushed into the final delta.
+    """
+    if finished:
+        return text
+    partial_len = 0
+    for marker in _TOOL_CALL_MARKERS:
+        partial_len = max(
+            partial_len,
+            _tool_marker_partial_suffix_length(text, marker, maximum=3),
+        )
+    return text[:-partial_len] if partial_len else text
 
 
 _RAW_JSON_TOOL_ANCHOR = '{"name":"'
@@ -16560,6 +16574,7 @@ async def stream_chat_completion(
     streamed_content = (
         ""  # Track content actually yielded to client (for post-stream dedup)
     )
+    streamed_reasoning_content = ""
     deferred_reasoning_visible_content = ""
     content_was_emitted = False  # Whether any content chunk was actually sent
     reasoning_was_streamed = False  # Whether any reasoning_content chunk was sent
@@ -16672,6 +16687,9 @@ async def stream_chat_completion(
         # family, so the answer pass is reliable.
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
+            _post_tool_continuation = (
+                _responses_messages_have_tool_result_after_latest_user(messages)
+            )
             reasoning_only_answer_family = _reasoning_answer_pass_family_label(
                 _family_name
             )
@@ -16685,9 +16703,13 @@ async def stream_chat_completion(
             else:
                 reasoning_only_answer_budget = max(0, _requested_output_budget)
                 reasoning_only_answer_enabled = True
-                _requested_thinking_budget = getattr(
-                    request, "max_thinking_tokens", None
-                )
+            _requested_thinking_budget = getattr(
+                request, "max_thinking_tokens", None
+            )
+            _can_partition_reasoning_pass = (
+                not _stream_tools_available or _post_tool_continuation
+            )
+            if _can_partition_reasoning_pass:
                 if (
                     _requested_thinking_budget is None
                     and _family_name in _AUTO_THINKING_PARTITION_FAMILIES
@@ -17007,6 +17029,17 @@ async def stream_chat_completion(
                     emit_reasoning = delta_msg.reasoning
                     emit_content = delta_msg.content
 
+                if tool_call_active and emit_reasoning:
+                    safe_reasoning_prefix = _tool_safe_stream_prefix(
+                        accumulated_reasoning,
+                        finished=output.finished,
+                    )
+                    emit_reasoning = (
+                        safe_reasoning_prefix[len(streamed_reasoning_content) :]
+                        if safe_reasoning_prefix.startswith(streamed_reasoning_content)
+                        else None
+                    )
+
                 # Tool-call-only streams often start with harmless whitespace
                 # before the native marker (DSV4 commonly emits "\n\n<｜DSML｜…").
                 # Do not send that whitespace as visible content until we know
@@ -17062,14 +17095,28 @@ async def stream_chat_completion(
                     deferred_reasoning_visible_content += emit_content
                     emit_content = None
                 elif _suppress_tools and emit_content:
+                    safe_content_prefix = (
+                        _tool_safe_stream_prefix(
+                            accumulated_content, finished=output.finished
+                        )
+                        if tool_call_active
+                        else accumulated_content
+                    )
                     emit_content = _suppressed_tool_display_delta(
-                        accumulated_content,
+                        safe_content_prefix,
                         streamed_content,
                         request,
                     )
                 elif emit_content:
+                    safe_content_prefix = (
+                        _tool_safe_stream_prefix(
+                            accumulated_content, finished=output.finished
+                        )
+                        if tool_call_active
+                        else accumulated_content
+                    )
                     emit_content = _visual_grounding_display_delta(
-                        accumulated_content,
+                        safe_content_prefix,
                         streamed_content,
                     )
 
@@ -17079,6 +17126,7 @@ async def stream_chat_completion(
 
                 if emit_reasoning:
                     reasoning_was_streamed = True
+                    streamed_reasoning_content += emit_reasoning
                 if emit_content:
                     content_was_emitted = True
                     streamed_content += emit_content
@@ -17188,14 +17236,28 @@ async def stream_chat_completion(
                     think_prefix_sent = True
 
                 if _suppress_tools and content:
+                    safe_text_prefix = (
+                        _tool_safe_stream_prefix(
+                            accumulated_text, finished=output.finished
+                        )
+                        if tool_call_active
+                        else accumulated_text
+                    )
                     content = _suppressed_tool_display_delta(
-                        accumulated_text,
+                        safe_text_prefix,
                         streamed_content,
                         request,
                     )
                 elif content:
+                    safe_text_prefix = (
+                        _tool_safe_stream_prefix(
+                            accumulated_text, finished=output.finished
+                        )
+                        if tool_call_active
+                        else accumulated_text
+                    )
                     content = _visual_grounding_display_delta(
-                        accumulated_text,
+                        safe_text_prefix,
                         streamed_content,
                     )
 
@@ -18167,13 +18229,32 @@ async def stream_responses_api(
         and not _tool_call_parser_disabled_explicitly
     )
     # An explicit single-call contract has no legitimate visible prose before
-    # the function call. Buffer the content rail from the first token so a
+    # the FIRST function call. Buffer that selection turn from token one so a
     # model that closes </think> early and continues meta-reasoning cannot leak
-    # that text through output_text.done. Genuine reasoning-summary deltas are
-    # still emitted below; general multi-tool turns keep normal streaming.
-    _exact_once_tool_contract = bool(
-        tool_call_active and _request_explicitly_requires_one_tool_once(request)
+    # it through output_text.done. Once a tool result follows the latest user
+    # message, the required call has already happened: keep marker detection
+    # armed for any new call, but stream ordinary answer content progressively.
+    _exact_once_requested = _request_explicitly_requires_one_tool_once(request)
+    _has_post_user_tool_result = _responses_messages_have_tool_result_after_latest_user(
+        messages
     )
+    _exact_once_tool_contract = bool(
+        tool_call_active
+        and _exact_once_requested
+        and not _has_post_user_tool_result
+    )
+    if tool_call_active and _exact_once_requested:
+        logger.info(
+            "Responses exact-once tool gate: initial_selection=%s "
+            "post_user_tool_result=%s message_shapes=%s",
+            _exact_once_tool_contract,
+            _has_post_user_tool_result,
+            [
+                (message.get("role"), message.get("type"))
+                for message in messages
+                if isinstance(message, dict)
+            ],
+        )
     tool_call_buffering = _exact_once_tool_contract
     # Early-stop after a complete tool-call turn (opt-in per tool parser via
     # STREAM_STOPS_AFTER_COMPLETE_CALL) — mirrors stream_chat_completion.
@@ -18366,6 +18447,9 @@ async def stream_responses_api(
         # family, so the answer pass is reliable.
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
+            _post_tool_continuation = (
+                _responses_messages_have_tool_result_after_latest_user(messages)
+            )
             reasoning_only_answer_family = _reasoning_answer_pass_family_label(
                 _family_name
             )
@@ -18379,9 +18463,13 @@ async def stream_responses_api(
             else:
                 reasoning_only_answer_budget = max(0, _requested_output_budget)
                 reasoning_only_answer_enabled = True
-                _requested_thinking_budget = getattr(
-                    request, "max_thinking_tokens", None
-                )
+            _requested_thinking_budget = getattr(
+                request, "max_thinking_tokens", None
+            )
+            _can_partition_reasoning_pass = (
+                not _stream_tools_available or _post_tool_continuation
+            )
+            if _can_partition_reasoning_pass:
                 if (
                     _requested_thinking_budget is None
                     and _family_name in _AUTO_THINKING_PARTITION_FAMILIES
@@ -18451,171 +18539,6 @@ async def stream_responses_api(
     _stream_timeout = (
         request.timeout if request.timeout is not None else _default_timeout
     )
-
-    if (
-        _responses_exact_reply_target(request)
-        and _responses_messages_have_tool_result_after_latest_user(messages)
-    ):
-        try:
-            output = await _await_chat_with_disconnect_abort(
-                engine,
-                messages=messages,
-                chat_kwargs=kwargs,
-                timeout=_stream_timeout,
-                fastapi_request=fastapi_request,
-                request_id=response_id,
-                endpoint="Responses API streaming exact-reply finalization",
-            )
-        except PromptTooLongError as e:
-            if hasattr(engine, "abort_request"):
-                await engine.abort_request(response_id)
-            yield _sse(
-                "error",
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "invalid_request_error",
-                        "message": str(e),
-                        "code": "prompt_too_long",
-                    },
-                },
-            )
-            return
-        except VLMImagePrefillBudgetError as e:
-            if hasattr(engine, "abort_request"):
-                await engine.abort_request(response_id)
-            yield _sse(
-                "error",
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "invalid_request_error",
-                        "message": str(e),
-                        "code": VLMImagePrefillBudgetError.code,
-                    },
-                },
-            )
-            return
-        except UnsupportedMediaModalityError as e:
-            if hasattr(engine, "abort_request"):
-                await engine.abort_request(response_id)
-            yield _sse(
-                "error",
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "invalid_request_error",
-                        "message": str(e),
-                        "code": UnsupportedMediaModalityError.code,
-                    },
-                },
-            )
-            return
-        except Exception as e:
-            logger.error(
-                "Responses API streaming exact-reply finalization failed: %s",
-                e,
-                exc_info=True,
-            )
-            if hasattr(engine, "abort_request"):
-                await engine.abort_request(response_id)
-            yield _sse(
-                "error",
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "server_error",
-                        "message": f"Generation failed: {type(e).__name__}: {e}",
-                        "code": "internal_error",
-                    },
-                },
-            )
-            return
-
-        display_text = _responses_fast_path_visible_text(output, request)
-        if display_text:
-            yield _sse(
-                "response.output_text.delta",
-                {
-                    "type": "response.output_text.delta",
-                    "item_id": msg_id,
-                    "output_index": 0,
-                    "content_index": 0,
-                    "delta": display_text,
-                },
-            )
-        yield _sse(
-            "response.output_text.done",
-            {
-                "type": "response.output_text.done",
-                "item_id": msg_id,
-                "output_index": 0,
-                "content_index": 0,
-                "text": display_text,
-            },
-        )
-        yield _sse(
-            "response.content_part.done",
-            {
-                "type": "response.content_part.done",
-                "item_id": msg_id,
-                "output_index": 0,
-                "content_index": 0,
-                "part": {
-                    "type": "output_text",
-                    "text": display_text,
-                    "annotations": [],
-                },
-            },
-        )
-        output_item = {
-            "id": msg_id,
-            "type": "message",
-            "status": "completed",
-            "role": "assistant",
-            "content": [
-                {"type": "output_text", "text": display_text, "annotations": []}
-            ],
-        }
-        yield _sse(
-            "response.output_item.done",
-            {
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": output_item,
-            },
-        )
-        _resp_finish = getattr(output, "finish_reason", None)
-        _resp_status = "incomplete" if _resp_finish == "length" else "completed"
-        _resp_extra: dict = {}
-        if _resp_status == "incomplete":
-            _resp_extra["incomplete_details"] = {"reason": "max_output_tokens"}
-        all_output_items = [output_item] if display_text else []
-        usage_obj = _get_responses_usage(output).model_dump(exclude_none=True)
-        completed_response = {
-            "id": response_id,
-            "object": "response",
-            "created_at": created_at,
-            "status": _resp_status,
-            "model": request.model,
-            "output_text": display_text,
-            "output": all_output_items,
-            **_resp_extra,
-            "usage": usage_obj,
-        }
-        _responses_store_history(
-            response_id,
-            messages + _responses_output_to_assistant_messages(all_output_items),
-            reasoning_only=False,
-        )
-        yield _sse(
-            "response.completed",
-            {
-                "type": "response.completed",
-                "response": completed_response,
-            },
-        )
-        return
 
     try:
         async for output in _stream_with_keepalive(
@@ -18747,10 +18670,18 @@ async def stream_responses_api(
 
                         # Check for tool call markers in content and reasoning
                         if tool_call_active and not tool_call_buffering:
+                            _buffer_trigger = None
                             if delta_msg.content and accumulated_content:
-                                tool_call_buffering = _has_tool_marker_or_partial_suffix(
+                                if _has_tool_marker_or_partial_suffix(
                                     accumulated_content
-                                ) or _content_forms_raw_json_tool_call(accumulated_content)
+                                ):
+                                    tool_call_buffering = True
+                                    _buffer_trigger = "content-marker"
+                                elif _content_forms_raw_json_tool_call(
+                                    accumulated_content
+                                ):
+                                    tool_call_buffering = True
+                                    _buffer_trigger = "raw-json"
                             if not tool_call_buffering and delta_msg.reasoning:
                                 _reasoning_tail = (
                                     accumulated_reasoning[-30:]
@@ -18763,6 +18694,8 @@ async def stream_responses_api(
                                 tool_call_buffering = _text_ends_with_tool_marker(
                                     _reasoning_tail
                                 )
+                                if tool_call_buffering:
+                                    _buffer_trigger = "reasoning-marker"
                             # GPT-OSS/Harmony native tool format: to=<name> code{...}
                             if not tool_call_buffering:
                                 _tc_check = (
@@ -18781,6 +18714,16 @@ async def stream_responses_api(
                                 )
                                 if re.search(r"\bto=\w[\w.]*\s+code\{", _tc_check):
                                     tool_call_buffering = True
+                                    _buffer_trigger = "harmony"
+
+                            if tool_call_buffering:
+                                logger.info(
+                                    "Responses dynamic tool buffering activated: "
+                                    "trigger=%s content_chars=%d reasoning_chars=%d",
+                                    _buffer_trigger,
+                                    len(accumulated_content),
+                                    len(accumulated_reasoning),
+                                )
 
                         if tool_call_buffering:
                             if (
@@ -18851,15 +18794,44 @@ async def stream_responses_api(
                                 emit_reasoning = delta_msg.reasoning
                                 emit_content = delta_msg.content
 
+                            if tool_call_active and emit_reasoning:
+                                safe_reasoning_prefix = _tool_safe_stream_prefix(
+                                    accumulated_reasoning,
+                                    finished=output.finished,
+                                )
+                                emit_reasoning = (
+                                    safe_reasoning_prefix[
+                                        len(streamed_reasoning_text) :
+                                    ]
+                                    if safe_reasoning_prefix.startswith(
+                                        streamed_reasoning_text
+                                    )
+                                    else None
+                                )
+
                             if _suppress_tools and emit_content:
+                                safe_content_prefix = (
+                                    _tool_safe_stream_prefix(
+                                        accumulated_content, finished=output.finished
+                                    )
+                                    if tool_call_active
+                                    else accumulated_content
+                                )
                                 emit_content = _suppressed_tool_display_delta(
-                                    accumulated_content,
+                                    safe_content_prefix,
                                     streamed_text,
                                     request,
                                 )
                             elif emit_content:
+                                safe_content_prefix = (
+                                    _tool_safe_stream_prefix(
+                                        accumulated_content, finished=output.finished
+                                    )
+                                    if tool_call_active
+                                    else accumulated_content
+                                )
                                 emit_content = _visual_grounding_display_delta(
-                                    accumulated_content,
+                                    safe_content_prefix,
                                     streamed_text,
                                 )
 
@@ -18918,14 +18890,28 @@ async def stream_responses_api(
                             think_prefix_sent = True
 
                         if _suppress_tools and content:
+                            safe_text_prefix = (
+                                _tool_safe_stream_prefix(
+                                    full_text, finished=output.finished
+                                )
+                                if tool_call_active
+                                else full_text
+                            )
                             content = _suppressed_tool_display_delta(
-                                full_text,
+                                safe_text_prefix,
                                 streamed_text,
                                 request,
                             )
                         elif content:
+                            safe_text_prefix = (
+                                _tool_safe_stream_prefix(
+                                    full_text, finished=output.finished
+                                )
+                                if tool_call_active
+                                else full_text
+                            )
                             content = _visual_grounding_display_delta(
-                                full_text,
+                                safe_text_prefix,
                                 streamed_text,
                             )
 

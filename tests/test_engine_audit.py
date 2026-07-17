@@ -6072,16 +6072,16 @@ class TestV4bToolChoiceRequired:
 
 
 class TestResponsesStreamingExactToolResult:
-    """Responses streaming must not drift from non-stream exact tool finalization."""
+    """Tool-result continuations must stay on the real Responses stream."""
 
-    def test_responses_streaming_exact_reply_uses_nonstream_finalizer(self):
+    def test_responses_streaming_has_no_nonstream_exact_reply_finalizer(self):
         import inspect
         from vmlx_engine.server import stream_responses_api
         source = inspect.getsource(stream_responses_api)
-        assert "_responses_exact_reply_target(request)" in source
-        assert "_responses_messages_have_tool_result_after_latest_user(messages)" in source
-        assert "_await_chat_with_disconnect_abort(" in source
-        assert "chat_kwargs=kwargs" in source
+        assert "_responses_exact_reply_target(request)" not in source
+        assert "Responses API streaming exact-reply finalization" not in source
+        assert "_has_post_user_tool_result" in source
+        assert "and not _has_post_user_tool_result" in source
         assert "response.output_text.delta" in source
 
     def test_exact_reply_finalizer_only_triggers_after_current_turn_tool_result(self):
@@ -6096,6 +6096,24 @@ class TestResponsesStreamingExactToolResult:
                 {"role": "tool", "tool_call_id": "call_1", "content": "A"},
             ]
         )
+
+    def test_inline_markdown_does_not_activate_native_tool_buffering(self):
+        from vmlx_engine.server import (
+            _has_tool_marker_or_partial_suffix,
+            _responses_messages_have_tool_result_after_latest_user,
+            _text_ends_with_tool_marker,
+            _tool_safe_stream_prefix,
+        )
+
+        assert not _text_ends_with_tool_marker("explanation of the `")
+        assert not _has_tool_marker_or_partial_suffix("ordinary answer <")
+        assert _text_ends_with_tool_marker("prefix ```t")
+        assert _has_tool_marker_or_partial_suffix("prefix <too")
+        assert _tool_safe_stream_prefix("explanation of the `") == "explanation of the "
+        assert _tool_safe_stream_prefix("explanation of the `path") == (
+            "explanation of the `path"
+        )
+        assert _tool_safe_stream_prefix("final `", finished=True) == "final `"
         assert not _responses_messages_have_tool_result_after_latest_user(
             [
                 {"role": "user", "content": "use tool then reply exactly: A"},
@@ -6106,33 +6124,218 @@ class TestResponsesStreamingExactToolResult:
             ]
         )
 
-    def test_exact_reply_fast_path_uses_visible_post_think_text(self):
-        from types import SimpleNamespace
-        from vmlx_engine.server import _responses_fast_path_visible_text
+    def test_post_tool_reasoning_partition_is_shared_by_chat_and_responses(self):
+        import inspect
+        import vmlx_engine.server as server
 
-        output = SimpleNamespace(
-            raw_text=(
-                'The command succeeded and produced "REAL_UI_LIVE_TOOL_TWO".\n'
-                "</think>\n"
-                "REAL_UI_LIVE_TOOL_TWO"
-            ),
-            text=(
-                'The command succeeded and produced "REAL_UI_LIVE_TOOL_TWO".\n'
-                "</think>\n"
-                "REAL_UI_LIVE_TOOL_TWO"
-            ),
+        source = inspect.getsource(server)
+        assert source.count(
+            "not _stream_tools_available or _post_tool_continuation"
+        ) == 2
+
+    @pytest.mark.asyncio
+    async def test_exact_once_tool_result_continuation_streams_visible_answer(
+        self, monkeypatch
+    ):
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.model_config_registry as registry
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest, StreamOptions
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.qwen3_parser import Qwen3ReasoningParser
+
+        prefix = "STREAMED_POST_TOOL_VISIBLE_PREFIX_"
+        suffix = "POST_TOOL_STREAM_DONE"
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            def __init__(self):
+                self.chat_calls = 0
+                self.stream_calls = 0
+                self.stream_kwargs = []
+
+            async def chat(self, *, messages, **kwargs):
+                self.chat_calls += 1
+                return GenerationOutput(
+                    text=prefix + suffix,
+                    new_text=prefix + suffix,
+                    prompt_tokens=11,
+                    completion_tokens=4,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+            async def stream_chat(self, *, messages, **kwargs):
+                self.stream_calls += 1
+                self.stream_kwargs.append(kwargs)
+                reasoning_1 = "<think>Explain the `"
+                yield GenerationOutput(
+                    text=reasoning_1,
+                    new_text=reasoning_1,
+                    prompt_tokens=11,
+                    completion_tokens=1,
+                    finished=False,
+                    finish_reason=None,
+                )
+                reasoning_2 = reasoning_1 + "path`.</think>"
+                yield GenerationOutput(
+                    text=reasoning_2,
+                    new_text="path`.</think>",
+                    prompt_tokens=11,
+                    completion_tokens=2,
+                    finished=False,
+                    finish_reason=None,
+                )
+                yield GenerationOutput(
+                    text=reasoning_2 + prefix,
+                    new_text=prefix,
+                    prompt_tokens=11,
+                    completion_tokens=3,
+                    finished=False,
+                    finish_reason=None,
+                )
+                yield GenerationOutput(
+                    text=reasoning_2 + prefix + suffix,
+                    new_text=suffix,
+                    prompt_tokens=11,
+                    completion_tokens=4,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        class _Registry:
+            def lookup(self, _key):
+                return SimpleNamespace(
+                    family_name="qwen3_5",
+                    think_in_template=True,
+                    reasoning_parser="qwen3",
+                    tool_parser="qwen",
+                    supports_thinking=True,
+                )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "qwen-post-tool-stream-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(
+            server, "_reasoning_parser", Qwen3ReasoningParser()
         )
-        request = SimpleNamespace(
-            enable_thinking=False,
+        monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+        monkeypatch.setattr(
+            server, "_tool_call_parser_disabled_explicitly", False
+        )
+        monkeypatch.setattr(registry, "get_model_config_registry", lambda: _Registry())
+
+        user_text = (
+            "Call file_info exactly once. After the tool result, "
+            "reply exactly: POST_TOOL_STREAM_DONE"
+        )
+        request = ResponsesRequest(
+            model="qwen-post-tool-stream-test",
             input=[
+                {"role": "user", "content": user_text},
                 {
-                    "role": "user",
-                    "content": "After the tool result, reply exactly: REAL_UI_LIVE_TOOL_TWO",
+                    "type": "function_call",
+                    "name": "file_info",
+                    "call_id": "call_1",
+                    "arguments": '{"path":"panel/package.json"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "Path: panel/package.json",
+                },
+            ],
+            stream=True,
+            enable_thinking=True,
+            max_thinking_tokens=256,
+            max_output_tokens=1536,
+            stream_options=StreamOptions(include_usage=True),
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
                 }
             ],
         )
 
-        assert _responses_fast_path_visible_text(output, request) == "REAL_UI_LIVE_TOOL_TWO"
+        engine = _Engine()
+        messages = [
+            {"role": "user", "content": user_text},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "file_info",
+                            "arguments": {"path": "panel/package.json"},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "Path: panel/package.json",
+            },
+        ]
+        events = []
+        async for chunk in server.stream_responses_api(
+            engine, messages, request, fastapi_request=None
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        deltas = [
+            event["delta"]
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        ]
+        completed = [
+            event["response"]
+            for event in events
+            if event.get("type") == "response.completed"
+        ]
+        function_items = [
+            event
+            for event in events
+            if event.get("type") == "response.output_item.done"
+            and event.get("item", {}).get("type") == "function_call"
+        ]
+        heartbeats = [
+            event for event in events if event.get("type") == "response.heartbeat"
+        ]
+        reasoning = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.reasoning_summary_text.delta"
+        )
+
+        assert engine.chat_calls == 0
+        assert engine.stream_calls == 1
+        assert engine.stream_kwargs[0]["max_tokens"] == 256
+        assert deltas == [prefix, suffix]
+        assert reasoning == "Explain the `path`."
+        assert heartbeats == []
+        assert completed[-1]["output_text"] == prefix + suffix
+        assert completed[-1]["status"] == "completed"
+        assert completed[-1]["usage"] == {
+            "input_tokens": 11,
+            "output_tokens": 4,
+            "total_tokens": 15,
+        }
+        assert function_items == []
 
 
 class TestNonStreamingDisconnectAbort:

@@ -69,14 +69,10 @@ def test_answer_pass_appends_reasoning_turn_for_legacy_families():
         }
 
 
-def test_only_live_proven_dsv4_reentry_keeps_full_pass_buffer():
-    """Full-pass buffering is evidence-based, not inherited by architecture.
-
-    Other families use the shared dynamic control-prefix guard and can therefore
-    stream ordinary direct-rail text without exposing an unresolved think marker.
-    """
+def test_no_answer_family_keeps_full_pass_buffer_by_name():
+    """All families use the dynamic control-prefix guard for stream safety."""
     guard = server_mod._ANSWER_PASS_LEAK_GUARD_FAMILIES
-    assert guard == frozenset({"deepseek_v4"})
+    assert guard == frozenset()
     for fam in (
         "step3p7", "minimax", "minimax_m2", "qwen3_5", "qwen3_5_moe",
         "gemma4", "hy_v3", "laguna", "openpangu_v2",

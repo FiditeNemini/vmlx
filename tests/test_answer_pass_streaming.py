@@ -120,15 +120,12 @@ def test_direct_rail_short_answer_is_not_model_allowlisted():
         assert "".join(deltas) == raw
 
 
-def test_only_live_proven_dsv4_reentry_keeps_full_pass_buffer():
-    assert _ANSWER_PASS_LEAK_GUARD_FAMILIES == frozenset({"deepseek_v4"})
+def test_no_family_batches_ordinary_answer_text_by_name():
+    assert _ANSWER_PASS_LEAK_GUARD_FAMILIES == frozenset()
     assert _answer_pass_stream_holdback("step3p7", buffer_answer_pass=False) == 0
     assert _answer_pass_stream_holdback("minimax", buffer_answer_pass=False) == 0
     assert _answer_pass_stream_holdback("gemma4", buffer_answer_pass=False) == 0
-    assert (
-        _answer_pass_stream_holdback("deepseek_v4", buffer_answer_pass=True)
-        == _ANS_MARKER_HOLDBACK
-    )
+    assert _answer_pass_stream_holdback("deepseek_v4", buffer_answer_pass=False) == 0
 
 
 def test_partial_close_think_marker_never_leaks_then_answer_streams():
@@ -143,6 +140,21 @@ def test_reopened_reasoning_is_hidden_until_close_then_answer_streams():
     deltas, raw = _drive(chunks, _req(enable_thinking=False))
     assert deltas == ["STEP", "-", "OK"]
     assert "private plan" not in "".join(deltas)
+
+
+def test_dsv4_thinking_variant_is_hidden_then_answer_streams():
+    chunks = ["<thi", "nking>", "private plan", "</thinking>", "D4", "-", "OK"]
+    deltas, raw = _drive(chunks, _req(enable_thinking=False))
+    assert deltas == ["D4", "-", "OK"]
+    assert "private plan" not in "".join(deltas)
+
+
+def test_terminal_unclosed_reasoning_variant_never_leaks():
+    deltas, raw = _drive(
+        ["<thinking>", "private plan without a close"],
+        _req(enable_thinking=False),
+    )
+    assert deltas == []
 
 
 def test_deltas_are_monotonic_prefix_extensions():

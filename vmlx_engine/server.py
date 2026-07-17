@@ -1951,14 +1951,13 @@ _ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
 # visible answer progressively. deepseek_v4 established the retained guard:
 # live-deterministic repro — with a prior salvage answer in history and a tight
 # budget, the DSV4 salvage re-opened planning as "<thinking>Let's parse the
-# user's request..." and leaked it as visible content. Do not spread that proven
-# DSV4 integration failure across unrelated families.
-# Step/MiniMax/Qwen now use the shared dynamic control-prefix guard above, so a
-# normal direct answer streams progressively while an actual ``<think...`` rail
-# stays hidden. DSV4 retains full-pass buffering because its deterministic live
-# re-entry also exercised history-dependent salvage behavior; remove that final
-# guard only after a dedicated DSV4 live matrix proves the dynamic lane.
-_ANSWER_PASS_LEAK_GUARD_FAMILIES = frozenset({"deepseek_v4"})
+# user's request..." and leaked it as visible content. Full-pass buffering is no
+# longer assigned by model family: the shared raw control-prefix state withholds
+# an actual ``<think...`` re-entry before any byte is emitted, while a normal
+# direct answer remains progressive. DSV4's dedicated Chat/Responses history
+# matrix remains a live release gate because unmarked planning text could not be
+# recalled after streaming.
+_ANSWER_PASS_LEAK_GUARD_FAMILIES = frozenset()
 
 
 def _answer_pass_thinking_reentry(raw_text: str) -> bool:

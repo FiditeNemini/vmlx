@@ -820,26 +820,32 @@ export function registerChatHandlers(
           console.log(
             `[CHAT] Applied default profile coding/tool settings to new chat ${chat.id}; generation/reasoning defaults stayed model-derived`,
           );
-        } else if (modelPath) {
-          // No starred profile — inherit settings from last chat of same model
-          const siblingChats = db.getChatsByModelPath(modelPath);
-          // Find the most recent OTHER chat (not this one) that has overrides
-          const lastSibling = siblingChats.find((c) => c.id !== chat.id);
-          if (lastSibling) {
-            const lastOverrides = db.getChatOverrides(lastSibling.id);
-            if (lastOverrides) {
-              const existing = db.getChatOverrides(chat.id) || {
-                chatId: chat.id,
-              };
-              const merged = buildNewChatInheritedOverrides(
-                existing as any,
-                lastOverrides as any,
-              );
-              db.setChatOverrides(merged);
-              console.log(
-                `[CHAT] Inherited coding/tool settings from last chat ${lastSibling.id.slice(0, 8)}; generation/reasoning defaults stayed model-derived`,
-              );
-            }
+        } else {
+          // No starred profile — honor the visible "last chat" contract across
+          // model switches. Skip this newly inserted row and any older chat
+          // without an override record instead of stopping at an empty sibling.
+          // The inheritance policy still copies only tool/workspace ergonomics;
+          // sampling, prompts, and reasoning remain model-derived.
+          const lastInherited = db
+            .getRecentChats(100)
+            .filter((candidate) => candidate.id !== chat.id)
+            .map((candidate) => ({
+              chat: candidate,
+              overrides: db.getChatOverrides(candidate.id),
+            }))
+            .find((candidate) => candidate.overrides !== undefined);
+          if (lastInherited?.overrides) {
+            const existing = db.getChatOverrides(chat.id) || {
+              chatId: chat.id,
+            };
+            const merged = buildNewChatInheritedOverrides(
+              existing as any,
+              lastInherited.overrides as any,
+            );
+            db.setChatOverrides(merged);
+            console.log(
+              `[CHAT] Inherited coding/tool settings from last chat ${lastInherited.chat.id.slice(0, 8)}; generation/reasoning defaults stayed model-derived`,
+            );
           }
         }
       } catch (e) {

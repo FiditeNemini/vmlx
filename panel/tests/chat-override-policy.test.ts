@@ -437,10 +437,30 @@ describe('new-chat override inheritance policy', () => {
     )
     const defaultProfileBranch = createHandler.slice(
       createHandler.indexOf('if (defaultProfile)'),
-      createHandler.indexOf('} else if (modelPath)'),
+      createHandler.indexOf(
+        '} else {',
+        createHandler.indexOf('if (defaultProfile)'),
+      ),
     )
 
     expect(defaultProfileBranch).toContain('buildNewChatInheritedOverrides')
     expect(defaultProfileBranch).not.toContain('Object.entries(defaultProfile)')
+  })
+
+  it('inherits tool settings from the newest override row across model switches', () => {
+    const chatIpcSource = fs.readFileSync(
+      path.resolve(__dirname, '../src/main/ipc/chat.ts'),
+      'utf8',
+    )
+    const createHandler = chatIpcSource.slice(
+      chatIpcSource.indexOf('"chat:create"'),
+      chatIpcSource.indexOf('ipcMain.handle("chat:getByModel"'),
+    )
+
+    expect(createHandler).toContain('.getRecentChats(100)')
+    expect(createHandler).toContain('candidate.id !== chat.id')
+    expect(createHandler).toContain('db.getChatOverrides(candidate.id)')
+    expect(createHandler).toContain('candidate.overrides !== undefined')
+    expect(createHandler).not.toContain('db.getChatsByModelPath(modelPath)')
   })
 })

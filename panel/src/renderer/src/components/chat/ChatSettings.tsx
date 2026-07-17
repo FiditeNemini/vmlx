@@ -82,6 +82,8 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const [detectedToolParser, setDetectedToolParser] = useState<string | undefined>(undefined)
   const [detectedReasoningParser, setDetectedReasoningParser] = useState<string | undefined>(undefined)
   const [detectedSupportsThinking, setDetectedSupportsThinking] = useState<boolean | undefined>(undefined)
+  const [detectedSupportsInstructMode, setDetectedSupportsInstructMode] = useState<boolean | undefined>(undefined)
+  const [detectedReasoningEfforts, setDetectedReasoningEfforts] = useState<Array<'low' | 'medium' | 'high' | 'max'> | undefined>(undefined)
   const [thinkingBudgetSupported, setThinkingBudgetSupported] = useState<boolean | undefined>(undefined)
   const [supportsThinkingBudget, setSupportsThinkingBudget] = useState<boolean | undefined>(undefined)
   const [savedChatModelPath, setSavedChatModelPath] = useState<string | undefined>(undefined)
@@ -90,11 +92,13 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const effectiveWireApi = overrides.wireApi ?? (isRemote ? 'completions' : 'responses')
   const effectiveReasoningParser = detectedSupportsThinking === false ? undefined : (detectedReasoningParser ?? reasoningParser)
   const thinkingSupported = detectedFamily === 'deepseek-v4' || detectedSupportsThinking === true || (detectedSupportsThinking !== false && !!effectiveReasoningParser)
+  const thinkingOffSupported = detectedSupportsInstructMode !== false
   const displayedEnableThinking = thinkingSupported ? overrides.enableThinking : undefined
   const thinkingDisabledClass = thinkingSupported ? '' : ' opacity-50 cursor-not-allowed'
-  const showReasoningEffort = detectedFamily === 'hy3' || effectiveReasoningParser === 'openai_gptoss' || effectiveReasoningParser === 'mistral'
-  const showLowEffort = effectiveReasoningParser !== 'mistral'
-  const showMediumEffort = effectiveReasoningParser !== 'mistral' && detectedFamily !== 'hy3'
+  const showReasoningEffort = (detectedReasoningEfforts?.length ?? 0) > 0 || detectedFamily === 'hy3' || effectiveReasoningParser === 'openai_gptoss' || effectiveReasoningParser === 'mistral'
+  const showLowEffort = detectedReasoningEfforts ? detectedReasoningEfforts.includes('low') : effectiveReasoningParser !== 'mistral'
+  const showMediumEffort = detectedReasoningEfforts ? detectedReasoningEfforts.includes('medium') : effectiveReasoningParser !== 'mistral' && detectedFamily !== 'hy3'
+  const showHighEffort = detectedReasoningEfforts ? detectedReasoningEfforts.includes('high') : true
   const dsv4MaxEnabled = detectedFamily === 'deepseek-v4'
 
   const loadProfiles = useCallback(() => {
@@ -142,12 +146,16 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
           setDetectedToolParser(detected?.toolParser)
           setDetectedReasoningParser(detected?.reasoningParser)
           setDetectedSupportsThinking(detected?.supportsThinking)
+          setDetectedSupportsInstructMode(detected?.supportsInstructMode)
+          setDetectedReasoningEfforts(detected?.supportedReasoningEfforts)
           setSupportsThinkingBudget(detected?.supportsThinkingBudget)
         } catch (_) {
           setDetectedFamily(undefined)
           setDetectedToolParser(undefined)
           setDetectedReasoningParser(undefined)
           setDetectedSupportsThinking(undefined)
+          setDetectedSupportsInstructMode(undefined)
+          setDetectedReasoningEfforts(undefined)
           setSupportsThinkingBudget(undefined)
         }
       }
@@ -486,21 +494,25 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                   >
                     {t('chat.settings.thinkingOn')}
                   </button>
-                  <button
-                    disabled={!thinkingSupported}
-                    onClick={() => updateThinkingMode(false, undefined)}
-                    className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                      displayedEnableThinking === false
-                        ? 'bg-primary text-primary-foreground'
-                        : thinkingSupported ? 'hover:bg-accent text-muted-foreground' : 'text-muted-foreground opacity-50 cursor-not-allowed'
-                    }${thinkingDisabledClass}`}
-                  >
-                    {t('chat.settings.thinkingOff')}
-                  </button>
+                  {thinkingOffSupported && (
+                    <button
+                      disabled={!thinkingSupported}
+                      onClick={() => updateThinkingMode(false, undefined)}
+                      className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                        displayedEnableThinking === false
+                          ? 'bg-primary text-primary-foreground'
+                          : thinkingSupported ? 'hover:bg-accent text-muted-foreground' : 'text-muted-foreground opacity-50 cursor-not-allowed'
+                      }${thinkingDisabledClass}`}
+                    >
+                      {t('chat.settings.thinkingOff')}
+                    </button>
+                  )}
                 </div>
               )}
               <p className="text-xs text-muted-foreground mt-1.5">
-                {t('chat.settings.thinkingHelp')}
+                {t(thinkingOffSupported
+                  ? 'chat.settings.thinkingHelp'
+                  : 'chat.settings.thinkingNativeOnlyHelp')}
               </p>
               {detectedFamily !== 'deepseek-v4' && overrides.enableThinking !== false && showReasoningEffort && (
                 <div className="mt-3">
@@ -544,16 +556,18 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                         )}
                       </>
                     )}
-                    <button
-                      onClick={() => update('reasoningEffort', 'high')}
-                      className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                        overrides.reasoningEffort === 'high'
-                          ? 'bg-primary text-primary-foreground'
-                          : 'hover:bg-accent text-muted-foreground'
-                      }`}
-                    >
-                      {t('chat.settings.effortHigh')}
-                    </button>
+                    {showHighEffort && (
+                      <button
+                        onClick={() => update('reasoningEffort', 'high')}
+                        className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                          overrides.reasoningEffort === 'high'
+                            ? 'bg-primary text-primary-foreground'
+                            : 'hover:bg-accent text-muted-foreground'
+                        }`}
+                      >
+                        {t('chat.settings.effortHigh')}
+                      </button>
+                    )}
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
                     {effectiveReasoningParser === 'mistral'

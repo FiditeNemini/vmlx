@@ -278,8 +278,8 @@ def test_lfm2_thinking_off_sentinel_applies_even_with_tools():
     assert _has_empty_think_pair(fixed)
 
 
-def test_step37_thinking_off_sentinel_closes_forced_template_think_with_tools():
-    """Step3.7's native template opens `<think>` even when thinking is off."""
+def test_step37_thinking_off_sentinel_preserves_native_forced_think():
+    """Step3.7 has no native direct rail; do not fabricate an empty thought."""
     prompt = (
         "<|im_start|>system\n# Tools\n<|im_end|>\n"
         "<|im_start|>user\nUse run_command once.<|im_end|>\n"
@@ -293,8 +293,8 @@ def test_step37_thinking_off_sentinel_closes_forced_template_think_with_tools():
         tools_present=True,
     )
 
-    assert fixed.endswith("<think>\n</think>\n\n")
-    assert _has_empty_think_pair(fixed)
+    assert fixed == prompt
+    assert not _has_empty_think_pair(fixed)
 
 
 # ---------------------------------------------------------------------------

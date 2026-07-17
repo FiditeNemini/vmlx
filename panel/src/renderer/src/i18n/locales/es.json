@@ -290,6 +290,7 @@
       "thinkingOn": "Activado",
       "thinkingOff": "Desactivado",
       "thinkingHelp": "Auto: vMLX local usa el valor de razonamiento predeterminado del modelo/runtime. Activado: solicita pensamiento. Desactivado: solicita respuestas directas.",
+      "thinkingNativeOnlyHelp": "Este modelo solo ofrece razonamiento nativo. Auto usa el valor predeterminado del modelo; Activado solicita razonamiento. Desactivado no está disponible.",
       "reasoningEffort": "Esfuerzo de razonamiento",
       "effortLow": "Bajo",
       "effortMedium": "Medio",

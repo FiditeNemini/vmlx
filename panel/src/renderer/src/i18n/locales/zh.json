@@ -290,6 +290,7 @@
       "thinkingOn": "开启",
       "thinkingOff": "关闭",
       "thinkingHelp": "自动:本地 vMLX 使用模型/运行时的默认推理设置。开启:请求思考。关闭:请求直接回复。",
+      "thinkingNativeOnlyHelp": "此模型仅支持原生推理。自动使用模型默认值；开启会请求推理。思考关闭不可用。",
       "reasoningEffort": "推理强度",
       "effortLow": "低",
       "effortMedium": "中",

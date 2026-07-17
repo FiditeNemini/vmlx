@@ -26,6 +26,8 @@ declare global {
           toolParser?: string;
           reasoningParser?: string;
           supportsThinking?: boolean;
+          supportsInstructMode?: boolean;
+          supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>;
           supportsThinkingBudget?: boolean;
           thinkInTemplate?: boolean;
           cacheType: string;

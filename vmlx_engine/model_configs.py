@@ -884,6 +884,8 @@ def register_all(registry=None):
             reasoning_parser="qwen3",
             think_in_template=True,
             supports_thinking=True,
+            supports_instruct_mode=False,
+            supported_reasoning_efforts=["low", "medium", "high"],
             is_mllm=True,
             architecture_hints={
                 "text_model_type": "step3p5",

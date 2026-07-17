@@ -91,7 +91,7 @@ describe('chat settings cross-family compatibility warnings', () => {
     expect(source).toContain('const [detectedSupportsThinking, setDetectedSupportsThinking]')
     expect(source).toContain('const effectiveReasoningParser = detectedSupportsThinking === false ? undefined : (detectedReasoningParser ?? reasoningParser)')
     expect(source).toContain("const thinkingSupported = detectedFamily === 'deepseek-v4' || detectedSupportsThinking === true || (detectedSupportsThinking !== false && !!effectiveReasoningParser)")
-    expect(source).toContain("const showReasoningEffort = detectedFamily === 'hy3' || effectiveReasoningParser === 'openai_gptoss' || effectiveReasoningParser === 'mistral'")
+    expect(source).toContain("const showReasoningEffort = (detectedReasoningEfforts?.length ?? 0) > 0")
     expect(source).toContain('const displayedEnableThinking = thinkingSupported ? overrides.enableThinking : undefined')
     expect(source).toContain('disabled={!thinkingSupported}')
   })
@@ -100,7 +100,20 @@ describe('chat settings cross-family compatibility warnings', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 
     expect(source).toContain("detectedFamily === 'hy3' || effectiveReasoningParser === 'openai_gptoss' || effectiveReasoningParser === 'mistral'")
-    expect(source).toContain("const showMediumEffort = effectiveReasoningParser !== 'mistral' && detectedFamily !== 'hy3'")
+    expect(source).toContain("detectedReasoningEfforts.includes('medium')")
+    expect(source).toContain("detectedFamily !== 'hy3'")
+  })
+
+  it('hides Thinking Off and exposes native effort levels when instruct mode is unsupported', () => {
+    const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
+    const ipc = readFileSync('src/main/ipc/chat.ts', 'utf8')
+
+    expect(source).toContain('const thinkingOffSupported = detectedSupportsInstructMode !== false')
+    expect(source).toContain('{thinkingOffSupported && (')
+    expect(source).toContain("'chat.settings.thinkingNativeOnlyHelp'")
+    expect(source).toContain('setDetectedReasoningEfforts(detected?.supportedReasoningEfforts)')
+    expect(ipc).toContain('supportsInstructMode === false && overrides?.enableThinking === false')
+    expect(ipc).toContain('if (supportsInstructMode === false) return;')
   })
 
   it('exposes DSV4 Max without consulting legacy force-direct session state', () => {

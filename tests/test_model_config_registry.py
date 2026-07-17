@@ -874,6 +874,8 @@ class TestModelConfigs:
         config = self._lookup(registry, "mlx-community/Qwen3-VL-7B-Instruct", "qwen3_vl")
         assert config.family_name == "qwen3_vl"
         assert config.is_mllm is True
+        assert config.supports_instruct_mode is not False
+        assert config.supported_reasoning_efforts is None
 
     def test_qwen_mamba_config(self, registry):
         config = self._lookup(registry, "Qwen-Mamba-7B", "qwen_mamba")
@@ -1123,6 +1125,8 @@ class TestModelConfigs:
         assert config.reasoning_parser == "qwen3"
         assert config.think_in_template is True
         assert config.supports_thinking is True
+        assert config.supports_instruct_mode is False
+        assert config.supported_reasoning_efforts == ["low", "medium", "high"]
         assert config.is_mllm is True
         # The source-VLM runtime_scope / vl_runtime_available / text_bridge hints
         # are only emitted by the text-bridge branch, which reads a real

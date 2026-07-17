@@ -290,6 +290,7 @@
       "thinkingOn": "켜기",
       "thinkingOff": "끄기",
       "thinkingHelp": "자동: 로컬 vMLX는 모델/런타임의 기본 추론 설정을 사용합니다. 켜기: 사고를 요청합니다. 끄기: 직접 응답을 요청합니다.",
+      "thinkingNativeOnlyHelp": "이 모델은 기본 추론 모드만 지원합니다. 자동은 모델 기본값을 사용하고, 켜기는 추론을 요청합니다. 사고 끄기는 사용할 수 없습니다.",
       "reasoningEffort": "추론 수준",
       "effortLow": "낮음",
       "effortMedium": "중간",

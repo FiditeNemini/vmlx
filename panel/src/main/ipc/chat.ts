@@ -1015,6 +1015,7 @@ export function registerChatHandlers(
       let chatUsesZayaAppleScriptToolBundle = false;
       let thinkingBudgetSupported: boolean | undefined;
       let supportsThinkingBudget: boolean | undefined;
+      let supportsInstructMode: boolean | undefined;
       // VLM video sampling (Qwen 3.6, Qwen3.5-VL, etc.) — forwarded as
       // video_fps / video_max_frames on the request body when present.
       // Default undefined = engine default (2.0 fps, 8 max frames).
@@ -1075,6 +1076,7 @@ export function registerChatHandlers(
               chat.modelPath,
             );
             supportsThinkingBudget = detected.supportsThinkingBudget;
+            supportsInstructMode = detected.supportsInstructMode;
             timeoutSeconds = effectiveFamilyRequestTimeoutSeconds(
               timeoutSeconds,
               chatDetectedFamily,
@@ -1369,6 +1371,11 @@ export function registerChatHandlers(
 
       // Get overrides if any
       const overrides = db.getChatOverrides(chatId);
+      if (!isRemote && supportsInstructMode === false && overrides?.enableThinking === false) {
+        throw new Error(
+          "This model has no native Thinking Off/Instruct mode. Open Chat Settings and choose Auto or On.",
+        );
+      }
 
       // Build request messages with system prompt if set
       // Using any[] to support tool_calls and tool_call_id fields
@@ -1881,6 +1888,10 @@ export function registerChatHandlers(
             if (!(finalAnswerRecovery || plannedDirectAnswerPass)) return;
             delete obj.tools;
             if (isRemote) return;
+            // Some native templates (currently Step-3.7) have no truthful
+            // thinking-off rail. Keep their bounded follow-up answer-only by
+            // removing tools, but do not coerce an empty <think> sentinel.
+            if (supportsInstructMode === false) return;
             obj.enable_thinking = false;
             obj.thinking_mode = "instruct";
             obj.chat_template_kwargs = {

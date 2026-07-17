@@ -88,6 +88,7 @@ def ensure_thinking_off_sentinel(
     name = (model_name or "").lower()
     is_lfm2 = fam in {"lfm2", "lfm2_moe"} or "lfm2" in name
     is_minimax_m3 = fam in {"minimax_m3", "minimax_m3_vl"} or "minimax-m3" in name
+    is_step3p7 = fam == "step3p7" or "step-3.7" in name
     is_minimax = (
         not is_minimax_m3
         and (fam == "minimax" or "minimax" in name)
@@ -97,10 +98,14 @@ def ensure_thinking_off_sentinel(
     if last_open >= 0:
         after_open = prompt[last_open + len("<think>") :]
         if "</think>" not in after_open:
+            # Step-3.7's official template always opens this rail and has no
+            # thinking-off branch. Preserve the native prompt; the public API
+            # rejects instruct mode instead of fabricating an empty thought.
+            if is_step3p7:
+                return prompt
             # #199-2B: MiniMax tool requests keep the planning rail open so the
-            # model can still select tools; every other family closes the forced
-            # <think> (e.g. Step-3.7) so the visible budget is not spent in
-            # hidden-thought punctuation.
+            # model can still select tools; compatible families may close an
+            # already-open thought when their native contract supports it.
             if tools_present and is_minimax:
                 return prompt
             return prompt[: last_open + len("<think>")] + "\n</think>\n\n"

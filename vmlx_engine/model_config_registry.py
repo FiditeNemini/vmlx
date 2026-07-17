@@ -61,6 +61,13 @@ class ModelConfig:
     # False is an explicit family/runtime compatibility verdict: do not let
     # stale JANG stamps or tokenizer probes auto-enable thinking.
     supports_thinking: Optional[bool] = None
+    # None means a reasoning-capable family exposes the normal direct/instruct
+    # rail. False means its native template has no truthful thinking-off mode;
+    # callers must keep reasoning enabled instead of coercing the prompt.
+    supports_instruct_mode: Optional[bool] = None
+    # Native template effort names advertised to API/UI clients. None keeps the
+    # existing parser/family-derived defaults; an explicit list is authoritative.
+    supported_reasoning_efforts: Optional[List[str]] = None
 
     # Multimodal
     is_mllm: bool = False

@@ -1915,24 +1915,22 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
         "openpangu_v2",
         "qwen3_5",
         "qwen3_5_moe",
-        # deepseek_v4 / step3p7 are bare deepseek_r1/qwen3 reasoners: on a hard
-        # prompt they can run the thinking block to the full budget without ever
-        # emitting a post-</think> answer, yielding empty content (agentic-loop
-        # stall). They honor enable_thinking=False on the direct rail, so the
-        # bounded thinking-off answer pass is coherent for them too.
+        # DSV4 can run the thinking block to the full budget without a visible
+        # answer and has a source-owned direct encoder for its bounded retry.
+        # Step3p7 is deliberately absent: its official template always opens
+        # <think> and has no native instruct rail, so a thinking-off retry would
+        # be prompt coercion rather than a valid model mode.
         "deepseek_v4",
-        "step3p7",
     }
 )
 
 # Families whose FIRST (thinking) pass may be capped by a client-sent
-# max_thinking_tokens. deepseek_v4 / step3p7 are deliberately EXCLUDED: they key
+# max_thinking_tokens. deepseek_v4 is deliberately EXCLUDED: it keys
 # on reasoning_effort, not a thinking-token budget, so max_thinking_tokens is an
 # inert field for them and capping max_tokens by it would wrongly truncate the
 # answer. They still receive the never-empty answer pass above.
 _THINKING_BUDGET_CAP_FAMILIES = _REASONING_ANSWER_PASS_FAMILIES - {
     "deepseek_v4",
-    "step3p7",
 }
 
 
@@ -3179,15 +3177,33 @@ def _resolve_enable_thinking(
     if not _family or str(_family).lower() == "unknown":
         _family = str(model_key or "")
     _family_l = str(_family).lower()
+
+    def _reject_unsupported_instruct_mode(source: str) -> None:
+        if _mc is None or getattr(_mc, "supports_instruct_mode", None) is not False:
+            return
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{_family} does not expose a native thinking-off/instruct mode; "
+                f"{source} requested enable_thinking=false. Use Auto/On with one "
+                "of the advertised reasoning_efforts instead."
+            ),
+        )
+
     if _mc is not None and getattr(_mc, "supports_thinking", None) is False:
         # The registry is the compatibility boundary. If a model family or
         # quant profile cannot safely expose a reasoning rail, stale UI state
         # and raw API kwargs must not resurrect it.
         return False
     if request_value is not None:
+        if request_value is False:
+            _reject_unsupported_instruct_mode("the request")
         return request_value
     if "enable_thinking" in ct_kwargs:
-        return bool(ct_kwargs["enable_thinking"])
+        _template_value = bool(ct_kwargs["enable_thinking"])
+        if _template_value is False:
+            _reject_unsupported_instruct_mode("chat_template_kwargs")
+        return _template_value
     _effort = str(reasoning_effort or "").strip().lower()
     _supports_thinking = False
     if _mc is not None:
@@ -3208,6 +3224,7 @@ def _resolve_enable_thinking(
     if _default_enable_thinking is True:
         return True
     if _default_enable_thinking is False:
+        _reject_unsupported_instruct_mode("the server default")
         return False
 
     default_hint = None
@@ -9907,13 +9924,24 @@ async def model_capabilities(model_id: str) -> dict:
         if supports_thinking_explicit is not None
         else bool(reasoning_parser or think_in_template)
     )
+    supports_instruct_mode_explicit = (
+        getattr(cfg, "supports_instruct_mode", None) if cfg is not None else None
+    )
+    supports_instruct_mode = supports_instruct_mode_explicit is not False
+    configured_reasoning_efforts = (
+        getattr(cfg, "supported_reasoning_efforts", None) if cfg is not None else None
+    )
     if family == "deepseek_v4":
         supports_thinking = True
         supported_modes = ["instruct", "reasoning"]
         reasoning_efforts = ["high", "max"]
     elif supports_thinking:
-        supported_modes = ["instruct", "reasoning"]
-        if family == "hy_v3":
+        supported_modes = (
+            ["instruct", "reasoning"] if supports_instruct_mode else ["reasoning"]
+        )
+        if configured_reasoning_efforts is not None:
+            reasoning_efforts = list(configured_reasoning_efforts)
+        elif family == "hy_v3":
             reasoning_efforts = ["low", "high"]
         elif reasoning_parser in ("openai_gptoss", "mistral"):
             reasoning_efforts = ["low", "medium", "high"]
@@ -9983,6 +10011,7 @@ async def model_capabilities(model_id: str) -> dict:
         "supports_tools": bool(tool_parser),
         "tool_parser": tool_parser,
         "supports_thinking": supports_thinking,
+        "supports_instruct_mode": supports_instruct_mode,
         "reasoning_parser": reasoning_parser,
         "think_in_template": think_in_template,
         "supported_modes": supported_modes,

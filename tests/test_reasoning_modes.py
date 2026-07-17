@@ -868,6 +868,83 @@ def test_enable_thinking_explicit_values_still_win_for_reasoning_families(monkey
     ) is False
 
 
+def test_step37_rejects_instruct_mode_but_keeps_native_reasoning_controls(monkeypatch):
+    """A template that always opens <think> must not advertise or fabricate Off."""
+    from fastapi import HTTPException
+
+    import vmlx_engine.model_config_registry as mcr
+    from vmlx_engine import server
+
+    cfg = SimpleNamespace(
+        family_name="step3p7",
+        reasoning_parser="qwen3",
+        think_in_template=True,
+        supports_thinking=True,
+        supports_instruct_mode=False,
+    )
+
+    class _Registry:
+        def lookup(self, _model_key):
+            return cfg
+
+    monkeypatch.setattr(mcr, "get_model_config_registry", lambda: _Registry())
+    monkeypatch.setattr(server, "_default_enable_thinking", None)
+
+    assert server._resolve_enable_thinking(
+        request_value=True,
+        ct_kwargs={},
+        tools_present=False,
+        model_key="step3p7",
+    ) is True
+    with pytest.raises(HTTPException, match="does not expose a native thinking-off/instruct mode"):
+        server._resolve_enable_thinking(
+            request_value=False,
+            ct_kwargs={},
+            tools_present=False,
+            model_key="step3p7",
+        )
+    with pytest.raises(HTTPException, match="chat_template_kwargs"):
+        server._resolve_enable_thinking(
+            request_value=None,
+            ct_kwargs={"enable_thinking": False},
+            tools_present=True,
+            model_key="step3p7",
+        )
+
+
+@pytest.mark.asyncio
+async def test_step37_capabilities_advertise_reasoning_only_and_native_efforts(monkeypatch):
+    import vmlx_engine.model_config_registry as mcr
+    from vmlx_engine import server
+
+    cfg = SimpleNamespace(
+        family_name="step3p7",
+        reasoning_parser="qwen3",
+        tool_parser="step3p5",
+        think_in_template=True,
+        supports_thinking=True,
+        supports_instruct_mode=False,
+        supported_reasoning_efforts=["low", "medium", "high"],
+        is_mllm=True,
+    )
+
+    class _Registry:
+        def lookup(self, _model_key):
+            return cfg
+
+    monkeypatch.setattr(mcr, "get_model_config_registry", lambda: _Registry())
+    monkeypatch.setattr(server, "_engine", SimpleNamespace(is_mllm=True))
+    monkeypatch.setattr(server, "_model_path", "")
+    monkeypatch.setattr(server, "_model_name", "")
+
+    caps = await server.model_capabilities("step3p7")
+
+    assert caps["supports_thinking"] is True
+    assert caps["supports_instruct_mode"] is False
+    assert caps["supported_modes"] == ["reasoning"]
+    assert caps["reasoning_efforts"] == ["low", "medium", "high"]
+
+
 @pytest.mark.asyncio
 async def test_capabilities_reports_loaded_scheduler_cache(monkeypatch):
     """The panel gates cache UI from /capabilities, so this must reflect the
@@ -1161,16 +1238,17 @@ def test_zaya_vl_mllm_plain_template_does_not_synthesize_hidden_only_think(
     assert "<think>" not in lm._apply_chat_template(messages, enable_thinking=False)
 
 
-def test_step37_mllm_thinking_off_closes_forced_processor_think(
+def test_step37_mllm_does_not_fabricate_thinking_off_processor_prompt(
     tmp_path, monkeypatch
 ):
-    """Step3.7's VLM wrapper must honor thinking-off after processor render.
+    """Step3.7's VLM wrapper must preserve its native processor render.
 
     The local Step3.7 template always appends an open ``<think>`` generation
     prompt, even when ``enable_thinking=False``. The MLLM wrapper is the prompt
     renderer used by the live app/server path, so it must close that rail before
     generation instead of leaving the model to spend the whole visible budget in
-    hidden-thought punctuation.
+    hidden-thought punctuation. Public request validation rejects this mode;
+    this direct renderer test pins the no-coercion fallback as well.
     """
     from vmlx_engine.models.mllm import MLXMultimodalLM
 
@@ -1217,7 +1295,8 @@ def test_step37_mllm_thinking_off_closes_forced_processor_think(
         ],
     )
 
-    assert rendered.endswith("<think>\n</think>\n\n")
+    assert rendered.endswith("<think>\n")
+    assert "</think>" not in rendered
 
 
 def test_zaya_vl_synthetic_mllm_think_prompt_seed_is_disabled_for_plain_template(

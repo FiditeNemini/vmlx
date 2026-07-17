@@ -1,19 +1,20 @@
-"""deepseek_v4 / step3p7 join the never-empty answer-pass families.
+"""DSV4 keeps its native direct answer pass; Step3p7 does not fake one.
 
 Regression guard for the DSV4/Step-3.7 empty-content-after-reasoning fix:
-- Both must be in _REASONING_ANSWER_PASS_FAMILIES so the bounded thinking-off
-  answer pass fires when the thinking block consumes the whole budget.
-- Both must be EXCLUDED from _THINKING_BUDGET_CAP_FAMILIES: they key on
+- DSV4 must be in _REASONING_ANSWER_PASS_FAMILIES because its source encoder
+  owns a real direct rail.
+- Step3p7 must be absent because its official template always opens <think>.
+- Both remain outside _THINKING_BUDGET_CAP_FAMILIES: they key on
   reasoning_effort, not a thinking-token budget, so max_thinking_tokens is an
   inert field and must not cap max_tokens for them (#89).
 """
 import vmlx_engine.server as server_mod
 
 
-def test_dsv4_and_step37_in_answer_pass_families():
+def test_dsv4_has_native_answer_pass_but_step37_does_not_fake_one():
     fams = server_mod._REASONING_ANSWER_PASS_FAMILIES
     assert "deepseek_v4" in fams
-    assert "step3p7" in fams
+    assert "step3p7" not in fams
     # existing families still covered
     for f in ("qwen3_5", "qwen3_5_moe", "gemma4", "hy_v3", "laguna",
               "minimax_m2", "openpangu_v2"):

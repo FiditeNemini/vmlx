@@ -124,3 +124,25 @@ class TestTerminalFinishGuard:
         ]
         out = _collect(frames)
         assert _finish_reasons(out) == ["stop"]
+
+    def test_structured_error_is_not_followed_by_synthetic_stop(self):
+        error = {
+            "id": "chatcmpl-test1234",
+            "object": "chat.completion.chunk",
+            "error": {
+                "message": "VLM prefill rejected before Metal forward",
+                "type": "invalid_request_error",
+                "code": "vlm_image_prefill_budget_exceeded",
+            },
+        }
+        frames = [
+            _sse(_chunk(delta={"role": "assistant"}, raw_null=True)),
+            _sse(error),
+            "data: [DONE]\n\n",
+        ]
+        out = _collect(frames)
+        assert _finish_reasons(out) == []
+        assert json.loads(out[-2].strip()[6:])["error"]["code"] == (
+            "vlm_image_prefill_budget_exceeded"
+        )
+        assert out[-1] == "data: [DONE]\n\n"

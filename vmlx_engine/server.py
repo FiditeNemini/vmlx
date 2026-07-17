@@ -16506,12 +16506,24 @@ async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterato
     contract tests.
     """
     finish_seen = False
+    error_seen = False
     first_chunk_meta = None
     async for sse in sse_stream:
         if sse.startswith("data: ") and not sse.startswith("data: [DONE]"):
+            try:
+                _p = json.loads(sse[6:].strip())
+            except Exception:
+                _p = None
+            if isinstance(_p, dict) and _p.get("error") is not None:
+                # A structured SSE error is already the terminal contract.
+                # Never append a synthetic successful `stop` after it: doing
+                # so made guarded VLM prefill failures look like empty normal
+                # completions to clients that key off finish_reason.
+                error_seen = True
             if first_chunk_meta is None and '"chat.completion.chunk"' in sse:
                 try:
-                    _p = json.loads(sse[6:].strip())
+                    if not isinstance(_p, dict):
+                        raise ValueError("invalid SSE payload")
                     first_chunk_meta = {
                         "id": _p.get("id"),
                         "created": _p.get("created"),
@@ -16525,7 +16537,11 @@ async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterato
                 and '"finish_reason": null' not in sse
             ):
                 finish_seen = True
-        elif sse.startswith("data: [DONE]") and not finish_seen:
+        elif (
+            sse.startswith("data: [DONE]")
+            and not finish_seen
+            and not error_seen
+        ):
             if first_chunk_meta is not None:
                 terminal = {
                     "id": first_chunk_meta["id"],

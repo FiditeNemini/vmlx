@@ -2177,6 +2177,32 @@ def test_mllm_media_cache_key_ignores_prompt_attention_mask_length():
     assert _mllm_media_cache_extra_keys(short) != _mllm_media_cache_extra_keys(other_image)
 
 
+def test_mllm_media_cache_key_uses_local_file_content_not_temp_path(tmp_path):
+    from vmlx_engine.mllm_batch_generator import _mllm_media_cache_extra_keys
+
+    first = tmp_path / "decoded-request-a.jpg"
+    second = tmp_path / "decoded-request-b.jpg"
+    different = tmp_path / "decoded-request-c.jpg"
+    first.write_bytes(b"same-frame-pixels")
+    second.write_bytes(b"same-frame-pixels")
+    different.write_bytes(b"different-frame-pixels")
+
+    def _request(path):
+        return SimpleNamespace(
+            images=[str(path)],
+            videos=None,
+            image_grid_thw=mx.array([[1, 2, 2]]),
+            pixel_values=None,
+        )
+
+    assert _mllm_media_cache_extra_keys(_request(first)) == (
+        _mllm_media_cache_extra_keys(_request(second))
+    )
+    assert _mllm_media_cache_extra_keys(_request(first)) != (
+        _mllm_media_cache_extra_keys(_request(different))
+    )
+
+
 def test_mllm_media_cache_key_includes_video_frame_settings():
     from vmlx_engine.mllm_batch_generator import _mllm_media_cache_extra_keys
 

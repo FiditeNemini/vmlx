@@ -459,6 +459,55 @@ class TestBatchedEngineVideoTemplate:
         assert content[1]["image_url"]["url"] == "/tmp/frame-1.png"
         assert rewritten is not messages
 
+    def test_qwen_video_frame_fallback_bounds_desktop_frames_before_image_expansion(
+        self, monkeypatch
+    ):
+        import numpy as np
+
+        from vmlx_engine.engine.batched import BatchedEngine
+
+        captured_shapes = []
+        monkeypatch.setattr(
+            "vmlx_engine.models.mllm.process_video_input",
+            lambda src: "/tmp/source.mp4",
+        )
+        monkeypatch.setattr(
+            "vmlx_engine.models.mllm.extract_video_frames_smart",
+            lambda path, fps, max_frames: [
+                np.zeros((1800, 2800, 3), dtype=np.uint8),
+                np.zeros((720, 480, 3), dtype=np.uint8),
+            ],
+        )
+
+        def _save(frames):
+            captured_shapes.extend(frame.shape for frame in frames)
+            return [f"/tmp/frame-{idx}.jpg" for idx, _ in enumerate(frames)]
+
+        monkeypatch.setattr(
+            "vmlx_engine.models.mllm.save_frames_to_temp",
+            _save,
+        )
+        monkeypatch.setenv("VMLINUX_VIDEO_FALLBACK_MAX_LONG_EDGE", "768")
+
+        engine = BatchedEngine.__new__(BatchedEngine)
+        engine._model_name = "dealignai/Qwen3.6-27B-MXFP8-CRACK-MTP"
+        engine._model_family_name = lambda: "qwen3_5"
+        engine._video_frame_fallback_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": "source.mp4"}},
+                    ],
+                }
+            ],
+            video_fps=2.0,
+            video_max_frames=8,
+        )
+
+        assert captured_shapes[0][:2] == (494, 768)
+        assert captured_shapes[1][:2] == (720, 480)
+
     def test_step37_video_frame_fallback_rewrites_video_to_image_parts(self, monkeypatch):
         from vmlx_engine.engine.batched import BatchedEngine
 

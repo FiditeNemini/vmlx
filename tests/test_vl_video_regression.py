@@ -524,6 +524,33 @@ def test_mimo_video_processor_outputs_stay_on_video_kwargs():
     assert 'kwargs["video_grid_thw"] = request.video_grid_thw' in module_src
 
 
+def test_vision_pixel_cache_round_trips_native_video_tensors():
+    """A native video cache hit must not erase video pixels or its grid."""
+    import mlx.core as mx
+
+    from vmlx_engine.vision_embedding_cache import VisionEmbeddingCache
+
+    cache = VisionEmbeddingCache(max_pixel_entries=2)
+    video_pixels = mx.array([[1.0, 2.0]])
+    video_grid = mx.array([[2, 3, 4]], dtype=mx.int32)
+    cache.set_pixel_cache(
+        images=["data:video/mp4;base64,AAAA"],
+        prompt="video prompt",
+        pixel_values=None,
+        video_pixel_values=video_pixels,
+        video_grid_thw=video_grid,
+        input_ids=mx.array([[7, 8]], dtype=mx.int32),
+    )
+
+    hit = cache.get_pixel_cache(
+        ["data:video/mp4;base64,AAAA"], "video prompt"
+    )
+    assert hit is not None
+    assert hit.pixel_values is None
+    assert hit.video_pixel_values is video_pixels
+    assert hit.video_grid_thw is video_grid
+
+
 # =============================================================================
 # Extended regression coverage — user requested "reasoning on/off, sliding
 # window, hybrid, buttons, etc."
@@ -3290,14 +3317,17 @@ class TestAsyncSSMRederiveReasoningHybrid:
             "finalize path"
         )
         # store() must be inside the prefill-success flow, not a post-gen hook
-        store_idx = src.find("self._ssm_state_cache.store(")
-        assert store_idx > 0
-        # Look backwards for `first_tokens.append` — which means we're
-        # still in the prefill block (after sampling the first token but
-        # before any generation step). If store() is AFTER a generation
-        # loop, this wouldn't hold.
-        preceding = src[max(0, store_idx - 4000):store_idx]
-        assert "first_tokens.append" in preceding, (
+        capture_idx = src.find("# Capture SSM state at prompt boundary")
+        store_idx = src.find("self._ssm_state_cache.store(", capture_idx)
+        next_method_idx = src.find("\n    def ", capture_idx)
+        first_token_idx = src.rfind("first_tokens.append", 0, store_idx)
+        assert capture_idx > 0
+        assert capture_idx < store_idx < next_method_idx
+        # The first-token append anchors this store in _process_prompts after
+        # the prefill sample. Compare function-local ordering instead of a
+        # fixed character window: media-conditioned cache ownership adds
+        # legitimate typed-layer code between the two anchors.
+        assert first_token_idx > 0 and first_token_idx < capture_idx, (
             "store() must live in prefill-success path (not finalize) — "
             "moving it post-generation reintroduces thinking contamination"
         )

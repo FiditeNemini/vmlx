@@ -209,6 +209,23 @@ def _mllm_media_cache_extra_keys(request: Any) -> Optional[Dict[str, str]]:
         hasher.update(label.encode("utf-8"))
         hasher.update(hashlib.sha256(str(value).encode("utf-8")).digest())
 
+    def _hash_media_source(label: str, value: Any) -> None:
+        """Hash local media by bytes so equivalent temp paths share a key."""
+        try:
+            path = Path(value)
+            if path.is_file():
+                content_hash = hashlib.sha256()
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        content_hash.update(chunk)
+                hasher.update(label.encode("utf-8"))
+                hasher.update(b"local-media-content")
+                hasher.update(content_hash.digest())
+                return
+        except (OSError, TypeError, ValueError):
+            pass
+        _hash_text(label, value)
+
     def _hash_array(label: str, value: Any) -> None:
         if value is None:
             return
@@ -223,14 +240,14 @@ def _mllm_media_cache_extra_keys(request: Any) -> Optional[Dict[str, str]]:
             _hash_text(label, value)
 
     for source in getattr(request, "images", None) or []:
-        _hash_text("image", source)
+        _hash_media_source("image", source)
     for source in getattr(request, "videos", None) or []:
-        _hash_text("video", source)
+        _hash_media_source("video", source)
     if getattr(request, "videos", None):
         _hash_text("video_fps", getattr(request, "video_fps", None))
         _hash_text("video_max_frames", getattr(request, "video_max_frames", None))
     for source in getattr(request, "audios", None) or []:
-        _hash_text("audio", source)
+        _hash_media_source("audio", source)
     if getattr(request, "audio", None):
         _hash_text("audio", getattr(request, "audio", None))
     _hash_array("image_grid_thw", getattr(request, "image_grid_thw", None))
@@ -4340,8 +4357,8 @@ class MLLMBatchGenerator:
             request.pixel_values = cached_pixels.pixel_values
             request.attention_mask = cached_pixels.attention_mask
             request.image_grid_thw = cached_pixels.image_grid_thw
-            request.video_pixel_values = None
-            request.video_grid_thw = None
+            request.video_pixel_values = cached_pixels.video_pixel_values
+            request.video_grid_thw = cached_pixels.video_grid_thw
             request.extra_kwargs = dict(cached_pixels.extra_kwargs)
             self._raise_if_prompt_over_limit(
                 request,
@@ -4536,7 +4553,10 @@ class MLLMBatchGenerator:
         if (
             not _mllm_bypass
             and media_cache_sources
-            and request.pixel_values is not None
+            and (
+                request.pixel_values is not None
+                or request.video_pixel_values is not None
+            )
         ):
             self.vision_cache.set_pixel_cache(
                 images=media_cache_sources,
@@ -4545,6 +4565,8 @@ class MLLMBatchGenerator:
                 input_ids=request.input_ids,
                 attention_mask=request.attention_mask,
                 image_grid_thw=request.image_grid_thw,
+                video_pixel_values=request.video_pixel_values,
+                video_grid_thw=request.video_grid_thw,
                 extra_kwargs=request.extra_kwargs,
                 processing_time=processing_time,
             )

@@ -48,6 +48,50 @@ _SIMPLE_MLLM_STREAM_TLS = _threading.local()
 logger = logging.getLogger(__name__)
 
 
+def _bound_video_fallback_frames(
+    frames: list[Any],
+    *,
+    max_long_edge: int,
+) -> list[Any]:
+    """Downscale sampled video frames without changing their aspect ratio.
+
+    Frame-fallback families present each sampled frame as a separate image. A
+    handful of full-resolution desktop frames can therefore expand into a
+    quadratic attention prompt large enough to exceed the VLM prefill guard.
+    Keep the real sampled pixels, but bound each frame before image-token
+    expansion. Invalid/test sentinel frames are left untouched.
+    """
+    if max_long_edge <= 0:
+        return frames
+
+    try:
+        import cv2
+    except Exception:
+        return frames
+
+    bounded: list[Any] = []
+    for frame in frames:
+        try:
+            height, width = (int(frame.shape[0]), int(frame.shape[1]))
+            long_edge = max(height, width)
+            if long_edge <= max_long_edge:
+                bounded.append(frame)
+                continue
+            scale = max_long_edge / float(long_edge)
+            resized_width = max(1, int(round(width * scale)))
+            resized_height = max(1, int(round(height * scale)))
+            bounded.append(
+                cv2.resize(
+                    frame,
+                    (resized_width, resized_height),
+                    interpolation=cv2.INTER_AREA,
+                )
+            )
+        except Exception:
+            bounded.append(frame)
+    return bounded
+
+
 def _raise_prompt_too_long_from_output(output: Any) -> None:
     """Convert structured scheduler prefill errors back into API-level errors."""
     if getattr(output, "error_code", None) == "prompt_too_long":
@@ -576,8 +620,17 @@ class BatchedEngine(BaseEngine):
 
         fps = video_fps or DEFAULT_FPS
         max_frames = video_max_frames or MAX_FRAMES
+        try:
+            frame_max_long_edge = max(
+                224,
+                int(os.environ.get("VMLINUX_VIDEO_FALLBACK_MAX_LONG_EDGE", "768")),
+            )
+        except (TypeError, ValueError):
+            frame_max_long_edge = 768
         rewritten: list[dict[str, Any]] = []
         changed = False
+        converted_videos = 0
+        converted_frames = 0
 
         def _normalize_video_source(src: Any) -> Any:
             if not isinstance(src, str) or not src.startswith("file://"):
@@ -703,6 +756,10 @@ class BatchedEngine(BaseEngine):
                         fps=fps,
                         max_frames=max_frames,
                     )
+                    frames = _bound_video_fallback_frames(
+                        frames,
+                        max_long_edge=frame_max_long_edge,
+                    )
                     frame_paths = save_frames_to_temp(frames)
                     frame_paths = _dedup_video_frames(
                         frame_paths,
@@ -725,6 +782,8 @@ class BatchedEngine(BaseEngine):
                         }
                     )
                 changed = True
+                converted_videos += 1
+                converted_frames += len(frame_paths)
 
             if changed:
                 out_msg = dict(msg)
@@ -733,7 +792,19 @@ class BatchedEngine(BaseEngine):
             else:
                 rewritten.append(msg)
 
-        return rewritten if changed else messages
+        if changed:
+            logger.info(
+                "%s video frame fallback converted %d video(s) to %d real "
+                "sampled frame image(s) (fps=%s, max_frames=%s, max_long_edge=%s)",
+                family,
+                converted_videos,
+                converted_frames,
+                fps,
+                max_frames,
+                frame_max_long_edge,
+            )
+            return rewritten
+        return messages
 
     def _qwen_video_frame_fallback_messages(
         self,

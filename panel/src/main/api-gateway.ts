@@ -451,8 +451,28 @@ export class ApiGateway extends EventEmitter {
   }
 
   async restart(port: number, host?: string): Promise<void> {
+    const wasRunning = this._running;
+    const previousPort = this.port;
+    const previousHost = this.host;
     await this.stop();
-    await this.start(port, host);
+    try {
+      await this.start(port, host);
+    } catch (err) {
+      // A rejected settings change must not take down a gateway that was
+      // already serving. Restore the last known-good listener and persisted
+      // host/port, then surface the original validation/bind error to the UI.
+      if (wasRunning) {
+        try {
+          await this.start(previousPort, previousHost);
+        } catch (restoreErr) {
+          console.error(
+            `[gateway] Failed to restore ${previousHost}:${previousPort} after rejected restart:`,
+            restoreErr,
+          );
+        }
+      }
+      throw err;
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════

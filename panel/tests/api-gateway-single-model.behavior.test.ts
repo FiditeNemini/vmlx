@@ -291,6 +291,46 @@ describe("ApiGateway single-model mode behavior", () => {
     expect(dbMock.setSetting).toHaveBeenCalledWith("gateway_port", String(port));
   });
 
+  it("restores the previous listener when restart targets an active session port", async () => {
+    const originalPort = await freePort();
+    const conflictingPort = await freePort();
+    dbMock.getSetting.mockReturnValue(undefined);
+    dbMock.getSessions.mockReturnValue([]);
+
+    const { ApiGateway } = await import("../src/main/api-gateway");
+    gateway = new ApiGateway();
+    await gateway.start(originalPort, "127.0.0.1");
+
+    dbMock.getSessions.mockReturnValue([
+      {
+        id: "active-model",
+        modelPath: "/models/Active-JANG",
+        modelName: "active-model",
+        host: "127.0.0.1",
+        port: conflictingPort,
+        status: "running",
+        type: "local",
+        config: "{}",
+      },
+    ]);
+
+    await expect(
+      gateway.restart(conflictingPort, "127.0.0.1"),
+    ).rejects.toThrow(`Gateway port ${conflictingPort} conflicts`);
+
+    expect(gateway.running).toBe(true);
+    expect((gateway as any).port).toBe(originalPort);
+    expect((gateway as any).host).toBe("127.0.0.1");
+    expect(dbMock.setSetting).toHaveBeenLastCalledWith(
+      "gateway_host",
+      "127.0.0.1",
+    );
+    expect(dbMock.setSetting).toHaveBeenCalledWith(
+      "gateway_port",
+      String(originalPort),
+    );
+  });
+
   it("reports failure when another active local session cannot be unloaded", async () => {
     dbMock.getSetting.mockImplementation((key: string) =>
       key === "gateway_single_model_mode" ? "true" : undefined,

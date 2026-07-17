@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from concurrent.futures import ThreadPoolExecutor
 from types import MethodType, SimpleNamespace
@@ -22,6 +23,7 @@ async def test_llm_engine_dispatches_terminal_before_deferred_cleanup() -> None:
     class _Collector:
         def put(self, output: RequestOutput) -> None:
             assert output.finished
+            assert not engine._terminal_cleanup_complete.is_set()
             order.append("dispatch")
 
     class _Scheduler:
@@ -40,6 +42,7 @@ async def test_llm_engine_dispatches_terminal_before_deferred_cleanup() -> None:
 
         def _cleanup_finished(self, finished_ids: set[str]) -> None:
             assert finished_ids == {"req"}
+            assert not engine._terminal_cleanup_complete.is_set()
             order.append("cleanup")
             engine._running = False
 
@@ -50,10 +53,13 @@ async def test_llm_engine_dispatches_terminal_before_deferred_cleanup() -> None:
     engine._output_collectors = {"req": _Collector()}
     engine._stream_states = {}
     engine._finished_events = {}
+    engine._terminal_cleanup_complete = asyncio.Event()
+    engine._terminal_cleanup_complete.set()
 
     await engine._engine_loop()
 
     assert order == ["dispatch", "cleanup"]
+    assert engine._terminal_cleanup_complete.is_set()
 
 
 @pytest.mark.asyncio
@@ -62,6 +68,8 @@ async def test_mllm_loop_dispatches_terminal_before_worker_cleanup() -> None:
     scheduler = MLLMScheduler.__new__(MLLMScheduler)
     scheduler._running = True
     scheduler._step_executor = ThreadPoolExecutor(max_workers=1)
+    scheduler._terminal_cleanup_complete = asyncio.Event()
+    scheduler._terminal_cleanup_complete.set()
 
     def _has_requests(self) -> bool:
         return self._running
@@ -75,10 +83,12 @@ async def test_mllm_loop_dispatches_terminal_before_worker_cleanup() -> None:
 
     def _dispatch(self, output: MLLMSchedulerOutput) -> None:
         assert output.outputs[0].finished
+        assert not self._terminal_cleanup_complete.is_set()
         order.append("dispatch")
 
     def _cleanup(self, finished_ids: set[str]) -> None:
         assert finished_ids == {"req"}
+        assert not self._terminal_cleanup_complete.is_set()
         order.append("cleanup")
         self._running = False
 
@@ -95,6 +105,57 @@ async def test_mllm_loop_dispatches_terminal_before_worker_cleanup() -> None:
         scheduler._step_executor.shutdown(wait=True)
 
     assert order == ["dispatch", "cleanup"]
+    assert scheduler._terminal_cleanup_complete.is_set()
+
+
+@pytest.mark.asyncio
+async def test_llm_request_admission_waits_for_terminal_cache_cleanup() -> None:
+    added: list[str] = []
+    engine = EngineCore.__new__(EngineCore)
+
+    class _Scheduler:
+        def add_request(self, request) -> None:
+            added.append(request.request_id)
+
+    engine.scheduler = _Scheduler()
+    engine.config = SimpleNamespace(stream_interval=1)
+    engine._output_collectors = {}
+    engine._stream_states = {}
+    engine._finished_events = {}
+    engine._terminal_cleanup_complete = asyncio.Event()
+
+    pending = asyncio.create_task(
+        engine.add_request(prompt="next turn", request_id="next")
+    )
+    await asyncio.sleep(0)
+    assert not pending.done()
+    assert added == []
+
+    engine._terminal_cleanup_complete.set()
+    assert await pending == "next"
+    assert added == ["next"]
+
+
+@pytest.mark.asyncio
+async def test_mllm_async_admission_waits_for_terminal_cache_cleanup() -> None:
+    added: list[str] = []
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler._terminal_cleanup_complete = asyncio.Event()
+    scheduler.output_queues = {}
+
+    def _add_request(self, **kwargs) -> str:
+        added.append(kwargs["prompt"])
+        return "next-vl"
+
+    scheduler.add_request = MethodType(_add_request, scheduler)
+    pending = asyncio.create_task(scheduler.add_request_async(prompt="next media turn"))
+    await asyncio.sleep(0)
+    assert not pending.done()
+    assert added == []
+
+    scheduler._terminal_cleanup_complete.set()
+    assert await pending == "next-vl"
+    assert added == ["next media turn"]
 
 
 def test_direct_scheduler_steps_retain_synchronous_cleanup_default() -> None:

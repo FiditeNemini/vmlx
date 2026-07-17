@@ -878,6 +878,12 @@ class MLLMScheduler:
         # Async processing control
         self._running = False
         self._processing_task: Optional[asyncio.Task] = None
+        # See EngineCore's equivalent gate: terminal media/text output is
+        # dispatched before cache persistence for low-latency streaming, while
+        # new async requests wait until paged/TQ/typed companion state is fully
+        # committed.  Sync step-based callers retain synchronous cleanup.
+        self._terminal_cleanup_complete = asyncio.Event()
+        self._terminal_cleanup_complete.set()
 
         # Statistics
         self.num_requests_processed = 0
@@ -4016,6 +4022,11 @@ class MLLMScheduler:
                     executor_s = (
                         time.perf_counter() - executor_t0 if trace_enabled else 0.0
                     )
+                    finished_ids = set(step_output.finished_request_ids)
+                    if finished_ids:
+                        # Close admission before terminal dispatch: the client
+                        # may immediately submit another turn from that event.
+                        self._terminal_cleanup_complete.clear()
                     # Dispatch outputs on the event loop (asyncio.Queue is not thread-safe)
                     dispatch_t0 = time.perf_counter() if trace_enabled else 0.0
                     self._dispatch_outputs(step_output)
@@ -4029,14 +4040,17 @@ class MLLMScheduler:
                     # runs on the model's single worker and completes before the
                     # next scheduler step, preserving MLX stream ownership and
                     # cache/bookkeeping ordering.
-                    if step_output.finished_request_ids:
+                    if finished_ids:
                         await asyncio.sleep(0)
                         cleanup_t0 = time.perf_counter() if trace_enabled else 0.0
-                        await loop.run_in_executor(
-                            self._step_executor,
-                            self._cleanup_finished_after_terminal_dispatch,
-                            set(step_output.finished_request_ids),
-                        )
+                        try:
+                            await loop.run_in_executor(
+                                self._step_executor,
+                                self._cleanup_finished_after_terminal_dispatch,
+                                finished_ids,
+                            )
+                        finally:
+                            self._terminal_cleanup_complete.set()
                         if trace_enabled:
                             cleanup_s = time.perf_counter() - cleanup_t0
                             step_output.trace_timings["cleanup_finished_s"] = (
@@ -4058,8 +4072,10 @@ class MLLMScheduler:
                     await asyncio.sleep(0.01)
 
             except asyncio.CancelledError:
+                self._terminal_cleanup_complete.set()
                 break
             except Exception as e:
+                self._terminal_cleanup_complete.set()
                 import traceback
                 logger.error(f"Error in MLLM process loop: {e}\n{traceback.format_exc()}")
                 # Fail all waiting+running requests so callers don't hang forever
@@ -4160,6 +4176,11 @@ class MLLMScheduler:
         Returns:
             Request ID for tracking
         """
+        # Do not let an immediately-following turn select a prefix while the
+        # prior terminal request is still persisting paged/TQ/typed companion
+        # cache state.  Event.wait() returns without yielding on the normal
+        # open path, so this adds no steady-state scheduling round trip.
+        await self._terminal_cleanup_complete.wait()
         request_id = self.add_request(
             prompt=prompt,
             images=images,

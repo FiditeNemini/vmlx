@@ -94,6 +94,15 @@ class EngineCore:
         self._stream_states: Dict[str, RequestStreamState] = {}
         self._finished_events: Dict[str, asyncio.Event] = {}
 
+        # Terminal output must reach API/UI consumers before potentially slow
+        # cache persistence, but the next request must not perform prefix
+        # lookup until that persistence completes.  The engine loop clears
+        # this gate before dispatching a finished output and reopens it after
+        # paged/TQ/SSM cleanup.  This keeps streaming responsive without
+        # allowing a same-prefix request to observe a partially-written cache.
+        self._terminal_cleanup_complete = asyncio.Event()
+        self._terminal_cleanup_complete.set()
+
         # Engine state
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -174,6 +183,13 @@ class EngineCore:
                     else:
                         output = self.scheduler.step(defer_finished_cleanup=True)
                     self._steps_executed += 1
+                    finished_ids = set(output.finished_request_ids)
+                    if finished_ids:
+                        # Close request admission before exposing the terminal
+                        # output.  A consumer can submit its next turn as soon
+                        # as it receives that output, while cache persistence
+                        # is intentionally still pending.
+                        self._terminal_cleanup_complete.clear()
 
                     # Periodic ghost request detection: find requests in
                     # scheduler.running that have no output collector.
@@ -263,26 +279,30 @@ class EngineCore:
                     # one exists, before admitting the next scheduler step.
                     # This preserves cache ownership while preventing the final
                     # visible delta from being held behind disk persistence.
-                    if output.finished_request_ids:
+                    if finished_ids:
                         if not outputs:
                             await asyncio.sleep(0)
-                        finished_ids = set(output.finished_request_ids)
-                        if _step_executor is not None:
-                            await _async_loop.run_in_executor(
-                                _step_executor,
-                                self.scheduler._cleanup_finished,
-                                finished_ids,
-                            )
-                        else:
-                            self.scheduler._cleanup_finished(finished_ids)
+                        try:
+                            if _step_executor is not None:
+                                await _async_loop.run_in_executor(
+                                    _step_executor,
+                                    self.scheduler._cleanup_finished,
+                                    finished_ids,
+                                )
+                            else:
+                                self.scheduler._cleanup_finished(finished_ids)
+                        finally:
+                            self._terminal_cleanup_complete.set()
                 else:
                     # No work, yield control
                     await asyncio.sleep(step_interval)
 
             except asyncio.CancelledError:
+                self._terminal_cleanup_complete.set()
                 self._fail_active_requests("Engine cancelled")
                 break
             except Exception as e:
+                self._terminal_cleanup_complete.set()
                 logger.error(f"Engine loop error: {e}", exc_info=True)
                 # Signal all active requests as failed so consumers don't hang
                 self._fail_active_requests(str(e))
@@ -446,6 +466,13 @@ class EngineCore:
 
         if max_prompt_tokens is not None and int(max_prompt_tokens) > 0:
             request._max_prompt_tokens = int(max_prompt_tokens)
+
+        # A prior terminal output may already be visible to the caller while
+        # its prefix/TQ/SSM state is still being persisted.  Wait before
+        # creating request bookkeeping or entering scheduler admission so a
+        # cancelled waiter cannot leak a collector and prefix lookup cannot
+        # observe a stale partial cache entry.
+        await self._terminal_cleanup_complete.wait()
 
         # Setup output collector with stream_interval from config
         self._output_collectors[request_id] = RequestOutputCollector(aggregate=True)

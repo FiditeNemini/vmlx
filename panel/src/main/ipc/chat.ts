@@ -38,6 +38,7 @@ import { dsv4OutputBudget } from "../../shared/dsv4RequestBudget";
 import { projectedMetalHeadroomChatErrorContent } from "../../shared/chatErrorDisplay";
 import { reconcileResponsesToolBufferAtStreamEnd } from "../../shared/responsesStreamRecovery";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
+import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
 import {
   buildNewChatInheritedOverrides,
   sanitizeChatOverrides,
@@ -3472,6 +3473,18 @@ export function registerChatHandlers(
             console.log(
               `[CHAT] Tool execution iteration ${toolIteration} (${receivedToolCalls.length} tool calls)`,
             );
+            const contentBeforeToolPreviewCleanup = fullContent;
+            fullContent = stripRedundantNamespacedToolPreview(
+              fullContent,
+              receivedToolCalls,
+            );
+            const clearedRedundantToolPreview =
+              contentBeforeToolPreviewCleanup !== fullContent;
+            if (clearedRedundantToolPreview) {
+              console.log(
+                `[CHAT] Removed redundant namespaced tool preview before Responses continuation`,
+              );
+            }
             // Preserve content before tool execution so abort can recover it
             if (fullContent.trim()) {
               allGeneratedContent +=
@@ -3480,7 +3493,11 @@ export function registerChatHandlers(
             // Flush accumulated content to renderer before blocking on tool execution
             try {
               const win = getWindow();
-              if (win && !win.isDestroyed() && allGeneratedContent.trim()) {
+              if (
+                win &&
+                !win.isDestroyed() &&
+                (allGeneratedContent.trim() || clearedRedundantToolPreview)
+              ) {
                 win.webContents.send("chat:stream", {
                   chatId,
                   messageId: assistantMessage.id,

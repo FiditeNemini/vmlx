@@ -111,6 +111,14 @@ describe('tool status responsiveness contract', () => {
     expect(executeBlock).toContain('JSON.parse(tc.function.arguments || "{}")')
   })
 
+  it('cleans a redundant namespaced tool preview before Responses continuation', () => {
+    const source = readPanelSource('src/main/ipc/chat.ts')
+
+    expect(source).toContain('stripRedundantNamespacedToolPreview(')
+    expect(source).toContain('clearedRedundantToolPreview')
+    expect(source).toContain('Removed redundant namespaced tool preview')
+  })
+
   it('recovers Responses function-call arguments from argument delta and done events', () => {
     const source = readPanelSource('src/main/ipc/chat.ts')
     const responsesParser = source.slice(

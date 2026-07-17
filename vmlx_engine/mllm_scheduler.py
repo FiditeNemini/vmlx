@@ -1032,10 +1032,12 @@ class MLLMScheduler:
     ) -> bool:
         """Return True when a media prompt may use media-keyed prefix cache.
 
-        Qwen3.5/3.6 VL has a clean media-conditioned N-1 cache producer and is
-        enabled by default. Other families retain the historical double opt-in
-        until they have equivalent typed-cache proof. ZAYA CCA remains
-        excluded because its current clean store path is text-only.
+        Qwen3.5/3.6 VL and Gemma 4 have a clean media-conditioned N-1 cache
+        producer and are enabled by default. Gemma stores the captured native
+        rotating-SWA plus compatible full-attention boundary under the media
+        side-key. Other families retain the historical double opt-in until they
+        have equivalent typed-cache proof. ZAYA CCA remains excluded because
+        its current clean store path is text-only.
         """
         enabled = os.environ.get("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "").strip().lower()
         if enabled in ("0", "false", "no", "off"):
@@ -1049,12 +1051,14 @@ class MLLMScheduler:
             or getattr(self, "_model_type", "")
             or ""
         ).lower()
-        qwen_media_safe = model_type in {
+        family_media_safe = model_type in {
             "qwen3_5",
             "qwen3_5_moe",
             "qwen3_5_vl",
+            "gemma4",
+            "gemma4_unified",
         }
-        if not qwen_media_safe:
+        if not family_media_safe:
             if enabled not in ("1", "true", "yes", "on"):
                 return False
             unsafe_ack = os.environ.get(
@@ -3092,6 +3096,26 @@ class MLLMScheduler:
                                 raw = request._extracted_cache
                                 if raw is None:
                                     cache_blocks = None
+                                elif (
+                                    media_cache_allowed
+                                    and _uses_mixed_attention_cache
+                                    and isinstance(raw, (list, tuple))
+                                ):
+                                    # The batch generator captured this exact
+                                    # media-conditioned N-1 boundary before
+                                    # releasing pixel/video tensors. Reuse it
+                                    # directly for Gemma's mixed rotating-SWA /
+                                    # full-attention store. Calling the ordinary
+                                    # path-dependent helper here would run a
+                                    # second *text-only* prefill and silently
+                                    # discard the vision-conditioned state.
+                                    cache_blocks = list(raw)
+                                    logger.info(
+                                        "Using captured media-conditioned mixed-SWA "
+                                        "N-1 cache for %s (%d layers)",
+                                        request_id,
+                                        len(cache_blocks),
+                                    )
                                 elif _uses_zaya_cache or _uses_mixed_attention_cache:
                                     # ZAYA CCA and Gemma-style mixed-SWA caches are
                                     # path-dependent. ZAYA conv_state/prev_hs and

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import vmlx_engine.server as server_mod
 from vmlx_engine.server import (
     _ANS_MARKER_HOLDBACK,
+    _ANSWER_PASS_LEAK_GUARD_FAMILIES,
     _answer_pass_stream_holdback,
     _answer_pass_visible_delta,
 )
@@ -28,7 +29,7 @@ def _req(enable_thinking=True):
     return SimpleNamespace(enable_thinking=enable_thinking)
 
 
-def _drive(raw_chunks, request, *, holdback=_ANS_MARKER_HOLDBACK):
+def _drive(raw_chunks, request, *, holdback=0):
     """Replicate the streaming loop: accumulate new_text, collect emitted deltas.
 
     The last chunk is delivered with finished=True (the engine's terminal chunk),
@@ -65,8 +66,8 @@ def test_streams_multiple_deltas_for_long_answer():
 
 def test_no_partial_marker_leak_gemma_channel():
     # gemma degraded form: clean_output_text turns "<|channel>thought" into a
-    # bare "thought" until "<channel|>" arrives, then re-strips it. The holdback
-    # must ensure that transient "thought" never escapes to the client.
+    # bare "thought" until "<channel|>" arrives, then re-strips it. The dynamic
+    # control state must ensure that transient "thought" never escapes.
     answer = ("The ocean is a vast interconnected system that stores heat, "
               "drives weather, and shelters countless species in its depths.")
     raw_chunks = ["<|channel>", "thought", "\n", "<channel|>"]
@@ -79,14 +80,15 @@ def test_no_partial_marker_leak_gemma_channel():
     assert joined.startswith("The ocean is a vast")
 
 
-def test_short_answer_flushes_once_on_finish():
-    # An answer shorter than the holdback stays buffered until the finished chunk,
-    # then flushes intact — the openPangu #66 floor case ("capital of France").
+def test_short_plain_answer_streams_without_family_allowlist():
+    # Ordinary text is not a control marker and must stream even when shorter than
+    # the old global 48-character tail.
     answer = "The capital of France is Paris."
     assert len(answer) < _ANS_MARKER_HOLDBACK
     raw_chunks = [answer[i:i + 3] for i in range(0, len(answer), 3)]
     deltas, raw = _drive(raw_chunks, _req())
-    assert deltas == [answer]
+    assert len(deltas) == len(raw_chunks)
+    assert "".join(deltas) == answer
 
 
 def test_hy3_direct_rail_short_answer_streams_incrementally():
@@ -97,10 +99,20 @@ def test_hy3_direct_rail_short_answer_streams_incrementally():
     assert "".join(deltas) == raw
 
 
-def test_direct_rail_short_answer_families_do_not_batch_behind_marker_holdback():
-    """Known direct-rail retries must stream even when the answer is short."""
+def test_direct_rail_short_answer_is_not_model_allowlisted():
+    """All non-buffered retries stream; behavior is based on text state, not family."""
     chunks = ["B1", "-", "OK"]
-    for family in ("hy_v3", "minimax_m3", "qwen3_5", "qwen3_5_moe"):
+    for family in (
+        "hy_v3",
+        "minimax_m3",
+        "qwen3_5",
+        "qwen3_5_moe",
+        "step3p7",
+        "minimax",
+        "gemma4",
+        "laguna",
+        "nemotron_h",
+    ):
         holdback = _answer_pass_stream_holdback(family, buffer_answer_pass=False)
         assert holdback == 0
         deltas, raw = _drive(chunks, _req(enable_thinking=False), holdback=holdback)
@@ -108,15 +120,29 @@ def test_direct_rail_short_answer_families_do_not_batch_behind_marker_holdback()
         assert "".join(deltas) == raw
 
 
-def test_marker_risk_answer_families_keep_tail_holdback():
-    assert (
-        _answer_pass_stream_holdback("gemma4", buffer_answer_pass=False)
-        == _ANS_MARKER_HOLDBACK
-    )
+def test_only_live_proven_dsv4_reentry_keeps_full_pass_buffer():
+    assert _ANSWER_PASS_LEAK_GUARD_FAMILIES == frozenset({"deepseek_v4"})
+    assert _answer_pass_stream_holdback("step3p7", buffer_answer_pass=False) == 0
+    assert _answer_pass_stream_holdback("minimax", buffer_answer_pass=False) == 0
+    assert _answer_pass_stream_holdback("gemma4", buffer_answer_pass=False) == 0
     assert (
         _answer_pass_stream_holdback("deepseek_v4", buffer_answer_pass=True)
         == _ANS_MARKER_HOLDBACK
     )
+
+
+def test_partial_close_think_marker_never_leaks_then_answer_streams():
+    chunks = ["<", "/t", "hink", ">", "B1", "-", "OK"]
+    deltas, raw = _drive(chunks, _req(enable_thinking=False))
+    assert deltas == ["B1", "-", "OK"]
+    assert "".join(deltas) == "B1-OK"
+
+
+def test_reopened_reasoning_is_hidden_until_close_then_answer_streams():
+    chunks = ["<think>", "private plan", "</think>", "STEP", "-", "OK"]
+    deltas, raw = _drive(chunks, _req(enable_thinking=False))
+    assert deltas == ["STEP", "-", "OK"]
+    assert "private plan" not in "".join(deltas)
 
 
 def test_deltas_are_monotonic_prefix_extensions():
@@ -186,16 +212,15 @@ def test_chat_legacy_reasoning_fallback_cannot_precede_answer_pass():
     )
 
 
-def test_all_bounded_answer_families_defer_partial_first_pass_content():
-    """A length-truncated visible prefix must not suppress the direct retry."""
+def test_main_chat_reasoning_content_is_never_terminally_buffered():
+    """Parser-exposed content streams now; only content-empty runs use retry."""
     source = inspect.getsource(server_mod.stream_chat_completion)
-    assert (
-        "m3_reasoning_only_answer_enabled\n"
-        "                    or reasoning_only_answer_enabled"
-    ) in source
-    assert "deferred_reasoning_visible_content += emit_content" in source
+    assert "not content_was_emitted" in source
+    assert "and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)" in source
+    assert "deferred_reasoning_visible_content" not in source
+    assert 'finish_reason="length"' in source
     assert "_answer_pass_stream_holdback(" in source
-    assert "buffered_text[index : index + 4]" in source
+    assert "synthetic terminal blob" in source
 
 
 def test_nonstream_answer_pass_replaces_length_truncated_visible_prefix():

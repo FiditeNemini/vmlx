@@ -1029,22 +1029,23 @@ def _answer_pass_visible_delta(
     turn the raw accumulation into the next content delta. It applies the SAME
     visible-text extraction the non-streaming answer pass used
     (``clean_output_text`` + the ``enable_thinking`` ``</think>`` split) so the
-    streamed text is byte-identical to the old single chunk, then holds back a
-    marker-length tail (until ``finished``) so transient partial reasoning-marker
-    fragments — e.g. gemma's ``<|channel>thought`` cleaning to a bare ``thought``
-    before ``<channel|>`` arrives — are re-stripped before they can escape.
+    streamed text is byte-identical to the old single chunk. A shared raw-control
+    state withholds only an unresolved leading reasoning/channel marker; callers
+    may additionally request a tail holdback for a full-pass safety lane.
 
     Returns ``(delta_to_emit, new_sent_cursor)``. ``delta_to_emit`` is ``""`` when
     nothing new is safe to emit yet (held back, or a non-monotonic clean revision
     that resyncs the cursor without emitting).
     """
-    vis = raw_text
+    vis = _answer_pass_safe_visible_raw(raw_text, finished=finished)
+    if vis is None:
+        return "", already_sent
     if getattr(request, "enable_thinking", None) is False and "</think>" in vis:
         vis = vis.rsplit("</think>", 1)[1]
     full = _finalize_visible_text_for_request(clean_output_text(vis), request)
     safe_holdback = max(
         0,
-        int(_ANS_MARKER_HOLDBACK if holdback is None else holdback),
+        int(0 if holdback is None else holdback),
     )
     if finished or safe_holdback == 0:
         target = full
@@ -1059,6 +1060,92 @@ def _answer_pass_visible_delta(
         # hadn't emitted): resync the cursor without emitting to avoid duplicates.
         return "", target
     return target[len(already_sent):], target
+
+
+_ANSWER_PASS_CONTROL_PREFIXES = (
+    "<|channel>",
+    "<channel|>",
+    "<think>",
+    "</think>",
+    "<thinking>",
+    "</thinking>",
+    "<mm:think>",
+    "</mm:think>",
+    "[THINK]",
+    "[/THINK]",
+)
+
+
+def _answer_pass_safe_visible_raw(
+    raw_text: str,
+    *,
+    finished: bool,
+) -> str | None:
+    """Return answer-pass text only when its leading control rail is resolved.
+
+    The bounded answer pass is a thinking-off rail, but several tokenizers can
+    still begin it with a partial close-think sentinel or a Gemma channel header.
+    Cleaning an incomplete marker makes transient control text look visible (for
+    example ``<|channel>thought`` becomes ``thought``), so a fixed character tail
+    was previously retained for every unknown family.  That batched short answers
+    and made the Chat API/Electron UI appear frozen.
+
+    This helper is family-independent: ordinary prose is safe immediately, while
+    only a *leading, unresolved* control rail is buffered.  Once a complete rail
+    closes, its reasoning prefix is removed and subsequent answer tokens may stream.
+    A terminal unclosed reasoning rail is hidden rather than leaked as content.
+    ``None`` means "wait for more input"; ``""`` means "resolved but no visible
+    answer".
+    """
+    raw = raw_text or ""
+    stripped = raw.lstrip()
+    if not stripped:
+        return raw
+
+    # A tokenizer can deliver a special token across several stream chunks. Hold
+    # only while the complete raw prefix is still a prefix of a known control token.
+    if any(marker.startswith(stripped) for marker in _ANSWER_PASS_CONTROL_PREFIXES):
+        return "" if finished else None
+
+    # Gemma's thought channel is not visible output. Its degraded form may omit
+    # the opening special token but retain the literal ``thought\n`` prefix.
+    if stripped.startswith("<|channel>") or stripped.startswith("thought\n"):
+        close_index = stripped.find("<channel|>")
+        if close_index < 0:
+            return "" if finished else None
+        return stripped[close_index + len("<channel|>") :]
+
+    # A direct rail that unexpectedly re-opens thinking must not expose planning
+    # prose. Handle the known XML/bracket dialects without a model-name allowlist.
+    reasoning_pairs = (
+        ("<think>", "</think>"),
+        ("<thinking>", "</thinking>"),
+        ("<mm:think>", "</mm:think>"),
+        ("[THINK]", "[/THINK]"),
+    )
+    for opener, closer in reasoning_pairs:
+        if stripped.startswith(opener):
+            close_index = stripped.find(closer, len(opener))
+            if close_index < 0:
+                return "" if finished else None
+            return stripped[close_index + len(closer) :]
+
+    # Attribute/variant forms such as DSV4's live ``<thinking>`` repro share the
+    # same ``<think`` stem. Keep them hidden until a matching think-like close tag
+    # resolves. The proven DSV4 lane is additionally full-pass buffered below.
+    if stripped.startswith("<think"):
+        close_match = re.search(r"</think[^>]*>", stripped, flags=re.IGNORECASE)
+        if close_match is None:
+            return "" if finished else None
+        return stripped[close_match.end() :]
+
+    # A complete leading close sentinel is a template-owned empty-thought rail.
+    # Drop it and allow answer tokens following it to stream immediately.
+    for closer in ("</think>", "</thinking>", "</mm:think>", "[/THINK]"):
+        if stripped.startswith(closer):
+            return stripped[len(closer) :]
+
+    return raw
 
 
 # Minimum tokens the reasoning-runaway answer pass may draw even when the first
@@ -1760,27 +1847,19 @@ def _force_answer_pass_direct_rail(
     answer_kwargs["chat_template_kwargs"] = answer_ct_kwargs
 
 
-_ANSWER_PASS_ZERO_HOLDBACK_FAMILIES = frozenset(
-    {
-        "hy_v3",
-        "minimax_m3",
-        "qwen3_5",
-        "qwen3_5_moe",
-    }
-)
-
-
 def _answer_pass_stream_holdback(
     family_name: str | None,
     *,
     buffer_answer_pass: bool,
 ) -> int:
-    """Tail characters to retain while streaming a direct visible-answer pass."""
+    """Tail retained after dynamic leading-control resolution.
+
+    Non-buffered answer passes no longer need a family allowlist or a fixed tail:
+    ``_answer_pass_safe_visible_raw`` withholds only an actually unresolved marker.
+    """
     if buffer_answer_pass:
         return _ANS_MARKER_HOLDBACK
-    if family_name in _ANSWER_PASS_ZERO_HOLDBACK_FAMILIES:
-        return 0
-    return _ANS_MARKER_HOLDBACK
+    return 0
 
 
 _REASONING_ANSWER_PASS_FAMILIES = frozenset(
@@ -1872,12 +1951,14 @@ _ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
 # visible answer progressively. deepseek_v4 established the retained guard:
 # live-deterministic repro — with a prior salvage answer in history and a tight
 # budget, the DSV4 salvage re-opened planning as "<thinking>Let's parse the
-# user's request..." and leaked it as visible content. The fresh-context
-# families share the risk profile, so they share the guard.
-_ANSWER_PASS_LEAK_GUARD_FAMILIES = _ANSWER_PASS_FRESH_CONTEXT_FAMILIES - {
-    "qwen3_5",
-    "qwen3_5_moe",
-}
+# user's request..." and leaked it as visible content. Do not spread that proven
+# DSV4 integration failure across unrelated families.
+# Step/MiniMax/Qwen now use the shared dynamic control-prefix guard above, so a
+# normal direct answer streams progressively while an actual ``<think...`` rail
+# stays hidden. DSV4 retains full-pass buffering because its deterministic live
+# re-entry also exercised history-dependent salvage behavior; remove that final
+# guard only after a dedicated DSV4 live matrix proves the dynamic lane.
+_ANSWER_PASS_LEAK_GUARD_FAMILIES = frozenset({"deepseek_v4"})
 
 
 def _answer_pass_thinking_reentry(raw_text: str) -> bool:
@@ -16598,7 +16679,6 @@ async def stream_chat_completion(
         ""  # Track content actually yielded to client (for post-stream dedup)
     )
     streamed_reasoning_content = ""
-    deferred_reasoning_visible_content = ""
     content_was_emitted = False  # Whether any content chunk was actually sent
     reasoning_was_streamed = False  # Whether any reasoning_content chunk was sent
 
@@ -17090,34 +17170,17 @@ async def stream_chat_completion(
                         yield f"data: {_dump_sse_json(heartbeat)}\n\n"
                     continue
 
-                # A family with the bounded reasoning answer pass can spend
-                # almost the whole first-pass budget in reasoning, then emit a
-                # partial visible prefix before finish_reason="length". Defer
-                # no-tool visible content until the first pass ends cleanly; if
-                # it truncates, the direct-rail answer pass below emits the
-                # complete answer instead of leaking an unusable prefix.
-                #
-                # Defer the RAW parser increment BEFORE the display-delta
-                # transforms: the deferral keeps streamed_content empty, so
-                # _visual_grounding_display_delta(accumulated, "") returned
-                # the FULL cleaned text every tick and the deferred buffer
-                # became a concatenation of cumulative snapshots
-                # ("TheThe skyThe sky appears…") — the duplicated-paragraph
-                # symptom of GitHub #226 item 5 (reproduced live 2026-07-05
-                # on MiniMax-M3-Coder-Small once the minimax_m3 parsers were
-                # autodetected). The end-of-stream flush already applies
-                # clean_output_text + _finalize_visible_text_for_request to
-                # the whole buffer, so raw deltas are the correct thing to
-                # store here. The deferral only arms when the request has no
-                # tools (see m3_reasoning_only_answer_enabled), so it cannot
-                # shadow the _suppress_tools display path below.
-                if (
-                    m3_reasoning_only_answer_enabled
-                    or reasoning_only_answer_enabled
-                ) and emit_content:
-                    deferred_reasoning_visible_content += emit_content
-                    emit_content = None
-                elif _suppress_tools and emit_content:
+                # Once the reasoning parser exposes content, it is real stream
+                # output and must follow the same progressive contract as the
+                # Responses API. The old family-wide deferral held every answer
+                # token until finish, making clean Step/Bonsai/MiniMax turns look
+                # frozen and converting decode into one synthetic terminal blob.
+                # If the client cap is reached after visible content, preserve
+                # the honest incremental prefix + finish_reason="length". The
+                # bounded direct answer pass remains only for truly content-empty
+                # reasoning runs, where nothing has been sent and replacement is
+                # still possible without duplicate or unretractable output.
+                if _suppress_tools and emit_content:
                     safe_content_prefix = (
                         _tool_safe_stream_prefix(
                             accumulated_content, finished=output.finished
@@ -17608,55 +17671,6 @@ async def stream_chat_completion(
         )
         reasoning_only_answer_budget = reasoning_tools_fallback_answer_budget
         reasoning_only_answer_enabled = True
-
-    if (
-        not content_was_emitted
-        and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
-        and deferred_reasoning_visible_content.strip()
-        and (not last_output or getattr(last_output, "finish_reason", None) != "length")
-    ):
-        buffered_text = _finalize_visible_text_for_request(
-            clean_output_text(deferred_reasoning_visible_content),
-            request,
-        )
-        if buffered_text:
-            content_was_emitted = True
-            streamed_content += buffered_text
-            # Hy3's parser may reveal a short direct answer only once its rail
-            # closes. Preserve Ollama's incremental content contract by
-            # replaying that finalized safe text in bounded deltas instead of
-            # one terminal blob. Other marker-heavy families retain the prior
-            # single finalized chunk.
-            buffered_parts = (
-                [
-                    buffered_text[index : index + 4]
-                    for index in range(0, len(buffered_text), 4)
-                ]
-                if _family_name == "hy_v3"
-                else [buffered_text]
-            )
-            for index, buffered_part in enumerate(buffered_parts):
-                buffered_chunk = ChatCompletionChunk(
-                    id=response_id,
-                    created=_created_ts,
-                    model=request.model,
-                    choices=[
-                        ChatCompletionChunkChoice(
-                            delta=ChatCompletionChunkDelta(content=buffered_part),
-                            finish_reason=(
-                                (
-                                    getattr(last_output, "finish_reason", None)
-                                    if last_output
-                                    else "stop"
-                                )
-                                or "stop"
-                            )
-                            if index == len(buffered_parts) - 1
-                            else None,
-                        )
-                    ],
-                )
-                yield f"data: {_dump_sse_json(buffered_chunk)}\n\n"
 
     # Fallback: if reasoning parser produced only reasoning with no content,
     # emit the reasoning text as content so clients always get a usable response.

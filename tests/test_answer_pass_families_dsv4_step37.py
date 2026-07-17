@@ -69,16 +69,18 @@ def test_answer_pass_appends_reasoning_turn_for_legacy_families():
         }
 
 
-def test_leak_guard_families_keep_qwen_progressive():
-    """Qwen's fresh direct rail streams progressively; families with a
-    live-proven thinking re-entry remain buffered."""
+def test_only_live_proven_dsv4_reentry_keeps_full_pass_buffer():
+    """Full-pass buffering is evidence-based, not inherited by architecture.
+
+    Other families use the shared dynamic control-prefix guard and can therefore
+    stream ordinary direct-rail text without exposing an unresolved think marker.
+    """
     guard = server_mod._ANSWER_PASS_LEAK_GUARD_FAMILIES
-    for fam in ("deepseek_v4", "step3p7", "minimax", "minimax_m2"):
-        assert fam in guard
-    for fam in ("qwen3_5", "qwen3_5_moe"):
-        assert fam not in guard
-    # families with live-proven coherent partial salvages stay unbuffered
-    for fam in ("gemma4", "hy_v3", "laguna", "openpangu_v2"):
+    assert guard == frozenset({"deepseek_v4"})
+    for fam in (
+        "step3p7", "minimax", "minimax_m2", "qwen3_5", "qwen3_5_moe",
+        "gemma4", "hy_v3", "laguna", "openpangu_v2",
+    ):
         assert fam not in guard
 
 

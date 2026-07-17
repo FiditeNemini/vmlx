@@ -827,7 +827,7 @@ describe('request body conditional params', () => {
     if (overrides.topP != null) obj.top_p = overrides.topP
     if (overrides.maxTokens) obj.max_tokens = overrides.maxTokens
     if (overrides.topK != null && overrides.topK > 0) obj.top_k = overrides.topK
-    if (overrides.minP != null && overrides.minP > 0) obj.min_p = overrides.minP
+    if (overrides.minP != null) obj.min_p = overrides.minP
     if (overrides.repeatPenalty != null && overrides.repeatPenalty !== 1.0) obj.repetition_penalty = overrides.repeatPenalty
     return obj
   }
@@ -856,9 +856,9 @@ describe('request body conditional params', () => {
     expect(obj.top_k).toBe(40)
   })
 
-  it('minP=0 is NOT sent (means disabled)', () => {
+  it('minP=0 IS sent to disable a non-zero bundle default', () => {
     const obj = buildRequestParams({ minP: 0 })
-    expect(obj).not.toHaveProperty('min_p')
+    expect(obj.min_p).toBe(0)
   })
 
   it('repeatPenalty=1.0 is NOT sent (means disabled)', () => {

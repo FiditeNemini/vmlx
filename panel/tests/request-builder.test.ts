@@ -102,7 +102,7 @@ function buildRequestBody(
         if (stopSequences) obj.stop = stopSequences
         const effectiveTopK = overrides?.topK
         if (effectiveTopK != null && effectiveTopK > 0) obj.top_k = effectiveTopK
-        if (overrides?.minP != null && overrides.minP > 0) obj.min_p = overrides.minP
+        if (overrides?.minP != null) obj.min_p = overrides.minP
         if (overrides?.repeatPenalty != null) obj.repetition_penalty = overrides.repeatPenalty
         if (tools) {
             obj.tools = tools.map(t => ({
@@ -134,7 +134,7 @@ function buildRequestBody(
         if (stopSequences) obj.stop = stopSequences
         const effectiveTopK = overrides?.topK
         if (effectiveTopK != null && effectiveTopK > 0) obj.top_k = effectiveTopK
-        if (overrides?.minP != null && overrides.minP > 0) obj.min_p = overrides.minP
+        if (overrides?.minP != null) obj.min_p = overrides.minP
         if (overrides?.repeatPenalty != null) obj.repetition_penalty = overrides.repeatPenalty
         if (tools) {
             obj.tools = tools
@@ -221,6 +221,17 @@ describe('buildRequestBody — Chat Completions API', () => {
     it('includes min_p when > 0', () => {
         const body = buildRequestBody('completions', 'gpt-4', messages, { minP: 0.05 }, false, false)
         expect(body.min_p).toBe(0.05)
+    })
+
+    it.each(['completions', 'responses'] as const)('includes explicit min_p=0 for %s so bundle defaults are disabled', wireApi => {
+        const body = buildRequestBody(wireApi, 'local-model', messages, { minP: 0 }, false, false)
+        expect(body.min_p).toBe(0)
+    })
+
+    it('persists zero from the chat settings slider instead of converting it to inherit', () => {
+        const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
+        expect(source).toContain("onChange={v => update('minP', v)}")
+        expect(source).not.toContain("update('minP', v === 0 ? undefined : v)")
     })
 
     it('includes repetition_penalty when != 1.0', () => {

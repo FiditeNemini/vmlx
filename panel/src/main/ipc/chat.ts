@@ -1907,7 +1907,9 @@ export function registerChatHandlers(
             const effectiveTopK = overrides?.topK;
             if (effectiveTopK != null && effectiveTopK > 0)
               obj.top_k = effectiveTopK;
-            if (overrides?.minP != null && overrides.minP > 0)
+            // Explicit zero disables a non-zero bundle min_p default. Only an
+            // absent override means inherit the model/server default.
+            if (overrides?.minP != null)
               obj.min_p = overrides.minP;
             // Always send when explicitly set; 1.0 can be an intentional
             // per-chat override of a bundle repetition penalty.
@@ -1983,7 +1985,7 @@ export function registerChatHandlers(
             const effectiveTopK = overrides?.topK;
             if (effectiveTopK != null && effectiveTopK > 0)
               obj.top_k = effectiveTopK;
-            if (overrides?.minP != null && overrides.minP > 0)
+            if (overrides?.minP != null)
               obj.min_p = overrides.minP;
             // Always send when explicitly set; 1.0 can be an intentional
             // per-chat override of a bundle repetition penalty.

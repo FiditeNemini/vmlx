@@ -611,7 +611,9 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
             <SliderField
               label={t('chat.settings.minP')}
               value={overrides.minP ?? modelDefaults.minP ?? 0}
-              onChange={v => update('minP', v === 0 ? undefined : v)}
+              // Unlike top-k, zero must remain an explicit override: omitting
+              // min_p lets the server restore a non-zero bundle default.
+              onChange={v => update('minP', v)}
               min={0} max={1} step={0.01}
               help={t('chat.settings.minPHelp')}
             />

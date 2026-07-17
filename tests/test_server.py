@@ -2828,7 +2828,18 @@ class TestOpenAILogprobsFormatting:
             "</function>",
             "</tool_call>",
         ]
-        deltas = call_deltas + [" POST_CALL_REPEAT"] * 40
+        # Regression shape from live Qwen3.6 Electron: the model fit a second
+        # byte-identical call inside the generic eight-chunk grace window and
+        # then naturally finished. The old `not output.finished` early-stop
+        # branch never reached its ninth tick, so both calls were executed.
+        duplicate_call = [
+            "<tool_call>",
+            "<function=file_info>",
+            "<parameter=path>panel/package.json</parameter>",
+            "</function>",
+            "</tool_call>",
+        ]
+        deltas = call_deltas + duplicate_call
 
         class _Engine:
             tokenizer = SimpleNamespace(has_thinking=False)
@@ -2913,7 +2924,7 @@ class TestOpenAILogprobsFormatting:
         ]
 
         assert engine.aborted
-        assert engine.chunks_consumed < len(deltas)
+        assert engine.chunks_consumed == len(call_deltas)
         assert len(function_items) == 1
         assert function_items[0]["name"] == "file_info"
         assert json.loads(function_items[0]["arguments"]) == {
@@ -3043,13 +3054,12 @@ class TestOpenAILogprobsFormatting:
         terminal = next(
             event["response"]
             for event in events
-            if event.get("type") == "response.incomplete"
+            if event.get("type") == "response.completed"
         )
 
         assert reasoning == "plan the requested call"
         assert visible == ""
-        assert terminal["status"] == "incomplete"
-        assert terminal["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert terminal["status"] == "completed"
         assert terminal["output_text"] == ""
         assert "visible meta-reasoning" not in json.dumps(terminal)
         assert len(function_items) == 1

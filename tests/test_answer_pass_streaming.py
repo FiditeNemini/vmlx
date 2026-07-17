@@ -21,6 +21,7 @@ from vmlx_engine.server import (
     _ANSWER_PASS_LEAK_GUARD_FAMILIES,
     _answer_pass_stream_holdback,
     _answer_pass_visible_delta,
+    _main_pass_finish_reason,
 )
 from vmlx_engine.api.utils import clean_output_text
 
@@ -201,6 +202,48 @@ def test_both_stream_sites_use_the_delta_helper():
     resp_src = inspect.getsource(server_mod.stream_responses_api)
     assert "_answer_pass_visible_delta" in resp_src
     assert "engine.stream_chat(messages=answer_messages" in resp_src
+
+
+def test_internal_reasoning_pass_terminal_is_held_until_visible_answer_finishes():
+    """A coding client must not see terminal length before the answer pass."""
+    assert _main_pass_finish_reason(
+        "length",
+        finished=True,
+        content_was_emitted=False,
+        accumulated_reasoning="private planning",
+        answer_pass_pending=True,
+    ) is None
+    assert _main_pass_finish_reason(
+        "stop",
+        finished=True,
+        content_was_emitted=False,
+        accumulated_reasoning="private planning",
+        answer_pass_pending=True,
+    ) is None
+
+
+def test_genuine_main_pass_terminal_reasons_are_preserved():
+    assert _main_pass_finish_reason(
+        "length",
+        finished=True,
+        content_was_emitted=True,
+        accumulated_reasoning="private planning",
+        answer_pass_pending=True,
+    ) == "length"
+    assert _main_pass_finish_reason(
+        "length",
+        finished=True,
+        content_was_emitted=False,
+        accumulated_reasoning="private planning",
+        answer_pass_pending=False,
+    ) == "length"
+    assert _main_pass_finish_reason(
+        "stop",
+        finished=False,
+        content_was_emitted=True,
+        accumulated_reasoning="",
+        answer_pass_pending=False,
+    ) is None
 
 
 def test_chat_legacy_reasoning_fallback_cannot_precede_answer_pass():

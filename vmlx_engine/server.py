@@ -1062,6 +1062,41 @@ def _answer_pass_visible_delta(
     return target[len(already_sent):], target
 
 
+def _main_pass_finish_reason(
+    finish_reason: str | None,
+    *,
+    finished: bool,
+    content_was_emitted: bool,
+    accumulated_reasoning: str,
+    answer_pass_pending: bool,
+) -> str | None:
+    """Return only a terminal reason that is final for the external stream.
+
+    A reasoning-first request can finish its initial generation with ``length``
+    and then continue through the bounded direct-answer pass.  Emitting that
+    first-pass reason tells OpenAI clients the *whole* response is terminal;
+    many coding harnesses correctly stop reading there and never receive the
+    visible answer.  Hold the internal terminal only while a content-empty,
+    reasoning-bearing request has a real answer-pass path pending.  The answer
+    pass emits its own final ``stop``; if it cannot produce safe content, the
+    existing post-stream warning path emits an honest final ``length``.
+
+    This is state-based and applies to every reasoning family using the shared
+    answer-pass contract, including tool-enabled fallbacks.  Genuine terminal
+    reasons after visible content, or requests with no continuation pending,
+    remain unchanged.
+    """
+    if not finished:
+        return None
+    if (
+        answer_pass_pending
+        and not content_was_emitted
+        and bool((accumulated_reasoning or "").strip())
+    ):
+        return None
+    return finish_reason
+
+
 _ANSWER_PASS_CONTROL_PREFIXES = (
     "<|channel>",
     "<channel|>",
@@ -5441,6 +5476,15 @@ def _stream_tool_call_early_stop_parser(
                     or getattr(request, "model", None)
                 ),
             }
+        # A user-scoped exact-once contract must stop on the first complete,
+        # schema-valid call.  The generic grace window lets native multi-call
+        # formats finish naturally, but Qwen can fit a duplicate call inside
+        # that window and then emit EOS; because terminal chunks skip the abort
+        # branch, both calls would otherwise be executed.  This attribute is
+        # per parser instance/request and does not change ordinary Qwen turns.
+        parser._stream_stop_grace_chunks = (
+            0 if qwen_exact_once else _STREAM_TOOL_CALL_STOP_GRACE_CHUNKS
+        )
         return parser
     except Exception as e:
         logger.warning(
@@ -16674,6 +16718,7 @@ async def stream_chat_completion(
     accumulated_text = ""
     accumulated_reasoning = ""  # Track reasoning text for fallback
     accumulated_content = ""  # Track content-only text for tool call marker detection
+    _early_stopped_tool_text: str | None = None
     streamed_content = (
         ""  # Track content actually yielded to client (for post-stream dedup)
     )
@@ -16918,7 +16963,14 @@ async def stream_chat_completion(
             ):
                 if _tc_stop_parser.stream_tool_calls_complete(accumulated_text):
                     _tc_stop_complete_chunks += 1
-                    if _tc_stop_complete_chunks > _STREAM_TOOL_CALL_STOP_GRACE_CHUNKS:
+                    _tc_stop_grace = int(
+                        getattr(
+                            _tc_stop_parser,
+                            "_stream_stop_grace_chunks",
+                            _STREAM_TOOL_CALL_STOP_GRACE_CHUNKS,
+                        )
+                    )
+                    if _tc_stop_complete_chunks > _tc_stop_grace:
                         logger.info(
                             "Stream %s: complete tool call parsed but model kept "
                             "generating %d chunks past it — stopping generation "
@@ -16935,6 +16987,7 @@ async def stream_chat_completion(
                         accumulated_text = _tc_stop_parser.stream_tool_call_stop_truncate(
                             accumulated_text
                         )
+                        _early_stopped_tool_text = accumulated_text
                         if _tc_stop_parser.stream_tool_calls_complete(
                             accumulated_content
                         ):
@@ -17216,6 +17269,17 @@ async def stream_chat_completion(
                     content_was_emitted = True
                     streamed_content += emit_content
 
+                # The first reasoning pass is an internal stage when a bounded
+                # visible-answer continuation is armed.  Do not expose its
+                # length/stop reason as the terminal reason for the whole API
+                # stream; a standards-compliant client may stop immediately.
+                _answer_pass_pending = bool(
+                    m3_reasoning_only_answer_enabled
+                    or reasoning_only_answer_enabled
+                    or m3_tools_fallback_answer_budget is not None
+                    or reasoning_tools_fallback_answer_budget is not None
+                )
+
                 chunk = ChatCompletionChunk(
                     id=response_id,
                     created=_created_ts,
@@ -17227,9 +17291,13 @@ async def stream_chat_completion(
                                 reasoning=emit_reasoning,
                             ),
                             logprobs=chunk_logprobs,
-                            finish_reason=output.finish_reason
-                            if output.finished
-                            else None,
+                            finish_reason=_main_pass_finish_reason(
+                                output.finish_reason,
+                                finished=bool(output.finished),
+                                content_was_emitted=content_was_emitted,
+                                accumulated_reasoning=accumulated_reasoning,
+                                answer_pass_pending=_answer_pass_pending,
+                            ),
                         )
                     ],
                     usage=chunk_usage,
@@ -17468,7 +17536,14 @@ async def stream_chat_completion(
         # If content is empty but reasoning has tool markers, check reasoning too
         # (model may emit tool calls in analysis channel instead of final channel).
         # Fall back to accumulated_text with think-tag stripping when no parser was active.
-        if request_parser and accumulated_content.strip():
+        if _early_stopped_tool_text:
+            # Immediate exact-once stopping happens before the current close
+            # marker is fed through the reasoning splitter. Parse the complete,
+            # parser-truncated raw candidate instead of an incomplete content
+            # accumulator; the exact-once branch below still suppresses any
+            # pre-call meta prose from visible output.
+            parse_text = _early_stopped_tool_text
+        elif request_parser and accumulated_content.strip():
             parse_text = accumulated_content.strip()
         elif request_parser and accumulated_reasoning.strip():
             # Tool call markers were in reasoning — try parsing reasoning text
@@ -18302,6 +18377,7 @@ async def stream_responses_api(
     streamed_text = ""  # Text already sent as deltas (before tool call marker)
     accumulated_content = ""  # Content-only text for tool call marker detection
     accumulated_reasoning = ""  # Reasoning text for fallback
+    _early_stopped_tool_text: str | None = None
     streamed_reasoning_text = ""  # Tool-safe reasoning already sent to the client
     content_was_emitted = False
     reasoning_was_streamed = False  # Whether reasoning was sent to client as deltas
@@ -18622,9 +18698,16 @@ async def stream_responses_api(
                 ):
                     if _tc_stop_parser.stream_tool_calls_complete(full_text):
                         _tc_stop_complete_chunks += 1
+                        _tc_stop_grace = int(
+                            getattr(
+                                _tc_stop_parser,
+                                "_stream_stop_grace_chunks",
+                                _STREAM_TOOL_CALL_STOP_GRACE_CHUNKS,
+                            )
+                        )
                         if (
                             _tc_stop_complete_chunks
-                            > _STREAM_TOOL_CALL_STOP_GRACE_CHUNKS
+                            > _tc_stop_grace
                         ):
                             logger.info(
                                 "Responses stream %s: complete tool call parsed "
@@ -18644,6 +18727,7 @@ async def stream_responses_api(
                                     full_text
                                 )
                             )
+                            _early_stopped_tool_text = full_text
                             if _tc_stop_parser.stream_tool_calls_complete(
                                 accumulated_content
                             ):
@@ -19103,7 +19187,11 @@ async def stream_responses_api(
         # Use content-only text when reasoning parser separated it (avoids losing
         # tool calls that appear inside <think> blocks during regex stripping).
         # If content is empty but reasoning has tool markers, check reasoning too.
-        if request_parser and accumulated_content.strip():
+        if _early_stopped_tool_text:
+            # See Chat Completions sibling: the stop point precedes processing
+            # the close-marker delta, so use the complete truncated raw call.
+            parse_text = _early_stopped_tool_text
+        elif request_parser and accumulated_content.strip():
             parse_text = accumulated_content.strip()
         elif request_parser and accumulated_reasoning.strip():
             parse_text = accumulated_reasoning.strip()

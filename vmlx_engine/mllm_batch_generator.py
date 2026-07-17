@@ -195,6 +195,9 @@ def _mllm_media_cache_extra_keys(request: Any) -> Optional[Dict[str, str]]:
         or getattr(request, "audios", None)
         or getattr(request, "pixel_values", None) is not None
         or getattr(request, "image_grid_thw", None) is not None
+        or getattr(request, "pixel_values_videos", None) is not None
+        or getattr(request, "video_pixel_values", None) is not None
+        or getattr(request, "video_grid_thw", None) is not None
     )
     if not has_media:
         return None
@@ -251,6 +254,7 @@ def _mllm_media_cache_extra_keys(request: Any) -> Optional[Dict[str, str]]:
     if getattr(request, "audio", None):
         _hash_text("audio", getattr(request, "audio", None))
     _hash_array("image_grid_thw", getattr(request, "image_grid_thw", None))
+    _hash_array("video_grid_thw", getattr(request, "video_grid_thw", None))
     _hash_array("audio_codes", getattr(request, "audio_codes", None))
     _hash_array("audio_embeds", getattr(request, "audio_embeds", None))
     _hash_array("audio_features", getattr(request, "audio_features", None))
@@ -260,6 +264,12 @@ def _mllm_media_cache_extra_keys(request: Any) -> Optional[Dict[str, str]]:
         # source URLs/paths. Do not hash attention_mask: it changes with text
         # history length and would make the same image miss across turns.
         _hash_array("pixel_values", getattr(request, "pixel_values", None))
+        _hash_array(
+            "pixel_values_videos",
+            getattr(request, "pixel_values_videos", None)
+            if getattr(request, "pixel_values_videos", None) is not None
+            else getattr(request, "video_pixel_values", None),
+        )
 
     return {"mllm_media": hasher.hexdigest()}
 

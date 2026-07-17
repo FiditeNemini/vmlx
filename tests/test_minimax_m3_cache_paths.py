@@ -666,6 +666,188 @@ def test_scheduler_single_batch_cache_hit_passes_cached_prefix_as_all_tokens(mon
     assert kwargs["all_tokens"] == [[10, 11, 12]]
 
 
+def test_m3_vl_cache_replay_requires_prefix_past_every_media_token():
+    from vmlx_engine.scheduler import _m3_vl_cached_prefix_covers_media_tokens
+
+    model = SimpleNamespace(
+        args=SimpleNamespace(image_token_index=200025, video_token_index=200026)
+    )
+    image_request = SimpleNamespace(
+        prompt_token_ids=[10, 200025, 200025, 13, 14],
+        cached_tokens=2,
+        pixel_values=object(),
+        pixel_values_videos=None,
+    )
+
+    assert not _m3_vl_cached_prefix_covers_media_tokens(model, image_request)
+    image_request.cached_tokens = 3
+    assert _m3_vl_cached_prefix_covers_media_tokens(model, image_request)
+
+    video_request = SimpleNamespace(
+        prompt_token_ids=[10, 200026, 12],
+        cached_tokens=1,
+        pixel_values=None,
+        pixel_values_videos=object(),
+    )
+    assert not _m3_vl_cached_prefix_covers_media_tokens(model, video_request)
+    video_request.cached_tokens = 2
+    assert _m3_vl_cached_prefix_covers_media_tokens(model, video_request)
+
+
+def test_engine_core_media_request_gets_content_side_key_without_hard_bypass():
+    from vmlx_engine.engine_core import EngineCore
+
+    captured = []
+    core = object.__new__(EngineCore)
+    core._terminal_cleanup_complete = asyncio.Event()
+    core._terminal_cleanup_complete.set()
+    core._output_collectors = {}
+    core._stream_states = {}
+    core._finished_events = {}
+    core.config = SimpleNamespace(stream_interval=1)
+    core.scheduler = SimpleNamespace(add_request=captured.append)
+
+    asyncio.run(
+        core.add_request(
+            [10, 200025, 12],
+            images=["data:image/png;base64,QUJD"],
+            pixel_values=mx.ones((2, 3), dtype=mx.float32),
+            image_grid_thw=mx.array([[1, 1, 1]], dtype=mx.int32),
+            prompt_token_ids=[10, 200025, 12],
+        )
+    )
+
+    assert len(captured) == 1
+    request = captured[0]
+    assert request._cache_extra_keys["mllm_media"]
+    assert request._m3_vl_media_cache_context is True
+    assert request._bypass_prefix_cache is False
+
+
+def test_scheduler_single_batch_m3_media_hit_replays_tail_without_pixels(monkeypatch):
+    from collections import deque
+
+    from vmlx_engine.request import Request, SamplingParams
+    from vmlx_engine.scheduler import Scheduler
+
+    request = Request(
+        request_id="m3-media-hit",
+        prompt=[10, 200025, 12, 13, 14],
+        sampling_params=SamplingParams(max_tokens=4),
+    )
+    request.prompt_token_ids = list(request.prompt)
+    request.num_prompt_tokens = len(request.prompt_token_ids)
+    request.prompt_cache = [_m3_cache(seq=3)]
+    request.cached_tokens = 3
+    request.remaining_tokens = [13, 14]
+    request.pixel_values = mx.ones((2, 3), dtype=mx.float32)
+    request.image_grid_thw = mx.array([[1, 1, 1]], dtype=mx.int32)
+    request._cache_extra_keys = {"mllm_media": "image-a"}
+
+    inserts = []
+
+    class SingleBatchGenerator:
+        def insert(self, prompts, **kwargs):
+            inserts.append((prompts, kwargs))
+            return [123]
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.model = SimpleNamespace(args=SimpleNamespace(image_token_index=200025))
+    scheduler.waiting = deque([request])
+    scheduler.running = {}
+    scheduler.config = SimpleNamespace(max_num_seqs=1)
+    scheduler.batch_generator = SingleBatchGenerator()
+    scheduler.request_id_to_uid = {}
+    scheduler.uid_to_request_id = {}
+    scheduler.stop_tokens = set()
+    scheduler.block_aware_cache = None
+    scheduler._kv_cache_bits = 0
+    scheduler._is_hybrid = False
+    scheduler._uses_dsv4_cache = False
+    scheduler._uses_zaya_cache = False
+    scheduler._long_repetition_context = False
+    scheduler._cache_reuse_budget_fraction = lambda: 0.95
+    scheduler._cache_merge_memory_multiplier = lambda _cache: 1.0
+    scheduler._record_scheduled_cache_hit = lambda _request: None
+    scheduler._release_unusable_paged_hit = lambda _request: None
+    scheduler._validate_cache = lambda _cache: True
+    scheduler.total_prompt_tokens = 0
+
+    monkeypatch.setattr(Scheduler, "_ensure_batch_generator", lambda _self, _sp: False)
+
+    assert Scheduler._schedule_waiting(scheduler) == [request]
+    prompts, kwargs = inserts[0]
+    assert prompts == [[13, 14]]
+    assert kwargs["caches"] == [[request.prompt_cache[0]]]
+    assert kwargs["all_tokens"] == [[10, 200025, 12]]
+    assert "pixel_values" not in kwargs
+    assert "image_grid_thw" not in kwargs
+
+
+def test_scheduler_single_batch_m3_partial_media_hit_falls_back_to_atomic_prefill(
+    monkeypatch,
+):
+    from collections import deque
+
+    from vmlx_engine.request import Request, SamplingParams
+    from vmlx_engine.scheduler import Scheduler
+
+    request = Request(
+        request_id="m3-media-partial",
+        prompt=[10, 200025, 200025, 13, 14],
+        sampling_params=SamplingParams(max_tokens=4),
+    )
+    request.prompt_token_ids = list(request.prompt)
+    request.num_prompt_tokens = len(request.prompt_token_ids)
+    request.prompt_cache = [_m3_cache(seq=2)]
+    request.cached_tokens = 2
+    request.remaining_tokens = [200025, 13, 14]
+    request.pixel_values = mx.ones((2, 3), dtype=mx.float32)
+    request.image_grid_thw = mx.array([[1, 1, 1]], dtype=mx.int32)
+    request._cache_extra_keys = {"mllm_media": "image-a"}
+
+    inserts = []
+    released = []
+
+    class SingleBatchGenerator:
+        def insert(self, prompts, **kwargs):
+            inserts.append((prompts, kwargs))
+            return [123]
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.model = SimpleNamespace(args=SimpleNamespace(image_token_index=200025))
+    scheduler.waiting = deque([request])
+    scheduler.running = {}
+    scheduler.config = SimpleNamespace(max_num_seqs=1)
+    scheduler.batch_generator = SingleBatchGenerator()
+    scheduler.request_id_to_uid = {}
+    scheduler.uid_to_request_id = {}
+    scheduler.stop_tokens = set()
+    scheduler.block_aware_cache = None
+    scheduler._kv_cache_bits = 0
+    scheduler._is_hybrid = False
+    scheduler._uses_dsv4_cache = False
+    scheduler._uses_zaya_cache = False
+    scheduler._long_repetition_context = False
+    scheduler._cache_reuse_budget_fraction = lambda: 0.95
+    scheduler._cache_merge_memory_multiplier = lambda _cache: 1.0
+    scheduler._record_scheduled_cache_hit = lambda _request: None
+    scheduler._release_unusable_paged_hit = released.append
+    scheduler._validate_cache = lambda _cache: True
+    scheduler.total_prompt_tokens = 0
+
+    monkeypatch.setattr(Scheduler, "_ensure_batch_generator", lambda _self, _sp: False)
+
+    assert Scheduler._schedule_waiting(scheduler) == [request]
+    prompts, kwargs = inserts[0]
+    assert released == [request]
+    assert prompts == [[10, 200025, 200025, 13, 14]]
+    assert kwargs["caches"] is None
+    assert kwargs["pixel_values"][0] is request.pixel_values
+    assert kwargs["image_grid_thw"][0] is request.image_grid_thw
+    assert "all_tokens" not in kwargs
+
+
 def test_single_batch_m3_prefills_full_prompt_before_sampling():
     from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
     from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
@@ -741,7 +923,7 @@ def test_single_batch_m3_video_tensors_are_forwarded_once_on_prefill():
     assert kwargs["video_grid_thw"].tolist() == [[4, 1, 1]]
 
 
-def test_engine_core_bypasses_token_only_prefix_cache_for_video_media():
+def test_engine_core_salts_video_media_cache_without_hard_bypass():
     from vmlx_engine.engine_core import EngineCore
 
     seen = {}
@@ -756,6 +938,8 @@ def test_engine_core_bypasses_token_only_prefix_cache_for_video_media():
     core._output_collectors = {}
     core._stream_states = {}
     core._finished_events = {}
+    core._terminal_cleanup_complete = asyncio.Event()
+    core._terminal_cleanup_complete.set()
 
     request_id = asyncio.run(
         core.add_request(
@@ -769,7 +953,98 @@ def test_engine_core_bypasses_token_only_prefix_cache_for_video_media():
     request = seen["request"]
     assert request.request_id == request_id
     assert request.prompt_token_ids == [1, 200026, 2]
-    assert request._bypass_prefix_cache is True
+    assert request._cache_extra_keys["mllm_media"]
+    assert request._m3_vl_media_cache_context is True
+    assert request._bypass_prefix_cache is False
+
+
+def test_batched_m3_text_route_forwards_raw_media_sources_to_engine_core():
+    from vmlx_engine.engine.batched import BatchedEngine
+
+    calls = []
+
+    class _Engine:
+        async def generate(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                output_text="ok",
+                output_token_ids=[1],
+                logprobs=None,
+                prompt_tokens=3,
+                completion_tokens=1,
+                cached_tokens=0,
+                cache_detail="",
+                finish_reason="stop",
+            )
+
+    engine = object.__new__(BatchedEngine)
+    engine._loaded = True
+    engine._is_mllm = False
+    engine._mllm_scheduler = None
+    engine._engine = _Engine()
+
+    asyncio.run(
+        engine.generate(
+            prompt="describe",
+            images=["data:image/png;base64,IMAGE-A"],
+            videos=["data:video/mp4;base64,VIDEO-A"],
+            _m3vl_prompt_token_ids=[1, 200025, 2],
+            _m3vl_pixel_values=object(),
+            _m3vl_image_grid_thw=object(),
+        )
+    )
+
+    assert calls[0]["images"] == ["data:image/png;base64,IMAGE-A"]
+    assert calls[0]["videos"] == ["data:video/mp4;base64,VIDEO-A"]
+
+
+def test_batched_m3_stream_route_forwards_raw_media_sources_to_engine_core():
+    from vmlx_engine.engine.batched import BatchedEngine
+
+    calls = []
+
+    class _Engine:
+        async def add_request(self, **kwargs):
+            calls.append(kwargs)
+            return "m3-stream"
+
+        async def stream_outputs(self, _request_id):
+            yield SimpleNamespace(
+                output_text="ok",
+                new_text="ok",
+                logprobs=None,
+                prompt_tokens=3,
+                completion_tokens=1,
+                cached_tokens=0,
+                cache_detail="",
+                finished=True,
+                finish_reason="stop",
+            )
+
+    engine = object.__new__(BatchedEngine)
+    engine._loaded = True
+    engine._is_mllm = False
+    engine._mllm_scheduler = None
+    engine._engine = _Engine()
+
+    async def _collect():
+        return [
+            output
+            async for output in engine.stream_generate(
+                prompt="describe",
+                images=["data:image/png;base64,IMAGE-A"],
+                videos=["data:video/mp4;base64,VIDEO-A"],
+                _m3vl_prompt_token_ids=[1, 200025, 2],
+                _m3vl_pixel_values=object(),
+                _m3vl_image_grid_thw=object(),
+            )
+        ]
+
+    outputs = asyncio.run(_collect())
+
+    assert outputs[-1].text == "ok"
+    assert calls[0]["images"] == ["data:image/png;base64,IMAGE-A"]
+    assert calls[0]["videos"] == ["data:video/mp4;base64,VIDEO-A"]
 
 
 def test_single_batch_m3_chunks_long_prompt_before_final_sample():

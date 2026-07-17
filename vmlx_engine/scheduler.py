@@ -70,6 +70,34 @@ def _typed_paged_cache_detail(cache_type: str, *, disk_hit: bool) -> str:
     base = f"paged+{cache_type}"
     return f"{base}+disk" if disk_hit else base
 
+
+def _m3_vl_cached_prefix_covers_media_tokens(model: Any, request: Any) -> bool:
+    """Return True only when restored M3 state contains every media splice.
+
+    A media-salted paged prefix is safe to replay without pixel tensors once
+    the cached boundary is strictly past the final image/video placeholder.
+    Partial hits that end inside the media span must take the original atomic
+    full-prompt vision forward instead.
+    """
+    cached_tokens = max(0, int(getattr(request, "cached_tokens", 0) or 0))
+    prompt_tokens = list(getattr(request, "prompt_token_ids", None) or [])
+    if cached_tokens <= 0 or not prompt_tokens:
+        return False
+
+    config = getattr(model, "args", None) or getattr(model, "config", None)
+    media_token_ids: set[int] = set()
+    if getattr(request, "pixel_values", None) is not None:
+        media_token_ids.add(int(getattr(config, "image_token_index", 200025)))
+    if getattr(request, "pixel_values_videos", None) is not None:
+        media_token_ids.add(int(getattr(config, "video_token_index", 200026)))
+    if not media_token_ids:
+        return False
+
+    media_positions = [
+        index for index, token in enumerate(prompt_tokens) if int(token) in media_token_ids
+    ]
+    return bool(media_positions) and cached_tokens > max(media_positions)
+
 # Enable MambaCache batching support for models like Nemotron
 ensure_mamba_support()
 
@@ -4867,6 +4895,7 @@ class Scheduler:
         else:
             _fetch_tokens = _full_tokens_list
             _gpl_suffix_tokens = []
+        _cache_extra_keys = getattr(request, "_cache_extra_keys", None)
 
         if self.block_aware_cache is not None and not _bypass:
             # Use paged cache
@@ -4885,6 +4914,7 @@ class Scheduler:
             block_table, remaining = self.block_aware_cache.fetch_cache(
                 request.request_id,
                 _fetch_tokens,
+                cache_extra_keys=_cache_extra_keys,
             )
             try:
                 _paged_disk_hits_after = int(
@@ -4916,6 +4946,7 @@ class Scheduler:
                     (paged_cold_tokens > 0 or getattr(self, "_tq_active", False))
                     and not self._uses_dsv4_cache
                     and not self._uses_zaya_cache
+                    and not _cache_extra_keys
                 ):
                     (
                         warm_cache,
@@ -5035,7 +5066,11 @@ class Scheduler:
                     f"Request {request.request_id}: paged cache miss, "
                     f"processing all {len(request.prompt_token_ids)} tokens"
                 )
-        elif self.memory_aware_cache is not None and not _bypass:
+        elif (
+            self.memory_aware_cache is not None
+            and not _bypass
+            and not _cache_extra_keys
+        ):
             # Use memory-aware prefix cache (gpl-stripped fetch; suffix re-attached)
             cache, remaining = self.memory_aware_cache.fetch(_fetch_tokens)
             remaining, cached_tokens = self._prefix_hit_tail_and_cached_tokens(
@@ -5075,7 +5110,7 @@ class Scheduler:
                     f"Request {request.request_id}: cache miss, "
                     f"processing all {len(request.prompt_token_ids)} tokens"
                 )
-        elif self.prefix_cache is not None and not _bypass:
+        elif self.prefix_cache is not None and not _bypass and not _cache_extra_keys:
             # Use legacy prefix cache (gpl-stripped fetch; suffix re-attached)
             cache, remaining = self.prefix_cache.fetch_cache(_fetch_tokens)
             remaining, cached_tokens = self._prefix_hit_tail_and_cached_tokens(
@@ -5121,6 +5156,7 @@ class Scheduler:
             request.prompt_cache is None
             and self.disk_cache is not None
             and not _bypass
+            and not _cache_extra_keys
             and not getattr(request, "_paged_block_table_needs_worker_reconstruct", False)
         ):
             _disk_fetch_tokens = list(request.prompt_token_ids)
@@ -6109,12 +6145,11 @@ class Scheduler:
             # Insert into BatchGenerator with optional cache.
             # Wrapped in try/except to prevent lost requests — if insert fails
             # completely, put the request back in the waiting queue.
-            # M3 VL (additive, gated): when the engine attached preprocessed
-            # vision tensors to this request, the SingleBatchGenerator must see
-            # the FULL prompt (every image-token position present in one forward
-            # for the vision splice) with no partial/prefix cache, plus the
-            # pixel_values/image_grid_thw. Only triggers when VMLX_M3_VL routed
-            # an image request here; text requests are byte-for-byte unchanged.
+            # M3 VL (additive, gated): a cold/partial media request must see the
+            # FULL prompt atomically with its vision tensors. A media-salted
+            # paged hit may omit those tensors only when the restored prefix is
+            # strictly past every image/video placeholder; the cached MSA state
+            # then already owns the vision splice and only the text tail is fed.
             _m3vl_pv = getattr(request, "pixel_values", None)
             _m3vl_grid = getattr(request, "image_grid_thw", None)
             _m3vl_pv_video = getattr(request, "pixel_values_videos", None)
@@ -6123,9 +6158,25 @@ class Scheduler:
                 (_m3vl_pv is not None or _m3vl_pv_video is not None)
                 and self.batch_generator.__class__.__name__ == "SingleBatchGenerator"
             )
-            if _m3vl_active:
-                tokens_to_process = list(request.prompt_token_ids)
+            _m3vl_cache_replay = bool(
+                _m3vl_active
+                and cache_to_use is not None
+                and getattr(request, "_cache_extra_keys", None)
+                and _m3_vl_cached_prefix_covers_media_tokens(self.model, request)
+            )
+            if _m3vl_active and cache_to_use is not None and not _m3vl_cache_replay:
+                logger.info(
+                    "Request %s: M3 VL cache prefix ends before the final media "
+                    "placeholder; releasing hit and using atomic full vision prefill",
+                    request.request_id,
+                )
+                self._release_unusable_paged_hit(request)
                 cache_to_use = None
+                request.prompt_cache = None
+                request.cached_tokens = 0
+                request.remaining_tokens = request.prompt_token_ids
+            if _m3vl_active and not _m3vl_cache_replay:
+                tokens_to_process = list(request.prompt_token_ids)
 
             try:
                 try:
@@ -6134,14 +6185,25 @@ class Scheduler:
                     if request_sampler is not None:
                         insert_kwargs["samplers"] = [request_sampler]
                     if _m3vl_active:
-                        if _m3vl_pv is not None:
-                            insert_kwargs["pixel_values"] = [_m3vl_pv]
-                            insert_kwargs["image_grid_thw"] = [_m3vl_grid]
-                        if _m3vl_pv_video is not None:
-                            insert_kwargs["pixel_values_videos"] = [_m3vl_pv_video]
-                            insert_kwargs["video_grid_thw"] = [_m3vl_video_grid]
+                        if _m3vl_cache_replay:
+                            cached_prefix_len = max(
+                                0, int(getattr(request, "cached_tokens", 0) or 0)
+                            )
+                            insert_kwargs["all_tokens"] = [
+                                list(request.prompt_token_ids[:cached_prefix_len])
+                            ]
+                        else:
+                            if _m3vl_pv is not None:
+                                insert_kwargs["pixel_values"] = [_m3vl_pv]
+                                insert_kwargs["image_grid_thw"] = [_m3vl_grid]
+                            if _m3vl_pv_video is not None:
+                                insert_kwargs["pixel_values_videos"] = [_m3vl_pv_video]
+                                insert_kwargs["video_grid_thw"] = [_m3vl_video_grid]
                         request_processors = self._request_logits_processors(
-                            request, list(tokens_to_process)
+                            request,
+                            list(request.prompt_token_ids)
+                            if _m3vl_cache_replay
+                            else list(tokens_to_process),
                         )
                         if request_processors is not None:
                             insert_kwargs["logits_processors"] = [request_processors]
@@ -6227,7 +6289,25 @@ class Scheduler:
                         request_sampler = self._request_seeded_sampler(request)
                         if request_sampler is not None:
                             insert_kwargs["samplers"] = [request_sampler]
-                        if (
+                        if _m3vl_active:
+                            if _m3vl_pv is not None:
+                                insert_kwargs["pixel_values"] = [_m3vl_pv]
+                                insert_kwargs["image_grid_thw"] = [_m3vl_grid]
+                            if _m3vl_pv_video is not None:
+                                insert_kwargs["pixel_values_videos"] = [
+                                    _m3vl_pv_video
+                                ]
+                                insert_kwargs["video_grid_thw"] = [
+                                    _m3vl_video_grid
+                                ]
+                            request_processors = self._request_logits_processors(
+                                request, list(tokens_to_process)
+                            )
+                            if request_processors is not None:
+                                insert_kwargs["logits_processors"] = [
+                                    request_processors
+                                ]
+                        elif (
                             self.batch_generator.__class__.__name__
                             == "DSV4BatchGenerator"
                         ):
@@ -6994,6 +7074,9 @@ class Scheduler:
                                         if (
                                             self.disk_cache is not None
                                             and not self._is_hybrid
+                                            and not getattr(
+                                                request, "_cache_extra_keys", None
+                                            )
                                         ):
                                             try:
                                                 from .mllm_batch_generator import (
@@ -7776,6 +7859,10 @@ class Scheduler:
                             _paged_store_kwargs = {
                                 "cache_type": self._pick_cache_type_for_request(request),
                             }
+                            if getattr(request, "_cache_extra_keys", None):
+                                _paged_store_kwargs["cache_extra_keys"] = dict(
+                                    request._cache_extra_keys
+                                )
                             if (
                                 self._is_hybrid
                                 and not self._uses_dsv4_cache
@@ -7855,7 +7942,10 @@ class Scheduler:
                     # NOTE: Tracking cleanup (pop + detach) moved above the
                     # _skip_cache_store guard so it runs unconditionally.
 
-                elif self.memory_aware_cache is not None:
+                elif (
+                    self.memory_aware_cache is not None
+                    and not getattr(request, "_cache_extra_keys", None)
+                ):
                     # Store in memory-aware prefix cache
                     # Key is prompt tokens only. Cache is truncated to prompt_len-1
                     # so the last token can be re-fed on cache hit for generation.
@@ -7974,7 +8064,10 @@ class Scheduler:
                             # Clear extracted cache reference to help GC
                             request._extracted_cache = None
 
-                elif self.prefix_cache is not None:
+                elif (
+                    self.prefix_cache is not None
+                    and not getattr(request, "_cache_extra_keys", None)
+                ):
                     # Store in legacy prefix cache (same truncation as memory-aware)
                     if (
                         hasattr(request, "_extracted_cache")

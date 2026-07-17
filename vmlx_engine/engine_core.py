@@ -20,6 +20,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from .request import Request, RequestOutput, RequestStatus, SamplingParams
 from .scheduler import Scheduler, SchedulerConfig
+from .mllm_batch_generator import _mllm_media_cache_extra_keys
 from .output_collector import RequestOutputCollector, RequestStreamState
 from .model_registry import get_registry
 
@@ -419,12 +420,15 @@ class EngineCore:
         if video_grid_thw is not None:
             request.video_grid_thw = video_grid_thw
 
-        # Standard LLM prefix keys are token-only. Different media with the
-        # same placeholder-token layout must never cross-reuse KV state. The
-        # MLLM scheduler has media-salted keys; this text-routed M3 path does
-        # not, so fail safe by bypassing every cache lookup/store for media.
+        # MiniMax-M3 VL is text-routed, but its image/video placeholders are
+        # content-dependent just like the generic MLLM path. Mix the shared
+        # byte-derived media fingerprint into paged/block keys so same-shaped
+        # different media cannot cross-reuse vision-conditioned MSA state.
+        # Scheduler admission below permits only the salted paged/block path;
+        # unsalted legacy/memory/prompt-L2 paths remain disabled for media.
         if pixel_values is not None or pixel_values_videos is not None:
-            request._bypass_prefix_cache = True
+            request._cache_extra_keys = _mllm_media_cache_extra_keys(request)
+            request._m3_vl_media_cache_context = bool(request._cache_extra_keys)
 
         # Attach gen_prompt_len for prefix cache key stripping.
         # The scheduler reads this via getattr(request, '_gen_prompt_len', 0)

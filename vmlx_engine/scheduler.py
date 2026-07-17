@@ -8790,7 +8790,12 @@ class Scheduler:
                     )
                     self.uid_to_request_id.pop(old_uid, None)
 
-    def step(self, max_retries: int = 2) -> SchedulerOutput:
+    def step(
+        self,
+        max_retries: int = 2,
+        *,
+        defer_finished_cleanup: bool = False,
+    ) -> SchedulerOutput:
         """
         Execute one scheduling step with automatic error recovery.
 
@@ -8805,6 +8810,8 @@ class Scheduler:
 
         Args:
             max_retries: Number of times to retry on cache errors (default 2)
+            defer_finished_cleanup: Return terminal outputs before synchronous
+                cache persistence. The async engine owns cleanup after dispatch.
 
         Returns:
             SchedulerOutput with results of this step
@@ -8871,7 +8878,8 @@ class Scheduler:
                         outputs, finished_ids = self._process_batch_responses(responses)
                         output.outputs = outputs
                         output.finished_request_ids = finished_ids
-                        self._cleanup_finished(finished_ids)
+                        if not defer_finished_cleanup:
+                            self._cleanup_finished(finished_ids)
 
                     # Success - break out of retry loop
                     break

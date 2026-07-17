@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
-from .request import Request, RequestOutput, SamplingParams
+from .request import Request, RequestOutput, RequestStatus, SamplingParams
 from .scheduler import Scheduler, SchedulerConfig
 from .output_collector import RequestOutputCollector, RequestStreamState
 from .model_registry import get_registry
@@ -168,10 +168,11 @@ class EngineCore:
                     # Run one generation step
                     if _step_executor is not None:
                         output = await _async_loop.run_in_executor(
-                            _step_executor, self.scheduler.step
+                            _step_executor,
+                            lambda: self.scheduler.step(defer_finished_cleanup=True),
                         )
                     else:
-                        output = self.scheduler.step()
+                        output = self.scheduler.step(defer_finished_cleanup=True)
                     self._steps_executed += 1
 
                     # Periodic ghost request detection: find requests in
@@ -255,6 +256,25 @@ class EngineCore:
                         # Without this, the tight loop aggregates many tokens
                         # before the consumer gets a chance to read them.
                         await asyncio.sleep(0)
+
+                    # Cache/TQ/SSM persistence for a long prompt can take
+                    # seconds. The terminal token is already in the collector;
+                    # only now perform cleanup, on the same model worker when
+                    # one exists, before admitting the next scheduler step.
+                    # This preserves cache ownership while preventing the final
+                    # visible delta from being held behind disk persistence.
+                    if output.finished_request_ids:
+                        if not outputs:
+                            await asyncio.sleep(0)
+                        finished_ids = set(output.finished_request_ids)
+                        if _step_executor is not None:
+                            await _async_loop.run_in_executor(
+                                _step_executor,
+                                self.scheduler._cleanup_finished,
+                                finished_ids,
+                            )
+                        else:
+                            self.scheduler._cleanup_finished(finished_ids)
                 else:
                     # No work, yield control
                     await asyncio.sleep(step_interval)
@@ -494,7 +514,9 @@ class EngineCore:
         event = self._finished_events.pop(request_id, None)
         if event:
             event.set()
-        self.scheduler.abort_request(request_id)
+        request = self.scheduler.get_request(request_id)
+        if request is None or not RequestStatus.is_finished(request.status):
+            self.scheduler.abort_request(request_id)
 
     async def stream_outputs(
         self,

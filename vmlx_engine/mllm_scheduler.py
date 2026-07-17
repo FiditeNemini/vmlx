@@ -3625,7 +3625,14 @@ class MLLMScheduler:
                 cleanup_trace.get("clear_memory_s", 0.0) * 1000.0,
             )
 
-    def step(self) -> MLLMSchedulerOutput:
+    def _cleanup_finished_after_terminal_dispatch(
+        self, finished_ids: Set[str]
+    ) -> None:
+        """Run deferred terminal cleanup with the normal scheduler lock held."""
+        with self._queue_lock:
+            self._cleanup_finished(finished_ids)
+
+    def step(self, *, defer_finished_cleanup: bool = False) -> MLLMSchedulerOutput:
         """Execute one scheduling step -- the core generation loop tick.
 
         Called repeatedly by _step_and_dispatch() in the background thread.
@@ -3634,7 +3641,8 @@ class MLLMScheduler:
         1. _schedule_waiting() moves queued requests -> running (under lock)
         2. batch_generator.next() generates one token for all active requests
         3. _process_batch_responses() extracts tokens, detokenizes, checks stops
-        4. _cleanup_finished() stores cache, frees memory, removes state
+        4. _cleanup_finished() stores cache, frees memory, removes state unless
+           the async streaming loop defers cleanup until after terminal dispatch
         5. Periodic Metal GC every 60s during sustained traffic
 
         Error recovery: on GPU/cache errors, attempts retry (max 2) per request
@@ -3782,8 +3790,9 @@ class MLLMScheduler:
                     _trace_mark("process_responses_s")
                     output.outputs = outputs
                     output.finished_request_ids = finished_ids
-                    self._cleanup_finished(finished_ids)
-                    _trace_mark("cleanup_finished_s")
+                    if not defer_finished_cleanup:
+                        self._cleanup_finished(finished_ids)
+                        _trace_mark("cleanup_finished_s")
                 _trace_mark("process_cleanup_s")
             else:
                 _trace_mark("process_responses_s")
@@ -4001,7 +4010,8 @@ class MLLMScheduler:
                     trace_enabled = _mllm_scheduler_trace_enabled()
                     executor_t0 = time.perf_counter() if trace_enabled else 0.0
                     step_output = await loop.run_in_executor(
-                        self._step_executor, self.step
+                        self._step_executor,
+                        lambda: self.step(defer_finished_cleanup=True),
                     )
                     executor_s = (
                         time.perf_counter() - executor_t0 if trace_enabled else 0.0
@@ -4012,6 +4022,31 @@ class MLLMScheduler:
                     dispatch_s = (
                         time.perf_counter() - dispatch_t0 if trace_enabled else 0.0
                     )
+                    # Terminal cache persistence can take seconds for a long
+                    # paged/TQ/SSM prefix. Dispatch the finished output and its
+                    # sentinel first, then yield the event loop so SSE/WebSocket
+                    # consumers can flush the final visible delta. Cleanup still
+                    # runs on the model's single worker and completes before the
+                    # next scheduler step, preserving MLX stream ownership and
+                    # cache/bookkeeping ordering.
+                    if step_output.finished_request_ids:
+                        await asyncio.sleep(0)
+                        cleanup_t0 = time.perf_counter() if trace_enabled else 0.0
+                        await loop.run_in_executor(
+                            self._step_executor,
+                            self._cleanup_finished_after_terminal_dispatch,
+                            set(step_output.finished_request_ids),
+                        )
+                        if trace_enabled:
+                            cleanup_s = time.perf_counter() - cleanup_t0
+                            step_output.trace_timings["cleanup_finished_s"] = (
+                                step_output.trace_timings.get("cleanup_finished_s", 0.0)
+                                + cleanup_s
+                            )
+                            step_output.trace_timings["process_cleanup_s"] = (
+                                step_output.trace_timings.get("process_cleanup_s", 0.0)
+                                + cleanup_s
+                            )
                     if trace_enabled and step_output.outputs:
                         self._record_scheduler_trace(
                             step_output,
@@ -4170,7 +4205,8 @@ class MLLMScheduler:
                 del self.output_queues[request_id]
             # If the request is still running (client disconnected mid-stream),
             # abort it so the slot is freed
-            if request_id in self.running:
+            request = self.running.get(request_id)
+            if request is not None and not RequestStatus.is_finished(request.status):
                 self.abort_request(request_id)
 
     async def generate(

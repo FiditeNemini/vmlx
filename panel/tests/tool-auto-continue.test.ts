@@ -66,6 +66,11 @@ describe('tool auto-continue policy', () => {
     ).toBe(true)
     expect(
       requestsDirectAnswerAfterSingleTool(
+        'Call the built-in file_info tool exactly once with path panel/package.json. After its result, reply exactly B1-ELECTRON-TOOL-TEMPLATE1-DONE and nothing else.',
+      ),
+    ).toBe(true)
+    expect(
+      requestsDirectAnswerAfterSingleTool(
         'Use tools as needed, then reply exactly DONE.',
       ),
     ).toBe(false)

@@ -172,10 +172,11 @@ def check_and_inject_fallback_tools(
     explicit_tool_requested = any(_request_mentions_tool_name(name) for name in tool_names)
 
     # Some templates need more than tool-name visibility. DSV4 may mention
-    # schemas without a parser-matching DSML exemplar. Qwen3.5/3.6 MoE's
-    # shipped template includes only an `example_function_name` exemplar; live
-    # tests showed it could answer with a fake directory listing instead of a
-    # native tool call even when the user explicitly said to use the tool.
+    # schemas without a parser-matching DSML exemplar. Qwen's native template
+    # intentionally uses `example_function_name` in its format explanation,
+    # but the <tools> block itself contains the real JSON schemas. Preserve
+    # that trained native scaffold for normal auto-tool turns; it has the
+    # model's own tool/result transcript framing and thinking contract.
     parser_id = (tool_parser_id or "").strip().lower()
     is_dsv4_prompt = "<｜User｜>" in prompt or "<｜Assistant｜>" in prompt
     is_qwen_native_tool_prompt = (
@@ -219,6 +220,7 @@ def check_and_inject_fallback_tools(
         parser_id in {"step3p5", "step", "stepfun"}
         or (
             not is_xml_function_native_tool_prompt
+            and not is_qwen_native_tool_prompt
             and
             "<tool_call>" in prompt
             and "<function=example_function_name>" in prompt
@@ -241,6 +243,25 @@ def check_and_inject_fallback_tools(
         is_qwen_native_tool_prompt
         and all(f"<function={name}>" in instruction_prompt for name in tool_names)
     )
+    _qwen_has_native_tool_schema = (
+        is_qwen_native_tool_prompt
+        and "<tools>" in instruction_prompt
+        and "</tools>" in instruction_prompt
+        and all(name in instruction_prompt for name in tool_names)
+    )
+    # A post-call continuation is different from a fresh auto-tool turn: it
+    # needs the explicit no-repeat instruction below, so it must not take the
+    # native-template fast path.
+    _qwen_has_post_user_tool_activity = False
+    if is_qwen_native_tool_prompt:
+        for _message in reversed(messages or []):
+            if not isinstance(_message, dict):
+                continue
+            if _message.get("role") == "user":
+                break
+            if _message.get("role") == "tool" or _message.get("tool_calls"):
+                _qwen_has_post_user_tool_activity = True
+                break
     _zaya_has_concrete_tool_examples = (
         is_zaya_native_tool_prompt
         # Zaya's shipped scaffold may contain parser-shaped examples for every
@@ -287,7 +308,15 @@ def check_and_inject_fallback_tools(
     )
     if all(name in prompt for name in tool_names) and (
         (not is_dsv4_prompt or _dsv4_has_concrete_dsml_examples)
-        and (not is_qwen_native_tool_prompt or _qwen_has_concrete_tool_examples)
+        and (
+            not is_qwen_native_tool_prompt
+            or _qwen_has_concrete_tool_examples
+            or (
+                _qwen_has_native_tool_schema
+                and not tool_choice_required
+                and not _qwen_has_post_user_tool_activity
+            )
+        )
         and (not is_zaya_native_tool_prompt or _zaya_has_concrete_tool_examples)
         and (not is_lfm2_native_tool_prompt or _lfm2_has_concrete_tool_examples)
         and (not is_openpangu_native_tool_prompt or _openpangu_has_concrete_tool_examples)

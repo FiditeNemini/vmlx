@@ -216,15 +216,11 @@ def test_qwen_explicit_run_exactly_binds_command_and_narrows_schema():
         tool_parser_id="qwen",
     )
 
-    assert "run_command" in injected
-    assert "Tool: read_file" not in injected
-    assert "<function=read_file>" not in injected
-    assert (
-        "<parameter=command>\nprintf B1TOOL > bonsai_native.txt\n</parameter>"
-        in injected
-    )
-    command = injected.split("<parameter=command>", 1)[1].split("</parameter>", 1)[0]
-    assert "After the tool result" not in command
+    # The shipped Qwen tool template already owns this auto-tool request.
+    # Keep its native schema/result transcript instead of replacing it with a
+    # second system instruction. Strict API tool_choice=required retains the
+    # explicit fallback contract in test_tool_format.py.
+    assert injected == _qwen_prompt()
 
 
 def test_qwen_explicit_to_run_binds_command_and_narrows_schema():
@@ -247,11 +243,7 @@ def test_qwen_explicit_to_run_binds_command_and_narrows_schema():
         tool_parser_id="qwen",
     )
 
-    assert "Tool: read_file" not in injected
-    assert "<function=read_file>" not in injected
-    assert "<parameter=command>\nprintf Q36_TOOL_811\n</parameter>" in injected
-    command = injected.split("<parameter=command>", 1)[1].split("</parameter>", 1)[0]
-    assert "After seeing the tool result" not in command
+    assert injected == _qwen_prompt()
 
 
 def test_qwen_tool_result_continuation_prevents_duplicate_execution():

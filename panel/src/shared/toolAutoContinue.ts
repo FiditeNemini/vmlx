@@ -33,7 +33,7 @@ export function requestsDirectAnswerAfterSingleTool(text: string): boolean {
     // user's exact contract (for example "after the real tool result"). The
     // previous literal-only match left tools enabled on that follow-up and a
     // live Bonsai turn executed the same file_info call five times.
-    /\bafter\b[^.!?\n]{0,64}\btool result\b/i.test(text) &&
+    /\bafter\b[^.!?\n]{0,64}\b(?:the\s+(?:real\s+)?tool|its|that)\s+result\b/i.test(text) &&
     /\breply exactly\b/i.test(text)
   )
 }

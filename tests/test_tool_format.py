@@ -988,7 +988,7 @@ class TestFallbackToolPromptFormat:
         assert "VALUE HERE" not in rendered
         assert "Call them using DSML format" in rendered
 
-    def test_qwen_fallback_injects_concrete_native_tool_example(self):
+    def test_qwen_native_template_keeps_its_tool_scaffold_for_auto_tools(self):
         from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
 
         class FakeTokenizer:
@@ -1034,10 +1034,12 @@ class TestFallbackToolPromptFormat:
             {"tokenize": False, "add_generation_prompt": True, "tools": tools},
         )
 
-        assert "<function=list_directory>" in rendered
-        assert "<parameter=path>" in rendered
-        assert "fake directory listing" in rendered
-        assert "tools" not in tokenizer.last_kwargs
+        # The real Qwen template owns the JSON schema, native XML shape,
+        # tool-result framing, and the optional pre-tool reasoning contract.
+        # Replacing it with a second synthetic system message made Bonsai
+        # deliberate over two competing contracts before one simple call.
+        assert rendered == prompt
+        assert tokenizer.last_kwargs is None
 
     def test_qwen_required_tool_choice_fallback_injects_hard_first_call_contract(self):
         from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools

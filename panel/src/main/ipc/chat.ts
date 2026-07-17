@@ -37,6 +37,7 @@ import { buildToolMediaFollowupContent } from "../../shared/toolMediaFollowup";
 import { dsv4OutputBudget } from "../../shared/dsv4RequestBudget";
 import { projectedMetalHeadroomChatErrorContent } from "../../shared/chatErrorDisplay";
 import { reconcileResponsesToolBufferAtStreamEnd } from "../../shared/responsesStreamRecovery";
+import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import {
   buildNewChatInheritedOverrides,
   sanitizeChatOverrides,
@@ -1674,6 +1675,15 @@ export function registerChatHandlers(
       let promptTokens = 0;
       let cachedTokens = 0;
       let cacheDetail = "";
+      const recordCacheUsage = (details: any) => {
+        const nextCachedTokens = Number(details?.cached_tokens);
+        if (Number.isFinite(nextCachedTokens) && nextCachedTokens > 0) {
+          cachedTokens = Math.max(cachedTokens, nextCachedTokens);
+        }
+        if (typeof details?.cache_detail === "string") {
+          cacheDetail = mergeCacheDetails(cacheDetail, details.cache_detail);
+        }
+      };
       let firstTokenTime: number | null = null;
       // Track actual generation time (excludes PP and tool execution pauses)
       let generationMs = 0;
@@ -2666,13 +2676,7 @@ export function registerChatHandlers(
                 }
                 if (parsed.usage.input_tokens != null)
                   promptTokens = parsed.usage.input_tokens;
-                if (parsed.usage.input_tokens_details?.cached_tokens) {
-                  cachedTokens =
-                    parsed.usage.input_tokens_details.cached_tokens;
-                  if (parsed.usage.input_tokens_details.cache_detail)
-                    cacheDetail =
-                      parsed.usage.input_tokens_details.cache_detail;
-                }
+                recordCacheUsage(parsed.usage.input_tokens_details);
               }
 
               // Handle error events from Responses API
@@ -2737,11 +2741,7 @@ export function registerChatHandlers(
                 }
                 if (respUsage.input_tokens != null)
                   promptTokens = respUsage.input_tokens;
-                if (respUsage.input_tokens_details?.cached_tokens) {
-                  cachedTokens = respUsage.input_tokens_details.cached_tokens;
-                  if (respUsage.input_tokens_details.cache_detail)
-                    cacheDetail = respUsage.input_tokens_details.cache_detail;
-                }
+                recordCacheUsage(respUsage.input_tokens_details);
               }
             } else {
               // ── Chat Completions SSE parsing ──
@@ -2781,13 +2781,7 @@ export function registerChatHandlers(
                 }
                 if (parsed.usage.prompt_tokens != null)
                   promptTokens = parsed.usage.prompt_tokens;
-                if (parsed.usage.prompt_tokens_details?.cached_tokens) {
-                  cachedTokens =
-                    parsed.usage.prompt_tokens_details.cached_tokens;
-                  if (parsed.usage.prompt_tokens_details.cache_detail)
-                    cacheDetail =
-                      parsed.usage.prompt_tokens_details.cache_detail;
-                }
+                recordCacheUsage(parsed.usage.prompt_tokens_details);
               }
 
               // Track finish_reason (length = truncated, content_filter = filtered)

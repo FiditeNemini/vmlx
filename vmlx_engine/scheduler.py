@@ -64,6 +64,12 @@ from .utils.memory_limits import (
 
 logger = logging.getLogger(__name__)
 
+
+def _typed_paged_cache_detail(cache_type: str, *, disk_hit: bool) -> str:
+    """Describe a typed paged hit without losing its L2 promotion source."""
+    base = f"paged+{cache_type}"
+    return f"{base}+disk" if disk_hit else base
+
 # Enable MambaCache batching support for models like Nemotron
 ensure_mamba_support()
 
@@ -4999,9 +5005,15 @@ class Scheduler:
                     if getattr(self, "_kv_cache_bits", 0):
                         request._prompt_cache_needs_worker_dequant = True
                     if self._uses_dsv4_cache:
-                        request._cache_detail = "paged+dsv4"
+                        request._cache_detail = _typed_paged_cache_detail(
+                            "dsv4",
+                            disk_hit=bool(getattr(request, "_paged_disk_hit", False)),
+                        )
                     elif self._uses_zaya_cache:
-                        request._cache_detail = "paged+zaya_cca"
+                        request._cache_detail = _typed_paged_cache_detail(
+                            "zaya_cca",
+                            disk_hit=bool(getattr(request, "_paged_disk_hit", False)),
+                        )
                     else:
                         request._cache_detail = (
                             "paged+disk"

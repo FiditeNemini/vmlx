@@ -11365,6 +11365,17 @@ class TestTurboQuantKVTelemetry:
         assert "disk+tq->paged" not in source
         assert "paged+ssm(" not in source
 
+    def test_llm_typed_paged_cache_detail_retains_disk_source(self):
+        from vmlx_engine.scheduler import _typed_paged_cache_detail
+
+        assert _typed_paged_cache_detail("dsv4", disk_hit=False) == "paged+dsv4"
+        assert _typed_paged_cache_detail("dsv4", disk_hit=True) == (
+            "paged+dsv4+disk"
+        )
+        assert _typed_paged_cache_detail("zaya_cca", disk_hit=True) == (
+            "paged+zaya_cca+disk"
+        )
+
     def test_llm_hybrid_cache_detail_marks_ssm_disk_source(self, monkeypatch):
         import vmlx_engine.scheduler as scheduler_mod
 

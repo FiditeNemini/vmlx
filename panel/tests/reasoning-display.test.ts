@@ -1614,3 +1614,14 @@ describe('Production chat source — MiniMax-M3 reasoning fallback wiring', () =
         expect(source).toContain('msgContent.replace(/<mm:think>[\\s\\S]*?<\\/mm:think>\\s*/g, "")')
     })
 })
+
+describe('Production chat source — terminal content typewriter drain', () => {
+    it('does not snap a coalesced reasoning-to-content backlog at stream completion', () => {
+        const source = readFileSync('src/renderer/src/components/chat/MessageBubble.tsx', 'utf8')
+
+        expect(source).toContain('const wasStreamingRef = useRef(isStreaming)')
+        expect(source).toContain('const wasStreaming = wasStreamingRef.current')
+        expect(source).toContain('if (!isStreaming && !wasStreaming)')
+        expect(source).toContain('React can receive the final content and completion IPC in one')
+    })
+})

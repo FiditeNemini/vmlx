@@ -128,19 +128,29 @@ function useTypewriter(fullContent: string, isStreaming: boolean): string {
   const rafRef = useRef<number>(0)
   const lenRef = useRef(fullContent.length)
   const fullRef = useRef(fullContent)
+  const wasStreamingRef = useRef(isStreaming)
   fullRef.current = fullContent
 
   useEffect(() => {
-    if (!isStreaming) {
-      cancelAnimationFrame(rafRef.current)
-      setDisplayed(fullContent)
-      lenRef.current = fullContent.length
-      return
-    }
+    const wasStreaming = wasStreamingRef.current
+    wasStreamingRef.current = isStreaming
+    cancelAnimationFrame(rafRef.current)
+
     // Content shrunk (rare correction) — snap
     if (fullContent.length < lenRef.current) {
       lenRef.current = fullContent.length
       setDisplayed(fullContent)
+      return
+    }
+
+    // Ordinary non-stream updates (history hydration, edit, regeneration
+    // replacement) should remain immediate. A just-finished stream is
+    // different: React can receive the final content and completion IPC in one
+    // batch. Draining that existing backlog preserves visible streaming instead
+    // of snapping the entire answer into view when isStreaming flips false.
+    if (!isStreaming && !wasStreaming) {
+      setDisplayed(fullContent)
+      lenRef.current = fullContent.length
       return
     }
     if (lenRef.current >= fullContent.length) return

@@ -1692,6 +1692,12 @@ export function registerChatHandlers(
         contentOffset?: number;
       }> = [];
       let toolStatusNeedsFlush = false;
+      // A single ReadableStream read can contain dozens of SSE events. Without
+      // yielding between visible deltas, Electron queues every chat:stream IPC
+      // message in one main-process turn and React coalesces the whole answer
+      // into the terminal render. Reasoning appears live, then content appears
+      // all at once even though the server emitted token-level deltas.
+      let rendererStreamNeedsFlush = false;
       // Declared outside try so catch block can access them for error recovery
       let isReasoning = false;
       let lastFinishReason: string | undefined;
@@ -2200,6 +2206,11 @@ export function registerChatHandlers(
           toolStatusNeedsFlush = false;
           await new Promise<void>((resolve) => setImmediate(resolve));
         };
+        const flushStreamDeltaToRenderer = async () => {
+          if (!rendererStreamNeedsFlush) return;
+          rendererStreamNeedsFlush = false;
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        };
 
         // Client-side tool call buffering: suppress content when leaked tool call XML detected.
         // Must check RAW content before template token stripping, since markers like
@@ -2405,6 +2416,7 @@ export function registerChatHandlers(
                   elapsed: elapsed.toFixed(1),
                 },
               });
+              rendererStreamNeedsFlush = true;
             }
           } catch (_) {}
         };
@@ -3054,6 +3066,9 @@ export function registerChatHandlers(
               if (toolStatusNeedsFlush) {
                 await flushToolStatusToRenderer();
               }
+              if (rendererStreamNeedsFlush) {
+                await flushStreamDeltaToRenderer();
+              }
             }
           }
           if (abortController.signal.aborted) return;
@@ -3067,6 +3082,9 @@ export function registerChatHandlers(
                 processLine(line.trim());
                 if (toolStatusNeedsFlush) {
                   await flushToolStatusToRenderer();
+                }
+                if (rendererStreamNeedsFlush) {
+                  await flushStreamDeltaToRenderer();
                 }
               }
             }

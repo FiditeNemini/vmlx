@@ -5,6 +5,20 @@ const readPanelSource = (path: string) =>
   readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
 
 describe('tool status responsiveness contract', () => {
+  it('yields the Electron main loop between visible SSE deltas', () => {
+    const source = readPanelSource('src/main/ipc/chat.ts')
+    const streamSseSource = source.slice(
+      source.indexOf('const streamSSE = async'),
+      source.indexOf('await streamSSE(reader);'),
+    )
+
+    expect(source).toContain('let rendererStreamNeedsFlush = false')
+    expect(source).toContain('const flushStreamDeltaToRenderer = async () =>')
+    expect(source).toContain('rendererStreamNeedsFlush = true')
+    expect(streamSseSource).toContain('if (rendererStreamNeedsFlush)')
+    expect(streamSseSource).toContain('await flushStreamDeltaToRenderer();')
+  })
+
   it('yields the Electron main loop after visible tool-status transitions', () => {
     const source = readPanelSource('src/main/ipc/chat.ts')
 

@@ -1760,6 +1760,29 @@ def _force_answer_pass_direct_rail(
     answer_kwargs["chat_template_kwargs"] = answer_ct_kwargs
 
 
+_ANSWER_PASS_ZERO_HOLDBACK_FAMILIES = frozenset(
+    {
+        "hy_v3",
+        "minimax_m3",
+        "qwen3_5",
+        "qwen3_5_moe",
+    }
+)
+
+
+def _answer_pass_stream_holdback(
+    family_name: str | None,
+    *,
+    buffer_answer_pass: bool,
+) -> int:
+    """Tail characters to retain while streaming a direct visible-answer pass."""
+    if buffer_answer_pass:
+        return _ANS_MARKER_HOLDBACK
+    if family_name in _ANSWER_PASS_ZERO_HOLDBACK_FAMILIES:
+        return 0
+    return _ANS_MARKER_HOLDBACK
+
+
 _REASONING_ANSWER_PASS_FAMILIES = frozenset(
     {
         "gemma4",
@@ -17787,11 +17810,10 @@ async def stream_chat_completion(
                     _ans_sent,
                     request,
                     bool(getattr(answer_output, "finished", False)),
-                    # Hy3's retry is explicitly forced onto no_think, so no
-                    # reasoning marker can resolve later. Stream every token;
-                    # holding 48 characters made short Ollama answers arrive
-                    # as one terminal message.content chunk.
-                    holdback=0 if _family_name == "hy_v3" else _ANS_MARKER_HOLDBACK,
+                    holdback=_answer_pass_stream_holdback(
+                        _family_name,
+                        buffer_answer_pass=_buffer_answer_pass,
+                    ),
                 )
                 if not _delta:
                     continue
@@ -19479,10 +19501,9 @@ async def stream_responses_api(
                         _ans_sent,
                         request,
                         bool(getattr(answer_output, "finished", False)),
-                        holdback=(
-                            0
-                            if _family_name == "hy_v3"
-                            else _ANS_MARKER_HOLDBACK
+                        holdback=_answer_pass_stream_holdback(
+                            _family_name,
+                            buffer_answer_pass=_buffer_answer_pass,
                         ),
                     )
                     if not _delta:

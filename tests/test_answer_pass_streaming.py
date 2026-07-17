@@ -16,7 +16,11 @@ import inspect
 from types import SimpleNamespace
 
 import vmlx_engine.server as server_mod
-from vmlx_engine.server import _ANS_MARKER_HOLDBACK, _answer_pass_visible_delta
+from vmlx_engine.server import (
+    _ANS_MARKER_HOLDBACK,
+    _answer_pass_stream_holdback,
+    _answer_pass_visible_delta,
+)
 from vmlx_engine.api.utils import clean_output_text
 
 
@@ -91,6 +95,28 @@ def test_hy3_direct_rail_short_answer_streams_incrementally():
     deltas, raw = _drive(chunks, _req(enable_thinking=False), holdback=0)
     assert len(deltas) == len(chunks)
     assert "".join(deltas) == raw
+
+
+def test_direct_rail_short_answer_families_do_not_batch_behind_marker_holdback():
+    """Known direct-rail retries must stream even when the answer is short."""
+    chunks = ["B1", "-", "OK"]
+    for family in ("hy_v3", "minimax_m3", "qwen3_5", "qwen3_5_moe"):
+        holdback = _answer_pass_stream_holdback(family, buffer_answer_pass=False)
+        assert holdback == 0
+        deltas, raw = _drive(chunks, _req(enable_thinking=False), holdback=holdback)
+        assert deltas == chunks
+        assert "".join(deltas) == raw
+
+
+def test_marker_risk_answer_families_keep_tail_holdback():
+    assert (
+        _answer_pass_stream_holdback("gemma4", buffer_answer_pass=False)
+        == _ANS_MARKER_HOLDBACK
+    )
+    assert (
+        _answer_pass_stream_holdback("deepseek_v4", buffer_answer_pass=True)
+        == _ANS_MARKER_HOLDBACK
+    )
 
 
 def test_deltas_are_monotonic_prefix_extensions():
@@ -168,7 +194,7 @@ def test_all_bounded_answer_families_defer_partial_first_pass_content():
         "                    or reasoning_only_answer_enabled"
     ) in source
     assert "deferred_reasoning_visible_content += emit_content" in source
-    assert 'if _family_name == "hy_v3"' in source
+    assert "_answer_pass_stream_holdback(" in source
     assert "buffered_text[index : index + 4]" in source
 
 

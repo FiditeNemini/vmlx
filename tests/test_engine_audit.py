@@ -15317,10 +15317,7 @@ class TestStreamUsagePropagatesCacheDetail:
         class _Engine:
             tokenizer = SimpleNamespace(has_thinking=False)
 
-            answer_prefix = (
-                "VISIBLE_QWEN_TOOLS_ANSWER_PREFIX_FOR_PROGRESS_"
-                + ("streaming-safe-prefix-" * 4)
-            )
+            answer_prefix = "B1-OK-"
 
             def __init__(self):
                 self.calls = []

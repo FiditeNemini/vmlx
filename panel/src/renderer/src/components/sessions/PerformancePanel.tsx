@@ -160,6 +160,10 @@ interface HealthData {
     effective_max_num_seqs?: number
     effective_prefill_batch_size?: number
     effective_completion_batch_size?: number
+    storage_encode_enabled?: boolean
+    stored_prefix_quantization?: string
+    storage_key_bits?: number
+    storage_value_bits?: number
   }
   native_cache?: {
     family?: string
@@ -268,6 +272,9 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
   const attentionKvStorage =
     health?.native_cache?.attention_kv_storage_quantization ??
     health?.native_cache?.storage_quantization
+  const tqStoredPrefix = health?.turboquant_kv_cache?.storage_encode_enabled
+    ? `${health.turboquant_kv_cache.stored_prefix_quantization ?? 'TurboQuant'} (K q${health.turboquant_kv_cache.storage_key_bits ?? '?'} / V q${health.turboquant_kv_cache.storage_value_bits ?? '?'})`
+    : null
 
   useEffect(() => {
     if (sessionStatus !== 'running') {
@@ -499,9 +506,9 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
               <InfoCard
                 label="Attention KV L2"
                 value={
-                  attentionKvStorage.enabled
+                  tqStoredPrefix ?? (attentionKvStorage.enabled
                     ? `q${attentionKvStorage.bits} / g${attentionKvStorage.group_size ?? 64}`
-                    : 'disabled'
+                    : 'disabled')
                 }
               />
             )}

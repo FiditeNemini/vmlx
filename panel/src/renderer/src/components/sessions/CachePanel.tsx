@@ -102,6 +102,9 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
   const attentionKvStorage =
     nativeCache?.attention_kv_storage_quantization ??
     nativeCache?.storage_quantization
+  const tqStoredPrefix = turboQuantKv?.storage_encode_enabled
+    ? `${turboQuantKv.stored_prefix_quantization ?? 'TurboQuant'} (K q${turboQuantKv.storage_key_bits ?? '?'} / V q${turboQuantKv.storage_value_bits ?? '?'})`
+    : null
 
   return (
     <div className="space-y-4">
@@ -409,9 +412,9 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
               <StatCard
                 label="Attention KV L2"
                 value={
-                  attentionKvStorage.enabled
+                  tqStoredPrefix ?? (attentionKvStorage.enabled
                     ? `q${attentionKvStorage.bits} / group ${attentionKvStorage.group_size ?? 64}`
-                    : 'disabled'
+                    : 'disabled')
                 }
               />
             )}
@@ -421,7 +424,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                 value={`${attentionKvStorage.ssm_policy}${attentionKvStorage.rederive ? ' + rederive' : ''}`}
               />
             )}
-            {kvQuant && (
+            {kvQuant && !tqStoredPrefix && (
               <StatCard
                 label="Stored KV Quant"
                 value={

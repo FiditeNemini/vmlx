@@ -42,6 +42,7 @@ import { reconcileResponsesToolBufferAtStreamEnd } from "../../shared/responsesS
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import { selectFinalDecodeTps } from "../../shared/chatMetrics";
 import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
+import { replayPersistedAssistantHistory } from "../../shared/toolHistoryReplay";
 import {
   ChatStreamServerEventError,
   shouldRethrowChatStreamLineError,
@@ -1559,109 +1560,22 @@ export function registerChatHandlers(
             /* not JSON, use as plain string */
           }
         }
-        // 2026-05-03: rebuild tool-call context from DB so chat-template
-        // re-render preserves the tool-call format anchor on continuation.
-        // We store the tool-call request and tool outputs on the visible
-        // assistant row, then expand them into wire-native history here.
-        const reqMsg: any = { role: m.role, content: msgContent };
+        // Rebuild each persisted assistant row into its original model-visible
+        // order. A tool loop is stored as one UI row, but native history must be
+        // reasoning -> function_call -> result -> reasoning -> final answer.
+        // This also preserves reasoning-only assistant turns instead of keeping
+        // them merely as a UI display field.
         if (m.role === "assistant") {
-          const oai = (m as any).toolCallsOaiJson;
-          if (typeof oai === "string" && oai.length > 0) {
-            try {
-              const tcs = JSON.parse(oai);
-              if (Array.isArray(tcs) && tcs.length > 0) {
-                // Validate shape: must have `function.name` + `function.arguments`.
-                const valid = tcs.filter(
-                  (tc: any) =>
-                    tc &&
-                    tc.id &&
-                    tc.function &&
-                    typeof tc.function.name === "string" &&
-                    typeof tc.function.arguments === "string",
-                );
-                if (valid.length > 0) {
-                  let toolResults: Array<{
-                    tool_call_id: string;
-                    content: string;
-                  }> = [];
-                  const resultsJson = (m as any).toolResultsOaiJson;
-                  if (typeof resultsJson === "string" && resultsJson.length > 0) {
-                    try {
-                      const parsedResults = JSON.parse(resultsJson);
-                      if (Array.isArray(parsedResults)) {
-                        toolResults = parsedResults
-                          .filter(
-                            (r: any) =>
-                              r &&
-                              typeof r.tool_call_id === "string" &&
-                              typeof r.content === "string",
-                          )
-                          .map((r: any) => ({
-                            tool_call_id: r.tool_call_id,
-                            content: r.content,
-                          }));
-                      }
-                    } catch {
-                      /* malformed tool results — replay tool_calls only */
-                    }
-                  }
-
-                  if (useResponsesApi) {
-                    for (const tc of valid) {
-                      requestMessages.push({
-                        type: "function_call",
-                        call_id: tc.id,
-                        name: tc.function.name,
-                        arguments: tc.function.arguments,
-                      });
-                    }
-                    for (const tr of toolResults) {
-                      requestMessages.push({
-                        type: "function_call_output",
-                        call_id: tr.tool_call_id,
-                        output: tr.content,
-                      });
-                    }
-                    if (
-                      typeof msgContent === "string" &&
-                      msgContent.trim().length > 0
-                    ) {
-                      requestMessages.push({
-                        type: "output_text",
-                        text: msgContent,
-                      });
-                    }
-                  } else {
-                    requestMessages.push({
-                      role: "assistant",
-                      content: null,
-                      tool_calls: valid,
-                    });
-                    for (const tr of toolResults) {
-                      requestMessages.push({
-                        role: "tool",
-                        tool_call_id: tr.tool_call_id,
-                        content: tr.content,
-                      });
-                    }
-                    if (
-                      typeof msgContent === "string" &&
-                      msgContent.trim().length > 0
-                    ) {
-                      requestMessages.push({
-                        role: "assistant",
-                        content: msgContent,
-                      });
-                    }
-                  }
-                  continue;
-                }
-              }
-            } catch {
-              /* malformed JSON — drop, fall through to content-only message */
-            }
+          const replay = replayPersistedAssistantHistory(
+            { ...(m as any), content: msgContent },
+            useResponsesApi,
+          );
+          if (replay.length > 0) {
+            requestMessages.push(...replay);
+            continue;
           }
         }
+        const reqMsg: any = { role: m.role, content: msgContent };
         requestMessages.push(reqMsg);
       }
 
@@ -3935,6 +3849,11 @@ export function registerChatHandlers(
         // check in MessageBubble, hiding the reasoning box.)
         const finalReasoningContent = currentReasoningContent();
         const finalReasoningSegments = currentReasoningSegments();
+        // Preserve empty tool-boundary slots in SQLite for exact model-history
+        // replay. The renderer receives only visible segments, but an empty
+        // slot records that a tool iteration produced no reasoning and prevents
+        // later segments from being attached to the wrong assistant turn.
+        const replayReasoningSegments = [...reasoningSegments];
         if (!fullContent && finalReasoningContent) {
           console.log(
             `[CHAT] No main content — reasoning only (${finalReasoningContent.length} chars)`,
@@ -3960,9 +3879,9 @@ export function registerChatHandlers(
         if (finalReasoningContent) {
           assistantMessage.reasoningContent = finalReasoningContent;
         }
-        if (finalReasoningSegments.length > 0) {
+        if (replayReasoningSegments.length > 0) {
           assistantMessage.reasoningSegmentsJson = JSON.stringify(
-            finalReasoningSegments,
+            replayReasoningSegments,
           );
         }
         const finalResponseWarnings = responseWarnings as string[] | null;

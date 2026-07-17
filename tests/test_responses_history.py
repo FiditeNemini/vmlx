@@ -65,6 +65,93 @@ def test_responses_output_history_converter_accepts_pydantic_and_dict_items():
     ]
 
 
+def test_responses_reasoning_replays_before_tool_call_and_visible_answer():
+    """Responses reasoning items must survive conversion into native history.
+
+    DeepSeek-V4 and other local reasoning templates consume
+    ``reasoning_content`` on historical assistant turns.  Dropping it changes
+    the token transcript even though the UI still displayed the reasoning.
+    """
+    from vmlx_engine.server import _responses_input_to_messages
+
+    converted = _responses_input_to_messages(
+        [
+            {
+                "type": "reasoning",
+                "content": [
+                    {"type": "reasoning", "text": "inspect the package"}
+                ],
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "file_info",
+                "arguments": '{"path":"panel/package.json"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Size: 5.2 KB",
+            },
+            {
+                "type": "reasoning",
+                "content": [
+                    {"type": "reasoning", "text": "report the observed size"}
+                ],
+            },
+            {"type": "output_text", "text": "5.2 KB"},
+        ]
+    )
+
+    assert converted == [
+        {
+            "role": "user",
+            "content": "Previous assistant tool-call history follows.",
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "arguments": {"path": "panel/package.json"},
+                    },
+                }
+            ],
+            "reasoning_content": "inspect the package",
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "Size: 5.2 KB"},
+        {
+            "role": "assistant",
+            "content": "5.2 KB",
+            "reasoning_content": "report the observed size",
+        },
+    ]
+
+
+def test_responses_role_assistant_preserves_reasoning_content():
+    from vmlx_engine.server import _responses_input_to_messages
+
+    assert _responses_input_to_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "visible",
+                "reasoning_content": "native prior thought",
+            }
+        ]
+    ) == [
+        {
+            "role": "assistant",
+            "content": "visible",
+            "reasoning_content": "native prior thought",
+        }
+    ]
+
+
 def test_responses_output_merges_visible_text_with_tool_calls_for_tool_adjacency():
     """A Responses item stream may contain visible assistant text plus a
     function_call. Store both on the same assistant message so the next
@@ -421,7 +508,11 @@ async def test_responses_streaming_reasoning_only_stores_placeholder_and_marker(
 
         assert server._responses_get_history(response_id) == [
             {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": ""},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "thinking only",
+            },
         ]
         assert server._chain_warnings_for_previous_response_id(response_id)
         warnings = completed[-1]["response"].get("warnings") or []
@@ -458,8 +549,12 @@ def test_reasoning_only_output_emits_assistant_placeholder():
     ]
     msgs = _responses_output_to_assistant_messages(items)
     assert msgs == [
-        {"role": "assistant", "content": ""}
-    ], "reasoning-only output must inject empty placeholder assistant turn"
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "thinking...",
+        }
+    ], "reasoning-only output must preserve the assistant reasoning turn"
 
 
 def test_message_item_with_only_reasoning_content_emits_assistant_placeholder():
@@ -477,7 +572,11 @@ def test_message_item_with_only_reasoning_content_emits_assistant_placeholder():
     ]
 
     assert _responses_output_to_assistant_messages(items) == [
-        {"role": "assistant", "content": ""}
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "thinking...",
+        }
     ]
 
 
@@ -558,8 +657,12 @@ def test_visible_text_output_does_NOT_get_placeholder():
     ]
     msgs = _responses_output_to_assistant_messages(items)
     assert msgs == [
-        {"role": "assistant", "content": "the answer is 42"}
-    ], "output_text should replay as assistant content; reasoning still dropped"
+        {
+            "role": "assistant",
+            "content": "the answer is 42",
+            "reasoning_content": "thinking...",
+        }
+    ], "output_text should replay with its native reasoning context"
 
 
 def test_function_call_only_does_NOT_get_placeholder():
@@ -620,8 +723,12 @@ def test_reasoning_only_history_round_trips_through_store():
     loaded = _responses_get_history("resp_test_reasoning_only")
     assert loaded == [
         {"role": "user", "content": "what is 2+2?"},
-        {"role": "assistant", "content": ""},
-    ], "stored history must preserve the assistant placeholder for chain anchoring"
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "...",
+        },
+    ], "stored history must preserve the assistant reasoning and chain anchor"
 
     _responses_history.clear()
 

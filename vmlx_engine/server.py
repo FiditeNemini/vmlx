@@ -13992,6 +13992,27 @@ def _responses_part_text(part) -> str:
     return text if isinstance(text, str) else ""
 
 
+def _responses_reasoning_texts(item) -> list[str]:
+    """Extract replayable reasoning text from a Responses reasoning item.
+
+    vMLX returns local-model reasoning as plain text in ``content`` parts.  It
+    is not merely UI metadata: native chat templates such as DeepSeek-V4 use
+    prior ``reasoning_content`` when reconstructing tool-call conversations.
+    Accept the standard summary/content envelopes plus the compact local form
+    emitted by this server and the panel.
+    """
+    texts: list[str] = []
+    direct = _responses_part_text(item)
+    if direct:
+        texts.append(direct)
+    for key in ("content", "summary"):
+        for part in _responses_field(item, key, []) or []:
+            text = _responses_part_text(part)
+            if text:
+                texts.append(text)
+    return texts
+
+
 def _responses_output_has_reasoning(output_items: list) -> bool:
     for item in output_items or []:
         item_type = _responses_field(item, "type")
@@ -14030,13 +14051,12 @@ def _responses_output_to_assistant_messages(output_items: list) -> list[dict]:
     assistant_messages: list[dict] = []
     content_parts: list[str] = []
     tool_calls: list[dict] = []
-    saw_reasoning = False
+    reasoning_parts: list[str] = []
 
     for item in output_items or []:
         item_type = _responses_field(item, "type")
         if item_type in _RESPONSES_REASONING_ITEM_TYPES:
-            # Reasoning is display metadata, not replayable chat content.
-            saw_reasoning = True
+            reasoning_parts.extend(_responses_reasoning_texts(item))
             continue
         if item_type == "function_call":
             name = _responses_field(item, "name", "")
@@ -14057,31 +14077,38 @@ def _responses_output_to_assistant_messages(output_items: list) -> list[dict]:
             if ptype in _RESPONSES_VISIBLE_PART_TYPES and text:
                 content_parts.append(text)
             elif ptype in _RESPONSES_REASONING_PART_TYPES:
-                saw_reasoning = True
+                if text:
+                    reasoning_parts.append(text)
+    reasoning_text = "\n".join(reasoning_parts) if reasoning_parts else ""
     if tool_calls:
         # A Responses turn can contain visible assistant text and function_call
         # items. Store them on the same assistant turn so the next
         # function_call_output remains adjacent to assistant.tool_calls for
         # strict native chat templates.
+        message = {
+            "role": "assistant",
+            "content": "\n".join(content_parts) if content_parts else "",
+            "tool_calls": tool_calls,
+        }
+        if reasoning_text:
+            message["reasoning_content"] = reasoning_text
+        assistant_messages.append(message)
+    elif content_parts:
+        message = {"role": "assistant", "content": "\n".join(content_parts)}
+        if reasoning_text:
+            message["reasoning_content"] = reasoning_text
+        assistant_messages.append(message)
+    elif reasoning_text and not assistant_messages:
+        # Reasoning-only output (no visible text, no tool calls): inject an
+        # assistant turn so `previous_response_id` chains preserve both the
+        # user→assistant→user anchor and the model's actual reasoning rail.
         assistant_messages.append(
             {
                 "role": "assistant",
-                "content": "\n".join(content_parts) if content_parts else "",
-                "tool_calls": tool_calls,
+                "content": "",
+                "reasoning_content": reasoning_text,
             }
         )
-    elif content_parts:
-        assistant_messages.append(
-            {"role": "assistant", "content": "\n".join(content_parts)}
-        )
-    elif saw_reasoning and not assistant_messages:
-        # Reasoning-only output (no visible text, no tool calls): inject an
-        # empty-content assistant placeholder so `previous_response_id` chains
-        # preserve the user→assistant→user template anchor and cache prefix
-        # alignment. Without this, chained turns lose all record that turn N
-        # happened and cache reuse drops because the next turn's prefill prompt
-        # has no overlap with prior assistant tokens.
-        assistant_messages.append({"role": "assistant", "content": ""})
     return assistant_messages
 
 
@@ -14659,12 +14686,24 @@ def _responses_input_to_messages(
         """Map 'developer' role to 'system' (OpenAI API compatibility)."""
         return "system" if role == "developer" else role
 
+    pending_reasoning_parts: list[str] = []
+
+    def _take_pending_reasoning() -> str:
+        text = "\n".join(pending_reasoning_parts)
+        pending_reasoning_parts.clear()
+        return text
+
     for item in input_data:
         if not isinstance(item, dict):
             if hasattr(item, "role"):
                 role = _normalize_role(item.role)
                 raw = item.content if hasattr(item, "content") else ""
                 msg: dict = {"role": role, "content": _resolve_content(raw)}
+                reasoning = getattr(item, "reasoning_content", None) or getattr(
+                    item, "reasoning", None
+                )
+                if role == "assistant" and reasoning:
+                    msg["reasoning_content"] = reasoning
                 if hasattr(item, "tool_calls") and item.tool_calls:
                     msg["tool_calls"] = (
                         item.tool_calls
@@ -14680,6 +14719,14 @@ def _responses_input_to_messages(
 
         item_type = item.get("type", "")
 
+        # Responses output reasoning items are valid multi-turn input.  Keep
+        # their text pending until the following assistant function_call or
+        # output_text item so native templates receive one correctly ordered
+        # assistant turn with ``reasoning_content``.
+        if item_type in _RESPONSES_REASONING_ITEM_TYPES:
+            pending_reasoning_parts.extend(_responses_reasoning_texts(item))
+            continue
+
         # function_call → assistant message with single tool_call
         if item_type == "function_call":
             call_id = item.get("call_id", f"call_{uuid.uuid4().hex[:8]}")
@@ -14693,27 +14740,29 @@ def _responses_input_to_messages(
                     args_parsed = {}
             else:
                 args_parsed = args_raw if args_raw else {}
-            messages.append(
-                {
-                    "role": "assistant",
-                    # Tool-call-only assistant turns are valid Responses/OpenAI
-                    # history anchors. Use an empty string instead of None:
-                    # strict templates such as Mistral 4 accept the tool_calls
-                    # but later evaluate `message['content'] | length`, which
-                    # crashes on None.
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {
-                                "name": item.get("name", ""),
-                                "arguments": args_parsed,
-                            },
-                        }
-                    ],
-                }
-            )
+            message = {
+                "role": "assistant",
+                # Tool-call-only assistant turns are valid Responses/OpenAI
+                # history anchors. Use an empty string instead of None:
+                # strict templates such as Mistral 4 accept the tool_calls
+                # but later evaluate `message['content'] | length`, which
+                # crashes on None.
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": item.get("name", ""),
+                            "arguments": args_parsed,
+                        },
+                    }
+                ],
+            }
+            reasoning = _take_pending_reasoning()
+            if reasoning:
+                message["reasoning_content"] = reasoning
+            messages.append(message)
             continue
 
         # function_call_output → tool message with result
@@ -14734,15 +14783,28 @@ def _responses_input_to_messages(
         # answer/context after a tool round.
         if item_type == "output_text":
             text = item.get("text", "")
-            if text:
-                messages.append({"role": "assistant", "content": text})
+            reasoning = _take_pending_reasoning()
+            if text or reasoning:
+                message = {"role": "assistant", "content": text}
+                if reasoning:
+                    message["reasoning_content"] = reasoning
+                messages.append(message)
             continue
 
         # message type with content parts
         if item_type == "message":
             role = _normalize_role(item.get("role", "user"))
             content = _resolve_content(item.get("content", ""))
-            messages.append({"role": role, "content": content})
+            message = {"role": role, "content": content}
+            if role == "assistant":
+                reasoning = (
+                    item.get("reasoning_content")
+                    or item.get("reasoning")
+                    or _take_pending_reasoning()
+                )
+                if reasoning:
+                    message["reasoning_content"] = reasoning
+            messages.append(message)
         # Standard role-based message (no type field, or type is not a special one)
         elif "role" in item:
             role = _normalize_role(item.get("role", "user"))
@@ -14760,17 +14822,43 @@ def _responses_input_to_messages(
                 _assistant_content = item.get("content")
                 if _assistant_content is None:
                     _assistant_content = ""
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": _assistant_content,
-                        "tool_calls": item["tool_calls"],
-                    }
+                message = {
+                    "role": "assistant",
+                    "content": _assistant_content,
+                    "tool_calls": item["tool_calls"],
+                }
+                reasoning = (
+                    item.get("reasoning_content")
+                    or item.get("reasoning")
+                    or _take_pending_reasoning()
                 )
+                if reasoning:
+                    message["reasoning_content"] = reasoning
+                messages.append(message)
             else:
                 content = _resolve_content(item.get("content", ""))
-                messages.append({"role": role, "content": content})
+                message = {"role": role, "content": content}
+                if role == "assistant":
+                    reasoning = (
+                        item.get("reasoning_content")
+                        or item.get("reasoning")
+                        or _take_pending_reasoning()
+                    )
+                    if reasoning:
+                        message["reasoning_content"] = reasoning
+                messages.append(message)
         # Skip unknown item types (e.g. reasoning, web_search_call, etc.)
+
+    if pending_reasoning_parts:
+        # Preserve a trailing reasoning-only input item as a completed
+        # assistant turn instead of silently collapsing user→user history.
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": _take_pending_reasoning(),
+            }
+        )
 
     # Responses clients may send a previous response as function_call /
     # function_call_output items without also replaying the original user

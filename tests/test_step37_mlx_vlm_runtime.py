@@ -446,6 +446,55 @@ def test_step37_processor_emits_patch_pixel_values_for_wide_images():
     assert "<patch_start>" in batch["input_text"][0]
 
 
+def test_step37_model_normalizes_numpy_media_tensors_at_runtime_boundary():
+    import mlx.core as mx
+    import numpy as np
+
+    from vmlx_engine.models.step3p7_mlx_vlm import Model, ModelConfig
+
+    model = Model(
+        ModelConfig.from_dict(
+            {
+                "text_config": {
+                    "model_type": "step3p5",
+                    "hidden_size": 8,
+                    "num_hidden_layers": 1,
+                    "vocab_size": 16,
+                    "num_attention_heads": 2,
+                    "num_attention_groups": 1,
+                    "head_dim": 4,
+                    "intermediate_size": 16,
+                },
+                "vision_config": {
+                    "width": 4,
+                    "layers": 0,
+                    "heads": 1,
+                    "num_channels": 3,
+                    "patch_size": 2,
+                    "image_size": 4,
+                    "use_abs_posemb": False,
+                    "use_cls_token": False,
+                    "use_rope2d": False,
+                    "mlp_ratio": 2,
+                    "hidden_act": "gelu",
+                },
+                "projector_config": {"hidden_size": 16, "text_hidden_size": 8},
+            }
+        )
+    )
+    parsed = model._parse_and_validate_image_input(
+        pixel_values=np.zeros((1, 3, 4, 4), dtype=np.float32),
+        patch_pixel_values=np.zeros((2, 3, 4, 4), dtype=np.float32),
+        num_patches=[2],
+    )
+
+    assert parsed is not None
+    assert isinstance(parsed["pixel_values"], mx.array)
+    assert isinstance(parsed["patch_pixel_values"], mx.array)
+    assert parsed["pixel_values"].shape == (1, 3, 4, 4)
+    assert parsed["patch_pixel_values"].shape == (2, 3, 4, 4)
+
+
 def test_step37_model_sanitize_keeps_language_vision_and_projector_weights():
     from vmlx_engine.models.step3p7_mlx_vlm import Model, ModelConfig
 

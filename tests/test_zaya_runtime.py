@@ -1983,7 +1983,7 @@ def test_non_qwen_mllm_media_paged_store_fails_closed_without_unsafe_ack(monkeyp
     assert scheduler.block_aware_cache.stores == []
 
 
-def test_qwen_and_gemma_media_prefix_cache_default_on_and_respect_explicit_off(
+def test_qwen_gemma_and_step_media_prefix_cache_default_on_and_respect_explicit_off(
     monkeypatch,
 ):
     """Cleared media families use their clean media boundary unless disabled."""
@@ -2018,13 +2018,39 @@ def test_qwen_and_gemma_media_prefix_cache_default_on_and_respect_explicit_off(
     scheduler.batch_generator._model_type = "gemma4"
     assert scheduler._mllm_media_prefix_cache_allowed(request, [10, 258880, 11])
 
+    generator._model_type = "step3p7"
+    generator._media_placeholder_token_ids_cache = {128001}
+    assert generator._media_prefix_cache_allowed(request, [10, 128001, 11])
+
+    scheduler.batch_generator._model_type = "step3p7"
+    assert scheduler._mllm_media_prefix_cache_allowed(request, [10, 128001, 11])
+
     monkeypatch.setenv("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "off")
-    assert not generator._media_prefix_cache_allowed(request, [10, 248056, 11])
-    assert not scheduler._mllm_media_prefix_cache_allowed(request, [10, 248056, 11])
+    for model_type, media_tokens in (
+        ("qwen3_5", {248056, 248057}),
+        ("gemma4", {258880, 258884}),
+        ("step3p7", {128001}),
+    ):
+        media_token = next(iter(media_tokens))
+        generator._model_type = model_type
+        generator._media_placeholder_token_ids_cache = media_tokens
+        scheduler.batch_generator._model_type = model_type
+        assert not generator._media_prefix_cache_allowed(
+            request, [10, media_token, 11]
+        )
+        assert not scheduler._mllm_media_prefix_cache_allowed(
+            request, [10, media_token, 11]
+        )
 
 
-def test_gemma4_media_mixed_swa_store_uses_captured_vision_boundary(monkeypatch):
-    """Gemma must store its media N-1 cache, never text-only re-prefill it."""
+@pytest.mark.parametrize(
+    ("model_type", "media_token"),
+    (("gemma4", 258880), ("step3p7", 128001)),
+)
+def test_mixed_swa_media_store_uses_captured_vision_boundary(
+    monkeypatch, model_type, media_token
+):
+    """Gemma/Step must store media N-1, never text-only re-prefill it."""
 
     from unittest.mock import MagicMock
 
@@ -2060,7 +2086,7 @@ def test_gemma4_media_mixed_swa_store_uses_captured_vision_boundary(monkeypatch)
         def release_request_refs(self, block_table):
             pass
 
-    media_key = {"mllm_media": "sha256:gemma-image-a"}
+    media_key = {"mllm_media": "sha256:mixed-image-a"}
     captured = [RotatingKVCache(), "full-attention-tq"]
     clean_text_prefill = MagicMock(return_value=["unsafe-text-only-cache"])
     scheduler = MLLMScheduler.__new__(MLLMScheduler)
@@ -2071,27 +2097,27 @@ def test_gemma4_media_mixed_swa_store_uses_captured_vision_boundary(monkeypatch)
     scheduler.disk_cache = None
     scheduler.batch_generator = SimpleNamespace(
         stop_tokens=set(),
-        _model_type="gemma4",
+        _model_type=model_type,
         _tight_memory_prefill_drain=False,
         _prefill_for_clean_path_dependent_cache=clean_text_prefill,
     )
     scheduler.stop_tokens = set()
     scheduler.running = {
-        "gemma4-media": SimpleNamespace(
-            request_id="gemma4-media",
+        "mixed-media": SimpleNamespace(
+            request_id="mixed-media",
             images=["data:image/png;base64,AAAA"],
             videos=None,
             _cache_extra_keys=media_key,
             _bypass_prefix_cache=False,
             _cached_tokens=0,
-            _extracted_tokens=[10, 258880, 11, 12],
+            _extracted_tokens=[10, media_token, 11, 12],
             _extracted_cache=lambda: captured,
             _added_stop_tokens=set(),
             num_output_tokens=1,
         )
     }
-    scheduler.request_id_to_uid = {"gemma4-media": 3}
-    scheduler.uid_to_request_id = {3: "gemma4-media"}
+    scheduler.request_id_to_uid = {"mixed-media": 3}
+    scheduler.uid_to_request_id = {3: "mixed-media"}
     scheduler.requests = dict(scheduler.running)
     scheduler.finished_req_ids = set()
     scheduler._is_hybrid = False
@@ -2106,13 +2132,13 @@ def test_gemma4_media_mixed_swa_store_uses_captured_vision_boundary(monkeypatch)
     ]
     monkeypatch.delenv("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", raising=False)
 
-    scheduler._cleanup_finished({"gemma4-media"})
+    scheduler._cleanup_finished({"mixed-media"})
 
     clean_text_prefill.assert_not_called()
     assert len(scheduler.block_aware_cache.stores) == 1
     request_id, tokens, states, side_key = scheduler.block_aware_cache.stores[0]
-    assert request_id == "gemma4-media"
-    assert tokens == [10, 258880, 11]
+    assert request_id == "mixed-media"
+    assert tokens == [10, media_token, 11]
     assert [state["state"] for state in states] == captured
     assert side_key == media_key
 

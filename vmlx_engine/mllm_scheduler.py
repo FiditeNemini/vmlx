@@ -1032,12 +1032,13 @@ class MLLMScheduler:
     ) -> bool:
         """Return True when a media prompt may use media-keyed prefix cache.
 
-        Qwen3.5/3.6 VL and Gemma 4 have a clean media-conditioned N-1 cache
-        producer and are enabled by default. Gemma stores the captured native
-        rotating-SWA plus compatible full-attention boundary under the media
-        side-key. Other families retain the historical double opt-in until they
-        have equivalent typed-cache proof. ZAYA CCA remains excluded because
-        its current clean store path is text-only.
+        Qwen3.5/3.6 VL, Gemma 4, and Step 3.7 have a clean
+        media-conditioned N-1 cache producer and are enabled by default. Gemma
+        and Step store captured native rotating-SWA plus compatible
+        full-attention boundaries under the media side-key. Other families
+        retain the historical double opt-in until they have equivalent
+        typed-cache proof. ZAYA CCA remains excluded because its current clean
+        store path is text-only.
         """
         enabled = os.environ.get("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "").strip().lower()
         if enabled in ("0", "false", "no", "off"):
@@ -1057,6 +1058,7 @@ class MLLMScheduler:
             "qwen3_5_vl",
             "gemma4",
             "gemma4_unified",
+            "step3p7",
         }
         if not family_media_safe:
             if enabled not in ("1", "true", "yes", "on"):
@@ -3104,11 +3106,11 @@ class MLLMScheduler:
                                     # The batch generator captured this exact
                                     # media-conditioned N-1 boundary before
                                     # releasing pixel/video tensors. Reuse it
-                                    # directly for Gemma's mixed rotating-SWA /
-                                    # full-attention store. Calling the ordinary
-                                    # path-dependent helper here would run a
-                                    # second *text-only* prefill and silently
-                                    # discard the vision-conditioned state.
+                                    # directly for Gemma/Step mixed rotating-SWA
+                                    # plus full-attention stores. Calling the
+                                    # ordinary path-dependent helper here would
+                                    # run a second *text-only* prefill and
+                                    # silently discard vision-conditioned state.
                                     cache_blocks = list(raw)
                                     logger.info(
                                         "Using captured media-conditioned mixed-SWA "

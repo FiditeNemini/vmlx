@@ -686,12 +686,7 @@ class Step3p7Projector(nn.Module):
 
 
 class Model(nn.Module):
-    """Source-owned Step3.7 VLM module shell with real weight routing.
-
-    This does not claim live VLM generation support. It prevents the previous
-    text-only bridge behavior where vision/projector tensors were dropped
-    before a real port could use or verify them.
-    """
+    """Source-owned Step3.7 VLM runtime with real vision weight routing."""
 
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -715,6 +710,19 @@ class Model(nn.Module):
         patch_pixel_values = kwargs.pop("patch_pixel_values", None)
         num_patches = kwargs.pop("num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
+
+        # mlx-vlm's shared request processor asks model processors for NumPy
+        # tensors. The source-owned Step processor also supports native MLX
+        # tensors for direct callers, so normalize both forms at the model
+        # boundary before any mx.transpose/reshape operation. Without this,
+        # live Electron/API image requests reached the real vision stack but
+        # failed immediately in _pixels_to_nhwc with a NumPy ndarray.
+        if isinstance(pixel_values, np.ndarray):
+            pixel_values = mx.array(pixel_values)
+        if isinstance(patch_pixel_values, np.ndarray):
+            patch_pixel_values = mx.array(patch_pixel_values)
+        if isinstance(image_embeds, np.ndarray):
+            image_embeds = mx.array(image_embeds)
 
         if pixel_values is None and image_embeds is None:
             return None

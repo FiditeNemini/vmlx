@@ -4895,12 +4895,13 @@ class MLLMBatchGenerator:
     ) -> bool:
         """Return True when media prompts may use media-keyed KV+SSM cache.
 
-        Qwen3.5/3.6 VL and Gemma 4 own a clean media-conditioned N-1 prefill
-        path and are enabled by default. Gemma's captured boundary includes its
-        native rotating-SWA state plus the compatible full-attention TQ slots.
-        Other families retain the old double opt-in until their cache topology
-        has equivalent source and live proof. An explicit false value remains
-        a kill switch for every default-enabled family.
+        Qwen3.5/3.6 VL, Gemma 4, and Step 3.7 own a clean
+        media-conditioned N-1 prefill path and are enabled by default. Gemma
+        and Step captured boundaries include native rotating-SWA state plus
+        compatible full-attention TQ slots. Other families retain the old
+        double opt-in until their cache topology has equivalent source and live
+        proof. An explicit false value remains a kill switch for every
+        default-enabled family.
         """
         enabled = os.environ.get("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "").strip().lower()
         if enabled in ("0", "false", "no", "off"):
@@ -4912,6 +4913,7 @@ class MLLMBatchGenerator:
             "qwen3_5_vl",
             "gemma4",
             "gemma4_unified",
+            "step3p7",
         }
         if not family_media_safe:
             if enabled not in ("1", "true", "yes", "on"):

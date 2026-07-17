@@ -4871,15 +4871,30 @@ class MLLMBatchGenerator:
         request: "MLLMBatchRequest",
         token_ids: Optional[List[int]] = None,
     ) -> bool:
-        """Return True when media prompts may use media-keyed KV+SSM cache."""
-        enabled = os.environ.get("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "").strip()
-        if enabled not in ("1", "true", "True", "yes", "on"):
+        """Return True when media prompts may use media-keyed KV+SSM cache.
+
+        Qwen3.5/3.6 VL owns a clean media-conditioned N-1 prefill path and is
+        enabled by default. Other families retain the old double opt-in until
+        their cache topology has equivalent source and live proof. An explicit
+        false value is a kill switch even for Qwen.
+        """
+        enabled = os.environ.get("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "").strip().lower()
+        if enabled in ("0", "false", "no", "off"):
             return False
-        unsafe_ack = os.environ.get(
-            "VMLINUX_MLLM_MEDIA_PREFIX_CACHE_UNSAFE_ACK", ""
-        ).strip()
-        if unsafe_ack not in ("1", "true", "True", "yes", "on"):
-            return False
+        model_type = str(getattr(self, "_model_type", "") or "").lower()
+        qwen_media_safe = model_type in {
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_vl",
+        }
+        if not qwen_media_safe:
+            if enabled not in ("1", "true", "yes", "on"):
+                return False
+            unsafe_ack = os.environ.get(
+                "VMLINUX_MLLM_MEDIA_PREFIX_CACHE_UNSAFE_ACK", ""
+            ).strip().lower()
+            if unsafe_ack not in ("1", "true", "yes", "on"):
+                return False
         if getattr(request, "_bypass_prefix_cache", False):
             return False
         if not getattr(request, "_cache_extra_keys", None):
@@ -6346,6 +6361,35 @@ class MLLMBatchGenerator:
                             trace.set(
                                 cache_after_forward=_cache_layer_debug_summary(req_cache)
                             )
+
+                    # A media prefix cannot be reconstructed later from token
+                    # ids alone. Build its clean N-1 cache now, while the
+                    # request still owns pixel/video tensors and grids. The
+                    # older deferred call ran after those fields were cleared,
+                    # silently turning the supposedly media-conditioned cache
+                    # into a text-only prefill. Do this only on a cold request;
+                    # a restored media prefix already owns the clean boundary.
+                    _media_tokens = list(
+                        getattr(req, "_original_token_ids", None) or []
+                    )
+                    if (
+                        int(getattr(req, "_cached_tokens", 0) or 0) == 0
+                        and len(_media_tokens) > 1
+                        and self._media_prefix_cache_allowed(req, _media_tokens)
+                    ):
+                        clean_media_cache = (
+                            self._prefill_for_clean_media_prefix_cache(
+                                req, _media_tokens[:-1]
+                            )
+                        )
+                        if clean_media_cache is not None:
+                            req._media_clean_prefix_cache = clean_media_cache  # type: ignore[attr-defined]
+                            logger.info(
+                                "MLLM media prefix cache: captured clean media "
+                                "N-1 boundary for %s (%d tokens) before tensor release",
+                                req.request_id,
+                                len(_media_tokens) - 1,
+                            )
                 except ValueError as ve:
                     if trace is not None:
                         trace.stop("forward")
@@ -6538,6 +6582,73 @@ class MLLMBatchGenerator:
                         if _media_cache_allowed_for_ssm
                         else None
                     )
+                    if _media_cache_allowed_for_ssm:
+                        # The clean N-1 media cache was captured immediately
+                        # after the real media forward, before pixel/grid tensor
+                        # release. Use that same boundary for both attention KV
+                        # and native SSM/GDN companion state. Never fall through
+                        # to text-only async rederive for a media prompt.
+                        clean_media_cache = getattr(
+                            req, "_media_clean_prefix_cache", None
+                        )
+                        if clean_media_cache is None:
+                            if int(getattr(req, "_cached_tokens", 0) or 0) > 0:
+                                logger.info(
+                                    "MLLM media prefix cache: restored media-keyed "
+                                    "KV+SSM boundary for %s; skipping redundant "
+                                    "clean-boundary store",
+                                    req.request_id,
+                                )
+                            else:
+                                logger.info(
+                                    "MLLM media prefix cache: no clean media boundary "
+                                    "for %s; full prefill will remain required",
+                                    req.request_id,
+                                )
+                            continue
+                        clean_ssm_layers: List[Any] = []
+                        kv_set = set(self._hybrid_kv_positions or [])
+                        for layer_idx, cache_obj in enumerate(clean_media_cache):
+                            if layer_idx in kv_set:
+                                continue
+                            if hasattr(cache_obj, "cache") and isinstance(
+                                cache_obj.cache, list
+                            ):
+                                from copy import deepcopy
+
+                                cloned = deepcopy(cache_obj)
+                                cloned.cache = [
+                                    mx.contiguous(arr) if arr is not None else None
+                                    for arr in cache_obj.cache
+                                ]
+                                clean_ssm_layers.append(cloned)
+                            else:
+                                clean_ssm_layers.append(cache_obj)
+                        all_tokens = list(
+                            getattr(req, "_original_token_ids", None)
+                            or input_ids_list[i]
+                        )
+                        prompt_len = (
+                            len(all_tokens) - 1
+                            if len(all_tokens) > 1
+                            else len(all_tokens)
+                        )
+                        if clean_ssm_layers and prompt_len > 0:
+                            self._ssm_state_cache.store(
+                                all_tokens[:prompt_len],
+                                prompt_len,
+                                clean_ssm_layers,
+                                is_complete=True,
+                                cache_extra_keys=_ssm_extra_keys,
+                            )
+                            logger.info(
+                                "MLLM media prefix cache: stored clean media SSM "
+                                "companion for %s (%d layers, %d-token key)",
+                                req.request_id,
+                                len(clean_ssm_layers),
+                                prompt_len,
+                            )
+                        continue
                     # vmlx#109: if capture-during-prefill already snapshotted
                     # a clean SSM state at the gpl boundary, store it now
                     # with is_complete=True and skip the deferred re-derive
@@ -6625,65 +6736,6 @@ class MLLMBatchGenerator:
                                         cache_extra_keys=_ssm_extra_keys,
                                     )
                                 else:
-                                    if _media_cache_allowed_for_ssm:
-                                        clean_media_cache = (
-                                            self._prefill_for_clean_media_prefix_cache(
-                                                req, list(all_tokens[:prompt_len])
-                                            )
-                                        )
-                                        if clean_media_cache is not None:
-                                            req._media_clean_prefix_cache = clean_media_cache  # type: ignore[attr-defined]
-                                            kv_set = set(self._hybrid_kv_positions or [])
-                                            clean_ssm_layers: List[Any] = []
-                                            for layer_idx, c in enumerate(clean_media_cache):
-                                                if layer_idx in kv_set:
-                                                    continue
-                                                if hasattr(c, "cache") and isinstance(c.cache, list):
-                                                    from copy import deepcopy
-
-                                                    cloned = deepcopy(c)
-                                                    cloned.cache = [
-                                                        mx.contiguous(a) if a is not None else None
-                                                        for a in c.cache
-                                                    ]
-                                                    clean_ssm_layers.append(cloned)
-                                                else:
-                                                    clean_ssm_layers.append(c)
-                                            if clean_ssm_layers:
-                                                self._ssm_state_cache.store(
-                                                    list(all_tokens[:prompt_len]),
-                                                    prompt_len,
-                                                    clean_ssm_layers,
-                                                    is_complete=True,
-                                                    cache_extra_keys=_ssm_extra_keys,
-                                                )
-                                                logger.info(
-                                                    "MLLM media prefix cache: stored clean "
-                                                    "media SSM companion for %s "
-                                                    "(%d layers, %d-token key)",
-                                                    req.request_id,
-                                                    len(clean_ssm_layers),
-                                                    prompt_len,
-                                                )
-                                        if clean_media_cache is not None:
-                                            logger.info(
-                                                "MLLM media prefix cache: clean media "
-                                                "prefix cache prepared for %s (%d-token key)",
-                                                req.request_id,
-                                                prompt_len,
-                                            )
-                                        # Never queue text-only rederive for media prompts:
-                                        # it would rebuild SSM without pixel/video embeddings.
-                                        if clean_media_cache is not None:
-                                            pass
-                                        else:
-                                            logger.info(
-                                                "MLLM media prefix cache: no clean media "
-                                                "prefix cache for %s; media row will remain "
-                                                "KV-only/full-prefill on repeat",
-                                                req.request_id,
-                                            )
-                                        continue
                                     # gpl>0 (thinking models): queue deferred
                                     # clean re-prefill. Queue the FIRST
                                     # prompt_len tokens (not the full
@@ -8268,14 +8320,23 @@ class MLLMBatchGenerator:
         """Run a media-conditioned clean prefill for a media prefix key.
 
         Unlike `_prefill_for_clean_path_dependent_cache`, this keeps the VLM
-        wrapper and pixel/video tensors in the forward path. It is used only
-        for explicit media-prefix-cache experiments because it adds an extra
-        prefill on the first request but is the minimal safe way to create SSM
+        wrapper and pixel/video tensors in the forward path. It adds an extra
+        prefill on a cold request but is the minimal safe way to create SSM
         state at the same media-keyed N-1 boundary as the paged KV blocks.
         """
         if not tokens or self.language_model is None:
             return None
+        _saved_pos_state: Dict[str, Any] = {}
         try:
+            # Qwen VL keeps request-local RoPE state on the language model.
+            # The auxiliary N-1 prefill must start clean, then restore the
+            # original full-prompt state so the active request's decode step
+            # continues from its real media prefill rather than the shorter
+            # cache-building pass.
+            for attr in ("_rope_deltas", "_position_ids"):
+                if hasattr(self.language_model, attr):
+                    _saved_pos_state[attr] = getattr(self.language_model, attr)
+                    setattr(self.language_model, attr, None)
             fresh_cache = (
                 self.language_model.make_cache()
                 if hasattr(self.language_model, "make_cache")
@@ -8297,7 +8358,7 @@ class MLLMBatchGenerator:
                 except Exception:
                     clean_req.attention_mask = request.attention_mask
             clean_req.vision_encoded = False
-            _ = self._run_vision_encoding(clean_req, cache=fresh_cache)
+            logits = self._run_vision_encoding(clean_req, cache=fresh_cache)
             materialize: List[Any] = []
 
             def _collect_cache_arrays(cache_obj: Any) -> None:
@@ -8327,6 +8388,7 @@ class MLLMBatchGenerator:
                         mx.synchronize()
                     else:
                         raise
+            del logits
             return fresh_cache
         except Exception as ex:
             logger.warning(
@@ -8335,6 +8397,12 @@ class MLLMBatchGenerator:
                 ex,
             )
             return None
+        finally:
+            for attr, value in _saved_pos_state.items():
+                try:
+                    setattr(self.language_model, attr, value)
+                except Exception:
+                    pass
 
     def run_idle_rederive(self) -> bool:
         """Process one SSM rederive task from the queue (scheduler idle tick).

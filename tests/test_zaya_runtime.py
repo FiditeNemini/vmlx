@@ -1745,6 +1745,12 @@ def test_zaya_mllm_paged_store_rederives_clean_prompt_boundary():
         def detach_request(self, request_id):
             self.detached.append(request_id)
 
+        def get_block_table(self, request_id):
+            return None
+
+        def release_request_refs(self, block_table):
+            pass
+
     class FakeBatchGenerator:
         def __init__(self):
             self.stop_tokens = set()
@@ -1835,6 +1841,12 @@ def test_zaya_mllm_media_paged_store_skips_prefix_cache():
         def detach_request(self, request_id):
             self.detached.append(request_id)
 
+        def get_block_table(self, request_id):
+            return None
+
+        def release_request_refs(self, block_table):
+            pass
+
     class FakePromptDiskCache:
         def __init__(self):
             self.stores = []
@@ -1894,8 +1906,8 @@ def test_zaya_mllm_media_paged_store_skips_prefix_cache():
     assert scheduler.disk_cache.stores == []
 
 
-def test_qwen_mllm_media_paged_store_fails_closed_without_unsafe_ack(monkeypatch):
-    """The media cache flag alone must not enable the incoherent hit path."""
+def test_non_qwen_mllm_media_paged_store_fails_closed_without_unsafe_ack(monkeypatch):
+    """Unknown media cache families retain the double opt-in safety gate."""
 
     from vmlx_engine.mllm_scheduler import MLLMScheduler
 
@@ -1921,6 +1933,12 @@ def test_qwen_mllm_media_paged_store_fails_closed_without_unsafe_ack(monkeypatch
 
         def detach_request(self, request_id):
             self.detached.append(request_id)
+
+        def get_block_table(self, request_id):
+            return None
+
+        def release_request_refs(self, block_table):
+            pass
 
     media_key = {"mllm_media": "sha256:blue"}
     scheduler = MLLMScheduler.__new__(MLLMScheduler)
@@ -1965,8 +1983,89 @@ def test_qwen_mllm_media_paged_store_fails_closed_without_unsafe_ack(monkeypatch
     assert scheduler.block_aware_cache.stores == []
 
 
-def test_qwen_mllm_media_paged_store_uses_media_side_key_with_unsafe_ack(monkeypatch):
-    """The broken media-cache experiment is doubly gated after live negative proof."""
+def test_qwen_media_prefix_cache_defaults_on_and_respects_explicit_off(monkeypatch):
+    """Config-derived Qwen VL uses its clean media boundary unless disabled."""
+
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+    from vmlx_engine.mllm_scheduler import MLLMScheduler
+
+    request = SimpleNamespace(
+        images=["data:image/png;base64,AAAA"],
+        videos=None,
+        _cache_extra_keys={"mllm_media": "sha256:blue"},
+        _bypass_prefix_cache=False,
+    )
+
+    generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    generator._model_type = "qwen3_5"
+    generator._media_placeholder_token_ids_cache = {248056, 248057}
+    monkeypatch.delenv("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", raising=False)
+    monkeypatch.delenv("VMLINUX_MLLM_MEDIA_PREFIX_CACHE_UNSAFE_ACK", raising=False)
+    assert generator._media_prefix_cache_allowed(request, [10, 248056, 11])
+
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler.batch_generator = SimpleNamespace(_model_type="qwen3_5")
+    scheduler._uses_zaya_cache = False
+    scheduler._mllm_request_has_media_cache_context = lambda _request, _tokens: True
+    assert scheduler._mllm_media_prefix_cache_allowed(request, [10, 248056, 11])
+
+    monkeypatch.setenv("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "off")
+    assert not generator._media_prefix_cache_allowed(request, [10, 248056, 11])
+    assert not scheduler._mllm_media_prefix_cache_allowed(request, [10, 248056, 11])
+
+
+def test_clean_media_prefill_keeps_pixels_and_restores_qwen_position_state():
+    """The N-1 cache pass must be media-conditioned and decode-state neutral."""
+
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    class FakeLanguageModel:
+        layers = []
+        _rope_deltas = "main-rope"
+        _position_ids = "main-position"
+
+        def make_cache(self):
+            return []
+
+    generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    generator.language_model = FakeLanguageModel()
+    pixel_marker = object()
+    request = SimpleNamespace(
+        request_id="qwen-media-clean",
+        pixel_values=pixel_marker,
+        video_pixel_values=None,
+        image_grid_thw=object(),
+        video_grid_thw=None,
+        attention_mask=None,
+        extra_kwargs={},
+        vision_encoded=True,
+    )
+    observed = {}
+
+    def fake_forward(clean_request, cache):
+        observed["pixel_values"] = clean_request.pixel_values
+        observed["tokens"] = clean_request.input_ids.tolist()
+        observed["rope_deltas"] = generator.language_model._rope_deltas
+        observed["position_ids"] = generator.language_model._position_ids
+        assert cache == []
+        return mx.array([[0.0]])
+
+    generator._run_vision_encoding = fake_forward
+    result = generator._prefill_for_clean_media_prefix_cache(request, [7, 8, 9])
+
+    assert result == []
+    assert observed == {
+        "pixel_values": pixel_marker,
+        "tokens": [[7, 8, 9]],
+        "rope_deltas": None,
+        "position_ids": None,
+    }
+    assert generator.language_model._rope_deltas == "main-rope"
+    assert generator.language_model._position_ids == "main-position"
+
+
+def test_nondefault_mllm_media_paged_store_uses_side_key_with_unsafe_ack(monkeypatch):
+    """Uncleared families can still opt into the historical diagnostic path."""
 
     from vmlx_engine.mllm_scheduler import MLLMScheduler
 
@@ -1981,6 +2080,7 @@ def test_qwen_mllm_media_paged_store_uses_media_side_key_with_unsafe_ack(monkeyp
             token_ids,
             cache_states,
             cache_extra_keys=None,
+            **kwargs,
         ):
             self.stores.append(
                 (request_id, list(token_ids), list(cache_states), cache_extra_keys)
@@ -1988,6 +2088,12 @@ def test_qwen_mllm_media_paged_store_uses_media_side_key_with_unsafe_ack(monkeyp
 
     class FakePagedCacheManager:
         def detach_request(self, request_id):
+            pass
+
+        def get_block_table(self, request_id):
+            return None
+
+        def release_request_refs(self, block_table):
             pass
 
     media_key = {"mllm_media": "sha256:blue"}

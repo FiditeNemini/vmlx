@@ -1032,22 +1032,36 @@ class MLLMScheduler:
     ) -> bool:
         """Return True when a media prompt may use media-keyed prefix cache.
 
-        This is intentionally opt-in while Qwen3.6 VL cache gates are being
-        expanded. ZAYA CCA remains excluded: its clean store path re-prefills
-        from text tokens and would lose image-conditioned state.
+        Qwen3.5/3.6 VL has a clean media-conditioned N-1 cache producer and is
+        enabled by default. Other families retain the historical double opt-in
+        until they have equivalent typed-cache proof. ZAYA CCA remains
+        excluded because its current clean store path is text-only.
         """
-        enabled = os.environ.get("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "").strip()
-        if enabled not in ("1", "true", "True", "yes", "on"):
-            return False
-        unsafe_ack = os.environ.get(
-            "VMLINUX_MLLM_MEDIA_PREFIX_CACHE_UNSAFE_ACK", ""
-        ).strip()
-        if unsafe_ack not in ("1", "true", "True", "yes", "on"):
+        enabled = os.environ.get("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "").strip().lower()
+        if enabled in ("0", "false", "no", "off"):
             return False
         if request is None or getattr(request, "_bypass_prefix_cache", False):
             return False
         if getattr(self, "_uses_zaya_cache", False):
             return False
+        model_type = str(
+            getattr(getattr(self, "batch_generator", None), "_model_type", "")
+            or getattr(self, "_model_type", "")
+            or ""
+        ).lower()
+        qwen_media_safe = model_type in {
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_vl",
+        }
+        if not qwen_media_safe:
+            if enabled not in ("1", "true", "yes", "on"):
+                return False
+            unsafe_ack = os.environ.get(
+                "VMLINUX_MLLM_MEDIA_PREFIX_CACHE_UNSAFE_ACK", ""
+            ).strip().lower()
+            if unsafe_ack not in ("1", "true", "yes", "on"):
+                return False
         extra = getattr(request, "_cache_extra_keys", None)
         if not extra:
             return False

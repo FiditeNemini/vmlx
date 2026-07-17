@@ -189,6 +189,35 @@ def test_uncalibrated_laguna_full_kv_auto_uses_tq8_on_all_attention_slots():
     assert resolved["auto_policy"] == "uncalibrated_full_kv_storage_tq8"
 
 
+def test_uncalibrated_hy3_full_kv_auto_uses_tq4_on_all_attention_slots():
+    from vmlx_engine.utils.turboquant_config import (
+        apply_uncalibrated_auto_tq_policy,
+    )
+
+    layer_types = ["attention"] * 80
+    resolved = apply_uncalibrated_auto_tq_policy(
+        {
+            "enabled": True,
+            "default_key_bits": 3,
+            "default_value_bits": 3,
+            "critical_key_bits": 4,
+            "critical_value_bits": 4,
+            "seed": 42,
+        },
+        {"model_type": "hy_v3", "num_hidden_layers": 80},
+        layer_types,
+    )
+
+    assert resolved["default_key_bits"] == 4
+    assert resolved["default_value_bits"] == 4
+    assert resolved["critical_key_bits"] == 4
+    assert resolved["critical_value_bits"] == 4
+    assert resolved["critical_layers"] == list(range(80))
+    assert resolved["sink_tokens"] == 0
+    assert resolved["compress_after"] == 0
+    assert resolved["auto_policy"] == "hy3_full_kv_storage_tq4"
+
+
 def test_tq_codec_signature_separates_bits_and_prefix_cache_namespaces():
     from vmlx_engine.prefix_cache import compute_model_cache_key
     from vmlx_engine.utils.turboquant_config import (
@@ -268,6 +297,16 @@ class FakeMixedSwaModel:
         from mlx_lm.models.cache import KVCache, RotatingKVCache
 
         return [RotatingKVCache(max_size=1024), KVCache()]
+
+
+class FakeFullKVModel:
+    def __init__(self, n_layers=4):
+        self.layers = [object()] * n_layers
+
+    def make_cache(self):
+        from mlx_lm.models.cache import KVCache
+
+        return [KVCache() for _ in self.layers]
 
 
 def _write_qwen36_hybrid_config(path):
@@ -432,6 +471,80 @@ def test_jang_bonsai_auto_uses_tq8_only_on_attention_slots(monkeypatch):
             assert layer.sink_tokens == 0
         else:
             assert isinstance(layer, NativeGatedDeltaState)
+
+
+def test_jang_hy3_auto_uses_tq4_on_all_attention_slots(monkeypatch):
+    from vmlx_engine.utils.jang_loader import _patch_turboquant_make_cache
+
+    model = FakeFullKVModel(n_layers=4)
+    model_config = {
+        "model_type": "hy_v3",
+        "num_hidden_layers": 4,
+        "head_dim": 128,
+    }
+    monkeypatch.setenv("VMLX_FORCE_TQ_AUTO", "1")
+    monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
+    monkeypatch.delenv("VMLINUX_TQ_COMPRESS_AFTER", raising=False)
+
+    _patch_turboquant_make_cache(model, {}, model_config)
+
+    cache = model.make_cache()
+    assert [type(slot).__name__ for slot in cache] == ["TurboQuantKVCache"] * 4
+    assert getattr(model.make_cache, "_vmlx_tq_auto_policy") == (
+        "hy3_full_kv_storage_tq4"
+    )
+    assert all(layer.key_bits == 4 for layer in cache)
+    assert all(layer.value_bits == 4 for layer in cache)
+
+
+def test_turboquant_batch_cache_deepcopy_preserves_dtype_and_array_ownership():
+    import copy
+
+    import mlx.core as mx
+
+    from vmlx_engine.utils.turboquant_config import (
+        TurboQuantConfig,
+        make_turboquant_cache,
+    )
+
+    config = TurboQuantConfig(
+        n_layers=1,
+        default_key_bits=4,
+        default_value_bits=4,
+        critical_key_bits=4,
+        critical_value_bits=4,
+        critical_layers=[0],
+        sink_tokens=0,
+        seed=42,
+        compress_after=0,
+    )
+    cache = make_turboquant_cache(
+        config,
+        n_layers=1,
+        key_dims=[8],
+        value_dims=[8],
+        layer_types=["attention"],
+    )[0]
+    cache.prepare(left_padding=[0])
+    keys = mx.arange(8, dtype=mx.float16).reshape(1, 1, 1, 8)
+    values = (keys + 10).astype(mx.bfloat16)
+    cache.update_and_fetch(keys, values)
+
+    clone = copy.deepcopy([cache])[0]
+
+    assert clone is not cache
+    assert clone._vmlx_tq_key_dtype == mx.float16
+    assert clone._vmlx_tq_value_dtype == mx.bfloat16
+    assert clone.keys is not cache.keys
+    assert clone.values is not cache.values
+    clone.keys[..., 0, 0] = 99
+    mx.eval(cache.keys, clone.keys)
+    assert float(cache.keys[..., 0, 0].item()) == 0.0
+    assert float(clone.keys[..., 0, 0].item()) == 99.0
+
+    clone.filter([0])
+    assert clone._idx is None
+    assert cache._idx == 1
 
 
 def test_native_cache_status_reports_hybrid_live_attention_tq():

@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER = 0
 UNCALIBRATED_AUTO_TQ_BITS = 8
 MIXED_SWA_AUTO_TQ_BITS = 4
+HY3_FULL_KV_AUTO_TQ_BITS = 4
 # Compatibility name retained for downstream tests/imports.  The safety rule is
 # no longer Qwen-only: any bundle without model-owned TQ calibration starts at
 # loss-minimizing 8-bit storage and may opt into lower bits in jang_config.json.
@@ -92,10 +93,13 @@ def apply_uncalibrated_auto_tq_policy(
     An uncalibrated 3-bit storage round-trip is not a safe family default: it
     has caused Bonsai/Qwen tool loops and, on Laguna, a deterministic coherent
     cold -> incoherent paged+TQ warm transition.  Auto therefore keeps the
-    mid-request live transition disabled and uses an 8-bit TQ storage codec on
-    real attention KV slots.  Cumulative SSM/GatedDelta companions remain
-    native and are never assigned fake TQ slots.  A bundle-owned calibrated
-    ``turboquant`` block or explicit operator settings remain authoritative.
+    mid-request live transition disabled and uses a correctness-gated storage
+    codec on real attention KV slots. Qwen/Bonsai hybrid and otherwise
+    unproven uncalibrated families stay at 8-bit. HY3's plain full-KV runtime
+    uses a family-scoped q4 policy that remains release-gated by live restart
+    and eviction proof. Cumulative SSM/GatedDelta companions remain native and
+    are never assigned fake TQ slots. A bundle-owned calibrated ``turboquant``
+    block or explicit operator settings remain authoritative.
     """
     resolved = dict(tq_cfg)
     from .hybrid_tq_cache import classify_qwen_cache_architecture
@@ -111,6 +115,13 @@ def apply_uncalibrated_auto_tq_policy(
     if not attention_layers:
         return resolved
 
+    hy3_full_kv = bool(_model_types(model_config) & {"hy_v3", "hy3"}) and (
+        len(attention_layers) == len(layer_types)
+    )
+    storage_bits = (
+        HY3_FULL_KV_AUTO_TQ_BITS if hy3_full_kv else UNCALIBRATED_AUTO_TQ_BITS
+    )
+
     if architecture == "qwen_full_kv":
         auto_policy = "qwen_full_kv_storage_tq8"
     elif architecture in {
@@ -118,6 +129,8 @@ def apply_uncalibrated_auto_tq_policy(
         "qwen3_next_hybrid_gated_delta",
     }:
         auto_policy = "qwen_hybrid_attention_kv_storage_tq8"
+    elif hy3_full_kv:
+        auto_policy = "hy3_full_kv_storage_tq4"
     elif len(attention_layers) == len(layer_types):
         auto_policy = "uncalibrated_full_kv_storage_tq8"
     else:
@@ -125,10 +138,10 @@ def apply_uncalibrated_auto_tq_policy(
 
     resolved.update(
         {
-            "default_key_bits": UNCALIBRATED_AUTO_TQ_BITS,
-            "default_value_bits": UNCALIBRATED_AUTO_TQ_BITS,
-            "critical_key_bits": UNCALIBRATED_AUTO_TQ_BITS,
-            "critical_value_bits": UNCALIBRATED_AUTO_TQ_BITS,
+            "default_key_bits": storage_bits,
+            "default_value_bits": storage_bits,
+            "critical_key_bits": storage_bits,
+            "critical_value_bits": storage_bits,
             # Use real KV positions, not raw first/last transformer indices.
             "critical_layers": attention_layers,
             "sink_tokens": 0,
@@ -247,6 +260,43 @@ def install_turboquant_live_telemetry() -> None:
     TurboQuantKVCache._vmlx_compress_telemetry_installed = True
 
 
+def install_turboquant_batch_deepcopy() -> None:
+    """Make TQ caches independently copyable by mlx-lm BatchGenerator.
+
+    ``PromptBatch.split()`` deep-copies every cache before filtering the old and
+    new batches. MLX arrays already implement an independent deepcopy, but
+    ``mlx.core.Dtype`` deliberately does not implement Python pickling. The TQ
+    cache records the original attention dtypes after its first update, so the
+    default object deepcopy fails after prefill and the scheduler retries the
+    same request forever. Preserve immutable dtype handles by identity and
+    deepcopy every other field, including live arrays and packed state.
+    """
+    import copy
+
+    from jang_tools.turboquant.cache import TurboQuantKVCache
+
+    if getattr(TurboQuantKVCache, "_vmlx_batch_deepcopy_installed", False):
+        return
+
+    def __deepcopy__(self, memo):
+        cls = type(self)
+        clone = cls.__new__(cls)
+        memo[id(self)] = clone
+        for name, value in self.__dict__.items():
+            if (
+                type(value).__name__ == "Dtype"
+                and type(value).__module__ == "mlx.core"
+            ):
+                copied = value
+            else:
+                copied = copy.deepcopy(value, memo)
+            setattr(clone, name, copied)
+        return clone
+
+    TurboQuantKVCache.__deepcopy__ = __deepcopy__
+    TurboQuantKVCache._vmlx_batch_deepcopy_installed = True
+
+
 def resolve_compress_after(tq_cfg: dict, model_config: dict | None = None) -> int:
     """Resolve the live-encode threshold without silently widening numerics.
 
@@ -310,6 +360,7 @@ def make_turboquant_cache(
     layer_types: list[str],
 ) -> list:
     """Build native companion caches plus threshold-aware TQ attention caches."""
+    install_turboquant_batch_deepcopy()
     install_turboquant_live_telemetry()
     from jang_tools.turboquant.cache import TurboQuantKVCache
 

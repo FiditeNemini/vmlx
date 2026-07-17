@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
+  requestedExactFinalToolNames,
   requestsDirectAnswerAfterSingleTool,
   requestsNoToolCalls,
   shouldAutoContinueAfterToolUse,
@@ -70,6 +71,21 @@ describe('tool auto-continue policy', () => {
         'Call the built-in file_info tool exactly once with path panel/package.json. After its result, reply exactly B1-ELECTRON-TOOL-TEMPLATE1-DONE and nothing else.',
       ),
     ).toBe(true)
+    expect(
+      requestsDirectAnswerAfterSingleTool(
+        'First call file_info exactly once with path panel/package.json. After that result, call run_command exactly once with command pwd. Use exactly those two tools in that order. After both tool results, reply exactly B1-CURRENT-MULTI3-DONE.',
+      ),
+    ).toBe(false)
+    expect(
+      requestedExactFinalToolNames(
+        'First call file_info exactly once with path panel/package.json. After that result, call run_command exactly once with command pwd. Use exactly those two tools in that order. After both tool results, reply exactly B1-CURRENT-MULTI3-DONE.',
+      ),
+    ).toEqual(['file_info', 'run_command'])
+    expect(
+      requestsDirectAnswerAfterSingleTool(
+        'Call file_info and run_command exactly once each. After both tool results, reply exactly DONE.',
+      ),
+    ).toBe(false)
     expect(
       requestsDirectAnswerAfterSingleTool(
         'Use tools as needed, then reply exactly DONE.',
@@ -144,12 +160,16 @@ describe('tool auto-continue policy', () => {
     )
   })
 
-  it('removes tools for an explicit single-tool exact-final follow-up', () => {
+  it('retires completed tools before the exact-final follow-up', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
     const planned = source.indexOf('plannedDirectAnswerPass =')
     const followUp = source.indexOf('if (!(await sendFollowUp())) break;', planned)
 
     expect(source).toContain('requestsDirectAnswerAfterSingleTool(latestUserText)')
+    expect(source).toContain('requestedExactFinalToolNames(latestUserText)')
+    expect(source).toContain('const availableToolDefinitions = () =>')
+    expect(source).toContain('completedExactFinalTools.add(normalizedToolName)')
+    expect(source).toContain('exactFinalToolNames.every((name) =>')
     expect(source).toContain('if (!(finalAnswerRecovery || plannedDirectAnswerPass)) return')
     expect(planned).toBeGreaterThan(-1)
     expect(followUp).toBeGreaterThan(planned)
@@ -167,12 +187,14 @@ describe('tool auto-continue policy', () => {
     expect(source).not.toContain('if (gap < 5000) generationMs += gap')
   })
 
-  it('does not replace the measured live stream rate with a buffered usage burst', () => {
+  it('uses cumulative agent-loop timing without accepting a buffered usage burst', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
 
-    expect(source).toContain('const finalTps =')
-    expect(source).toContain('liveTps > 0')
-    expect(source).toContain('? liveTps')
+    expect(source).toContain('const liveTpsHistory: number[] = []')
+    expect(source).toContain('liveTpsHistory.push(liveTps)')
+    expect(source).toContain('const finalTps = selectFinalDecodeTps({')
+    expect(source).toContain('cumulativeTps: cumulativeDecodeTps')
+    expect(source).toContain('rollingTps: liveTpsHistory')
   })
 
   it('drops only superseded empty-response warnings after a successful recovery', () => {

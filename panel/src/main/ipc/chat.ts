@@ -29,6 +29,7 @@ import {
   visibleReasoningSegments,
 } from "../../shared/interleavedReasoning";
 import {
+  requestedExactFinalToolNames,
   requestsDirectAnswerAfterSingleTool,
   requestsNoToolCalls,
   shouldAutoContinueAfterToolUse,
@@ -39,6 +40,7 @@ import { dsv4OutputBudget } from "../../shared/dsv4RequestBudget";
 import { projectedMetalHeadroomChatErrorContent } from "../../shared/chatErrorDisplay";
 import { reconcileResponsesToolBufferAtStreamEnd } from "../../shared/responsesStreamRecovery";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
+import { selectFinalDecodeTps } from "../../shared/chatMetrics";
 import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
 import {
   ChatStreamServerEventError,
@@ -1408,6 +1410,11 @@ export function registerChatHandlers(
       const directAnswerAfterSingleTool =
         overrides?.builtinToolsEnabled === true &&
         requestsDirectAnswerAfterSingleTool(latestUserText);
+      const exactFinalToolNames =
+        overrides?.builtinToolsEnabled === true
+          ? requestedExactFinalToolNames(latestUserText)
+          : [];
+      const completedExactFinalTools = new Set<string>();
       const suppressGenericAgenticToolPromptForNativeTools =
         overrides?.builtinToolsEnabled === true &&
         shouldSuppressGenericAgenticPromptForNativeTools(
@@ -1718,6 +1725,13 @@ export function registerChatHandlers(
       const TPS_BUFFER_SIZE = 30;
       const tpsSnapshots: Array<[number, number]> = []; // [timestamp, relative tokenCount]
       let liveTps = 0;
+      // Keep a bounded history across tool iterations. The last rolling value
+      // can represent only a tiny final-answer tail after a long pause, while
+      // the displayed token count is cumulative across every reasoning/tool
+      // round. Final metrics need a representative stream rate, not merely the
+      // last ten tokens of the last HTTP request.
+      const liveTpsHistory: number[] = [];
+      const MAX_LIVE_TPS_SAMPLES = 512;
       let tpsTokenBase = 0; // re-anchor point for tpsSnapshots after iteration reset
       // No streaming throttle — emit every token. Renderer-side useTypewriter
       // in MessageBubble.tsx handles smooth character reveal via rAF.
@@ -1841,6 +1855,21 @@ export function registerChatHandlers(
               .filter(Boolean)
           : undefined;
 
+        const availableToolDefinitions = () =>
+          filterTools(overrides || {}, {
+            hasDirectMediaAttachments: hasMediaAttachments,
+            zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
+          }).filter(
+            (tool) => {
+              const name = tool.function.name.toLowerCase();
+              return (
+                (exactFinalToolNames.length === 0 ||
+                  exactFinalToolNames.includes(name)) &&
+                !completedExactFinalTools.has(name)
+              );
+            },
+          );
+
         // Build request body — shared between initial request and tool follow-ups
         const buildRequestBody = (): Record<string, any> => {
           const resolvedOutputBudget = dsv4OutputBudget(
@@ -1944,10 +1973,7 @@ export function registerChatHandlers(
             if (overrides?.repeatPenalty != null)
               obj.repetition_penalty = overrides.repeatPenalty;
             if (overrides?.builtinToolsEnabled) {
-              obj.tools = filterTools(overrides, {
-                hasDirectMediaAttachments: hasMediaAttachments,
-                zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
-              }).map((t) => ({
+              obj.tools = availableToolDefinitions().map((t) => ({
                 type: "function",
                 name: t.function.name,
                 description: t.function.description,
@@ -2023,10 +2049,7 @@ export function registerChatHandlers(
             if (overrides?.builtinToolsEnabled) {
               // Chat Completions API: tools must be in OpenAI format with "function" wrapper
               // e.g. {"type": "function", "function": {"name": ..., "parameters": ...}}
-              obj.tools = filterTools(overrides, {
-                hasDirectMediaAttachments: hasMediaAttachments,
-                zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
-              });
+              obj.tools = availableToolDefinitions();
               if (userForbidsToolCalls) obj.tool_choice = "none";
             }
             // enable_thinking: explicit user override sent to both local and remote.
@@ -2408,6 +2431,12 @@ export function registerChatHandlers(
                 : tpsDelta <= 0
                   ? 0
                   : liveTps;
+            if (Number.isFinite(liveTps) && liveTps > 0) {
+              liveTpsHistory.push(liveTps);
+              if (liveTpsHistory.length > MAX_LIVE_TPS_SAMPLES) {
+                liveTpsHistory.shift();
+              }
+            }
           }
 
           // Suppress rendering (but not counting/TPS) when tool call content is detected
@@ -3471,6 +3500,10 @@ export function registerChatHandlers(
                   }
                 : { role: "tool", tool_call_id: tc.id, content: resultText },
             );
+            const normalizedToolName = tc.function.name.toLowerCase();
+            if (exactFinalToolNames.includes(normalizedToolName)) {
+              completedExactFinalTools.add(normalizedToolName);
+            }
           }
 
           // Inject media from read_image/read_video tool results as multimodal
@@ -3632,7 +3665,11 @@ export function registerChatHandlers(
             }
             emitToolStatus("processing", "", undefined, toolIteration);
             plannedDirectAnswerPass =
-              directAnswerAfterSingleTool && toolIteration === 1;
+              (directAnswerAfterSingleTool || exactFinalToolNames.length > 1) &&
+              exactFinalToolNames.length > 0 &&
+              exactFinalToolNames.every((name) =>
+                completedExactFinalTools.has(name),
+              );
             // Reset idle timer before follow-up — tools may have consumed minutes
             if (chatSession) sessionManager.touchSession(chatSession.id);
             if (!(await sendFollowUp())) break;
@@ -3800,18 +3837,18 @@ export function registerChatHandlers(
         const finalGenSec = genTimeSec > 0.05 ? genTimeSec : wallTimeSec;
         // Use cumulative total across all tool iterations (server restarts completion_tokens per request)
         const totalTokenCount = cumulativeTokenOffset + iterationTokenCount;
-        // Prefer the rolling rate measured from actual streamed token deltas.
-        // Some Responses paths buffer reasoning/answer-pass output and flush a
-        // burst after generation; dividing cumulative usage by delta-arrival
-        // time then reports impossible rates (for example 261 t/s while the
-        // same live stream measured 42.9 t/s). Keep cumulative timing only as
-        // a fallback for endpoints that never supplied enough deltas.
-        const finalTps =
-          liveTps > 0
-            ? liveTps
-            : finalGenSec > 0
-              ? totalTokenCount / finalGenSec
-              : 0;
+        const cumulativeDecodeTps =
+          finalGenSec > 0 ? totalTokenCount / finalGenSec : 0;
+        // Progressive streams have credible cumulative delta timing even when
+        // the last rolling window covers only a short post-tool answer tail.
+        // Buffered answer passes are the opposite: their cumulative rate is an
+        // impossible burst, so selectFinalDecodeTps falls back to the median
+        // observed rolling stream rate.
+        const finalTps = selectFinalDecodeTps({
+          cumulativeTps: cumulativeDecodeTps,
+          rollingTps: liveTpsHistory,
+          lastRollingTps: liveTps,
+        });
         // TTFT measured from fetchStartTime (excludes health check and message building overhead)
         const ttft = Math.max(
           0,

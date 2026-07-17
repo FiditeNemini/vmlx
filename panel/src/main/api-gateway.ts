@@ -1546,8 +1546,6 @@ export class ApiGateway extends EventEmitter {
         }
 
         let buffer = "";
-        let content = "";
-        let thinking = "";
         let toolCalls: any[] | null = null;
         let doneReason: string | null = null;
         let done = false;
@@ -1555,6 +1553,35 @@ export class ApiGateway extends EventEmitter {
           completion_tokens?: number;
           prompt_tokens?: number;
         } | null = null;
+
+        const emitTerminal = (): void => {
+          if (done || !this.responseWritable(res)) return;
+          done = true;
+          const ollamaMsg: any = {
+            model: modelForResponse,
+            created_at: new Date().toISOString(),
+            message: { role: "assistant", content: "" },
+            done: true,
+            done_reason:
+              doneReason === "tool_calls" ? "tool_calls" : doneReason || "stop",
+          };
+          // Ollama streams content and thinking incrementally. Its terminal
+          // chat object carries an empty message plus statistics; repeating
+          // either accumulated rail makes conforming clients concatenate it.
+          if (toolCalls) {
+            const convertedToolCalls = this.openAIToolCallsToOllama(toolCalls);
+            if (convertedToolCalls) ollamaMsg.message.tool_calls = convertedToolCalls;
+          }
+          if (usage) {
+            ollamaMsg.eval_count = usage.completion_tokens;
+            ollamaMsg.prompt_eval_count = usage.prompt_tokens;
+          }
+          if (!this.writeJsonLine(res, ollamaMsg)) {
+            proxyRes.destroy();
+            return;
+          }
+          this.endResponse(res);
+        };
 
         proxyRes.on("data", (chunk: Buffer) => {
           buffer += chunk.toString();
@@ -1567,7 +1594,7 @@ export class ApiGateway extends EventEmitter {
             const payload = trimmed.slice(6);
 
             if (payload === "[DONE]") {
-              done = true;
+              emitTerminal();
               continue;
             }
 
@@ -1575,14 +1602,13 @@ export class ApiGateway extends EventEmitter {
               const parsed = JSON.parse(payload);
               const delta = parsed.choices?.[0]?.delta;
               const finishReason = parsed.choices?.[0]?.finish_reason;
-
-              if (delta?.content) {
-                content += delta.content;
-              }
               const reasoningDelta =
                 delta?.reasoning_content || delta?.reasoning;
-              if (reasoningDelta) {
-                thinking += reasoningDelta;
+              if (parsed.usage) {
+                usage = {
+                  completion_tokens: parsed.usage.completion_tokens || 0,
+                  prompt_tokens: parsed.usage.prompt_tokens || 0,
+                };
               }
 
               // tool_calls may arrive in one delta chunk or be fragmented
@@ -1622,42 +1648,7 @@ export class ApiGateway extends EventEmitter {
               }
 
               if (finishReason != null) {
-                done = true;
                 doneReason = finishReason || "stop";
-                if (parsed.usage) {
-                  usage = {
-                    completion_tokens: parsed.usage.completion_tokens || 0,
-                    prompt_tokens: parsed.usage.prompt_tokens || 0,
-                  };
-                }
-
-                const ollamaMsg: any = {
-                  model: modelForResponse,
-                  created_at: new Date().toISOString(),
-                  message: { role: "assistant", content: "" },
-                  done: true,
-                  done_reason:
-                    doneReason === "tool_calls"
-                      ? "tool_calls"
-                      : doneReason || "stop",
-                };
-                if (thinking) ollamaMsg.message.thinking = thinking;
-                if (toolCalls) {
-                  const convertedToolCalls =
-                    this.openAIToolCallsToOllama(toolCalls);
-                  if (convertedToolCalls)
-                    ollamaMsg.message.tool_calls = convertedToolCalls;
-                }
-                if (usage) {
-                  ollamaMsg.eval_count = usage.completion_tokens;
-                  ollamaMsg.prompt_eval_count = usage.prompt_tokens;
-                }
-                if (!this.writeJsonLine(res, ollamaMsg)) {
-                  proxyRes.destroy();
-                  return;
-                }
-                this.endResponse(res);
-                return;
               }
               if (delta?.content || reasoningDelta) {
                 const ollamaMsg: any = {
@@ -1682,23 +1673,7 @@ export class ApiGateway extends EventEmitter {
         });
 
         proxyRes.on("end", () => {
-          if (this.responseWritable(res) && !done) {
-            if (
-              !this.writeJsonLine(res, {
-                model: modelForResponse,
-                created_at: new Date().toISOString(),
-                message: {
-                  role: "assistant",
-                  content,
-                  ...(thinking ? { thinking } : {}),
-                },
-                done: true,
-                done_reason: doneReason || "stop",
-              })
-            )
-              return;
-            this.endResponse(res);
-          }
+          emitTerminal();
         });
       }
     });

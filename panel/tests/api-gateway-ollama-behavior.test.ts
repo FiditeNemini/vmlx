@@ -112,6 +112,42 @@ async function startStreamingChatBackend(): Promise<BackendHandle> {
   return { server, port: await listen(server), bodies, paths };
 }
 
+async function startStreamingThinkingBackend(): Promise<BackendHandle> {
+  const bodies: any[] = [];
+  const paths: string[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => {
+      paths.push(req.url || "");
+      const raw = Buffer.concat(chunks).toString("utf8");
+      bodies.push(raw ? JSON.parse(raw) : {});
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+      });
+      res.write(
+        'data: {"choices":[{"delta":{"reasoning_content":"plan "},"finish_reason":null}]}\n\n',
+      );
+      res.write(
+        'data: {"choices":[{"delta":{"reasoning_content":"then act"},"finish_reason":null}]}\n\n',
+      );
+      res.write(
+        'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":null}]}\n\n',
+      );
+      res.write(
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+      );
+      res.write(
+        'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4}}\n\n',
+      );
+      res.write("data: [DONE]\n\n");
+      res.end();
+    });
+  });
+  return { server, port: await listen(server), bodies, paths };
+}
+
 async function startEmbeddingBackend(): Promise<BackendHandle> {
   const bodies: any[] = [];
   const paths: string[] = [];
@@ -684,6 +720,44 @@ describe("Ollama gateway request translation behavior", () => {
     expect(chunks[2].done_reason).toBe("stop");
     expect(chunks[2].eval_count).toBe(2);
     expect(chunks[2].prompt_eval_count).toBe(2);
+  });
+
+  it("streams thinking exactly once and leaves the terminal message empty", async () => {
+    backend = await startStreamingThinkingBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    const response = await fetch(`http://127.0.0.1:${started.port}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "hy3-model",
+        stream: true,
+        think: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    const chunks = (await response.text())
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+
+    expect(response.status).toBe(200);
+    expect(backend.paths).toEqual(["/v1/chat/completions"]);
+    expect(backend.bodies[0].enable_thinking).toBe(true);
+    expect(chunks.map((chunk) => chunk.message.thinking || "").join(""))
+      .toBe("plan then act");
+    expect(chunks.map((chunk) => chunk.message.content || "").join(""))
+      .toBe("answer");
+    expect(chunks.at(-1)).toMatchObject({
+      message: { role: "assistant", content: "" },
+      done: true,
+      done_reason: "stop",
+      eval_count: 4,
+      prompt_eval_count: 3,
+    });
+    expect(chunks.at(-1).message).not.toHaveProperty("thinking");
   });
 
   it("auto-switches single-model Ollama generate while emitting incremental response chunks", async () => {

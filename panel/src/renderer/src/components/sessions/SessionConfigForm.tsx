@@ -365,6 +365,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     detectedCacheType === 'mamba' ||
     detectedCacheType === 'hybrid' ||
     detectedCacheType === 'rotating_kv'
+  const mixedSwaCacheActive =
+    detectedCacheType === 'rotating_kv' ||
+    detectedCacheSubtype === 'mixed_swa_kv'
   const subtypeRequiresPagedCache =
     detectedCacheSubtype === 'step3p7_full_sliding_kv' ||
     detectedCacheSubtype === 'mixed_swa_kv'
@@ -408,6 +411,24 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const effectiveStoredCacheQuantization = openPanguExactTypedCache
     ? 'none'
     : nativeTypedCacheOwnsStoredCodec ? 'auto' : config.kvCacheQuantization
+  const explicitStoredCacheCodec = effectiveStoredCacheQuantization !== 'auto'
+  const liveCacheCodecLabel = openPanguExactTypedCache
+    ? 'openPangu typed composite cache'
+    : dsv4Active
+      ? 'DeepSeek-V4 native composite cache'
+      : m3Active
+        ? 'MiniMax-M3 native MSA cache'
+        : explicitStoredCacheCodec
+          ? effectiveStoredCacheQuantization === 'none'
+            ? 'Live TurboQuant and stored quantization disabled'
+            : `Live TurboQuant disabled; stored cache ${effectiveStoredCacheQuantization}`
+          : mixedSwaCacheActive
+            ? 'TQ4 full-attention KV + native rotating SWA'
+            : 'Engine-selected native cache'
+  const liveCacheCodecBadge =
+    openPanguExactTypedCache || dsv4Active || m3Active || explicitStoredCacheCodec
+      ? 'TURBOQUANT OFF'
+      : mixedSwaCacheActive ? 'MIXED AUTO' : 'AUTO'
   const effectiveMaxNumSeqs = dsv4Active ? 1 : config.maxNumSeqs
   const effectivePrefillBatchSize = dsv4Active ? 1 : config.prefillBatchSize
   const effectiveCompletionBatchSize = dsv4Active ? 1 : config.completionBatchSize
@@ -1055,7 +1076,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       <Section title={t('sessions.config.kvCacheQuantization')} expanded={expandedSections.kvCacheQuant} onToggle={() => toggleSection('kvCacheQuant')} hidden={isImage}>
         {batchingOff && <IncompatWarning text="KV cache quantization requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above." />}
         {!batchingOff && prefixOff && <IncompatWarning text="KV cache quantization requires prefix cache. Enable 'Prefix Cache' above to use KV cache quantization." />}
-        {!effectivelyNoBatching && !prefixOff && isMambaCache && <PerformanceHint text="Hybrid stateful cache detected — the engine keeps SSM/GLA state native and only uses cache codecs proven for that architecture. Generic TurboQuant KV is disabled unless a tested override exists." />}
+        {!effectivelyNoBatching && !prefixOff && mixedSwaCacheActive && <PerformanceHint text="Mixed sliding/full attention cache detected — Auto applies TQ4 only to compatible full-attention KV slots and preserves native rotating-SWA metadata. Explicit None disables both live TQ-KV and stored quantization." />}
+        {!effectivelyNoBatching && !prefixOff && isMambaCache && !mixedSwaCacheActive && !dsv4Active && !m3Active && !openPanguExactTypedCache && <PerformanceHint text="Hybrid stateful cache detected — the engine keeps SSM/GLA state native and only uses cache codecs proven for that architecture. Generic TurboQuant KV is disabled unless a tested override exists." />}
         {!effectivelyNoBatching && dsv4Active && <PerformanceHint text="DeepSeek-V4 keeps generic KV q4/q8 disabled. Its prefix reuse uses native SWA+CSA/HCA snapshots through the DSV4 Native Composite Prefix Cache switch, not the generic stored-KV codec." />}
         {!effectivelyNoBatching && m3Active && <PerformanceHint text="MiniMax-M3 keeps generic KV q4/q8 disabled. Prefix reuse uses native MSA snapshots with keys, values, idx_keys, and absolute offsets; generic stored-KV codecs cannot preserve that cache format." />}
         {!effectivelyNoBatching && openPanguExactTypedCache && <PerformanceHint text="openPangu keeps generic KV q4/q8 disabled. Its exact typed snapshot owns MLA KV, DSA indexer, rotating-SWA metadata, and causal-convolution state as one full-precision record." />}
@@ -1075,9 +1097,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             <Tooltip text="Auto mode leaves the CLI flag unset so the engine can choose per architecture: calibrated TurboQuant for compatible plain KV/JANGTQ caches, native composite or typed caches for DSV4/ZAYA/hybrid SSM, and stored-prefix fallback only where that codec is valid." />
           </span>
           <div className="cfg-input flex items-center justify-between" style={{ background: 'var(--card)', cursor: 'default' }}>
-            <span>{openPanguExactTypedCache ? 'openPangu typed composite cache' : 'Engine-selected native cache'}</span>
+            <span>{liveCacheCodecLabel}</span>
             <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'var(--success-bg, rgba(34,197,94,0.15))', color: 'var(--success-fg, rgb(34,197,94))' }}>
-              {openPanguExactTypedCache ? 'TURBOQUANT OFF' : 'AUTO'}
+              {liveCacheCodecBadge}
             </span>
           </div>
         </div>

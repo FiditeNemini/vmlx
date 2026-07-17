@@ -894,6 +894,22 @@ describe('KV Cache Quantization', () => {
         expect(source).not.toContain('TurboQuant only')
     })
 
+    it('describes mixed-SWA and explicit live TurboQuant state truthfully', () => {
+        const fs = require('fs')
+        const source = fs.readFileSync(
+            'src/renderer/src/components/sessions/SessionConfigForm.tsx',
+            'utf-8',
+        )
+
+        expect(source).toContain("detectedCacheType === 'rotating_kv'")
+        expect(source).toContain('TQ4 full-attention KV + native rotating SWA')
+        expect(source).toContain('preserves native rotating-SWA metadata')
+        expect(source).toContain('Live TurboQuant and stored quantization disabled')
+        expect(source).toContain('Live TurboQuant disabled; stored cache ${effectiveStoredCacheQuantization}')
+        expect(source).toContain("? 'TURBOQUANT OFF'")
+        expect(source).toContain("mixedSwaCacheActive ? 'MIXED AUTO' : 'AUTO'")
+    })
+
     it('chat reasoning Auto copy avoids force-language', () => {
         const fs = require('fs')
         const locale = JSON.parse(
@@ -3092,8 +3108,9 @@ describe('JIT Toggle', () => {
         expect(form).toContain("const nativeTypedCacheOwnsStoredCodec = dsv4Active || m3Active || openPanguExactTypedCache")
         expect(form).toContain("const effectiveStoredCacheQuantization = openPanguExactTypedCache")
         expect(form).toContain("? 'none'")
-        expect(form).toContain("openPanguExactTypedCache ? 'openPangu typed composite cache' : 'Engine-selected native cache'")
-        expect(form).toContain("openPanguExactTypedCache ? 'TURBOQUANT OFF' : 'AUTO'")
+        expect(form).toContain("? 'openPangu typed composite cache'")
+        expect(form).toContain("? 'MiniMax-M3 native MSA cache'")
+        expect(form).toContain('openPanguExactTypedCache || dsv4Active || m3Active || explicitStoredCacheCodec')
         expect(form).toContain('MiniMax-M3 keeps generic KV q4/q8 disabled')
         expect(form).toContain('native MSA snapshots with keys, values, idx_keys, and absolute offsets')
         expect(form).toContain('disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}')

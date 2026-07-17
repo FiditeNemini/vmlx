@@ -41,6 +41,10 @@ import { reconcileResponsesToolBufferAtStreamEnd } from "../../shared/responsesS
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
 import {
+  ChatStreamServerEventError,
+  shouldRethrowChatStreamLineError,
+} from "../../shared/chatStreamErrors";
+import {
   buildNewChatInheritedOverrides,
   sanitizeChatOverrides,
 } from "../chat-override-policy";
@@ -2712,7 +2716,7 @@ export function registerChatHandlers(
                   throw expectedChatBackendDisconnectError();
                 }
                 console.error(`[CHAT] Responses API error event: ${errDetail}`);
-                throw new Error(`Server error: ${errDetail}`);
+                throw new ChatStreamServerEventError(`Server error: ${errDetail}`);
               }
 
               if (responsesEventType === "response.warning") {
@@ -2817,7 +2821,7 @@ export function registerChatHandlers(
                 console.error(
                   `[CHAT] Chat completions error chunk: ${errDetail}`,
                 );
-                throw new Error(`Server error: ${errDetail}`);
+                throw new ChatStreamServerEventError(`Server error: ${errDetail}`);
               }
 
               // Handle reasoning_content from reasoning parser
@@ -3018,6 +3022,19 @@ export function registerChatHandlers(
               }
             }
           } catch (e) {
+            // Error events are valid SSE JSON, not malformed lines. Propagate
+            // them to the outer request catch so the empty assistant placeholder
+            // is removed and the renderer receives the real server failure.
+            // The previous catch logged and swallowed these intentional throws,
+            // turning prefill failures into a false zero-token completion.
+            if (
+              shouldRethrowChatStreamLineError(
+                e,
+                isExpectedChatBackendDisconnectError(e),
+              )
+            ) {
+              throw e;
+            }
             // Skip malformed JSON lines — log at debug level for troubleshooting
             if (e instanceof SyntaxError) {
               // Expected: malformed SSE data line

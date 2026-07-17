@@ -169,7 +169,10 @@ def check_and_inject_fallback_tools(
             )
         )
 
-    explicit_tool_requested = any(_request_mentions_tool_name(name) for name in tool_names)
+    explicitly_requested_tool_names = {
+        name for name in tool_names if _request_mentions_tool_name(name)
+    }
+    explicit_tool_requested = bool(explicitly_requested_tool_names)
 
     # Some templates need more than tool-name visibility. DSV4 may mention
     # schemas without a parser-matching DSML exemplar. Qwen's native template
@@ -198,6 +201,9 @@ def check_and_inject_fallback_tools(
             explicit_tool_requested = any(
                 _request_mentions_tool_name(name) for name in tool_names
             )
+            explicitly_requested_tool_names = {
+                name for name in tool_names if _request_mentions_tool_name(name)
+            }
     is_qwen_native_tool_prompt = (
         parser_id not in {"xml_function", "mimo_xml_function"}
         and "<|im_start|>" in prompt
@@ -450,6 +456,26 @@ def check_and_inject_fallback_tools(
         is_qwen_native_tool_prompt
         and (tools_called_after_latest_user or tool_result_after_latest_user)
     )
+    qwen_requested_remaining_tools = {
+        name
+        for name in explicitly_requested_tool_names
+        if name not in tools_called_after_latest_user
+    }
+    qwen_client_narrowed_to_remaining_tools = bool(
+        tools_called_after_latest_user
+        and tool_names
+        and set(tool_names).isdisjoint(tools_called_after_latest_user)
+    )
+    qwen_multi_tool_continuation = bool(
+        qwen_tool_result_continuation
+        and (
+            qwen_requested_remaining_tools
+            or qwen_client_narrowed_to_remaining_tools
+        )
+    )
+    qwen_terminal_tool_result_continuation = bool(
+        qwen_tool_result_continuation and not qwen_multi_tool_continuation
+    )
     dsv4_tool_result_continuation = bool(
         is_dsv4_prompt
         and (tools_called_after_latest_user or tool_result_after_latest_user)
@@ -517,7 +543,17 @@ def check_and_inject_fallback_tools(
         openpangu_prompt_tools = template_tools
     qwen_prompt_tools = template_tools
     if is_qwen_native_tool_prompt:
-        if qwen_tool_result_continuation:
+        if qwen_multi_tool_continuation:
+            remaining_names = qwen_requested_remaining_tools or set(tool_names)
+            qwen_prompt_tools = [
+                tool
+                for tool in template_tools
+                if _tool_props(tool)[0] in remaining_names
+                and _tool_props(tool)[0] not in tools_called_after_latest_user
+            ]
+            if not qwen_prompt_tools:
+                qwen_prompt_tools = template_tools
+        elif qwen_terminal_tool_result_continuation:
             if recent_tool_call_arguments:
                 qwen_prompt_tools = _recently_called_tools(template_tools)
             elif explicit_tool_requested:
@@ -1178,7 +1214,7 @@ def check_and_inject_fallback_tools(
             )
         )
     elif is_qwen_native_tool_prompt:
-        if qwen_tool_result_continuation:
+        if qwen_terminal_tool_result_continuation:
             completed_names = tools_called_after_latest_user or {
                 name
                 for name in (_tool_props(tool)[0] for tool in qwen_prompt_tools)
@@ -1198,7 +1234,22 @@ def check_and_inject_fallback_tools(
                 "you must call it instead of fabricating a result.",
                 "",
             ]
-        if not qwen_tool_result_continuation and explicit_tool_requested and not tool_choice_required:
+            if qwen_multi_tool_continuation:
+                completed = ", ".join(sorted(tools_called_after_latest_user)) or "prior tool"
+                remaining = ", ".join(
+                    _tool_props(tool)[0] for tool in qwen_prompt_tools
+                )
+                qwen_lines.extend(
+                    [
+                        "Native multi-tool continuation: the previous tool call already ran and its real result is present in the conversation.",
+                        f"Completed tool(s): {completed}. Do not call those completed tools again.",
+                        f"The client intentionally supplied the remaining tool(s): {remaining}.",
+                        "Your next assistant output must be exactly one native call to a remaining tool before any prose.",
+                        "Do not answer the user's final request until the remaining tool result is returned in a later continuation.",
+                        "",
+                    ]
+                )
+        if not qwen_terminal_tool_result_continuation and explicit_tool_requested and not tool_choice_required:
             qwen_lines.extend(
                 [
                     "The current user explicitly named an available tool.",
@@ -1208,7 +1259,7 @@ def check_and_inject_fallback_tools(
                     "",
                 ]
             )
-        if not qwen_tool_result_continuation and tool_choice_required:
+        if not qwen_terminal_tool_result_continuation and tool_choice_required:
             qwen_lines.extend(
                 [
                     "The current API request set tool_choice=required. You must emit exactly one native tool call before any prose.",
@@ -1218,7 +1269,9 @@ def check_and_inject_fallback_tools(
                     "",
                 ]
             )
-        for idx, tool in enumerate(qwen_prompt_tools if not qwen_tool_result_continuation else []):
+        for idx, tool in enumerate(
+            qwen_prompt_tools if not qwen_terminal_tool_result_continuation else []
+        ):
             func = _tool_func(tool)
             name = func.get("name", "") or "unknown_tool"
             qwen_lines.append(f"Tool: {name}")
@@ -1265,7 +1318,7 @@ def check_and_inject_fallback_tools(
                                 "it is file content or answer text."
                             )
             qwen_lines.append("")
-        if not qwen_tool_result_continuation:
+        if not qwen_terminal_tool_result_continuation:
             tool_prompt = (
                 "\n".join(qwen_lines).rstrip()
                 + "\n\nWhen a tool call is needed, emit ONLY this native XML shape. "

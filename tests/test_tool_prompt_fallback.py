@@ -284,6 +284,48 @@ def test_qwen_tool_result_continuation_prevents_duplicate_execution():
     assert "Tool: read_file" not in injected
 
 
+def test_qwen_tool_result_continuation_allows_explicit_remaining_tool():
+    tools = _qwen_test_tools()
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "First call read_file exactly once with path panel/package.json. "
+                "After that result, call run_command exactly once with command pwd. "
+                "After both results, reply exactly MULTI-DONE and nothing else."
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "read_file",
+                        "arguments": {"path": "panel/package.json"},
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": "package metadata"},
+    ]
+
+    injected = check_and_inject_fallback_tools(
+        _qwen_prompt(),
+        messages,
+        [tools[0]],
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": [tools[0]]},
+        tool_parser_id="qwen",
+    )
+
+    assert "Native multi-tool continuation" in injected
+    assert "Completed tool(s): read_file" in injected
+    assert "remaining tool(s): run_command" in injected
+    assert "<function=run_command>" in injected
+    assert "Do not emit another <tool_call>" not in injected
+
+
 def test_dsv4_encoder_prompt_tools_narrow_to_explicit_latest_user_tool():
     tools = [
         {"type": "function", "function": {"name": "read_file"}},

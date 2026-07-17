@@ -275,6 +275,20 @@ def test_dsv4_loader_has_no_attention_monkeypatch_fallback():
     assert "_verify_dsv4_attention_contract" in source
 
 
+def test_dsv4_session_load_materializes_parameters_before_first_request():
+    """The app load route must not defer DSV4 weights to the first prompt."""
+    source = (ENGINE_ROOT / "utils" / "tokenizer.py").read_text(
+        encoding="utf-8"
+    )
+    route_start = source.index("# Route DeepSeek V4 bundles")
+    route_end = source.index("# Laguna (poolside)", route_start)
+    dsv4_route = source[route_start:route_end]
+
+    assert "load_jangtq_dsv4_model(" in dsv4_route
+    assert "skip_params_eval=False" in dsv4_route
+    assert "skip_params_eval=True" not in dsv4_route
+
+
 _DSV4_ATTENTION_MARKERS = {
     "symmetric_mask_trim": "if attn_mask.shape[-1] > full_kv.shape[2]",
     "per_query_compressed_pool_mask": "comp_mask = comp_mask & selected",

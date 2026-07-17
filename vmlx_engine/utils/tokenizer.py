@@ -1120,9 +1120,15 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
                         f"load_jangtq_dsv4 runtime wrapper."
                     )
                     from ..loaders.load_jangtq_dsv4 import load_jangtq_dsv4_model
+                    # A started DSV4 session must own a materialized model before
+                    # the first user request.  Keeping this True made health report
+                    # model_loaded while MLX still had 0 active bytes; the first
+                    # prompt then paid the deferred parameter evaluation cost.
+                    # Evaluate the stored quantized parameters here.  This is not a
+                    # synthetic generation warmup and does not populate prompt KV.
                     _m, _t = load_jangtq_dsv4_model(
                         local_model_path,
-                        skip_params_eval=True,
+                        skip_params_eval=False,
                     )
                     _inject_chat_template_if_missing(_t, local_model_path)
                     return _m, _t

@@ -17684,12 +17684,11 @@ async def stream_chat_completion(
             # path used (marker-length holdback until finish) — the streamed text
             # is byte-identical to the old single chunk, just incremental.
             #
-            # qwen3_5* EXCEPTION (W2-1 parity): a length-truncated thinking-off
-            # salvage can re-continue the cut reasoning as planning prose, and a
-            # streamed delta can't be recalled. So for qwen3_5* we BUFFER the
-            # whole pass (emit nothing during the loop) and emit it in one delta
-            # afterwards ONLY if it completed cleanly — matching the non-stream
-            # run-then-adopt-if-complete semantics without risking a leak.
+            # Families in _ANSWER_PASS_LEAK_GUARD_FAMILIES still buffer because
+            # their thinking-off salvage can reopen a real thinking marker and a
+            # streamed delta cannot be recalled. Qwen3.5/3.6 is intentionally not
+            # in that set: its fresh-context direct rail removed the planning
+            # continuation, so its visible answer must remain progressive.
             _buffer_answer_pass = _family_name in _ANSWER_PASS_LEAK_GUARD_FAMILIES
             _ans_budget_cap = int(answer_kwargs.get("max_tokens") or 0)
             _ans_raw = ""
@@ -19462,11 +19461,9 @@ async def stream_responses_api(
                 # marker-length tail so transient partial-marker fragments are
                 # re-stripped before they escape. Final text is identical to the
                 # old single delta — just incremental.
-                # qwen3_5* EXCEPTION (W2-1 parity): buffer the whole pass and
-                # emit only if it completes cleanly — see the Chat Completions
-                # site. A streamed output_text.delta can't be recalled, so a
-                # length-truncated (leaky) salvage must be discarded before any
-                # delta is sent.
+                # Families in _ANSWER_PASS_LEAK_GUARD_FAMILIES still buffer and
+                # emit only after a clean pass; see the Chat Completions site.
+                # Qwen3.5/3.6 uses fresh context and is intentionally progressive.
                 _buffer_answer_pass = _family_name in _ANSWER_PASS_LEAK_GUARD_FAMILIES
                 _ans_budget_cap = int(answer_kwargs.get("max_tokens") or 0)
                 _ans_raw = ""

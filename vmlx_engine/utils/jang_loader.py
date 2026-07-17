@@ -1674,7 +1674,11 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
     # TQ those slots only and leave the sliding slots on their native rotating
     # cache. See build_mixed_swa_layer_types.
     _mixed_swa_layout = _has_mixed_attention_layout(model_config)
-    _swa_tq_opt_in = _os_tq.environ.get("VMLX_SWA_TQ") in ("1", "true", "TRUE", "yes", "on")
+    _swa_tq_opt_in = (
+        _os_tq.environ.get("VMLX_SWA_TQ")
+        in ("1", "true", "TRUE", "yes", "on")
+        or _os_tq.environ.get("VMLX_FORCE_TQ_AUTO") == "1"
+    )
     if _mixed_swa_layout and not _swa_tq_opt_in:
         logger.info(
             "  TurboQuant KV skipped: mixed sliding/full attention model uses "
@@ -1743,6 +1747,7 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
     try:
         from .turboquant_config import (
             TurboQuantConfig,
+            apply_mixed_swa_auto_tq_policy,
             apply_uncalibrated_auto_tq_policy,
             make_turboquant_cache,
             resolve_compress_after,
@@ -1790,6 +1795,13 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         and _swa_tq_opt_in
         and is_mixed_swa_tq_supported(model_config, n_layers)
     )
+    if _mixed_swa_layout and _swa_tq_opt_in and not _mixed_swa_tq:
+        logger.info(
+            "  TurboQuant KV skipped: mixed sliding/full attention layout does "
+            "not map one-to-one onto the native cache slots; preserving the "
+            "model-owned rotating/full cache instead of applying flat TQ."
+        )
+        return
     if _has_rotating_slots and not _mixed_swa_tq:
         logger.info(
             "  TurboQuant KV skipped: native rotating/full attention cache layout "
@@ -1852,6 +1864,11 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
             model_config,
             _layer_types,
         )
+        if _mixed_swa_tq:
+            _tq_cfg = apply_mixed_swa_auto_tq_policy(
+                _tq_cfg,
+                build_mixed_swa_layer_types(model_config),
+            )
     _tq_cfg["compress_after"] = resolve_compress_after(_tq_cfg, model_config)
     # Use _tq_cfg (which may be auto-generated defaults) instead of re-reading jang_cfg.
     # This happens only after the real native layer layout is known so hybrid

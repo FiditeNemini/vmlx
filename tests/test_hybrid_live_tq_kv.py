@@ -126,6 +126,23 @@ def test_uncalibrated_qwen_full_kv_auto_uses_tq8_on_all_attention_slots():
     assert resolved["auto_policy"] == "qwen_full_kv_storage_tq8"
 
 
+def test_uncalibrated_mixed_swa_auto_uses_q4_on_full_attention_only():
+    from vmlx_engine.utils.turboquant_config import apply_mixed_swa_auto_tq_policy
+
+    resolved = apply_mixed_swa_auto_tq_policy(
+        {"enabled": True, "default_key_bits": 8, "default_value_bits": 8},
+        ["sliding", "sliding", "attention", "sliding", "attention"],
+    )
+
+    assert resolved["default_key_bits"] == 4
+    assert resolved["default_value_bits"] == 4
+    assert resolved["critical_key_bits"] == 4
+    assert resolved["critical_value_bits"] == 4
+    assert resolved["critical_layers"] == [2, 4]
+    assert resolved["compress_after"] == 0
+    assert resolved["auto_policy"] == "mixed_swa_full_attention_kv_storage_tq4"
+
+
 def test_uncalibrated_qwen_cumulative_only_does_not_get_fake_tq_slots():
     from vmlx_engine.utils.turboquant_config import (
         apply_uncalibrated_auto_tq_policy,
@@ -243,6 +260,16 @@ class FakeBonsaiModel:
         ]
 
 
+class FakeMixedSwaModel:
+    def __init__(self):
+        self.layers = [object(), object()]
+
+    def make_cache(self):
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
+
+        return [RotatingKVCache(max_size=1024), KVCache()]
+
+
 def _write_qwen36_hybrid_config(path):
     config = {
         "model_type": "qwen3_5_moe",
@@ -331,6 +358,40 @@ def test_jang_qwen_hybrid_tq_patches_attention_cache_only(monkeypatch):
     assert getattr(model.make_cache, "_vmlx_hybrid_tq_policy") == "attention_kv_only"
     assert getattr(model.make_cache, "_vmlx_hybrid_tq_attention_layers") == (0, 2)
     assert getattr(model.make_cache, "_vmlx_hybrid_tq_companion_layers") == (1, 3)
+
+
+def test_jang_mixed_swa_auto_tq_patches_only_full_attention_slot(monkeypatch):
+    from vmlx_engine.utils.jang_loader import _patch_turboquant_make_cache
+
+    model = FakeMixedSwaModel()
+    model_config = {
+        "model_type": "gemma4_unified",
+        "text_config": {
+            "model_type": "gemma4_unified_text",
+            "num_hidden_layers": 2,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "layer_types": ["sliding_attention", "full_attention"],
+        },
+    }
+    monkeypatch.setenv("VMLX_FORCE_TQ_AUTO", "1")
+    monkeypatch.delenv("VMLX_SWA_TQ", raising=False)
+    monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
+
+    _patch_turboquant_make_cache(model, {}, model_config)
+
+    cache = model.make_cache()
+    assert [type(slot).__name__ for slot in cache] == [
+        "RotatingKVCache",
+        "TurboQuantKVCache",
+    ]
+    assert getattr(model.make_cache, "_vmlx_hybrid_tq_attention_layers") == (1,)
+    assert getattr(model.make_cache, "_vmlx_hybrid_tq_companion_layers") == (0,)
+    assert getattr(model.make_cache, "_vmlx_tq_auto_policy") == (
+        "mixed_swa_full_attention_kv_storage_tq4"
+    )
+    assert cache[1].key_bits == 4
+    assert cache[1].value_bits == 4
 
 
 def test_jang_bonsai_auto_uses_tq8_only_on_attention_slots(monkeypatch):

@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER = 0
 UNCALIBRATED_AUTO_TQ_BITS = 8
+MIXED_SWA_AUTO_TQ_BITS = 4
 # Compatibility name retained for downstream tests/imports.  The safety rule is
 # no longer Qwen-only: any bundle without model-owned TQ calibration starts at
 # loss-minimizing 8-bit storage and may opt into lower bits in jang_config.json.
@@ -133,6 +134,40 @@ def apply_uncalibrated_auto_tq_policy(
             "sink_tokens": 0,
             "compress_after": QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER,
             "auto_policy": auto_policy,
+        }
+    )
+    return resolved
+
+
+def apply_mixed_swa_auto_tq_policy(
+    tq_cfg: dict,
+    layer_types: list[str] | tuple[str, ...],
+) -> dict:
+    """Use q4 TQ only on full-attention slots of a mixed rotating-SWA cache.
+
+    Sliding slots retain their native RotatingKVCache and window metadata. The
+    returned critical-layer list therefore names only the unbounded KV slots
+    that the mixed-cache builder replaces with TurboQuantKVCache.
+    """
+    normalized = [str(value).lower() for value in layer_types]
+    full_attention_layers = [
+        index for index, value in enumerate(normalized) if value == "attention"
+    ]
+    has_sliding = any(value == "sliding" for value in normalized)
+    if not has_sliding or not full_attention_layers:
+        return dict(tq_cfg)
+
+    resolved = dict(tq_cfg)
+    resolved.update(
+        {
+            "default_key_bits": MIXED_SWA_AUTO_TQ_BITS,
+            "default_value_bits": MIXED_SWA_AUTO_TQ_BITS,
+            "critical_key_bits": MIXED_SWA_AUTO_TQ_BITS,
+            "critical_value_bits": MIXED_SWA_AUTO_TQ_BITS,
+            "critical_layers": full_attention_layers,
+            "sink_tokens": 0,
+            "compress_after": 0,
+            "auto_policy": "mixed_swa_full_attention_kv_storage_tq4",
         }
     )
     return resolved

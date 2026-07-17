@@ -44,22 +44,22 @@ _TRUNC = "We are given the task. Interpretation: We need BLUE-F"
 
 
 def test_answer_pass_fresh_context_families():
-    """deepseek_v4/step3p7/minimax templates render the appended reasoning turn
-    as a malformed empty/double assistant turn (DSV4: <Assistant><eos>
-    <Assistant></think>; minimax: back-to-back ]~b]ai turns — live-proven
-    degenerate/empty salvage 2026-07-12). Their answer pass must re-run the
-    ORIGINAL messages with nothing appended."""
-    for fam in ("deepseek_v4", "step3p7", "minimax", "minimax_m2"):
+    """Malformed/double assistant templates and Qwen's live-proven planning
+    continuation must re-run the ORIGINAL messages with nothing appended."""
+    for fam in (
+        "deepseek_v4", "step3p7", "minimax", "minimax_m2",
+        "qwen3_5", "qwen3_5_moe",
+    ):
         out = server_mod._answer_pass_messages(_MSGS, fam, _TRUNC)
         assert out == _MSGS
         assert out is not _MSGS  # fresh copy, caller list not aliased
 
 
 def test_answer_pass_appends_reasoning_turn_for_legacy_families():
-    """The legacy live-proven behavior (W14/W15) is untouched: the truncated
+    """Other legacy families keep the truncated
     reasoning rides along as an assistant turn."""
-    for fam in ("qwen3_5", "qwen3_5_moe", "gemma4", "hy_v3", "laguna",
-                "openpangu_v2", None, "reasoning model"):
+    for fam in ("gemma4", "hy_v3", "laguna", "openpangu_v2", None,
+                "reasoning model"):
         out = server_mod._answer_pass_messages(_MSGS, fam, _TRUNC)
         assert out[:-1] == _MSGS
         assert out[-1] == {
@@ -69,14 +69,14 @@ def test_answer_pass_appends_reasoning_turn_for_legacy_families():
         }
 
 
-def test_leak_guard_families_cover_fresh_context():
-    """Fresh-context families share the qwen3_5 buffered-salvage leak guard
-    (#92 semantics): emit a truncated salvage, discard only on a thinking
-    re-entry."""
+def test_leak_guard_families_keep_qwen_progressive():
+    """Qwen's fresh direct rail streams progressively; families with a
+    live-proven thinking re-entry remain buffered."""
     guard = server_mod._ANSWER_PASS_LEAK_GUARD_FAMILIES
-    for fam in ("qwen3_5", "qwen3_5_moe", "deepseek_v4", "step3p7",
-                "minimax", "minimax_m2"):
+    for fam in ("deepseek_v4", "step3p7", "minimax", "minimax_m2"):
         assert fam in guard
+    for fam in ("qwen3_5", "qwen3_5_moe"):
+        assert fam not in guard
     # families with live-proven coherent partial salvages stay unbuffered
     for fam in ("gemma4", "hy_v3", "laguna", "openpangu_v2"):
         assert fam not in guard

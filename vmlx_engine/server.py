@@ -1099,6 +1099,34 @@ def _answer_pass_visible_delta(
 ANSWER_PASS_FLOOR = 48
 
 
+# Qwen3.5/3.6 can keep revising an already-complete solution inside its hidden
+# reasoning rail until the entire output cap is exhausted.  The visible-answer
+# pass then receives only ANSWER_PASS_FLOOR, which is too small for a normal
+# terminal response.  When neither the request nor the bundle supplies a
+# thinking budget, partition the existing total output cap instead of granting
+# a hidden retry overage: at most 1,024 tokens go to reasoning and at least 256
+# tokens (or half of a smaller cap) remain available for visible content.
+# Explicit max_thinking_tokens remains authoritative.
+AUTO_THINKING_PASS_LIMIT = 1024
+AUTO_VISIBLE_ANSWER_RESERVE = 256
+_AUTO_THINKING_PARTITION_FAMILIES = frozenset({"qwen3_5", "qwen3_5_moe"})
+
+
+def _auto_thinking_pass_budget(total_cap: Any) -> int:
+    """Return Qwen's Auto reasoning share without exceeding ``total_cap``."""
+    try:
+        resolved_cap = max(0, int(total_cap or 0))
+    except (TypeError, ValueError):
+        resolved_cap = 0
+    if resolved_cap <= 1:
+        return resolved_cap
+    reserve = min(
+        AUTO_VISIBLE_ANSWER_RESERVE,
+        max(1, resolved_cap // 2),
+    )
+    return max(1, min(AUTO_THINKING_PASS_LIMIT, resolved_cap - reserve))
+
+
 def _remaining_answer_pass_budget(
     cap: Any, used: Any, floor: int = ANSWER_PASS_FLOOR
 ) -> int:
@@ -1823,23 +1851,36 @@ def _reasoning_answer_pass_family_label(family_name: str) -> str:
 # renders back-to-back assistant turns (reasoning inlined as a completed turn,
 # then a second assistant open). minimax (M2.x) renders back-to-back ]~b]ai
 # turns the same way (truncated think closed as a full turn, then a second
-# empty-think assistant open). These families run the answer pass on the
-# ORIGINAL messages instead.
+# empty-think assistant open). Qwen3.5/3.6 does render ``reasoning_content``,
+# but live Responses proof showed that replaying a length-truncated reasoning
+# turn makes the thinking-off pass continue the same planning prose without
+# reopening a literal <think> tag; the tag-only leak guard then misclassifies
+# it as visible content. The identical 256-token direct rail on the ORIGINAL
+# messages completed with 88 output_text deltas and response.completed.
 _ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
-    {"deepseek_v4", "step3p7", "minimax", "minimax_m2"}
+    {
+        "deepseek_v4",
+        "step3p7",
+        "minimax",
+        "minimax_m2",
+        "qwen3_5",
+        "qwen3_5_moe",
+    }
 )
 
-# Families whose salvage is BUFFERED and discarded on a thinking re-entry
-# (raw re-opens a thinking block — see _answer_pass_thinking_reentry).
-# qwen3_5* established the semantics (#92: emit a truncated salvage, reject
-# only genuine planning-prose re-entry). deepseek_v4 joined 2026-07-12:
+# Families whose salvage must remain BUFFERED and discarded on a thinking
+# re-entry (raw re-opens a thinking block — see _answer_pass_thinking_reentry).
+# Qwen3.5/3.6 now uses a fresh-context direct rail, which removes the truncated
+# reasoning turn that caused planning continuation; it can therefore stream the
+# visible answer progressively. deepseek_v4 established the retained guard:
 # live-deterministic repro — with a prior salvage answer in history and a tight
 # budget, the DSV4 salvage re-opened planning as "<thinking>Let's parse the
 # user's request..." and leaked it as visible content. The fresh-context
 # families share the risk profile, so they share the guard.
-_ANSWER_PASS_LEAK_GUARD_FAMILIES = (
-    frozenset({"qwen3_5", "qwen3_5_moe"}) | _ANSWER_PASS_FRESH_CONTEXT_FAMILIES
-)
+_ANSWER_PASS_LEAK_GUARD_FAMILIES = _ANSWER_PASS_FRESH_CONTEXT_FAMILIES - {
+    "qwen3_5",
+    "qwen3_5_moe",
+}
 
 
 def _answer_pass_thinking_reentry(raw_text: str) -> bool:
@@ -13195,8 +13236,7 @@ async def create_chat_completion(
     _ns_answer_pass_original_cap = None
     _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
     if (
-        _ns_pre_mtt is not None
-        and chat_kwargs.get("enable_thinking") is not False
+        chat_kwargs.get("enable_thinking") is not False
         and getattr(request, "enable_thinking", None) is not False
         and (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is not False
         and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
@@ -13214,11 +13254,32 @@ async def create_chat_completion(
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
         ):
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
-            _ns_pre_capped = max(1, min(_ns_pre_orig, int(_ns_pre_mtt)))
-            if _ns_pre_capped < _ns_pre_orig:
-                _ns_answer_pass_original_cap = _ns_pre_orig
-                chat_kwargs = dict(chat_kwargs)
-                chat_kwargs["max_tokens"] = _ns_pre_capped
+            _ns_auto_partition = False
+            if (
+                _ns_pre_mtt is None
+                and _ns_pre_family in _AUTO_THINKING_PARTITION_FAMILIES
+                and chat_kwargs.get("thinking_budget") is None
+                and (chat_kwargs.get("chat_template_kwargs") or {}).get(
+                    "thinking_budget"
+                ) is None
+            ):
+                _ns_pre_mtt = _auto_thinking_pass_budget(_ns_pre_orig)
+                _ns_auto_partition = True
+            if _ns_pre_mtt is not None:
+                _ns_pre_capped = max(1, min(_ns_pre_orig, int(_ns_pre_mtt)))
+                if _ns_pre_capped < _ns_pre_orig:
+                    _ns_answer_pass_original_cap = _ns_pre_orig
+                    chat_kwargs = dict(chat_kwargs)
+                    chat_kwargs["max_tokens"] = _ns_pre_capped
+                    if _ns_auto_partition:
+                        logger.info(
+                            "%s non-stream chat Auto reasoning partition: "
+                            "total_cap=%d thinking_cap=%d visible_reserve=%d",
+                            _ns_pre_family,
+                            _ns_pre_orig,
+                            _ns_pre_capped,
+                            _ns_pre_orig - _ns_pre_capped,
+                        )
 
     try:
         output = await _await_chat_with_disconnect_abort(
@@ -15417,8 +15478,7 @@ async def create_response(
     _ns_answer_pass_original_cap = None
     _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
     if (
-        _ns_pre_mtt is not None
-        and chat_kwargs.get("enable_thinking") is not False
+        chat_kwargs.get("enable_thinking") is not False
         and getattr(request, "enable_thinking", None) is not False
         and (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is not False
         and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
@@ -15436,11 +15496,32 @@ async def create_response(
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
         ):
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
-            _ns_pre_capped = max(1, min(_ns_pre_orig, int(_ns_pre_mtt)))
-            if _ns_pre_capped < _ns_pre_orig:
-                _ns_answer_pass_original_cap = _ns_pre_orig
-                chat_kwargs = dict(chat_kwargs)
-                chat_kwargs["max_tokens"] = _ns_pre_capped
+            _ns_auto_partition = False
+            if (
+                _ns_pre_mtt is None
+                and _ns_pre_family in _AUTO_THINKING_PARTITION_FAMILIES
+                and chat_kwargs.get("thinking_budget") is None
+                and (chat_kwargs.get("chat_template_kwargs") or {}).get(
+                    "thinking_budget"
+                ) is None
+            ):
+                _ns_pre_mtt = _auto_thinking_pass_budget(_ns_pre_orig)
+                _ns_auto_partition = True
+            if _ns_pre_mtt is not None:
+                _ns_pre_capped = max(1, min(_ns_pre_orig, int(_ns_pre_mtt)))
+                if _ns_pre_capped < _ns_pre_orig:
+                    _ns_answer_pass_original_cap = _ns_pre_orig
+                    chat_kwargs = dict(chat_kwargs)
+                    chat_kwargs["max_tokens"] = _ns_pre_capped
+                    if _ns_auto_partition:
+                        logger.info(
+                            "%s non-stream Responses Auto reasoning partition: "
+                            "total_cap=%d thinking_cap=%d visible_reserve=%d",
+                            _ns_pre_family,
+                            _ns_pre_orig,
+                            _ns_pre_capped,
+                            _ns_pre_orig - _ns_pre_capped,
+                        )
 
     try:
         output = await _await_chat_with_disconnect_abort(
@@ -16607,6 +16688,25 @@ async def stream_chat_completion(
                 _requested_thinking_budget = getattr(
                     request, "max_thinking_tokens", None
                 )
+                if (
+                    _requested_thinking_budget is None
+                    and _family_name in _AUTO_THINKING_PARTITION_FAMILIES
+                    and kwargs.get("thinking_budget") is None
+                    and (kwargs.get("chat_template_kwargs") or {}).get(
+                        "thinking_budget"
+                    ) is None
+                ):
+                    _requested_thinking_budget = _auto_thinking_pass_budget(
+                        _requested_output_budget
+                    )
+                    logger.info(
+                        "%s Chat Completions Auto reasoning partition: "
+                        "total_cap=%d thinking_cap=%d visible_reserve=%d",
+                        _family_name,
+                        _requested_output_budget,
+                        _requested_thinking_budget,
+                        _requested_output_budget - _requested_thinking_budget,
+                    )
                 if _requested_thinking_budget is not None:
                     _requested_thinking_budget = max(
                         1, int(_requested_thinking_budget)
@@ -18283,6 +18383,25 @@ async def stream_responses_api(
                 _requested_thinking_budget = getattr(
                     request, "max_thinking_tokens", None
                 )
+                if (
+                    _requested_thinking_budget is None
+                    and _family_name in _AUTO_THINKING_PARTITION_FAMILIES
+                    and kwargs.get("thinking_budget") is None
+                    and (kwargs.get("chat_template_kwargs") or {}).get(
+                        "thinking_budget"
+                    ) is None
+                ):
+                    _requested_thinking_budget = _auto_thinking_pass_budget(
+                        _requested_output_budget
+                    )
+                    logger.info(
+                        "%s Responses Auto reasoning partition: "
+                        "total_cap=%d thinking_cap=%d visible_reserve=%d",
+                        _family_name,
+                        _requested_output_budget,
+                        _requested_thinking_budget,
+                        _requested_output_budget - _requested_thinking_budget,
+                    )
                 if _requested_thinking_budget is not None:
                     _requested_thinking_budget = max(
                         1, int(_requested_thinking_budget)
@@ -19450,6 +19569,12 @@ async def stream_responses_api(
                     content_was_emitted = True
                     streamed_text += _ans_sent
                     completion_tokens += int(_ans_ct or 0)
+                    # The visible-answer pass now owns the terminal status. The
+                    # first reasoning pass commonly ended with finish=length by
+                    # design; retaining that stale output incorrectly emitted
+                    # response.incomplete even when this pass stopped cleanly.
+                    if _ans_last_out is not None:
+                        last_output = _ans_last_out
             except Exception as e:
                 logger.error(
                     "%s visible answer pass failed for %s: %s",

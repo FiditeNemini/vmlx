@@ -15095,7 +15095,8 @@ class TestStreamUsagePropagatesCacheDetail:
     async def test_qwen35_tools_enabled_reasoning_only_rearms_visible_answer_pass(
         self, monkeypatch
     ):
-        """Offered tools must not leave an ordinary Qwen answer reasoning-only."""
+        """A length-capped Qwen reasoning pass must terminal-complete after its
+        clean visible-answer pass, even when tools were offered."""
         import json
         from types import SimpleNamespace
 
@@ -15113,6 +15114,11 @@ class TestStreamUsagePropagatesCacheDetail:
         class _Engine:
             tokenizer = SimpleNamespace(has_thinking=False)
 
+            answer_prefix = (
+                "VISIBLE_QWEN_TOOLS_ANSWER_PREFIX_FOR_PROGRESS_"
+                + ("streaming-safe-prefix-" * 4)
+            )
+
             def __init__(self):
                 self.calls = []
 
@@ -15123,8 +15129,16 @@ class TestStreamUsagePropagatesCacheDetail:
                     assert "_vmlx_tools_present" not in kwargs
                     assert "_vmlx_template_tools" not in kwargs
                     yield GenerationOutput(
-                        text="VISIBLE_QWEN_TOOLS_ANSWER",
-                        new_text="VISIBLE_QWEN_TOOLS_ANSWER",
+                        text=self.answer_prefix,
+                        new_text=self.answer_prefix,
+                        prompt_tokens=13,
+                        completion_tokens=3,
+                        finished=False,
+                        finish_reason=None,
+                    )
+                    yield GenerationOutput(
+                        text=self.answer_prefix + "DONE",
+                        new_text="DONE",
                         prompt_tokens=13,
                         completion_tokens=4,
                         finished=True,
@@ -15139,7 +15153,7 @@ class TestStreamUsagePropagatesCacheDetail:
                     cached_tokens=9,
                     cache_detail="memory",
                     finished=True,
-                    finish_reason="stop",
+                    finish_reason="length",
                 )
 
         class _Registry:
@@ -15207,10 +15221,13 @@ class TestStreamUsagePropagatesCacheDetail:
         )[-1]["response"]
         assert len(response_engine.calls) == 2
         assert response_engine.calls[1][1].get("enable_thinking") is False
-        assert [row["delta"] for row in response_content] == [
-            "VISIBLE_QWEN_TOOLS_ANSWER"
-        ]
-        assert response_completed["output_text"] == "VISIBLE_QWEN_TOOLS_ANSWER"
+        assert len(response_content) >= 2
+        assert "".join(row["delta"] for row in response_content) == (
+            response_engine.answer_prefix + "DONE"
+        )
+        assert response_completed["output_text"] == (
+            response_engine.answer_prefix + "DONE"
+        )
 
         chat_engine = _Engine()
         chat_request = ChatCompletionRequest(
@@ -15252,7 +15269,10 @@ class TestStreamUsagePropagatesCacheDetail:
         ]
         assert len(chat_engine.calls) == 2
         assert chat_engine.calls[1][1].get("enable_thinking") is False
-        assert chat_content == ["VISIBLE_QWEN_TOOLS_ANSWER"]
+        assert len(chat_content) >= 2
+        assert "".join(chat_content) == (
+            chat_engine.answer_prefix + "DONE"
+        )
 
     @pytest.mark.asyncio
     async def test_minimax_m3_chat_stream_reasoning_only_runs_visible_answer_pass(

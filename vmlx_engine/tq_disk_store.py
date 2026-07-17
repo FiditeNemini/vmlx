@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,37 @@ def _restore_tq_dtype(value: Any, dtype_name: Any, label: str) -> Any:
     if target is None:
         raise ValueError(f"invalid or missing {label} TQ dtype: {name!r}")
     return value if value.dtype == target else value.astype(target)
+
+
+@lru_cache(maxsize=32)
+def _tq_decoder_pair(
+    key_dim: int,
+    value_dim: int,
+    key_bits: int,
+    value_bits: int,
+    seed: int,
+) -> Tuple[Any, Any]:
+    """Return immutable TurboQuant decoder state for one codec configuration.
+
+    Paged-prefix reconstruction may decode thousands of block/layer entries
+    with the same dimensions, bit widths, and seed. Constructing a fresh
+    ``TurboQuantKVCache`` for each entry also rebuilds identical rotation,
+    codebook, and QJL decoder state each time. Keep a small process-local cache
+    of the encoder pair; decode operations remain independent because the
+    encoder objects are read-only after initialization.
+    """
+    from jang_tools.turboquant.cache import TurboQuantKVCache
+
+    tq = TurboQuantKVCache(
+        key_dim=key_dim,
+        value_dim=value_dim,
+        key_bits=key_bits,
+        value_bits=value_bits,
+        seed=seed,
+        compress_after=0,
+        sink_tokens=0,
+    )
+    return tq.key_encoder, tq.value_encoder
 
 
 def encode_tq_block(
@@ -148,25 +180,22 @@ def decode_tq_block(entry: Tuple[Any, ...]) -> Tuple[Any, Any]:
     tag, encoded_keys, encoded_values, config = entry
     if tag != "turboquant_kv" or not isinstance(config, dict):
         raise ValueError("malformed TQ block tag/config")
-    from jang_tools.turboquant.cache import TurboQuantKVCache
     from jang_tools.turboquant.pipeline import decode_keys, decode_values
 
-    tq = TurboQuantKVCache(
-        key_dim=int(config["key_dim"]),
-        value_dim=int(config["value_dim"]),
-        key_bits=int(config["key_bits"]),
-        value_bits=int(config["value_bits"]),
-        seed=int(config["seed"]),
-        compress_after=0,
-        sink_tokens=0,
+    key_encoder, value_encoder = _tq_decoder_pair(
+        int(config["key_dim"]),
+        int(config["value_dim"]),
+        int(config["key_bits"]),
+        int(config["value_bits"]),
+        int(config["seed"]),
     )
     keys = _restore_tq_dtype(
-        decode_keys(encoded_keys, tq.key_encoder),
+        decode_keys(encoded_keys, key_encoder),
         config.get("key_dtype"),
         "key",
     )
     values = _restore_tq_dtype(
-        decode_values(encoded_values, tq.value_encoder),
+        decode_values(encoded_values, value_encoder),
         config.get("value_dtype"),
         "value",
     )
@@ -177,6 +206,195 @@ def decode_tq_block(entry: Tuple[Any, ...]) -> Tuple[Any, Any]:
             f"keys={keys.shape[-2]}, values={values.shape[-2]}"
         )
     return keys, values
+
+
+def _tq_block_batch_signature(entry: Tuple[Any, ...]) -> Optional[Tuple[Any, ...]]:
+    """Return a grouping signature for one independently packed TQ page."""
+    if not isinstance(entry, (tuple, list)) or len(entry) != 4:
+        return None
+    tag, encoded_keys, encoded_values, config = entry
+    if tag != "turboquant_kv" or not isinstance(config, dict):
+        return None
+    try:
+        key_shape = tuple(int(dim) for dim in encoded_keys.shape)
+        value_shape = tuple(int(dim) for dim in encoded_values.shape)
+        if len(key_shape) != 4 or len(value_shape) != 4:
+            return None
+        if key_shape[-2] != value_shape[-2]:
+            return None
+        return (
+            key_shape,
+            value_shape,
+            int(config["key_dim"]),
+            int(config["value_dim"]),
+            int(config["key_bits"]),
+            int(config["value_bits"]),
+            str(config["key_dtype"]),
+            str(config["value_dtype"]),
+            int(config["seed"]),
+            int(encoded_keys.index_bits),
+            int(encoded_values.index_bits),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _stack_tq_block_entries(entries: List[Tuple[Any, ...]]) -> Optional[Tuple[Any, ...]]:
+    """Stack equal-shaped independently packed pages as an outer batch.
+
+    TurboQuant packs every page independently and pads its final uint32 word.
+    Concatenating those words is lossless only when every page ends exactly on a
+    packing boundary.  The added outer dimension preserves the original
+    batch/head/token ordering; the caller folds it into the token axis only
+    after decoding.  Unusual layouts use the scalar compatibility path.
+    """
+    if not entries:
+        return None
+    first = entries[0]
+    if not isinstance(first, (tuple, list)) or len(first) != 4:
+        return None
+    tag, first_keys, first_values, first_config = first
+    if tag != "turboquant_kv" or not isinstance(first_config, dict):
+        return None
+
+    key_payloads = []
+    value_payloads = []
+    signature = _tq_block_batch_signature(first)
+    if signature is None:
+        return None
+
+    for entry in entries:
+        if not isinstance(entry, (tuple, list)) or len(entry) != 4:
+            return None
+        entry_tag, encoded_keys, encoded_values, config = entry
+        if entry_tag != "turboquant_kv" or not isinstance(config, dict):
+            return None
+        if _tq_block_batch_signature(entry) != signature:
+            return None
+
+        key_shape = tuple(int(dim) for dim in encoded_keys.shape)
+        value_shape = tuple(int(dim) for dim in encoded_values.shape)
+        if int(config.get("offset", -1)) != key_shape[-2]:
+            return None
+        key_payloads.append(encoded_keys)
+        value_payloads.append(encoded_values)
+
+    merged_key_shape = (len(entries),) + tuple(first_keys.shape)
+    merged_value_shape = (len(entries),) + tuple(first_values.shape)
+    from jang_tools.turboquant.pipeline import (
+        pack_bits,
+        pack_signs,
+        unpack_bits,
+        unpack_signs,
+    )
+
+    def _stack_indices(payloads: List[Any], attr: str, bits: int, elements: int):
+        packed = [getattr(payload, attr) for payload in payloads]
+        if elements % (32 // bits) == 0:
+            return mx.concatenate(packed, axis=0)
+        unpacked = [unpack_bits(value, bits, elements) for value in packed]
+        return pack_bits(mx.concatenate(unpacked, axis=0), bits)
+
+    key_elements = 1
+    value_elements = 1
+    for dim in first_keys.shape:
+        key_elements *= int(dim)
+    for dim in first_values.shape:
+        value_elements *= int(dim)
+    if key_elements % 32 == 0:
+        qjl_packed = mx.concatenate(
+            [payload.qjl_packed for payload in key_payloads], axis=0
+        )
+    else:
+        qjl_packed = pack_signs(
+            mx.concatenate(
+                [
+                    unpack_signs(payload.qjl_packed, key_elements)
+                    for payload in key_payloads
+                ],
+                axis=0,
+            )
+        )
+
+    key_type = type(first_keys)
+    value_type = type(first_values)
+    merged_keys = key_type(
+        indices_packed=_stack_indices(
+            key_payloads,
+            "indices_packed",
+            int(first_keys.index_bits),
+            key_elements,
+        ),
+        qjl_packed=qjl_packed,
+        residual_norms=mx.stack(
+            [payload.residual_norms for payload in key_payloads], axis=0
+        ),
+        vector_norms=mx.stack(
+            [payload.vector_norms for payload in key_payloads], axis=0
+        ),
+        shape=merged_key_shape,
+        index_bits=int(first_keys.index_bits),
+    )
+    merged_values = value_type(
+        indices_packed=_stack_indices(
+            value_payloads,
+            "indices_packed",
+            int(first_values.index_bits),
+            value_elements,
+        ),
+        vector_norms=mx.stack(
+            [payload.vector_norms for payload in value_payloads], axis=0
+        ),
+        shape=merged_value_shape,
+        index_bits=int(first_values.index_bits),
+    )
+    return (
+        "turboquant_kv",
+        merged_keys,
+        merged_values,
+        dict(first_config),
+    )
+
+
+def decode_tq_blocks(entries: List[Tuple[Any, ...]]) -> Tuple[Any, Any]:
+    """Decode a sequence of paged TQ entries with a guarded batched fast path."""
+    if not entries:
+        raise ValueError("cannot decode an empty TQ block sequence")
+    if len(entries) == 1:
+        return decode_tq_block(entries[0])
+
+    decoded = []
+    start = 0
+    while start < len(entries):
+        signature = _tq_block_batch_signature(entries[start])
+        end = start + 1
+        while (
+            signature is not None
+            and end < len(entries)
+            and _tq_block_batch_signature(entries[end]) == signature
+        ):
+            end += 1
+        run = entries[start:end]
+        stacked = _stack_tq_block_entries(run) if len(run) > 1 else None
+        if stacked is None:
+            decoded.extend(decode_tq_block(entry) for entry in run)
+        else:
+            keys, values = decode_tq_block(stacked)
+            # [pages, batch, heads, tokens, dim] ->
+            # [batch, heads, pages * tokens, dim]
+            keys = mx.transpose(keys, (1, 2, 0, 3, 4)).reshape(
+                keys.shape[1], keys.shape[2], -1, keys.shape[-1]
+            )
+            values = mx.transpose(values, (1, 2, 0, 3, 4)).reshape(
+                values.shape[1], values.shape[2], -1, values.shape[-1]
+            )
+            decoded.append((keys, values))
+        start = end
+
+    return (
+        mx.concatenate([keys for keys, _ in decoded], axis=2),
+        mx.concatenate([values for _, values in decoded], axis=2),
+    )
 
 
 def is_tq_compressed_cache(cache: List[Any]) -> bool:

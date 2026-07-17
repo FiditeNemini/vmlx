@@ -185,6 +185,119 @@ def test_tq_block_decode_restores_bfloat16_attention_dtype():
     assert restored_values.dtype == mx.bfloat16
 
 
+def test_tq_block_decode_reuses_bounded_decoder_state():
+    from vmlx_engine import tq_disk_store
+
+    tq_disk_store._tq_decoder_pair.cache_clear()
+    first = _tq_state(tokens=8, seed=127)
+    second = _tq_state(tokens=16, seed=127)
+    entries = [
+        tq_disk_store.encode_tq_block(
+            state["state"][0],
+            state["state"][1],
+            state["tq_config"],
+        )
+        for state in (first, second)
+    ]
+
+    decoded = [tq_disk_store.decode_tq_block(entry) for entry in entries]
+    mx.eval(*(array for pair in decoded for array in pair))
+    info = tq_disk_store._tq_decoder_pair.cache_info()
+
+    assert info.maxsize == 32
+    assert info.currsize == 1
+    assert info.misses == 1
+    assert info.hits == 1
+    assert decoded[0][0].shape[-2] == 8
+    assert decoded[1][0].shape[-2] == 16
+
+
+def test_tq_block_batch_decode_matches_individual_q4_pages_exactly():
+    from vmlx_engine import tq_disk_store
+
+    states = [_tq_state(tokens=8, seed=131) for _ in range(3)]
+    for state in states:
+        state["tq_config"].update(key_bits=4, value_bits=4)
+    entries = [
+        tq_disk_store.encode_tq_block(
+            state["state"][0],
+            state["state"][1],
+            state["tq_config"],
+        )
+        for state in states
+    ]
+    individual = [tq_disk_store.decode_tq_block(entry) for entry in entries]
+    expected_keys = mx.concatenate([pair[0] for pair in individual], axis=2)
+    expected_values = mx.concatenate([pair[1] for pair in individual], axis=2)
+
+    tq_disk_store._tq_decoder_pair.cache_clear()
+    keys, values = tq_disk_store.decode_tq_blocks(entries)
+    mx.eval(keys, values, expected_keys, expected_values)
+    info = tq_disk_store._tq_decoder_pair.cache_info()
+
+    assert keys.shape[-2] == 24
+    assert values.shape[-2] == 24
+    assert float(mx.max(mx.abs(keys - expected_keys)).item()) == 0.0
+    assert float(mx.max(mx.abs(values - expected_values)).item()) == 0.0
+    assert info.misses == 1
+    assert info.hits == 0
+
+
+def test_tq_block_batch_decode_preserves_partial_tail_order():
+    from vmlx_engine import tq_disk_store
+
+    states = [_tq_state(tokens=tokens, seed=137) for tokens in (8, 8, 7)]
+    for state in states:
+        state["tq_config"].update(key_bits=4, value_bits=4)
+    entries = [
+        tq_disk_store.encode_tq_block(
+            state["state"][0],
+            state["state"][1],
+            state["tq_config"],
+        )
+        for state in states
+    ]
+    individual = [tq_disk_store.decode_tq_block(entry) for entry in entries]
+    expected_keys = mx.concatenate([pair[0] for pair in individual], axis=2)
+    expected_values = mx.concatenate([pair[1] for pair in individual], axis=2)
+
+    tq_disk_store._tq_decoder_pair.cache_clear()
+    keys, values = tq_disk_store.decode_tq_blocks(entries)
+    mx.eval(keys, values, expected_keys, expected_values)
+    info = tq_disk_store._tq_decoder_pair.cache_info()
+
+    assert keys.shape[-2] == 23
+    assert values.shape[-2] == 23
+    assert float(mx.max(mx.abs(keys - expected_keys)).item()) == 0.0
+    assert float(mx.max(mx.abs(values - expected_values)).item()) == 0.0
+    assert info.misses == 1
+    assert info.hits == 1
+
+
+def test_tq_block_batch_decode_falls_back_for_mixed_codec_configs():
+    from vmlx_engine import tq_disk_store
+
+    states = [_tq_state(tokens=8, seed=seed) for seed in (139, 149)]
+    entries = [
+        tq_disk_store.encode_tq_block(
+            state["state"][0],
+            state["state"][1],
+            state["tq_config"],
+        )
+        for state in states
+    ]
+
+    tq_disk_store._tq_decoder_pair.cache_clear()
+    keys, values = tq_disk_store.decode_tq_blocks(entries)
+    mx.eval(keys, values)
+    info = tq_disk_store._tq_decoder_pair.cache_info()
+
+    assert keys.shape[-2] == 16
+    assert values.shape[-2] == 16
+    assert info.currsize == 2
+    assert info.misses == 2
+
+
 def test_nested_cache_list_tq_block_roundtrip_preserves_seed():
     from vmlx_engine.block_disk_store import _deserialize_block, _serialize_block
     from vmlx_engine.cache_record_validator import validate_cache_record

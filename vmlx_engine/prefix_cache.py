@@ -3540,18 +3540,11 @@ class BlockAwarePrefixCache:
                     cumulative_count += 1
 
                 elif tq_block_entries:
-                    from .tq_disk_store import decode_tq_block
+                    from .tq_disk_store import decode_tq_blocks
 
-                    decoded_keys = []
-                    decoded_values = []
-                    for tq_entry in tq_block_entries:
-                        block_keys, block_values = decode_tq_block(tq_entry)
-                        decoded_keys.append(block_keys)
-                        decoded_values.append(block_values)
-                    concat_keys = mx.concatenate(decoded_keys, axis=2)
-                    concat_values = mx.concatenate(decoded_values, axis=2)
+                    concat_keys, concat_values = decode_tq_blocks(tq_block_entries)
                     mx.eval(concat_keys, concat_values)
-                    if len(decoded_keys) == 1:
+                    if len(tq_block_entries) == 1:
                         concat_keys = concat_keys * 1
                         concat_values = concat_values * 1
                         mx.eval(concat_keys, concat_values)
@@ -3967,16 +3960,9 @@ class BlockAwarePrefixCache:
                                 sub_cumulative = sub
 
                         if sub_tq_entries:
-                            from .tq_disk_store import decode_tq_block
+                            from .tq_disk_store import decode_tq_blocks
 
-                            tq_keys = []
-                            tq_values = []
-                            for sub_tq in sub_tq_entries:
-                                tk, tv = decode_tq_block(sub_tq)
-                                tq_keys.append(tk)
-                                tq_values.append(tv)
-                            ck = mx.concatenate(tq_keys, axis=2)
-                            cv = mx.concatenate(tq_values, axis=2)
+                            ck, cv = decode_tq_blocks(sub_tq_entries)
                             mx.eval(ck, cv)
                             allowed_kv = self._get_allowed_n_kv_heads()
                             if allowed_kv and ck.shape[1] not in allowed_kv:

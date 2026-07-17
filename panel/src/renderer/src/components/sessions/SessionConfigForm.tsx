@@ -308,9 +308,11 @@ interface SessionConfigFormProps {
   imageMode?: string
   /** Session ID for components that need to query the running backend (e.g. DistributedNodeList). Omit for the CreateSession form where the session doesn't exist yet. */
   sessionId?: string
+  /** Model path/name used only for artifact-specific policy labels (for example Bonsai's q8 exception). */
+  modelIdentity?: string
 }
 
-export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedUsePagedCache, detectedCacheSubtype, detectedFamily, detectedToolParser, detectedReasoningParser, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId }: SessionConfigFormProps) {
+export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedUsePagedCache, detectedCacheSubtype, detectedFamily, detectedToolParser, detectedReasoningParser, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId, modelIdentity }: SessionConfigFormProps) {
   const { t } = useTranslation()
   const isImage = modelType === 'image'
   const isImageEdit = isImage && (imageMode === 'edit' || config.imageMode === 'edit')
@@ -366,6 +368,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     detectedCacheType === 'mamba' ||
     detectedCacheType === 'hybrid' ||
     detectedCacheType === 'rotating_kv'
+  const normalizedModelIdentity = (modelIdentity || '').toLowerCase()
+  const bonsaiActive = normalizedModelIdentity.includes('bonsai')
+  const qwenHybridTqActive = isMambaCache && (normalizedDetectedFamily || '').startsWith('qwen')
   const mixedSwaCacheActive =
     detectedCacheType === 'rotating_kv' ||
     detectedCacheSubtype === 'mixed_swa_kv'
@@ -427,11 +432,21 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             ? 'Native HY3 KV + TQ4 stored prefixes'
             : mixedSwaCacheActive
               ? 'TQ4 full-attention KV + native rotating SWA'
+              : qwenHybridTqActive
+                ? bonsaiActive
+                  ? 'TQ8 attention KV + native hybrid state'
+                  : 'TQ4 attention KV + native hybrid state'
               : 'Engine-selected native cache'
   const liveCacheCodecBadge =
     openPanguExactTypedCache || dsv4Active || m3Active || explicitStoredCacheCodec
       ? 'TURBOQUANT OFF'
-      : hy3Active ? 'TQ4 AUTO' : mixedSwaCacheActive ? 'MIXED AUTO' : 'AUTO'
+      : hy3Active
+        ? 'TQ4 AUTO'
+        : mixedSwaCacheActive
+          ? 'MIXED AUTO'
+          : qwenHybridTqActive
+            ? bonsaiActive ? 'TQ8 AUTO' : 'TQ4 AUTO'
+            : 'AUTO'
   const effectiveMaxNumSeqs = dsv4Active ? 1 : config.maxNumSeqs
   const effectivePrefillBatchSize = dsv4Active ? 1 : config.prefillBatchSize
   const effectiveCompletionBatchSize = dsv4Active ? 1 : config.completionBatchSize
@@ -1081,7 +1096,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!batchingOff && prefixOff && <IncompatWarning text="KV cache quantization requires prefix cache. Enable 'Prefix Cache' above to use KV cache quantization." />}
         {!effectivelyNoBatching && !prefixOff && mixedSwaCacheActive && <PerformanceHint text="Mixed sliding/full attention cache detected — Auto applies TQ4 only to compatible full-attention KV slots and preserves native rotating-SWA metadata. Explicit None disables both live TQ-KV and stored quantization." />}
         {!effectivelyNoBatching && !prefixOff && hy3Active && <PerformanceHint text="HY3 plain-KV cache detected — Auto uses TQ4 for paged/L2 stored prefixes while live decode stays on the native KV cache. Native MTP D1 copies this cache independently before batch split/verify." />}
-        {!effectivelyNoBatching && !prefixOff && isMambaCache && !mixedSwaCacheActive && !dsv4Active && !m3Active && !openPanguExactTypedCache && <PerformanceHint text="Hybrid stateful cache detected — the engine keeps SSM/GLA state native and only uses cache codecs proven for that architecture. Generic TurboQuant KV is disabled unless a tested override exists." />}
+        {!effectivelyNoBatching && !prefixOff && qwenHybridTqActive && !mixedSwaCacheActive && <PerformanceHint text={bonsaiActive ? 'Bonsai hybrid cache detected — Auto applies TQ8 only to compatible attention KV and preserves native SSM/GLA companion state.' : 'Qwen hybrid cache detected — Auto applies TQ4 only to compatible attention KV and preserves native SSM/GLA companion state.'} />}
+        {!effectivelyNoBatching && !prefixOff && isMambaCache && !qwenHybridTqActive && !mixedSwaCacheActive && !dsv4Active && !m3Active && !openPanguExactTypedCache && <PerformanceHint text="Hybrid stateful cache detected — the engine keeps SSM/GLA state native and only uses cache codecs proven for that architecture. Generic TurboQuant KV is disabled unless a tested override exists." />}
         {!effectivelyNoBatching && dsv4Active && <PerformanceHint text="DeepSeek-V4 keeps generic KV q4/q8 disabled. Its prefix reuse uses native SWA+CSA/HCA snapshots through the DSV4 Native Composite Prefix Cache switch, not the generic stored-KV codec." />}
         {!effectivelyNoBatching && m3Active && <PerformanceHint text="MiniMax-M3 keeps generic KV q4/q8 disabled. Prefix reuse uses native MSA snapshots with keys, values, idx_keys, and absolute offsets; generic stored-KV codecs cannot preserve that cache format." />}
         {!effectivelyNoBatching && openPanguExactTypedCache && <PerformanceHint text="openPangu keeps generic KV q4/q8 disabled. Its exact typed snapshot owns MLA KV, DSA indexer, rotating-SWA metadata, and causal-convolution state as one full-precision record." />}

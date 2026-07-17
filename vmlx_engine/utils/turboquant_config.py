@@ -15,12 +15,14 @@ from jang_tools.turboquant.config import TurboQuantConfig as _JangTurboQuantConf
 logger = logging.getLogger(__name__)
 
 QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER = 0
-UNCALIBRATED_AUTO_TQ_BITS = 8
+UNCALIBRATED_AUTO_TQ_BITS = 4
+BONSAI_UNCALIBRATED_AUTO_TQ_BITS = 8
 MIXED_SWA_AUTO_TQ_BITS = 4
 HY3_FULL_KV_AUTO_TQ_BITS = 4
 # Compatibility name retained for downstream tests/imports.  The safety rule is
-# no longer Qwen-only: any bundle without model-owned TQ calibration starts at
-# loss-minimizing 8-bit storage and may opt into lower bits in jang_config.json.
+# no longer Qwen-only: compatible bundles without model-owned TQ calibration use
+# q4 stored attention KV. Bonsai retains the q8 exception established by its
+# live agent-loop proof; native non-KV companion state is never quantized.
 QWEN_HYBRID_UNCALIBRATED_TQ_BITS = UNCALIBRATED_AUTO_TQ_BITS
 _QWEN_HYBRID_MODEL_TYPES = frozenset(
     {
@@ -44,6 +46,22 @@ def _model_types(model_config: dict | None) -> set[str]:
         str(candidate.get("model_type") or "").lower()
         for candidate in candidates
     }
+
+
+def _is_bonsai_config(model_config: dict | None) -> bool:
+    """Identify the Bonsai Qwen derivative that retains the q8 cache policy."""
+    if not isinstance(model_config, dict):
+        return False
+    candidates = [model_config]
+    text_config = model_config.get("text_config")
+    if isinstance(text_config, dict):
+        candidates.append(text_config)
+    identity_fields = ("_name_or_path", "name_or_path", "model_name", "name")
+    return any(
+        "bonsai" in str(candidate.get(field) or "").lower()
+        for candidate in candidates
+        for field in identity_fields
+    )
 
 
 def _is_qwen_hybrid_attention_config(
@@ -94,12 +112,13 @@ def apply_uncalibrated_auto_tq_policy(
     has caused Bonsai/Qwen tool loops and, on Laguna, a deterministic coherent
     cold -> incoherent paged+TQ warm transition.  Auto therefore keeps the
     mid-request live transition disabled and uses a correctness-gated storage
-    codec on real attention KV slots. Qwen/Bonsai hybrid and otherwise
-    unproven uncalibrated families stay at 8-bit. HY3's plain full-KV runtime
-    uses a family-scoped q4 policy that remains release-gated by live restart
-    and eviction proof. Cumulative SSM/GatedDelta companions remain native and
-    are never assigned fake TQ slots. A bundle-owned calibrated ``turboquant``
-    block or explicit operator settings remain authoritative.
+    codec on real attention KV slots. Qwen hybrid and other compatible families
+    use q4 stored attention KV. Bonsai alone keeps q8 because its repeated
+    agent-loop proof established that boundary. HY3's
+    plain full-KV runtime also uses q4. Cumulative SSM/GatedDelta companions
+    remain native and are never assigned fake TQ slots. A bundle-owned
+    calibrated ``turboquant`` block or explicit operator settings remain
+    authoritative.
     """
     resolved = dict(tq_cfg)
     from .hybrid_tq_cache import classify_qwen_cache_architecture
@@ -118,23 +137,36 @@ def apply_uncalibrated_auto_tq_policy(
     hy3_full_kv = bool(_model_types(model_config) & {"hy_v3", "hy3"}) and (
         len(attention_layers) == len(layer_types)
     )
+    bonsai = _is_bonsai_config(model_config)
     storage_bits = (
-        HY3_FULL_KV_AUTO_TQ_BITS if hy3_full_kv else UNCALIBRATED_AUTO_TQ_BITS
+        BONSAI_UNCALIBRATED_AUTO_TQ_BITS
+        if bonsai
+        else HY3_FULL_KV_AUTO_TQ_BITS
+        if hy3_full_kv
+        else UNCALIBRATED_AUTO_TQ_BITS
     )
 
     if architecture == "qwen_full_kv":
-        auto_policy = "qwen_full_kv_storage_tq8"
+        auto_policy = (
+            "bonsai_full_kv_storage_tq8"
+            if bonsai
+            else "qwen_full_kv_storage_tq4"
+        )
     elif architecture in {
         "qwen3_5_hybrid_gated_delta",
         "qwen3_next_hybrid_gated_delta",
     }:
-        auto_policy = "qwen_hybrid_attention_kv_storage_tq8"
+        auto_policy = (
+            "bonsai_hybrid_attention_kv_storage_tq8"
+            if bonsai
+            else "qwen_hybrid_attention_kv_storage_tq4"
+        )
     elif hy3_full_kv:
         auto_policy = "hy3_full_kv_storage_tq4"
     elif len(attention_layers) == len(layer_types):
-        auto_policy = "uncalibrated_full_kv_storage_tq8"
+        auto_policy = "uncalibrated_full_kv_storage_tq4"
     else:
-        auto_policy = "uncalibrated_selective_attention_kv_storage_tq8"
+        auto_policy = "uncalibrated_selective_attention_kv_storage_tq4"
 
     resolved.update(
         {

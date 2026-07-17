@@ -75,7 +75,7 @@ def test_qwen_cache_classifier_distinguishes_subtypes():
     ) == "unsupported"
 
 
-def test_uncalibrated_qwen_hybrid_auto_uses_tq8_on_real_kv_positions():
+def test_uncalibrated_qwen_hybrid_auto_uses_tq4_on_real_kv_positions():
     from vmlx_engine.utils.turboquant_config import (
         apply_uncalibrated_auto_tq_policy,
     )
@@ -87,17 +87,38 @@ def test_uncalibrated_qwen_hybrid_auto_uses_tq8_on_real_kv_positions():
         layer_types,
     )
 
-    assert resolved["default_key_bits"] == 8
-    assert resolved["default_value_bits"] == 8
-    assert resolved["critical_key_bits"] == 8
-    assert resolved["critical_value_bits"] == 8
+    assert resolved["default_key_bits"] == 4
+    assert resolved["default_value_bits"] == 4
+    assert resolved["critical_key_bits"] == 4
+    assert resolved["critical_value_bits"] == 4
     assert resolved["critical_layers"] == list(range(3, 64, 4))
     assert resolved["sink_tokens"] == 0
     assert resolved["compress_after"] == 0
-    assert resolved["auto_policy"] == "qwen_hybrid_attention_kv_storage_tq8"
+    assert resolved["auto_policy"] == "qwen_hybrid_attention_kv_storage_tq4"
 
 
-def test_uncalibrated_qwen_full_kv_auto_uses_tq8_on_all_attention_slots():
+def test_bonsai_qwen_hybrid_auto_retains_tq8_exception():
+    from vmlx_engine.utils.turboquant_config import (
+        apply_uncalibrated_auto_tq_policy,
+    )
+
+    config = _qwen_hybrid_model_config()
+    config["_name_or_path"] = "Bonsai-27b-1bit-JANG"
+    layer_types = ["ssm", "ssm", "ssm", "attention"] * 16
+
+    resolved = apply_uncalibrated_auto_tq_policy(
+        {"enabled": True, "default_key_bits": 3, "seed": 42},
+        config,
+        layer_types,
+    )
+
+    assert resolved["default_key_bits"] == 8
+    assert resolved["default_value_bits"] == 8
+    assert resolved["critical_layers"] == list(range(3, 64, 4))
+    assert resolved["auto_policy"] == "bonsai_hybrid_attention_kv_storage_tq8"
+
+
+def test_uncalibrated_qwen_full_kv_auto_uses_tq4_on_all_attention_slots():
     from vmlx_engine.utils.turboquant_config import (
         apply_uncalibrated_auto_tq_policy,
     )
@@ -116,14 +137,14 @@ def test_uncalibrated_qwen_full_kv_auto_uses_tq8_on_all_attention_slots():
         layer_types,
     )
 
-    assert resolved["default_key_bits"] == 8
-    assert resolved["default_value_bits"] == 8
-    assert resolved["critical_key_bits"] == 8
-    assert resolved["critical_value_bits"] == 8
+    assert resolved["default_key_bits"] == 4
+    assert resolved["default_value_bits"] == 4
+    assert resolved["critical_key_bits"] == 4
+    assert resolved["critical_value_bits"] == 4
     assert resolved["critical_layers"] == list(range(28))
     assert resolved["sink_tokens"] == 0
     assert resolved["compress_after"] == 0
-    assert resolved["auto_policy"] == "qwen_full_kv_storage_tq8"
+    assert resolved["auto_policy"] == "qwen_full_kv_storage_tq4"
 
 
 def test_uncalibrated_mixed_swa_auto_uses_q4_on_full_attention_only():
@@ -158,7 +179,7 @@ def test_uncalibrated_qwen_cumulative_only_does_not_get_fake_tq_slots():
     assert resolved == original
 
 
-def test_uncalibrated_laguna_full_kv_auto_uses_tq8_on_all_attention_slots():
+def test_uncalibrated_laguna_full_kv_auto_uses_tq4_on_all_attention_slots():
     from vmlx_engine.utils.turboquant_config import (
         apply_uncalibrated_auto_tq_policy,
     )
@@ -179,14 +200,14 @@ def test_uncalibrated_laguna_full_kv_auto_uses_tq8_on_all_attention_slots():
         layer_types,
     )
 
-    assert resolved["default_key_bits"] == 8
-    assert resolved["default_value_bits"] == 8
-    assert resolved["critical_key_bits"] == 8
-    assert resolved["critical_value_bits"] == 8
+    assert resolved["default_key_bits"] == 4
+    assert resolved["default_value_bits"] == 4
+    assert resolved["critical_key_bits"] == 4
+    assert resolved["critical_value_bits"] == 4
     assert resolved["critical_layers"] == list(range(70))
     assert resolved["sink_tokens"] == 0
     assert resolved["compress_after"] == 0
-    assert resolved["auto_policy"] == "uncalibrated_full_kv_storage_tq8"
+    assert resolved["auto_policy"] == "uncalibrated_full_kv_storage_tq4"
 
 
 def test_uncalibrated_hy3_full_kv_auto_uses_tq4_on_all_attention_slots():
@@ -245,7 +266,7 @@ def test_tq_codec_signature_separates_bits_and_prefix_cache_namespaces():
             return []
 
         make_cache._vmlx_tq_storage_signature = turboquant_storage_signature(
-            config, "uncalibrated_full_kv_storage_tq8"
+            config, "uncalibrated_full_kv_storage_tq4"
         )
         model = Model()
         model.make_cache = make_cache
@@ -439,6 +460,7 @@ def test_jang_bonsai_auto_uses_tq8_only_on_attention_slots(monkeypatch):
     model = FakeBonsaiModel()
     model_config = {
         "model_type": "qwen3_5",
+        "_name_or_path": "Bonsai-27b-1bit-JANG",
         "text_config": {
             "model_type": "qwen3_5_text",
             "num_hidden_layers": 64,
@@ -460,7 +482,7 @@ def test_jang_bonsai_auto_uses_tq8_only_on_attention_slots(monkeypatch):
         index for index in range(64) if index not in attention_positions
     )
     assert getattr(model.make_cache, "_vmlx_tq_auto_policy") == (
-        "qwen_hybrid_attention_kv_storage_tq8"
+        "bonsai_hybrid_attention_kv_storage_tq8"
     )
     for index, layer in enumerate(cache):
         if index in attention_positions:
@@ -562,9 +584,9 @@ def test_native_cache_status_reports_hybrid_live_attention_tq():
         _hybrid_live_tq_companion_layers=[1, 3],
         # compress_after=0 => objects-only, no live decode-time encoding.
         _hybrid_live_tq_compress_after=0,
-        _hybrid_tq_auto_policy="qwen_hybrid_attention_kv_storage_tq8",
-        _hybrid_tq_default_key_bits=8,
-        _hybrid_tq_default_value_bits=8,
+        _hybrid_tq_auto_policy="qwen_hybrid_attention_kv_storage_tq4",
+        _hybrid_tq_default_key_bits=4,
+        _hybrid_tq_default_value_bits=4,
         _hybrid_kv_positions=[0, 2],
         _kv_cache_bits=4,
         _kv_cache_group_size=64,
@@ -594,10 +616,10 @@ def test_native_cache_status_reports_hybrid_live_attention_tq():
         "enabled": True,
         "mode": "storage_boundary",
         "codec": "turboquant_native",
-        "bits": 8,
-        "value_bits": 8,
+        "bits": 4,
+        "value_bits": 4,
         "group_size": None,
-        "auto_policy": "qwen_hybrid_attention_kv_storage_tq8",
+        "auto_policy": "qwen_hybrid_attention_kv_storage_tq4",
         "applies_to": "attention_kv_layers_only",
         "ssm_policy": "native_companion_state",
         "rederive": "async_clean_prefill_on_miss_or_warm_pass",

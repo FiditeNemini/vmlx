@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   requestsDirectAnswerAfterSingleTool,
+  requestsNoToolCalls,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
 } from '../src/shared/toolAutoContinue'
@@ -84,6 +85,29 @@ describe('tool auto-continue policy', () => {
         'Call file_info exactly once. After checking prerequisites. The tool result may be long; reply exactly DONE.',
       ),
     ).toBe(false)
+  })
+
+  it('maps an explicit current-turn no-tool directive to the API contract', () => {
+    expect(
+      requestsNoToolCalls(
+        '[FOLLOW] Do not call any tool. Use only the previous result.',
+      ),
+    ).toBe(true)
+    expect(requestsNoToolCalls('Please never use tools. Answer directly.')).toBe(true)
+    expect(
+      requestsNoToolCalls('Do not call any tool unless the file is missing.'),
+    ).toBe(false)
+    expect(
+      requestsNoToolCalls('Explain why someone might say "do not call any tool".'),
+    ).toBe(false)
+  })
+
+  it('sends tool_choice none and suppresses the generic tool prompt when requested', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+
+    expect(source).toContain('requestsNoToolCalls(latestUserText)')
+    expect(source.match(/obj\.tool_choice = "none"/g) || []).toHaveLength(2)
+    expect(source).toContain('!userForbidsToolCalls')
   })
 
   it('checks the terminal AppleScript round before sending a follow-up', () => {

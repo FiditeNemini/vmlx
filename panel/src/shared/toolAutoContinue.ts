@@ -37,3 +37,12 @@ export function requestsDirectAnswerAfterSingleTool(text: string): boolean {
     /\breply exactly\b/i.test(text)
   )
 }
+
+export function requestsNoToolCalls(text: string): boolean {
+  // Map an explicit current-turn user directive onto the standard API
+  // `tool_choice: "none"` contract. Keep this directive-shaped so quoted
+  // discussion of tool policy does not silently disable the catalog.
+  return /(?:^|[.!?\]\n])\s*(?:please\s+)?(?:do not|don['’]?t|dont|never)\s+(?:call|use)\s+(?:any\s+)?tools?\b(?!\s+unless)/i.test(
+    text,
+  )
+}

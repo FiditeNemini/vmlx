@@ -30,6 +30,7 @@ import {
 } from "../../shared/interleavedReasoning";
 import {
   requestsDirectAnswerAfterSingleTool,
+  requestsNoToolCalls,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
 } from "../../shared/toolAutoContinue";
@@ -1390,6 +1391,9 @@ export function registerChatHandlers(
         // the final-response instruction and made Nemotron emit the requested
         // marker twice after a correct tool result.
         /\breply exactly\b/i.test(latestUserText);
+      const userForbidsToolCalls =
+        overrides?.builtinToolsEnabled === true &&
+        requestsNoToolCalls(latestUserText);
       const directAnswerAfterSingleTool =
         overrides?.builtinToolsEnabled === true &&
         requestsDirectAnswerAfterSingleTool(latestUserText);
@@ -1410,7 +1414,8 @@ export function registerChatHandlers(
           role: "system",
           content:
             overrides!.systemPrompt! +
-            (suppressAgenticToolPromptForExactOutput ||
+            (userForbidsToolCalls ||
+            suppressAgenticToolPromptForExactOutput ||
             suppressGenericAgenticToolPromptForNativeTools
               ? ""
               : toolRule) +
@@ -1423,6 +1428,7 @@ export function registerChatHandlers(
         });
       } else if (
         overrides?.builtinToolsEnabled &&
+        !userForbidsToolCalls &&
         !suppressAgenticToolPromptForExactOutput &&
         !suppressGenericAgenticToolPromptForNativeTools
       ) {
@@ -1932,6 +1938,7 @@ export function registerChatHandlers(
                 description: t.function.description,
                 parameters: t.function.parameters,
               }));
+              if (userForbidsToolCalls) obj.tool_choice = "none";
             }
             // enable_thinking: explicit user override sent to both local and remote.
             // When undefined (auto), local omits the field so the native
@@ -2005,6 +2012,7 @@ export function registerChatHandlers(
                 hasDirectMediaAttachments: hasMediaAttachments,
                 zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
               });
+              if (userForbidsToolCalls) obj.tool_choice = "none";
             }
             // enable_thinking: explicit user override sent to both local and remote.
             // When undefined (auto), local omits the field so the native

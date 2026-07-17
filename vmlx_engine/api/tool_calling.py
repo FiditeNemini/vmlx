@@ -179,6 +179,25 @@ def check_and_inject_fallback_tools(
     # model's own tool/result transcript framing and thinking contract.
     parser_id = (tool_parser_id or "").strip().lower()
     is_dsv4_prompt = "<｜User｜>" in prompt or "<｜Assistant｜>" in prompt
+    if is_dsv4_prompt:
+        # The canonical DSV4 encoder scopes a broad API tool catalog to the
+        # explicitly requested or most-recently called tools.  Judge its
+        # rendered prompt against that same scoped set.  Comparing the prompt
+        # to every API-authorized tool falsely reports that schemas were
+        # dropped, then prepends a second synthetic fallback even though the
+        # encoder already rendered the correct DSML example.  Live Responses
+        # multi-turn testing showed that duplicate fallback can drive DSV4
+        # into an unbounded literal `response` loop.
+        from ..loaders.dsv4_chat_encoder import select_tools_for_explicit_request
+
+        scoped_tools = select_tools_for_explicit_request(messages, template_tools)
+        if scoped_tools:
+            template_tools = scoped_tools
+            tool_names = [_tool_func(t).get("name", "") for t in template_tools]
+            tool_names = [name for name in tool_names if name]
+            explicit_tool_requested = any(
+                _request_mentions_tool_name(name) for name in tool_names
+            )
     is_qwen_native_tool_prompt = (
         parser_id not in {"xml_function", "mimo_xml_function"}
         and "<|im_start|>" in prompt
@@ -234,6 +253,11 @@ def check_and_inject_fallback_tools(
     # tools correctly. Otherwise inject a concrete native exemplar.
     _dsv4_has_concrete_dsml_examples = (
         is_dsv4_prompt
+        # A named current-turn request still needs the request-bound fallback
+        # below.  The canonical encoder's native example proves the parser
+        # shape, but it may contain an empty/generic argument rather than the
+        # concrete path or command from the user.
+        and not explicit_tool_requested
         and all(
             f'<｜DSML｜invoke name="{name}"' in instruction_prompt
             for name in tool_names
@@ -556,6 +580,23 @@ def check_and_inject_fallback_tools(
                 return value
 
         name = re.escape(param)
+        if (
+            normalized_param in {"path", "file", "filename", "dir", "directory"}
+            or normalized_param.endswith("_path")
+        ):
+            # File paths routinely contain `/`, `~`, and percent/URL-safe
+            # characters.  The generic scalar patterns below intentionally
+            # use a narrower alphabet and truncated `panel/package.json` to
+            # `panel` in the live DSV4 DSML example.
+            path_patterns = (
+                rf"\bwith\s+{name}\s+[`'\"]?([A-Za-z0-9_~@%+=:,./-]{{1,240}})",
+                rf"\b{name}\s*(?:=|:|to|is)\s*[`'\"]?([A-Za-z0-9_~@%+=:,./-]{{1,240}})",
+                rf"\b{name}\s+[`'\"]?([A-Za-z0-9_~@%+=:,./-]{{1,240}})",
+            )
+            for pattern in path_patterns:
+                match = re.search(pattern, binding_text, flags=re.IGNORECASE)
+                if match:
+                    return match.group(1).rstrip(".,;:!?`'\"")
         patterns = (
             rf"\b{name}\s+argument\s+must\s+be\s+(?:the\s+)?literal\s+string\s+[`'\"]?([A-Za-z0-9][A-Za-z0-9_.:-]{{0,119}})",
             rf"\b{name}\s*(?:=|:|to|is)\s*[`'\"]?([A-Za-z0-9][A-Za-z0-9_.:-]{{0,119}})",

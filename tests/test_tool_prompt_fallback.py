@@ -614,6 +614,129 @@ def test_dsv4_fallback_preserves_recent_tool_schema_on_later_user_turn():
     assert '<｜DSML｜invoke name="read_file">' not in injected
 
 
+def test_dsv4_broad_catalog_does_not_duplicate_scoped_native_history_prompt():
+    """Fallback validation must use the same tool scope as the DSV4 encoder."""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "file_info",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+    ]
+    messages = [
+        {"role": "user", "content": "Call file_info for panel/package.json."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "file_info",
+                        "arguments": {"path": "panel/package.json"},
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": "Size: 5.2 KB"},
+        {"role": "assistant", "content": "5.2 KB"},
+        {"role": "user", "content": "Repeat the size without calling a tool."},
+    ]
+    native_prompt = """
+<｜begin▁of▁sentence｜>system
+<｜DSML｜tool_calls>
+<｜DSML｜invoke name="file_info">
+<｜DSML｜parameter name="path" string="true">panel/package.json</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>
+<｜User｜>Repeat the size without calling a tool.
+<｜Assistant｜>
+""".strip()
+
+    checked = check_and_inject_fallback_tools(
+        native_prompt,
+        messages,
+        tools,
+        DSV4LikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="dsml",
+    )
+
+    assert checked == native_prompt
+    assert "Tool: read_file" not in checked
+
+
+def test_dsv4_broad_catalog_keeps_request_bound_fallback_for_explicit_tool():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "file_info",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+    ]
+    user_request = "Call file_info exactly once with path panel/package.json."
+    native_prompt = f"""
+<｜begin▁of▁sentence｜>system
+<｜DSML｜tool_calls>
+<｜DSML｜invoke name="file_info">
+<｜DSML｜parameter name="path" string="true"></｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>
+<｜User｜>{user_request}
+<｜Assistant｜>
+""".strip()
+
+    checked = check_and_inject_fallback_tools(
+        native_prompt,
+        [{"role": "user", "content": user_request}],
+        tools,
+        DSV4LikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="dsml",
+    )
+
+    assert checked != native_prompt
+    assert "The current user explicitly named an available tool." in checked
+    assert (
+        '<｜DSML｜parameter name="path" string="true">panel/package.json'
+        '</｜DSML｜parameter>'
+    ) in checked
+    assert "Tool: read_file" not in checked
+
+
 def test_dsv4_new_explicit_tool_turn_does_not_reuse_prior_tool_result():
     tools = [
         {

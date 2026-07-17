@@ -25,7 +25,7 @@ export function TitleBar() {
 
   return (
     <div
-      className="flex items-center h-10 bg-card border-b border-border flex-shrink-0"
+      className="flex items-center h-10 min-w-0 overflow-hidden bg-card border-b border-border flex-shrink-0"
       style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
     >
       {/* macOS traffic light spacer + sidebar toggle */}
@@ -53,7 +53,7 @@ export function TitleBar() {
       </div>
 
       {/* Center: mode toggle */}
-      <div className="flex-1 flex justify-center">
+      <div className="flex-1 min-w-0 flex justify-center">
         <div
           className="flex items-center bg-muted/80 rounded-lg p-0.5 gap-0.5 border border-border/30 shadow-sm"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
@@ -196,14 +196,16 @@ function ModeButton({
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all duration-200 ${
+      aria-label={label}
+      title={label}
+      className={`flex items-center gap-1.5 max-[720px]:gap-0 px-3 max-[720px]:px-2 py-1.5 text-xs font-medium rounded-md transition-all duration-200 ${
         active
           ? "bg-background text-foreground shadow-md shadow-primary/10"
           : "text-muted-foreground/70 hover:text-foreground hover:bg-background/50"
       }`}
     >
       {icon}
-      {label}
+      <span className="max-[720px]:sr-only">{label}</span>
     </button>
   );
 }

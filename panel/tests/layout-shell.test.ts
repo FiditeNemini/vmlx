@@ -445,6 +445,23 @@ describe('SessionView chat list overlay', () => {
     expect(sessionViewSource).toContain('className="absolute inset-0 bg-background/50 z-10"')
     expect(sessionViewSource).not.toContain('className="fixed inset-0 bg-background/50 z-10"')
   })
+
+  it('wraps the session toolbar at narrow widths instead of clipping controls', () => {
+    expect(sessionViewSource).toContain('flex flex-wrap items-center gap-3')
+    expect(sessionViewSource).toContain('overflow-x-hidden')
+    expect(sessionViewSource).toContain('max-[800px]:basis-full')
+  })
+})
+
+describe('TitleBar narrow-width controls', () => {
+  const titleBarSource = readFileSync('src/renderer/src/components/layout/TitleBar.tsx', 'utf8')
+
+  it('keeps every mode accessible while compacting labels below 720px', () => {
+    expect(titleBarSource).toContain('aria-label={label}')
+    expect(titleBarSource).toContain('title={label}')
+    expect(titleBarSource).toContain('max-[720px]:sr-only')
+    expect(titleBarSource).toContain('max-[720px]:px-2')
+  })
 })
 
 describe('Date Grouping (ChatHistory)', () => {

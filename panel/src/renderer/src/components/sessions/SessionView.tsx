@@ -246,7 +246,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
   return (
     <div className="relative flex flex-col h-full min-h-0">
       {/* Session Header */}
-      <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-card/50 flex-shrink-0 overflow-x-auto [scrollbar-width:thin]">
+      <div className="flex flex-wrap items-center gap-3 px-4 py-2 border-b border-border bg-card/50 flex-shrink-0 overflow-x-hidden">
         <button onClick={onBack} className="text-muted-foreground hover:text-foreground text-sm flex items-center gap-1 flex-shrink-0">
           <ArrowLeft className="h-3.5 w-3.5" /> Sessions
         </button>
@@ -279,7 +279,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
           )}
         </div>
 
-        <div className="flex items-center gap-2 flex-shrink-0">
+        <div className="flex flex-wrap items-center justify-end gap-2 flex-shrink-0 max-[800px]:basis-full">
           {!isImage && (
             <>
               <button

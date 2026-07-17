@@ -339,6 +339,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const normalizedDetectedFamily = normalizeDetectedFamilyName(detectedFamily)
   const dsv4Active = normalizedDetectedFamily === 'deepseek-v4'
   const m3Active = normalizedDetectedFamily === 'minimax_m3'
+  const hy3Active = normalizedDetectedFamily === 'hy_v3' || normalizedDetectedFamily === 'hy3'
   const openPanguExactTypedCache = normalizedDetectedFamily === 'openpangu_v2'
   const effectiveSmeltActive = !!config.smelt && !dsv4Active
   const effectiveFlashMoeActive = !!config.flashMoe && !dsv4Active
@@ -422,13 +423,15 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           ? effectiveStoredCacheQuantization === 'none'
             ? 'Live TurboQuant and stored quantization disabled'
             : `Live TurboQuant disabled; stored cache ${effectiveStoredCacheQuantization}`
-          : mixedSwaCacheActive
-            ? 'TQ4 full-attention KV + native rotating SWA'
-            : 'Engine-selected native cache'
+          : hy3Active
+            ? 'Native HY3 KV + TQ4 stored prefixes'
+            : mixedSwaCacheActive
+              ? 'TQ4 full-attention KV + native rotating SWA'
+              : 'Engine-selected native cache'
   const liveCacheCodecBadge =
     openPanguExactTypedCache || dsv4Active || m3Active || explicitStoredCacheCodec
       ? 'TURBOQUANT OFF'
-      : mixedSwaCacheActive ? 'MIXED AUTO' : 'AUTO'
+      : hy3Active ? 'TQ4 AUTO' : mixedSwaCacheActive ? 'MIXED AUTO' : 'AUTO'
   const effectiveMaxNumSeqs = dsv4Active ? 1 : config.maxNumSeqs
   const effectivePrefillBatchSize = dsv4Active ? 1 : config.prefillBatchSize
   const effectiveCompletionBatchSize = dsv4Active ? 1 : config.completionBatchSize
@@ -1077,6 +1080,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {batchingOff && <IncompatWarning text="KV cache quantization requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above." />}
         {!batchingOff && prefixOff && <IncompatWarning text="KV cache quantization requires prefix cache. Enable 'Prefix Cache' above to use KV cache quantization." />}
         {!effectivelyNoBatching && !prefixOff && mixedSwaCacheActive && <PerformanceHint text="Mixed sliding/full attention cache detected — Auto applies TQ4 only to compatible full-attention KV slots and preserves native rotating-SWA metadata. Explicit None disables both live TQ-KV and stored quantization." />}
+        {!effectivelyNoBatching && !prefixOff && hy3Active && <PerformanceHint text="HY3 plain-KV cache detected — Auto uses TQ4 for paged/L2 stored prefixes while live decode stays on the native KV cache. Native MTP D1 copies this cache independently before batch split/verify." />}
         {!effectivelyNoBatching && !prefixOff && isMambaCache && !mixedSwaCacheActive && !dsv4Active && !m3Active && !openPanguExactTypedCache && <PerformanceHint text="Hybrid stateful cache detected — the engine keeps SSM/GLA state native and only uses cache codecs proven for that architecture. Generic TurboQuant KV is disabled unless a tested override exists." />}
         {!effectivelyNoBatching && dsv4Active && <PerformanceHint text="DeepSeek-V4 keeps generic KV q4/q8 disabled. Its prefix reuse uses native SWA+CSA/HCA snapshots through the DSV4 Native Composite Prefix Cache switch, not the generic stored-KV codec." />}
         {!effectivelyNoBatching && m3Active && <PerformanceHint text="MiniMax-M3 keeps generic KV q4/q8 disabled. Prefix reuse uses native MSA snapshots with keys, values, idx_keys, and absolute offsets; generic stored-KV codecs cannot preserve that cache format." />}

@@ -907,7 +907,20 @@ describe('KV Cache Quantization', () => {
         expect(source).toContain('Live TurboQuant and stored quantization disabled')
         expect(source).toContain('Live TurboQuant disabled; stored cache ${effectiveStoredCacheQuantization}')
         expect(source).toContain("? 'TURBOQUANT OFF'")
-        expect(source).toContain("mixedSwaCacheActive ? 'MIXED AUTO' : 'AUTO'")
+        expect(source).toContain("hy3Active ? 'TQ4 AUTO' : mixedSwaCacheActive ? 'MIXED AUTO' : 'AUTO'")
+    })
+
+    it('reports HY3 q4 stored-prefix Auto separately from native live KV', () => {
+        const fs = require('fs')
+        const source = fs.readFileSync(
+            'src/renderer/src/components/sessions/SessionConfigForm.tsx',
+            'utf-8',
+        )
+
+        expect(source).toContain("normalizedDetectedFamily === 'hy_v3' || normalizedDetectedFamily === 'hy3'")
+        expect(source).toContain('Native HY3 KV + TQ4 stored prefixes')
+        expect(source).toContain("hy3Active ? 'TQ4 AUTO'")
+        expect(source).toContain('Native MTP D1 copies this cache independently before batch split/verify')
     })
 
     it('chat reasoning Auto copy avoids force-language', () => {

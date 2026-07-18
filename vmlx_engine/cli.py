@@ -1158,7 +1158,28 @@ def serve_command(args):
                             # (autodetect block above also forces JIT off).
                             "openpangu_v2",
                         }
-                        if _is_affine and not _excluded_family:
+                        # mx.compile-safety gate: the runtime refuses to
+                        # compile MLLM (mlx-vlm streaming path) and hybrid
+                        # SSM/Mamba caches (path-dependent Python objects), so
+                        # defaulting JIT ON for them makes args/logs claim a
+                        # state the runtime will never enter
+                        # (ENGINE-AFFINE-JIT-DEFAULT-HYGIENE).
+                        _compile_unsafe = bool(
+                            getattr(_mc, "is_mllm", False)
+                            or str(getattr(_mc, "cache_type", "") or "").lower()
+                            == "hybrid"
+                        )
+                        if _is_affine and not _excluded_family and _compile_unsafe:
+                            logger.info(
+                                "JANG affine model detected (format=%s, family=%s) but "
+                                "JIT default stays OFF: %s is not mx.compile safe.",
+                                _fmt,
+                                _mc.family_name,
+                                "multimodal/VLM streaming path"
+                                if getattr(_mc, "is_mllm", False)
+                                else "hybrid SSM/Mamba cache",
+                            )
+                        if _is_affine and not _excluded_family and not _compile_unsafe:
                             args.enable_jit = True
                             logger.info(
                                 "JANG affine model detected (format=%s, family=%s) — "

@@ -246,7 +246,11 @@ export async function checkEngineInstallation(): Promise<EngineInstallation> {
  * Get version from vmlx-engine binary
  */
 async function getVersionFromBinary(path: string): Promise<string> {
-  // Get version via Python package metadata (works with editable installs)
+  // Prefer the imported module's version over distribution metadata. Editable
+  // source checkouts can legitimately have stale dist-info after a version bump
+  // while the console-script shim already imports the current source tree. Using
+  // metadata first made the dev UI report (and compare updates against) an old
+  // engine version even though every launched server ran newer code.
   try {
     const { readFileSync } = await import('fs')
     const firstLine = readFileSync(path, 'utf-8').split('\n')[0]
@@ -260,7 +264,7 @@ async function getVersionFromBinary(path: string): Promise<string> {
         shebang,
         [
           '-B', '-s', '-c',
-          "import importlib.metadata as m\nfor name in ('vmlx', 'vmlx-engine'):\n    try:\n        print(m.version(name)); break\n    except m.PackageNotFoundError:\n        pass",
+          "import importlib.metadata as m\ntry:\n    import vmlx_engine\n    version = getattr(vmlx_engine, '__version__', '')\nexcept Exception:\n    version = ''\nif version:\n    print(version)\nelse:\n    for name in ('vmlx', 'vmlx-engine'):\n        try:\n            print(m.version(name)); break\n        except m.PackageNotFoundError:\n            pass",
         ],
         {
           env: {

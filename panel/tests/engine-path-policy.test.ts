@@ -36,4 +36,20 @@ describe('engine path policy', () => {
     expect(createSession).not.toContain('uv tool install vmlx-engine')
     expect(createSession).not.toContain('pip3 install vmlx-engine')
   })
+
+  it('prefers the imported engine version over stale editable-install metadata', () => {
+    const source = readFileSync('src/main/engine-manager.ts', 'utf8')
+    const getVersion = source.slice(
+      source.indexOf('async function getVersionFromBinary'),
+      source.indexOf('function detectInstallMethod'),
+    )
+
+    const moduleImport = getVersion.indexOf('import vmlx_engine')
+    const moduleVersion = getVersion.indexOf("getattr(vmlx_engine, '__version__', '')")
+    const metadataFallback = getVersion.indexOf("for name in ('vmlx', 'vmlx-engine')")
+
+    expect(moduleImport).toBeGreaterThanOrEqual(0)
+    expect(moduleVersion).toBeGreaterThan(moduleImport)
+    expect(metadataFallback).toBeGreaterThan(moduleVersion)
+  })
 })

@@ -355,6 +355,7 @@ const api = {
     start: (sessionId: string) => ipcRenderer.invoke('sessions:start', sessionId),
     stop: (sessionId: string) => ipcRenderer.invoke('sessions:stop', sessionId),
     delete: (sessionId: string) => ipcRenderer.invoke('sessions:delete', sessionId),
+    repointModelPath: (sessionId: string) => ipcRenderer.invoke('sessions:repointModelPath', sessionId),
     detect: () => ipcRenderer.invoke('sessions:detect'),
     update: (sessionId: string, config: any) => ipcRenderer.invoke('sessions:update', sessionId, config),
     getLogs: (sessionId: string) => ipcRenderer.invoke('sessions:getLogs', sessionId),
@@ -408,6 +409,11 @@ const api = {
       const handler = (_: any, data: any) => callback(data)
       ipcRenderer.on('session:deleted', handler)
       return () => { ipcRenderer.removeListener('session:deleted', handler) }
+    },
+    onUpdated: (callback: (data: any) => void) => {
+      const handler = (_: any, data: any) => callback(data)
+      ipcRenderer.on('session:updated', handler)
+      return () => { ipcRenderer.removeListener('session:updated', handler) }
     },
     onStandby: (callback: (data: any) => void) => {
       const handler = (_: any, data: any) => callback(data)

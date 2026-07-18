@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Settings, ScrollText, Moon, Sun } from "lucide-react";
+import { AlertTriangle, FolderSearch, Settings, ScrollText, Moon, Sun, Trash2 } from "lucide-react";
 import { useSessionsContext } from "../../contexts/SessionsContext";
 import { useTranslation } from "../../i18n";
 
@@ -20,6 +20,8 @@ interface Session {
   type?: "local" | "remote";
   remoteUrl?: string;
   remoteModel?: string;
+  modelPathMissing: boolean;
+  usableTwinId?: string;
 }
 
 interface SessionCardProps {
@@ -29,6 +31,7 @@ interface SessionCardProps {
   onStart: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
+  onRepoint: (sessionId: string) => void;
   onSleep?: (sessionId: string) => void;
   onWake?: (sessionId: string) => void;
 }
@@ -68,6 +71,7 @@ export function SessionCard({
   onStart,
   onStop,
   onDelete,
+  onRepoint,
   onSleep,
   onWake,
 }: SessionCardProps) {
@@ -154,6 +158,12 @@ export function SessionCard({
                 {jangLabel}
               </span>
             )}
+            {session.modelPathMissing && (
+              <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 font-medium flex-shrink-0">
+                <AlertTriangle className="h-3 w-3" />
+                {t('sessions.card.modelPathMissing')}
+              </span>
+            )}
           </div>
           <p
             className="text-xs text-muted-foreground truncate mt-0.5"
@@ -183,6 +193,15 @@ export function SessionCard({
           </span>
         </div>
       </div>
+
+      {session.modelPathMissing && (
+        <div className="mb-3 rounded border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-300">
+          <p>{t('sessions.card.modelPathMissingDetail')}</p>
+          {session.usableTwinId && (
+            <p className="mt-1 text-amber-300/80">{t('sessions.card.usableTwin')}</p>
+          )}
+        </div>
+      )}
 
       {/* Loading progress bar */}
       {session.status === "loading" && (
@@ -230,6 +249,33 @@ export function SessionCard({
 
       {/* Actions */}
       <div className="flex gap-2">
+        {session.modelPathMissing ? (
+          <>
+            {(session.status === "running" || session.status === "loading" || session.status === "standby") && (
+              <button
+                onClick={() => onStop(session.id)}
+                className="px-3 py-1.5 text-sm rounded border border-border text-muted-foreground hover:bg-destructive hover:text-destructive-foreground hover:border-destructive"
+              >
+                {t('sessions.card.stop')}
+              </button>
+            )}
+            <button
+              onClick={() => onRepoint(session.id)}
+              className="flex-1 px-3 py-1.5 text-sm rounded border border-amber-500/40 text-amber-300 hover:bg-amber-500/10 flex items-center justify-center gap-1.5"
+            >
+              <FolderSearch className="h-3.5 w-3.5" />
+              {t('sessions.card.repointModelPath')}
+            </button>
+            <button
+              onClick={() => onDelete(session.id)}
+              className="px-3 py-1.5 text-sm rounded border border-border text-muted-foreground hover:bg-destructive hover:text-destructive-foreground hover:border-destructive flex items-center gap-1.5"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              {t('sessions.card.removeSession')}
+            </button>
+          </>
+        ) : (
+          <>
         {session.status === "running" && (
           <button
             onClick={() => onOpen(session.id)}
@@ -331,6 +377,8 @@ export function SessionCard({
           >
             {t('sessions.card.delete')}
           </button>
+        )}
+          </>
         )}
       </div>
     </div>

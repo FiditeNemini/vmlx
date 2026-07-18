@@ -598,6 +598,15 @@ declare global {
         delete: (
           sessionId: string,
         ) => Promise<{ success: boolean; error?: string }>;
+        repointModelPath: (sessionId: string) => Promise<{
+          success: boolean;
+          canceled?: boolean;
+          error?: string;
+          session?: any;
+          oldModelPath?: string;
+          newModelPath?: string;
+          reboundChatCount?: number;
+        }>;
         detect: () => Promise<any[]>;
         update: (
           sessionId: string,
@@ -657,6 +666,7 @@ declare global {
         onLog: (callback: (data: any) => void) => () => void;
         onCreated: (callback: (data: any) => void) => () => void;
         onDeleted: (callback: (data: any) => void) => () => void;
+        onUpdated: (callback: (data: any) => void) => () => void;
         onStandby: (callback: (data: any) => void) => () => void;
         onLoadProgress: (
           callback: (data: {

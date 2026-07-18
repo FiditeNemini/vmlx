@@ -470,6 +470,11 @@
       "stopStandbyTitle": "Stop server process completely",
       "viewCrashLogsTitle": "View crash logs",
       "delete": "Delete",
+      "modelPathMissing": "Model path missing",
+      "modelPathMissingDetail": "This model directory is unavailable. Reconnect its drive or choose a valid model bundle.",
+      "usableTwin": "A session for the same model has an available path.",
+      "repointModelPath": "Repoint model path",
+      "removeSession": "Remove session",
       "pidLabel": "PID {pid}"
     },
     "config": {
@@ -576,12 +581,16 @@
       "detectRunning": "Detect Running",
       "active": "Active ({n})",
       "inactive": "Inactive ({n})",
+      "missing": "Missing model ({n})",
       "loading": "Loading sessions...",
       "deleteConfirm": "Delete this session? Chat history for this model will be preserved.",
+      "repointSuccess": "Model path updated",
+      "repointSuccessDetail": "Preserved history and rebound {n} matching chat(s).",
       "toast": {
         "startFailed": "Failed to start session",
         "stopFailed": "Failed to stop session",
-        "deleteFailed": "Failed to delete session"
+        "deleteFailed": "Failed to delete session",
+        "repointFailed": "Failed to repoint model path"
       }
     },
     "settings": {

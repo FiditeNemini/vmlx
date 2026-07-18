@@ -470,6 +470,11 @@
       "stopStandbyTitle": "Detener por completo el proceso del servidor",
       "viewCrashLogsTitle": "Ver registros de fallos",
       "delete": "Eliminar",
+      "modelPathMissing": "Falta la ruta del modelo",
+      "modelPathMissingDetail": "Este directorio de modelo no está disponible. Reconecta su unidad o elige un paquete de modelo válido.",
+      "usableTwin": "Una sesión del mismo modelo tiene una ruta disponible.",
+      "repointModelPath": "Reasignar ruta del modelo",
+      "removeSession": "Eliminar sesión",
       "pidLabel": "PID {pid}"
     },
     "config": {
@@ -576,12 +581,16 @@
       "detectRunning": "Detectar en ejecución",
       "active": "Activas ({n})",
       "inactive": "Inactivas ({n})",
+      "missing": "Modelo ausente ({n})",
       "loading": "Cargando sesiones...",
       "deleteConfirm": "¿Eliminar esta sesión? El historial de chat de este modelo se conservará.",
+      "repointSuccess": "Ruta del modelo actualizada",
+      "repointSuccessDetail": "Se conservó el historial y se reenlazaron {n} chat(s) coincidentes.",
       "toast": {
         "startFailed": "No se pudo iniciar la sesión",
         "stopFailed": "No se pudo detener la sesión",
-        "deleteFailed": "No se pudo eliminar la sesión"
+        "deleteFailed": "No se pudo eliminar la sesión",
+        "repointFailed": "Error al reasignar la ruta del modelo"
       }
     },
     "settings": {
@@ -897,6 +906,78 @@
       "closeAria": "Cerrar"
     }
   },
+  "main": {
+    "tray": {
+      "modelsLoaded": "vMLX — {n} modelo(s) cargado(s)",
+      "apiGateway": "API Gateway: localhost:{port}",
+      "copyApiUrl": "Copiar URL de API",
+      "singleModelMode": "Modo de un solo modelo del gateway",
+      "statusRunning": "✓ En ejecución",
+      "statusStarting": "Iniciando...",
+      "statusError": "Error",
+      "port": "Puerto: {port}",
+      "unpin": "Desanclar (permitir desalojo)",
+      "pin": "Anclar (evitar desalojo)",
+      "stop": "Detener",
+      "wake": "Despertar",
+      "sleep": "Dormir",
+      "noModels": "No hay modelos cargados",
+      "memory": "Memoria: {used} / {total} GB",
+      "openWindow": "Abrir ventana de vMLX",
+      "quit": "Salir de vMLX",
+      "tooltipRunningSleeping": "vMLX — {running} en ejecución, {standby} durmiendo",
+      "tooltipNoModels": "vMLX — No hay modelos cargados"
+    },
+    "dialog": {
+      "unexpectedErrorTitle": "Error inesperado",
+      "unexpectedErrorBody": "vMLX encontró un error:\n\n{message}\n\nLa aplicación se cerrará ahora.",
+      "dbRecoveredTitle": "Base de datos recuperada",
+      "dbRecoveredMessage": "Su base de datos de chat estaba dañada y se ha recreado.",
+      "dbRecoveredDetail": "Sus datos anteriores se respaldaron en:\n{path}",
+      "ok": "OK",
+      "selectWorkingDir": "Seleccionar directorio de trabajo",
+      "attachImagesTitle": "Adjuntar imágenes",
+      "attachImagesFilterImages": "Imágenes"
+    },
+    "window": {
+      "downloads": "Descargas"
+    },
+    "loadProgress": {
+      "initializing": "Inicializando...",
+      "checkingMemory": "Verificando memoria...",
+      "creatingEngine": "Creando motor...",
+      "startingServer": "Iniciando servidor...",
+      "serverInitializing": "Inicializando servidor...",
+      "configuringTools": "Configurando herramientas...",
+      "configuringLimits": "Configurando límites...",
+      "serverStartedLoadingModel": "Servidor iniciado, cargando modelo...",
+      "loadingModelToGpu": "Cargando modelo en GPU...",
+      "loadingJangWeights": "Cargando pesos JANG...",
+      "loadingJangVl": "Cargando modelo JANG VL...",
+      "loadingVisionModel": "Cargando modelo de visión...",
+      "loadingImageModel": "Cargando modelo de imagen...",
+      "loadingJangVlShort": "Cargando JANG VL...",
+      "loadingWeights": "Cargando pesos...",
+      "processingMla": "Procesando capas MLA...",
+      "convertingBfloat16": "Convirtiendo a bfloat16...",
+      "weightsLoaded": "Pesos cargados",
+      "modelLoaded": "Modelo cargado",
+      "visionModelLoaded": "Modelo de visión cargado",
+      "imageModelLoaded": "Modelo de imagen cargado",
+      "engineReady": "Motor listo",
+      "savingWeights": "Guardando pesos en SSD...",
+      "buildingIndex": "Construyendo índice de pesos...",
+      "settingUpKvCache": "Configurando caché KV...",
+      "loadingChatTemplate": "Cargando plantilla de chat...",
+      "configuringCache": "Configurando caché...",
+      "startingScheduler": "Iniciando planificador...",
+      "batchedEngineLoaded": "BatchedEngine cargado",
+      "almostReady": "Casi listo...",
+      "connected": "Conectado",
+      "modelReady": "Modelo listo",
+      "wakingFromSleep": "Despertando del sueño..."
+    }
+  },
   "tools": {
     "title": "Herramientas para desarrolladores",
     "subtitle": "Inspeccione, diagnostique y convierta modelos",
@@ -1057,77 +1138,5 @@
     "allChecksPassed": "Se superaron las {{count}} verificaciones",
     "summaryDetail": "{{passed}} superadas, {{failed}} fallidas, {{warnings}} advertencias",
     "checking": "verificando..."
-  },
-  "main": {
-    "tray": {
-      "modelsLoaded": "vMLX — {n} modelo(s) cargado(s)",
-      "apiGateway": "API Gateway: localhost:{port}",
-      "copyApiUrl": "Copiar URL de API",
-      "singleModelMode": "Modo de un solo modelo del gateway",
-      "statusRunning": "✓ En ejecución",
-      "statusStarting": "Iniciando...",
-      "statusError": "Error",
-      "port": "Puerto: {port}",
-      "unpin": "Desanclar (permitir desalojo)",
-      "pin": "Anclar (evitar desalojo)",
-      "stop": "Detener",
-      "wake": "Despertar",
-      "sleep": "Dormir",
-      "noModels": "No hay modelos cargados",
-      "memory": "Memoria: {used} / {total} GB",
-      "openWindow": "Abrir ventana de vMLX",
-      "quit": "Salir de vMLX",
-      "tooltipRunningSleeping": "vMLX — {running} en ejecución, {standby} durmiendo",
-      "tooltipNoModels": "vMLX — No hay modelos cargados"
-    },
-    "dialog": {
-      "unexpectedErrorTitle": "Error inesperado",
-      "unexpectedErrorBody": "vMLX encontró un error:\n\n{message}\n\nLa aplicación se cerrará ahora.",
-      "dbRecoveredTitle": "Base de datos recuperada",
-      "dbRecoveredMessage": "Su base de datos de chat estaba dañada y se ha recreado.",
-      "dbRecoveredDetail": "Sus datos anteriores se respaldaron en:\n{path}",
-      "ok": "OK",
-      "selectWorkingDir": "Seleccionar directorio de trabajo",
-      "attachImagesTitle": "Adjuntar imágenes",
-      "attachImagesFilterImages": "Imágenes"
-    },
-    "window": {
-      "downloads": "Descargas"
-    },
-    "loadProgress": {
-      "initializing": "Inicializando...",
-      "checkingMemory": "Verificando memoria...",
-      "creatingEngine": "Creando motor...",
-      "startingServer": "Iniciando servidor...",
-      "serverInitializing": "Inicializando servidor...",
-      "configuringTools": "Configurando herramientas...",
-      "configuringLimits": "Configurando límites...",
-      "serverStartedLoadingModel": "Servidor iniciado, cargando modelo...",
-      "loadingModelToGpu": "Cargando modelo en GPU...",
-      "loadingJangWeights": "Cargando pesos JANG...",
-      "loadingJangVl": "Cargando modelo JANG VL...",
-      "loadingVisionModel": "Cargando modelo de visión...",
-      "loadingImageModel": "Cargando modelo de imagen...",
-      "loadingJangVlShort": "Cargando JANG VL...",
-      "loadingWeights": "Cargando pesos...",
-      "processingMla": "Procesando capas MLA...",
-      "convertingBfloat16": "Convirtiendo a bfloat16...",
-      "weightsLoaded": "Pesos cargados",
-      "modelLoaded": "Modelo cargado",
-      "visionModelLoaded": "Modelo de visión cargado",
-      "imageModelLoaded": "Modelo de imagen cargado",
-      "engineReady": "Motor listo",
-      "savingWeights": "Guardando pesos en SSD...",
-      "buildingIndex": "Construyendo índice de pesos...",
-      "settingUpKvCache": "Configurando caché KV...",
-      "loadingChatTemplate": "Cargando plantilla de chat...",
-      "configuringCache": "Configurando caché...",
-      "startingScheduler": "Iniciando planificador...",
-      "batchedEngineLoaded": "BatchedEngine cargado",
-      "almostReady": "Casi listo...",
-      "connected": "Conectado",
-      "modelReady": "Modelo listo",
-      "wakingFromSleep": "Despertando del sueño..."
-    }
   }
 }

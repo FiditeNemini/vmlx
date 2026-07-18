@@ -23,6 +23,11 @@ import {
 import { appendMetalWiredLimitGuidance, classifyLargeModelMemoryPreflight } from '../shared/metalWiredLimit'
 import { sessionMatchesModelPath } from '../shared/sessionUtils'
 import {
+  classifySessionModelPaths,
+  type SessionModelPathClassification,
+  validateModelBundleDirectory,
+} from './session-model-path'
+import {
   estimateModelLaunchResidentBytes,
   isLazyMmapJangBundle,
   estimateMacReclaimableMemoryBytes,
@@ -1611,6 +1616,8 @@ export class SessionManager extends EventEmitter {
         // still exists — a real comparison, and only when exactly one distinct
         // valid path matches, never a guess. This lets Start succeed instead of
         // failing on a dead symlink when the model is plainly available.
+        // When NO unambiguous twin exists, fail with the explicit repoint hint
+        // (the session list surfaces the Repoint/Remove recovery actions).
         const resolved = Array.from(new Set(
           db.getSessions()
             .filter(s =>
@@ -1640,7 +1647,9 @@ export class SessionManager extends EventEmitter {
             }
           }
         } else {
-          throw new Error(`Model not found at: ${config.modelPath}`)
+          throw new Error(
+            `Model not found at: ${config.modelPath}. Repoint the session to a valid model bundle before starting it.`,
+          )
         }
       }
 
@@ -2409,6 +2418,61 @@ export class SessionManager extends EventEmitter {
     }
   }
 
+  repointSessionModelPath(
+    sessionId: string,
+    candidatePath: string,
+    options: { confirmIdentityChange?: boolean } = {},
+  ): { session: Session; oldModelPath: string; reboundChatCount: number } {
+    const session = db.getSession(sessionId)
+    if (!session) throw new Error(`Session ${sessionId} not found`)
+    if (session.type === 'remote') throw new Error('Remote sessions do not use local model paths.')
+
+    const validation = validateModelBundleDirectory(candidatePath)
+    if (!validation.valid) throw new Error(validation.error || 'Invalid model bundle directory.')
+
+    const newModelPath = validation.path
+    const identityChanged = !sessionMatchesModelPath(session.modelPath, newModelPath)
+    if (identityChanged && !options.confirmIdentityChange) {
+      throw new Error('The selected model identity differs from this session and requires confirmation.')
+    }
+    if (
+      identityChanged &&
+      (session.status === 'running' || session.status === 'loading' || session.status === 'standby')
+    ) {
+      throw new Error('Stop this session before repointing it to a different model.')
+    }
+
+    const pathOwner = db.getSessionByModelPath(newModelPath)
+    if (pathOwner && pathOwner.id !== session.id) {
+      throw new Error(
+        `That model path is already used by session "${pathOwner.modelName || pathOwner.id}". Remove the stale session explicitly if the existing session should be kept.`,
+      )
+    }
+
+    let config: Record<string, unknown> = {}
+    try { config = JSON.parse(session.config || '{}') } catch { /* preserve a usable baseline below */ }
+    config.modelPath = newModelPath
+
+    const reboundChatCount = db.repointSessionModelPath(
+      session.id,
+      session.modelPath,
+      {
+        modelPath: newModelPath,
+        modelName: basename(newModelPath) || session.modelName,
+        config: JSON.stringify(config),
+      },
+    )
+    const updated = db.getSession(session.id)!
+    this.emit('session:updated', {
+      sessionId: session.id,
+      session: updated,
+      oldModelPath: session.modelPath,
+      newModelPath,
+      reboundChatCount,
+    })
+    return { session: updated, oldModelPath: session.modelPath, reboundChatCount }
+  }
+
   // ─── Discovery & Adoption ─────────────────────────────────────────
 
   async detectAndAdoptAll(): Promise<Session[]> {
@@ -3132,8 +3196,8 @@ export class SessionManager extends EventEmitter {
 
   // ─── Queries ───────────────────────────────────────────────────────
 
-  getSessions(): Session[] {
-    return db.getSessions()
+  getSessions(): Array<Session & SessionModelPathClassification> {
+    return classifySessionModelPaths(db.getSessions())
   }
 
   getSession(id: string): Session | undefined {

@@ -18,6 +18,8 @@ interface Session {
   updatedAt: number
   lastStartedAt?: number
   lastStoppedAt?: number
+  modelPathMissing: boolean
+  usableTwinId?: string
 }
 
 interface SessionDashboardProps {
@@ -91,6 +93,7 @@ export function SessionDashboard({ onOpenSession, onConfigureSession, onCreateSe
       }),
       window.api.sessions.onCreated(() => loadSessions()),
       window.api.sessions.onDeleted(() => loadSessions()),
+      window.api.sessions.onUpdated(() => loadSessions()),
       ...(window.api.sessions.onStandby ? [window.api.sessions.onStandby(() => loadSessions())] : []),
     ]
 
@@ -125,6 +128,21 @@ export function SessionDashboard({ onOpenSession, onConfigureSession, onCreateSe
       showToast('error', t('sessions.dashboard.toast.deleteFailed'), result.error)
     }
     loadSessions()
+  }
+
+  const handleRepoint = async (sessionId: string) => {
+    const result = await window.api.sessions.repointModelPath(sessionId)
+    if (result.canceled) return
+    if (!result.success) {
+      showToast('error', t('sessions.dashboard.toast.repointFailed'), result.error)
+      return
+    }
+    showToast(
+      'success',
+      t('sessions.dashboard.repointSuccess'),
+      t('sessions.dashboard.repointSuccessDetail', { n: result.reboundChatCount || 0 }),
+    )
+    await loadSessions()
   }
 
   const handleDetect = async () => {
@@ -176,8 +194,9 @@ export function SessionDashboard({ onOpenSession, onConfigureSession, onCreateSe
     await loadDirectories()
   }
 
-  const runningSessions = sessions.filter(s => s.status === 'running' || s.status === 'loading' || s.status === 'standby')
-  const stoppedSessions = sessions.filter(s => s.status === 'stopped' || s.status === 'error')
+  const missingSessions = sessions.filter(s => s.modelPathMissing)
+  const runningSessions = sessions.filter(s => !s.modelPathMissing && (s.status === 'running' || s.status === 'loading' || s.status === 'standby'))
+  const stoppedSessions = sessions.filter(s => !s.modelPathMissing && (s.status === 'stopped' || s.status === 'error'))
 
   const handleSleep = async (sessionId: string) => {
     try { await window.api.sessions.softSleep?.(sessionId) } catch {}
@@ -272,6 +291,31 @@ export function SessionDashboard({ onOpenSession, onConfigureSession, onCreateSe
         </div>
       ) : (
         <>
+          {/* Sessions whose persisted local model directory is unavailable */}
+          {missingSessions.length > 0 && (
+            <div className="mb-6">
+              <h2 className="text-sm font-semibold text-amber-400 uppercase tracking-wider mb-3">
+                {t('sessions.dashboard.missing', { n: missingSessions.length })}
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {missingSessions.map(session => (
+                  <SessionCard
+                    key={session.id}
+                    session={session}
+                    onOpen={onOpenSession}
+                    onConfigure={onConfigureSession}
+                    onStart={handleStart}
+                    onStop={handleStop}
+                    onDelete={handleDelete}
+                    onRepoint={handleRepoint}
+                    onSleep={handleSleep}
+                    onWake={handleWake}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Running Sessions */}
           {runningSessions.length > 0 && (
             <div className="mb-6">
@@ -288,6 +332,7 @@ export function SessionDashboard({ onOpenSession, onConfigureSession, onCreateSe
                     onStart={handleStart}
                     onStop={handleStop}
                     onDelete={handleDelete}
+                    onRepoint={handleRepoint}
                     onSleep={handleSleep}
                     onWake={handleWake}
                   />
@@ -312,6 +357,7 @@ export function SessionDashboard({ onOpenSession, onConfigureSession, onCreateSe
                     onStart={handleStart}
                     onStop={handleStop}
                     onDelete={handleDelete}
+                    onRepoint={handleRepoint}
                     onSleep={handleSleep}
                     onWake={handleWake}
                   />

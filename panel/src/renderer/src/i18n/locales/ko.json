@@ -470,6 +470,11 @@
       "stopStandbyTitle": "서버 프로세스 완전 중지",
       "viewCrashLogsTitle": "충돌 로그 보기",
       "delete": "삭제",
+      "modelPathMissing": "모델 경로 없음",
+      "modelPathMissingDetail": "이 모델 디렉터리를 사용할 수 없습니다. 드라이브를 다시 연결하거나 유효한 모델 번들을 선택하세요.",
+      "usableTwin": "동일한 모델의 다른 세션에 사용 가능한 경로가 있습니다.",
+      "repointModelPath": "모델 경로 다시 지정",
+      "removeSession": "세션 제거",
       "pidLabel": "PID {pid}"
     },
     "config": {
@@ -576,12 +581,16 @@
       "detectRunning": "실행 중 감지",
       "active": "활성 ({n})",
       "inactive": "비활성 ({n})",
+      "missing": "모델 없음 ({n})",
       "loading": "세션 로드 중...",
       "deleteConfirm": "이 세션을 삭제하시겠습니까? 이 모델의 채팅 기록은 보존됩니다.",
+      "repointSuccess": "모델 경로가 업데이트됨",
+      "repointSuccessDetail": "기록을 보존하고 일치하는 채팅 {n}개를 다시 연결했습니다.",
       "toast": {
         "startFailed": "세션 시작 실패",
         "stopFailed": "세션 중지 실패",
-        "deleteFailed": "세션 삭제 실패"
+        "deleteFailed": "세션 삭제 실패",
+        "repointFailed": "모델 경로 다시 지정 실패"
       }
     },
     "settings": {
@@ -897,6 +906,78 @@
       "closeAria": "닫기"
     }
   },
+  "main": {
+    "tray": {
+      "modelsLoaded": "vMLX — {n}개 모델 로드됨",
+      "apiGateway": "API 게이트웨이: localhost:{port}",
+      "copyApiUrl": "API URL 복사",
+      "singleModelMode": "게이트웨이 단일 모델 모드",
+      "statusRunning": "✓ 실행 중",
+      "statusStarting": "시작 중...",
+      "statusError": "오류",
+      "port": "포트: {port}",
+      "unpin": "고정 해제 (정리 허용)",
+      "pin": "고정 (정리 방지)",
+      "stop": "중지",
+      "wake": "깨우기",
+      "sleep": "휴면",
+      "noModels": "로드된 모델 없음",
+      "memory": "메모리: {used} / {total} GB",
+      "openWindow": "vMLX 창 열기",
+      "quit": "vMLX 종료",
+      "tooltipRunningSleeping": "vMLX — {running}개 실행, {standby}개 휴면",
+      "tooltipNoModels": "vMLX — 로드된 모델 없음"
+    },
+    "dialog": {
+      "unexpectedErrorTitle": "예상치 못한 오류",
+      "unexpectedErrorBody": "vMLX에서 오류가 발생했습니다:\n\n{message}\n\n앱을 종료합니다.",
+      "dbRecoveredTitle": "데이터베이스 복구됨",
+      "dbRecoveredMessage": "채팅 데이터베이스가 손상되어 다시 생성되었습니다.",
+      "dbRecoveredDetail": "이전 데이터가 다음 위치에 백업되었습니다:\n{path}",
+      "ok": "확인",
+      "selectWorkingDir": "작업 디렉토리 선택",
+      "attachImagesTitle": "이미지 첨부",
+      "attachImagesFilterImages": "이미지"
+    },
+    "window": {
+      "downloads": "다운로드"
+    },
+    "loadProgress": {
+      "initializing": "초기화 중...",
+      "checkingMemory": "메모리 확인 중...",
+      "creatingEngine": "엔진 생성 중...",
+      "startingServer": "서버 시작 중...",
+      "serverInitializing": "서버 초기화 중...",
+      "configuringTools": "도구 구성 중...",
+      "configuringLimits": "제한 구성 중...",
+      "serverStartedLoadingModel": "서버 시작됨, 모델 로드 중...",
+      "loadingModelToGpu": "GPU에 모델 로드 중...",
+      "loadingJangWeights": "JANG 가중치 로드 중...",
+      "loadingJangVl": "JANG VL 모델 로드 중...",
+      "loadingVisionModel": "비전 모델 로드 중...",
+      "loadingImageModel": "이미지 모델 로드 중...",
+      "loadingJangVlShort": "JANG VL 로드 중...",
+      "loadingWeights": "가중치 로드 중...",
+      "processingMla": "MLA 레이어 처리 중...",
+      "convertingBfloat16": "bfloat16으로 변환 중...",
+      "weightsLoaded": "가중치 로드됨",
+      "modelLoaded": "모델 로드됨",
+      "visionModelLoaded": "비전 모델 로드됨",
+      "imageModelLoaded": "이미지 모델 로드됨",
+      "engineReady": "엔진 준비 완료",
+      "savingWeights": "SSD에 가중치 저장 중...",
+      "buildingIndex": "가중치 인덱스 구축 중...",
+      "settingUpKvCache": "KV 캐시 설정 중...",
+      "loadingChatTemplate": "채팅 템플릿 로드 중...",
+      "configuringCache": "캐시 구성 중...",
+      "startingScheduler": "스케줄러 시작 중...",
+      "batchedEngineLoaded": "BatchedEngine 로드됨",
+      "almostReady": "거의 준비됨...",
+      "connected": "연결됨",
+      "modelReady": "모델 준비 완료",
+      "wakingFromSleep": "휴면에서 깨어나는 중..."
+    }
+  },
   "tools": {
     "title": "개발자 도구",
     "subtitle": "모델을 검사, 진단 및 변환",
@@ -1057,77 +1138,5 @@
     "allChecksPassed": "{{count}}개 점검 모두 통과",
     "summaryDetail": "{{passed}}개 통과, {{failed}}개 실패, {{warnings}}개 경고",
     "checking": "확인 중..."
-  },
-  "main": {
-    "tray": {
-      "modelsLoaded": "vMLX — {n}개 모델 로드됨",
-      "apiGateway": "API 게이트웨이: localhost:{port}",
-      "copyApiUrl": "API URL 복사",
-      "singleModelMode": "게이트웨이 단일 모델 모드",
-      "statusRunning": "✓ 실행 중",
-      "statusStarting": "시작 중...",
-      "statusError": "오류",
-      "port": "포트: {port}",
-      "unpin": "고정 해제 (정리 허용)",
-      "pin": "고정 (정리 방지)",
-      "stop": "중지",
-      "wake": "깨우기",
-      "sleep": "휴면",
-      "noModels": "로드된 모델 없음",
-      "memory": "메모리: {used} / {total} GB",
-      "openWindow": "vMLX 창 열기",
-      "quit": "vMLX 종료",
-      "tooltipRunningSleeping": "vMLX — {running}개 실행, {standby}개 휴면",
-      "tooltipNoModels": "vMLX — 로드된 모델 없음"
-    },
-    "dialog": {
-      "unexpectedErrorTitle": "예상치 못한 오류",
-      "unexpectedErrorBody": "vMLX에서 오류가 발생했습니다:\n\n{message}\n\n앱을 종료합니다.",
-      "dbRecoveredTitle": "데이터베이스 복구됨",
-      "dbRecoveredMessage": "채팅 데이터베이스가 손상되어 다시 생성되었습니다.",
-      "dbRecoveredDetail": "이전 데이터가 다음 위치에 백업되었습니다:\n{path}",
-      "ok": "확인",
-      "selectWorkingDir": "작업 디렉토리 선택",
-      "attachImagesTitle": "이미지 첨부",
-      "attachImagesFilterImages": "이미지"
-    },
-    "window": {
-      "downloads": "다운로드"
-    },
-    "loadProgress": {
-      "initializing": "초기화 중...",
-      "checkingMemory": "메모리 확인 중...",
-      "creatingEngine": "엔진 생성 중...",
-      "startingServer": "서버 시작 중...",
-      "serverInitializing": "서버 초기화 중...",
-      "configuringTools": "도구 구성 중...",
-      "configuringLimits": "제한 구성 중...",
-      "serverStartedLoadingModel": "서버 시작됨, 모델 로드 중...",
-      "loadingModelToGpu": "GPU에 모델 로드 중...",
-      "loadingJangWeights": "JANG 가중치 로드 중...",
-      "loadingJangVl": "JANG VL 모델 로드 중...",
-      "loadingVisionModel": "비전 모델 로드 중...",
-      "loadingImageModel": "이미지 모델 로드 중...",
-      "loadingJangVlShort": "JANG VL 로드 중...",
-      "loadingWeights": "가중치 로드 중...",
-      "processingMla": "MLA 레이어 처리 중...",
-      "convertingBfloat16": "bfloat16으로 변환 중...",
-      "weightsLoaded": "가중치 로드됨",
-      "modelLoaded": "모델 로드됨",
-      "visionModelLoaded": "비전 모델 로드됨",
-      "imageModelLoaded": "이미지 모델 로드됨",
-      "engineReady": "엔진 준비 완료",
-      "savingWeights": "SSD에 가중치 저장 중...",
-      "buildingIndex": "가중치 인덱스 구축 중...",
-      "settingUpKvCache": "KV 캐시 설정 중...",
-      "loadingChatTemplate": "채팅 템플릿 로드 중...",
-      "configuringCache": "캐시 구성 중...",
-      "startingScheduler": "스케줄러 시작 중...",
-      "batchedEngineLoaded": "BatchedEngine 로드됨",
-      "almostReady": "거의 준비됨...",
-      "connected": "연결됨",
-      "modelReady": "모델 준비 완료",
-      "wakingFromSleep": "휴면에서 깨어나는 중..."
-    }
   }
 }

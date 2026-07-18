@@ -1,10 +1,13 @@
-import { ipcMain, BrowserWindow, dialog, app as electronApp } from 'electron'
+import { ipcMain, BrowserWindow, dialog, app as electronApp, type OpenDialogOptions } from 'electron'
 import { readFileSync } from 'fs'
 import { sessionManager } from '../sessions'
+import { db } from '../database'
 import type { ServerConfig } from '../server'
 import { abortByEndpoint } from './chat'
 import { validateMcpConfigText } from '../../shared/mcpConfigValidation'
 import { defaultManagedMcpConfigDir, importMcpConfigFile } from '../mcp-config-store'
+import { sessionMatchesModelPath } from '../../shared/sessionUtils'
+import { validateModelBundleDirectory } from '../session-model-path'
 
 function connectHost(host: string): string {
   return host === '0.0.0.0' ? '127.0.0.1' : host
@@ -94,6 +97,7 @@ const SESSION_EVENTS = [
   'session:health',
   'session:log',
   'session:deleted',
+  'session:updated',
   'session:standby',
   'session:loadProgress'
 ]
@@ -166,6 +170,74 @@ export function registerSessionHandlers(getWindow: () => BrowserWindow | null): 
       try {
         await sessionManager.deleteSession(sessionId)
         return { success: true }
+      } catch (error) {
+        return { success: false, error: (error as Error).message }
+      }
+    })
+
+    ipcMain.handle('sessions:repointModelPath', async (_, sessionId: string) => {
+      try {
+        const session = sessionManager.getSession(sessionId)
+        if (!session) return { success: false, error: `Session ${sessionId} not found` }
+        if (session.type === 'remote') {
+          return { success: false, error: 'Remote sessions do not use local model paths.' }
+        }
+
+        const window = getWindow()
+        const openOptions: OpenDialogOptions = {
+          title: 'Repoint model path',
+          message: 'Select the model bundle directory containing config.json.',
+          buttonLabel: 'Select model bundle',
+          properties: ['openDirectory'],
+          securityScopedBookmarks: true,
+        }
+        const selection = window && !window.isDestroyed()
+          ? await dialog.showOpenDialog(window, openOptions)
+          : await dialog.showOpenDialog(openOptions)
+        if (selection.canceled || selection.filePaths.length === 0) {
+          return { success: false, canceled: true }
+        }
+
+        const validation = validateModelBundleDirectory(selection.filePaths[0])
+        if (!validation.valid) {
+          return { success: false, error: validation.error }
+        }
+
+        const identityChanged = !sessionMatchesModelPath(session.modelPath, validation.path)
+        if (identityChanged) {
+          const confirmOptions = {
+            type: 'warning' as const,
+            title: 'Confirm different model identity',
+            message: 'The selected model appears to be different from this session.',
+            detail: `Current: ${session.modelName || session.modelPath}\nSelected: ${validation.path}\n\nRepointing preserves chat history but binds matching chats to the selected model.`,
+            buttons: ['Cancel', 'Repoint model path'],
+            defaultId: 0,
+            cancelId: 0,
+            noLink: true,
+          }
+          const confirmation = window && !window.isDestroyed()
+            ? await dialog.showMessageBox(window, confirmOptions)
+            : await dialog.showMessageBox(confirmOptions)
+          if (confirmation.response !== 1) {
+            return { success: false, canceled: true }
+          }
+        }
+
+        const repointed = sessionManager.repointSessionModelPath(
+          sessionId,
+          validation.path,
+          { confirmIdentityChange: identityChanged },
+        )
+        if (selection.bookmarks?.[0]) {
+          db.saveBookmark(validation.path, selection.bookmarks[0])
+        }
+        return {
+          success: true,
+          session: repointed.session,
+          oldModelPath: repointed.oldModelPath,
+          newModelPath: repointed.session.modelPath,
+          reboundChatCount: repointed.reboundChatCount,
+        }
       } catch (error) {
         return { success: false, error: (error as Error).message }
       }

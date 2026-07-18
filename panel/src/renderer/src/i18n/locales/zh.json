@@ -470,6 +470,11 @@
       "stopStandbyTitle": "完全停止服务器进程",
       "viewCrashLogsTitle": "查看崩溃日志",
       "delete": "删除",
+      "modelPathMissing": "模型路径缺失",
+      "modelPathMissingDetail": "此模型目录不可用。请重新连接其驱动器或选择有效的模型包。",
+      "usableTwin": "同一模型的另一个会话具有可用路径。",
+      "repointModelPath": "重新指定模型路径",
+      "removeSession": "移除会话",
       "pidLabel": "PID {pid}"
     },
     "config": {
@@ -576,12 +581,16 @@
       "detectRunning": "检测运行中",
       "active": "活动 ({n})",
       "inactive": "非活动 ({n})",
+      "missing": "缺失模型 ({n})",
       "loading": "加载会话中...",
       "deleteConfirm": "删除此会话?此模型的聊天记录将被保留。",
+      "repointSuccess": "模型路径已更新",
+      "repointSuccessDetail": "已保留历史记录并重新绑定 {n} 个匹配的聊天。",
       "toast": {
         "startFailed": "启动会话失败",
         "stopFailed": "停止会话失败",
-        "deleteFailed": "删除会话失败"
+        "deleteFailed": "删除会话失败",
+        "repointFailed": "重新指定模型路径失败"
       }
     },
     "settings": {
@@ -897,6 +906,78 @@
       "closeAria": "关闭"
     }
   },
+  "main": {
+    "tray": {
+      "modelsLoaded": "vMLX — 已加载 {n} 个模型",
+      "apiGateway": "API 网关: localhost:{port}",
+      "copyApiUrl": "复制 API URL",
+      "singleModelMode": "网关单模型模式",
+      "statusRunning": "✓ 运行中",
+      "statusStarting": "启动中...",
+      "statusError": "错误",
+      "port": "端口: {port}",
+      "unpin": "取消固定 (允许清除)",
+      "pin": "固定 (防止清除)",
+      "stop": "停止",
+      "wake": "唤醒",
+      "sleep": "休眠",
+      "noModels": "未加载模型",
+      "memory": "内存: {used} / {total} GB",
+      "openWindow": "打开 vMLX 窗口",
+      "quit": "退出 vMLX",
+      "tooltipRunningSleeping": "vMLX — {running} 运行中, {standby} 休眠中",
+      "tooltipNoModels": "vMLX — 未加载模型"
+    },
+    "dialog": {
+      "unexpectedErrorTitle": "意外错误",
+      "unexpectedErrorBody": "vMLX 遇到错误:\n\n{message}\n\n应用即将退出。",
+      "dbRecoveredTitle": "数据库已恢复",
+      "dbRecoveredMessage": "您的聊天数据库已损坏并已重新创建。",
+      "dbRecoveredDetail": "您以前的数据已备份到:\n{path}",
+      "ok": "确定",
+      "selectWorkingDir": "选择工作目录",
+      "attachImagesTitle": "附加图片",
+      "attachImagesFilterImages": "图片"
+    },
+    "window": {
+      "downloads": "下载"
+    },
+    "loadProgress": {
+      "initializing": "正在初始化...",
+      "checkingMemory": "检查内存...",
+      "creatingEngine": "创建引擎...",
+      "startingServer": "启动服务器...",
+      "serverInitializing": "服务器初始化中...",
+      "configuringTools": "配置工具...",
+      "configuringLimits": "配置限制...",
+      "serverStartedLoadingModel": "服务器已启动, 正在加载模型...",
+      "loadingModelToGpu": "加载模型到 GPU...",
+      "loadingJangWeights": "加载 JANG 权重...",
+      "loadingJangVl": "加载 JANG VL 模型...",
+      "loadingVisionModel": "加载视觉模型...",
+      "loadingImageModel": "加载图像模型...",
+      "loadingJangVlShort": "加载 JANG VL...",
+      "loadingWeights": "加载权重...",
+      "processingMla": "处理 MLA 层...",
+      "convertingBfloat16": "转换为 bfloat16...",
+      "weightsLoaded": "权重已加载",
+      "modelLoaded": "模型已加载",
+      "visionModelLoaded": "视觉模型已加载",
+      "imageModelLoaded": "图像模型已加载",
+      "engineReady": "引擎就绪",
+      "savingWeights": "正在保存权重到 SSD...",
+      "buildingIndex": "构建权重索引...",
+      "settingUpKvCache": "设置 KV 缓存...",
+      "loadingChatTemplate": "加载聊天模板...",
+      "configuringCache": "配置缓存...",
+      "startingScheduler": "启动调度器...",
+      "batchedEngineLoaded": "BatchedEngine 已加载",
+      "almostReady": "即将就绪...",
+      "connected": "已连接",
+      "modelReady": "模型就绪",
+      "wakingFromSleep": "从休眠唤醒中..."
+    }
+  },
   "tools": {
     "title": "开发者工具",
     "subtitle": "查看、诊断并转换模型",
@@ -1057,77 +1138,5 @@
     "allChecksPassed": "全部 {{count}} 项检查通过",
     "summaryDetail": "{{passed}} 项通过,{{failed}} 项失败,{{warnings}} 项警告",
     "checking": "检查中..."
-  },
-  "main": {
-    "tray": {
-      "modelsLoaded": "vMLX — 已加载 {n} 个模型",
-      "apiGateway": "API 网关: localhost:{port}",
-      "copyApiUrl": "复制 API URL",
-      "singleModelMode": "网关单模型模式",
-      "statusRunning": "✓ 运行中",
-      "statusStarting": "启动中...",
-      "statusError": "错误",
-      "port": "端口: {port}",
-      "unpin": "取消固定 (允许清除)",
-      "pin": "固定 (防止清除)",
-      "stop": "停止",
-      "wake": "唤醒",
-      "sleep": "休眠",
-      "noModels": "未加载模型",
-      "memory": "内存: {used} / {total} GB",
-      "openWindow": "打开 vMLX 窗口",
-      "quit": "退出 vMLX",
-      "tooltipRunningSleeping": "vMLX — {running} 运行中, {standby} 休眠中",
-      "tooltipNoModels": "vMLX — 未加载模型"
-    },
-    "dialog": {
-      "unexpectedErrorTitle": "意外错误",
-      "unexpectedErrorBody": "vMLX 遇到错误:\n\n{message}\n\n应用即将退出。",
-      "dbRecoveredTitle": "数据库已恢复",
-      "dbRecoveredMessage": "您的聊天数据库已损坏并已重新创建。",
-      "dbRecoveredDetail": "您以前的数据已备份到:\n{path}",
-      "ok": "确定",
-      "selectWorkingDir": "选择工作目录",
-      "attachImagesTitle": "附加图片",
-      "attachImagesFilterImages": "图片"
-    },
-    "window": {
-      "downloads": "下载"
-    },
-    "loadProgress": {
-      "initializing": "正在初始化...",
-      "checkingMemory": "检查内存...",
-      "creatingEngine": "创建引擎...",
-      "startingServer": "启动服务器...",
-      "serverInitializing": "服务器初始化中...",
-      "configuringTools": "配置工具...",
-      "configuringLimits": "配置限制...",
-      "serverStartedLoadingModel": "服务器已启动, 正在加载模型...",
-      "loadingModelToGpu": "加载模型到 GPU...",
-      "loadingJangWeights": "加载 JANG 权重...",
-      "loadingJangVl": "加载 JANG VL 模型...",
-      "loadingVisionModel": "加载视觉模型...",
-      "loadingImageModel": "加载图像模型...",
-      "loadingJangVlShort": "加载 JANG VL...",
-      "loadingWeights": "加载权重...",
-      "processingMla": "处理 MLA 层...",
-      "convertingBfloat16": "转换为 bfloat16...",
-      "weightsLoaded": "权重已加载",
-      "modelLoaded": "模型已加载",
-      "visionModelLoaded": "视觉模型已加载",
-      "imageModelLoaded": "图像模型已加载",
-      "engineReady": "引擎就绪",
-      "savingWeights": "正在保存权重到 SSD...",
-      "buildingIndex": "构建权重索引...",
-      "settingUpKvCache": "设置 KV 缓存...",
-      "loadingChatTemplate": "加载聊天模板...",
-      "configuringCache": "配置缓存...",
-      "startingScheduler": "启动调度器...",
-      "batchedEngineLoaded": "BatchedEngine 已加载",
-      "almostReady": "即将就绪...",
-      "connected": "已连接",
-      "modelReady": "模型就绪",
-      "wakingFromSleep": "从休眠唤醒中..."
-    }
   }
 }

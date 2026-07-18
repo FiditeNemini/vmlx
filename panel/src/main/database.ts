@@ -1924,6 +1924,43 @@ class DatabaseManager {
     stmt.run(...values);
   }
 
+  /**
+   * Repoint a session and every chat bound to its old model_path atomically.
+   * Messages remain attached to their chat IDs and are therefore untouched.
+   */
+  repointSessionModelPath(
+    id: string,
+    oldModelPath: string,
+    updates: Pick<Session, "modelPath" | "modelName" | "config">,
+  ): number {
+    this.ensureOpen();
+    const repoint = this.db.transaction(() => {
+      const current = this.getSession(id);
+      if (!current) throw new Error(`Session ${id} not found`);
+      if (current.modelPath !== oldModelPath) {
+        throw new Error("The session model path changed before it could be repointed.");
+      }
+
+      // Keep the established session update path as the single writer for the
+      // sessions table, then rebind chats in the same SQLite transaction.
+      this.updateSession(id, updates);
+      const result = this.db.prepare(`
+        UPDATE chats
+        SET model_path = ?,
+            model_id = CASE WHEN model_id = ? THEN ? ELSE model_id END
+        WHERE model_path = ?
+      `).run(
+        updates.modelPath,
+        oldModelPath,
+        updates.modelPath,
+        oldModelPath,
+      );
+      return Number(result.changes ?? 0);
+    });
+
+    return repoint();
+  }
+
   deleteSession(id: string): void {
     this.ensureOpen();
     const stmt = this.db.prepare("DELETE FROM sessions WHERE id = ?");

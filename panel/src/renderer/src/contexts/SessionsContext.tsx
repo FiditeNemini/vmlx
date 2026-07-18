@@ -11,6 +11,8 @@ export interface SessionSummary {
   type?: 'local' | 'remote'
   remoteUrl?: string
   config?: string // JSON blob — includes modelType, imageMode, etc.
+  modelPathMissing: boolean
+  usableTwinId?: string
 }
 
 export interface LoadProgress {
@@ -58,6 +60,7 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
     const unsubs = [
       window.api.sessions.onCreated(() => refreshSessions()),
       window.api.sessions.onDeleted(() => refreshSessions()),
+      window.api.sessions.onUpdated(() => refreshSessions()),
       window.api.sessions.onStarting((data: any) => {
         setSessions(prev => prev.map(s => s.id === data.sessionId ? { ...s, status: 'loading' as const } : s))
         setLoadProgress(prev => { const next = new Map(prev); next.delete(data.sessionId); return next })

@@ -470,6 +470,11 @@
       "stopStandbyTitle": "サーバープロセスを完全に停止",
       "viewCrashLogsTitle": "クラッシュログを表示",
       "delete": "削除",
+      "modelPathMissing": "モデルパスが見つかりません",
+      "modelPathMissingDetail": "このモデルディレクトリは利用できません。ドライブを再接続するか、有効なモデルバンドルを選択してください。",
+      "usableTwin": "同じモデルの別のセッションに利用可能なパスがあります。",
+      "repointModelPath": "モデルパスを再指定",
+      "removeSession": "セッションを削除",
       "pidLabel": "PID {pid}"
     },
     "config": {
@@ -576,12 +581,16 @@
       "detectRunning": "実行中を検出",
       "active": "アクティブ ({n})",
       "inactive": "非アクティブ ({n})",
+      "missing": "モデル欠落 ({n})",
       "loading": "セッションを読み込み中...",
       "deleteConfirm": "このセッションを削除しますか?このモデルのチャット履歴は保持されます。",
+      "repointSuccess": "モデルパスを更新しました",
+      "repointSuccessDetail": "履歴を保持し、一致する {n} 件のチャットを再バインドしました。",
       "toast": {
         "startFailed": "セッションの開始に失敗しました",
         "stopFailed": "セッションの停止に失敗しました",
-        "deleteFailed": "セッションの削除に失敗しました"
+        "deleteFailed": "セッションの削除に失敗しました",
+        "repointFailed": "モデルパスの再指定に失敗しました"
       }
     },
     "settings": {
@@ -897,6 +906,78 @@
       "closeAria": "閉じる"
     }
   },
+  "main": {
+    "tray": {
+      "modelsLoaded": "vMLX — {n} モデル読み込み済み",
+      "apiGateway": "API ゲートウェイ: localhost:{port}",
+      "copyApiUrl": "API URL をコピー",
+      "singleModelMode": "ゲートウェイ単一モデルモード",
+      "statusRunning": "✓ 実行中",
+      "statusStarting": "開始中...",
+      "statusError": "エラー",
+      "port": "ポート: {port}",
+      "unpin": "ピン留め解除 (削除を許可)",
+      "pin": "ピン留め (削除を防止)",
+      "stop": "停止",
+      "wake": "起動",
+      "sleep": "スリープ",
+      "noModels": "モデルが読み込まれていません",
+      "memory": "メモリ: {used} / {total} GB",
+      "openWindow": "vMLX ウィンドウを開く",
+      "quit": "vMLX を終了",
+      "tooltipRunningSleeping": "vMLX — {running} 実行中、{standby} スリープ中",
+      "tooltipNoModels": "vMLX — モデルが読み込まれていません"
+    },
+    "dialog": {
+      "unexpectedErrorTitle": "予期しないエラー",
+      "unexpectedErrorBody": "vMLX でエラーが発生しました:\n\n{message}\n\nアプリを終了します。",
+      "dbRecoveredTitle": "データベースを復旧しました",
+      "dbRecoveredMessage": "チャットデータベースが破損し、再作成されました。",
+      "dbRecoveredDetail": "以前のデータは以下の場所にバックアップされました:\n{path}",
+      "ok": "OK",
+      "selectWorkingDir": "作業ディレクトリを選択",
+      "attachImagesTitle": "画像を添付",
+      "attachImagesFilterImages": "画像"
+    },
+    "window": {
+      "downloads": "ダウンロード"
+    },
+    "loadProgress": {
+      "initializing": "初期化中...",
+      "checkingMemory": "メモリを確認中...",
+      "creatingEngine": "エンジンを作成中...",
+      "startingServer": "サーバーを起動中...",
+      "serverInitializing": "サーバーを初期化中...",
+      "configuringTools": "ツールを設定中...",
+      "configuringLimits": "制限を設定中...",
+      "serverStartedLoadingModel": "サーバー起動、モデルを読み込み中...",
+      "loadingModelToGpu": "GPU にモデルを読み込み中...",
+      "loadingJangWeights": "JANG ウェイトを読み込み中...",
+      "loadingJangVl": "JANG VL モデルを読み込み中...",
+      "loadingVisionModel": "ビジョンモデルを読み込み中...",
+      "loadingImageModel": "画像モデルを読み込み中...",
+      "loadingJangVlShort": "JANG VL を読み込み中...",
+      "loadingWeights": "ウェイトを読み込み中...",
+      "processingMla": "MLA レイヤーを処理中...",
+      "convertingBfloat16": "bfloat16 に変換中...",
+      "weightsLoaded": "ウェイト読み込み完了",
+      "modelLoaded": "モデル読み込み完了",
+      "visionModelLoaded": "ビジョンモデル読み込み完了",
+      "imageModelLoaded": "画像モデル読み込み完了",
+      "engineReady": "エンジン準備完了",
+      "savingWeights": "SSD にウェイトを保存中...",
+      "buildingIndex": "ウェイトインデックスを構築中...",
+      "settingUpKvCache": "KV キャッシュを設定中...",
+      "loadingChatTemplate": "チャットテンプレートを読み込み中...",
+      "configuringCache": "キャッシュを設定中...",
+      "startingScheduler": "スケジューラーを起動中...",
+      "batchedEngineLoaded": "BatchedEngine 読み込み完了",
+      "almostReady": "もうすぐ準備完了...",
+      "connected": "接続済み",
+      "modelReady": "モデル準備完了",
+      "wakingFromSleep": "スリープから復帰中..."
+    }
+  },
   "tools": {
     "title": "開発者ツール",
     "subtitle": "モデルを調査・診断・変換します",
@@ -1057,77 +1138,5 @@
     "allChecksPassed": "{{count}} 件のチェックすべて合格しました",
     "summaryDetail": "{{passed}} 件合格、{{failed}} 件失敗、{{warnings}} 件警告",
     "checking": "チェック中..."
-  },
-  "main": {
-    "tray": {
-      "modelsLoaded": "vMLX — {n} モデル読み込み済み",
-      "apiGateway": "API ゲートウェイ: localhost:{port}",
-      "copyApiUrl": "API URL をコピー",
-      "singleModelMode": "ゲートウェイ単一モデルモード",
-      "statusRunning": "✓ 実行中",
-      "statusStarting": "開始中...",
-      "statusError": "エラー",
-      "port": "ポート: {port}",
-      "unpin": "ピン留め解除 (削除を許可)",
-      "pin": "ピン留め (削除を防止)",
-      "stop": "停止",
-      "wake": "起動",
-      "sleep": "スリープ",
-      "noModels": "モデルが読み込まれていません",
-      "memory": "メモリ: {used} / {total} GB",
-      "openWindow": "vMLX ウィンドウを開く",
-      "quit": "vMLX を終了",
-      "tooltipRunningSleeping": "vMLX — {running} 実行中、{standby} スリープ中",
-      "tooltipNoModels": "vMLX — モデルが読み込まれていません"
-    },
-    "dialog": {
-      "unexpectedErrorTitle": "予期しないエラー",
-      "unexpectedErrorBody": "vMLX でエラーが発生しました:\n\n{message}\n\nアプリを終了します。",
-      "dbRecoveredTitle": "データベースを復旧しました",
-      "dbRecoveredMessage": "チャットデータベースが破損し、再作成されました。",
-      "dbRecoveredDetail": "以前のデータは以下の場所にバックアップされました:\n{path}",
-      "ok": "OK",
-      "selectWorkingDir": "作業ディレクトリを選択",
-      "attachImagesTitle": "画像を添付",
-      "attachImagesFilterImages": "画像"
-    },
-    "window": {
-      "downloads": "ダウンロード"
-    },
-    "loadProgress": {
-      "initializing": "初期化中...",
-      "checkingMemory": "メモリを確認中...",
-      "creatingEngine": "エンジンを作成中...",
-      "startingServer": "サーバーを起動中...",
-      "serverInitializing": "サーバーを初期化中...",
-      "configuringTools": "ツールを設定中...",
-      "configuringLimits": "制限を設定中...",
-      "serverStartedLoadingModel": "サーバー起動、モデルを読み込み中...",
-      "loadingModelToGpu": "GPU にモデルを読み込み中...",
-      "loadingJangWeights": "JANG ウェイトを読み込み中...",
-      "loadingJangVl": "JANG VL モデルを読み込み中...",
-      "loadingVisionModel": "ビジョンモデルを読み込み中...",
-      "loadingImageModel": "画像モデルを読み込み中...",
-      "loadingJangVlShort": "JANG VL を読み込み中...",
-      "loadingWeights": "ウェイトを読み込み中...",
-      "processingMla": "MLA レイヤーを処理中...",
-      "convertingBfloat16": "bfloat16 に変換中...",
-      "weightsLoaded": "ウェイト読み込み完了",
-      "modelLoaded": "モデル読み込み完了",
-      "visionModelLoaded": "ビジョンモデル読み込み完了",
-      "imageModelLoaded": "画像モデル読み込み完了",
-      "engineReady": "エンジン準備完了",
-      "savingWeights": "SSD にウェイトを保存中...",
-      "buildingIndex": "ウェイトインデックスを構築中...",
-      "settingUpKvCache": "KV キャッシュを設定中...",
-      "loadingChatTemplate": "チャットテンプレートを読み込み中...",
-      "configuringCache": "キャッシュを設定中...",
-      "startingScheduler": "スケジューラーを起動中...",
-      "batchedEngineLoaded": "BatchedEngine 読み込み完了",
-      "almostReady": "もうすぐ準備完了...",
-      "connected": "接続済み",
-      "modelReady": "モデル準備完了",
-      "wakingFromSleep": "スリープから復帰中..."
-    }
   }
 }

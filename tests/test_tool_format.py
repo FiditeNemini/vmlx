@@ -3230,6 +3230,68 @@ class TestFallbackToolPromptFormat:
         )
         assert hidden is None
 
+    def test_server_streaming_suppressed_malformed_qwen_prefix_recovers_answer(
+        self, monkeypatch
+    ):
+        """A rejected Qwen call prefix must not leak or batch a later answer."""
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+
+        monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+        req = ResponsesRequest(model="m", input="x", tool_choice="none")
+
+        prefix = "<tool_call>\n<function=file_info>\n<"
+        assert server._clean_suppressed_tool_markup_for_display(prefix, req) == ""
+        assert server._suppressed_tool_display_delta(prefix, "", req) is None
+
+        malformed_then_answer = (
+            prefix
+            + "\n\n\nThe reported file size is 5.2 KB.\n"
+            + "Q35-API-TOOL-DONE"
+        )
+        cleaned = server._clean_suppressed_tool_markup_for_display(
+            malformed_then_answer,
+            req,
+        )
+        assert cleaned == (
+            "The reported file size is 5.2 KB.\nQ35-API-TOOL-DONE"
+        )
+        assert "<tool_call" not in cleaned
+        assert "<function=" not in cleaned
+        assert server._suppressed_tool_display_delta(
+            malformed_then_answer,
+            "",
+            req,
+        ) == cleaned
+
+    def test_server_suppressed_cleanup_leaves_ordinary_angle_text_unchanged(
+        self, monkeypatch
+    ):
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+
+        monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+        req = ResponsesRequest(model="m", input="x", tool_choice="none")
+        ordinary = "The value 3 < 5 is ordinary visible prose."
+        assert server._clean_suppressed_tool_markup_for_display(ordinary, req) == ordinary
+
+    def test_server_suppressed_delta_never_reemits_nonmonotonic_accumulator(
+        self, monkeypatch
+    ):
+        """A cleanup rewrite cannot become a cumulative replacement SSE delta."""
+        import vmlx_engine.server as server
+
+        monkeypatch.setattr(
+            server,
+            "_clean_suppressed_tool_markup_for_display",
+            lambda *_args, **_kwargs: "Corrected prefix plus visible suffix",
+        )
+        assert server._suppressed_tool_display_delta(
+            "raw accumulated text",
+            "Already emitted prefix",
+            None,
+        ) is None
+
     def test_server_repairs_schema_gated_tool_instruction_echo(self, monkeypatch):
         import vmlx_engine.server as server
         from vmlx_engine.api.models import ResponsesRequest

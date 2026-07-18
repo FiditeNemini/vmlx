@@ -3268,6 +3268,98 @@ class TestOpenAILogprobsFormatting:
         assert engine.calls[1]["kwargs"]["chat_template_kwargs"]["thinking_mode"] == "disabled"
 
     @pytest.mark.asyncio
+    async def test_nonstream_responses_suppressed_repeat_tool_runs_answer_pass(
+        self, monkeypatch
+    ):
+        """tool_choice=none must not finalize empty after hidden native markup."""
+        from types import SimpleNamespace
+
+        import vmlx_engine.model_config_registry as registry
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.qwen3_parser import Qwen3ReasoningParser
+
+        config = SimpleNamespace(
+            family_name="qwen3_5",
+            think_in_template=True,
+            reasoning_parser="qwen3",
+            tool_parser="qwen",
+            supports_thinking=True,
+        )
+
+        class _Engine:
+            is_mllm = False
+            preserve_native_tool_format = False
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, *, messages, **kwargs):
+                self.calls.append({"messages": messages, "kwargs": kwargs})
+                text = (
+                    "Q35-NONSTREAM-SUPPRESSED-DONE"
+                    if kwargs.get("enable_thinking") is False
+                    else (
+                        "I should call the tool again.</think>\n\n<tool_call>\n"
+                        "<function=file_info>\n<parameter=path>\n"
+                        "panel/package.json\n</parameter>\n</function>\n</tool_call>"
+                    )
+                )
+                return GenerationOutput(
+                    text=text,
+                    raw_text=text,
+                    prompt_tokens=8,
+                    completion_tokens=8,
+                    finish_reason="stop",
+                )
+
+        engine = _Engine()
+        monkeypatch.setattr(server, "_engine", engine)
+        monkeypatch.setattr(server, "_served_model_name", "qwen3-policy-test")
+        monkeypatch.setattr(server, "_model_name", "qwen3-policy-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_model_type", "llm")
+        monkeypatch.setattr(server, "_reasoning_parser", Qwen3ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+        monkeypatch.setattr(server, "_mcp_manager", None)
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(
+            registry,
+            "get_model_config_registry",
+            lambda *args, **kwargs: SimpleNamespace(lookup=lambda *a, **k: config),
+        )
+
+        response = await server.create_response(
+            ResponsesRequest(
+                model="qwen3-policy-test",
+                input="use the prior tool result",
+                max_output_tokens=112,
+                enable_thinking=True,
+                tool_choice="none",
+                tools=[
+                    {
+                        "type": "function",
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    }
+                ],
+            ),
+            fastapi_request=None,
+        )
+
+        assert response.output_text == "Q35-NONSTREAM-SUPPRESSED-DONE"
+        assert len(engine.calls) == 2
+        assert engine.calls[1]["kwargs"]["enable_thinking"] is False
+        assert "tools" not in engine.calls[1]["kwargs"]
+        assert "<tool_call>" not in response.model_dump_json()
+
+    @pytest.mark.asyncio
     async def test_nonstream_chat_minimax_tools_available_no_call_runs_answer_pass(
         self, monkeypatch
     ):

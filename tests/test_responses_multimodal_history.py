@@ -87,6 +87,29 @@ def test_matching_tool_message_keeps_native_tool_role():
     assert messages[1]["tool_call_id"] == "call_1"
 
 
+def test_request_scoped_system_message_does_not_orphan_restored_tool_result():
+    tool_call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "record_fact", "arguments": {"value": "blue-cat"}},
+    }
+    messages = _coerce_orphan_tool_messages_for_template(
+        [
+            {"role": "user", "content": "record this"},
+            {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+            {"role": "system", "content": "Use the tool result; do not call again."},
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": '{"stored":"blue-cat"}',
+            },
+        ]
+    )
+
+    assert messages[-1]["role"] == "tool"
+    assert messages[-1]["tool_call_id"] == "call_1"
+
+
 def test_zaya_vl_tool_history_is_text_only_and_merges_followup():
     tool_call = {
         "id": "call_1",

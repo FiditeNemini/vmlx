@@ -58,7 +58,7 @@ def test_responses_output_history_converter_accepts_pydantic_and_dict_items():
                 {
                     "id": "call_1",
                     "type": "function",
-                    "function": {"name": "lookup", "arguments": '{"q":"teal"}'},
+                    "function": {"name": "lookup", "arguments": {"q": "teal"}},
                 }
             ],
         },
@@ -192,6 +192,10 @@ def test_responses_output_merges_visible_text_with_tool_calls_for_tool_adjacency
     assert previous["role"] == "assistant"
     assert previous.get("tool_calls")
     assert previous["content"] == "I will inspect it."
+    assert previous["tool_calls"][0]["function"]["arguments"] == {
+        "path": "vmlx_engine/server.py",
+        "symbol": "cache_stats",
+    }
 
 
 def test_responses_object_exposes_output_text_convenience_field():
@@ -234,6 +238,31 @@ def test_dsv4_responses_tool_choice_none_does_not_synthesize_tools():
 
     assert "elif not _suppress_tools and _is_dsv4_resp_msgs" in src
     assert "_synthesize_tools_from_message_tool_calls(messages)" in src
+
+
+def test_responses_nonstream_suppression_never_revives_raw_tool_markup():
+    from vmlx_engine.server import _select_responses_visible_text
+
+    raw = '<tool_call>\n<function=file_info>{"path":"x"}</function>\n</tool_call>'
+
+    assert _select_responses_visible_text(
+        cleaned_text="",
+        raw_text=raw,
+        tool_calls=None,
+        suppress_tools=True,
+    ) == ""
+    assert _select_responses_visible_text(
+        cleaned_text="visible answer",
+        raw_text=raw,
+        tool_calls=None,
+        suppress_tools=True,
+    ) == "visible answer"
+    assert _select_responses_visible_text(
+        cleaned_text="",
+        raw_text="ordinary answer",
+        tool_calls=None,
+        suppress_tools=False,
+    ) == "ordinary answer"
 
 
 def test_responses_previous_history_keeps_instructions_as_leading_system():
@@ -407,6 +436,67 @@ async def test_responses_streaming_stores_history_for_previous_response_id():
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "stored answer"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_responses_streaming_does_not_store_request_scoped_instructions():
+    from vmlx_engine.api.models import ResponsesRequest
+    from vmlx_engine import server
+
+    class FakeEngine:
+        tokenizer = SimpleNamespace(has_thinking=False)
+
+        async def stream_chat(self, messages, **kwargs):
+            assert messages[0] == {
+                "role": "system",
+                "content": "Call file_info exactly once.",
+            }
+            yield SimpleNamespace(
+                new_text="stored answer",
+                prompt_tokens=3,
+                completion_tokens=2,
+                finish_reason="stop",
+                finished=True,
+            )
+
+    server._responses_history.clear()
+    server._reasoning_parser = None
+    request = ResponsesRequest(
+        model="unit-test-model",
+        input="hello",
+        instructions="Call file_info exactly once.",
+        stream=True,
+    )
+    generation_messages = [
+        {"role": "system", "content": request.instructions},
+        {"role": "user", "content": "hello"},
+    ]
+    persistent_messages = [
+        {"role": "system", "content": "Explicit input policy."},
+        {"role": "user", "content": "hello"},
+    ]
+
+    try:
+        events = [
+            event async for event in server.stream_responses_api(
+                FakeEngine(),
+                generation_messages,
+                request,
+                history_messages=persistent_messages,
+            )
+        ]
+        completed = _sse_payloads(events, "response.completed")
+        response_id = completed[-1]["response"]["id"]
+        history = server._responses_get_history(response_id)
+
+        assert history == [
+            {"role": "system", "content": "Explicit input policy."},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "stored answer"},
+        ]
+        assert request.instructions not in json.dumps(history)
+    finally:
+        server._responses_history.clear()
 
 
 @pytest.mark.asyncio

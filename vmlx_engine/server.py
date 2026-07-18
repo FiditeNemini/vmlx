@@ -1001,6 +1001,27 @@ def _drop_tool_visible_channel_marker(
     return text
 
 
+def _select_responses_visible_text(
+    *,
+    cleaned_text: str | None,
+    raw_text: str | None,
+    tool_calls: list | None,
+    suppress_tools: bool,
+) -> str:
+    """Select non-stream Responses text without reviving suppressed markup.
+
+    An empty ``cleaned_text`` is meaningful when ``tool_choice=none``: the
+    model may have emitted only native tool-control XML/JSON, all of which was
+    intentionally removed. Falling back to ``raw_text`` in that case leaks the
+    control payload and makes non-stream behavior disagree with SSE.
+    """
+    if cleaned_text:
+        return clean_output_text(cleaned_text)
+    if suppress_tools or tool_calls:
+        return ""
+    return clean_output_text(raw_text) if raw_text else ""
+
+
 def _responses_messages_have_tool_result_after_latest_user(messages: list[dict]) -> bool:
     for message in reversed(messages or []):
         if not isinstance(message, dict):
@@ -5603,10 +5624,43 @@ def _clean_suppressed_tool_markup_for_display(
         cleaned_text, tool_calls = _parse_tool_calls_with_parser(output_text, request)
     except Exception as exc:
         logger.debug("Suppressed tool-markup cleanup failed: %s", exc)
-        return output_text
+        tool_calls = None
+        cleaned_text = output_text
     if tool_calls:
         return _strip_tool_markup_residue_for_display(cleaned_text or "")
-    return output_text
+
+    marker_positions = [
+        pos for marker in _TOOL_CALL_MARKERS if (pos := output_text.find(marker)) >= 0
+    ]
+    if not marker_positions:
+        return output_text
+
+    marker_start = min(marker_positions)
+    visible_prefix = output_text[:marker_start].rstrip()
+    suppressed_suffix = output_text[marker_start:]
+
+    # A quant-degraded/native model can start a call and then abandon it before
+    # producing a schema-valid closing tag, for example:
+    #
+    #   <tool_call>\n<function=file_info>\n<\n\nThe visible answer ...
+    #
+    # The complete parser must reject that as a function call, but tool_choice=none
+    # still means the native control prefix is not assistant prose.  Recover a
+    # trailing answer only when the malformed envelope supplies an unambiguous
+    # standalone delimiter line followed by a blank-line boundary.  Otherwise keep
+    # only text that safely preceded the marker; never expose the speculative XML.
+    recovery = re.search(
+        r"(?m)^[ \t]*[<>/{}`\[\]]{1,8}[ \t]*\r?\n"
+        r"(?:[ \t]*\r?\n)+(?=\S)",
+        suppressed_suffix,
+    )
+    if recovery:
+        visible_suffix = suppressed_suffix[recovery.end() :]
+        recovered = "\n".join(
+            part for part in (visible_prefix, visible_suffix.lstrip()) if part
+        )
+        return _strip_tool_markup_residue_for_display(recovered)
+    return visible_prefix
 
 
 def _suppressed_tool_display_delta(
@@ -5640,6 +5694,15 @@ def _suppressed_tool_display_delta(
     if streamed_display_text and cleaned.startswith(streamed_display_text):
         delta = cleaned[len(streamed_display_text) :]
     elif streamed_display_text == cleaned:
+        delta = ""
+    elif streamed_display_text:
+        # Cleanup can become non-monotonic when a later chunk completes (or
+        # invalidates) native markup that appeared earlier in the accumulated
+        # text. SSE deltas cannot retract bytes already delivered to the client.
+        # Re-emitting the full cleaned accumulator here duplicates the entire
+        # answer on every subsequent token and makes UI/API streams appear to
+        # loop before response.output_text.done snaps to the final text. Hold the
+        # changed prefix instead; the terminal done item remains authoritative.
         delta = ""
     else:
         delta = cleaned
@@ -13709,7 +13772,7 @@ async def create_chat_completion(
     _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
     _ns_tools_available = bool(
         getattr(request, "tools", None) or chat_kwargs.get("tools")
-    )
+    ) and not _suppress_tools
     _ns_m3_valid_tool_call = (
         _ns_is_m3
         and not _suppress_tools
@@ -13728,8 +13791,16 @@ async def create_chat_completion(
         bool(reasoning_text)
         and getattr(output, "finish_reason", None) == "length"
     )
+    _ns_visible_content_for_answer_gate = content_for_parsing
+    if _suppress_tools and _ns_visible_content_for_answer_gate:
+        _ns_visible_content_for_answer_gate = (
+            _clean_suppressed_tool_markup_for_display(
+                _strip_think_for_tool_parse(_ns_visible_content_for_answer_gate),
+                request,
+            )
+        )
     if (
-        (not content_for_parsing or _ns_reasoning_truncated)
+        (not _ns_visible_content_for_answer_gate or _ns_reasoning_truncated)
         and reasoning_text
         and not _ns_thinking_off
         and (
@@ -14096,6 +14167,24 @@ def _responses_output_is_reasoning_only(output_items: list) -> bool:
     ) and not _responses_output_has_visible_or_tool(output_items)
 
 
+def _responses_tool_arguments_for_history(arguments: Any) -> dict:
+    """Normalize Responses function arguments for native chat templates.
+
+    Responses wire items carry ``arguments`` as a JSON string, while native
+    templates (Qwen, Mistral, and others) iterate the historical argument
+    mapping. Explicit replay already performs this conversion in
+    ``_responses_input_to_messages``; local ``previous_response_id`` storage
+    must use the identical shape or the two continuation paths tokenize
+    differently.
+    """
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return arguments if isinstance(arguments, dict) else {}
+
+
 def _responses_output_to_assistant_messages(output_items: list) -> list[dict]:
     """Convert a Responses output array back to chat-history assistant turns."""
     assistant_messages: list[dict] = []
@@ -14110,7 +14199,9 @@ def _responses_output_to_assistant_messages(output_items: list) -> list[dict]:
             continue
         if item_type == "function_call":
             name = _responses_field(item, "name", "")
-            arguments = _responses_field(item, "arguments", "{}")
+            arguments = _responses_tool_arguments_for_history(
+                _responses_field(item, "arguments", "{}")
+            )
             call_id = _responses_field(item, "call_id") or f"call_{uuid.uuid4().hex[:8]}"
             tool_calls.append(
                 {
@@ -14974,7 +15065,11 @@ def _coerce_orphan_tool_messages_for_template(messages: list[dict]) -> list[dict
                     }
                 )
                 continue
-        elif role != "assistant":
+        elif role not in ("assistant", "system", "developer"):
+            # Responses request-scoped instructions are normalized to the
+            # leading system slot after this pass. They do not break native
+            # adjacency between a restored assistant tool call and the current
+            # function_call_output. Reset only on an actual conversation turn.
             active_tool_call_ids = set()
         coerced.append(msg)
     return coerced
@@ -15320,6 +15415,16 @@ async def create_response(
                 _preserve_mm = True
         except Exception:
             pass
+    # Responses ``instructions`` are request-scoped. OpenAI's chaining
+    # contract explicitly does not carry them through ``previous_response_id``.
+    # Keep a second, instruction-free transcript for the local history store;
+    # otherwise a tool-result follow-up can inherit contradictory first-turn
+    # instructions such as "call this tool exactly once".
+    history_messages = _responses_input_to_messages(
+        request.input,
+        None,
+        preserve_multimodal=_preserve_mm,
+    )
     messages = _responses_input_to_messages(
         request.input,
         request.instructions,
@@ -15333,6 +15438,7 @@ async def create_response(
             )
         if previous_messages:
             messages = previous_messages + messages
+            history_messages = previous_messages + history_messages
             logger.debug(
                 "Responses API restored %d history message(s) from %s",
                 len(previous_messages),
@@ -15380,7 +15486,9 @@ async def create_response(
         if json_instruction:
             messages = _inject_json_instruction(messages, json_instruction)
     messages = _normalize_leading_system_messages(messages)
-
+    # Persist only explicit input system/developer messages. Template-only
+    # coercions and request-scoped instructions remain generation-local.
+    history_messages = _normalize_leading_system_messages(history_messages)
     _responses_max_prompt_tokens = _effective_max_prompt_tokens(request)
     prompt_limit_response = _reject_if_prompt_too_long_for_messages(
         messages,
@@ -15789,7 +15897,12 @@ async def create_response(
     if request.stream:
         return StreamingResponse(
             stream_responses_api(
-                engine, messages, request, fastapi_request, **chat_kwargs
+                engine,
+                messages,
+                request,
+                fastapi_request,
+                history_messages=history_messages,
+                **chat_kwargs,
             ),
             media_type="text/event-stream",
         )
@@ -16050,7 +16163,7 @@ async def create_response(
     _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
     _ns_tools_available = bool(
         getattr(request, "tools", None) or chat_kwargs.get("tools")
-    )
+    ) and not _suppress_tools
     _ns_m3_valid_tool_call = (
         _ns_is_m3
         and not _suppress_tools
@@ -16069,8 +16182,16 @@ async def create_response(
         bool(reasoning_text)
         and getattr(output, "finish_reason", None) == "length"
     )
+    _ns_visible_content_for_answer_gate = content_for_parsing
+    if _suppress_tools and _ns_visible_content_for_answer_gate:
+        _ns_visible_content_for_answer_gate = (
+            _clean_suppressed_tool_markup_for_display(
+                _strip_think_for_tool_parse(_ns_visible_content_for_answer_gate),
+                request,
+            )
+        )
     if (
-        (not content_for_parsing or _ns_reasoning_truncated)
+        (not _ns_visible_content_for_answer_gate or _ns_reasoning_truncated)
         and reasoning_text
         and not _ns_thinking_off
         and (
@@ -16328,10 +16449,11 @@ async def create_response(
         )
 
     # Add main message (use cleaned text if tool calls were extracted, otherwise raw text)
-    final_text = (
-        clean_output_text(cleaned_text)
-        if cleaned_text
-        else ("" if tool_calls else (clean_output_text(content_for_parsing) if content_for_parsing else ""))
+    final_text = _select_responses_visible_text(
+        cleaned_text=cleaned_text,
+        raw_text=content_for_parsing,
+        tool_calls=tool_calls,
+        suppress_tools=_suppress_tools,
     )
     if final_text:
         final_text = _finalize_visible_text_for_request(final_text, request)
@@ -16380,7 +16502,7 @@ async def create_response(
     )
     _responses_store_history(
         response_obj.id,
-        messages + _responses_output_to_assistant_messages(output_items),
+        history_messages + _responses_output_to_assistant_messages(output_items),
         reasoning_only=_reasoning_only,
     )
     return response_obj
@@ -18449,6 +18571,7 @@ async def stream_responses_api(
     messages: list,
     request: ResponsesRequest,
     fastapi_request: Request | None = None,
+    history_messages: list | None = None,
     **kwargs,
 ) -> AsyncIterator[str]:
     """Stream response in OpenAI Responses API SSE format.
@@ -19455,9 +19578,13 @@ async def stream_responses_api(
         len(tool_calls or []),
     )
 
+    _fallback_visible_content = (
+        cleaned_text if _suppress_tools else accumulated_content
+    )
+
     if (
         not tool_calls
-        and not accumulated_content.strip()
+        and not (_fallback_visible_content or "").strip()
         and not m3_reasoning_only_answer_enabled
         and m3_tools_fallback_answer_budget is not None
         and accumulated_reasoning.strip()
@@ -19474,7 +19601,7 @@ async def stream_responses_api(
 
     if (
         not tool_calls
-        and not accumulated_content.strip()
+        and not (_fallback_visible_content or "").strip()
         and not reasoning_only_answer_enabled
         and reasoning_tools_fallback_answer_budget is not None
         and accumulated_reasoning.strip()
@@ -19635,7 +19762,7 @@ async def stream_responses_api(
         display_text = cleaned_text or ""
         if request_parser:
             # Reasoning was already emitted during streaming — use content-only text
-            if accumulated_content:
+            if accumulated_content and not _suppress_tools:
                 display_text = accumulated_content
             elif (
                 accumulated_reasoning
@@ -20128,7 +20255,8 @@ async def stream_responses_api(
     }
     _responses_store_history(
         response_id,
-        messages + _responses_output_to_assistant_messages(all_output_items),
+        (history_messages if history_messages is not None else messages)
+        + _responses_output_to_assistant_messages(all_output_items),
         reasoning_only=_stream_reasoning_only,
     )
     _terminal_response_event = (

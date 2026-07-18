@@ -39,3 +39,19 @@ describe('session log retention across stop', () => {
     expect(delBlock).toContain('this.logBuffers.delete(sessionId)')
   })
 })
+
+describe('session create dedupes by model identity', () => {
+  const source = readFileSync(
+    new URL('../src/main/sessions.ts', import.meta.url),
+    'utf8',
+  )
+
+  it('create-path existing lookup falls back to identity matching', () => {
+    expect(source).toContain(
+      "db.getSessionByModelPath(modelPath) ||",
+    )
+    expect(source).toContain(
+      "s => s.type !== 'remote' && sessionMatchesModelPath(s.modelPath, modelPath)",
+    )
+  })
+})

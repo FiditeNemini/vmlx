@@ -1396,8 +1396,17 @@ export class SessionManager extends EventEmitter {
     normalizeCacheStackMutualExclusion(config)
     markCacheStackStartupDefaultsCurrent(config)
 
-    // Check if session already exists for this model path
-    const existing = db.getSessionByModelPath(modelPath)
+    // Check if session already exists for this model path. Raw-path lookup
+    // first; fall back to model IDENTITY so path-prefix twins (~/models
+    // symlink vs /Volumes real dir, HF id vs resolved dir) reuse the
+    // existing session instead of spawning duplicate rows — duplicate twins
+    // caused the stopped-pin/not-running-banner class (see
+    // CHAT-SESSION-MODELPATH-IDENTITY-MISMATCH).
+    const existing =
+      db.getSessionByModelPath(modelPath) ||
+      db.getSessions().find(
+        s => s.type !== 'remote' && sessionMatchesModelPath(s.modelPath, modelPath)
+      )
     if (existing) {
       // Merge new config into existing (don't overwrite unspecified fields)
       let existingConfig: Record<string, any> = {}

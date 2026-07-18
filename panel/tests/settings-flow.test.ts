@@ -2564,7 +2564,7 @@ describe('Default IP and New Settings', () => {
     it('create-session fills missing cache settings before stamping incoming settings current', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const start = source.indexOf('private async _createSessionInner')
-        const existing = source.indexOf('const existing = db.getSessionByModelPath(modelPath)', start)
+        const existing = source.indexOf('const existing =', start)
         const beforeExisting = source.slice(start, existing)
         const existingBlock = source.slice(existing, source.indexOf('const id = uuidv4()', existing))
 

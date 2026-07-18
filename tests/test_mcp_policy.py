@@ -47,11 +47,13 @@ def _manager_with_fake_tools() -> MCPClientManager:
                 name="fs",
                 command="npx",
                 args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+                skip_security_validation=True,
             ),
             "web": MCPServerConfig(
                 name="web",
                 command="uvx",
                 args=["mcp-server-fetch"],
+                skip_security_validation=True,
             ),
         }
     )

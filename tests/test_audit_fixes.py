@@ -429,7 +429,7 @@ class TestDiskCacheSafety:
         """Verify the try/except OSError guard exists in disk cache fetch."""
         import inspect
         from vmlx_engine import disk_cache
-        source = inspect.getsource(disk_cache.DiskCacheManager.fetch)
+        source = inspect.getsource(disk_cache.DiskCacheManager._fetch_impl)
         assert "except OSError" in source
 
 

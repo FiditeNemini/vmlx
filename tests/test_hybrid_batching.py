@@ -961,7 +961,7 @@ class TestHybridSSMResumeRemaining:
         guard = source[max(0, skip_idx - 700):skip_idx + 200]
 
         assert skip_idx < paged_store_idx
-        assert "self._is_hybrid" in guard
+        assert 'getattr(self, "_is_hybrid", False)' in guard
         assert 'getattr(request, "_cached_tokens", 0)' in guard
         assert "_skip_cache_store = True" in guard
 

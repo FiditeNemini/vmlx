@@ -15644,7 +15644,7 @@ class TestStreamUsagePropagatesCacheDetail:
         }
 
     @pytest.mark.asyncio
-    async def test_minimax_m3_chat_stream_length_truncated_visible_prefix_uses_answer_pass(
+    async def test_minimax_m3_chat_stream_length_truncated_visible_prefix_stays_progressive(
         self, monkeypatch
     ):
         import json
@@ -15750,9 +15750,10 @@ class TestStreamUsagePropagatesCacheDetail:
             if line.startswith("data: ") and line.strip() != "data: [DONE]":
                 chunks.append(json.loads(line.removeprefix("data: ")))
 
-        # F6: the visible answer pass is a second stream_chat with thinking off.
-        assert [call[0] for call in calls] == ["stream", "stream"]
-        assert calls[1][2].get("enable_thinking") is False
+        # Once visible bytes have streamed, they cannot be retracted and replaced
+        # by a second direct-answer pass. Preserve the progressive prefix and the
+        # honest length terminal; content-empty reasoning runs exercise F6.
+        assert [call[0] for call in calls] == ["stream"]
         content_deltas = [
             choice["delta"].get("content")
             for chunk in chunks
@@ -15768,9 +15769,12 @@ class TestStreamUsagePropagatesCacheDetail:
         ]
 
         assert any("MM3_STREAM_CHAT_OK" in delta for delta in reasoning_deltas)
-        assert content_deltas == [
-            "MM3_STREAM_CHAT_OK Oracle EBS is an integrated Oracle business application suite."
-        ]
+        assert content_deltas == ["MM3_STREAM_CHAT"]
+        assert any(
+            choice.get("finish_reason") == "length"
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+        )
 
 
 class TestHuggingFaceDownloadRegression:

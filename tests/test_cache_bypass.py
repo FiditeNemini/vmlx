@@ -210,6 +210,8 @@ class TestSchedulerBypassGating:
             return f.read()
 
     def test_scheduler_schedule_has_bypass_gate(self):
+        import re
+
         src = self._read("vmlx_engine/scheduler.py")
         # The main _schedule_request path must declare the bypass variable
         assert "_bypass = bool(getattr(request, \"_bypass_prefix_cache\"" in src, (
@@ -220,8 +222,8 @@ class TestSchedulerBypassGating:
             "self.block_aware_cache is not None and not _bypass" in src
         ), "scheduler.py block_aware_cache fetch is no longer gated on _bypass"
         # memory_aware_cache fetch must be gated
-        assert (
-            "self.memory_aware_cache is not None and not _bypass" in src
+        assert re.search(
+            r"self\.memory_aware_cache is not None\s+and not _bypass", src
         ), "scheduler.py memory_aware_cache fetch is no longer gated on _bypass"
         # legacy prefix_cache fetch must be gated
         assert (
@@ -518,9 +520,15 @@ class TestServerForwarding:
     def test_streaming_tool_detection_requires_request_tools(self):
         """Streaming paths should not buffer tool-call markers unless tools
         were actually passed into the request/template."""
+        import re
+
         src = self._read_server()
         assert "_stream_tools_available = bool(kwargs.get(\"tools\")) or _request_has_tools" in src
-        assert "tool_call_active = _stream_tools_available and not _suppress_tools" in src
+        assert re.search(
+            r"tool_call_active = \(\s*_stream_tools_available\s+"
+            r"and not _suppress_tools\s+and not _tool_call_parser_disabled_explicitly",
+            src,
+        )
         assert "(_enable_auto_tool_choice or _tool_call_parser is not None or _request_has_tools" not in src
 
     def test_explicit_cli_repetition_penalty_wins_over_dsv4_bundle_default(self, tmp_path, monkeypatch):

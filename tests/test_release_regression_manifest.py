@@ -4588,7 +4588,8 @@ def test_release_regression_manifest_chat_ipc_stream_metrics_include_cache_reuse
     ].split("metrics: {", 1)[1].split("}", 1)[0]
     assert "cachedTokens" in complete_block
     assert "cacheDetail" in complete_block
-    assert "respUsage.input_tokens_details.cache_detail" in source
+    assert "recordCacheUsage(respUsage.input_tokens_details)" in source
+    assert 'typeof details?.cache_detail === "string"' in source
 
 
 def test_release_regression_manifest_chat_ipc_rolls_back_failed_media_turns():

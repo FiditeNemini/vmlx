@@ -1464,7 +1464,7 @@ class TestSchedulerBasic:
                 self.paged_cache = _PagedCache()
                 self._request_tables = {}
 
-            def fetch_cache(self, request_id, tokens):
+            def fetch_cache(self, request_id, tokens, cache_extra_keys=None):
                 self.fetch_calls.append((request_id, list(tokens)))
                 return None, list(tokens)
 
@@ -1598,7 +1598,7 @@ class TestSchedulerBasic:
             def __init__(self):
                 self.paged_cache = _PagedCache()
 
-            def fetch_cache(self, request_id, tokens):
+            def fetch_cache(self, request_id, tokens, cache_extra_keys=None):
                 self.paged_cache.stats.disk_hits += 4
                 return BlockTable(request_id, [1, 2, 3, 4], 256), list(tokens[256:])
 
@@ -1659,7 +1659,7 @@ class TestSchedulerBasic:
             def __init__(self):
                 self.paged_cache = _PagedCache()
 
-            def fetch_cache(self, request_id, tokens):
+            def fetch_cache(self, request_id, tokens, cache_extra_keys=None):
                 self.paged_cache.stats.disk_hits += 2
                 return BlockTable(request_id, [1, 2], 128), list(tokens[128:])
 
@@ -1707,7 +1707,7 @@ class TestSchedulerBasic:
         class _BlockAwareCache:
             paged_cache = _PagedCache()
 
-            def fetch_cache(self, request_id, tokens):
+            def fetch_cache(self, request_id, tokens, cache_extra_keys=None):
                 return BlockTable(request_id=request_id, block_ids=[1], num_tokens=64), [64]
 
             def get_stats(self):

@@ -192,8 +192,12 @@ def build_audit(root: Path) -> dict[str, Any]:
     }
     issue176_checks = {
         "marks_promoted_disk_blocks": "cache_data_from_disk" in paged_cache,
-        "drops_disk_mirror_after_reconstruct": "block.cache_data = None" in prefix_cache
-        and "block.cache_data_from_disk = False" in prefix_cache,
+        "drops_disk_mirror_after_reconstruct": (
+            "release_resident_payload(block)" in prefix_cache
+            and "def release_resident_payload" in paged_cache
+            and "block.cache_data = None" in paged_cache
+            and "block.cache_data_from_disk = False" in paged_cache
+        ),
         "regression_test_present": "test_paged_cache_reconstruct_drops_promoted_disk_block_mirror"
         in _read(root / "tests/test_engine_audit.py"),
         "l2_readable_write_through_regression_test_present": (

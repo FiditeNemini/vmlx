@@ -281,6 +281,10 @@ def test_main_chat_reasoning_content_is_never_terminally_buffered():
 def test_nonstream_answer_pass_replaces_length_truncated_visible_prefix():
     chat_source = inspect.getsource(server_mod.create_chat_completion)
     responses_source = inspect.getsource(server_mod.create_response)
-    expected = "(not content_for_parsing or _ns_reasoning_truncated)"
-    assert expected in chat_source
-    assert expected in responses_source
+    for source in (chat_source, responses_source):
+        assert "_ns_visible_content_for_answer_gate = content_for_parsing" in source
+        assert "_clean_suppressed_tool_markup_for_display(" in source
+        assert (
+            "(not _ns_visible_content_for_answer_gate or _ns_reasoning_truncated)"
+            in source
+        )

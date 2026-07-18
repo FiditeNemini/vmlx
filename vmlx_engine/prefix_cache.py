@@ -1287,6 +1287,11 @@ class BlockAwarePrefixCache:
         self._hits = 0
         self._misses = 0
         self._tokens_saved = 0
+        # Per-request credit lets a hybrid consumer roll back a KV lookup that
+        # cannot actually be used without matching path-dependent companion
+        # state.  Lookup success and execution success are not equivalent for
+        # SSM/GDN hybrids.
+        self._hit_credits: Dict[str, int] = {}
 
         # Lazy-cached expected KV head count for validation
         self._n_kv_heads: Optional[int] = None
@@ -1634,6 +1639,7 @@ class BlockAwarePrefixCache:
             remaining = tokens[block_table.num_tokens:]
             self._hits += 1
             self._tokens_saved += block_table.num_tokens
+            self._hit_credits[request_id] = block_table.num_tokens
             logger.info(
                 f"Paged cache hit for {request_id}: "
                 f"{len(cached_blocks)} blocks, {block_table.num_tokens} tokens"
@@ -1691,6 +1697,7 @@ class BlockAwarePrefixCache:
             remaining = tokens[len(matched_tokens) :]
             self._hits += 1
             self._tokens_saved += len(matched_tokens)
+            self._hit_credits[request_id] = len(matched_tokens)
 
             logger.debug(
                 f"Prefix index hit for {request_id}: "
@@ -2976,6 +2983,7 @@ class BlockAwarePrefixCache:
         Args:
             request_id: Request identifier
         """
+        self._hit_credits.pop(request_id, None)
         entry = self._request_tables.pop(request_id, None)
         if entry:
             # Drop from per-type LRU bucket so eviction priority stays accurate
@@ -2998,6 +3006,7 @@ class BlockAwarePrefixCache:
         free_block()s every block — turning the SSM-companion miss into
         a cache poisoning event that defeats cross-session reuse.
         """
+        self._hit_credits.pop(request_id, None)
         entry = self._request_tables.pop(request_id, None)
         if entry:
             for _d in self._entries_by_type.values():
@@ -3005,6 +3014,57 @@ class BlockAwarePrefixCache:
                     del _d[request_id]
             self.paged_cache.detach_request(request_id)
             logger.debug(f"Detached request {request_id} (blocks kept cached)")
+
+    def adjust_cache_hit_credit(
+        self,
+        request_id: str,
+        *,
+        accepted_tokens: int,
+    ) -> bool:
+        """Reconcile lookup credit with the prefix the consumer actually used.
+
+        Hybrid MLLM lookup can find attention-KV blocks and only then discover
+        that the matching SSM/GDN companion is absent.  In that case generation
+        full-prefills from token zero, so reporting a hit or saved tokens is
+        accounting fiction.  A shorter valid companion may also trim the usable
+        prefix; retain only that smaller token credit.
+
+        Returns True when an outstanding hit credit was adjusted.
+        """
+
+        credited_tokens = self._hit_credits.get(request_id)
+        if credited_tokens is None:
+            return False
+        try:
+            accepted = max(0, min(int(accepted_tokens or 0), credited_tokens))
+        except (TypeError, ValueError):
+            accepted = 0
+        if accepted >= credited_tokens:
+            return False
+
+        self._tokens_saved = max(
+            0,
+            self._tokens_saved - (credited_tokens - accepted),
+        )
+        if accepted == 0:
+            self._hits = max(0, self._hits - 1)
+            self._misses += 1
+            self._hit_credits.pop(request_id, None)
+        else:
+            self._hit_credits[request_id] = accepted
+        logger.info(
+            "Adjusted prefix-cache hit credit for %s: credited=%d accepted=%d "
+            "(hybrid companion boundary)",
+            request_id,
+            credited_tokens,
+            accepted,
+        )
+        return True
+
+    def finalize_cache_hit_credit(self, request_id: str) -> None:
+        """Drop reconciliation state once a request's cache decision is final."""
+
+        self._hit_credits.pop(request_id, None)
 
     def trim_block_table(
         self, request_id: str, target_tokens: int
@@ -4298,6 +4358,7 @@ class BlockAwarePrefixCache:
         self._hits = 0
         self._misses = 0
         self._tokens_saved = 0
+        self._hit_credits.clear()
         self.paged_cache.reset_stats()
 
     def clear(self) -> None:

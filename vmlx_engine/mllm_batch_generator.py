@@ -1472,6 +1472,164 @@ def _is_kv_like(c) -> bool:
     return isinstance(c, (KVCache, RotatingKVCache)) or type(c).__name__ == _TQ_CLASS_NAME
 
 
+_CACHE_OWNER_WRAPPER_ATTRS = (
+    "language_model",
+    "model",
+    "inner",
+    "base_model",
+    "text_model",
+    "transformer",
+)
+
+
+def _iter_cache_owner_candidates(
+    model: Any,
+    language_model: Optional[Any] = None,
+    *,
+    limit: int = 12,
+):
+    """Yield wrapper/model candidates that may own ``make_cache``.
+
+    JANG-affine VLM loading can leave the callable on the real text backbone
+    behind a compatibility wrapper.  Other cache/config detection in this file
+    already walks ``language_model`` and inner ``model`` objects; keep cache
+    ownership on the same structural path without copying methods onto wrappers.
+    """
+
+    queue: List[Tuple[str, Any]] = []
+    seen: set[int] = set()
+
+    def add(label: str, value: Any) -> None:
+        if value is None or id(value) in seen:
+            return
+        seen.add(id(value))
+        queue.append((label, value))
+
+    add("language_model", language_model)
+    add("model", model)
+    index = 0
+    while index < len(queue) and index < limit:
+        label, value = queue[index]
+        index += 1
+        yield label, value
+        for attr in _CACHE_OWNER_WRAPPER_ATTRS:
+            try:
+                child = getattr(value, attr, None)
+            except Exception:
+                child = None
+            if child is not None and child is not value:
+                add(f"{label}.{attr}", child)
+
+
+def _resolve_make_cache_owner(
+    model: Any,
+    language_model: Optional[Any] = None,
+) -> Tuple[Optional[Any], Optional[str]]:
+    """Return the first callable ``make_cache`` owner and its wrapper path."""
+
+    for label, candidate in _iter_cache_owner_candidates(model, language_model):
+        try:
+            make_cache = getattr(candidate, "make_cache", None)
+        except Exception:
+            make_cache = None
+        if callable(make_cache):
+            return candidate, label
+    return None, None
+
+
+def _hybrid_cache_layout(
+    model: Any,
+    language_model: Optional[Any] = None,
+) -> Tuple[
+    Optional[Any],
+    Optional[str],
+    Optional[List[Any]],
+    Optional[List[int]],
+    Optional[str],
+]:
+    """Resolve the authoritative cache template and its attention positions."""
+
+    owner, owner_path = _resolve_make_cache_owner(model, language_model)
+    if owner is None:
+        return None, None, None, None, "no callable make_cache owner"
+    try:
+        template = list(owner.make_cache() or [])
+    except Exception as exc:
+        return owner, owner_path, None, None, f"{type(exc).__name__}: {exc}"
+    positions = [index for index, cache in enumerate(template) if _is_kv_like(cache)]
+    return owner, owner_path, template, positions, None
+
+
+def _config_as_hybrid_probe(config: Any, *, depth: int = 0) -> Optional[Dict[str, Any]]:
+    """Normalize dict/dataclass configs for the hybrid-family warning gate."""
+
+    if config is None or depth > 3:
+        return None
+    if isinstance(config, dict):
+        return config
+    raw = getattr(config, "_raw_config", None)
+    if isinstance(raw, dict):
+        return raw
+    probe: Dict[str, Any] = {}
+    for field in (
+        "model_type",
+        "hybrid_override_pattern",
+        "layer_types",
+        "layer_type",
+        "layers_block_type",
+    ):
+        value = getattr(config, field, None)
+        if value is not None:
+            probe[field] = value
+    text_config = getattr(config, "text_config", None)
+    text_probe = _config_as_hybrid_probe(text_config, depth=depth + 1)
+    if text_probe:
+        probe["text_config"] = text_probe
+    return probe or None
+
+
+def _declares_hybrid_ssm_model(model: Any, language_model: Optional[Any] = None) -> bool:
+    """Return True when wrapper metadata declares SSM/linear-attention layers."""
+
+    from .utils.ssm_companion_cache import is_hybrid_ssm_config
+
+    for _, candidate in _iter_cache_owner_candidates(model, language_model):
+        for attr in ("config", "args", "text_config"):
+            probe = _config_as_hybrid_probe(getattr(candidate, attr, None))
+            if probe is not None and is_hybrid_ssm_config(probe):
+                return True
+    return False
+
+
+def _warn_if_hybrid_detection_disabled(
+    *,
+    model: Any,
+    language_model: Optional[Any],
+    is_hybrid: bool,
+    owner_path: Optional[str],
+    template: Optional[List[Any]],
+    error: Optional[str],
+) -> None:
+    """Make a declared hybrid family's disabled companion path impossible to hide."""
+
+    if is_hybrid or not _declares_hybrid_ssm_model(model, language_model):
+        return
+    template_names = (
+        [type(cache).__name__ for cache in template]
+        if template is not None
+        else None
+    )
+    logger.warning(
+        "Hybrid-family model resolved _is_hybrid=False; SSM companion lookup/store "
+        "is disabled and attention-KV prefix hits cannot be consumed safely. "
+        "model_type=%s make_cache_owner=%s template=%s error=%s",
+        _runtime_model_type(model) or "unknown",
+        owner_path or "none",
+        template_names,
+        error or "none",
+    )
+
+
 def _is_tq_batch_api(c) -> bool:
     """TurboQuant cache with real batch filter/extract/extend semantics."""
     if type(c).__name__ != _TQ_CLASS_NAME:
@@ -3978,17 +4136,34 @@ class MLLMBatchGenerator:
         # Statistics
         self._stats = MLLMBatchStats()
 
-        # Pre-compute hybrid cache template info (avoids make_cache() per request)
+        # Pre-compute hybrid cache template info (avoids make_cache() per request).
+        # The callable may live behind a JANG-affine compatibility wrapper, so
+        # resolve and retain the real owner instead of checking only the first
+        # language_model object.
         self._hybrid_kv_positions: Optional[List[int]] = None
         self._hybrid_num_layers: Optional[int] = None
-        if hasattr(self.language_model, 'make_cache'):
-            try:
-                from mlx_lm.models.cache import KVCache
-                template = self.language_model.make_cache()
-                self._hybrid_num_layers = len(template)
-                self._hybrid_kv_positions = [i for i, t in enumerate(template) if _is_kv_like(t)]
-            except Exception as e:
-                logger.warning(f"Failed to pre-compute hybrid cache info: {e}")
+        (
+            self._cache_model,
+            self._cache_model_path,
+            _hybrid_template,
+            _hybrid_positions,
+            _hybrid_detection_error,
+        ) = _hybrid_cache_layout(model, self.language_model)
+        if _hybrid_template is not None and _hybrid_positions is not None:
+            self._hybrid_num_layers = len(_hybrid_template)
+            self._hybrid_kv_positions = _hybrid_positions
+            if self._cache_model is not self.language_model:
+                logger.info(
+                    "MLLMBatchGenerator: resolved make_cache through wrapper path %s (%s)",
+                    self._cache_model_path,
+                    type(self._cache_model).__name__,
+                )
+        elif _hybrid_detection_error and self._cache_model is not None:
+            logger.warning(
+                "Failed to pre-compute hybrid cache info from %s: %s",
+                self._cache_model_path,
+                _hybrid_detection_error,
+            )
 
         # Pre-computed bool: is this a hybrid model (SSM + attention)?
         # Used throughout _process_prompts and _run_vision_encoding to gate
@@ -3997,6 +4172,14 @@ class MLLMBatchGenerator:
             self._hybrid_kv_positions is not None
             and self._hybrid_num_layers is not None
             and len(self._hybrid_kv_positions) < self._hybrid_num_layers
+        )
+        _warn_if_hybrid_detection_disabled(
+            model=model,
+            language_model=self.language_model,
+            is_hybrid=self._is_hybrid,
+            owner_path=self._cache_model_path,
+            template=_hybrid_template,
+            error=_hybrid_detection_error,
         )
 
         # Vision embedding cache for repeated images
@@ -4728,6 +4911,13 @@ class MLLMBatchGenerator:
             # starts from token 0. Keep inline checkpoint keys absolute over
             # all_tokens.
             request._cached_tokens = 0  # type: ignore[attr-defined]
+
+    def _adjust_paged_hit_credit(self, request_id: str, accepted_tokens: int) -> None:
+        """Best-effort reconciliation for hybrid KV/companion acceptance."""
+
+        adjust = getattr(self.block_aware_cache, "adjust_cache_hit_credit", None)
+        if callable(adjust):
+            adjust(request_id, accepted_tokens=accepted_tokens)
 
     def _clean_ssm_boundary_for(
         self, request: "MLLMBatchRequest", seq_len: int, has_images: bool
@@ -5799,6 +5989,7 @@ class MLLMBatchGenerator:
                                                     req,
                                                     int(getattr(block_table, "num_tokens", 0) or 0),
                                                 )
+                                                self._adjust_paged_hit_credit(req.request_id, 0)
                                                 self.block_aware_cache.release_cache(req.request_id)
                                                 continue
                                             # Trim the block_table down to block-aligned
@@ -5810,6 +6001,9 @@ class MLLMBatchGenerator:
                                                 req.request_id, _ck_len
                                             )
                                             if trimmed is not None and trimmed.num_tokens > 0:
+                                                self._adjust_paged_hit_credit(
+                                                    req.request_id, trimmed.num_tokens
+                                                )
                                                 block_table = trimmed
                                                 ssm_states = _ck_states
                                                 remaining = token_list[trimmed.num_tokens:]
@@ -5861,6 +6055,7 @@ class MLLMBatchGenerator:
                                                     req,
                                                     int(getattr(block_table, "num_tokens", 0) or 0),
                                                 )
+                                                self._adjust_paged_hit_credit(req.request_id, 0)
                                                 self.block_aware_cache.release_cache(req.request_id)
                                                 continue
                                         else:
@@ -5912,6 +6107,7 @@ class MLLMBatchGenerator:
                                                 req,
                                                 int(getattr(block_table, "num_tokens", 0) or 0),
                                             )
+                                            self._adjust_paged_hit_credit(req.request_id, 0)
                                             self.block_aware_cache.release_cache(req.request_id)
                                             continue  # Skip reconstruction
 
@@ -5959,7 +6155,9 @@ class MLLMBatchGenerator:
                                     # Full hybrid cache reconstruction:
                                     # KV from paged cache + SSM from companion cache
                                     full_cache = _fix_hybrid_cache(
-                                        reconstructed, self.language_model,
+                                        reconstructed,
+                                        getattr(self, "_cache_model", None)
+                                        or self.language_model,
                                         kv_positions=self._hybrid_kv_positions,
                                         num_model_layers=self._hybrid_num_layers,
                                     )
@@ -6346,7 +6544,8 @@ class MLLMBatchGenerator:
                         cache_for_fix = None
                 if req.prompt_cache is not None:
                     req_cache = _fix_hybrid_cache(
-                        cache_for_fix, self.language_model,
+                        cache_for_fix,
+                        getattr(self, "_cache_model", None) or self.language_model,
                         kv_positions=self._hybrid_kv_positions,
                         num_model_layers=self._hybrid_num_layers,
                     )
@@ -6356,11 +6555,15 @@ class MLLMBatchGenerator:
                     # fetched KV layers before the prefill tail so the live
                     # decode path keeps the same TQ memory profile as cold
                     # prefill. If the model is not TQ-backed this is a no-op.
-                    req_cache = _recompress_to_tq(req_cache, self.language_model)
+                    req_cache = _recompress_to_tq(
+                        req_cache,
+                        getattr(self, "_cache_model", None) or self.language_model,
+                    )
                 else:
                     try:
-                        if hasattr(self.language_model, 'make_cache'):
-                            req_cache = self.language_model.make_cache()
+                        cache_model = getattr(self, "_cache_model", None)
+                        if cache_model is not None:
+                            req_cache = cache_model.make_cache()
                         else:
                             from mlx_lm.models.cache import KVCache
                             req_cache = [KVCache() for _ in self.language_model.layers]
@@ -6465,8 +6668,9 @@ class MLLMBatchGenerator:
                         if hasattr(req, "_inline_ssm_checkpoints"):
                             req._inline_ssm_checkpoints = None
                         try:
-                            if hasattr(self.language_model, 'make_cache'):
-                                req_cache = self.language_model.make_cache()
+                            cache_model = getattr(self, "_cache_model", None)
+                            if cache_model is not None:
+                                req_cache = cache_model.make_cache()
                             else:
                                 from mlx_lm.models.cache import KVCache
                                 req_cache = [KVCache() for _ in self.language_model.layers]
@@ -6859,7 +7063,10 @@ class MLLMBatchGenerator:
                     try:
                         from mlx_lm.models.cache import KVCache
                         try:
-                            req_cache = self.language_model.make_cache()
+                            req_cache = (
+                                getattr(self, "_cache_model", None)
+                                or self.language_model
+                            ).make_cache()
                         except Exception:
                             req_cache = [KVCache() for _ in self.language_model.layers]
                         logits = self._run_vision_encoding(req, cache=req_cache)
@@ -6913,8 +7120,9 @@ class MLLMBatchGenerator:
                                 # the correct mix of KVCache + ArraysCache. Plain
                                 # [KVCache() for _] breaks hybrid models that need
                                 # ArraysCache.create_attention_mask().
-                                if hasattr(self.language_model, 'make_cache'):
-                                    req_cache = self.language_model.make_cache()
+                                cache_model = getattr(self, "_cache_model", None)
+                                if cache_model is not None:
+                                    req_cache = cache_model.make_cache()
                                 else:
                                     req_cache = [KVCache() for _ in self.language_model.layers]
                                 logits = self._run_vision_encoding(req, cache=req_cache)
@@ -8285,11 +8493,8 @@ class MLLMBatchGenerator:
             )
             return None
         try:
-            fresh_cache = (
-                self.language_model.make_cache()
-                if hasattr(self.language_model, "make_cache")
-                else None
-            )
+            cache_model = getattr(self, "_cache_model", None)
+            fresh_cache = cache_model.make_cache() if cache_model is not None else None
             if fresh_cache is None:
                 from mlx_lm.models.cache import KVCache
                 fresh_cache = [KVCache() for _ in range(len(self.language_model.layers))]
@@ -8375,11 +8580,8 @@ class MLLMBatchGenerator:
                 if hasattr(self.language_model, attr):
                     _saved_pos_state[attr] = getattr(self.language_model, attr)
                     setattr(self.language_model, attr, None)
-            fresh_cache = (
-                self.language_model.make_cache()
-                if hasattr(self.language_model, "make_cache")
-                else None
-            )
+            cache_model = getattr(self, "_cache_model", None)
+            fresh_cache = cache_model.make_cache() if cache_model is not None else None
             if fresh_cache is None:
                 from mlx_lm.models.cache import KVCache
 

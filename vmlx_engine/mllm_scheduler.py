@@ -2369,6 +2369,11 @@ class MLLMScheduler:
             # Clean up paged cache block tables (prevent leak)
             # Use delete_block_table on abort so ref_counts are decremented
             if self.block_aware_cache is not None:
+                finalize_credit = getattr(
+                    self.block_aware_cache, "finalize_cache_hit_credit", None
+                )
+                if callable(finalize_credit):
+                    finalize_credit(request_id)
                 self.block_aware_cache._request_tables.pop(request_id, None)
                 if self.paged_cache_manager is not None:
                     self.paged_cache_manager.delete_block_table(request_id)
@@ -2903,6 +2908,7 @@ class MLLMScheduler:
             or getattr(request, "_cache_detail", "")
             or "unknown"
         )
+        request._cache_detail = detail
         self._cache_hit_requests += 1
         self._cache_hit_tokens += cached_tokens
         self._cache_hit_tokens_by_detail[detail] = (
@@ -3637,6 +3643,11 @@ class MLLMScheduler:
             # and admission of newer prefixes in long-running VLM sessions.
             paged_entry = None
             if self.block_aware_cache is not None:
+                finalize_credit = getattr(
+                    self.block_aware_cache, "finalize_cache_hit_credit", None
+                )
+                if callable(finalize_credit):
+                    finalize_credit(request_id)
                 paged_entry = self.block_aware_cache._request_tables.pop(
                     request_id, None
                 )
@@ -3795,6 +3806,13 @@ class MLLMScheduler:
                     # to prevent stale entries on retry
                     if self.block_aware_cache is not None:
                         for req_id in self.running:
+                            finalize_credit = getattr(
+                                self.block_aware_cache,
+                                "finalize_cache_hit_credit",
+                                None,
+                            )
+                            if callable(finalize_credit):
+                                finalize_credit(req_id)
                             self.block_aware_cache._request_tables.pop(req_id, None)
                     if self.paged_cache_manager is not None:
                         for req_id in self.running:
@@ -4298,6 +4316,11 @@ class MLLMScheduler:
             audio=audio,
             **kwargs,
         )
+        # Hold the request object across terminal dispatch.  Deferred cleanup
+        # removes it from ``self.requests`` after queueing the final output,
+        # potentially before this coroutine resumes to construct non-streaming
+        # usage metadata.
+        request = self.requests.get(request_id)
 
         # Collect all outputs
         final_output = None
@@ -4313,6 +4336,22 @@ class MLLMScheduler:
                 output_text="",
                 finished=True,
                 finish_reason="stop",
+            )
+
+        # The terminal queued output can predate cleanup-side cache metadata.
+        # The scheduler request is authoritative for non-streaming usage, so
+        # stamp its accepted cache boundary onto generate()'s final result.
+        if request is not None:
+            try:
+                final_output.cached_tokens = int(
+                    getattr(request, "_cached_tokens", 0) or 0
+                )
+            except (TypeError, ValueError):
+                final_output.cached_tokens = 0
+            final_output.cache_detail = str(
+                getattr(request, "_cache_detail", "")
+                or getattr(final_output, "cache_detail", "")
+                or ""
             )
 
         # Cleanup

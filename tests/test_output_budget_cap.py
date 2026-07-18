@@ -50,4 +50,6 @@ def test_all_chat_and_responses_answer_passes_use_remaining_budget():
     assert 'answer_kwargs["max_tokens"] = max(\n            256' not in source
     assert "_ns_budget = max(32" not in source
     assert source.count("_auto_thinking_pass_budget(") >= 5
-    assert '_AUTO_THINKING_PARTITION_FAMILIES = frozenset({"qwen3_5", "qwen3_5_moe"})' in source
+    assert server._AUTO_THINKING_PARTITION_FAMILIES == frozenset(
+        {"qwen3", "qwen3_5", "qwen3_5_moe"}
+    )

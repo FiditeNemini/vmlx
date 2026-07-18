@@ -16,7 +16,7 @@ def test_dsv4_has_native_answer_pass_but_step37_does_not_fake_one():
     assert "deepseek_v4" in fams
     assert "step3p7" not in fams
     # existing families still covered
-    for f in ("qwen3_5", "qwen3_5_moe", "gemma4", "hy_v3", "laguna",
+    for f in ("qwen3", "qwen3_5", "qwen3_5_moe", "gemma4", "hy_v3", "laguna",
               "minimax_m2", "openpangu_v2"):
         assert f in fams
 
@@ -26,7 +26,7 @@ def test_dsv4_and_step37_excluded_from_thinking_budget_cap():
     assert "deepseek_v4" not in cap
     assert "step3p7" not in cap
     # families that DO honor a thinking-token budget remain capped
-    for f in ("qwen3_5", "qwen3_5_moe", "gemma4", "hy_v3", "laguna",
+    for f in ("qwen3", "qwen3_5", "qwen3_5_moe", "gemma4", "hy_v3", "laguna",
               "minimax_m2", "openpangu_v2"):
         assert f in cap
 
@@ -35,6 +35,7 @@ def test_answer_pass_labels_for_new_families():
     label = server_mod._reasoning_answer_pass_family_label
     assert label("deepseek_v4") == "DeepSeek-V4"
     assert label("step3p7") == "Step-3.7"
+    assert label("qwen3") == "Qwen3"
     # unchanged defaults
     assert label("hy_v3") == "Hy3"
     assert label("qwen3_5") == "Qwen3.5"
@@ -49,7 +50,7 @@ def test_answer_pass_fresh_context_families():
     continuation must re-run the ORIGINAL messages with nothing appended."""
     for fam in (
         "deepseek_v4", "step3p7", "minimax", "minimax_m2",
-        "qwen3_5", "qwen3_5_moe",
+        "qwen3", "qwen3_5", "qwen3_5_moe",
     ):
         out = server_mod._answer_pass_messages(_MSGS, fam, _TRUNC)
         assert out == _MSGS
@@ -75,7 +76,7 @@ def test_no_answer_family_keeps_full_pass_buffer_by_name():
     guard = server_mod._ANSWER_PASS_LEAK_GUARD_FAMILIES
     assert guard == frozenset()
     for fam in (
-        "step3p7", "minimax", "minimax_m2", "qwen3_5", "qwen3_5_moe",
+        "step3p7", "minimax", "minimax_m2", "qwen3", "qwen3_5", "qwen3_5_moe",
         "gemma4", "hy_v3", "laguna", "openpangu_v2",
     ):
         assert fam not in guard

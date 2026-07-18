@@ -1,0 +1,198 @@
+"""Shared Chat/Responses contract for bounded plain-Qwen3 reasoning."""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+import vmlx_engine.model_config_registry as registry
+import vmlx_engine.server as server
+from vmlx_engine.api.models import (
+    ChatCompletionRequest,
+    Message,
+    ResponsesRequest,
+    StreamOptions,
+)
+from vmlx_engine.engine.base import GenerationOutput
+from vmlx_engine.reasoning.qwen3_parser import Qwen3ReasoningParser
+
+
+class _Qwen3BudgetEngine:
+    tokenizer = SimpleNamespace(has_thinking=False)
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def stream_chat(self, *, messages, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("enable_thinking") is False:
+            text = ""
+            for index, (delta, finished) in enumerate(
+                (("Q3-", False), ("STREAM-DONE", True)), start=1
+            ):
+                text += delta
+                yield GenerationOutput(
+                    text=text,
+                    new_text=delta,
+                    tokens=[],
+                    prompt_tokens=9,
+                    completion_tokens=index,
+                    finished=finished,
+                    finish_reason="stop" if finished else None,
+                )
+            return
+
+        reasoning = "<think>plain qwen3 reasoning pass hit the explicit budget"
+        yield GenerationOutput(
+            text=reasoning,
+            new_text=reasoning,
+            tokens=[],
+            prompt_tokens=7,
+            completion_tokens=int(kwargs["max_tokens"]),
+            finished=True,
+            finish_reason="length",
+        )
+
+
+def _install_qwen3_policy(monkeypatch) -> None:
+    config = SimpleNamespace(
+        family_name="qwen3",
+        think_in_template=True,
+        reasoning_parser="qwen3",
+        tool_parser="qwen",
+        supports_thinking=True,
+    )
+    monkeypatch.setattr(server, "_default_timeout", 5.0)
+    monkeypatch.setattr(server, "_model_name", "qwen3-policy-test")
+    monkeypatch.setattr(server, "_model_path", None)
+    monkeypatch.setattr(server, "_reasoning_parser", Qwen3ReasoningParser())
+    monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+    monkeypatch.setattr(
+        registry,
+        "get_model_config_registry",
+        lambda *args, **kwargs: SimpleNamespace(lookup=lambda *a, **k: config),
+    )
+
+
+def _data_events(chunks: list[str]) -> list[dict]:
+    events: list[dict] = []
+    for chunk in chunks:
+        for line in chunk.splitlines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                events.append(json.loads(line.removeprefix("data: ")))
+    return events
+
+
+@pytest.mark.asyncio
+async def test_qwen3_responses_streams_answer_after_explicit_thinking_budget(
+    monkeypatch,
+):
+    _install_qwen3_policy(monkeypatch)
+    engine = _Qwen3BudgetEngine()
+    request = ResponsesRequest(
+        model="qwen3-policy-test",
+        input="say the marker",
+        stream=True,
+        enable_thinking=True,
+        max_thinking_tokens=32,
+        max_output_tokens=112,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    chunks = []
+    async for chunk in server.stream_responses_api(
+        engine,
+        [{"role": "user", "content": "say the marker"}],
+        request,
+        fastapi_request=None,
+        max_tokens=112,
+    ):
+        chunks.append(chunk)
+    events = _data_events(chunks)
+
+    assert engine.calls[0]["max_tokens"] == 32
+    assert engine.calls[1]["enable_thinking"] is False
+    assert engine.calls[1]["max_tokens"] == 80
+    assert [
+        event["delta"]
+        for event in events
+        if event.get("type") == "response.output_text.delta"
+    ] == ["Q3-", "STREAM-DONE"]
+    completed = next(
+        event["response"] for event in events if event.get("type") == "response.completed"
+    )
+    assert completed["output"][0]["content"][0]["text"] == "Q3-STREAM-DONE"
+
+
+@pytest.mark.asyncio
+async def test_qwen3_chat_streams_answer_after_explicit_thinking_budget(monkeypatch):
+    _install_qwen3_policy(monkeypatch)
+    engine = _Qwen3BudgetEngine()
+    messages = [Message(role="user", content="say the marker")]
+    request = ChatCompletionRequest(
+        model="qwen3-policy-test",
+        messages=messages,
+        stream=True,
+        enable_thinking=True,
+        max_thinking_tokens=32,
+        max_tokens=112,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    chunks = []
+    async for chunk in server.stream_chat_completion(
+        engine,
+        messages,
+        request,
+        fastapi_request=None,
+        max_tokens=112,
+    ):
+        chunks.append(chunk)
+    events = _data_events(chunks)
+
+    assert engine.calls[0]["max_tokens"] == 32
+    assert engine.calls[1]["enable_thinking"] is False
+    assert engine.calls[1]["max_tokens"] == 80
+    content_deltas = [
+        choice["delta"].get("content", "")
+        for event in events
+        for choice in event.get("choices", [])
+        if choice.get("delta", {}).get("content")
+    ]
+    assert content_deltas == ["Q3-", "STREAM-DONE"]
+
+
+@pytest.mark.asyncio
+async def test_qwen3_responses_auto_partition_reserves_visible_answer(monkeypatch):
+    _install_qwen3_policy(monkeypatch)
+    engine = _Qwen3BudgetEngine()
+    request = ResponsesRequest(
+        model="qwen3-policy-test",
+        input="say the marker",
+        stream=True,
+        enable_thinking=True,
+        max_output_tokens=112,
+    )
+
+    chunks = []
+    async for chunk in server.stream_responses_api(
+        engine,
+        [{"role": "user", "content": "say the marker"}],
+        request,
+        fastapi_request=None,
+        max_tokens=112,
+    ):
+        chunks.append(chunk)
+
+    assert server._auto_thinking_pass_budget(112) == 56
+    assert engine.calls[0]["max_tokens"] == 56
+    assert engine.calls[1]["enable_thinking"] is False
+    assert engine.calls[1]["max_tokens"] == 56
+    events = _data_events(chunks)
+    assert [
+        event["delta"]
+        for event in events
+        if event.get("type") == "response.output_text.delta"
+    ] == ["Q3-", "STREAM-DONE"]

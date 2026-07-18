@@ -1195,7 +1195,7 @@ def _answer_pass_safe_visible_raw(
 ANSWER_PASS_FLOOR = 48
 
 
-# Qwen3.5/3.6 can keep revising an already-complete solution inside its hidden
+# Qwen3/3.5/3.6 can keep revising an already-complete solution inside its hidden
 # reasoning rail until the entire output cap is exhausted.  The visible-answer
 # pass then receives only ANSWER_PASS_FLOOR, which is too small for a normal
 # terminal response.  When neither the request nor the bundle supplies a
@@ -1205,7 +1205,9 @@ ANSWER_PASS_FLOOR = 48
 # Explicit max_thinking_tokens remains authoritative.
 AUTO_THINKING_PASS_LIMIT = 1024
 AUTO_VISIBLE_ANSWER_RESERVE = 256
-_AUTO_THINKING_PARTITION_FAMILIES = frozenset({"qwen3_5", "qwen3_5_moe"})
+_AUTO_THINKING_PARTITION_FAMILIES = frozenset(
+    {"qwen3", "qwen3_5", "qwen3_5_moe"}
+)
 
 
 def _auto_thinking_pass_budget(total_cap: Any) -> int:
@@ -1913,6 +1915,7 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
         "minimax",
         "minimax_m2",
         "openpangu_v2",
+        "qwen3",
         "qwen3_5",
         "qwen3_5_moe",
         # DSV4 can run the thinking block to the full budget without a visible
@@ -1942,6 +1945,7 @@ def _reasoning_answer_pass_family_label(family_name: str) -> str:
         "minimax": "MiniMax-M2",
         "minimax_m2": "MiniMax-M2",
         "openpangu_v2": "openPangu",
+        "qwen3": "Qwen3",
         "deepseek_v4": "DeepSeek-V4",
         "step3p7": "Step-3.7",
     }.get(family_name, "Qwen3.5")
@@ -1972,6 +1976,7 @@ _ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
         "step3p7",
         "minimax",
         "minimax_m2",
+        "qwen3",
         "qwen3_5",
         "qwen3_5_moe",
     }

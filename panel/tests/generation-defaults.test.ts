@@ -168,7 +168,7 @@ describe('readGenerationDefaults generation_config defaults', () => {
     })
   })
 
-  it('returns null when neither metadata file defines sampling defaults', async () => {
+  it('returns the qwen3 reasoning-budget capability without inventing sampling defaults', async () => {
     const dir = makeModelDir({
       'generation_config.json': {
         bos_token_id: 1,
@@ -179,7 +179,10 @@ describe('readGenerationDefaults generation_config defaults', () => {
       },
     }, 'vmlx-generation-defaults-empty-')
 
-    await expect(readGenerationDefaults(dir)).resolves.toBeNull()
+    await expect(readGenerationDefaults(dir)).resolves.toEqual({
+      supportsThinkingBudget: true,
+      source: 'generation_config',
+    })
   })
 
   it('marks thinking-budget unsupported when the template has thinking but no budget variable', async () => {
@@ -328,6 +331,17 @@ describe('readGenerationDefaults supportsThinkingBudget capability surfacing', (
       'config.json': { model_type: 'qwen3_5' },
       'generation_config.json': { temperature: 0.7 },
     }, 'vmlx-generation-defaults-stb-qwen35-')
+
+    await expect(readGenerationDefaults(dir)).resolves.toMatchObject({
+      supportsThinkingBudget: true,
+    })
+  })
+
+  it('surfaces supportsThinkingBudget for plain qwen3', async () => {
+    const dir = makeModelDir({
+      'config.json': { model_type: 'qwen3' },
+      'generation_config.json': { temperature: 0.7 },
+    }, 'vmlx-generation-defaults-stb-qwen3-')
 
     await expect(readGenerationDefaults(dir)).resolves.toMatchObject({
       supportsThinkingBudget: true,

@@ -87,7 +87,7 @@ REQUIRED_CACHE_TEST_MARKERS = (
     "test_accepts_scheduler_owned_ssm_l2_store",
     "test_scheduler_creates_matching_ssm_companion_l2_for_block_disk",
     # L2/block-disk must backfill paged cache for later partial reuse.
-    "test_prompt_disk_l2_hit_backfills_paged_cache_for_partial_reuse",
+    "test_prompt_tq_disk_l2_hit_skips_synchronous_plain_paged_backfill",
     # Qwen hybrid rows keep selective live TQ only where the runtime supports it.
     "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_stored_kv_q4",
     # TQ-native disk serialization must preserve mixed hybrid caches and round
@@ -353,7 +353,7 @@ REQUIRED_CACHE_FAMILY_MATRIX: dict[str, dict[str, tuple[str, ...]]] = {
     "prompt_disk_l2": {
         "checks": ("prompt_disk_l2_backfill_contracts",),
         "markers": (
-            "test_prompt_disk_l2_hit_backfills_paged_cache_for_partial_reuse",
+            "test_prompt_tq_disk_l2_hit_skips_synchronous_plain_paged_backfill",
         ),
         "api_checks": (),
         "api_command_markers": (),
@@ -653,7 +653,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
         ),
         "prompt_disk_l2_backfill_contracts": (
             not failed
-            and "test_prompt_disk_l2_hit_backfills_paged_cache_for_partial_reuse" not in missing_markers
+            and "test_prompt_tq_disk_l2_hit_skips_synchronous_plain_paged_backfill" not in missing_markers
         ),
         "cache_detail_telemetry_contracts": (
             not failed

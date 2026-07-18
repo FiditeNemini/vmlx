@@ -141,7 +141,7 @@ REQUIRED_NOHEAVY_API_CACHE_TEST_MARKERS = (
     "test_server_repairs_dsv4_partial_tool_intent_from_request_args",
     "test_dsv4_fallback_tool_prompt_uses_canonical_tool_calls_wrapper",
     "test_memory_pressure_partially_reuses_hybrid_ssm_with_aligned_checkpoint",
-    "test_prompt_disk_l2_hit_backfills_paged_cache_for_partial_reuse",
+    "test_prompt_tq_disk_l2_hit_skips_synchronous_plain_paged_backfill",
     "test_hybrid_ssm_checkpoint_alignment_falls_back_to_exact_aligned_state",
     "test_serialize_tq_cache_mixed_hybrid",
     "test_tq_tensors_roundtrip_via_safetensors",
@@ -213,7 +213,7 @@ COMMANDS: dict[str, list[str]] = {
         "-vv",
         "tests/test_batching.py",
         "-k",
-        "dsv4 or hybrid_ssm or cache_detail or prompt_disk_l2",
+        "dsv4 or hybrid_ssm or cache_detail or prompt_disk_l2 or prompt_tq_disk_l2",
     ],
     "tq_and_mllm_cache_contracts": [
         sys.executable,

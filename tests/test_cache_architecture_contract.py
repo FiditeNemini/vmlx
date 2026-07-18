@@ -61,7 +61,7 @@ def test_cache_architecture_contract_pins_named_cache_edges():
     assert "test_memory_pressure_reuses_shorter_dsv4_terminal_composite_prefix" in required_pytest
     assert "test_memory_pressure_refuses_dsv4_partial_without_terminal_composite" in required_pytest
     assert "test_memory_pressure_partially_reuses_hybrid_ssm_with_aligned_checkpoint" in required_pytest
-    assert "test_prompt_disk_l2_hit_backfills_paged_cache_for_partial_reuse" in required_pytest
+    assert "test_prompt_tq_disk_l2_hit_skips_synchronous_plain_paged_backfill" in required_pytest
     assert "test_hybrid_ssm_checkpoint_alignment_falls_back_to_exact_aligned_state" in required_pytest
     assert "test_hybrid_ssm_auto_mode_disables_live_tq_but_keeps_stored_kv_q4" in required_pytest
     assert "test_mimo_v2_jang_loader_skips_generic_turboquant_kv_auto_mode" in required_pytest

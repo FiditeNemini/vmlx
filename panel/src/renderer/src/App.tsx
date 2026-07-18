@@ -76,8 +76,17 @@ function App() {
     }
   }, [sessions, state.activeSessionId, state.activeChatId, openChat])
 
-  // Resolve the endpoint for the active session
-  const activeSession = sessions.find(s => s.id === state.activeSessionId)
+  // Resolve the endpoint for the active session. A chat can stay pinned to a
+  // stopped DUPLICATE session of the same model (identity split across path
+  // prefixes: ~/models symlink vs /Volumes real dir spawns twin session rows)
+  // while the usable twin runs — prefer the usable same-identity session so
+  // the composer/banner reflect reality instead of the stale pin.
+  const pinnedSession = sessions.find(s => s.id === state.activeSessionId)
+  const sessionUsable = (s: typeof sessions[number] | undefined) =>
+    !!s && (s.status === 'running' || s.status === 'loading' || s.status === 'standby')
+  const activeSession = (pinnedSession && !sessionUsable(pinnedSession))
+    ? sessions.find(s => sessionMatchesModelPath(s.modelPath, pinnedSession.modelPath) && sessionUsable(s)) || pinnedSession
+    : pinnedSession
   // Standby sessions still have a live process on their port — JIT middleware auto-wakes
   const sessionEndpoint = (activeSession?.status === 'running' || activeSession?.status === 'standby')
     ? { host: activeSession.host, port: activeSession.port }

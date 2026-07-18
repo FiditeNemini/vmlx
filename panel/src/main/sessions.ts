@@ -1548,6 +1548,9 @@ export class SessionManager extends EventEmitter {
   private async _startSessionInner(sessionId: string): Promise<void> {
     const session = db.getSession(sessionId)
     if (!session) throw new Error(`Session ${sessionId} not found`)
+    // Fresh log buffer per run — stop retains the previous buffer for
+    // postmortems; a new start must not blend runs together.
+    this.logBuffers.delete(sessionId)
 
     const managed = this.processes.get(sessionId)
     if (managed?.process || managed?.adoptedPid) {
@@ -2251,9 +2254,12 @@ export class SessionManager extends EventEmitter {
         lastStoppedAt: Date.now(),
         standbyDepth: null
       })
-      // Clear idle tracking and log buffer
+      // Clear idle tracking. RETAIN the log buffer so a crash/stop
+      // postmortem is possible (STOP-DESTROYS-SESSION-LOG-BUFFER): deleting
+      // it here made every server death unexplainable after the fact. The
+      // buffer is reset at the next start, and deleteSession still drops it.
       this.lastRequestAt.delete(sessionId)
-      this.logBuffers.delete(sessionId)
+      this.pushLog(sessionId, '[INFO] Session stopped — log retained for postmortem until next start')
       this.emit('session:stopped', { sessionId })
     })
   }

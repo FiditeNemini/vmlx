@@ -8461,13 +8461,24 @@ def _stat_int(stats: dict[str, Any] | None, *keys: str) -> int:
     return 0
 
 
-def _kv_cache_quantization_status(scheduler: Any | None) -> dict[str, Any] | None:
+def _kv_cache_quantization_status(
+    scheduler: Any | None,
+    turboquant_status: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Return a truthful stored-KV quantization status block.
 
     The scheduler keeps ``_kv_cache_bits=0`` when stored-cache quantization is
     inactive. Exposing that raw integer makes the UI render a bogus "0-bit"
     cache codec, so both /health and /v1/cache/stats normalize through this
     helper.
+
+    ``_kv_cache_bits`` only tracks the explicit legacy live-quantization
+    setting. When the TurboQuant STORAGE codec is active (Auto policy,
+    ``storage_encode_enabled``), stored KV really is quantized at the cache
+    boundary, and reporting ``enabled: false`` here contradicted the
+    ``turboquant_kv_cache`` section on the same response
+    (HEALTH-KV-QUANT-FLAG-FALSE-WHILE-TQ-ACTIVE). Callers pass the computed
+    TurboQuant status so this summary tells the same truth.
     """
     if scheduler is None or not hasattr(scheduler, "_kv_cache_bits"):
         return None
@@ -8476,9 +8487,26 @@ def _kv_cache_quantization_status(scheduler: Any | None) -> dict[str, Any] | Non
     except (TypeError, ValueError):
         bits = 0
     if bits <= 0:
+        tq = turboquant_status or {}
+        if tq.get("storage_encode_enabled"):
+            return {
+                "enabled": True,
+                "mode": "turboquant-storage",
+                # bits mirrors key_bits for consumers that render a single
+                # "N-bit" figure (panel PerformancePanel).
+                "bits": tq.get("storage_key_bits"),
+                "stored_prefix_quantization": tq.get(
+                    "stored_prefix_quantization"
+                ),
+                "key_bits": tq.get("storage_key_bits"),
+                "value_bits": tq.get("storage_value_bits"),
+                "auto_policy": tq.get("auto_policy"),
+                "live_encode_enabled": bool(tq.get("live_encode_enabled")),
+            }
         return {"enabled": False}
     return {
         "enabled": True,
+        "mode": "live",
         "bits": bits,
         "group_size": getattr(scheduler, "_kv_cache_group_size", 64),
     }
@@ -8744,8 +8772,14 @@ async def health():
     except Exception:
         pass
 
-    # Include stored-KV cache quantization status for diagnostics.
-    kv_quant_info = _kv_cache_quantization_status(scheduler)
+    # Include stored-KV cache quantization status for diagnostics. Pass the
+    # TurboQuant status so an active storage codec is reported truthfully.
+    kv_quant_info = _kv_cache_quantization_status(
+        scheduler,
+        _turboquant_kv_cache_status(_engine, scheduler)
+        if _engine is not None
+        else None,
+    )
 
     # Include speculative decoding status
     spec_info = None
@@ -9267,18 +9301,21 @@ async def cache_stats():
             "last_cache_selection": stats.get("last_cache_selection"),
             "last_cache_execution": stats.get("last_cache_execution"),
         }
-        # Stored-KV cache quantization info. Normalize disabled state so the
-        # panel never renders raw bits=0 as a fake "0-bit" codec.
-        kv_quant = _kv_cache_quantization_status(scheduler)
-        if kv_quant:
-            result["kv_cache_quantization"] = kv_quant
-
         # TurboQuant KV cache status (separate path from generic
         # kv_cache_quantization). Use the same recursive detector as /health
         # so source and packaged app expose the actual patched make_cache path.
+        # Computed first so the kv_cache_quantization summary below can report
+        # an active storage codec truthfully.
         result["turboquant_kv_cache"] = _turboquant_kv_cache_status(
             _engine, scheduler
         )
+        # Stored-KV cache quantization info. Normalize disabled state so the
+        # panel never renders raw bits=0 as a fake "0-bit" codec.
+        kv_quant = _kv_cache_quantization_status(
+            scheduler, result["turboquant_kv_cache"]
+        )
+        if kv_quant:
+            result["kv_cache_quantization"] = kv_quant
         _mc = _current_model_config()
         native_cache = _native_cache_status(
             scheduler,

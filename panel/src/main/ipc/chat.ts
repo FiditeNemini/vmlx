@@ -1623,6 +1623,14 @@ export function registerChatHandlers(
       let tokenCount = 0;
       let promptTokens = 0;
       let cachedTokens = 0;
+      // Exchange totals across tool-loop streams. promptTokens/cachedTokens
+      // are per-stream (usage chunks are cumulative within one stream, so
+      // recordCacheUsage takes a max); pairing the LAST stream's prompt with
+      // the max cached across ALL streams displayed impossible stats like
+      // "481 prompt (3904 cached)". Streams fold into these totals at each
+      // follow-up boundary and the final metrics report coherent sums.
+      let exchangePromptTokens = 0;
+      let exchangeCachedTokens = 0;
       let cacheDetail = "";
       const recordCacheUsage = (details: any) => {
         const nextCachedTokens = Number(details?.cached_tokens);
@@ -3136,6 +3144,12 @@ export function registerChatHandlers(
 
         // ─── Helper: send follow-up request and stream response ────────────
         const sendFollowUp = async (): Promise<boolean> => {
+          // Fold the finished stream's prompt/cached counts into the exchange
+          // totals so the final metrics pair coherently (cached <= prompt).
+          exchangePromptTokens += promptTokens;
+          exchangeCachedTokens += Math.min(cachedTokens, promptTokens);
+          promptTokens = 0;
+          cachedTokens = 0;
           // Reset SSE parser state from previous stream
           currentEventType = "";
           seenResponsesApiEvents.clear();
@@ -3925,6 +3939,14 @@ export function registerChatHandlers(
         }
         assistantMessage.content = fullContent;
         assistantMessage.tokens = totalTokenCount;
+        // Fold the final stream into the exchange totals so persisted metrics
+        // and the completion log report coherent prompt/cached pairs across
+        // tool-loop streams (cached can never exceed prompt).
+        const finalStreamPromptTokens = promptTokens;
+        promptTokens = exchangePromptTokens + finalStreamPromptTokens;
+        cachedTokens =
+          exchangeCachedTokens +
+          Math.min(cachedTokens, finalStreamPromptTokens);
         assistantMessage.metricsJson = JSON.stringify({
           tokenCount: totalTokenCount,
           promptTokens: promptTokens || undefined,

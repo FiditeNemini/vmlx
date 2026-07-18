@@ -42,9 +42,14 @@ describe('tool status responsiveness contract', () => {
 
   it('detects partial ZAYA/Zyphra XML tool prefixes before raw markup renders', () => {
     const source = readPanelSource('src/main/ipc/chat.ts')
+    // The marker pattern moved to the shared module so the restore path can
+    // bypass re-detection (see responses-stream-recovery tests); chat.ts must
+    // consume the shared export, and the shared module owns the dialects.
+    const shared = readPanelSource('src/shared/responsesStreamRecovery.ts')
 
-    expect(source).toContain('<zyphra_tool_call\\b')
-    expect(source).toContain('<function(?:=|\\b)')
+    expect(source).toContain('TOOL_CALL_MARKER_LINE_START')
+    expect(shared).toContain('<zyphra_tool_call\\b')
+    expect(shared).toContain('<function(?:=|\\b)')
     expect(source).toContain('emitToolStatus(\n                  "generating"')
     expect(source).toContain('responsesEventType === "response.heartbeat"')
     expect(source).toContain('parsed.tool_call_generating')

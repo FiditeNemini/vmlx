@@ -4,6 +4,19 @@ export interface ResponsesToolBufferReconciliation {
 }
 
 /**
+ * Line-start tool-call markers that activate client-side speculative
+ * buffering. Includes real native dialects and common hallucinated tags.
+ *
+ * Contract: text restored by reconcileResponsesToolBufferAtStreamEnd is
+ * authoritative zero-tool output and MUST NOT be re-scanned with this
+ * pattern — the restored text often still contains the very marker that
+ * activated buffering, and re-scanning re-suppresses it forever (the
+ * stream is already over, so no second reconciliation can rescue it).
+ */
+export const TOOL_CALL_MARKER_LINE_START =
+  /(?:^|\n)\s*(?:<zyphra_tool_call\b|<function(?:=|\b)|<minimax:tool_call|<tool_call\b|\[Calling tool:|<invoke name=|<read_file\b|<write_file\b|<run_command\b|<search_files\b|<edit_file\b|<list_directory\b|<execute_command\b|<bash\b)/;
+
+/**
  * Reconcile a Responses stream that advertised speculative tool generation but
  * completed without a concrete function_call item.
  *

@@ -39,7 +39,10 @@ import {
 import { buildToolMediaFollowupContent } from "../../shared/toolMediaFollowup";
 import { dsv4OutputBudget } from "../../shared/dsv4RequestBudget";
 import { projectedMetalHeadroomChatErrorContent } from "../../shared/chatErrorDisplay";
-import { reconcileResponsesToolBufferAtStreamEnd } from "../../shared/responsesStreamRecovery";
+import {
+  reconcileResponsesToolBufferAtStreamEnd,
+  TOOL_CALL_MARKER_LINE_START,
+} from "../../shared/responsesStreamRecovery";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import { selectFinalDecodeTps } from "../../shared/chatMetrics";
 import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
@@ -2230,20 +2233,20 @@ export function registerChatHandlers(
           delta: string,
           isReasoningDelta: boolean,
           skipClientCount = false,
+          bypassToolMarkerDetection = false,
         ) => {
           // Skip emission if abort already fired — prevents stale tokens from reaching renderer
           if (abortController.signal.aborted) return;
           // Track raw content BEFORE stripping for tool call marker detection
           let suppressVisibleToolDelta = false;
-          if (!isReasoningDelta) {
+          if (!isReasoningDelta && !bypassToolMarkerDetection) {
             rawAccumulated += delta;
             // Only activate buffering when tool call markers appear at the start of a line,
             // not when the model is explaining tool syntax in prose (e.g., "I'll use <tool_call>...")
             if (!clientToolCallBuffering) {
               // Catch real tool call formats and common hallucinated tool-call tags.
               // Use trailing window (last 200 chars) to avoid O(n) regex on full response
-              const lineStartPattern =
-                /(?:^|\n)\s*(?:<zyphra_tool_call\b|<function(?:=|\b)|<minimax:tool_call|<tool_call\b|\[Calling tool:|<invoke name=|<read_file\b|<write_file\b|<run_command\b|<search_files\b|<edit_file\b|<list_directory\b|<execute_command\b|<bash\b)/;
+              const lineStartPattern = TOOL_CALL_MARKER_LINE_START;
               const searchWindow =
                 rawAccumulated.length > 200
                   ? rawAccumulated.slice(-200)
@@ -3111,7 +3114,20 @@ export function registerChatHandlers(
           // from completed tool iterations and emitDelta will prepend it for UI.
           fullContent = "";
           rawAccumulated = "";
-          emitDelta(reconciliation.authoritativeText, false);
+          // bypassToolMarkerDetection: the restored text is authoritative
+          // zero-tool output and frequently still contains the marker that
+          // activated buffering (e.g. a hallucinated <run_command> dialect).
+          // Re-scanning it would re-activate buffering and swallow the text
+          // permanently — the stream is over, nothing reconciles twice.
+          // Tool-dialect text is fenced so the markdown renderer shows it
+          // verbatim instead of parsing the tags as invisible HTML. The final
+          // sanitizer's never-empty guard is what protects it at persistence.
+          const restoredText = TOOL_CALL_MARKER_LINE_START.test(
+            reconciliation.authoritativeText,
+          )
+            ? "```text\n" + reconciliation.authoritativeText.trim() + "\n```"
+            : reconciliation.authoritativeText;
+          emitDelta(restoredText, false, false, true);
           _sawResponsesTextDelta = true;
         };
 
@@ -3800,7 +3816,11 @@ export function registerChatHandlers(
           fullContent = allGeneratedContent;
         }
 
-        // Strip any remaining template tokens and leaked tool call XML
+        // Strip any remaining template tokens and leaked tool call XML.
+        // preSanitizeContent backs the never-empty guard below: sanitizing a
+        // non-empty answer down to nothing hides the model's real output
+        // (e.g. an unparsed textual tool-call dialect) behind a blank turn.
+        const preSanitizeContent = fullContent.trim();
         fullContent = fullContent.replace(TEMPLATE_TOKEN_REGEX, "");
         // Strip Harmony protocol residue (concatenated protocol words after template token removal)
         fullContent = fullContent.replace(
@@ -3862,6 +3882,27 @@ export function registerChatHandlers(
         );
         stopPeriodicSave(); // Stop periodic saves — final save below overwrites with complete content
         fullContent = fullContent.trim();
+        // Never-empty sanitize guard: if stripping leaked tool-call markup
+        // emptied an answer that had real text (and no tool actually ran this
+        // turn to justify hiding it), surface the original verbatim in a fence
+        // instead of persisting a blank assistant turn. Fencing renders the
+        // raw dialect visibly instead of as invisible HTML tags.
+        const visibleAfterSanitize = fullContent
+          .replace(/```[^\n`]*\n?/g, "")
+          .trim();
+        if (
+          !visibleAfterSanitize &&
+          preSanitizeContent &&
+          collectedToolStatuses.length === 0
+        ) {
+          console.log(
+            `[CHAT] Sanitizer emptied a ${preSanitizeContent.length}-char answer with no executed tool — preserving verbatim in a fence`,
+          );
+          const preserved = preSanitizeContent
+            .replace(/```[^\n`]*\n?/g, "")
+            .trim();
+          fullContent = "```text\n" + (preserved || preSanitizeContent) + "\n```";
+        }
         // If no main content but reasoning was produced, keep them separate.
         // Reasoning stays in reasoningContent for the reasoning box; content stays empty.
         // (Previously this did fullContent = reasoningContent which triggered the anti-dup

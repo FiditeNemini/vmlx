@@ -122,6 +122,12 @@ describe("Responses speculative tool-buffer reconciliation", () => {
     expect(source).toContain(
       "Sanitizer emptied a ${preSanitizeContent.length}-char answer",
     );
-    expect(source).toContain("collectedToolStatuses.length === 0");
+    expect(source).toContain(
+      "receivedToolCalls.filter(Boolean).length === 0",
+    );
+    // Speculative "generating" statuses must NOT mask the guard.
+    expect(source).not.toContain(
+      "collectedToolStatuses.length === 0 &&\n          preSanitizeContent",
+    );
   });
 });

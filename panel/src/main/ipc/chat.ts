@@ -3890,10 +3890,14 @@ export function registerChatHandlers(
         const visibleAfterSanitize = fullContent
           .replace(/```[^\n`]*\n?/g, "")
           .trim();
+        // "No executed tool" must key on REAL tool calls / completed tool
+        // iterations — the speculative buffering "Generating tool call..."
+        // status also lands in collectedToolStatuses and would mask the guard.
         if (
           !visibleAfterSanitize &&
           preSanitizeContent &&
-          collectedToolStatuses.length === 0
+          receivedToolCalls.filter(Boolean).length === 0 &&
+          !allGeneratedContent
         ) {
           console.log(
             `[CHAT] Sanitizer emptied a ${preSanitizeContent.length}-char answer with no executed tool — preserving verbatim in a fence`,

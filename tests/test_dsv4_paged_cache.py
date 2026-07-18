@@ -18,6 +18,20 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 
+def _restore_process_env_after_test(request, *names):
+    """Restore variables mutated directly by CLI policy helpers."""
+    originals = {name: os.environ.get(name) for name in names}
+
+    def _restore():
+        for name, value in originals.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    request.addfinalizer(_restore)
+
+
 def _make_dsv4_state_cache():
     from jang_tools.dsv4.mlx_model import DeepseekV4Cache
 
@@ -73,12 +87,13 @@ def test_pool_quantized_v4_cache_does_not_route_to_hybrid_ssm():
     assert not Scheduler._is_hybrid_model(_Model())
 
 
-def test_dsv4_pool_quant_default_uses_materialized_native_pool(monkeypatch):
+def test_dsv4_pool_quant_default_uses_materialized_native_pool(monkeypatch, request):
     """DSV4 pool quant defaults on now that historical pool reads are materialized."""
     from vmlx_engine.loaders.load_jangtq_dsv4 import (
         _configure_dsv4_pool_quant_default,
     )
 
+    _restore_process_env_after_test(request, "DSV4_LONG_CTX", "DSV4_POOL_QUANT")
     monkeypatch.delenv("DSV4_LONG_CTX", raising=False)
     monkeypatch.delenv("DSV4_POOL_QUANT", raising=False)
 
@@ -142,10 +157,18 @@ def test_dsv4_cli_cache_policy_opt_in_uses_ds4_page_sized_blocks(monkeypatch):
     assert "block_size=64->256" in changed
 
 
-def test_dsv4_runtime_policy_applies_to_bench_like_cli_args(tmp_path, monkeypatch):
+def test_dsv4_runtime_policy_applies_to_bench_like_cli_args(
+    tmp_path, monkeypatch, request
+):
     """Bench/CLI paths must use the default-on native DSV4 cache policy."""
     from vmlx_engine.cli import _apply_dsv4_runtime_policy
 
+    _restore_process_env_after_test(
+        request,
+        "DSV4_LONG_CTX",
+        "DSV4_POOL_QUANT",
+        "VMLX_DISABLE_TQ_KV",
+    )
     (tmp_path / "config.json").write_text('{"model_type":"deepseek_v4"}')
     args = SimpleNamespace(
         model=str(tmp_path),

@@ -8,6 +8,8 @@ equivalence (conv-state + SWA rotation + DSA indexer + sink masks), and the
 manifest-driven quantization overrides.
 """
 
+import os
+
 import mlx.core as mx
 import pytest
 
@@ -112,12 +114,21 @@ def test_registry_resolves_openpangu_family(tmp_path):
     assert "<|message_end|>" in mc.eos_tokens
 
 
-def test_cli_policy_forces_turboquant_and_generic_kv_quant_off(monkeypatch):
+def test_cli_policy_forces_turboquant_and_generic_kv_quant_off(monkeypatch, request):
     from types import SimpleNamespace
     from unittest.mock import Mock
 
     from vmlx_engine.cli import _apply_openpangu_cache_policy
 
+    original_disable_tq = os.environ.get("VMLX_DISABLE_TQ_KV")
+
+    def _restore_disable_tq():
+        if original_disable_tq is None:
+            os.environ.pop("VMLX_DISABLE_TQ_KV", None)
+        else:
+            os.environ["VMLX_DISABLE_TQ_KV"] = original_disable_tq
+
+    request.addfinalizer(_restore_disable_tq)
     monkeypatch.setenv("VMLX_FORCE_TQ_AUTO", "1")
     monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
     args = SimpleNamespace(

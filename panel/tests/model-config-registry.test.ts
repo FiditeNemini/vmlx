@@ -810,9 +810,9 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.reasoningParser).toBe('gemma4')
     expect(detected.toolParser).toBe('gemma4')
     expect(detected.enableAutoToolChoice).toBe(true)
-    // gemma4 mixed-SWA cache type + Phase-1 paged-off
+    // Gemma4 mixed-SWA uses its typed paged prefix/block-L2 path by default.
     expect(detected.cacheType).toBe('rotating_kv')
-    expect(detected.usePagedCache).toBe(false)
+    expect(detected.usePagedCache).toBe(true)
   })
 
   it('resolves family from JANG capabilities.family when config.json model_type is unrecognized', () => {
@@ -864,9 +864,8 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('gemma4')
     expect(detected.cacheType).toBe('rotating_kv')
-    // Phase-1 (2026-06-13): Gemma mixed-SWA proven correct paged-OFF (memory-aware
-    // prefix + disk_cache L2 SSD + TurboQuantKVCache, cache HIT no drift).
-    expect(detected.usePagedCache).toBe(false)
+    // The typed mixed-SWA runtime owns paged prefix and block-disk restoration.
+    expect(detected.usePagedCache).toBe(true)
   })
 
   it('keeps JANG VLM enabled from capabilities.modality=vision when architecture.has_vision is absent', () => {

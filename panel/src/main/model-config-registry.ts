@@ -171,8 +171,8 @@ registerFamily('glm4', { cacheType: 'kv', toolParser: 'glm47', enableAutoToolCho
 // Gemma
 registerFamily('medgemma', { cacheType: 'kv', isMultimodal: true, description: 'Google MedGemma (medical multimodal)', priority: 3 })
 registerFamily('paligemma', { cacheType: 'kv', isMultimodal: true, description: 'Google PaliGemma', priority: 5 })
-registerFamily('gemma4', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 4 (multimodal)', priority: 5 })
-registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', supportsThinkingBudget: true, enableAutoToolChoice: true, description: 'Gemma 4 (text-only)', priority: 4 })
+registerFamily('gemma4', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Gemma 4 (multimodal)', priority: 5 })
+registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', supportsThinkingBudget: true, enableAutoToolChoice: true, usePagedCache: true, description: 'Gemma 4 (text-only)', priority: 4 })
 registerFamily('gemma3', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3 (multimodal)', priority: 10 })
 registerFamily('gemma3-text', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, description: 'Gemma 3 (text-only)', priority: 8 })
 registerFamily('gemma3n', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3n (multimodal)', priority: 10 })
@@ -869,10 +869,9 @@ function applyConfigMetadataOverrides(
     configDeclaresMixedSwaAttention(parsedConfig)
   ) {
     next.cacheType = 'rotating_kv'
-    // Phase-1 cache policy (2026-06-13): Gemma SWA (mixed full+sliding) is proven correct
-    // paged-OFF with memory-aware prefix + disk_cache L2 (SSD) + TurboQuantKVCache (cache HIT,
-    // no drift). Default to paged-off/SSD-prefix; rotating_kv cacheType still drives the UI label.
-    next.usePagedCache = false
+    // Gemma 4's typed mixed-SWA cache supports paged prefix reuse and block-disk
+    // restore. Keep the effective UI default aligned with that runtime path.
+    next.usePagedCache = true
   }
   // 2026-07-12 (paged default ON, MLLM/#98 guard): a family can be marked
   // multimodal AFTER its registry paged default was computed (e.g. Qwen3.5 media,
@@ -886,6 +885,7 @@ function applyConfigMetadataOverrides(
     next.isMultimodal === true &&
     !next.forceTextOnly &&
     next.family !== 'minimax_m3' &&
+    next.family !== 'gemma4' &&
     (next.cacheType === 'kv' || next.cacheType === 'rotating_kv') &&
     next.cacheSubtype !== 'step3p7_full_sliding_kv'
   ) {
@@ -916,10 +916,10 @@ function configToDetected(family: string, config: Omit<ModelConfig, 'pattern' | 
     cacheSubtype: config.cacheSubtype,
     architectureHints: config.architectureHints,
     // 2026-07-12 (paged default ON, UI<->engine parity): families that declare
-    // usePagedCache keep their value (hybrid/SSM/M3 = true, openPangu = false).
+    // usePagedCache keep their value (hybrid/SSM/M3/Gemma4 = true, openPangu = false).
     // Undeclared families default ON for TEXT and OFF for multimodal/VL — VL
     // stays on the memory-aware path until the MLLM paged byte-ceiling (#98)
-    // lands. gemma mixed-SWA is separately forced OFF in applyConfigMetadataOverrides.
+    // lands. Gemma4's typed mixed-SWA path is explicitly paged-ON.
     usePagedCache: config.usePagedCache ?? (config.isMultimodal ? false : true),
     enableAutoToolChoice: config.enableAutoToolChoice ?? false,
     isMultimodal: config.isMultimodal ?? false,

@@ -102,8 +102,14 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
   const attentionKvStorage =
     nativeCache?.attention_kv_storage_quantization ??
     nativeCache?.storage_quantization
+  const tqKeyBits = turboQuantKv?.key_bits_values?.length
+    ? turboQuantKv.key_bits_values.map((bits: number) => `q${bits}`).join('/')
+    : `q${turboQuantKv?.storage_key_bits ?? '?'}`
+  const tqValueBits = turboQuantKv?.value_bits_values?.length
+    ? turboQuantKv.value_bits_values.map((bits: number) => `q${bits}`).join('/')
+    : `q${turboQuantKv?.storage_value_bits ?? '?'}`
   const tqStoredPrefix = turboQuantKv?.storage_encode_enabled
-    ? `${turboQuantKv.stored_prefix_quantization ?? 'TurboQuant'} (K q${turboQuantKv.storage_key_bits ?? '?'} / V q${turboQuantKv.storage_value_bits ?? '?'})`
+    ? `${turboQuantKv.stored_prefix_quantization ?? 'TurboQuant'} (K ${tqKeyBits} / V ${tqValueBits})`
     : null
 
   return (

@@ -7919,8 +7919,16 @@ def _turboquant_kv_cache_status(engine=None, scheduler=None) -> dict:
                 for attr in ("block_aware_cache", "memory_aware_cache", "prefix_cache")
             )
         )
+        mixed_native_bits = bool(
+            native_tq_storage
+            and (len(key_bits_values) > 1 or len(value_bits_values) > 1)
+        )
         stored_prefix = (
-            f"turboquant-q{configured_key_bits}"
+            "turboquant-"
+            + "/".join(f"q{bits}" for bits in key_bits_values)
+            + "-mixed"
+            if mixed_native_bits
+            else f"turboquant-q{configured_key_bits}"
             if native_tq_storage and configured_key_bits > 0
             else (f"q{kv_bits}" if kv_bits > 0 else "native")
         )

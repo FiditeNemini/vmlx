@@ -923,7 +923,7 @@ describe('KV Cache Quantization', () => {
         expect(source).toContain('Native MTP D1 copies this cache independently before batch split/verify')
     })
 
-    it('reports Qwen TQ4 Auto and the Bonsai-only TQ8 exception', () => {
+    it('reports Qwen mixed full-KV Auto and the Bonsai-only all-TQ8 exception', () => {
         const fs = require('fs')
         const source = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
@@ -931,6 +931,10 @@ describe('KV Cache Quantization', () => {
         )
 
         expect(source).toContain("const bonsaiActive = normalizedModelIdentity.includes('bonsai')")
+        expect(source).toContain("const qwenFullTqActive = !isMambaCache")
+        expect(source).toContain('TQ4 bulk attention KV + TQ8 boundary layers')
+        expect(source).toContain('MIXED TQ4/8 AUTO')
+        expect(source).toContain('protects the first/last six boundary layers with TQ8')
         expect(source).toContain('TQ4 attention KV + native hybrid state')
         expect(source).toContain('TQ8 attention KV + native hybrid state')
         expect(source).toContain('Qwen hybrid cache detected — Auto applies TQ4')
@@ -987,6 +991,8 @@ describe('KV Cache Quantization', () => {
         expect(cachePanel).toContain('stored_prefix_quantization')
         expect(cachePanel).toContain('storage_key_bits')
         expect(cachePanel).toContain('storage_value_bits')
+        expect(cachePanel).toContain('key_bits_values')
+        expect(cachePanel).toContain('value_bits_values')
         expect(cachePanel).toContain('kvQuant && !tqStoredPrefix')
         expect(cachePanel).toContain('SSM Policy')
         expect(cachePanel).toContain('single_sequence_only')
@@ -1039,6 +1045,8 @@ describe('KV Cache Quantization', () => {
         expect(perfPanel).toContain('stored_prefix_quantization')
         expect(perfPanel).toContain('storage_key_bits')
         expect(perfPanel).toContain('storage_value_bits')
+        expect(perfPanel).toContain('key_bits_values')
+        expect(perfPanel).toContain('value_bits_values')
         expect(perfPanel).toContain('SSM Policy')
         expect(perfPanel).toContain('Cache Stack')
         expect(perfPanel).toContain('Cache Components')

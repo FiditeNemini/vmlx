@@ -118,7 +118,7 @@ def test_bonsai_qwen_hybrid_auto_retains_tq8_exception():
     assert resolved["auto_policy"] == "bonsai_hybrid_attention_kv_storage_tq8"
 
 
-def test_uncalibrated_qwen_full_kv_auto_uses_tq4_on_all_attention_slots():
+def test_uncalibrated_qwen_full_kv_auto_uses_tq4_with_q8_critical_layers():
     from vmlx_engine.utils.turboquant_config import (
         apply_uncalibrated_auto_tq_policy,
     )
@@ -139,12 +139,43 @@ def test_uncalibrated_qwen_full_kv_auto_uses_tq4_on_all_attention_slots():
 
     assert resolved["default_key_bits"] == 4
     assert resolved["default_value_bits"] == 4
-    assert resolved["critical_key_bits"] == 4
-    assert resolved["critical_value_bits"] == 4
-    assert resolved["critical_layers"] == list(range(28))
+    assert resolved["critical_key_bits"] == 8
+    assert resolved["critical_value_bits"] == 8
+    assert resolved["critical_layers"] == [
+        0, 1, 2, 3, 4, 5, -6, -5, -4, -3, -2, -1
+    ]
     assert resolved["sink_tokens"] == 0
     assert resolved["compress_after"] == 0
-    assert resolved["auto_policy"] == "qwen_full_kv_storage_tq4"
+    assert resolved["auto_policy"] == "qwen_full_kv_storage_tq4_critical_tq8"
+
+
+def test_qwen_full_kv_mixed_policy_builds_q4_bulk_and_q8_critical_slots():
+    from vmlx_engine.utils.turboquant_config import (
+        TurboQuantConfig,
+        apply_uncalibrated_auto_tq_policy,
+        make_turboquant_cache,
+    )
+
+    layer_types = ["attention"] * 28
+    resolved = apply_uncalibrated_auto_tq_policy(
+        {"enabled": True, "seed": 42},
+        {"model_type": "qwen3"},
+        layer_types,
+    )
+    config = TurboQuantConfig.from_jang_config(
+        {"turboquant": resolved}, n_layers=28
+    )
+    assert config is not None
+    cache = make_turboquant_cache(
+        config,
+        n_layers=28,
+        key_dims=[128] * 28,
+        value_dims=[128] * 28,
+        layer_types=layer_types,
+    )
+
+    assert [layer.key_bits for layer in cache[:7]] == [8, 8, 8, 8, 8, 8, 4]
+    assert [layer.value_bits for layer in cache[-7:]] == [4, 8, 8, 8, 8, 8, 8]
 
 
 def test_uncalibrated_mixed_swa_auto_uses_q4_on_full_attention_only():

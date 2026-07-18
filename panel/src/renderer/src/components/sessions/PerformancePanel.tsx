@@ -164,6 +164,8 @@ interface HealthData {
     stored_prefix_quantization?: string
     storage_key_bits?: number
     storage_value_bits?: number
+    key_bits_values?: number[]
+    value_bits_values?: number[]
   }
   native_cache?: {
     family?: string
@@ -272,8 +274,14 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
   const attentionKvStorage =
     health?.native_cache?.attention_kv_storage_quantization ??
     health?.native_cache?.storage_quantization
+  const tqKeyBits = health?.turboquant_kv_cache?.key_bits_values?.length
+    ? health.turboquant_kv_cache.key_bits_values.map(bits => `q${bits}`).join('/')
+    : `q${health?.turboquant_kv_cache?.storage_key_bits ?? '?'}`
+  const tqValueBits = health?.turboquant_kv_cache?.value_bits_values?.length
+    ? health.turboquant_kv_cache.value_bits_values.map(bits => `q${bits}`).join('/')
+    : `q${health?.turboquant_kv_cache?.storage_value_bits ?? '?'}`
   const tqStoredPrefix = health?.turboquant_kv_cache?.storage_encode_enabled
-    ? `${health.turboquant_kv_cache.stored_prefix_quantization ?? 'TurboQuant'} (K q${health.turboquant_kv_cache.storage_key_bits ?? '?'} / V q${health.turboquant_kv_cache.storage_value_bits ?? '?'})`
+    ? `${health.turboquant_kv_cache.stored_prefix_quantization ?? 'TurboQuant'} (K ${tqKeyBits} / V ${tqValueBits})`
     : null
 
   useEffect(() => {

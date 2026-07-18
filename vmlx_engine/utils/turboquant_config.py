@@ -21,8 +21,11 @@ MIXED_SWA_AUTO_TQ_BITS = 4
 HY3_FULL_KV_AUTO_TQ_BITS = 4
 # Compatibility name retained for downstream tests/imports.  The safety rule is
 # no longer Qwen-only: compatible bundles without model-owned TQ calibration use
-# q4 stored attention KV. Bonsai retains the q8 exception established by its
-# live agent-loop proof; native non-KV companion state is never quantized.
+# q4 stored attention KV. Full-KV Qwen keeps q4 for the bulk layers but protects
+# the first/last six critical layers with q8; uniform q4 corrupted a live Qwen3
+# restore while mixed q4/q8 and uniform q8 remained coherent in long-context
+# cache probes. Bonsai retains its all-q8 exception established by its live
+# agent-loop proof; native non-KV companion state is never quantized.
 QWEN_HYBRID_UNCALIBRATED_TQ_BITS = UNCALIBRATED_AUTO_TQ_BITS
 _QWEN_HYBRID_MODEL_TYPES = frozenset(
     {
@@ -113,7 +116,10 @@ def apply_uncalibrated_auto_tq_policy(
     cold -> incoherent paged+TQ warm transition.  Auto therefore keeps the
     mid-request live transition disabled and uses a correctness-gated storage
     codec on real attention KV slots. Qwen hybrid and other compatible families
-    use q4 stored attention KV. Bonsai alone keeps q8 because its repeated
+    use q4 stored attention KV. Full-KV Qwen uses q4 bulk layers with q8 first/
+    last-six critical layers because uniform q4 failed live semantic restore and
+    the narrower first/last-three boundary still had a strict-format miss.
+    Bonsai alone keeps q8 on every compatible KV layer because its repeated
     agent-loop proof established that boundary. HY3's
     plain full-KV runtime also uses q4. Cumulative SSM/GatedDelta companions
     remain native and are never assigned fake TQ slots. A bundle-owned
@@ -150,7 +156,7 @@ def apply_uncalibrated_auto_tq_policy(
         auto_policy = (
             "bonsai_full_kv_storage_tq8"
             if bonsai
-            else "qwen_full_kv_storage_tq4"
+            else "qwen_full_kv_storage_tq4_critical_tq8"
         )
     elif architecture in {
         "qwen3_5_hybrid_gated_delta",
@@ -168,14 +174,25 @@ def apply_uncalibrated_auto_tq_policy(
     else:
         auto_policy = "uncalibrated_selective_attention_kv_storage_tq4"
 
+    critical_layers = (
+        [0, 1, 2, 3, 4, 5, -6, -5, -4, -3, -2, -1]
+        if architecture == "qwen_full_kv" and not bonsai
+        else attention_layers
+    )
+    critical_bits = (
+        8
+        if architecture == "qwen_full_kv" and not bonsai
+        else storage_bits
+    )
     resolved.update(
         {
             "default_key_bits": storage_bits,
             "default_value_bits": storage_bits,
-            "critical_key_bits": storage_bits,
-            "critical_value_bits": storage_bits,
-            # Use real KV positions, not raw first/last transformer indices.
-            "critical_layers": attention_layers,
+            "critical_key_bits": critical_bits,
+            "critical_value_bits": critical_bits,
+            # Hybrid lists name every real KV position. Full-KV Qwen instead
+            # uses first/last transformer positions because every slot is KV.
+            "critical_layers": critical_layers,
             "sink_tokens": 0,
             "compress_after": QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER,
             "auto_policy": auto_policy,

@@ -102,6 +102,15 @@ export function replayPersistedAssistantHistory(
 
   if (calls.length === 0) {
     if (useResponsesApi) {
+      // A persisted reasoning-only assistant row usually means the previous
+      // turn hit an answer-recovery/output-budget edge and produced no visible
+      // assistant text. Replaying that hidden reasoning as a standalone
+      // Responses reasoning item makes the next request treat stale private
+      // thoughts as live assistant context. Preserve only the assistant turn
+      // boundary; tool-loop rows above still replay their ordered reasoning.
+      if (!content.trim() && segments[0]?.trim()) {
+        return [{ type: 'message', role: 'assistant', content: '' }]
+      }
       const items: any[] = []
       if (segments[0]?.trim()) items.push(reasoningItem(segments[0]))
       if (content.trim()) items.push({ type: 'output_text', text: content })

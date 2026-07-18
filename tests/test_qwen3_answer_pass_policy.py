@@ -56,9 +56,44 @@ class _Qwen3BudgetEngine:
         )
 
 
-def _install_qwen3_policy(monkeypatch) -> None:
+class _Qwen35AutoBudgetOverrunEngine:
+    tokenizer = SimpleNamespace(has_thinking=False)
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def stream_chat(self, *, messages, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("enable_thinking") is False:
+            text = ""
+            for index, delta in enumerate(("Q35-", "VISIBLE-DONE"), start=1):
+                text += delta
+                yield GenerationOutput(
+                    text=text,
+                    new_text=delta,
+                    tokens=[],
+                    prompt_tokens=11,
+                    completion_tokens=index,
+                    finished=index == 2,
+                    finish_reason="stop" if index == 2 else None,
+                )
+            return
+
+        reasoning = "<think>qwen3.5 auto reasoning overran the implicit UI cap"
+        yield GenerationOutput(
+            text=reasoning,
+            new_text=reasoning,
+            tokens=[],
+            prompt_tokens=17,
+            completion_tokens=456,
+            finished=True,
+            finish_reason="stop",
+        )
+
+
+def _install_qwen_policy(monkeypatch, family_name: str = "qwen3") -> None:
     config = SimpleNamespace(
-        family_name="qwen3",
+        family_name=family_name,
         think_in_template=True,
         reasoning_parser="qwen3",
         tool_parser="qwen",
@@ -74,6 +109,10 @@ def _install_qwen3_policy(monkeypatch) -> None:
         "get_model_config_registry",
         lambda *args, **kwargs: SimpleNamespace(lookup=lambda *a, **k: config),
     )
+
+
+def _install_qwen3_policy(monkeypatch) -> None:
+    _install_qwen_policy(monkeypatch, "qwen3")
 
 
 def _data_events(chunks: list[str]) -> list[dict]:
@@ -196,3 +235,77 @@ async def test_qwen3_responses_auto_partition_reserves_visible_answer(monkeypatc
         for event in events
         if event.get("type") == "response.output_text.delta"
     ] == ["Q3-", "STREAM-DONE"]
+
+
+@pytest.mark.asyncio
+async def test_qwen35_chat_auto_blank_budget_still_runs_floor_answer_pass(monkeypatch):
+    """UI Auto/blank Max Tokens must not finalize as reasoning-only content."""
+    _install_qwen_policy(monkeypatch, "qwen3_5")
+    engine = _Qwen35AutoBudgetOverrunEngine()
+    messages = [Message(role="user", content="say the marker")]
+    request = ChatCompletionRequest(
+        model="dealignai/Qwen3.6-27B-MXFP8-CRACK-MTP",
+        messages=messages,
+        stream=True,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    chunks = []
+    async for chunk in server.stream_chat_completion(
+        engine,
+        messages,
+        request,
+        fastapi_request=None,
+    ):
+        chunks.append(chunk)
+
+    assert engine.calls[0]["max_tokens"] == server._auto_thinking_pass_budget(256)
+    assert engine.calls[1]["enable_thinking"] is False
+    assert engine.calls[1]["chat_template_kwargs"]["enable_thinking"] is False
+    assert engine.calls[1]["max_tokens"] == server.ANSWER_PASS_FLOOR
+    events = _data_events(chunks)
+    content_deltas = [
+        choice["delta"].get("content", "")
+        for event in events
+        for choice in event.get("choices", [])
+        if choice.get("delta", {}).get("content")
+    ]
+    assert content_deltas == ["Q35-", "VISIBLE-DONE"]
+
+
+@pytest.mark.asyncio
+async def test_qwen35_responses_auto_blank_budget_still_runs_floor_answer_pass(
+    monkeypatch,
+):
+    """Responses UI Auto/blank Max Tokens must not finalize reasoning-only."""
+    _install_qwen_policy(monkeypatch, "qwen3_5")
+    engine = _Qwen35AutoBudgetOverrunEngine()
+    request = ResponsesRequest(
+        model="dealignai/Qwen3.6-27B-MXFP8-CRACK-MTP",
+        input="say the marker",
+        stream=True,
+    )
+
+    chunks = []
+    async for chunk in server.stream_responses_api(
+        engine,
+        [{"role": "user", "content": "say the marker"}],
+        request,
+        fastapi_request=None,
+    ):
+        chunks.append(chunk)
+
+    assert engine.calls[0]["max_tokens"] == server._auto_thinking_pass_budget(256)
+    assert engine.calls[1]["enable_thinking"] is False
+    assert engine.calls[1]["chat_template_kwargs"]["enable_thinking"] is False
+    assert engine.calls[1]["max_tokens"] == server.ANSWER_PASS_FLOOR
+    events = _data_events(chunks)
+    assert [
+        event["delta"]
+        for event in events
+        if event.get("type") == "response.output_text.delta"
+    ] == ["Q35-", "VISIBLE-DONE"]
+    completed = next(
+        event["response"] for event in events if event.get("type") == "response.completed"
+    )
+    assert completed["output"][0]["content"][0]["text"] == "Q35-VISIBLE-DONE"

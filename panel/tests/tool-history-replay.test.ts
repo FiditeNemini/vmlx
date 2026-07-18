@@ -111,16 +111,22 @@ describe('persisted assistant tool-history replay', () => {
     expect(replay[4].call_id).toBe('call_2')
   })
 
-  it('preserves a reasoning-only assistant row', () => {
+  it('keeps a Responses reasoning-only assistant row as a boundary without replaying stale hidden text', () => {
     expect(
       replayPersistedAssistantHistory(
-        { content: '', reasoningSegmentsJson: JSON.stringify(['thinking']) },
+        {
+          content: '',
+          reasoningSegmentsJson: JSON.stringify([
+            'stale private reasoning about a previous user prompt',
+          ]),
+        },
         true,
       ),
     ).toEqual([
       {
-        type: 'reasoning',
-        content: [{ type: 'reasoning', text: 'thinking' }],
+        type: 'message',
+        role: 'assistant',
+        content: '',
       },
     ])
   })

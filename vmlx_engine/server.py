@@ -17986,7 +17986,11 @@ async def stream_chat_completion(
             answer_ct_kwargs["thinking_mode"] = "disabled"
         elif _answer_family == "openPangu":
             answer_ct_kwargs["thinking"] = False
-        answer_ct_kwargs.pop("enable_thinking", None)
+        else:
+            # Qwen3.5/3.6 VLM/MTP templates consume enable_thinking from
+            # chat_template_kwargs; the top-level kwarg alone is not enough to
+            # keep the bounded visible-answer retry on the direct rail.
+            answer_ct_kwargs["enable_thinking"] = False
         answer_kwargs["chat_template_kwargs"] = answer_ct_kwargs
         answer_kwargs.pop("tools", None)
         answer_kwargs.pop("_vmlx_tools_present", None)
@@ -19697,7 +19701,11 @@ async def stream_responses_api(
                 answer_ct_kwargs["thinking_mode"] = "disabled"
             elif _answer_family == "openPangu":
                 answer_ct_kwargs["thinking"] = False
-            answer_ct_kwargs.pop("enable_thinking", None)
+            else:
+                # Qwen3.5/3.6 VLM/MTP templates consume enable_thinking from
+                # chat_template_kwargs; the top-level kwarg alone is not enough to
+                # keep the bounded visible-answer retry on the direct rail.
+                answer_ct_kwargs["enable_thinking"] = False
             answer_kwargs["chat_template_kwargs"] = answer_ct_kwargs
             answer_kwargs.pop("tools", None)
             answer_kwargs.pop("_vmlx_tools_present", None)

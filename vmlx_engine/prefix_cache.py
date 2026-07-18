@@ -2339,13 +2339,37 @@ class BlockAwarePrefixCache:
                             _layer_summary = f"{_kv_count} kv layers"
                             if _extra_tags:
                                 _layer_summary += f", {_extra_tags}"
-                            logger.info(
-                                f"Block disk: queuing write for block {block.block_id} "
-                                f"({_layer_summary}, {len(block_tokens)} tokens)"
+                            _has_native_tq = any(
+                                _entry_has_native_tq(_entry)
+                                for _entry in np_block
                             )
-                            pending_disk_writes.append(
-                                (block_chain_hash, np_block, len(block_tokens))
-                            )
+                            if _has_native_tq:
+                                # Native TQ entries contain lazy MLX encode graphs.
+                                # Deferring every page until after the extraction
+                                # loop retains prompt_blocks * layers graphs and can
+                                # exceed Metal's process resource limit on long
+                                # prefixes. Serialize/evaluate one complete packed
+                                # page now; the disk store still queues only the
+                                # rename/index update on its background thread.
+                                logger.info(
+                                    f"Block disk: writing bounded TQ block "
+                                    f"{block.block_id} ({_layer_summary}, "
+                                    f"{len(block_tokens)} tokens)"
+                                )
+                                disk_store.write_block_async(
+                                    block_chain_hash,
+                                    np_block,
+                                    len(block_tokens),
+                                )
+                            else:
+                                logger.info(
+                                    f"Block disk: queuing write for block "
+                                    f"{block.block_id} ({_layer_summary}, "
+                                    f"{len(block_tokens)} tokens)"
+                                )
+                                pending_disk_writes.append(
+                                    (block_chain_hash, np_block, len(block_tokens))
+                                )
                         else:
                             logger.warning(
                                 f"Block disk: _numpy_block_slice returned empty "

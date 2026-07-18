@@ -200,6 +200,9 @@ def test_tq_block_decode_reuses_bounded_decoder_state():
         for state in (first, second)
     ]
 
+    # Measure reconstruction reuse independently of the shared encoder-state
+    # reuse exercised while the two entries were serialized above.
+    tq_disk_store._tq_decoder_pair.cache_clear()
     decoded = [tq_disk_store.decode_tq_block(entry) for entry in entries]
     mx.eval(*(array for pair in decoded for array in pair))
     info = tq_disk_store._tq_decoder_pair.cache_info()
@@ -210,6 +213,33 @@ def test_tq_block_decode_reuses_bounded_decoder_state():
     assert info.hits == 1
     assert decoded[0][0].shape[-2] == 8
     assert decoded[1][0].shape[-2] == 16
+
+
+def test_tq_block_storage_encode_does_not_call_live_cache_compress(monkeypatch):
+    from jang_tools.turboquant.cache import TurboQuantKVCache
+    from vmlx_engine import tq_disk_store
+
+    state = _tq_state(tokens=8, seed=129)
+    state["tq_config"].update(key_bits=4, value_bits=4)
+    tq_disk_store._tq_decoder_pair.cache_clear()
+
+    def fail_live_compress(*args, **kwargs):
+        raise AssertionError("disk block encoding must not call live cache compress()")
+
+    monkeypatch.setattr(TurboQuantKVCache, "compress", fail_live_compress)
+    entry = tq_disk_store.encode_tq_block(
+        state["state"][0],
+        state["state"][1],
+        state["tq_config"],
+    )
+    keys, values = tq_disk_store.decode_tq_block(entry)
+    mx.eval(keys, values)
+
+    assert entry[0] == "turboquant_kv"
+    assert entry[3]["key_bits"] == 4
+    assert entry[3]["value_bits"] == 4
+    assert keys.shape == state["state"][0].shape
+    assert values.shape == state["state"][1].shape
 
 
 def test_tq_block_batch_decode_matches_individual_q4_pages_exactly():
@@ -365,6 +395,44 @@ def test_tq_paged_numpy_disk_path_keeps_native_entries(tmp_path):
             assert restored[0][3]["seed"] == 149
     finally:
         store.shutdown()
+
+
+def test_tq_paged_disk_writes_are_bounded_per_extracted_block(monkeypatch):
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache, PagedCacheManager
+
+    events = []
+
+    class _RecordingDiskStore:
+        def write_block_async(self, block_hash, cache_data, token_count):
+            events.append(("write", token_count, len(cache_data)))
+
+    manager = PagedCacheManager(block_size=16, max_blocks=16)
+    manager._disk_store = _RecordingDiskStore()
+    cache = BlockAwarePrefixCache(
+        model=_TinyQwenModel(),
+        paged_cache_manager=manager,
+        tq_enabled=True,
+    )
+    original_extract = cache._extract_block_tensor_slice
+
+    def record_extract(*args, **kwargs):
+        events.append(("extract", args[2] - args[1], None))
+        return original_extract(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "_extract_block_tensor_slice", record_extract)
+    cache.store_cache(
+        "bounded-write",
+        list(range(32)),
+        [_tq_state(tokens=32, seed=163)],
+    )
+
+    assert [event[0] for event in events] == [
+        "extract",
+        "write",
+        "extract",
+        "write",
+    ]
+    assert [event[1] for event in events if event[0] == "write"] == [16, 16]
 
 
 def test_tq_paged_disk_none_mode_skips_existing_native_blocks(tmp_path):

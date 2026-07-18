@@ -84,24 +84,30 @@ def _tq_decoder_pair(
     """Return immutable TurboQuant decoder state for one codec configuration.
 
     Paged-prefix reconstruction may decode thousands of block/layer entries
-    with the same dimensions, bit widths, and seed. Constructing a fresh
-    ``TurboQuantKVCache`` for each entry also rebuilds identical rotation,
-    codebook, and QJL decoder state each time. Keep a small process-local cache
-    of the encoder pair; decode operations remain independent because the
-    encoder objects are read-only after initialization.
+    with the same dimensions, bit widths, and seed. Rebuilding the identical
+    rotation, codebook, and QJL state for each entry is wasteful. Keep a small
+    process-local cache of the encoder pair; encode/decode operations remain
+    independent because the encoder objects are read-only after initialization.
     """
-    from jang_tools.turboquant.cache import TurboQuantKVCache
+    from jang_tools.turboquant.pipeline import TurboQuantEncoder
 
-    tq = TurboQuantKVCache(
-        key_dim=key_dim,
-        value_dim=value_dim,
-        key_bits=key_bits,
-        value_bits=value_bits,
-        seed=seed,
-        compress_after=0,
-        sink_tokens=0,
+    # Disk/paged-cache serialization only needs the immutable codec state.
+    # Constructing a live TurboQuantKVCache here also allocates cache buffers,
+    # while ``compress()`` performs an immediate decode that storage discards.
+    return (
+        TurboQuantEncoder(
+            dim=key_dim,
+            key_bits=key_bits,
+            value_bits=value_bits,
+            seed=seed,
+        ),
+        TurboQuantEncoder(
+            dim=value_dim,
+            key_bits=key_bits,
+            value_bits=value_bits,
+            seed=seed + 500,
+        ),
     )
-    return tq.key_encoder, tq.value_encoder
 
 
 def encode_tq_block(
@@ -122,7 +128,7 @@ def encode_tq_block(
     if token_count <= 0 or int(values.shape[-2]) != token_count:
         raise ValueError("TQ block key/value token lengths must match and be nonzero")
 
-    from jang_tools.turboquant.cache import TurboQuantKVCache
+    from jang_tools.turboquant.pipeline import encode_keys, encode_values
 
     key_bits = int(config.get("key_bits", 8) or 8)
     value_bits = int(config.get("value_bits", 8) or 8)
@@ -131,25 +137,18 @@ def encode_tq_block(
         raise ValueError(
             f"unsupported TQ block codec bits key={key_bits} value={value_bits}"
         )
-    tq = TurboQuantKVCache(
-        key_dim=int(keys.shape[-1]),
-        value_dim=int(values.shape[-1]),
-        key_bits=key_bits,
-        value_bits=value_bits,
-        seed=seed,
-        compress_after=0,
-        sink_tokens=0,
+    key_encoder, value_encoder = _tq_decoder_pair(
+        int(keys.shape[-1]),
+        int(values.shape[-1]),
+        key_bits,
+        value_bits,
+        seed,
     )
-    tq.keys = mx.contiguous(keys)
-    tq.values = mx.contiguous(values)
-    tq.offset = token_count
-    tq.compress()
-    ck = tq._compressed_keys
-    cv = tq._compressed_values
+    ck = encode_keys(mx.contiguous(keys), key_encoder)
+    cv = encode_values(mx.contiguous(values), value_encoder)
     if (
         ck is None
         or cv is None
-        or int(getattr(tq, "_compressed_tokens", 0) or 0) != token_count
         or int(ck.shape[-2]) != token_count
         or int(cv.shape[-2]) != token_count
     ):

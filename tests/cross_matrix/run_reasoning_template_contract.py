@@ -108,6 +108,10 @@ def _sha256(path: Path) -> str:
 
 
 def _parse_counts(output: str) -> dict[str, int | None]:
+    # Vitest decorates labels and counts with ANSI SGR sequences. Without
+    # normalizing those first, ``Tests 118 passed`` fails the primary regex and
+    # the generic fallback captures ``3 passed`` from the Test Files summary.
+    output = re.sub(r"\x1b\[[0-9;]*m", "", output)
     passed = None
     skipped = None
     deselected = None

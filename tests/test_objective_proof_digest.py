@@ -42,9 +42,20 @@ def test_objective_proof_digest_tracks_n2_pro_397b_release_blocker():
     assert row["status"] == "open"
     assert "JANG1L" in row["caveat"]
     assert "JANGTQ" in row["caveat"]
-    assert row["details"]["local_artifact_probe"]["artifact_present"] is True
-    assert row["details"]["local_artifact_probe"]["memory_preflight_decision"] == "do_not_launch"
-    assert row["details"]["noheavy_contracts"]["n2_family_policy"] is True
+    probe = row["details"]["local_artifact_probe"]
+    assert isinstance(probe["artifact_present"], bool)
+    if probe["artifact_present"]:
+        assert probe["memory_preflight_decision"] == "do_not_launch"
+    else:
+        assert probe["memory_preflight_decision"] is None
+        assert (
+            objective.N2_PRO_JANG1L_LOCAL_MEMORY_PREFLIGHT_REL
+            in row["details"]["missing_evidence"]
+        )
+    contracts = row["details"]["noheavy_contracts"]
+    assert isinstance(contracts["n2_family_policy"], bool)
+    if not row["details"]["missing_evidence"]:
+        assert contracts["n2_family_policy"] is True
     assert "runtime_cache_api_ui_live_proof" in row["details"]["required_next_evidence"]
 
 

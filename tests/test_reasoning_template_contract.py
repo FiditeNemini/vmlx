@@ -39,3 +39,14 @@ def test_reasoning_template_contract_pins_named_reasoning_edges():
     panel_command = gate.COMMANDS["panel_reasoning_rendering"][1]
     assert "-vv" in engine_command
     assert "--reporter=verbose" in panel_command
+
+
+def test_reasoning_template_contract_parses_ansi_colored_vitest_test_count():
+    from tests.cross_matrix import run_reasoning_template_contract as gate
+
+    output = (
+        "\x1b[2m Test Files \x1b[22m 3 passed (3)\n"
+        "\x1b[2m      Tests \x1b[22m 118 passed (118)\n"
+    )
+
+    assert gate._parse_counts(output)["passed"] == 118

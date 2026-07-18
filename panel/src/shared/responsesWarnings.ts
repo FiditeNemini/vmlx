@@ -19,6 +19,24 @@ export interface ResponsesPayloadLike {
   // Other fields are present but not required for warning extraction.
 }
 
+export const OUTPUT_TRUNCATED_WARNING =
+  'Output truncated because the maximum output-token limit was reached. Increase Max Tokens or send a follow-up message to continue.'
+
+/**
+ * Preserve a terminal length stop as response metadata, not assistant text.
+ *
+ * Both Chat Completions and Responses surface the same `length` finish reason
+ * to the panel main process. Persisting one deduplicated warning keeps the
+ * terminal state truthful after the renderer reloads the SQLite-backed row.
+ */
+export function appendOutputTruncationWarning(
+  warnings: string[] | null,
+  finishReason: unknown,
+): string[] | null {
+  if (finishReason !== 'length') return warnings
+  return Array.from(new Set([...(warnings || []), OUTPUT_TRUNCATED_WARNING]))
+}
+
 /**
  * Extract a clean `string[]` of warnings from a Responses API payload.
  *

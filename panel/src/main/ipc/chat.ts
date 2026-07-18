@@ -18,6 +18,7 @@ import { executeBuiltinTool } from "../tools/executor";
 import { detectModelConfigFromDir } from "../model-config-registry";
 import { getAuthHeaders } from "./utils";
 import {
+  appendOutputTruncationWarning,
   dropSupersededRecoveryWarnings,
   extractResponsesWarnings,
 } from "../../shared/responsesWarnings";
@@ -3902,7 +3903,10 @@ export function registerChatHandlers(
             replayReasoningSegments,
           );
         }
-        const finalResponseWarnings = responseWarnings as string[] | null;
+        const finalResponseWarnings = appendOutputTruncationWarning(
+          responseWarnings as string[] | null,
+          lastFinishReason,
+        );
         if (finalResponseWarnings && finalResponseWarnings.length > 0) {
           assistantMessage.warningsJson = JSON.stringify(finalResponseWarnings);
           console.warn(

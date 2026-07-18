@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
+  appendOutputTruncationWarning,
   extractResponsesWarnings,
   dropSupersededRecoveryWarnings,
+  OUTPUT_TRUNCATED_WARNING,
   categorizeResponsesWarning,
 } from '../src/renderer/src/lib/responsesWarnings'
 
@@ -108,6 +110,30 @@ describe('dropSupersededRecoveryWarnings', () => {
   })
 })
 
+describe('appendOutputTruncationWarning', () => {
+  it('adds one persisted warning for a length terminal state', () => {
+    expect(appendOutputTruncationWarning(null, 'length')).toEqual([
+      OUTPUT_TRUNCATED_WARNING,
+    ])
+  })
+
+  it('preserves existing warnings and deduplicates the truncation warning', () => {
+    expect(
+      appendOutputTruncationWarning(
+        ['Parser warning.', OUTPUT_TRUNCATED_WARNING],
+        'length',
+      ),
+    ).toEqual(['Parser warning.', OUTPUT_TRUNCATED_WARNING])
+  })
+
+  it('does not alter warnings for a completed response', () => {
+    expect(appendOutputTruncationWarning(['Parser warning.'], 'stop')).toEqual([
+      'Parser warning.',
+    ])
+    expect(appendOutputTruncationWarning(null, undefined)).toBeNull()
+  })
+})
+
 describe('categorizeResponsesWarning', () => {
   it('categorizes the reasoning-only chain warning', () => {
     expect(
@@ -147,6 +173,7 @@ describe('Responses warnings panel wiring', () => {
   it('main chat IPC handles completed and incomplete terminal warnings and usage', () => {
     const source = readFileSync(new URL('../src/main/ipc/chat.ts', import.meta.url), 'utf8')
     expect(source).toContain('dropSupersededRecoveryWarnings,')
+    expect(source).toContain('appendOutputTruncationWarning,')
     expect(source).toContain('extractResponsesWarnings,')
     expect(source).toContain('from "../../shared/responsesWarnings"')
     expect(source).toContain('responsesEventType === "response.warning"')
@@ -157,6 +184,7 @@ describe('Responses warnings panel wiring', () => {
     expect(source).toContain('const eventWarnings = extractResponsesWarnings(parsed)')
     expect(source).toContain('const completedWarnings = extractResponsesWarnings(')
     expect(source).toContain('const chatWarnings = extractResponsesWarnings(parsed)')
+    expect(source).toContain('const finalResponseWarnings = appendOutputTruncationWarning(')
     expect(source).toContain('assistantMessage.warningsJson = JSON.stringify(finalResponseWarnings)')
     expect(source).toContain('warnings: finalResponseWarnings || undefined')
   })
@@ -175,6 +203,7 @@ describe('Responses warnings panel wiring', () => {
     const messageBubble = readFileSync(new URL('../src/renderer/src/components/chat/MessageBubble.tsx', import.meta.url), 'utf8')
     expect(chatInterface).toContain('const responseWarnings = extractResponsesWarnings({ warnings: data.warnings })')
     expect(chatInterface).toContain('warnings: responseWarnings ?? m.warnings')
+    expect(chatInterface).not.toContain("finalContent += '\\n\\n---\\n*'")
     expect(messageBubble).toContain('{warnings && warnings.length > 0 && (')
     expect(messageBubble).toContain('warnings.map((warning, index) => (')
     expect(messageBubble).toContain('{warning}</span>')

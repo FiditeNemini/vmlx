@@ -332,17 +332,12 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
 
     const handleComplete = (data: any) => {
       if (data.chatId !== chatId) return
-      // Append truncation warning if server indicated max_tokens was hit
-      let finalContent = data.content || ''
       const responseWarnings = extractResponsesWarnings({ warnings: data.warnings }) ?? undefined
-      if (data.finishReason === 'length' && finalContent) {
-        finalContent += '\n\n---\n*' + t('chat.interface.truncationNotice') + '*'
-      }
       setMessages(prev => prev.map(m =>
         m.id === data.messageId
           ? {
             ...m,
-            content: finalContent || m.content,
+            content: data.content || m.content,
             tokens: data.metrics?.tokenCount,
             metrics: data.metrics,
             warnings: responseWarnings ?? m.warnings

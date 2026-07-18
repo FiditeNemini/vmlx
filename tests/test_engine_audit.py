@@ -9611,9 +9611,14 @@ class TestV6AbortUsesDeleteBlockTable:
         # This is in the step() method's except block
         idx = source.find("# Clean up paged cache block tables for all running")
         assert idx != -1, "Error-recovery cache cleanup comment must exist"
-        nearby = source[idx:idx + 500]
+        # Window must span the hit-credit finalization block (1657ed312)
+        # that now sits between the comment and the delete call.
+        nearby = source[idx:idx + 2000]
         assert "delete_block_table" in nearby, (
             "Error-recovery path must use delete_block_table (not detach_request)"
+        )
+        assert ".detach_request(" not in nearby, (
+            "Error-recovery path must NOT detach_request (leaks ref_counts)"
         )
 
     def test_completion_path_uses_detach(self):
@@ -9775,7 +9780,11 @@ class TestMLLMTurboQuantFetchPath:
 
         source = inspect.getsource(MLLMBatchGenerator._process_prompts)
 
-        assert "_recompress_to_tq(req_cache, self.language_model)" in source
+        # The call now resolves the TQ cache owner first (_cache_model for
+        # wrapper-nested VLMs, falling back to language_model) — assert the
+        # recompress call and both owner candidates, not one exact arg shape.
+        assert "_recompress_to_tq(" in source
+        assert "_cache_model" in source and "self.language_model" in source
         assert "TQ recompress removed from fetch paths" not in source
 
 

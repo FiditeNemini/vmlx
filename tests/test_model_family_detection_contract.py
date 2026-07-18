@@ -704,18 +704,21 @@ def test_decode_speed_gate_has_large_external_mistral_gptoss_rows():
     from tests.cross_matrix.run_decode_speed_gate import ROWS, build_serve_command
 
     expected_rows = {
+        # reasoning=None is registry ground truth for Mistral-Medium-3.5:
+        # the family emits [THINK] in content by design (no reasoning parser);
+        # verified via get_model_config_registry().lookup on both bundles.
         "mistral_medium_jangtq_ext": {
             "path": "/Volumes/ModelDrive/jangq-ai/Mistral-Medium-3.5-128B-JANGTQ",
             "mllm": True,
             "tool": "mistral",
-            "reasoning": "mistral",
+            "reasoning": None,
             "format_marker": "JANGTQ",
         },
         "mistral_medium_mxfp4_ext": {
             "path": "/Volumes/ModelDrive/jangq-ai/Mistral-Medium-3.5-128B-mxfp4",
             "mllm": True,
             "tool": "mistral",
-            "reasoning": "mistral",
+            "reasoning": None,
             "format_marker": "mxfp4",
         },
         "gpt_oss_ext": {
@@ -748,7 +751,10 @@ def test_decode_speed_gate_has_large_external_mistral_gptoss_rows():
         assert "--max-tokens" not in cmd
         assert "--is-mllm" in cmd if expected["mllm"] else "--is-mllm" not in cmd
         assert cmd[cmd.index("--tool-call-parser") + 1] == expected["tool"]
-        assert cmd[cmd.index("--reasoning-parser") + 1] == expected["reasoning"]
+        if expected["reasoning"] is None:
+            assert "--reasoning-parser" not in cmd
+        else:
+            assert cmd[cmd.index("--reasoning-parser") + 1] == expected["reasoning"]
 
 
 def test_decode_speed_gate_has_external_nemotron3_jangtq_mxfp_rows():

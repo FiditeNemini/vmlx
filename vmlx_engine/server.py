@@ -8073,7 +8073,13 @@ def _current_model_config():
         return None
 
 
-def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None) -> dict:
+def _native_cache_status(
+    scheduler=None,
+    *,
+    family: str | None = None,
+    cfg=None,
+    turboquant_status: dict[str, Any] | None = None,
+) -> dict:
     """Report architecture-native cache contracts separately from generic TQ-KV."""
     if scheduler is None and family is None and cfg is None:
         return {}
@@ -8439,7 +8445,12 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
         or cache_subtype
         in {"mixed_swa_kv", "step3p7_full_sliding_kv", "mimo_v2_asymmetric_swa"}
     ):
-        tq_enabled = bool(getattr(scheduler, "_tq_active", False))
+        tq_objects_active = bool(getattr(scheduler, "_tq_active", False))
+        tq_live_encode = (
+            bool(turboquant_status.get("live_encode_enabled"))
+            if turboquant_status is not None
+            else tq_objects_active
+        )
         try:
             stored_kv_bits = int(getattr(scheduler, "_kv_cache_bits", 0) or 0)
         except (TypeError, ValueError):
@@ -8448,6 +8459,20 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
             stored_kv_group = int(getattr(scheduler, "_kv_cache_group_size", 64) or 64)
         except (TypeError, ValueError):
             stored_kv_group = 64
+        if stored_kv_bits <= 0 and turboquant_status is not None:
+            try:
+                stored_kv_bits = int(
+                    turboquant_status.get("storage_key_bits", 0) or 0
+                )
+            except (TypeError, ValueError):
+                stored_kv_bits = 0
+        storage_quantized = bool(
+            stored_kv_bits > 0
+            or (
+                turboquant_status is not None
+                and turboquant_status.get("storage_encode_enabled")
+            )
+        )
         return {
             "family": family_name or scheduler_family or "mixed_attention",
             "schema": "mixed_swa_kv_v1",
@@ -8459,19 +8484,18 @@ def _native_cache_status(scheduler=None, *, family: str | None = None, cfg=None)
                 "rotating_window_metadata",
             ],
             "generic_turboquant_kv": {
-                "enabled": tq_enabled,
-                # Objects-only policy descriptor (matches plain/hybrid siblings).
-                # NOT a live-encode claim: mixed-SWA TQ installs TurboQuant KV
-                # objects but live encode is gated by compress_after (default 0
-                # -> off). The truthful live-encode state lives in the top-level
-                # turboquant_kv_cache block; do not re-assert "live" here.
-                "reason": "mixed_swa_attention_kv" if tq_enabled else "not_active",
+                "enabled": tq_live_encode,
+                "reason": (
+                    "mixed_swa_live_attention_kv"
+                    if tq_live_encode
+                    else "storage_only" if storage_quantized else "not_active"
+                ),
             },
             "storage_quantization": {
-                "enabled": stored_kv_bits > 0,
+                "enabled": storage_quantized,
                 "mode": "storage_boundary",
-                "bits": stored_kv_bits if stored_kv_bits > 0 else None,
-                "group_size": stored_kv_group if stored_kv_bits > 0 else None,
+                "bits": stored_kv_bits if storage_quantized else None,
+                "group_size": stored_kv_group if storage_quantized else None,
                 "applies_to": "full_and_sliding_attention_kv",
                 "metadata_policy": "preserve_rotating_window_metadata",
             },
@@ -9014,6 +9038,7 @@ async def health():
             scheduler,
             family=getattr(_mc, "family_name", None),
             cfg=_mc,
+            turboquant_status=result["turboquant_kv_cache"],
         )
         if native_cache:
             result["native_cache"] = native_cache
@@ -9384,6 +9409,7 @@ async def cache_stats():
             scheduler,
             family=getattr(_mc, "family_name", None),
             cfg=_mc,
+            turboquant_status=result["turboquant_kv_cache"],
         )
         if native_cache:
             result["native_cache"] = native_cache
@@ -10107,7 +10133,13 @@ async def model_capabilities(model_id: str) -> dict:
         and paged_cache_enabled
         and getattr(scheduler, "_uses_dsv4_cache", False)
     )
-    native_cache = _native_cache_status(scheduler, family=family, cfg=cfg)
+    turboquant_status = _turboquant_kv_cache_status(_engine, scheduler)
+    native_cache = _native_cache_status(
+        scheduler,
+        family=family,
+        cfg=cfg,
+        turboquant_status=turboquant_status,
+    )
     quantization_status = _model_quantization_status(bundle_path)
     acceleration_status = _model_acceleration_status(bundle_path)
     mtp_status = _model_mtp_status_with_loaded_runtime(bundle_path)

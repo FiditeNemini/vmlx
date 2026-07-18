@@ -13334,6 +13334,47 @@ class TestTurboQuantKVTelemetry:
         assert status["paged"] is True
         assert status["block_disk_l2"] is True
 
+    def test_native_cache_status_distinguishes_mixed_swa_storage_from_live_tq(self):
+        from types import SimpleNamespace
+        from vmlx_engine.server import _native_cache_status
+
+        scheduler = SimpleNamespace(
+            _model_type_for_runtime="gemma4",
+            _mixed_attention_cache_model=True,
+            _tq_active=True,
+            _kv_cache_bits=0,
+            _kv_cache_group_size=64,
+            block_aware_cache=object(),
+            paged_cache_manager=SimpleNamespace(_disk_store=object()),
+        )
+        tq_status = {
+            "enabled": True,
+            "objects_active": True,
+            "live_encode_enabled": False,
+            "storage_encode_enabled": True,
+            "storage_key_bits": 4,
+            "storage_value_bits": 4,
+            "stored_prefix_quantization": "turboquant-q4",
+        }
+
+        status = _native_cache_status(
+            scheduler,
+            turboquant_status=tq_status,
+        )
+
+        assert status["generic_turboquant_kv"] == {
+            "enabled": False,
+            "reason": "storage_only",
+        }
+        assert status["storage_quantization"] == {
+            "enabled": True,
+            "mode": "storage_boundary",
+            "bits": 4,
+            "group_size": 64,
+            "applies_to": "full_and_sliding_attention_kv",
+            "metadata_policy": "preserve_rotating_window_metadata",
+        }
+
     def test_native_cache_status_reports_step37_full_sliding_kv_from_registry_subtype(self):
         from types import SimpleNamespace
         from vmlx_engine.server import _native_cache_status

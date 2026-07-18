@@ -57,7 +57,9 @@ GEMMA4_INSTALLED_SPEED_ARTIFACTS = (
 GEMMA4_CURRENT_INSTALLED_SPEED_ARTIFACT = Path(
     "build/current-runtime-memory-stress-gemma4-26b-jang4m-chat-thinkingoff-speed-floor-issue115-installed-app-20260601.json"
 )
-GEMMA4_CURRENT_MEMORY_STRESS_ARTIFACT = GEMMA4_CURRENT_INSTALLED_SPEED_ARTIFACT
+GEMMA4_CURRENT_MEMORY_STRESS_ARTIFACT = Path(
+    "docs/internal/release-gates/20260718_gemma4_mixed_swa_checkpoint/live-gate.json"
+)
 QWEN35_INSTALLED_SPEED_ARTIFACT = Path(
     "build/current-decode-speed-live-qwen35-4bit-issue115-installed-app-after-decode-position-20260601.json"
 )
@@ -773,11 +775,11 @@ def _issue119_checks(root: Path) -> dict[str, bool]:
     memory_gate = _gemma26_current_memory_stress_gate(root)
     gemma_responses = (
         root
-        / "build/private-evidence/current-real-ui-live-model-gemma4-responses-stricttools-max768-visible-20260531-proof.json"
+        / "docs/internal/release-gates/20260718_gemma4_mixed_swa_checkpoint/api-proof.json"
     )
     gemma_cache = (
         root
-        / "build/private-evidence/current-real-ui-live-model-gemma4-cachecontrols-l2storage-20260531-proof.json"
+        / "docs/internal/release-gates/20260718_gemma4_mixed_swa_checkpoint/ui-proof.json"
     )
     response_surfaces = _surfaces(gemma_responses)
     cache_surfaces = _surfaces(gemma_cache)
@@ -794,8 +796,8 @@ def _issue119_checks(root: Path) -> dict[str, bool]:
         "gemma26_real_ui_artifacts_indexed": (
             gemma_responses.exists()
             and gemma_cache.exists()
-            and "Gemma-4-26B-A4B-it-JANG_4M-CRACK" in _read(gemma_responses)
-            and "Gemma-4-26B-A4B-it-JANG_4M-CRACK" in _read(gemma_cache)
+            and "gemma-4-26B-A4B-it-qat-JANG_4M" in _read(gemma_responses)
+            and "gemma-4-26B-A4B-it-qat-JANG_4M" in _read(gemma_cache)
             and "responses_api" in response_surfaces
             and "language_leak_check" in response_surfaces
             and "l2_disk_storage" in cache_surfaces

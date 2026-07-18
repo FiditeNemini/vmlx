@@ -179,6 +179,18 @@ def test_public_app_issue_audit_uses_current_manifest_artifact():
     )
 
 
+def test_public_app_issue119_uses_current_gemma4_mixed_swa_live_gate():
+    from tests.cross_matrix import run_public_app_issue_audit as gate
+
+    assert str(gate.GEMMA4_CURRENT_MEMORY_STRESS_ARTIFACT) == (
+        "docs/internal/release-gates/"
+        "20260718_gemma4_mixed_swa_checkpoint/live-gate.json"
+    )
+    issue119 = gate.build_audit(Path("."))["issues"]["119"]
+    assert issue119["focused_source_slice"] == "pass"
+    assert all(issue119["checks"].values())
+
+
 def test_public_app_issue117_open_boundary_uses_preflight_without_live_cancel_probe(
     monkeypatch,
     tmp_path,

@@ -523,7 +523,13 @@ class TestServerForwarding:
         import re
 
         src = self._read_server()
-        assert "_stream_tools_available = bool(kwargs.get(\"tools\")) or _request_has_tools" in src
+        assert src.count(
+            "_stream_tools_available = _tools_available_for_generation("
+        ) >= 2, (
+            "Chat Completions and Responses streaming must both derive tool "
+            "availability from the effective generation-time tool set"
+        )
+        assert src.count('request, kwargs.get("tools")') >= 2
         assert re.search(
             r"tool_call_active = \(\s*_stream_tools_available\s+"
             r"and not _suppress_tools\s+and not _tool_call_parser_disabled_explicitly",

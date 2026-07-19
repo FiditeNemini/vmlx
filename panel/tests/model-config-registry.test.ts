@@ -1692,4 +1692,17 @@ describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {
       expect(detected.supportsThinkingBudget).toBeUndefined()
     })
   }
+
+  it('declares DSV4 model-default reasoning and supported effort controls', () => {
+    const dir = makeModelDir({ model_type: 'deepseek_v4' })
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('deepseek-v4')
+    expect(detected.reasoningParser).toBe('deepseek_r1')
+    expect(detected.supportsThinking).toBe(true)
+    expect(detected.supportsInstructMode).toBe(true)
+    expect(detected.defaultEnableThinking).toBe(true)
+    expect(detected.supportedReasoningEfforts).toEqual(['high', 'max'])
+    expect(detected.supportsThinkingBudget).toBeUndefined()
+  })
 })

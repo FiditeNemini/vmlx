@@ -438,6 +438,16 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
               {detectedFamily === 'deepseek-v4' ? (
                 <div className="flex gap-1 bg-background rounded border border-border p-0.5">
                   <button
+                    onClick={() => updateThinkingMode(undefined, undefined)}
+                    className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                      overrides.enableThinking == null
+                        ? 'bg-primary text-primary-foreground'
+                        : 'hover:bg-accent text-muted-foreground'
+                    }`}
+                  >
+                    {t('chat.settings.thinkingAuto')}
+                  </button>
+                  <button
                     onClick={() => updateThinkingMode(false, undefined)}
                     className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
                       overrides.enableThinking === false

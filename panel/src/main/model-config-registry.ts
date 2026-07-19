@@ -154,7 +154,18 @@ registerFamily('mixtral', { cacheType: 'kv', toolParser: 'mistral', enableAutoTo
 registerFamily('mistral', { cacheType: 'kv', toolParser: 'mistral', enableAutoToolChoice: true, description: 'Mistral', priority: 20 })
 
 // DeepSeek
-registerFamily('deepseek-v4', { cacheType: 'kv', toolParser: 'dsml', reasoningParser: 'deepseek_r1', enableAutoToolChoice: true, description: 'DeepSeek V4 Flash', priority: 4 })
+registerFamily('deepseek-v4', {
+  cacheType: 'kv',
+  toolParser: 'dsml',
+  reasoningParser: 'deepseek_r1',
+  supportsThinking: true,
+  supportsInstructMode: true,
+  supportedReasoningEfforts: ['high', 'max'],
+  defaultEnableThinking: true,
+  enableAutoToolChoice: true,
+  description: 'DeepSeek V4 Flash',
+  priority: 4,
+})
 registerFamily('deepseek-vl', { cacheType: 'kv', toolParser: 'deepseek', isMultimodal: true, description: 'DeepSeek-VL vision-language', priority: 5 })
 registerFamily('deepseek-r1', { cacheType: 'kv', toolParser: 'deepseek', reasoningParser: 'deepseek_r1', description: 'DeepSeek R1', priority: 5 })
 registerFamily('deepseek-v3', { cacheType: 'kv', toolParser: 'deepseek', reasoningParser: 'deepseek_r1', enableAutoToolChoice: true, description: 'DeepSeek V3', priority: 5 })

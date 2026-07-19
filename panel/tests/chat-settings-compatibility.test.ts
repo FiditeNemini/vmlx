@@ -126,6 +126,14 @@ describe('chat settings cross-family compatibility warnings', () => {
     expect(source).toContain("overrides.reasoningEffort !== 'max' || !dsv4MaxEnabled")
   })
 
+  it('keeps DSV4 model-default reasoning visible as a real Auto state', () => {
+    const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
+
+    expect(source).toContain('onClick={() => updateThinkingMode(undefined, undefined)}')
+    expect(source).toContain('overrides.enableThinking == null')
+    expect(source).toContain("{t('chat.settings.thinkingAuto')}")
+  })
+
   it('does not silently mutate DSV4 output budgets when the user changes reasoning mode', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 

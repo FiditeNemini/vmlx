@@ -1264,6 +1264,30 @@ def _auto_thinking_pass_budget(total_cap: Any) -> int:
     return max(1, min(AUTO_THINKING_PASS_LIMIT, resolved_cap - reserve))
 
 
+def _auto_thinking_partition_allowed(
+    request: ChatCompletionRequest | ResponsesRequest | None,
+    family_name: str | None,
+    *,
+    tools_available: bool,
+    post_tool_continuation: bool = False,
+) -> bool:
+    """Whether Qwen Auto may reserve visible-output budget on this pass.
+
+    An ordinary ``tool_choice=auto`` request must not lose its entire output
+    budget to hidden reasoning merely because a coding harness attached a tool
+    catalog.  Reserve the same bounded Qwen answer share used by tools-free
+    requests, then remove the tool catalog only if final parsing found neither a
+    call nor visible content.  Required, named, or explicitly requested tool
+    turns remain unpartitioned and fail closed; they must never be converted
+    into a tools-free prose answer.
+    """
+    if family_name not in _AUTO_THINKING_PARTITION_FAMILIES:
+        return False
+    if not tools_available or post_tool_continuation:
+        return True
+    return not _request_explicitly_requests_tool_use(request)
+
+
 def _remaining_answer_pass_budget(
     cap: Any, used: Any, floor: int = ANSWER_PASS_FLOOR
 ) -> int:
@@ -13678,11 +13702,13 @@ async def create_chat_completion(
     # sizes off the full budget, not the capped thinking budget.
     _ns_answer_pass_original_cap = None
     _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
+    _ns_pre_tools_available = bool(
+        getattr(request, "tools", None) or chat_kwargs.get("tools")
+    )
     if (
         chat_kwargs.get("enable_thinking") is not False
         and getattr(request, "enable_thinking", None) is not False
         and (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is not False
-        and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
     ):
         try:
             from .model_config_registry import get_model_config_registry as _ns_pre_mcr
@@ -13695,6 +13721,13 @@ async def create_chat_completion(
         if (
             _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
+        ) and (
+            not _ns_pre_tools_available
+            or _auto_thinking_partition_allowed(
+                request,
+                _ns_pre_family,
+                tools_available=_ns_pre_tools_available,
+            )
         ):
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
             _ns_auto_partition = False
@@ -13941,6 +13974,18 @@ async def create_chat_completion(
             request,
         )
     )
+    _ns_ordinary_auto_tool_fallback = (
+        _auto_thinking_partition_allowed(
+            request,
+            _ns_family,
+            tools_available=_ns_tools_available,
+        )
+        and not _has_schema_valid_tool_call_candidate(
+            content_for_parsing,
+            reasoning_text,
+            request,
+        )
+    )
     _ns_reasoning_truncated = (
         bool(reasoning_text)
         and getattr(output, "finish_reason", None) == "length"
@@ -13969,6 +14014,7 @@ async def create_chat_completion(
             not _ns_tools_available
             or (_ns_is_m3 and not _ns_m3_valid_tool_call)
             or (_ns_native_tool_recovery and not _ns_native_valid_tool_call)
+            or _ns_ordinary_auto_tool_fallback
         )
         and _remaining_answer_pass_budget(
             _ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256,
@@ -16100,11 +16146,13 @@ async def create_response(
     # API non-stream surface hits the same runaway-reasoning empty-content bug.
     _ns_answer_pass_original_cap = None
     _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
+    _ns_pre_tools_available = bool(
+        getattr(request, "tools", None) or chat_kwargs.get("tools")
+    )
     if (
         chat_kwargs.get("enable_thinking") is not False
         and getattr(request, "enable_thinking", None) is not False
         and (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is not False
-        and not bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
     ):
         try:
             from .model_config_registry import get_model_config_registry as _ns_pre_mcr
@@ -16117,6 +16165,13 @@ async def create_response(
         if (
             _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
+        ) and (
+            not _ns_pre_tools_available
+            or _auto_thinking_partition_allowed(
+                request,
+                _ns_pre_family,
+                tools_available=_ns_pre_tools_available,
+            )
         ):
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
             _ns_auto_partition = False
@@ -16374,6 +16429,18 @@ async def create_response(
             request,
         )
     )
+    _ns_ordinary_auto_tool_fallback = (
+        _auto_thinking_partition_allowed(
+            request,
+            _ns_family,
+            tools_available=_ns_tools_available,
+        )
+        and not _has_schema_valid_tool_call_candidate(
+            content_for_parsing,
+            reasoning_text,
+            request,
+        )
+    )
     _ns_reasoning_truncated = (
         bool(reasoning_text)
         and getattr(output, "finish_reason", None) == "length"
@@ -16402,6 +16469,7 @@ async def create_response(
             not _ns_tools_available
             or (_ns_is_m3 and not _ns_m3_valid_tool_call)
             or (_ns_native_tool_recovery and not _ns_native_valid_tool_call)
+            or _ns_ordinary_auto_tool_fallback
         )
         and _remaining_answer_pass_budget(
             _ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256,
@@ -17390,8 +17458,11 @@ async def stream_chat_completion(
             _requested_thinking_budget = getattr(
                 request, "max_thinking_tokens", None
             )
-            _can_partition_reasoning_pass = (
-                not _stream_tools_available or _post_tool_continuation
+            _can_partition_reasoning_pass = _auto_thinking_partition_allowed(
+                request,
+                _family_name,
+                tools_available=_stream_tools_available,
+                post_tool_continuation=_post_tool_continuation,
             )
             if _can_partition_reasoning_pass:
                 if (
@@ -18270,6 +18341,7 @@ async def stream_chat_completion(
         and not reasoning_only_answer_enabled
         and reasoning_tools_fallback_answer_budget is not None
         and accumulated_reasoning.strip()
+        and not _request_explicitly_requests_tool_use(request)
     ):
         # Tool availability alone must not disable the never-empty contract.
         # The real parser has now found no function call, so the same bounded
@@ -19149,8 +19221,11 @@ async def stream_responses_api(
             _requested_thinking_budget = getattr(
                 request, "max_thinking_tokens", None
             )
-            _can_partition_reasoning_pass = (
-                not _stream_tools_available or _post_tool_continuation
+            _can_partition_reasoning_pass = _auto_thinking_partition_allowed(
+                request,
+                _family_name,
+                tools_available=_stream_tools_available,
+                post_tool_continuation=_post_tool_continuation,
             )
             if _can_partition_reasoning_pass:
                 if (
@@ -19867,6 +19942,7 @@ async def stream_responses_api(
         and not reasoning_only_answer_enabled
         and reasoning_tools_fallback_answer_budget is not None
         and accumulated_reasoning.strip()
+        and not _request_explicitly_requests_tool_use(request)
     ):
         # Tools were offered, but the finalized parser found no call. Re-arm
         # the established bounded direct-answer pass so an ordinary no-tool

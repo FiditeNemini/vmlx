@@ -167,6 +167,27 @@ def _data_events(chunks: list[str]) -> list[dict]:
     return events
 
 
+def _responses_file_info_tool() -> dict:
+    return {
+        "type": "function",
+        "name": "file_info",
+        "description": "Inspect one path",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    }
+
+
+def _chat_file_info_tool() -> dict:
+    tool = _responses_file_info_tool()
+    return {
+        "type": "function",
+        "function": {key: value for key, value in tool.items() if key != "type"},
+    }
+
+
 @pytest.mark.asyncio
 async def test_qwen3_responses_streams_answer_after_explicit_thinking_budget(
     monkeypatch,
@@ -278,6 +299,162 @@ async def test_qwen3_responses_auto_partition_reserves_visible_answer(monkeypatc
         for event in events
         if event.get("type") == "response.output_text.delta"
     ] == ["Q3-", "STREAM-DONE"]
+
+
+@pytest.mark.asyncio
+async def test_qwen3_responses_auto_tools_partition_ordinary_answer(monkeypatch):
+    """An attached Auto catalog must not let hidden reasoning starve content."""
+    _install_qwen3_policy(monkeypatch)
+    engine = _Qwen3BudgetEngine()
+    tool = _responses_file_info_tool()
+    request = ResponsesRequest(
+        model="qwen3-policy-test",
+        input="say the marker without using a tool",
+        stream=True,
+        enable_thinking=True,
+        tools=[tool],
+        tool_choice="auto",
+        max_output_tokens=112,
+    )
+
+    chunks = []
+    async for chunk in server.stream_responses_api(
+        engine,
+        [{"role": "user", "content": "say the marker without using a tool"}],
+        request,
+        fastapi_request=None,
+        max_tokens=112,
+        tools=[tool],
+    ):
+        chunks.append(chunk)
+
+    assert engine.calls[0]["max_tokens"] == 56
+    assert engine.calls[1]["enable_thinking"] is False
+    assert engine.calls[1]["max_tokens"] == 56
+    assert "tools" not in engine.calls[1]
+    events = _data_events(chunks)
+    assert [
+        event["delta"]
+        for event in events
+        if event.get("type") == "response.output_text.delta"
+    ] == ["Q3-", "STREAM-DONE"]
+    assert any(event.get("type") == "response.completed" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_qwen3_chat_auto_tools_partition_ordinary_answer(monkeypatch):
+    _install_qwen3_policy(monkeypatch)
+    engine = _Qwen3BudgetEngine()
+    tool = _chat_file_info_tool()
+    messages = [Message(role="user", content="say the marker without using a tool")]
+    request = ChatCompletionRequest(
+        model="qwen3-policy-test",
+        messages=messages,
+        stream=True,
+        enable_thinking=True,
+        tools=[tool],
+        tool_choice="auto",
+        max_tokens=112,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    chunks = []
+    async for chunk in server.stream_chat_completion(
+        engine,
+        messages,
+        request,
+        fastapi_request=None,
+        max_tokens=112,
+        tools=[{"name": "file_info", "parameters": tool["function"]["parameters"]}],
+    ):
+        chunks.append(chunk)
+
+    assert engine.calls[0]["max_tokens"] == 56
+    assert engine.calls[1]["enable_thinking"] is False
+    assert engine.calls[1]["max_tokens"] == 56
+    assert "tools" not in engine.calls[1]
+    content = "".join(
+        choice["delta"].get("content", "")
+        for event in _data_events(chunks)
+        for choice in event.get("choices", [])
+    )
+    assert content == "Q3-STREAM-DONE"
+
+
+@pytest.mark.asyncio
+async def test_qwen3_responses_explicit_tool_intent_remains_fail_closed(monkeypatch):
+    """A failed explicit tool request cannot become a tools-free prose retry."""
+    _install_qwen3_policy(monkeypatch)
+    engine = _Qwen3BudgetEngine()
+    tool = _responses_file_info_tool()
+    request = ResponsesRequest(
+        model="qwen3-policy-test",
+        input="Call the file_info tool for panel/package.json",
+        stream=True,
+        enable_thinking=True,
+        tools=[tool],
+        tool_choice="auto",
+        max_output_tokens=112,
+    )
+
+    chunks = []
+    async for chunk in server.stream_responses_api(
+        engine,
+        [{"role": "user", "content": "Call the file_info tool for panel/package.json"}],
+        request,
+        fastapi_request=None,
+        max_tokens=112,
+        tools=[tool],
+    ):
+        chunks.append(chunk)
+
+    assert len(engine.calls) == 1
+    assert engine.calls[0]["max_tokens"] == 112
+    events = _data_events(chunks)
+    assert not any(
+        event.get("type") == "response.output_text.delta" for event in events
+    )
+    assert any(event.get("type") == "response.incomplete" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_qwen3_chat_explicit_tool_intent_remains_fail_closed(monkeypatch):
+    _install_qwen3_policy(monkeypatch)
+    engine = _Qwen3BudgetEngine()
+    tool = _chat_file_info_tool()
+    messages = [
+        Message(role="user", content="Call the file_info tool for panel/package.json")
+    ]
+    request = ChatCompletionRequest(
+        model="qwen3-policy-test",
+        messages=messages,
+        stream=True,
+        enable_thinking=True,
+        tools=[tool],
+        tool_choice="auto",
+        max_tokens=112,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    chunks = []
+    async for chunk in server.stream_chat_completion(
+        engine,
+        messages,
+        request,
+        fastapi_request=None,
+        max_tokens=112,
+        tools=[{"name": "file_info", "parameters": tool["function"]["parameters"]}],
+    ):
+        chunks.append(chunk)
+
+    assert len(engine.calls) == 1
+    assert engine.calls[0]["max_tokens"] == 112
+    events = _data_events(chunks)
+    assert not any(
+        choice.get("delta", {}).get("content")
+        for event in events
+        for choice in event.get("choices", [])
+    )
 
 
 @pytest.mark.asyncio

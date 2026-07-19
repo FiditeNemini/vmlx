@@ -336,6 +336,13 @@ def check_and_inject_fallback_tools(
         is_step3p5_native_tool_prompt
         and all(f"<function={name}>" in instruction_prompt for name in tool_names)
     )
+    _step3p5_has_native_tool_schema = (
+        is_step3p5_native_tool_prompt
+        and "<tools>" in instruction_prompt
+        and "</tools>" in instruction_prompt
+        and "<function=example_function_name>" in instruction_prompt
+        and all(name in instruction_prompt for name in tool_names)
+    )
     if all(name in prompt for name in tool_names) and (
         (not is_dsv4_prompt or _dsv4_has_concrete_dsml_examples)
         and (
@@ -352,7 +359,15 @@ def check_and_inject_fallback_tools(
         and (not is_openpangu_native_tool_prompt or _openpangu_has_concrete_tool_examples)
         and (not is_minimax_native_tool_prompt or _minimax_has_concrete_tool_examples)
         and (not is_xml_function_native_tool_prompt or _xml_function_has_native_tool_schema)
-        and (not is_step3p5_native_tool_prompt or _step3p5_has_concrete_tool_examples)
+        and (
+            not is_step3p5_native_tool_prompt
+            or _step3p5_has_concrete_tool_examples
+            or (
+                _step3p5_has_native_tool_schema
+                and not explicit_tool_requested
+                and not tool_choice_required
+            )
+        )
     ):
         return prompt
 

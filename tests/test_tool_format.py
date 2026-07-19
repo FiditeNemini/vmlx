@@ -1146,6 +1146,55 @@ class TestFallbackToolPromptFormat:
         assert rendered == prompt
         assert tokenizer.calls == 0
 
+    def test_step3p5_auto_without_tool_request_keeps_native_schema_only(self):
+        from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
+
+        class FakeTokenizer:
+            calls = 0
+
+            def apply_chat_template(self, messages, **kwargs):
+                self.calls += 1
+                return "\n".join(m.get("content", "") for m in messages)
+
+        prompt = (
+            "<|im_start|>system\n<tools>\n"
+            '{"type":"function","function":{"name":"list_directory"}}\n'
+            "</tools>\n"
+            "<tool_call>\n<function=example_function_name>\n"
+            "<parameter=example_parameter_1>value_1</parameter>\n"
+            "</function>\n</tool_call>\n"
+            "<|im_end|>\n<|im_start|>user\nSay hello.\n"
+            "<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        )
+        messages = [{"role": "user", "content": "Say hello."}]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_directory",
+                    "description": "List files",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                },
+            }
+        ]
+
+        tokenizer = FakeTokenizer()
+        rendered = check_and_inject_fallback_tools(
+            prompt,
+            messages,
+            tools,
+            tokenizer,
+            {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+            tool_parser_id="step3p5",
+        )
+
+        assert rendered == prompt
+        assert tokenizer.calls == 0
+
     def test_step3p5_fallback_injects_native_xml_tool_example(self):
         from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
 

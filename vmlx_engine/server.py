@@ -1042,6 +1042,7 @@ def _answer_pass_visible_delta(
     finished: bool,
     *,
     holdback: int | None = None,
+    think_in_prompt: bool = False,
 ) -> tuple[str, str]:
     """Incremental visible-content delta for the STREAMED bounded answer pass (F6).
 
@@ -1058,7 +1059,11 @@ def _answer_pass_visible_delta(
     nothing new is safe to emit yet (held back, or a non-monotonic clean revision
     that resyncs the cursor without emitting).
     """
-    vis = _answer_pass_safe_visible_raw(raw_text, finished=finished)
+    vis = _answer_pass_safe_visible_raw(
+        raw_text,
+        finished=finished,
+        think_in_prompt=think_in_prompt,
+    )
     if vis is None:
         return "", already_sent
     if getattr(request, "enable_thinking", None) is False and "</think>" in vis:
@@ -1136,6 +1141,7 @@ def _answer_pass_safe_visible_raw(
     raw_text: str,
     *,
     finished: bool,
+    think_in_prompt: bool = False,
 ) -> str | None:
     """Return answer-pass text only when its leading control rail is resolved.
 
@@ -1161,6 +1167,18 @@ def _answer_pass_safe_visible_raw(
     # A tokenizer can deliver a special token across several stream chunks. Hold
     # only while the complete raw prefix is still a prefix of a known control token.
     if any(marker.startswith(stripped) for marker in _ANSWER_PASS_CONTROL_PREFIXES):
+        return "" if finished else None
+
+    # Step-3.7 has no native direct/thinking-off mode.  Its tools-free recovery
+    # therefore reuses the official template, whose generation prompt already
+    # opened ``<think>``.  Hide the retry's private reasoning until the real
+    # closing sentinel arrives, then expose only the model-generated answer.
+    # This is parser semantics, not synthetic content or a forced closer.
+    if think_in_prompt:
+        for closer in ("</think>", "</thinking>", "</mm:think>", "[/THINK]"):
+            close_index = stripped.find(closer)
+            if close_index >= 0:
+                return stripped[close_index + len(closer) :]
         return "" if finished else None
 
     # Gemma's thought channel is not visible output. Its degraded form may omit
@@ -1947,6 +1965,31 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
         "deepseek_v4",
     }
 )
+
+# Families that have no native thinking-off/direct rail but can still recover an
+# ordinary tools-enabled answer after final tool parsing rejects every candidate.
+# The retry keeps the family-owned reasoning template active and removes only the
+# tool schemas that caused the invalid control turn.  This is intentionally
+# separate from ``_REASONING_ANSWER_PASS_FAMILIES``: adding Step there would make
+# no-tool requests use a fabricated thinking-off mode that its official template
+# does not support.
+_NATIVE_REASONING_TOOL_RECOVERY_FAMILIES = frozenset({"step3p7"})
+
+
+def _native_reasoning_tool_recovery_allowed(
+    family_name: str | None,
+    request: ChatCompletionRequest | ResponsesRequest | None,
+    *,
+    tools_available: bool,
+    effective_thinking: bool | None,
+) -> bool:
+    """Whether an ordinary auto-tool turn may retry on its native no-tools rail."""
+    return bool(
+        family_name in _NATIVE_REASONING_TOOL_RECOVERY_FAMILIES
+        and tools_available
+        and effective_thinking is not False
+        and not _request_explicitly_requests_tool_use(request)
+    )
 
 # Families whose FIRST (thinking) pass may be capped by a client-sent
 # max_thinking_tokens. deepseek_v4 is deliberately EXCLUDED: it keys
@@ -5536,21 +5579,12 @@ def _stream_tool_call_early_stop_parser(
         return None
 
 
-def _request_explicitly_requires_one_tool_once(
+def _latest_request_user_text(
     request: ChatCompletionRequest | ResponsesRequest | None,
-) -> bool:
-    """Narrow Qwen early-stop gate for an explicit single-call user contract.
-
-    Qwen can legitimately emit sequential or interleaved calls, so it must not
-    opt into parser-wide early stopping. Live Bonsai-27B-1bit evidence showed a
-    different bounded case: the user named ``file_info`` and said "exactly
-    once", the model emitted a complete schema-valid call, then repeated the
-    call dozens of times for thousands of hidden reasoning tokens. Stop only
-    when the latest user text itself requires exactly one invocation and names
-    exactly one tool exposed by the request.
-    """
+) -> str:
+    """Return only the latest user-authored text from either public API shape."""
     if request is None:
-        return False
+        return ""
 
     def _content_text(value: Any) -> str:
         if isinstance(value, str):
@@ -5585,6 +5619,80 @@ def _request_explicitly_requires_one_tool_once(
             if text:
                 latest_user_text = text
 
+    return latest_user_text
+
+
+def _request_explicitly_requests_tool_use(
+    request: ChatCompletionRequest | ResponsesRequest | None,
+) -> bool:
+    """Protect explicit tool requests from a tools-free recovery pass.
+
+    Auto tool catalogs are present on ordinary coding-harness turns, so merely
+    having tools is not intent.  Conversely, a request that names an available
+    function or explicitly asks to call/use a tool must remain fail-closed when
+    parsing rejects the model's candidate; silently answering without the tool
+    would violate the user's contract.  Explicit negative instructions remain
+    eligible for tools-free recovery.
+    """
+    if request is None or _is_required_tool_choice(
+        getattr(request, "tool_choice", None)
+    ):
+        return request is not None
+
+    latest_user_text = _latest_request_user_text(request)
+    if not latest_user_text:
+        return False
+    if re.search(
+        r"\b(?:do\s+not|don't|never|must\s+not)\s+"
+        r"(?:use|call|invoke|run|execute)\b",
+        latest_user_text,
+        flags=re.IGNORECASE,
+    ) or re.search(
+        r"\bwithout\s+(?:using|calling|invoking|running|executing)\b",
+        latest_user_text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+
+    tool_names = {
+        name
+        for tool in (_effective_tools_for_tool_parsing(request) or [])
+        for name in [_tool_definition_name(tool)]
+        if name
+    }
+    if any(
+        re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])",
+            latest_user_text,
+        )
+        for name in tool_names
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b(?:use|call|invoke|run|execute)\b.{0,48}"
+            r"\b(?:tool|function)\b|"
+            r"\b(?:tool|function)\b.{0,48}\b(?:use|call|invoke|run|execute)\b",
+            latest_user_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+def _request_explicitly_requires_one_tool_once(
+    request: ChatCompletionRequest | ResponsesRequest | None,
+) -> bool:
+    """Narrow Qwen early-stop gate for an explicit single-call user contract.
+
+    Qwen can legitimately emit sequential or interleaved calls, so it must not
+    opt into parser-wide early stopping. Live Bonsai-27B-1bit evidence showed a
+    different bounded case: the user named ``file_info`` and said "exactly
+    once", the model emitted a complete schema-valid call, then repeated the
+    call dozens of times for thousands of hidden reasoning tokens. Stop only
+    when the latest user text itself requires exactly one invocation and names
+    exactly one tool exposed by the request.
+    """
+    latest_user_text = _latest_request_user_text(request)
     if not latest_user_text or not re.search(
         r"\b(?:exactly\s+once|exactly\s+one(?:\s+native)?\s+(?:tool|function)\s+call)\b",
         latest_user_text,
@@ -13819,11 +13927,33 @@ async def create_chat_completion(
         or getattr(request, "enable_thinking", None) is False
         or (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is False
     )
+    _ns_native_tool_recovery = _native_reasoning_tool_recovery_allowed(
+        _ns_family,
+        request,
+        tools_available=_ns_tools_available,
+        effective_thinking=False if _ns_thinking_off else True,
+    )
+    _ns_native_valid_tool_call = (
+        _ns_native_tool_recovery
+        and _has_schema_valid_tool_call_candidate(
+            content_for_parsing,
+            reasoning_text,
+            request,
+        )
+    )
     _ns_reasoning_truncated = (
         bool(reasoning_text)
         and getattr(output, "finish_reason", None) == "length"
     )
     _ns_visible_content_for_answer_gate = content_for_parsing
+    if _ns_native_tool_recovery and not _ns_native_valid_tool_call:
+        _ns_visible_content_for_answer_gate = (
+            _visible_prefix_before_unparsed_tool_markup(
+                _strip_think_for_tool_parse(
+                    _ns_visible_content_for_answer_gate or ""
+                )
+            )
+        )
     if _suppress_tools and _ns_visible_content_for_answer_gate:
         _ns_visible_content_for_answer_gate = (
             _clean_suppressed_tool_markup_for_display(
@@ -13838,35 +13968,44 @@ async def create_chat_completion(
         and (
             not _ns_tools_available
             or (_ns_is_m3 and not _ns_m3_valid_tool_call)
+            or (_ns_native_tool_recovery and not _ns_native_valid_tool_call)
         )
         and _remaining_answer_pass_budget(
             _ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256,
             getattr(output, "completion_tokens", 0),
         ) > 0
     ):
-        if _ns_family in _REASONING_ANSWER_PASS_FAMILIES or _ns_is_m3:
+        if (
+            _ns_family in _REASONING_ANSWER_PASS_FAMILIES
+            or _ns_is_m3
+            or _ns_native_tool_recovery
+        ):
             _ns_cap = int(_ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
             _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
             logger.info(
                 "%s non-stream chat produced no visible content; running "
-                "bounded thinking-off answer pass (reasoning_chars=%d, "
+                "bounded %s answer pass (reasoning_chars=%d, "
                 "cap=%d, used=%d, answer_budget=%d)",
-                _ns_family, len(reasoning_text or ""), _ns_cap, _ns_used,
+                _ns_family,
+                "native tools-free" if _ns_native_tool_recovery else "thinking-off",
+                len(reasoning_text or ""), _ns_cap, _ns_used,
                 _ns_budget,
             )
             _ns_kwargs = dict(chat_kwargs)
-            _force_answer_pass_direct_rail(
-                _ns_kwargs,
-                family_name=_ns_family,
-            )
+            if not _ns_native_tool_recovery:
+                _force_answer_pass_direct_rail(
+                    _ns_kwargs,
+                    family_name=_ns_family,
+                )
             _ns_kwargs["max_tokens"] = _ns_budget
             _ns_ct = dict(_ns_kwargs.get("chat_template_kwargs") or {})
-            if _ns_is_m3:
-                _ns_ct["thinking_mode"] = "disabled"
-            if _ns_family == "openpangu_v2":
-                _ns_ct["thinking"] = False
-            _ns_ct.pop("enable_thinking", None)
+            if not _ns_native_tool_recovery:
+                if _ns_is_m3:
+                    _ns_ct["thinking_mode"] = "disabled"
+                if _ns_family == "openpangu_v2":
+                    _ns_ct["thinking"] = False
+                _ns_ct.pop("enable_thinking", None)
             _ns_kwargs["chat_template_kwargs"] = _ns_ct
             _ns_kwargs.pop("tools", None)
             _ns_kwargs.pop("_vmlx_tools_present", None)
@@ -13883,7 +14022,18 @@ async def create_chat_completion(
                     request_id=f"{response_id}:visible-answer",
                     endpoint="Chat Completions visible answer pass (non-stream)",
                 )
-                _ns_text = clean_output_text(getattr(_ns_out, "text", "") or "")
+                if _ns_native_tool_recovery:
+                    _ns_text, _ = _answer_pass_visible_delta(
+                        getattr(_ns_out, "text", "") or "",
+                        "",
+                        request,
+                        True,
+                        think_in_prompt=True,
+                    )
+                else:
+                    _ns_text = clean_output_text(
+                        getattr(_ns_out, "text", "") or ""
+                    )
                 # For qwen3.5/3.6 ONLY, adopt the salvage when it actually
                 # COMPLETED. A salvage that itself hit the bounded budget
                 # (finish_reason="length") is an incomplete fragment: a
@@ -16210,11 +16360,33 @@ async def create_response(
         or getattr(request, "enable_thinking", None) is False
         or (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is False
     )
+    _ns_native_tool_recovery = _native_reasoning_tool_recovery_allowed(
+        _ns_family,
+        request,
+        tools_available=_ns_tools_available,
+        effective_thinking=False if _ns_thinking_off else True,
+    )
+    _ns_native_valid_tool_call = (
+        _ns_native_tool_recovery
+        and _has_schema_valid_tool_call_candidate(
+            content_for_parsing,
+            reasoning_text,
+            request,
+        )
+    )
     _ns_reasoning_truncated = (
         bool(reasoning_text)
         and getattr(output, "finish_reason", None) == "length"
     )
     _ns_visible_content_for_answer_gate = content_for_parsing
+    if _ns_native_tool_recovery and not _ns_native_valid_tool_call:
+        _ns_visible_content_for_answer_gate = (
+            _visible_prefix_before_unparsed_tool_markup(
+                _strip_think_for_tool_parse(
+                    _ns_visible_content_for_answer_gate or ""
+                )
+            )
+        )
     if _suppress_tools and _ns_visible_content_for_answer_gate:
         _ns_visible_content_for_answer_gate = (
             _clean_suppressed_tool_markup_for_display(
@@ -16229,35 +16401,44 @@ async def create_response(
         and (
             not _ns_tools_available
             or (_ns_is_m3 and not _ns_m3_valid_tool_call)
+            or (_ns_native_tool_recovery and not _ns_native_valid_tool_call)
         )
         and _remaining_answer_pass_budget(
             _ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256,
             getattr(output, "completion_tokens", 0),
         ) > 0
     ):
-        if _ns_family in _REASONING_ANSWER_PASS_FAMILIES or _ns_is_m3:
+        if (
+            _ns_family in _REASONING_ANSWER_PASS_FAMILIES
+            or _ns_is_m3
+            or _ns_native_tool_recovery
+        ):
             _ns_cap = int(_ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
             _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
             logger.info(
                 "%s non-stream responses produced no visible content; running "
-                "bounded thinking-off answer pass (reasoning_chars=%d, "
+                "bounded %s answer pass (reasoning_chars=%d, "
                 "cap=%d, used=%d, answer_budget=%d)",
-                _ns_family, len(reasoning_text or ""), _ns_cap, _ns_used,
+                _ns_family,
+                "native tools-free" if _ns_native_tool_recovery else "thinking-off",
+                len(reasoning_text or ""), _ns_cap, _ns_used,
                 _ns_budget,
             )
             _ns_kwargs = dict(chat_kwargs)
-            _force_answer_pass_direct_rail(
-                _ns_kwargs,
-                family_name=_ns_family,
-            )
+            if not _ns_native_tool_recovery:
+                _force_answer_pass_direct_rail(
+                    _ns_kwargs,
+                    family_name=_ns_family,
+                )
             _ns_kwargs["max_tokens"] = _ns_budget
             _ns_ct = dict(_ns_kwargs.get("chat_template_kwargs") or {})
-            if _ns_is_m3:
-                _ns_ct["thinking_mode"] = "disabled"
-            if _ns_family == "openpangu_v2":
-                _ns_ct["thinking"] = False
-            _ns_ct.pop("enable_thinking", None)
+            if not _ns_native_tool_recovery:
+                if _ns_is_m3:
+                    _ns_ct["thinking_mode"] = "disabled"
+                if _ns_family == "openpangu_v2":
+                    _ns_ct["thinking"] = False
+                _ns_ct.pop("enable_thinking", None)
             _ns_kwargs["chat_template_kwargs"] = _ns_ct
             _ns_kwargs.pop("tools", None)
             _ns_kwargs.pop("_vmlx_tools_present", None)
@@ -16274,7 +16455,18 @@ async def create_response(
                     request_id=f"{response_id}:visible-answer",
                     endpoint="Responses visible answer pass (non-stream)",
                 )
-                _ns_text = clean_output_text(getattr(_ns_out, "text", "") or "")
+                if _ns_native_tool_recovery:
+                    _ns_text, _ = _answer_pass_visible_delta(
+                        getattr(_ns_out, "text", "") or "",
+                        "",
+                        request,
+                        True,
+                        think_in_prompt=True,
+                    )
+                else:
+                    _ns_text = clean_output_text(
+                        getattr(_ns_out, "text", "") or ""
+                    )
                 # For qwen3.5/3.6 ONLY, adopt the salvage when it actually
                 # COMPLETED. A salvage that itself hit the bounded budget
                 # (finish_reason="length") is an incomplete fragment: a
@@ -17160,7 +17352,15 @@ async def stream_chat_completion(
             reasoning_only_answer_family = ""
     if (
         not reasoning_only_answer_enabled
-        and _family_name in _REASONING_ANSWER_PASS_FAMILIES
+        and (
+            _family_name in _REASONING_ANSWER_PASS_FAMILIES
+            or _native_reasoning_tool_recovery_allowed(
+                _family_name,
+                request,
+                tools_available=_stream_tools_available,
+                effective_thinking=_effective_thinking,
+            )
+        )
         and _effective_thinking is not False
     ):
         # Degraded qwen3.5/3.6 quants (e.g. MXFP4-CRACK) can run their thinking
@@ -18077,8 +18277,13 @@ async def stream_chat_completion(
         # genuine tool stream.
         logger.info(
             "%s tools-enabled stream produced no valid tool call or visible "
-            "content; re-arming bounded thinking-off answer pass",
+            "content; re-arming bounded %s answer pass",
             reasoning_only_answer_family or "reasoning model",
+            (
+                "native tools-free"
+                if _family_name in _NATIVE_REASONING_TOOL_RECOVERY_FAMILIES
+                else "thinking-off"
+            ),
         )
         reasoning_only_answer_budget = reasoning_tools_fallback_answer_budget
         reasoning_only_answer_enabled = True
@@ -18149,9 +18354,14 @@ async def stream_chat_completion(
         )
         logger.info(
             "%s Chat Completions stream produced no visible content; "
-            "running bounded thinking-off answer pass "
+            "running bounded %s answer pass "
             "(reasoning_chars=%d, answer_budget=%s)",
             _answer_family,
+            (
+                "native tools-free"
+                if _family_name in _NATIVE_REASONING_TOOL_RECOVERY_FAMILIES
+                else "thinking-off"
+            ),
             len(accumulated_reasoning),
             _answer_budget,
         )
@@ -18159,21 +18369,27 @@ async def stream_chat_completion(
             messages, _family_name, accumulated_reasoning
         )
         answer_kwargs = dict(kwargs)
+        _native_reasoning_retry = (
+            _family_name in _NATIVE_REASONING_TOOL_RECOVERY_FAMILIES
+        )
         # Register the answer-pass stream under the id the disconnect handler
         # aborts (`{response_id}:visible-answer`); otherwise it inherits the main
         # request_id and abort_request() misses, leaking the answer-pass
         # generation on the GPU after the client disconnects mid-answer-pass.
         answer_kwargs["request_id"] = f"{response_id}:visible-answer"
-        _force_answer_pass_direct_rail(
-            answer_kwargs,
-            family_name=_family_name,
-        )
+        if not _native_reasoning_retry:
+            _force_answer_pass_direct_rail(
+                answer_kwargs,
+                family_name=_family_name,
+            )
         answer_kwargs["max_tokens"] = _remaining_answer_pass_budget(
             _answer_budget or 256,
             completion_tokens,
         )
         answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
-        if _answer_family == "MiniMax-M3":
+        if _native_reasoning_retry:
+            pass
+        elif _answer_family == "MiniMax-M3":
             answer_ct_kwargs["thinking_mode"] = "disabled"
         elif _answer_family == "openPangu":
             answer_ct_kwargs["thinking"] = False
@@ -18243,6 +18459,7 @@ async def stream_chat_completion(
                         _family_name,
                         buffer_answer_pass=_buffer_answer_pass,
                     ),
+                    think_in_prompt=_native_reasoning_retry,
                 )
                 if not _delta:
                     continue
@@ -18270,7 +18487,12 @@ async def stream_chat_completion(
                     or (_ans_budget_cap and _ans_ct >= _ans_budget_cap)
                 )
                 _full_delta, _ans_sent = _answer_pass_visible_delta(
-                    _ans_raw, "", request, True, holdback=0
+                    _ans_raw,
+                    "",
+                    request,
+                    True,
+                    holdback=0,
+                    think_in_prompt=_native_reasoning_retry,
                 )
                 logger.debug(
                     "%s buffered Chat Completions answer pass result: "
@@ -18889,7 +19111,15 @@ async def stream_responses_api(
             reasoning_only_answer_family = ""
     if (
         not reasoning_only_answer_enabled
-        and _family_name in _REASONING_ANSWER_PASS_FAMILIES
+        and (
+            _family_name in _REASONING_ANSWER_PASS_FAMILIES
+            or _native_reasoning_tool_recovery_allowed(
+                _family_name,
+                request,
+                tools_available=_stream_tools_available,
+                effective_thinking=_effective_thinking,
+            )
+        )
         and _effective_thinking is not False
     ):
         # Degraded qwen3.5/3.6 quants (e.g. MXFP4-CRACK) can run their thinking
@@ -19643,8 +19873,13 @@ async def stream_responses_api(
         # answer cannot end as a reasoning-only/blank assistant row.
         logger.info(
             "%s tools-enabled Responses stream produced no valid tool call or "
-            "visible content; re-arming bounded thinking-off answer pass",
+            "visible content; re-arming bounded %s answer pass",
             reasoning_only_answer_family or "reasoning model",
+            (
+                "native tools-free"
+                if _family_name in _NATIVE_REASONING_TOOL_RECOVERY_FAMILIES
+                else "thinking-off"
+            ),
         )
         reasoning_only_answer_budget = reasoning_tools_fallback_answer_budget
         reasoning_only_answer_enabled = True
@@ -19869,9 +20104,14 @@ async def stream_responses_api(
             )
             logger.info(
                 "%s reasoning produced no visible content; "
-                "running bounded thinking-off answer pass "
+                "running bounded %s answer pass "
                 "(reasoning_chars=%d, answer_budget=%s)",
                 _answer_family,
+                (
+                    "native tools-free"
+                    if _family_name in _NATIVE_REASONING_TOOL_RECOVERY_FAMILIES
+                    else "thinking-off"
+                ),
                 len(accumulated_reasoning),
                 _answer_budget,
             )
@@ -19879,21 +20119,27 @@ async def stream_responses_api(
                 messages, _family_name, accumulated_reasoning
             )
             answer_kwargs = dict(kwargs)
+            _native_reasoning_retry = (
+                _family_name in _NATIVE_REASONING_TOOL_RECOVERY_FAMILIES
+            )
             # Register the answer-pass stream under the id the disconnect handler
             # aborts (`{response_id}:visible-answer`); otherwise abort_request()
             # misses and the answer-pass generation leaks on the GPU after a
             # mid-answer-pass client disconnect. Mirror of the Chat Completions site.
             answer_kwargs["request_id"] = f"{response_id}:visible-answer"
-            _force_answer_pass_direct_rail(
-                answer_kwargs,
-                family_name=_family_name,
-            )
+            if not _native_reasoning_retry:
+                _force_answer_pass_direct_rail(
+                    answer_kwargs,
+                    family_name=_family_name,
+                )
             answer_kwargs["max_tokens"] = _remaining_answer_pass_budget(
                 _answer_budget or 256,
                 completion_tokens,
             )
             answer_ct_kwargs = dict(answer_kwargs.get("chat_template_kwargs") or {})
-            if _answer_family == "MiniMax-M3":
+            if _native_reasoning_retry:
+                pass
+            elif _answer_family == "MiniMax-M3":
                 answer_ct_kwargs["thinking_mode"] = "disabled"
             elif _answer_family == "openPangu":
                 answer_ct_kwargs["thinking"] = False
@@ -19906,11 +20152,6 @@ async def stream_responses_api(
             answer_kwargs.pop("tools", None)
             answer_kwargs.pop("_vmlx_tools_present", None)
             answer_kwargs.pop("_vmlx_template_tools", None)
-            answer_endpoint = (
-                "Responses API MiniMax-M3 visible answer pass"
-                if m3_reasoning_only_answer_enabled
-                else f"Responses API {_answer_family} visible answer pass"
-            )
             try:
                 # F6: STREAM the answer pass token-by-token (see the Chat
                 # Completions site for the full rationale + mechanics). The MLLM
@@ -19956,6 +20197,7 @@ async def stream_responses_api(
                             _family_name,
                             buffer_answer_pass=_buffer_answer_pass,
                         ),
+                        think_in_prompt=_native_reasoning_retry,
                     )
                     if not _delta:
                         continue
@@ -19975,7 +20217,12 @@ async def stream_responses_api(
                         or (_ans_budget_cap and _ans_ct >= _ans_budget_cap)
                     )
                     _full_delta, _ans_sent = _answer_pass_visible_delta(
-                        _ans_raw, "", request, True, holdback=0
+                        _ans_raw,
+                        "",
+                        request,
+                        True,
+                        holdback=0,
+                        think_in_prompt=_native_reasoning_retry,
                     )
                     logger.debug(
                         "%s buffered Responses answer pass result: "
@@ -20021,7 +20268,6 @@ async def stream_responses_api(
                             )
                 if _ans_sent:
                     display_text = _ans_sent
-                    content_was_emitted = True
                     streamed_text += _ans_sent
                     completion_tokens += int(_ans_ct or 0)
                     # The visible-answer pass now owns the terminal status. The

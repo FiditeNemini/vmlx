@@ -3267,6 +3267,336 @@ class TestOpenAILogprobsFormatting:
         assert "tools" not in engine.calls[1]["kwargs"]
         assert engine.calls[1]["kwargs"]["chat_template_kwargs"]["thinking_mode"] == "disabled"
 
+    def test_step_native_tool_recovery_intent_gate(self):
+        """Only ordinary auto-tool turns may drop schemas for Step recovery."""
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+
+        tools = [
+            {
+                "type": "function",
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            }
+        ]
+
+        ordinary = ResponsesRequest(
+            model="step-test",
+            input="Privately calculate 143 times 27 and return the number.",
+            tools=tools,
+        )
+        explicit = ResponsesRequest(
+            model="step-test",
+            input="Use the run_command tool to print the number.",
+            tools=tools,
+        )
+        prohibited = ResponsesRequest(
+            model="step-test",
+            input="Do not call run_command; calculate the number yourself.",
+            tools=tools,
+        )
+        required = ResponsesRequest(
+            model="step-test",
+            input="Calculate the number.",
+            tool_choice="required",
+            tools=tools,
+        )
+
+        assert not server._request_explicitly_requests_tool_use(ordinary)
+        assert server._request_explicitly_requests_tool_use(explicit)
+        assert not server._request_explicitly_requests_tool_use(prohibited)
+        assert server._request_explicitly_requests_tool_use(required)
+        assert server._native_reasoning_tool_recovery_allowed(
+            "step3p7",
+            ordinary,
+            tools_available=True,
+            effective_thinking=True,
+        )
+        assert not server._native_reasoning_tool_recovery_allowed(
+            "step3p7",
+            explicit,
+            tools_available=True,
+            effective_thinking=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_streaming_responses_step_invalid_auto_tool_runs_native_retry(
+        self, monkeypatch
+    ):
+        """Step keeps its think rail, drops only tools, and streams the real answer."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.model_config_registry as registry
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.qwen3_parser import Qwen3ReasoningParser
+
+        config = SimpleNamespace(
+            family_name="step3p7",
+            think_in_template=True,
+            reasoning_parser="qwen3",
+            tool_parser="step3p5",
+            supports_thinking=True,
+        )
+
+        class _Engine:
+            is_mllm = False
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            def __init__(self):
+                self.calls = []
+
+            async def stream_chat(self, *, messages, **kwargs):
+                self.calls.append({"messages": messages, "kwargs": dict(kwargs)})
+                if len(self.calls) == 1:
+                    deltas = [
+                        "I should answer the arithmetic request.",
+                        (
+                            "</think>\n<tool_call>\n<function=run_command>\n"
+                            "</function>\n</tool_call>"
+                        ),
+                    ]
+                else:
+                    deltas = [
+                        "I checked the multiplication again.",
+                        "</think>\n3861 ",
+                        "STEP-RECOVERY-DONE",
+                    ]
+                text = ""
+                for index, delta in enumerate(deltas, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=delta,
+                        tokens=[index],
+                        prompt_tokens=8,
+                        completion_tokens=index,
+                        finished=index == len(deltas),
+                        finish_reason="stop" if index == len(deltas) else None,
+                    )
+
+        engine = _Engine()
+        monkeypatch.setattr(server, "_engine", engine)
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "step-recovery-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", Qwen3ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", "step3p5")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        monkeypatch.setattr(
+            server,
+            "_engine_prompt_starts_in_reasoning",
+            lambda *args, **kwargs: True,
+        )
+        monkeypatch.setattr(
+            registry,
+            "get_model_config_registry",
+            lambda *args, **kwargs: SimpleNamespace(lookup=lambda *a, **k: config),
+        )
+
+        tools = [
+            {
+                "type": "function",
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            }
+        ]
+        request = ResponsesRequest(
+            model="step-recovery-test",
+            input="Privately calculate 143 times 27.",
+            stream=True,
+            max_output_tokens=128,
+            enable_thinking=True,
+            tools=tools,
+        )
+
+        events = []
+        async for chunk in server.stream_responses_api(
+            engine,
+            [{"role": "user", "content": request.input}],
+            request,
+            fastapi_request=None,
+            tools=tools,
+            enable_thinking=True,
+            max_tokens=128,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        content_deltas = [
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        ]
+        visible = "".join(content_deltas)
+        completed = next(
+            event["response"]
+            for event in events
+            if event.get("type") == "response.completed"
+        )
+        function_items = [
+            event["item"]
+            for event in events
+            if event.get("type") == "response.output_item.done"
+            and event.get("item", {}).get("type") == "function_call"
+        ]
+
+        assert visible == "3861 STEP-RECOVERY-DONE"
+        assert len(content_deltas) >= 2
+        assert completed["output_text"] == visible
+        assert function_items == []
+        assert "<tool_call>" not in json.dumps(completed)
+        assert len(engine.calls) == 2
+        assert "tools" in engine.calls[0]["kwargs"]
+        assert "tools" not in engine.calls[1]["kwargs"]
+        assert engine.calls[1]["kwargs"].get("enable_thinking") is not False
+
+    @pytest.mark.asyncio
+    async def test_streaming_chat_step_invalid_auto_tool_runs_native_retry(
+        self, monkeypatch
+    ):
+        """Chat Completions shares Step's progressive native retry contract."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.model_config_registry as registry
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.qwen3_parser import Qwen3ReasoningParser
+
+        config = SimpleNamespace(
+            family_name="step3p7",
+            think_in_template=True,
+            reasoning_parser="qwen3",
+            tool_parser="step3p5",
+            supports_thinking=True,
+        )
+
+        class _Engine:
+            is_mllm = False
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            def __init__(self):
+                self.calls = []
+
+            async def stream_chat(self, *, messages, **kwargs):
+                self.calls.append({"messages": messages, "kwargs": dict(kwargs)})
+                deltas = (
+                    [
+                        "I should answer without a command.",
+                        (
+                            "</think>\n<tool_call>\n<function=run_command>\n"
+                            "</function>\n</tool_call>"
+                        ),
+                    ]
+                    if len(self.calls) == 1
+                    else [
+                        "I checked the result.",
+                        "</think>\n3861 ",
+                        "STEP-CHAT-RECOVERY-DONE",
+                    ]
+                )
+                text = ""
+                for index, delta in enumerate(deltas, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=delta,
+                        tokens=[index],
+                        prompt_tokens=8,
+                        completion_tokens=index,
+                        finished=index == len(deltas),
+                        finish_reason="stop" if index == len(deltas) else None,
+                    )
+
+        engine = _Engine()
+        monkeypatch.setattr(server, "_engine", engine)
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "step-recovery-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", Qwen3ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", "step3p5")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        monkeypatch.setattr(
+            server,
+            "_engine_prompt_starts_in_reasoning",
+            lambda *args, **kwargs: True,
+        )
+        monkeypatch.setattr(
+            registry,
+            "get_model_config_registry",
+            lambda *args, **kwargs: SimpleNamespace(lookup=lambda *a, **k: config),
+        )
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                },
+            }
+        ]
+        request = ChatCompletionRequest(
+            model="step-recovery-test",
+            messages=[Message(role="user", content="Privately calculate 143 times 27.")],
+            stream=True,
+            max_tokens=128,
+            enable_thinking=True,
+            tools=tools,
+        )
+
+        chunks = []
+        async for chunk in server.stream_chat_completion(
+            engine,
+            [{"role": "user", "content": "Privately calculate 143 times 27."}],
+            request,
+            fastapi_request=None,
+            tools=tools,
+            enable_thinking=True,
+            max_tokens=128,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: ") and line != "data: [DONE]":
+                    chunks.append(json.loads(line.removeprefix("data: ")))
+
+        content_deltas = [
+            choice.get("delta", {}).get("content", "")
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+            if choice.get("delta", {}).get("content") is not None
+        ]
+        visible = "".join(content_deltas)
+        finish_reasons = [
+            choice.get("finish_reason")
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+            if choice.get("finish_reason") is not None
+        ]
+
+        assert visible == "3861 STEP-CHAT-RECOVERY-DONE"
+        assert len([delta for delta in content_deltas if delta]) >= 2
+        assert finish_reasons[-1] == "stop"
+        assert len(engine.calls) == 2
+        assert "tools" not in engine.calls[1]["kwargs"]
+        assert engine.calls[1]["kwargs"].get("enable_thinking") is not False
+
     @pytest.mark.asyncio
     async def test_nonstream_responses_suppressed_repeat_tool_runs_answer_pass(
         self, monkeypatch

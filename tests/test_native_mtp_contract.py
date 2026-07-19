@@ -19,7 +19,7 @@ def test_native_mtp_contract_pins_named_policy_and_panel_edges():
     assert "test_qwen36_mxfp4_mtp_bundle_is_text_native_ready" in required
     assert "test_native_mtp_detection_uses_weights_not_path_name" in required
     assert "test_runtime_metadata_can_explicitly_drop_configured_mtp" in required
-    assert "test_jang2k_profile_blocks_native_mtp_runtime_but_keeps_vl_artifact_route" in required
+    assert "test_jang2k_profile_alone_does_not_block_native_mtp_runtime" in required
     assert "test_jang_quant_mode_supports_mxfp8_metadata" in required
     assert "test_native_mtp_depth_defaults_to_three" in required
     assert "test_native_mtp_depth_uses_validated_model_tuning_sidecar_by_default" in required

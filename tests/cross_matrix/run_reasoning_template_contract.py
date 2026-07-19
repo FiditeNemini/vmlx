@@ -18,10 +18,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from tests.cross_matrix.output_counts import parse_counts
+except ModuleNotFoundError:  # direct script execution
+    from output_counts import parse_counts
+
 
 DEFAULT_OUT = Path("build/current-reasoning-template-contract-20260526-settings-audit.json")
 
 SOURCE_HASH_FILES = (
+    "tests/cross_matrix/output_counts.py",
     "vmlx_engine/server.py",
     "vmlx_engine/reasoning/__init__.py",
     "vmlx_engine/reasoning/deepseek_r1_parser.py",
@@ -108,27 +114,7 @@ def _sha256(path: Path) -> str:
 
 
 def _parse_counts(output: str) -> dict[str, int | None]:
-    # Vitest decorates labels and counts with ANSI SGR sequences. Without
-    # normalizing those first, ``Tests 118 passed`` fails the primary regex and
-    # the generic fallback captures ``3 passed`` from the Test Files summary.
-    output = re.sub(r"\x1b\[[0-9;]*m", "", output)
-    passed = None
-    skipped = None
-    deselected = None
-    match = re.search(r"Tests\s+(\d+) passed", output)
-    if match:
-        passed = int(match.group(1))
-    match = re.search(r"(\d+) passed", output)
-    if match and passed is None:
-        passed = int(match.group(1))
-    match = re.search(r"(\d+) skipped", output)
-    if match:
-        skipped = int(match.group(1))
-    match = re.search(r"(\d+) deselected", output)
-    if match:
-        deselected = int(match.group(1))
-    return {"passed": passed, "skipped": skipped, "deselected": deselected}
-
+    return parse_counts(output)
 
 def _run(root: Path, name: str, cwd_rel: Path, cmd: list[str]) -> dict[str, Any]:
     started = time.monotonic()

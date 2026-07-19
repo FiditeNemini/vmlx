@@ -18,10 +18,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from tests.cross_matrix.output_counts import parse_counts
+except ModuleNotFoundError:  # direct script execution
+    from output_counts import parse_counts
+
 
 DEFAULT_OUT = Path("build/current-model-artifact-format-contract-after-mllm-tight-memory-guard-20260607.json")
 
 SOURCE_HASH_FILES = (
+    "tests/cross_matrix/output_counts.py",
     "vmlx_engine/model_config_registry.py",
     "vmlx_engine/model_configs.py",
     "vmlx_engine/native_mtp.py",
@@ -91,16 +97,7 @@ def _sha256(path: Path) -> str:
 
 
 def _parse_counts(output: str) -> dict[str, int | None]:
-    passed = None
-    deselected = None
-    match = re.search(r"(\d+) passed", output)
-    if match:
-        passed = int(match.group(1))
-    match = re.search(r"(\d+) deselected", output)
-    if match:
-        deselected = int(match.group(1))
-    return {"passed": passed, "deselected": deselected}
-
+    return parse_counts(output)
 
 def _run(root: Path, name: str, cmd: list[str]) -> dict[str, Any]:
     started = time.monotonic()

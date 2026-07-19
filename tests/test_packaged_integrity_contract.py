@@ -44,15 +44,7 @@ def _expected_open_digest_line() -> str:
 
 
 def _current_objective_open_digest_line() -> str:
-    artifact = json.loads(
-        Path(runner.CURRENT_OBJECTIVE_DIGEST_ARTIFACT).read_text(encoding="utf-8")
-    )
-    open_requirements = [
-        item["requirement"]
-        for item in artifact["requirements"]
-        if item["status"] != "pass"
-        and item["requirement"] not in runner.SUITE_DEFERRED_RELEASE_OPEN_REQUIREMENTS
-    ]
+    open_requirements = runner.current_objective_open_requirements()
     return "[FAIL] objective proof digest: " + "; ".join(open_requirements)
 
 

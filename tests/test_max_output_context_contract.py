@@ -79,8 +79,8 @@ def test_max_output_context_contract_covers_all_public_api_surfaces():
     assert "switching chats never carries a previous chat maxTokens into Auto Responses" in required
     assert "new chats preserve model-owned maxTokens while refusing inherited output caps" in required
     assert "persisted chat maxTokens cannot relaunch server with a new startup maxTokens" in required
-    assert "keeps per-chat maxThinkingTokens as template thinking budget only, never output or prompt context" in required
-    assert "keeps Responses maxThinkingTokens as thinking budget only and separate from output caps" in required
+    assert "sends top-level max_thinking_tokens for an engine-honoring family (supportsThinkingBudget)" in required
+    assert "sends Responses max_thinking_tokens for an engine-honoring family (supportsThinkingBudget)" in required
     assert "chat:setOverrides treats maxThinkingTokens as an explicit thinking budget, not an output cap" in required
     assert "test_explicit_max_thinking_tokens_overrides_effort_budget_without_rewriting_output_length" in required
     assert "test_public_api_models_reject_non_positive_output_caps" in required

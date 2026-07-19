@@ -19,6 +19,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from tests.cross_matrix.output_counts import parse_counts
+except ModuleNotFoundError:  # direct script execution
+    from output_counts import parse_counts
+
 
 DEFAULT_OUT = Path("build/current-vl-media-cache-contract-after-dsv4-preflight-refresh-20260608.json")
 
@@ -36,6 +41,7 @@ PYTEST_PATTERN = (
 )
 
 SOURCE_HASH_FILES = (
+    "tests/cross_matrix/output_counts.py",
     "vmlx_engine/models/mllm.py",
     "vmlx_engine/mllm_batch_generator.py",
     "vmlx_engine/mllm_scheduler.py",
@@ -151,7 +157,7 @@ REQUIRED_PANEL_VL_MEDIA_TEST_MARKERS = (
     "buildResult priority chain puts modelPath basename before cfg.servedModelName in the ASSIGNMENT (not just comments)",
     "VLM gets --continuous-batching for BatchedEngine with MLLMScheduler",
     "VLM continuous batching off emits explicit opt-out and suppresses cache stack",
-    "auto-detected VLM wins over stale isMultimodal=false",
+    "user Force-Off beats auto-detected VLM: emits --text-only, not --is-mllm",
     "marks Qwen3.6 VL JANG bundles with indexed MTP tensors as native MTP capable",
     "keeps ZAYA1-VL multimodal when a stale stamp says text",
     "keeps MXTQ/JANGTQ Qwen hybrid VLM multimodal",
@@ -172,23 +178,7 @@ def _sha256(path: Path) -> str:
 
 
 def _parse_counts(output: str) -> dict[str, int | None]:
-    passed = None
-    skipped = None
-    deselected = None
-    match = re.search(r"Tests\s+(\d+) passed", output)
-    if match:
-        passed = int(match.group(1))
-    match = re.search(r"(\d+) passed", output)
-    if match and passed is None:
-        passed = int(match.group(1))
-    match = re.search(r"(\d+) skipped", output)
-    if match:
-        skipped = int(match.group(1))
-    match = re.search(r"(\d+) deselected", output)
-    if match:
-        deselected = int(match.group(1))
-    return {"passed": passed, "skipped": skipped, "deselected": deselected}
-
+    return parse_counts(output)
 
 def _run(root: Path, name: str, cwd_rel: Path, cmd: list[str]) -> dict[str, Any]:
     started = time.monotonic()

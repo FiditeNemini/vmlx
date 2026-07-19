@@ -20,12 +20,18 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from tests.cross_matrix.output_counts import parse_counts
+except ModuleNotFoundError:  # direct script execution
+    from output_counts import parse_counts
+
 
 DEFAULT_OUT = Path(
     "build/current-generation-defaults-contract-after-pr-intake-matrix-refresh-20260609.json"
 )
 
 SOURCE_HASH_FILES = (
+    "tests/cross_matrix/output_counts.py",
     "vmlx_engine/server.py",
     "vmlx_engine/cli.py",
     "tests/test_engine_audit.py",
@@ -93,7 +99,7 @@ REQUIRED_GENERATION_DEFAULT_TEST_MARKERS = (
     "test_local_generation_metadata_audit_accepts_template_budget_support",
     "marks thinking-budget unsupported when the template has thinking but no budget variable",
     "surfaces maxThinkingTokens only when the template consumes thinking_budget",
-    "chat settings hides max-thinking tokens when template metadata says budget is unsupported",
+    "chat settings shows max-thinking tokens only for engine-honoring or template-budget families",
 )
 
 REQUIRED_GENERATION_DEFAULT_FAMILY_MATRIX: dict[str, dict[str, tuple[str, ...]]] = {
@@ -162,7 +168,7 @@ REQUIRED_GENERATION_DEFAULT_FAMILY_MATRIX: dict[str, dict[str, tuple[str, ...]]]
             "test_local_generation_metadata_audit_flags_thinking_template_without_budget",
             "test_local_generation_metadata_audit_accepts_template_budget_support",
             "surfaces maxThinkingTokens only when the template consumes thinking_budget",
-            "chat settings hides max-thinking tokens when template metadata says budget is unsupported",
+            "chat settings shows max-thinking tokens only for engine-honoring or template-budget families",
         ),
     },
     "step3p7_metadata_route_matrix": {
@@ -278,23 +284,7 @@ def _sha256(path: Path) -> str:
 
 
 def _parse_counts(output: str) -> dict[str, int | None]:
-    passed = None
-    skipped = None
-    deselected = None
-    match = re.search(r"Tests\s+(\d+) passed", output)
-    if match:
-        passed = int(match.group(1))
-    match = re.search(r"(\d+) passed", output)
-    if match and passed is None:
-        passed = int(match.group(1))
-    match = re.search(r"(\d+) skipped", output)
-    if match:
-        skipped = int(match.group(1))
-    match = re.search(r"(\d+) deselected", output)
-    if match:
-        deselected = int(match.group(1))
-    return {"passed": passed, "skipped": skipped, "deselected": deselected}
-
+    return parse_counts(output)
 
 def _run(root: Path, name: str, cwd_rel: Path, cmd: list[str]) -> dict[str, Any]:
     started = time.monotonic()
@@ -422,7 +412,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
             and "test_local_generation_metadata_audit_accepts_template_budget_support" not in missing_markers
             and "marks thinking-budget unsupported when the template has thinking but no budget variable" not in missing_markers
             and "surfaces maxThinkingTokens only when the template consumes thinking_budget" not in missing_markers
-            and "chat settings hides max-thinking tokens when template metadata says budget is unsupported" not in missing_markers
+            and "chat settings shows max-thinking tokens only for engine-honoring or template-budget families" not in missing_markers
         ),
         "panel_does_not_emit_default_sampler_cli_flags": (
             not failed

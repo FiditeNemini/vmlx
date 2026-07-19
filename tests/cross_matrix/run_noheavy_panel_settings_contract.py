@@ -30,9 +30,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from tests.cross_matrix.output_counts import parse_vitest_counts
+except ModuleNotFoundError:  # direct script execution
+    from output_counts import parse_vitest_counts
+
 
 DEFAULT_OUT = Path("build/current-panel-settings-contract-proof-20260601-cache-ui-storage-quant.json")
 SOURCE_HASH_FILES = (
+    "tests/cross_matrix/output_counts.py",
     "panel/src/main/sessions.ts",
     "panel/src/main/memory-enforcer.ts",
     "panel/src/main/model-config-registry.ts",
@@ -58,6 +64,7 @@ SOURCE_HASH_FILES = (
     "panel/tests/generation-defaults.test.ts",
     "panel/tests/i18n-consistency.test.ts",
     "panel/tests/load-progress-honesty.test.ts",
+    "panel/tests/model-launch-memory.test.ts",
     "panel/tests/model-config-registry.test.ts",
     "tests/test_model_config_registry.py",
     "tests/test_panel_cli_flag_contract.py",
@@ -65,7 +72,7 @@ SOURCE_HASH_FILES = (
 
 REQUIRED_PANEL_SETTINGS_SOURCE_MARKERS = (
     "DSV4 pool quant and native prefix controls stay DSV4-only",
-    "launch memory admission is warning-only for lazy-mmap bundles",
+    "allows lazy-mmap launches when reclaimable macOS pages cover the freemem gap",
     "test_panel_serve_flags_are_registered_engine_cli_flags",
     "test_runtime_and_preview_additional_arg_filters_share_blocklists",
 )
@@ -81,6 +88,7 @@ COMMANDS: dict[str, list[str]] = {
         "tests/generation-defaults.test.ts",
         "tests/i18n-consistency.test.ts",
         "tests/load-progress-honesty.test.ts",
+        "tests/model-launch-memory.test.ts",
     ],
     "panel_typecheck": ["npm", "run", "typecheck"],
     "panel_model_config_registry": [
@@ -107,28 +115,7 @@ COMMANDS: dict[str, list[str]] = {
 
 
 def _parse_counts(output: str) -> dict[str, int | None]:
-    test_files_passed = None
-    tests_passed = None
-    tests_skipped = None
-    match = re.search(r"Test Files\s+(\d+) passed", output)
-    if match:
-        test_files_passed = int(match.group(1))
-    match = re.search(r"Tests\s+(\d+) passed", output)
-    if match:
-        tests_passed = int(match.group(1))
-    if tests_passed is None:
-        match = re.search(r"(\d+) passed", output)
-        if match:
-            tests_passed = int(match.group(1))
-    match = re.search(r"Tests\s+.*?(\d+) skipped", output)
-    if match:
-        tests_skipped = int(match.group(1))
-    return {
-        "test_files_passed": test_files_passed,
-        "tests_passed": tests_passed,
-        "tests_skipped": tests_skipped,
-    }
-
+    return parse_vitest_counts(output)
 
 def _run_command(name: str, cmd: list[str], cwd: Path) -> dict[str, Any]:
     started = time.monotonic()
@@ -165,6 +152,7 @@ def missing_source_markers(root: Path) -> list[str]:
         for rel in (
             "panel/tests/settings-flow.test.ts",
             "panel/tests/dsv4-env.test.ts",
+            "panel/tests/model-launch-memory.test.ts",
             "tests/test_panel_cli_flag_contract.py",
         )
     )
@@ -188,7 +176,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
     engine_model_counts = commands["engine_model_config_registry"]["counts"]
     cli_flag_ok = commands["engine_panel_cli_flag_contract"]["returncode"] == 0
     settings_coverage_ok = (
-        settings_counts["test_files_passed"] == 6
+        settings_counts["test_files_passed"] == 7
         and (settings_counts["tests_passed"] or 0) >= 260
     )
     panel_model_ok = (

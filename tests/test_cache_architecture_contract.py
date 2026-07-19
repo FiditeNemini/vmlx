@@ -67,7 +67,7 @@ def test_cache_architecture_contract_pins_named_cache_edges():
     assert "test_mimo_v2_jang_loader_skips_generic_turboquant_kv_auto_mode" in required_pytest
     assert "test_accepts_scheduler_owned_ssm_l2_store" in required_pytest
     assert "test_scheduler_creates_matching_ssm_companion_l2_for_block_disk" in required_pytest
-    assert "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_stored_kv_q4" in required_pytest
+    assert "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore" in required_pytest
     assert "test_serialize_tq_cache_mixed_hybrid" in required_pytest
     assert "test_tq_tensors_roundtrip_via_safetensors" in required_pytest
     assert "test_mllm_stats_include_cache_fields" in required_pytest
@@ -177,7 +177,7 @@ def test_cache_architecture_contract_publishes_structured_family_matrix():
     qwen = gate.REQUIRED_CACHE_FAMILY_MATRIX["qwen36_hybrid_tq"]
     assert "turboquant_kv_runtime_contract" in qwen["checks"]
     assert (
-        "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_stored_kv_q4"
+        "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore"
         in qwen["markers"]
     )
 

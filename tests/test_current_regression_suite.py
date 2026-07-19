@@ -476,6 +476,44 @@ def test_current_regression_suite_checkpoints_each_started_step(
     assert before_second["completed_steps"] == ["first_contract"]
 
 
+def test_current_regression_suite_bootstraps_clean_checkout_before_digest_exists(
+    monkeypatch,
+    tmp_path,
+):
+    from tests.cross_matrix import run_current_regression_suite as suite
+
+    out = tmp_path / "current-suite.json"
+    monkeypatch.setattr(
+        suite,
+        "CURRENT_SUITE_COMMANDS",
+        {
+            "first_contract": [sys.executable, "-c", "print('first')"],
+            "objective_digest": [sys.executable, "generate-digest"],
+        },
+    )
+    snapshots = {}
+
+    def fake_run_step(name, cmd, cwd):
+        if name == "first_contract":
+            snapshots["before_first"] = json.loads(out.read_text(encoding="utf-8"))
+        if name == "objective_digest":
+            _write_known_open_objective_digest(tmp_path)
+        return {"name": name, "command": cmd, "returncode": 0, "stdout_tail": []}
+
+    monkeypatch.setattr(suite, "_run_step", fake_run_step)
+
+    artifact = suite.build_suite_artifact(
+        tmp_path,
+        include_release_gate=False,
+        current_suite_artifact_path=out,
+    )
+
+    assert snapshots["before_first"]["status"] == "open"
+    assert snapshots["before_first"]["objective_digest_available"] is False
+    assert artifact["status"] == "pass"
+    assert artifact["objective_digest_available"] is True
+
+
 def test_current_regression_suite_prints_step_progress(tmp_path, monkeypatch, capsys):
     from tests.cross_matrix import run_current_regression_suite as suite
 

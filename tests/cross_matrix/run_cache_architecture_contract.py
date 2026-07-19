@@ -20,6 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    from tests.cross_matrix.output_counts import parse_counts
+except ModuleNotFoundError:  # direct script execution
+    from output_counts import parse_counts
+
 
 DEFAULT_OUT = Path(
     "build/current-cache-architecture-contract-after-noheavy-contract-refresh-20260608.json"
@@ -38,6 +43,7 @@ CACHE_PATTERN = (
 )
 
 SOURCE_HASH_FILES = (
+    "tests/cross_matrix/output_counts.py",
     "vmlx_engine/server.py",
     "vmlx_engine/scheduler.py",
     "vmlx_engine/prefix_cache.py",
@@ -68,6 +74,7 @@ SOURCE_HASH_FILES = (
     "panel/tests/dsv4-env.test.ts",
     "panel/tests/settings-flow.test.ts",
     "panel/tests/cache-control-policy.test.ts",
+    "panel/tests/cache-capacity-display.test.ts",
 )
 
 REQUIRED_CACHE_TEST_MARKERS = (
@@ -89,7 +96,7 @@ REQUIRED_CACHE_TEST_MARKERS = (
     # L2/block-disk must backfill paged cache for later partial reuse.
     "test_prompt_tq_disk_l2_hit_skips_synchronous_plain_paged_backfill",
     # Qwen hybrid rows keep selective live TQ only where the runtime supports it.
-    "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_stored_kv_q4",
+    "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore",
     # TQ-native disk serialization must preserve mixed hybrid caches and round
     # trip real safetensors metadata instead of dequantizing everything.
     "test_serialize_tq_cache_mixed_hybrid",
@@ -158,7 +165,8 @@ REQUIRED_PANEL_CACHE_MARKERS = (
     "disabling prefix cache disables all dependent features",
     "MCP tools honor explicit prefix cache disable",
     "cacheMemoryPercent default 15 emits 0.15 when legacy memory cache is active",
-    "omits memory-aware cache budget flags when paged cache is active",
+    "explains that MB/percent set the paged L1 RAM ceiling and only TTL is ignored",
+    "derives disabled/ignored control state from effective paged cache state",
     "mutual exclusion: disk cache NOT emitted when paged cache is active",
     "mutual exclusion: block disk cache only emitted when paged cache is active",
     "prefix cache disabled suppresses all cache sub-flags",
@@ -268,7 +276,7 @@ REQUIRED_CACHE_FAMILY_MATRIX: dict[str, dict[str, tuple[str, ...]]] = {
     "qwen36_hybrid_tq": {
         "checks": ("turboquant_kv_runtime_contract",),
         "markers": (
-            "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_stored_kv_q4",
+            "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore",
         ),
         "api_checks": ("turboquant_kv_runtime_contract",),
         "api_command_markers": (),
@@ -420,6 +428,7 @@ COMMANDS: dict[str, CommandSpec] = {
             "run",
             "tests/settings-flow.test.ts",
             "tests/cache-control-policy.test.ts",
+            "tests/cache-capacity-display.test.ts",
             "tests/dsv4-env.test.ts",
             "--reporter=verbose",
             "-t",
@@ -435,20 +444,7 @@ def _sha256(path: Path) -> str:
 
 
 def _parse_counts(output: str) -> dict[str, int | None]:
-    passed = None
-    skipped = None
-    deselected = None
-    matches = [int(value) for value in re.findall(r"(\d+) passed", output)]
-    if matches:
-        passed = max(matches)
-    matches = [int(value) for value in re.findall(r"(\d+) skipped", output)]
-    if matches:
-        skipped = max(matches)
-    matches = [int(value) for value in re.findall(r"(\d+) deselected", output)]
-    if matches:
-        deselected = max(matches)
-    return {"passed": passed, "skipped": skipped, "deselected": deselected}
-
+    return parse_counts(output)
 
 def _run(root: Path, name: str, spec: CommandSpec) -> dict[str, Any]:
     started = time.monotonic()
@@ -613,7 +609,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
         "turboquant_kv_runtime_contract": (
             not failed
             and "turboquant_kv_runtime_contract" not in missing_api_checks
-            and "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_stored_kv_q4" not in missing_markers
+            and "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore" not in missing_markers
         ),
         "turboquant_disk_roundtrip": (
             not failed

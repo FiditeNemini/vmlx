@@ -320,7 +320,26 @@ def _source_hashes(root: Path) -> dict[str, str]:
 
 def _load_objective_digest(root: Path) -> dict[str, Any]:
     path = root / CURRENT_OBJECTIVE_DIGEST_ARTIFACT
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # A clean checkout has no generated build artifacts yet. The suite
+        # checkpoints progress before its objective_digest step runs, so keep
+        # those provisional summaries truthful instead of crashing before the
+        # producer can create the digest. The final summary still requires the
+        # real artifact to exist.
+        return {
+            "status": "pending",
+            "artifact": str(CURRENT_OBJECTIVE_DIGEST_ARTIFACT),
+            "requirements": [
+                {
+                    "requirement": requirement,
+                    "status": "pending",
+                    "caveat": "objective digest has not been generated yet",
+                }
+                for requirement in EXPECTED_OPEN_REQUIREMENTS
+            ],
+        }
 
 
 def _open_requirements(digest: dict[str, Any]) -> list[str]:
@@ -465,6 +484,9 @@ def _build_summary(
     *,
     current_step: str | None = None,
 ) -> dict[str, Any]:
+    objective_digest_available = (
+        root / CURRENT_OBJECTIVE_DIGEST_ARTIFACT
+    ).is_file()
     digest = _load_objective_digest(root)
     open_requirements = _open_requirements(digest)
     open_requirement_details = _open_requirement_details(digest)
@@ -481,6 +503,7 @@ def _build_summary(
         "pass"
         if (
             current_step is None
+            and objective_digest_available
             and not failed_steps
             and not unexpected_open
             and not missing_expected_open
@@ -496,6 +519,7 @@ def _build_summary(
         "unexpected_open_requirements": unexpected_open,
         "missing_expected_open_requirements": missing_expected_open,
         "source_hashes": _source_hashes(root),
+        "objective_digest_available": objective_digest_available,
         "current_step": current_step,
         "completed_steps": list(steps),
         "failed_steps": failed_steps,

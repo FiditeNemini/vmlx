@@ -19,12 +19,18 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from tests.cross_matrix.output_counts import parse_counts
+except ModuleNotFoundError:  # direct script execution
+    from output_counts import parse_counts
+
 
 DEFAULT_OUT = Path(
     "build/current-max-output-context-contract-after-jangtq2-objective-refresh-20260607.json"
 )
 
 SOURCE_HASH_FILES = (
+    "tests/cross_matrix/output_counts.py",
     "vmlx_engine/server.py",
     "vmlx_engine/api/models.py",
     "vmlx_engine/api/anthropic_adapter.py",
@@ -119,8 +125,8 @@ REQUIRED_MAX_OUTPUT_CONTEXT_TEST_MARKERS = (
     "default profiles cannot make maxTokens sticky on clean new chats",
     "new chats preserve model-owned maxTokens while refusing inherited output caps",
     "does not turn model max_new_tokens into a sticky per-chat max_tokens override",
-    "keeps per-chat maxThinkingTokens as template thinking budget only, never output or prompt context",
-    "keeps Responses maxThinkingTokens as thinking budget only and separate from output caps",
+    "sends top-level max_thinking_tokens for an engine-honoring family (supportsThinkingBudget)",
+    "sends Responses max_thinking_tokens for an engine-honoring family (supportsThinkingBudget)",
     "suppresses stale maxThinkingTokens when thinking is explicitly off",
     "chat:setOverrides treats maxThinkingTokens as an explicit thinking budget, not an output cap",
     "coding tool configs keep output limit separate from context fallback",
@@ -204,23 +210,7 @@ def _sha256(path: Path) -> str:
 
 
 def _parse_counts(output: str) -> dict[str, int | None]:
-    passed = None
-    skipped = None
-    deselected = None
-    match = re.search(r"Tests\s+(\d+) passed", output)
-    if match:
-        passed = int(match.group(1))
-    match = re.search(r"(\d+) passed", output)
-    if match and passed is None:
-        passed = int(match.group(1))
-    match = re.search(r"(\d+) skipped", output)
-    if match:
-        skipped = int(match.group(1))
-    match = re.search(r"(\d+) deselected", output)
-    if match:
-        deselected = int(match.group(1))
-    return {"passed": passed, "skipped": skipped, "deselected": deselected}
-
+    return parse_counts(output)
 
 def _run(root: Path, name: str, cwd_rel: Path, cmd: list[str]) -> dict[str, Any]:
     started = time.monotonic()
@@ -339,7 +329,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
             and "chat:setOverrides rejects non-finite or non-numeric maxTokens instead of poisoning server defaults" not in missing_markers
             and "persisted chat maxTokens cannot relaunch server with a new startup maxTokens" not in missing_markers
             and "per-chat maxTokens below or above the server startup default remain request scoped" not in missing_markers
-            and "keeps per-chat maxThinkingTokens as template thinking budget only, never output or prompt context" not in missing_markers
+            and "sends top-level max_thinking_tokens for an engine-honoring family (supportsThinkingBudget)" not in missing_markers
         ),
         "request_builders_omit_auto_output_cap": (
             not failed
@@ -350,7 +340,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
             and "cleared persisted chat maxTokens null stays Auto for Chat Completions and Responses" not in missing_markers
             and "switching chats never carries a previous chat maxTokens into Auto Chat Completions" not in missing_markers
             and "switching chats never carries a previous chat maxTokens into Auto Responses" not in missing_markers
-            and "keeps Responses maxThinkingTokens as thinking budget only and separate from output caps" not in missing_markers
+            and "sends Responses max_thinking_tokens for an engine-honoring family (supportsThinkingBudget)" not in missing_markers
             and "suppresses stale maxThinkingTokens when thinking is explicitly off" not in missing_markers
         ),
         "new_chat_output_caps_are_not_inherited_or_made_sticky": (

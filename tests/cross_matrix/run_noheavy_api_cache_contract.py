@@ -37,9 +37,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from tests.cross_matrix.output_counts import parse_counts
+except ModuleNotFoundError:  # direct script execution
+    from output_counts import parse_counts
+
 
 DEFAULT_OUT = Path("build/current-noheavy-api-cache-contract-after-xml-docs-boundary-20260609.json")
 SOURCE_HASH_FILES = (
+    "tests/cross_matrix/output_counts.py",
     "vmlx_engine/server.py",
     "vmlx_engine/api/models.py",
     "vmlx_engine/api/tool_calling.py",
@@ -394,16 +400,7 @@ COMMANDS: dict[str, list[str]] = {
 
 
 def _parse_counts(output: str) -> dict[str, int | None]:
-    passed = None
-    deselected = None
-    matches = re.findall(r"(\d+) passed", output)
-    if matches:
-        passed = int(matches[-1])
-    matches = re.findall(r"(\d+) deselected", output)
-    if matches:
-        deselected = int(matches[-1])
-    return {"passed": passed, "deselected": deselected}
-
+    return parse_counts(output)
 
 def _run_command(name: str, cmd: list[str], cwd: Path) -> dict[str, Any]:
     started = time.monotonic()

@@ -18,10 +18,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from tests.cross_matrix.output_counts import parse_counts
+except ModuleNotFoundError:  # direct script execution
+    from output_counts import parse_counts
+
 
 DEFAULT_OUT = Path("build/current-native-mtp-contract-after-noheavy-contract-refresh-20260608.json")
 
 SOURCE_HASH_FILES = (
+    "tests/cross_matrix/output_counts.py",
     "vmlx_engine/native_mtp.py",
     "vmlx_engine/mllm_batch_generator.py",
     "vmlx_engine/server.py",
@@ -48,7 +54,7 @@ REQUIRED_NATIVE_MTP_TEST_MARKERS = (
     "test_native_mtp_detection_uses_weights_not_path_name",
     "test_config_only_mtp_bundle_does_not_activate_native_runtime",
     "test_runtime_metadata_can_explicitly_drop_configured_mtp",
-    "test_jang2k_profile_blocks_native_mtp_runtime_but_keeps_vl_artifact_route",
+    "test_jang2k_profile_alone_does_not_block_native_mtp_runtime",
     "test_jang_quant_mode_supports_mxfp8_metadata",
     # Depth/tuning/D3 policy: D3 can be used only from explicit runtime policy
     # and model-local evidence, not hidden sampler forcing.
@@ -120,23 +126,7 @@ def _sha256(path: Path) -> str:
 
 
 def _parse_counts(output: str) -> dict[str, int | None]:
-    passed = None
-    skipped = None
-    deselected = None
-    match = re.search(r"Tests\s+(\d+) passed", output)
-    if match:
-        passed = int(match.group(1))
-    match = re.search(r"(\d+) passed", output)
-    if match and passed is None:
-        passed = int(match.group(1))
-    match = re.search(r"(\d+) skipped", output)
-    if match:
-        skipped = int(match.group(1))
-    match = re.search(r"(\d+) deselected", output)
-    if match:
-        deselected = int(match.group(1))
-    return {"passed": passed, "skipped": skipped, "deselected": deselected}
-
+    return parse_counts(output)
 
 def _run(root: Path, name: str, cwd_rel: Path, cmd: list[str]) -> dict[str, Any]:
     started = time.monotonic()
@@ -189,6 +179,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
             and "test_runtime_metadata_can_explicitly_drop_configured_mtp" not in missing_markers
             and "test_partial_indexed_layers_flagged" not in missing_markers
             and "test_qwen36_nested_config_and_layered_tensors_are_native_ready" not in missing_markers
+            and "test_jang2k_profile_alone_does_not_block_native_mtp_runtime" not in missing_markers
         ),
         "config_only_mtp_never_activates": (
             not failed

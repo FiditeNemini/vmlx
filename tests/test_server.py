@@ -4728,6 +4728,40 @@ class TestToolChoiceNonePromptParity:
         assert not server._tools_available_for_generation(
             request, engine_tools=[{"name": "file_info"}]
         )
+        assert server._request_tools_for_generation_prompt(request) == []
+
+    def test_named_choice_filters_request_prompt_tools(self):
+        from vmlx_engine import server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+
+        request = ChatCompletionRequest(
+            model="minimax-test",
+            messages=[Message(role="user", content="inspect the file")],
+            tool_choice={
+                "type": "function",
+                "function": {"name": "file_info"},
+            },
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                },
+            ],
+        )
+
+        effective = server._request_tools_for_generation_prompt(request)
+        assert len(effective) == 1
+        assert effective[0].function["name"] == "file_info"
 
     @pytest.mark.asyncio
     async def test_streaming_chat_post_tool_direct_answer_is_visible(

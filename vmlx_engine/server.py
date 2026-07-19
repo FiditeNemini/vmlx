@@ -3438,6 +3438,16 @@ def _filter_tools_for_specific_choice(
     return filtered
 
 
+def _request_tools_for_generation_prompt(request: Any) -> list[Any]:
+    """Return public request tools that are actually rendered this turn."""
+    if request is None or getattr(request, "tool_choice", None) == "none":
+        return []
+    return _filter_tools_for_specific_choice(
+        list(getattr(request, "tools", None) or []),
+        getattr(request, "tool_choice", None),
+    )
+
+
 def _is_required_tool_choice(tool_choice: Any) -> bool:
     """Return True when the request requires at least one tool call."""
     if tool_choice == "required":
@@ -10545,13 +10555,19 @@ async def create_anthropic_message(
     # Merge server-wide --chat-template-kwargs defaults with any adapter-populated
     # kwargs (e.g., thinking_budget from Anthropic thinking.budget_tokens)
     _ct_kwargs = _merge_ct_kwargs(chat_req.chat_template_kwargs)
+    _msg_tool_choice = chat_req.tool_choice
+    _msg_effective_tools = _request_tools_for_generation_prompt(chat_req)
+    _attach_effective_tools_for_tool_parsing(chat_req, _msg_effective_tools)
+    if _msg_tool_choice is not None:
+        _msg_kwargs["tool_choice"] = _msg_tool_choice
+        _ct_kwargs.setdefault("tool_choice", _msg_tool_choice)
 
     # Forward enable_thinking to engine — without this, the model always thinks
     # internally even when the client sends thinking: {type: "disabled"}
     _et = _resolve_enable_thinking(
         request_value=chat_req.enable_thinking,
         ct_kwargs=_ct_kwargs,
-        tools_present=bool(chat_req.tools),
+        tools_present=bool(_msg_effective_tools),
         model_key=_model_path or _model_name or chat_req.model,
         engine=engine,
         auto_detect=True,
@@ -10601,7 +10617,7 @@ async def create_anthropic_message(
         _dsv4_thinking = _resolve_dsv4_thinking_policy(
             requested_enable_thinking=chat_req.enable_thinking,
             effort_requested=bool(_cur_effort),
-            tools_present=bool(getattr(chat_req, "tools", None)),
+            tools_present=bool(_msg_effective_tools),
             tool_choice=getattr(chat_req, "tool_choice", None),
             default_mode=_jang_chat_default_mode(
                 _model_path or _model_name or getattr(chat_req, "model", "") or ""
@@ -10635,9 +10651,9 @@ async def create_anthropic_message(
             _ct_kwargs.pop("reasoning_effort", None)
 
     # Pass tools to engine so batched.py knows not to inject <think></think>
-    if chat_req.tools:
+    if _msg_effective_tools:
         from .api.tool_calling import convert_tools_for_template
-        _msg_kwargs["tools"] = convert_tools_for_template(chat_req.tools)
+        _msg_kwargs["tools"] = convert_tools_for_template(_msg_effective_tools)
         _msg_kwargs["_vmlx_tools_present"] = True
 
     _normalize_minimax_m3_thinking_mode(

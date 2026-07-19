@@ -768,6 +768,25 @@ def test_step37_pixel_values_path_projects_vision_features_for_image_tokens():
     assert embeddings[0].shape == (1, 8)
 
 
+def test_step37_zero_patch_array_metadata_keeps_the_base_image():
+    import mlx.core as mx
+    import numpy as np
+
+    from vmlx_engine.models.step3p7_mlx_vlm import Model
+
+    model = Model.__new__(Model)
+    pixel_values = mx.zeros((1, 3, 4, 4))
+
+    for num_patches in (mx.array([0]), np.array([0], dtype=np.int32)):
+        image_input = model._parse_and_validate_image_input(
+            pixel_values=pixel_values,
+            num_patches=num_patches,
+        )
+
+        assert image_input is not None
+        assert image_input["num_patches"] == [0]
+
+
 def test_step37_processor_placeholder_count_matches_projected_visual_tokens():
     import numpy as np
     from PIL import Image

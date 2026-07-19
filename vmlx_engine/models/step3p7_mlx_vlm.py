@@ -724,6 +724,20 @@ class Model(nn.Module):
         if isinstance(image_embeds, np.ndarray):
             image_embeds = mx.array(image_embeds)
 
+        # mlx_vlm.prepare_inputs may normalize this small metadata vector to
+        # either an MLX or NumPy array.  Preserve a legitimate zero-patch base
+        # image: relying on ``array([0])`` truthiness turns it into ``[]`` and
+        # drops the base-image embedding while the prompt still owns 169 image
+        # placeholders.
+        if isinstance(num_patches, (mx.array, np.ndarray)):
+            num_patches = num_patches.tolist()
+        if num_patches is not None:
+            if not isinstance(num_patches, (list, tuple)):
+                num_patches = [num_patches]
+            if any(isinstance(value, (list, tuple)) for value in num_patches):
+                raise ValueError("Step3.7 num_patches must be a one-dimensional vector.")
+            num_patches = [int(value) for value in num_patches]
+
         if pixel_values is None and image_embeds is None:
             return None
         if pixel_values is not None:
@@ -774,7 +788,9 @@ class Model(nn.Module):
             if patch_pixel_values is not None
             else None
         )
-        num_patches = image_input.get("num_patches") or []
+        num_patches = image_input.get("num_patches")
+        if num_patches is None:
+            num_patches = []
 
         image_features = self._process_image_features(image_features)
         patch_image_features = (

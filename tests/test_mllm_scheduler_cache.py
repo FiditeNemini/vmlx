@@ -1372,6 +1372,16 @@ class TestHybridSSMBlockDiskWiring:
         assert "ssm_state_disk_store" in source_ensure
         assert config.enable_block_disk_cache is True
 
+    def test_scheduler_allows_authoritative_block_l2_with_paged_ram_off(self):
+        """Hybrid VLMs may use SSD blocks plus typed SSM state without RAM pages."""
+        source = Path("vmlx_engine/mllm_scheduler.py").read_text()
+
+        assert "self.config.use_paged_cache or self.config.enable_block_disk_cache" in source
+        assert "block_disk_only = bool(" in source
+        assert "disk_only=block_disk_only" in source
+        assert "MLLM block disk-only prefix backend" in source
+        assert "refusing to substitute a RAM backend" in source
+
     def test_scheduler_init_log_distinguishes_prompt_and_block_l2(self):
         """Startup logs must not hide block-disk L2 behind prompt L2 status."""
         import inspect

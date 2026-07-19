@@ -406,6 +406,11 @@ function buildCommandPreview(
   const zayaCcaActive = isZayaCcaFamily(detectedFamily)
   const turboQuantActive = !!detected?.isTurboQuant
   const hybridCacheActive = cacheTypeRequiresPaged(detected?.cacheType)
+  const hybridSsmBlockDiskOnlySupported =
+    (detected?.cacheType === 'hybrid' || detected?.cacheType === 'mamba') &&
+    !zayaCcaActive &&
+    !dsv4Active &&
+    !openPanguExactTypedCache
   const subtypePagedCacheActive = cacheSubtypeRequiresPaged(detected?.cacheSubtype)
   const effectiveDistributed = requestedDistributed && !dsv4Active
   const effectiveFlashMoe = requestedFlashMoe && !effectiveDistributed && !dsv4Active
@@ -480,6 +485,7 @@ function buildCommandPreview(
       ? dsv4PrefixCacheOptIn && !!config.enableBlockDiskCache
       : !!config.enableBlockDiskCache,
     architectureRequiresPagedCache,
+    architectureSupportsBlockDiskOnly: hybridSsmBlockDiskOnlySupported,
   })
   const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
   const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache

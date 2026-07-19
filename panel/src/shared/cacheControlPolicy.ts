@@ -15,6 +15,13 @@ export interface CacheControlState {
   enableDiskCache: boolean
   enableBlockDiskCache: boolean
   architectureRequiresPagedCache?: boolean
+  /**
+   * The architecture has non-KV companion state, but the engine can pair the
+   * disk-only KV block index with a typed companion SSD store/rederive path.
+   * This is currently true for hybrid/Mamba SSM caches, not for native typed
+   * DSV4/ZAYA/M3/openPangu cache contracts.
+   */
+  architectureSupportsBlockDiskOnly?: boolean
 }
 
 export interface CacheControlPolicy {
@@ -44,7 +51,8 @@ export function resolveCacheControlPolicy(state: CacheControlState): CacheContro
   const batchingOff = !state.continuousBatching
   const prefixOff = !state.enablePrefixCache
   const architectureRequiresPagedCache = !!state.architectureRequiresPagedCache
-  const architectureForcedPagedActive = architectureRequiresPagedCache && !batchingOff && !prefixOff
+  const blockDiskOnlyAlternative = !!state.architectureSupportsBlockDiskOnly && !!state.enableBlockDiskCache
+  const architectureForcedPagedActive = architectureRequiresPagedCache && !blockDiskOnlyAlternative && !batchingOff && !prefixOff
   const userPagedCacheActive = !batchingOff && !prefixOff && !!state.usePagedCache
   const effectiveUsePagedCache = architectureForcedPagedActive || userPagedCacheActive
   const blockDiskCacheActive = !batchingOff && !prefixOff && !!state.enableBlockDiskCache
@@ -83,7 +91,8 @@ export function resolveCacheLaunchPolicy(state: CacheControlState): CacheLaunchP
   const batchingOff = !state.continuousBatching
   const architectureRequiresPagedCache = !!state.architectureRequiresPagedCache
   const prefixEnabled = !batchingOff && !!state.enablePrefixCache
-  const architectureForcedPagedActive = architectureRequiresPagedCache && prefixEnabled
+  const blockDiskOnlyAlternative = !!state.architectureSupportsBlockDiskOnly && !!state.enableBlockDiskCache
+  const architectureForcedPagedActive = architectureRequiresPagedCache && !blockDiskOnlyAlternative && prefixEnabled
   const effectiveUsePagedCache = prefixEnabled && (
     architectureForcedPagedActive ||
     !!state.usePagedCache

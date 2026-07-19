@@ -532,19 +532,30 @@ class MLLMScheduler:
             except Exception as e:
                 logger.warning(f"Failed to enable Mamba batching support: {e}")
                 self._is_hybrid = False  # Fall back to standard KV-only handling
-            # Auto-switch to paged cache (MambaCache can't be truncated by memory-aware cache)
-            if self._is_hybrid and self.config.enable_prefix_cache and not self.config.use_paged_cache:
+            # MambaCache cannot use the legacy memory-aware cache. Paged RAM is
+            # required only when Block Disk L2 is absent; disk-only blocks pair
+            # attention KV with the typed SSM companion L2/rederive path.
+            if (
+                self._is_hybrid
+                and self.config.enable_prefix_cache
+                and not self.config.use_paged_cache
+                and not self.config.enable_block_disk_cache
+            ):
                 logger.info(
                     "Auto-switching VLM to paged cache for hybrid model "
-                    "(memory-aware cache can't truncate MambaCache)."
+                    "because neither paged RAM nor Block Disk L2 is available."
                 )
                 self.config.use_paged_cache = True
                 self.config.use_memory_aware_cache = False
 
-        # --- Cache initialization chain (paged > memory-aware > legacy) ---
+        # --- Cache initialization chain (block-aware > memory-aware > legacy) ---
         if self.config.enable_prefix_cache:
-            if self.config.use_paged_cache:
-                # Paged cache with optional block-level disk store (L2)
+            if self.config.use_paged_cache or self.config.enable_block_disk_cache:
+                # Paged RAM with optional L2, or authoritative disk-only blocks.
+                block_disk_only = bool(
+                    self.config.enable_block_disk_cache
+                    and not self.config.use_paged_cache
+                )
                 block_disk_store = None
                 if self.config.enable_block_disk_cache:
                     cache_dir = self.config.block_disk_cache_dir
@@ -631,8 +642,14 @@ class MLLMScheduler:
                     except Exception as e:
                         logger.error(
                             f"VLM block disk cache init failed at {cache_dir}: {e}. "
-                            "Continuing without block disk cache."
+                            "The disk-only route will refuse a RAM fallback."
                         )
+
+                if block_disk_only and block_disk_store is None:
+                    raise RuntimeError(
+                        "VLM block disk-only cache was requested but its SSD store "
+                        "could not be initialized; refusing to substitute a RAM backend"
+                    )
 
                 try:
                     from .paged_cache import PagedCacheManager
@@ -648,23 +665,35 @@ class MLLMScheduler:
                     # evicts only free (ref==0) cached blocks, disk-L2 first.
                     from .memory_cache import MemoryCacheConfig as _MemCacheCfg
 
-                    _mllm_paged_resident_budget = _MemCacheCfg(
-                        max_memory_mb=self.config.cache_memory_mb,
-                        max_memory_percent=self.config.cache_memory_percent,
-                    ).compute_memory_limit()
+                    _mllm_paged_resident_budget = (
+                        0
+                        if block_disk_only
+                        else _MemCacheCfg(
+                            max_memory_mb=self.config.cache_memory_mb,
+                            max_memory_percent=self.config.cache_memory_percent,
+                        ).compute_memory_limit()
+                    )
                     self.paged_cache_manager = PagedCacheManager(
                         block_size=self.config.paged_cache_block_size,
                         max_blocks=self.config.max_cache_blocks,
                         disk_store=block_disk_store,
                         max_resident_bytes=_mllm_paged_resident_budget,
+                        disk_only=block_disk_only,
                     )
-                    logger.info(
-                        "MLLM paged cache RAM ceiling: %.0f MB (%.0f%% of available); "
-                        "block pool max_blocks=%d",
-                        _mllm_paged_resident_budget / (1024 * 1024),
-                        self.config.cache_memory_percent * 100,
-                        self.config.max_cache_blocks,
-                    )
+                    if block_disk_only:
+                        logger.info(
+                            "MLLM block disk-only prefix backend: paged RAM disabled, "
+                            "max_index_blocks=%d; payloads restore transiently from SSD",
+                            self.config.max_cache_blocks,
+                        )
+                    else:
+                        logger.info(
+                            "MLLM paged cache RAM ceiling: %.0f MB (%.0f%% of available); "
+                            "block pool max_blocks=%d",
+                            _mllm_paged_resident_budget / (1024 * 1024),
+                            self.config.cache_memory_percent * 100,
+                            self.config.max_cache_blocks,
+                        )
                     self.block_aware_cache = BlockAwarePrefixCache(
                         model=lang_model,
                         paged_cache_manager=self.paged_cache_manager,
@@ -695,10 +724,15 @@ class MLLMScheduler:
                             model_key = hashlib.sha256(scope.encode()).hexdigest()
                         self._ssm_companion_model_key = model_key
                     logger.info(
-                        f"VLM Paged cache enabled: block_size={self.config.paged_cache_block_size}, "
+                        f"VLM {'block disk-only' if block_disk_only else 'paged'} cache enabled: "
+                        f"block_size={self.config.paged_cache_block_size}, "
                         f"max_blocks={self.config.max_cache_blocks}"
                     )
                 except Exception as e:
+                    if block_disk_only:
+                        raise RuntimeError(
+                            "Failed to initialize authoritative VLM block disk-only cache"
+                        ) from e
                     logger.warning(f"Failed to initialize VLM paged cache: {e}")
                     self.paged_cache_manager = None
                     self.block_aware_cache = None

@@ -162,6 +162,48 @@ describe('cache control policy', () => {
     expect(policy.enableBlockDiskCache).toBe(true)
   })
 
+  it('lets a hybrid SSM architecture use block SSD L2 without paged RAM', () => {
+    const ui = resolveCacheControlPolicy({
+      continuousBatching: true,
+      enablePrefixCache: true,
+      usePagedCache: false,
+      enableDiskCache: false,
+      enableBlockDiskCache: true,
+      architectureRequiresPagedCache: true,
+      architectureSupportsBlockDiskOnly: true,
+    })
+    const launch = resolveCacheLaunchPolicy({
+      continuousBatching: true,
+      enablePrefixCache: true,
+      usePagedCache: false,
+      enableDiskCache: false,
+      enableBlockDiskCache: true,
+      architectureRequiresPagedCache: true,
+      architectureSupportsBlockDiskOnly: true,
+    })
+
+    expect(ui.architectureForcedPagedActive).toBe(false)
+    expect(ui.pagedCacheDisabled).toBe(false)
+    expect(ui.effectiveUsePagedCache).toBe(false)
+    expect(launch.effectiveUsePagedCache).toBe(false)
+    expect(launch.enableBlockDiskCache).toBe(true)
+  })
+
+  it('still forces paged cache for a hybrid architecture without block SSD L2', () => {
+    const policy = resolveCacheLaunchPolicy({
+      continuousBatching: true,
+      enablePrefixCache: true,
+      usePagedCache: false,
+      enableDiskCache: false,
+      enableBlockDiskCache: false,
+      architectureRequiresPagedCache: true,
+      architectureSupportsBlockDiskOnly: true,
+    })
+
+    expect(policy.effectiveUsePagedCache).toBe(true)
+    expect(policy.enableBlockDiskCache).toBe(false)
+  })
+
   it('DSV4 composite cache opt-in updates the DSV4 master flag and prerequisites together', () => {
     expect(cacheControlUpdatesForDsv4CompositeToggle(true)).toEqual([
       ['dsv4PrefixCache', true],

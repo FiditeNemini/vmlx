@@ -837,8 +837,11 @@ class Scheduler:
         self.paged_cache_manager: Optional[PagedCacheManager] = None
         self.block_aware_cache: Optional[BlockAwarePrefixCache] = None
 
-        # Auto-detect hybrid models (MambaCache + KVCache) and switch to
-        # paged cache, since memory-aware cache can't truncate MambaCache.
+        # Auto-detect hybrid models (MambaCache + KVCache). They cannot use the
+        # legacy memory-aware cache, but Block Disk L2 is now a complete block
+        # backend even when paged RAM is explicitly disabled: attention KV is
+        # restored from SSD and full-precision SSM state comes from the typed
+        # companion L2 or clean-prefill rederive.
         if (
             self.config.enable_prefix_cache
             and not self.config.use_paged_cache
@@ -856,10 +859,12 @@ class Scheduler:
             and not self.config.use_paged_cache
             and self.config.use_memory_aware_cache
             and self._is_hybrid
+            and not self.config.enable_block_disk_cache
         ):
             logger.info(
                 "Non-standard cache model detected (MambaCache/hybrid layers). "
-                "Auto-switching to paged cache for correct cache reuse."
+                "Auto-switching to paged cache because neither paged RAM nor "
+                "Block Disk L2 is available for correct cache reuse."
             )
             self.config.use_paged_cache = True
             self.config.use_memory_aware_cache = False
@@ -1514,14 +1519,15 @@ class Scheduler:
 
     @staticmethod
     def _is_hybrid_model(model: Any) -> bool:
-        """Check if model uses non-standard cache types requiring paged cache.
+        """Check if model uses non-standard cache types requiring block-aware reuse.
 
         Returns True for:
         - Hybrid models (mixed KVCache + MambaCache layers)
         - Pure Mamba/SSM models (all MambaCache/ArraysCache layers)
 
-        These models cannot use memory-aware cache (which needs truncatable KVCache)
-        and must be routed to paged cache for correct prefix caching.
+        These models cannot use memory-aware cache (which needs truncatable KVCache).
+        They use either paged RAM blocks or disk-only blocks paired with the typed
+        SSM companion cache/rederive path.
         """
         if not hasattr(model, "make_cache"):
             return False
@@ -5891,16 +5897,21 @@ class Scheduler:
                 return None
         request._tq_native_cache_hit = tq_native_blocks > 0
         request.prompt_cache = full_cache
-        request._cache_detail = (
-            "paged+ssm+disk"
-            if getattr(request, "_paged_disk_hit", False)
-            else "paged+ssm"
-        )
+        if bool(
+            getattr(getattr(self, "paged_cache_manager", None), "disk_only", False)
+        ):
+            request._cache_detail = "block-disk+ssm"
+        else:
+            request._cache_detail = (
+                "paged+ssm+disk"
+                if getattr(request, "_paged_disk_hit", False)
+                else "paged+ssm"
+            )
         if request._tq_native_cache_hit:
             request._cache_detail += "+tq-native"
         request._cache_detail_ssm_layers = ssm_idx
         logger.info(
-            f"Request {request.request_id}: hybrid paged HIT — "
+            f"Request {request.request_id}: hybrid block-cache HIT — "
             f"{getattr(request.block_table, 'num_tokens', fetch_num)} tokens "
             f"(KV + {ssm_idx} SSM layers)"
         )

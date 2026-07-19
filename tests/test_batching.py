@@ -1869,6 +1869,46 @@ class TestSchedulerCacheResilience:
         finally:
             scheduler.shutdown()
 
+    def test_hybrid_block_disk_only_backend_attaches_typed_ssm_companion_l2(
+        self, mock_tokenizer, tmp_path
+    ):
+        """Paged Off hybrid caches pair SSD KV blocks with full-precision SSM L2."""
+
+        class KVCache:
+            pass
+
+        class MambaCache:
+            pass
+
+        model = MagicMock()
+        model.make_cache.return_value = [KVCache(), MambaCache()]
+        cache_dir = tmp_path / "hybrid-block-l2"
+        scheduler = Scheduler(
+            model=model,
+            tokenizer=mock_tokenizer,
+            config=SchedulerConfig(
+                model_path="dealignai/Qwen3.6-35B-A3B-JANGTQ-CRACK",
+                enable_prefix_cache=True,
+                use_paged_cache=False,
+                use_memory_aware_cache=True,
+                enable_block_disk_cache=True,
+                block_disk_cache_dir=str(cache_dir),
+                max_cache_blocks=8,
+                kv_cache_quantization="q4",
+            ),
+        )
+        try:
+            assert scheduler._is_hybrid is True
+            assert scheduler.paged_cache_manager.disk_only is True
+            assert scheduler._ssm_state_cache is not None
+            assert scheduler._ssm_state_cache._disk is not None
+            assert scheduler._ssm_state_cache._disk.directory == (
+                cache_dir / "ssm_companion"
+            )
+            assert scheduler._hybrid_kv_positions == [0]
+        finally:
+            scheduler.shutdown()
+
     def test_cache_miss_no_error(self, mock_model, mock_tokenizer):
         """Cache miss should not cause any errors."""
         scheduler = Scheduler(

@@ -5434,11 +5434,14 @@ class TestC3BlockDiskCacheQuantScoping:
         from vmlx_engine.mllm_scheduler import MLLMScheduler
 
         source = inspect.getsource(MLLMScheduler.__init__)
-        block_section = source[source.find("enable_block_disk_cache"):]
-        assert "quant" in block_section[:500], (
+        # Anchor on the owning block-store scope key. Hybrid disk-only policy
+        # now mentions enable_block_disk_cache before the cache constructor.
+        start = source.index("block_scope_key = (")
+        block_section = source[start : start + 500]
+        assert 'f"{self.config.model_path}:quant={quant_tag}"' in block_section, (
             "MLLM block disk cache hash must include quantization in scope key"
         )
-        assert 'f":tq_native={tq_native_tag}"' in source, (
+        assert 'f":tq_native={tq_native_tag}"' in block_section, (
             "MLLM disk cache hashes must separate native TQ Auto from explicit Off"
         )
 
@@ -11408,7 +11411,8 @@ class TestTurboQuantKVTelemetry:
         assert "cache_detail=getattr(req, '_cache_detail', \"\") or \"\"" in source
         assert "_paged_hybrid_cache_detail(" in source
         assert "_paged_attention_cache_detail(" in source
-        assert "return f\"{base}+disk\" if disk_hit else base" in source
+        assert 'base = "block-disk+mixed_swa"' in source
+        assert 'return f"{base}+tq-native" if tq_native else base' in source
 
     def test_mllm_mixed_swa_cache_detail_does_not_report_ssm(self):
         from vmlx_engine.mllm_batch_generator import _paged_hybrid_cache_detail
@@ -11425,6 +11429,26 @@ class TestTurboQuantKVTelemetry:
         assert _paged_hybrid_cache_detail(disk_hit=True, mixed_attention=False) == (
             "paged+ssm+disk"
         )
+        assert _paged_hybrid_cache_detail(
+            disk_hit=True,
+            mixed_attention=False,
+            disk_only=True,
+            tq_native=True,
+        ) == "block-disk+ssm+tq-native"
+
+    def test_mllm_disk_only_cache_detail_does_not_claim_paged_ram(self):
+        from vmlx_engine.mllm_batch_generator import _paged_attention_cache_detail
+
+        assert _paged_attention_cache_detail(
+            disk_hit=True,
+            mixed_attention=False,
+            disk_only=True,
+            tq_native=True,
+        ) == "block-disk+tq-native"
+
+        source = Path("./vmlx_engine/mllm_batch_generator.py").read_text()
+        assert '"block-disk" if _block_disk_only else "paged"' in source
+        assert '"_last_reconstruct_tq_blocks"' in source
 
     def test_mllm_non_hybrid_mixed_swa_cache_detail_is_labeled(self):
         source = Path("./vmlx_engine/mllm_batch_generator.py").read_text()

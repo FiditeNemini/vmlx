@@ -105,6 +105,10 @@ function cacheTypeRequiresPaged(cacheType?: string): boolean {
   return cacheType === 'hybrid' || cacheType === 'mamba' || cacheType === 'rotating_kv'
 }
 
+function cacheTypeSupportsBlockDiskOnly(cacheType?: string): boolean {
+  return cacheType === 'hybrid' || cacheType === 'mamba'
+}
+
 function cacheSubtypeRequiresPaged(cacheSubtype?: string): boolean {
   return cacheSubtype === 'step3p7_full_sliding_kv' || cacheSubtype === 'mixed_swa_kv'
 }
@@ -1850,6 +1854,7 @@ export class SessionManager extends EventEmitter {
           if (
             freshConfig.usePagedCache === true &&
             (cacheTypeRequiresPaged(freshConfig.cacheType) || cacheSubtypeRequiresPaged(freshConfig.cacheSubtype)) &&
+            !(cacheTypeSupportsBlockDiskOnly(freshConfig.cacheType) && !isZayaCcaFamily(freshFamily) && config.enableBlockDiskCache === true) &&
             config.continuousBatching !== false &&
             config.enablePrefixCache !== false &&
             config.usePagedCache === false
@@ -3460,6 +3465,11 @@ export class SessionManager extends EventEmitter {
       zayaCcaActive ||
       dsv4PrefixCacheOptIn ||
       ((hybridCacheActive || subtypePagedCacheActive) && detected.usePagedCache === true)
+    const hybridSsmBlockDiskOnlySupported =
+      cacheTypeSupportsBlockDiskOnly(detected.cacheType) &&
+      !zayaCcaActive &&
+      !dsv4Active &&
+      !openPanguExactTypedCache
     const cacheLaunchPolicy = resolveCacheLaunchPolicy({
       continuousBatching: cacheStackActive,
       enablePrefixCache: dsv4Active
@@ -3473,6 +3483,7 @@ export class SessionManager extends EventEmitter {
         ? dsv4PrefixCacheOptIn && !!config.enableBlockDiskCache
         : openPanguExactTypedCache ? false : !!config.enableBlockDiskCache,
       architectureRequiresPagedCache,
+      architectureSupportsBlockDiskOnly: hybridSsmBlockDiskOnlySupported,
     })
     const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
     const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache

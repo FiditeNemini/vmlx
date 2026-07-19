@@ -336,6 +336,8 @@ function buildCommandPreview(
                 : false
     const zayaCcaActive = isZayaCcaFamily(detectedFamily)
     const hybridCacheActive = detected?.cacheType === 'hybrid' || detected?.cacheType === 'mamba'
+    const hybridSsmBlockDiskOnlySupported =
+        hybridCacheActive && !zayaCcaActive && !dsv4Active && detectedFamily !== 'openpangu_v2'
     const effectiveDistributed = requestedDistributed && !dsv4Active
     const effectiveFlashMoe = requestedFlashMoe && !effectiveDistributed && !dsv4Active
     const effectiveEnableJit = !!config.enableJit && !isVLM && !effectiveFlashMoe && !effectiveDistributed && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !hybridCacheActive
@@ -394,6 +396,7 @@ function buildCommandPreview(
             zayaCcaActive ||
             dsv4PrefixCacheOptIn ||
             ((cacheTypeRequiresPaged(detected?.cacheType) || cacheSubtypeRequiresPaged(detected?.cacheSubtype)) && detected?.usePagedCache === true),
+        architectureSupportsBlockDiskOnly: hybridSsmBlockDiskOnlySupported,
     })
     const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
     const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache
@@ -2307,7 +2310,7 @@ describe('No Hardcoded Values', () => {
         expect(source).toContain('dsv4PoolQuant: dsv4DefaultCacheOptIn')
     })
 
-    it('detected Qwen3.6 hybrid cache forces paged cache over stale saved false', () => {
+    it('detected Qwen3.6 hybrid cache honors paged Off when block SSD L2 owns the prefix backend', () => {
         const out = preview(
             {
                 enablePrefixCache: true,
@@ -2325,15 +2328,20 @@ describe('No Hardcoded Values', () => {
         )
 
         expect(hasFlag(out, '--is-mllm')).toBe(true)
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
-        // #98/H1: cache-memory-% sets the paged L1 RAM byte ceiling → emitted.
-        expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.15')
+        // SSD-only mode has no persistent L1 payload, so a RAM ceiling is inert.
+        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
     })
 
-    it('detected Mamba cache forces paged cache while regular KV respects saved false', () => {
+    it('detected Mamba cache forces paged cache when Block L2 is absent while regular KV respects saved false', () => {
         const mambaOut = preview(
-            { enablePrefixCache: true, usePagedCache: false },
+            {
+                enablePrefixCache: true,
+                usePagedCache: false,
+                enableBlockDiskCache: false,
+            },
             { family: 'qwen3-next', cacheType: 'mamba', usePagedCache: true },
         )
         const kvOut = preview(

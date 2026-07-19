@@ -1642,14 +1642,36 @@ def _is_tq_batch_api(c) -> bool:
     )
 
 
-def _paged_hybrid_cache_detail(*, disk_hit: bool, mixed_attention: bool) -> str:
-    base = "paged+mixed_swa" if mixed_attention else "paged+ssm"
-    return f"{base}+disk" if disk_hit else base
+def _paged_hybrid_cache_detail(
+    *,
+    disk_hit: bool,
+    mixed_attention: bool,
+    disk_only: bool = False,
+    tq_native: bool = False,
+) -> str:
+    if disk_only:
+        base = "block-disk+mixed_swa" if mixed_attention else "block-disk+ssm"
+    else:
+        base = "paged+mixed_swa" if mixed_attention else "paged+ssm"
+        if disk_hit:
+            base = f"{base}+disk"
+    return f"{base}+tq-native" if tq_native else base
 
 
-def _paged_attention_cache_detail(*, disk_hit: bool, mixed_attention: bool) -> str:
-    base = "paged+mixed_swa" if mixed_attention else "paged"
-    return f"{base}+disk" if disk_hit else base
+def _paged_attention_cache_detail(
+    *,
+    disk_hit: bool,
+    mixed_attention: bool,
+    disk_only: bool = False,
+    tq_native: bool = False,
+) -> str:
+    if disk_only:
+        base = "block-disk+mixed_swa" if mixed_attention else "block-disk"
+    else:
+        base = "paged+mixed_swa" if mixed_attention else "paged"
+        if disk_hit:
+            base = f"{base}+disk"
+    return f"{base}+tq-native" if tq_native else base
 
 
 def _paged_reconstruct_disk_source(
@@ -6136,12 +6158,17 @@ class MLLMBatchGenerator:
                                             continue  # Skip reconstruction
 
                                 # Either non-hybrid OR hybrid with SSM state — reconstruct
+                                _block_disk_only = bool(
+                                    getattr(self.paged_cache_manager, "disk_only", False)
+                                )
                                 _cache_execution = {
                                     "request_id": req.request_id,
                                     "cache_detail": None,
                                     "cached_tokens": int(getattr(block_table, "num_tokens", 0) or 0),
                                     "blocks": len(getattr(block_table, "blocks", []) or []),
-                                    "selection": "paged",
+                                    "selection": (
+                                        "block-disk" if _block_disk_only else "paged"
+                                    ),
                                     "disk_hit": bool(_paged_disk_hit),
                                     "reconstructed": False,
                                     "dequantized": False,
@@ -6168,6 +6195,18 @@ class MLLMBatchGenerator:
                                 if _reconstruct_disk_blocks > 0:
                                     _cache_execution["disk_blocks"] = (
                                         _reconstruct_disk_blocks
+                                    )
+                                _tq_native_blocks = int(
+                                    getattr(
+                                        self.block_aware_cache,
+                                        "_last_reconstruct_tq_blocks",
+                                        0,
+                                    )
+                                    or 0
+                                )
+                                if _tq_native_blocks > 0:
+                                    _cache_execution["tq_native_blocks"] = (
+                                        _tq_native_blocks
                                     )
                                 if reconstructed is not None:
                                     _dequant_started = time.perf_counter()
@@ -6216,6 +6255,8 @@ class MLLMBatchGenerator:
                                     req._cache_detail = _paged_hybrid_cache_detail(
                                         disk_hit=_paged_disk_hit,
                                         mixed_attention=self._mixed_attention_cache_model,
+                                        disk_only=_block_disk_only,
+                                        tq_native=_tq_native_blocks > 0,
                                     )
                                     _cache_execution["cache_detail"] = req._cache_detail
                                     _cache_execution["total_worker_cache_seconds"] = round(
@@ -6265,6 +6306,8 @@ class MLLMBatchGenerator:
                                         req._cache_detail = _paged_attention_cache_detail(
                                             disk_hit=_paged_disk_hit,
                                             mixed_attention=self._mixed_attention_cache_model,
+                                            disk_only=_block_disk_only,
+                                            tq_native=_tq_native_blocks > 0,
                                         )
                                     _cache_execution["cache_detail"] = req._cache_detail
                                     _cache_execution["total_worker_cache_seconds"] = round(

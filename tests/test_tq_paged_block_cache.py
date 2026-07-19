@@ -246,6 +246,52 @@ def test_tq_decoder_startup_warmup_materializes_distinct_layer_seeds():
     assert info.currsize == 3
 
 
+def test_mllm_tq_decoder_warmup_resolves_language_model_owner(monkeypatch):
+    from types import SimpleNamespace
+
+    from vmlx_engine import tq_disk_store
+    from vmlx_engine.mllm_scheduler import MLLMScheduler
+
+    calls = {}
+
+    def fake_warm(cache_layers, *, probe_heads):
+        calls["layers"] = cache_layers
+        calls["probe_heads"] = probe_heads
+        return {
+            "configs": 2,
+            "arrays": 4,
+            "bytes": 128,
+            "probe_tokens": 64,
+            "probe_heads": probe_heads,
+            "codec_probes": 2,
+        }
+
+    monkeypatch.setattr(tq_disk_store, "warm_tq_decoder_states", fake_warm)
+
+    def _hybrid_turboquant_make_cache():
+        return ["tq-slot", "ssm-slot"]
+
+    owner = SimpleNamespace(
+        args=SimpleNamespace(num_key_value_heads=8),
+        make_cache=_hybrid_turboquant_make_cache,
+    )
+    scheduler = object.__new__(MLLMScheduler)
+    scheduler.model = SimpleNamespace(language_model=owner)
+    scheduler.config = SimpleNamespace(enable_prefix_cache=True)
+    scheduler._tq_active = True
+    scheduler._tq_decoder_warmup_stats = None
+
+    stats = scheduler.warm_tq_storage_decoders()
+
+    assert stats["enabled"] is True
+    assert stats["configs"] == 2
+    assert calls == {
+        "layers": ["tq-slot", "ssm-slot"],
+        "probe_heads": 8,
+    }
+    assert scheduler._tq_decoder_warmup_stats == stats
+
+
 def test_tq_block_storage_encode_does_not_call_live_cache_compress(monkeypatch):
     from jang_tools.turboquant.cache import TurboQuantKVCache
     from vmlx_engine import tq_disk_store

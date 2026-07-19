@@ -953,6 +953,19 @@ class BatchedEngine(BaseEngine):
             processor=self._processor,
             config=mllm_config,
         )
+
+        # Multimodal Qwen/Bonsai/Gemma routes own a separate scheduler but
+        # reconstruct the same native TurboQuant paged/L2 records. Warm those
+        # codecs on the loader/step worker before readiness, matching the text
+        # scheduler path below without touching native SSM or rotating state.
+        _warm_mllm_tq_storage = getattr(
+            self._mllm_scheduler,
+            "warm_tq_storage_decoders",
+            None,
+        )
+        if callable(_warm_mllm_tq_storage):
+            await loop.run_in_executor(loader_executor, _warm_mllm_tq_storage)
+
         await self._mllm_scheduler.start()
 
         logger.info(

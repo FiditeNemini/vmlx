@@ -462,6 +462,7 @@ class MLLMScheduler:
         self._kv_cache_bits = 0
         self._kv_cache_group_size = 64
         self._tq_active = False
+        self._tq_decoder_warmup_stats: Optional[Dict[str, Any]] = None
         self._hybrid_live_tq_policy = None
         self._hybrid_live_tq_attention_layers = []
         self._hybrid_live_tq_companion_layers = []
@@ -1204,6 +1205,96 @@ class MLLMScheduler:
                 if nxt is not None and nxt is not obj and id(nxt) not in seen:
                     stack.append(nxt)
         return False
+
+    def warm_tq_storage_decoders(self) -> Dict[str, Any]:
+        """Materialize VLM TQ storage codecs on the pinned model worker.
+
+        MLLM routes do not use the text ``Scheduler``. Resolve the same patched
+        language-model ``make_cache`` owner used by hybrid cache detection,
+        then warm only its TurboQuantKVCache slots. ArraysCache/Mamba state and
+        rotating-window cache slots remain untouched.
+        """
+        stats: Dict[str, Any] = {
+            "enabled": False,
+            "configs": 0,
+            "arrays": 0,
+            "bytes": 0,
+            "probe_tokens": 0,
+            "probe_heads": 0,
+            "codec_probes": 0,
+            "seconds": 0.0,
+        }
+        if not (self._tq_active and self.config.enable_prefix_cache):
+            self._tq_decoder_warmup_stats = stats
+            return stats
+
+        def _safe_attr(obj: Any, name: str) -> Any:
+            if obj is None:
+                return None
+            if type(obj).__module__ == "unittest.mock":
+                return getattr(obj, "__dict__", {}).get(name)
+            return getattr(obj, name, None)
+
+        owner = None
+        seen = set()
+        stack = [self.model]
+        while stack:
+            obj = stack.pop()
+            if obj is None or id(obj) in seen:
+                continue
+            seen.add(id(obj))
+            make_cache = _safe_attr(obj, "make_cache")
+            if make_cache is not None and is_turboquant_make_cache(make_cache):
+                owner = obj
+                break
+            for attr in ("model", "language_model"):
+                child = _safe_attr(obj, attr)
+                if child is not None and child is not obj and id(child) not in seen:
+                    stack.append(child)
+
+        started = time.perf_counter()
+        cache_layers = None
+        try:
+            if owner is None:
+                raise RuntimeError("TurboQuant make_cache owner was not found")
+            from .tq_disk_store import warm_tq_decoder_states
+
+            cache_layers = owner.make_cache() or []
+            model_args = _safe_attr(owner, "args") or _safe_attr(owner, "config")
+            if isinstance(model_args, dict):
+                probe_heads = int(model_args.get("num_key_value_heads", 1) or 1)
+            else:
+                probe_heads = int(
+                    _safe_attr(model_args, "num_key_value_heads") or 1
+                )
+            stats.update(
+                warm_tq_decoder_states(cache_layers, probe_heads=probe_heads)
+            )
+            stats["enabled"] = bool(stats.get("configs"))
+            stats["seconds"] = round(time.perf_counter() - started, 6)
+            logger.info(
+                "MLLM TurboQuant storage decoder startup warmup: configs=%d "
+                "arrays=%d bytes=%d codec_probes=%d probe_tokens=%d "
+                "probe_heads=%d seconds=%.3f",
+                stats["configs"],
+                stats["arrays"],
+                stats["bytes"],
+                stats["codec_probes"],
+                stats["probe_tokens"],
+                stats["probe_heads"],
+                stats["seconds"],
+            )
+        except Exception as exc:
+            stats["seconds"] = round(time.perf_counter() - started, 6)
+            stats["error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "MLLM TurboQuant storage decoder startup warmup failed: %s",
+                exc,
+            )
+        finally:
+            del cache_layers
+        self._tq_decoder_warmup_stats = stats
+        return stats
 
     def _detect_turboquant_batch_api(self) -> bool:
         """Return True when all VLM TurboQuant cache slots expose batch API v1."""
@@ -4380,6 +4471,7 @@ class MLLMScheduler:
                 "cache_hit_requests": self._cache_hit_requests,
                 "cache_hit_tokens": self._cache_hit_tokens,
                 "cache_hit_tokens_by_detail": dict(self._cache_hit_tokens_by_detail),
+                "tq_decoder_warmup": self._tq_decoder_warmup_stats,
             }
 
             if self.batch_generator is not None:

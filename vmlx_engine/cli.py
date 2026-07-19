@@ -132,6 +132,51 @@ def _bundle_declares_mxtq_jangtq(model_path: str | None) -> bool:
     return any(_declares_mxtq(config) for config in configs)
 
 
+def _bundle_is_dense_mistral3_jangtq(model_path: str | None) -> bool:
+    """Return true only for the validated dense Ministral3 JANGTQ layout.
+
+    The generic MXTQ guard remains necessary for routed/hybrid bundles whose
+    prefill logits have diverged under MPP_NAX.  Mistral Medium 3.5 is a dense
+    ``mistral3`` wrapper with a ``ministral3`` text model, so it can use the
+    prefill-only ``auto`` dispatch after real-shape official-weight checks.
+    Mistral 4 bundles also use an outer ``mistral3`` wrapper; the inner model
+    type check deliberately excludes them.
+    """
+
+    if not model_path:
+        return False
+    try:
+        import json
+        from pathlib import Path
+
+        root = Path(model_path).expanduser()
+        config_path = root / "config.json"
+        if not config_path.is_file():
+            return False
+        config = json.loads(config_path.read_text())
+        text_config = config.get("text_config")
+        if not isinstance(text_config, dict):
+            return False
+        if config.get("model_type") != "mistral3":
+            return False
+        if text_config.get("model_type") != "ministral3":
+            return False
+
+        expert_keys = (
+            "num_local_experts",
+            "num_experts",
+            "n_routed_experts",
+            "moe_intermediate_size",
+        )
+        return not any(
+            config.get(key) not in (None, 0, False)
+            or text_config.get(key) not in (None, 0, False)
+            for key in expert_keys
+        )
+    except Exception:
+        return False
+
+
 def _speculative_incompatibility_reason(args) -> str | None:
     if not getattr(args, "speculative_model", None):
         return None
@@ -176,13 +221,25 @@ def _apply_jangtq_mpp_nax_policy(args, logger):
                 "JANGTQ_MPP_NAX=auto; set JANGTQ_MPP_NAX=on only for explicit "
                 "kernel diagnostics."
             )
-        elif _bundle_declares_mxtq_jangtq(getattr(args, "model", None)):
+        elif (
+            _bundle_declares_mxtq_jangtq(getattr(args, "model", None))
+            and not _bundle_is_dense_mistral3_jangtq(
+                getattr(args, "model", None)
+            )
+        ):
             mode = "off"
             logger.info(
                 "MXTQ/JANGTQ bundle detected — disabling JANGTQ_MPP_NAX=auto. "
                 "Reporter repros showed incorrect prefill logits on MXTQ/hybrid "
                 "JANGTQ with auto; set JANGTQ_MPP_NAX=on only for explicit "
                 "kernel diagnostics."
+            )
+        elif _bundle_is_dense_mistral3_jangtq(getattr(args, "model", None)):
+            logger.info(
+                "Dense Ministral3 JANGTQ detected — retaining prefill-only "
+                "JANGTQ_MPP_NAX=auto. Official-weight 396-token checks covered "
+                "all attention and MLP projection shapes; single-token decode "
+                "continues to use the legacy kernel."
             )
     os.environ["JANGTQ_MPP_NAX"] = "1" if mode == "on" else mode
     if os.environ.pop("JANGTQ_TOPK_OVERRIDE", None) is not None:

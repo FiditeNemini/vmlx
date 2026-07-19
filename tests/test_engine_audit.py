@@ -10260,6 +10260,61 @@ class TestJangTqMppNaxCliPolicy:
             for call in logger.info.call_args_list
         )
 
+    def test_jangtq_mpp_nax_cli_policy_keeps_auto_for_dense_ministral3_bundle(
+        self, monkeypatch, tmp_path
+    ):
+        from vmlx_engine.cli import _apply_jangtq_mpp_nax_policy
+
+        monkeypatch.delenv("JANGTQ_MPP_NAX", raising=False)
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "mistral3",
+                    "text_config": {"model_type": "ministral3"},
+                }
+            )
+        )
+        (tmp_path / "jang_config.json").write_text(
+            json.dumps({"weight_format": "mxtq", "mxtq_bits": 2})
+        )
+        (tmp_path / "jangtq_runtime.safetensors").write_bytes(b"sidecar")
+        args = SimpleNamespace(model=str(tmp_path))
+        logger = MagicMock()
+
+        mode = _apply_jangtq_mpp_nax_policy(args, logger)
+
+        assert mode == "auto"
+        assert os.environ["JANGTQ_MPP_NAX"] == "auto"
+        assert any(
+            "Dense Ministral3 JANGTQ" in str(call)
+            for call in logger.info.call_args_list
+        )
+
+    def test_jangtq_mpp_nax_cli_policy_does_not_exempt_mistral4_wrapper(
+        self, monkeypatch, tmp_path
+    ):
+        from vmlx_engine.cli import _apply_jangtq_mpp_nax_policy
+
+        monkeypatch.delenv("JANGTQ_MPP_NAX", raising=False)
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "mistral3",
+                    "text_config": {"model_type": "mistral4"},
+                }
+            )
+        )
+        (tmp_path / "jang_config.json").write_text(
+            json.dumps({"weight_format": "mxtq", "mxtq_bits": 2})
+        )
+        args = SimpleNamespace(model=str(tmp_path))
+        logger = MagicMock()
+
+        mode = _apply_jangtq_mpp_nax_policy(args, logger)
+
+        assert mode == "off"
+        assert os.environ["JANGTQ_MPP_NAX"] == "off"
+
     def test_jangtq_mpp_nax_cli_policy_disables_auto_for_jangtq_repo_id(
         self, monkeypatch
     ):

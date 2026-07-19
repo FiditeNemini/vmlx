@@ -22,6 +22,7 @@ from vmlx_engine.mllm_scheduler import MLLMSchedulerConfig, MLLMScheduler
 from vmlx_engine.mllm_batch_generator import (
     MLLMBatchGenerator,
     _disk_prefix_hit_tail_and_cached_tokens as _mllm_disk_prefix_hit_tail_and_cached_tokens,
+    _paged_reconstruct_disk_source,
     _prefix_hit_tail_and_cached_tokens as _mllm_prefix_hit_tail_and_cached_tokens,
     _trace_mimo_v2_generated_token,
 )
@@ -35,6 +36,27 @@ def test_mllm_scheduler_does_not_shadow_hashlib_in_init():
 
     assert "import hashlib" not in source
     assert "hashlib.sha256" in source
+
+
+def test_mllm_worker_reconstruct_promotes_lazy_l2_source_to_request_detail():
+    """An indexed paged hit whose payload refaults from L2 is a disk hit."""
+    cache = SimpleNamespace(_last_reconstruct_disk_blocks=3)
+
+    assert _paged_reconstruct_disk_source(
+        fetch_disk_hit=False,
+        block_aware_cache=cache,
+        reconstructed=["kv"],
+    ) == (True, 3)
+    assert _paged_reconstruct_disk_source(
+        fetch_disk_hit=True,
+        block_aware_cache=SimpleNamespace(_last_reconstruct_disk_blocks=0),
+        reconstructed=["kv"],
+    ) == (True, 0)
+    assert _paged_reconstruct_disk_source(
+        fetch_disk_hit=False,
+        block_aware_cache=cache,
+        reconstructed=None,
+    ) == (False, 0)
 
 
 def test_batched_template_tool_call_arguments_are_mappings():

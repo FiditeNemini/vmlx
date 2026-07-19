@@ -1652,6 +1652,30 @@ def _paged_attention_cache_detail(*, disk_hit: bool, mixed_attention: bool) -> s
     return f"{base}+disk" if disk_hit else base
 
 
+def _paged_reconstruct_disk_source(
+    *,
+    fetch_disk_hit: bool,
+    block_aware_cache: Any,
+    reconstructed: Any,
+) -> tuple[bool, int]:
+    """Merge fetch-time and lazy worker-side L2 source accounting.
+
+    Frugal paged entries can keep an in-process block index while releasing the
+    tensor payload. ``fetch_cache`` then finds the chain without reading disk;
+    the actual L2 read happens later inside ``reconstruct_cache``. Sampling only
+    the fetch-time disk counter mislabels that restore as RAM-only.
+    """
+    if reconstructed is None:
+        return bool(fetch_disk_hit), 0
+    try:
+        disk_blocks = int(
+            getattr(block_aware_cache, "_last_reconstruct_disk_blocks", 0) or 0
+        )
+    except Exception:
+        disk_blocks = 0
+    return bool(fetch_disk_hit or disk_blocks > 0), max(0, disk_blocks)
+
+
 def _cache_layer_debug_summary(cache: Optional[List[Any]], limit: int = 8) -> str:
     if not cache:
         return ""
@@ -6133,6 +6157,18 @@ class MLLMBatchGenerator:
                                 )
                                 _cache_execution["reconstructed"] = reconstructed is not None
                                 _cache_execution["reconstruction_ok"] = reconstructed is not None
+                                _paged_disk_hit, _reconstruct_disk_blocks = (
+                                    _paged_reconstruct_disk_source(
+                                        fetch_disk_hit=_paged_disk_hit,
+                                        block_aware_cache=self.block_aware_cache,
+                                        reconstructed=reconstructed,
+                                    )
+                                )
+                                _cache_execution["disk_hit"] = bool(_paged_disk_hit)
+                                if _reconstruct_disk_blocks > 0:
+                                    _cache_execution["disk_blocks"] = (
+                                        _reconstruct_disk_blocks
+                                    )
                                 if reconstructed is not None:
                                     _dequant_started = time.perf_counter()
                                     reconstructed = _dequantize_cache(reconstructed)

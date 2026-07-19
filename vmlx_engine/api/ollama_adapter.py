@@ -588,6 +588,40 @@ def openai_chat_chunk_to_ollama_generate_ndjson(
     return json.dumps(result) + "\n"
 
 
+def merge_ollama_generate_stream_terminal(
+    pending: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge deferred templated ``/api/generate`` terminal rows.
+
+    Chat Completions sends finish reason and usage as separate SSE events.
+    Ollama permits one final ``done:true`` row, so the generate adapter must
+    retain the finish event until the later usage event arrives.
+    """
+    merged: dict[str, Any] = dict(pending or {})
+    merged.update(
+        {
+            "model": current.get("model", merged.get("model", "")),
+            "created_at": current.get(
+                "created_at",
+                merged.get("created_at", _now_iso()),
+            ),
+            "done": True,
+        }
+    )
+    merged["response"] = current.get("response") or merged.get("response") or ""
+    if current.get("thinking") or merged.get("thinking"):
+        merged["thinking"] = current.get("thinking") or merged.get("thinking")
+    for key in ("eval_count", "prompt_eval_count", "total_duration"):
+        if key in current:
+            merged[key] = current[key]
+    merged["done_reason"] = current.get(
+        "done_reason",
+        merged.get("done_reason", "stop"),
+    )
+    return merged
+
+
 def openai_completion_chunk_to_ollama_ndjson(sse_line: str, model: str) -> str | None:
     """Convert a single SSE line from /v1/completions to Ollama /api/generate NDJSON."""
     if not sse_line.startswith("data: "):

@@ -11672,6 +11672,7 @@ async def ollama_generate(fastapi_request: Request):
     from .api.ollama_adapter import (
         ollama_generate_to_openai,
         ollama_generate_to_openai_chat,
+        merge_ollama_generate_stream_terminal,
         openai_chat_response_to_ollama_generate,
         openai_chat_chunk_to_ollama_generate_ndjson,
     )
@@ -11706,10 +11707,25 @@ async def ollama_generate(fastapi_request: Request):
         streaming_response = await create_chat_completion(chat_req, fastapi_request)
 
         async def templated_ndjson_stream():
-            done_sent = False
+            pending_done: dict[str, Any] | None = None
             async for sse_line in streaming_response.body_iterator:
                 if isinstance(sse_line, bytes):
                     sse_line = sse_line.decode("utf-8", "replace")
+                if sse_line.strip() == "data: [DONE]":
+                    if pending_done is None:
+                        pending_done = {
+                            "model": model_name,
+                            "created_at": time.strftime(
+                                "%Y-%m-%dT%H:%M:%S.000Z",
+                                time.gmtime(),
+                            ),
+                            "response": "",
+                            "done": True,
+                            "done_reason": "stop",
+                        }
+                    yield json.dumps(pending_done) + "\n"
+                    pending_done = None
+                    continue
                 ndjson = openai_chat_chunk_to_ollama_generate_ndjson(
                     sse_line, model_name
                 )
@@ -11717,12 +11733,16 @@ async def ollama_generate(fastapi_request: Request):
                     try:
                         _ndjson_obj = json.loads(ndjson)
                         if _ndjson_obj.get("done") is True:
-                            if done_sent:
-                                continue
-                            done_sent = True
+                            pending_done = merge_ollama_generate_stream_terminal(
+                                pending_done,
+                                _ndjson_obj,
+                            )
+                            continue
                     except (json.JSONDecodeError, TypeError):
                         pass
                     yield ndjson
+            if pending_done is not None:
+                yield json.dumps(pending_done) + "\n"
 
         return _SR(templated_ndjson_stream(), media_type="application/x-ndjson")
 

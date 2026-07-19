@@ -387,3 +387,33 @@ def test_ollama_terminal_merge_defers_length_until_after_answer_and_usage():
     assert merged["eval_count"] == 428
     assert merged["prompt_eval_count"] == 97
     assert merged["message"]["thinking"] == "reason"
+
+
+def test_ollama_generate_terminal_merge_retains_usage_on_single_done_row():
+    from vmlx_engine.api.ollama_adapter import (
+        merge_ollama_generate_stream_terminal,
+    )
+
+    finish = {
+        "model": "minimax",
+        "created_at": "2026-07-19T00:00:00.000Z",
+        "response": "",
+        "done": True,
+        "done_reason": "stop",
+    }
+    usage = {
+        "model": "minimax",
+        "created_at": "2026-07-19T00:00:01.000Z",
+        "response": "",
+        "done": True,
+        "done_reason": "stop",
+        "eval_count": 215,
+        "prompt_eval_count": 78,
+    }
+
+    merged = merge_ollama_generate_stream_terminal(finish, usage)
+
+    assert merged["done"] is True
+    assert merged["done_reason"] == "stop"
+    assert merged["eval_count"] == 215
+    assert merged["prompt_eval_count"] == 78

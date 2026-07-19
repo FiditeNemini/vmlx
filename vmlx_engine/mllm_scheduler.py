@@ -4138,6 +4138,21 @@ class MLLMScheduler:
 
     async def stop(self) -> None:
         """Stop the scheduler."""
+        # Finished media/text output is dispatched before worker-owned cache
+        # cleanup.  Preserve that in-flight cleanup when Electron Stop/Start (or
+        # process shutdown) follows the visible terminal delta immediately;
+        # cancelling here used to lose the just-finished mediaSalt/TQ/L2 state.
+        if self._processing_task and not self._terminal_cleanup_complete.is_set():
+            logger.info("Waiting for terminal MLLM cache cleanup before stop")
+            try:
+                await asyncio.wait_for(
+                    self._terminal_cleanup_complete.wait(), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Terminal MLLM cache cleanup did not finish within 5s; "
+                    "continuing scheduler shutdown"
+                )
         self._running = False
         if self._processing_task:
             self._processing_task.cancel()

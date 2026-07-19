@@ -1342,9 +1342,11 @@ class BatchedEngine(BaseEngine):
             Empty list on any failure — the caller falls back to
             single-store under ``cache_type='assistant'``.
         """
-        # Skip the work for trivial conversations: 1 message has no boundary,
-        # 0 messages is degenerate.
-        if not messages or len(messages) < 2:
+        # An empty conversation is degenerate. A single user/system message is
+        # still a real role boundary: if it falls back to ``assistant``, the
+        # priority LRU can evict a brand-new base-turn disk snapshot before its
+        # first follow-up whenever L2 is near the size ceiling.
+        if not messages:
             return []
         # Skip if no system or non-uniform structure — only valuable when at
         # least one message can be pinned with a role > "assistant" priority.

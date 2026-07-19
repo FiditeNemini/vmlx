@@ -158,6 +158,70 @@ async def test_mllm_async_admission_waits_for_terminal_cache_cleanup() -> None:
     assert added == ["next media turn"]
 
 
+@pytest.mark.asyncio
+async def test_llm_stop_waits_for_terminal_cache_cleanup_before_cancelling() -> None:
+    order: list[str] = []
+    engine = EngineCore.__new__(EngineCore)
+
+    class _Scheduler:
+        def shutdown(self) -> None:
+            order.append("shutdown")
+
+    async def _loop() -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            order.append("cancel")
+            raise
+
+    engine.scheduler = _Scheduler()
+    engine._running = True
+    engine._terminal_cleanup_complete = asyncio.Event()
+    engine._task = asyncio.create_task(_loop())
+    await asyncio.sleep(0)
+
+    stopping = asyncio.create_task(engine.stop())
+    await asyncio.sleep(0)
+    assert not stopping.done()
+    assert order == []
+
+    engine._terminal_cleanup_complete.set()
+    await stopping
+
+    assert order == ["cancel", "shutdown"]
+    assert engine._task is None
+
+
+@pytest.mark.asyncio
+async def test_mllm_stop_waits_for_terminal_cache_cleanup_before_cancelling() -> None:
+    order: list[str] = []
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+
+    async def _loop() -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            order.append("cancel")
+            raise
+
+    scheduler._running = True
+    scheduler._terminal_cleanup_complete = asyncio.Event()
+    scheduler._processing_task = asyncio.create_task(_loop())
+    scheduler.batch_generator = None
+    await asyncio.sleep(0)
+
+    stopping = asyncio.create_task(scheduler.stop())
+    await asyncio.sleep(0)
+    assert not stopping.done()
+    assert order == []
+
+    scheduler._terminal_cleanup_complete.set()
+    await stopping
+
+    assert order == ["cancel"]
+    assert scheduler._running is False
+
+
 def test_direct_scheduler_steps_retain_synchronous_cleanup_default() -> None:
     llm_source = inspect.getsource(Scheduler.step)
     mllm_source = inspect.getsource(MLLMScheduler.step)

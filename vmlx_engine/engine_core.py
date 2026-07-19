@@ -124,6 +124,22 @@ class EngineCore:
 
     async def stop(self) -> None:
         """Stop the engine loop and flush caches."""
+        # A terminal output is intentionally dispatched before its prefix/TQ/SSM
+        # cleanup so the client can paint the final delta without waiting on
+        # persistence.  Do not cancel that cleanup when the user immediately
+        # stops/restarts the model after seeing the answer.  The same event gates
+        # next-turn admission; it is also the durability boundary for shutdown.
+        if self._task and not self._terminal_cleanup_complete.is_set():
+            logger.info("Waiting for terminal cache cleanup before engine stop")
+            try:
+                await asyncio.wait_for(
+                    self._terminal_cleanup_complete.wait(), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Terminal cache cleanup did not finish within 5s; "
+                    "continuing engine shutdown"
+                )
         self._running = False
         if self._task:
             self._task.cancel()

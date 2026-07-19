@@ -17098,6 +17098,28 @@ async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterato
     finish_seen = False
     error_seen = False
     first_chunk_meta = None
+    usage_field_seen = False
+
+    def _synthetic_terminal() -> dict | None:
+        if first_chunk_meta is None:
+            return None
+        terminal = {
+            "id": first_chunk_meta["id"],
+            "object": "chat.completion.chunk",
+            "created": first_chunk_meta["created"],
+            "model": first_chunk_meta["model"],
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        if usage_field_seen:
+            terminal["usage"] = None
+        return terminal
+
     async for sse in sse_stream:
         if sse.startswith("data: ") and not sse.startswith("data: [DONE]"):
             try:
@@ -17110,6 +17132,8 @@ async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterato
                 # so made guarded VLM prefill failures look like empty normal
                 # completions to clients that key off finish_reason.
                 error_seen = True
+            if isinstance(_p, dict) and "usage" in _p:
+                usage_field_seen = True
             if first_chunk_meta is None and '"chat.completion.chunk"' in sse:
                 try:
                     if not isinstance(_p, dict):
@@ -17127,25 +17151,28 @@ async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterato
                 and '"finish_reason": null' not in sse
             ):
                 finish_seen = True
+            # include_usage's choices-empty total must remain the last JSON
+            # chunk before [DONE]. If the generator omitted finish_reason,
+            # insert the guard chunk *before* that usage tail, not at [DONE]
+            # after it. Strict clients consume finish -> usage -> [DONE].
+            if (
+                not finish_seen
+                and not error_seen
+                and isinstance(_p, dict)
+                and _p.get("choices") == []
+                and _p.get("usage") is not None
+            ):
+                terminal = _synthetic_terminal()
+                if terminal is not None:
+                    yield f"data: {json.dumps(terminal, ensure_ascii=True)}\n\n"
+                    finish_seen = True
         elif (
             sse.startswith("data: [DONE]")
             and not finish_seen
             and not error_seen
         ):
-            if first_chunk_meta is not None:
-                terminal = {
-                    "id": first_chunk_meta["id"],
-                    "object": "chat.completion.chunk",
-                    "created": first_chunk_meta["created"],
-                    "model": first_chunk_meta["model"],
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": "stop",
-                        }
-                    ],
-                }
+            terminal = _synthetic_terminal()
+            if terminal is not None:
                 yield f"data: {json.dumps(terminal, ensure_ascii=True)}\n\n"
                 finish_seen = True
         yield sse
@@ -17167,6 +17194,23 @@ async def stream_chat_completion(
     # Check if we should include usage in the final chunk
     include_usage = request.stream_options and request.stream_options.include_usage
 
+    def _dump_chat_chunk(obj, *, terminal_usage: bool = False) -> str:
+        """Serialize one Chat SSE chunk with OpenAI-compatible usage shape.
+
+        ``include_usage`` requests exactly one non-null, choices-empty usage
+        chunk immediately before ``[DONE]``. Ordinary chunks carry
+        ``usage:null``; they must never expose the engine's growing counters.
+        The Electron client derives live TPS from real reasoning/content
+        deltas and consumes the authoritative total from the terminal chunk.
+        """
+        if hasattr(obj, "model_dump"):
+            payload = obj.model_dump(exclude_none=True)
+        else:
+            payload = dict(obj)
+        if include_usage and not terminal_usage:
+            payload["usage"] = None
+        return json.dumps(payload, ensure_ascii=True)
+
     # Stable timestamp for all chunks in this stream (OpenAI spec compliance)
     _created_ts = int(time.time())
 
@@ -17181,7 +17225,7 @@ async def stream_chat_completion(
             )
         ],
     )
-    yield f"data: {_dump_sse_json(first_chunk)}\n\n"
+    yield f"data: {_dump_chat_chunk(first_chunk)}\n\n"
 
     # Resolve effective enable_thinking:
     # Priority: top-level field > chat_template_kwargs > server default > auto-detect
@@ -17755,9 +17799,9 @@ async def stream_chat_completion(
                                 }
                             ],
                         }
-                        yield f"data: {json.dumps(start_chunk, ensure_ascii=True)}\n\n"
-                    # Subsequent ticks: spec-clean empty delta (carries usage
-                    # if include_usage). No `tool_call_generating` field.
+                        yield f"data: {_dump_chat_chunk(start_chunk)}\n\n"
+                    # Subsequent ticks: spec-clean empty delta.
+                    # No `tool_call_generating` field and no non-terminal usage.
                     buf_chunk = ChatCompletionChunk(
                         id=response_id,
                         created=_created_ts,
@@ -17768,13 +17812,9 @@ async def stream_chat_completion(
                                 finish_reason=None,
                             )
                         ],
-                        usage=get_usage(output) if include_usage else None,
                     )
-                    yield f"data: {_dump_sse_json(buf_chunk)}\n\n"
+                    yield f"data: {_dump_chat_chunk(buf_chunk)}\n\n"
                     continue
-
-                # Include usage in every chunk when include_usage is on (for real-time metrics)
-                chunk_usage = get_usage(output) if include_usage else None
 
                 # Suppressed reasoning is never redirected into visible content.
                 # If a boundary delta carries both reasoning and content, only
@@ -17793,9 +17833,8 @@ async def stream_chat_completion(
                                     finish_reason=None,
                                 )
                             ],
-                            usage=get_usage(output) if include_usage else None,
                         )
-                        yield f"data: {_dump_sse_json(heartbeat)}\n\n"
+                        yield f"data: {_dump_chat_chunk(heartbeat)}\n\n"
                         continue
                 else:
                     emit_reasoning = delta_msg.reasoning
@@ -17834,9 +17873,8 @@ async def stream_chat_completion(
                                     finish_reason=None,
                                 )
                             ],
-                            usage=get_usage(output),
                         )
-                        yield f"data: {_dump_sse_json(heartbeat)}\n\n"
+                        yield f"data: {_dump_chat_chunk(heartbeat)}\n\n"
                     continue
 
                 # Once the reasoning parser exposes content, it is real stream
@@ -17917,9 +17955,8 @@ async def stream_chat_completion(
                             ),
                         )
                     ],
-                    usage=chunk_usage,
                 )
-                yield f"data: {_dump_sse_json(chunk)}\n\n"
+                yield f"data: {_dump_chat_chunk(chunk)}\n\n"
             elif not request_parser:
                 # Standard path without reasoning parsing (no parser configured)
                 content = delta_text
@@ -17961,7 +17998,7 @@ async def stream_chat_completion(
                                 }
                             ],
                         }
-                        yield f"data: {json.dumps(start_chunk, ensure_ascii=True)}\n\n"
+                        yield f"data: {_dump_chat_chunk(start_chunk)}\n\n"
                     buf_chunk = ChatCompletionChunk(
                         id=response_id,
                         created=_created_ts,
@@ -17972,9 +18009,8 @@ async def stream_chat_completion(
                                 finish_reason=None,
                             )
                         ],
-                        usage=get_usage(output) if include_usage else None,
                     )
-                    yield f"data: {_dump_sse_json(buf_chunk)}\n\n"
+                    yield f"data: {_dump_chat_chunk(buf_chunk)}\n\n"
                     continue
 
                 # Same leading-whitespace guard as the reasoning-parser path.
@@ -17995,9 +18031,8 @@ async def stream_chat_completion(
                                     finish_reason=None,
                                 )
                             ],
-                            usage=get_usage(output),
                         )
-                        yield f"data: {_dump_sse_json(heartbeat)}\n\n"
+                        yield f"data: {_dump_chat_chunk(heartbeat)}\n\n"
                     continue
 
                 # Add <think> prefix on first content chunk for thinking models
@@ -18035,8 +18070,6 @@ async def stream_chat_completion(
                     content_was_emitted = True
                     streamed_content += content
 
-                # Include usage in every chunk when include_usage is on (for real-time metrics)
-                chunk_usage = get_usage(output) if include_usage else None
                 chunk = ChatCompletionChunk(
                     id=response_id,
                     created=_created_ts,
@@ -18052,9 +18085,8 @@ async def stream_chat_completion(
                             else None,
                         )
                     ],
-                    usage=chunk_usage,
                 )
-                yield f"data: {_dump_sse_json(chunk)}\n\n"
+                yield f"data: {_dump_chat_chunk(chunk)}\n\n"
             else:
                 # Reasoning parser is active but delta_text is empty/None
                 # (progress-only engine chunk). Skip — don't emit empty delta.
@@ -18141,7 +18173,7 @@ async def stream_chat_completion(
                 choices=[],
                 usage=_err_usage,
             )
-            yield f"data: {_dump_sse_json(err_usage_chunk)}\n\n"
+            yield f"data: {_dump_chat_chunk(err_usage_chunk, terminal_usage=True)}\n\n"
         yield "data: [DONE]\n\n"
         return
 
@@ -18204,7 +18236,7 @@ async def stream_chat_completion(
                         )
                     ],
                 )
-                yield f"data: {_dump_sse_json(content_chunk)}\n\n"
+                yield f"data: {_dump_chat_chunk(content_chunk)}\n\n"
 
             # Emit tool calls in OpenAI-compatible streaming format (#46):
             # Chunk 1: tool_calls data with finish_reason=null
@@ -18250,7 +18282,7 @@ async def stream_chat_completion(
                     }
                 ],
             }
-            yield f"data: {json.dumps(tc_data_chunk, ensure_ascii=True)}\n\n"
+            yield f"data: {_dump_chat_chunk(tc_data_chunk)}\n\n"
             # Finish chunk: empty delta with finish_reason="tool_calls"
             tc_finish_chunk = {
                 "id": response_id,
@@ -18265,7 +18297,7 @@ async def stream_chat_completion(
                     }
                 ],
             }
-            yield f"data: {json.dumps(tc_finish_chunk, ensure_ascii=True)}\n\n"
+            yield f"data: {_dump_chat_chunk(tc_finish_chunk)}\n\n"
             # Skip normal end-of-stream handling — we already set finish_reason
             if include_usage:
                 _tc_usage = Usage(
@@ -18284,7 +18316,7 @@ async def stream_chat_completion(
                     choices=[],
                     usage=_tc_usage,
                 )
-                yield f"data: {_dump_sse_json(usage_chunk)}\n\n"
+                yield f"data: {_dump_chat_chunk(usage_chunk, terminal_usage=True)}\n\n"
             tool_calls_emitted = True
             yield "data: [DONE]\n\n"
             return
@@ -18325,7 +18357,7 @@ async def stream_chat_completion(
                         )
                     ],
                 )
-                yield f"data: {_dump_sse_json(flush_chunk)}\n\n"
+                yield f"data: {_dump_chat_chunk(flush_chunk)}\n\n"
 
     if (
         not tool_calls_emitted
@@ -18398,7 +18430,7 @@ async def stream_chat_completion(
                 )
             ],
         )
-        yield f"data: {_dump_sse_json(fallback_chunk)}\n\n"
+        yield f"data: {_dump_chat_chunk(fallback_chunk)}\n\n"
 
     if (
         not content_was_emitted
@@ -18558,7 +18590,7 @@ async def stream_chat_completion(
                         )
                     ],
                 )
-                yield f"data: {_dump_sse_json(answer_chunk)}\n\n"
+                yield f"data: {_dump_chat_chunk(answer_chunk)}\n\n"
             if _buffer_answer_pass:
                 # Emit the buffered qwen3_5* answer as one delta, but ONLY if the
                 # pass itself completed. A pass that hit its bounded budget
@@ -18614,7 +18646,7 @@ async def stream_chat_completion(
                             )
                         ],
                     )
-                    yield f"data: {_dump_sse_json(answer_chunk)}\n\n"
+                    yield f"data: {_dump_chat_chunk(answer_chunk)}\n\n"
                 elif _ans_reasoning_leak:
                     logger.info(
                         "%s streaming answer pass re-entered reasoning "
@@ -18646,7 +18678,7 @@ async def stream_chat_completion(
                         )
                     ],
                 )
-                yield f"data: {_dump_sse_json(answer_finish_chunk)}\n\n"
+                yield f"data: {_dump_chat_chunk(answer_finish_chunk)}\n\n"
         except Exception as e:
             logger.error(
                 "%s Chat Completions visible answer pass failed for %s: %s",
@@ -18678,7 +18710,7 @@ async def stream_chat_completion(
                             finish_reason=None,
                         )],
                     )
-                    yield f"data: {_dump_sse_json(tc_content_chunk)}\n\n"
+                    yield f"data: {_dump_chat_chunk(tc_content_chunk)}\n\n"
                 tc_chunk = ChatCompletionChunk(
                     id=response_id, created=_created_ts, model=request.model,
                     choices=[ChatCompletionChunkChoice(
@@ -18692,7 +18724,7 @@ async def stream_chat_completion(
                     )],
                 )
                 tool_calls_emitted = True
-                yield f"data: {_dump_sse_json(tc_chunk)}\n\n"
+                yield f"data: {_dump_chat_chunk(tc_chunk)}\n\n"
             else:
                 logger.info(
                     f"Request {response_id}: tool markers found in suppressed "
@@ -18705,7 +18737,7 @@ async def stream_chat_completion(
                         finish_reason="stop",
                     )],
                 )
-                yield f"data: {_dump_sse_json(diag_chunk)}\n\n"
+                yield f"data: {_dump_chat_chunk(diag_chunk)}\n\n"
         else:
             logger.info(
                 f"Request {response_id}: model produced only reasoning ({len(accumulated_reasoning)} chars) — suppressed per user setting"
@@ -18717,7 +18749,7 @@ async def stream_chat_completion(
                     finish_reason="stop",
                 )],
             )
-            yield f"data: {_dump_sse_json(diag_chunk)}\n\n"
+            yield f"data: {_dump_chat_chunk(diag_chunk)}\n\n"
 
     _stream_chat_warnings = None
     if (
@@ -18748,7 +18780,7 @@ async def stream_chat_completion(
             choices=[],
             warnings=_stream_chat_warnings,
         )
-        yield f"data: {_dump_sse_json(warning_chunk)}\n\n"
+        yield f"data: {_dump_chat_chunk(warning_chunk)}\n\n"
         # Strict OpenAI clients (langchain, harnesses) wait for a chunk with
         # non-null finish_reason before closing the stream. The warning chunk
         # above carries choices=[] so it has no finish_reason; without an
@@ -18770,7 +18802,7 @@ async def stream_chat_completion(
                     )
                 ],
             )
-            yield f"data: {_dump_sse_json(warning_finish_chunk)}\n\n"
+            yield f"data: {_dump_chat_chunk(warning_finish_chunk)}\n\n"
 
     # Safeguard: if model generated zero tokens (empty stream), finish the stream
     # without injecting diagnostic prose as assistant output. The warning belongs
@@ -18793,7 +18825,7 @@ async def stream_chat_completion(
                 )
             ],
         )
-        yield f"data: {_dump_sse_json(empty_chunk)}\n\n"
+        yield f"data: {_dump_chat_chunk(empty_chunk)}\n\n"
 
     # Enforce tool_choice="required" in streaming: emit error SSE if no tool calls
     if _is_required_tool_choice(getattr(request, "tool_choice", None)) and not tool_calls_emitted:
@@ -18898,7 +18930,7 @@ async def stream_chat_completion(
             choices=[],  # Empty choices for usage-only chunk
             usage=_usage,
         )
-        yield f"data: {_dump_sse_json(usage_chunk)}\n\n"
+        yield f"data: {_dump_chat_chunk(usage_chunk, terminal_usage=True)}\n\n"
 
     yield "data: [DONE]\n\n"
 

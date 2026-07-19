@@ -124,6 +124,12 @@ class TestTerminalFinishGuard:
         ]
         out = _collect(frames)
         assert _finish_reasons(out) == ["stop"]
+        assert out[-1] == "data: [DONE]\n\n"
+        terminal = json.loads(out[-3].strip()[6:])
+        final_usage = json.loads(out[-2].strip()[6:])
+        assert terminal["choices"][0]["finish_reason"] == "stop"
+        assert terminal["usage"] is None
+        assert final_usage == usage_chunk
 
     def test_structured_error_is_not_followed_by_synthetic_stop(self):
         error = {

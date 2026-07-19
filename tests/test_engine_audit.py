@@ -11220,6 +11220,7 @@ class TestTurboQuantKVTelemetry:
         scheduler.memory_aware_cache = None
         scheduler.prefix_cache = None
         scheduler.disk_cache = None
+        scheduler._tq_decoder_warmup_stats = None
         batch_stats = SimpleNamespace(
             last_cache_execution={
                 "cache_detail": "paged+ssm",
@@ -11289,6 +11290,7 @@ class TestTurboQuantKVTelemetry:
         scheduler.memory_aware_cache = None
         scheduler.prefix_cache = None
         scheduler.disk_cache = None
+        scheduler._tq_decoder_warmup_stats = None
 
         assert scheduler.get_stats()["last_cache_execution"] == execution
 
@@ -15157,8 +15159,12 @@ class TestStreamUsagePropagatesCacheDetail:
                 chunks.append(json.loads(line.removeprefix("data: ")))
 
         usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
-        assert usage_chunks
-        assert usage_chunks[-1]["usage"]["prompt_tokens_details"] == {
+        assert len(usage_chunks) == 1
+        assert usage_chunks[0]["choices"] == []
+        assert chunks[-1] is usage_chunks[0]
+        assert all("usage" in chunk for chunk in chunks)
+        assert all(chunk["usage"] is None for chunk in chunks[:-1])
+        assert usage_chunks[0]["usage"]["prompt_tokens_details"] == {
             "cached_tokens": 0,
             "cache_detail": "paged+zaya_cca",
         }
@@ -15706,6 +15712,11 @@ class TestStreamUsagePropagatesCacheDetail:
 
         assert any("internal M3 plan" in delta for delta in reasoning_deltas)
         assert content_deltas == ["VISIBLE_M3_ANSWER"]
+        assert len(usage_chunks) == 1
+        assert usage_chunks[0]["choices"] == []
+        assert chunks[-1] is usage_chunks[0]
+        assert all("usage" in chunk for chunk in chunks)
+        assert all(chunk["usage"] is None for chunk in chunks[:-1])
         assert usage_chunks[-1]["usage"]["prompt_tokens_details"] == {
             "cached_tokens": 13,
             "cache_detail": "memory",

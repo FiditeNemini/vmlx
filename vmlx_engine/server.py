@@ -1234,23 +1234,30 @@ def _answer_pass_safe_visible_raw(
 ANSWER_PASS_FLOOR = 48
 
 
-# Qwen3/3.5/3.6 can keep revising an already-complete solution inside its hidden
-# reasoning rail until the entire output cap is exhausted.  The visible-answer
-# pass then receives only ANSWER_PASS_FLOOR, which is too small for a normal
-# terminal response.  When neither the request nor the bundle supplies a
-# thinking budget, partition the existing total output cap instead of granting
-# a hidden retry overage: at most 1,024 tokens go to reasoning and at least 256
-# tokens (or half of a smaller cap) remain available for visible content.
-# Explicit max_thinking_tokens remains authoritative.
+# Reasoning families can keep revising an already-complete solution inside their
+# hidden rail until the entire output cap is exhausted.  The visible-answer pass
+# then receives only ANSWER_PASS_FLOOR, which is too small for a normal terminal
+# response.  When neither the request nor the bundle supplies a thinking budget,
+# partition the existing total output cap instead of granting a hidden retry
+# overage: at most 1,024 tokens go to reasoning and at least 256 tokens (or half
+# of a smaller cap) remain available for visible content.  Explicit
+# max_thinking_tokens remains authoritative.
+#
+# Keep this an architecture allowlist: membership requires both a bounded
+# thinking-off answer pass and a template/runtime whose first-pass max_tokens can
+# safely act as a reasoning budget.  Hy3 meets both conditions: Auto deliberately
+# maps to reasoning_effort=high, while its native no_think template owns the
+# direct answer pass.  Omitting it made a 512-token Auto turn spend all 512 tokens
+# in reasoning and expose only a three-character answer before terminal length.
 AUTO_THINKING_PASS_LIMIT = 1024
 AUTO_VISIBLE_ANSWER_RESERVE = 256
 _AUTO_THINKING_PARTITION_FAMILIES = frozenset(
-    {"qwen3", "qwen3_5", "qwen3_5_moe"}
+    {"hy_v3", "qwen3", "qwen3_5", "qwen3_5_moe"}
 )
 
 
 def _auto_thinking_pass_budget(total_cap: Any) -> int:
-    """Return Qwen's Auto reasoning share without exceeding ``total_cap``."""
+    """Return the Auto reasoning share without exceeding ``total_cap``."""
     try:
         resolved_cap = max(0, int(total_cap or 0))
     except (TypeError, ValueError):
@@ -1271,11 +1278,11 @@ def _auto_thinking_partition_allowed(
     tools_available: bool,
     post_tool_continuation: bool = False,
 ) -> bool:
-    """Whether Qwen Auto may reserve visible-output budget on this pass.
+    """Whether Auto reasoning may reserve visible-output budget on this pass.
 
     An ordinary ``tool_choice=auto`` request must not lose its entire output
     budget to hidden reasoning merely because a coding harness attached a tool
-    catalog.  Reserve the same bounded Qwen answer share used by tools-free
+    catalog.  Reserve the same bounded answer share used by tools-free
     requests, then remove the tool catalog only if final parsing found neither a
     call nor visible content.  Required, named, or explicitly requested tool
     turns remain unpartitioned and fail closed; they must never be converted
@@ -19919,9 +19926,25 @@ async def stream_responses_api(
         len(tool_calls or []),
     )
 
-    _fallback_visible_content = (
-        cleaned_text if _suppress_tools else accumulated_content
-    )
+    # When the reasoning parser already separated a private rail, only its
+    # accumulated CONTENT can satisfy the visible-answer gate.  A tool_choice=none
+    # request still enters the suppressed-tools cleanup path; using cleaned_text
+    # there recycled full_text (the private reasoning rail) and falsely told the
+    # gate that visible content existed.  The result was a reasoning-only terminal
+    # with no bounded answer pass for any affected Responses reasoning family.
+    # Models without a separated reasoning rail keep the suppressed-tools cleaned
+    # text so raw native tool markup remains hidden from ordinary content.
+    if request_parser and accumulated_reasoning.strip():
+        _fallback_visible_content = accumulated_content
+        if _suppress_tools and _fallback_visible_content:
+            _fallback_visible_content = _clean_suppressed_tool_markup_for_display(
+                _fallback_visible_content,
+                request,
+            )
+    else:
+        _fallback_visible_content = (
+            cleaned_text if _suppress_tools else accumulated_content
+        )
 
     if (
         not tool_calls

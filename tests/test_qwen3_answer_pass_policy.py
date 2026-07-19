@@ -158,6 +158,26 @@ def _install_qwen3_policy(monkeypatch) -> None:
     _install_qwen_policy(monkeypatch, "qwen3")
 
 
+def _install_hy3_policy(monkeypatch) -> None:
+    config = SimpleNamespace(
+        family_name="hy_v3",
+        think_in_template=False,
+        reasoning_parser="qwen3",
+        tool_parser="hunyuan",
+        supports_thinking=True,
+    )
+    monkeypatch.setattr(server, "_default_timeout", 5.0)
+    monkeypatch.setattr(server, "_model_name", "hy3-policy-test")
+    monkeypatch.setattr(server, "_model_path", None)
+    monkeypatch.setattr(server, "_reasoning_parser", Qwen3ReasoningParser())
+    monkeypatch.setattr(server, "_tool_call_parser", "hunyuan")
+    monkeypatch.setattr(
+        registry,
+        "get_model_config_registry",
+        lambda *args, **kwargs: SimpleNamespace(lookup=lambda *a, **k: config),
+    )
+
+
 def _data_events(chunks: list[str]) -> list[dict]:
     events: list[dict] = []
     for chunk in chunks:
@@ -581,6 +601,47 @@ async def test_qwen35_responses_auto_blank_budget_still_runs_floor_answer_pass(
     assert engine.calls[1]["enable_thinking"] is False
     assert engine.calls[1]["chat_template_kwargs"]["enable_thinking"] is False
     assert engine.calls[1]["max_tokens"] == server.ANSWER_PASS_FLOOR
+    events = _data_events(chunks)
+    assert [
+        event["delta"]
+        for event in events
+        if event.get("type") == "response.output_text.delta"
+    ] == ["Q35-", "VISIBLE-DONE"]
+    completed = next(
+        event["response"] for event in events if event.get("type") == "response.completed"
+    )
+    assert completed["output"][0]["content"][0]["text"] == "Q35-VISIBLE-DONE"
+
+
+@pytest.mark.asyncio
+async def test_hy3_responses_auto_partitions_reasoning_and_streams_direct_answer(
+    monkeypatch,
+):
+    """Hy3 Auto uses the shared reserve instead of starving visible content."""
+    _install_hy3_policy(monkeypatch)
+    engine = _Qwen35AutoBudgetOverrunEngine()
+    request = ResponsesRequest(
+        model="jangq-ai/Hy3-JANG_2K-MTP",
+        input="say the marker",
+        stream=True,
+        max_output_tokens=512,
+        tools=[_responses_file_info_tool()],
+        tool_choice="none",
+    )
+
+    chunks = []
+    async for chunk in server.stream_responses_api(
+        engine,
+        [{"role": "user", "content": "say the marker"}],
+        request,
+        fastapi_request=None,
+        max_tokens=512,
+    ):
+        chunks.append(chunk)
+
+    assert engine.calls[0]["max_tokens"] == server._auto_thinking_pass_budget(512)
+    assert engine.calls[1]["enable_thinking"] is False
+    assert engine.calls[1]["reasoning_effort"] == "no_think"
     events = _data_events(chunks)
     assert [
         event["delta"]

@@ -35,6 +35,17 @@ describe('JANG quantization labels', () => {
     })).toBe('JANG_4M (4.45b)')
   })
 
+  it('does not mislabel mixed routed JANG profiles with their affine container bits', () => {
+    expect(formatJangQuantizationLabel({
+      format: 'jang',
+      quantization: {
+        profile: 'JANG_2K',
+        bits: 8,
+        routed_avg_bits: 2.3333333333333335,
+      },
+    })).toBe('JANG_2K (2.33b routed)')
+  })
+
   it('falls back without leaking undefined when profile has no known bit mapping', () => {
     expect(formatJangQuantizationLabel({
       weight_format: 'mxtq',

@@ -18,6 +18,7 @@ export function formatJangQuantizationLabel(config: {
     actual_bits?: unknown
     target_bits?: unknown
     bits?: unknown
+    routed_avg_bits?: unknown
   }
 }): string | undefined {
   const format = typeof config.format === 'string' ? config.format.toLowerCase() : ''
@@ -25,10 +26,11 @@ export function formatJangQuantizationLabel(config: {
     typeof config.weight_format === 'string' ? config.weight_format.toLowerCase() : ''
   const quant = config.quantization ?? {}
   const profile = typeof quant.profile === 'string' ? quant.profile.trim() : undefined
-  const explicitBits =
-    numberOrUndefined(quant.actual_bits) ??
-    numberOrUndefined(quant.target_bits) ??
-    numberOrUndefined(quant.bits)
+  const actualBits = numberOrUndefined(quant.actual_bits)
+  const targetBits = numberOrUndefined(quant.target_bits)
+  const containerBits = numberOrUndefined(quant.bits)
+  const routedAverageBits = numberOrUndefined(quant.routed_avg_bits)
+  const explicitBits = actualBits ?? targetBits ?? containerBits
 
   if (weightFormat === 'mxtq' || format === 'mxtq' || format === 'jangtq') {
     const bits = explicitBits ?? jangtqBitsFromProfile(profile)
@@ -45,6 +47,11 @@ export function formatJangQuantizationLabel(config: {
     weightFormat === 'jjqf' ||
     weightFormat === 'mxq'
   ) {
+    if (profile && actualBits != null) return `${profile} (${actualBits}b)`
+    if (profile && routedAverageBits != null) {
+      const routedLabel = Number(routedAverageBits.toFixed(2))
+      return `${profile} (${routedLabel}b routed)`
+    }
     if (profile) return explicitBits ? `${profile} (${explicitBits}b)` : profile
     return explicitBits ? `JANG ${explicitBits}-bit` : 'JANG'
   }

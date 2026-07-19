@@ -25,8 +25,8 @@ def test_remaining_answer_pass_budget_bounded_floor():
     assert budget(384, 384, floor=0) == 0
 
 
-def test_qwen_auto_thinking_partition_preserves_visible_answer_budget():
-    """Auto Qwen reasoning stays inside the total output cap and cannot starve
+def test_auto_thinking_partition_preserves_visible_answer_budget():
+    """Auto reasoning stays inside the total output cap and cannot starve
     the visible-answer pass when no explicit or bundle budget exists."""
     budget = server._auto_thinking_pass_budget
 
@@ -51,5 +51,5 @@ def test_all_chat_and_responses_answer_passes_use_remaining_budget():
     assert "_ns_budget = max(32" not in source
     assert source.count("_auto_thinking_pass_budget(") >= 5
     assert server._AUTO_THINKING_PARTITION_FAMILIES == frozenset(
-        {"qwen3", "qwen3_5", "qwen3_5_moe"}
+        {"hy_v3", "qwen3", "qwen3_5", "qwen3_5_moe"}
     )

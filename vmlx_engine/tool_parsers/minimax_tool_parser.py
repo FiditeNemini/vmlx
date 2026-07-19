@@ -135,7 +135,34 @@ class MiniMaxToolParser(ToolParser):
         # Strip <think> tags first (model uses interleaved thinking)
         cleaned_text = self.strip_think_tags(model_output)
 
-        if "<minimax:tool_call>" not in cleaned_text:
+        # Some MiniMax M2.7 tokenizer streams consume the opening outer
+        # namespace token while leaving a complete invoke and the closing
+        # ``</minimax:tool_call>`` in decoded output. This is still
+        # unambiguous native control markup, but the old outer-marker gate
+        # rejected it and leaked the invoke as visible text. Restore only this
+        # narrowly validated shape: a complete invoke must precede the orphan
+        # outer close. Arbitrary visible ``<invoke>`` examples remain content.
+        normalized_text = cleaned_text
+        if "<minimax:tool_call>" not in normalized_text:
+            orphan_close = normalized_text.find("</minimax:tool_call>")
+            invoke_start = normalized_text.find("<invoke name=")
+            invoke_close = (
+                normalized_text.find("</invoke>", invoke_start)
+                if invoke_start >= 0
+                else -1
+            )
+            if (
+                invoke_start >= 0
+                and invoke_close > invoke_start
+                and orphan_close > invoke_close
+            ):
+                normalized_text = (
+                    normalized_text[:invoke_start]
+                    + "<minimax:tool_call>"
+                    + normalized_text[invoke_start:]
+                )
+
+        if "<minimax:tool_call>" not in normalized_text:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=cleaned_text
             )
@@ -143,7 +170,7 @@ class MiniMaxToolParser(ToolParser):
         tool_calls: list[dict[str, Any]] = []
 
         # Find all <minimax:tool_call> blocks
-        for block_match in self.TOOL_CALL_PATTERN.finditer(cleaned_text):
+        for block_match in self.TOOL_CALL_PATTERN.finditer(normalized_text):
             block_content = block_match.group(1).strip()
 
             # Strategy 1: <invoke name="func">...</invoke> (standard format)
@@ -181,7 +208,7 @@ class MiniMaxToolParser(ToolParser):
                     tool_calls.append(tc)
 
         if not tool_calls:
-            for block_content in self._unterminated_tool_call_blocks(cleaned_text):
+            for block_content in self._unterminated_tool_call_blocks(normalized_text):
                 for invoke_match in self.LENIENT_INVOKE_PATTERN.finditer(block_content):
                     tool_call = self._tool_call_from_invoke(
                         invoke_match.group(1),
@@ -192,7 +219,7 @@ class MiniMaxToolParser(ToolParser):
                         tool_calls.append(tool_call)
 
         # Remove tool call blocks from text to get remaining content
-        content_text = self.TOOL_CALL_PATTERN.sub("", cleaned_text).strip()
+        content_text = self.TOOL_CALL_PATTERN.sub("", normalized_text).strip()
         if tool_calls and "<minimax:tool_call>" in content_text:
             content_text = re.sub(
                 r"<minimax:tool_call>.*$",

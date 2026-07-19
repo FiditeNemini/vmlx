@@ -1069,6 +1069,29 @@ class TestMiniMaxToolParser:
         assert result.content == "Let me check the weather for you."
         assert result.tool_calls[0]["name"] == "get_weather"
 
+    def test_orphan_outer_close_with_complete_invoke_is_native_call(self, parser):
+        """M2.7 may consume the opening namespace token while decoding."""
+        text = '''<invoke name="file_info">
+<parameter name="path">panel/package.json</parameter>
+</invoke>
+</minimax:tool_call>'''
+        result = parser.extract_tool_calls(text)
+
+        assert result.tools_called
+        assert result.content is None
+        assert result.tool_calls[0]["name"] == "file_info"
+        assert json.loads(result.tool_calls[0]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+
+    def test_visible_invoke_without_orphan_outer_close_remains_content(self, parser):
+        """Do not promote arbitrary XML examples without the MiniMax close."""
+        text = '<invoke name="file_info"><parameter name="path">x</parameter></invoke>'
+        result = parser.extract_tool_calls(text)
+
+        assert not result.tools_called
+        assert result.content == text
+
     def test_think_tags_with_tool_call(self, parser):
         """Test <think> tags are stripped before parsing."""
         text = """<think>I need to get the weather data.</think>

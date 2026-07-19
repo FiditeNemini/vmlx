@@ -184,7 +184,7 @@ ROWS: list[ModelRow] = [
             "F32 critical controls, explicit bit plan, and prestacked JANGTQ "
             "sidecar.",
             "DSV4 SWA+CSA/HCA heterogenous cache; paged/block L2 must use "
-            "deepseek_v4_v7 composite-state serialization, not generic KV blocks"
+            "deepseek_v4_v8 composite-state serialization, not generic KV blocks"
         ],
     ),
     ModelRow(
@@ -218,7 +218,7 @@ ROWS: list[ModelRow] = [
             "the JANG_2L_GS64_ProjLayerBits_Ggs32-Dgs32-Ugs64_bk4_Tok8g64_NoMTP "
             "profile from jang_config.json.",
             "Must use the DSV4 native SWA+CSA/HCA composite cache path "
-            "with deepseek_v4_v7 paged-prefix/L2 serialization; generic "
+            "with deepseek_v4_v8 paged-prefix/L2 serialization; generic "
             "TurboQuant KV is invalid for this family.",
         ],
     ),
@@ -1856,7 +1856,7 @@ def capability_endpoint_contract_ok(row: ModelRow, caps: Any) -> bool:
         and "max" in (caps.get("reasoning_efforts") or [])
         and isinstance(native, dict)
         and native.get("family") == "deepseek_v4"
-        and native.get("schema") == "deepseek_v4_v7"
+        and native.get("schema") == "deepseek_v4_v8"
         and native.get("cache_type") == "native_composite"
         and native.get("generic_turboquant_kv", {}).get("enabled") is False
     )
@@ -2510,8 +2510,8 @@ def live_audit(row: ModelRow, py: Path, port: int, timeout_load: int, keep_runni
         check(
             "dsv4_paged_cache_composite_enabled",
             "DeepseekV4Cache-aware paged prefix cache enabled" in log_text
-            and "deepseek_v4_v7" in log_text,
-            "DSV4 must keep paged/L2 cache on and use the deepseek_v4 v7 composite-state schema",
+            and "deepseek_v4_v8" in log_text,
+            "DSV4 must keep paged/L2 cache on and use the deepseek_v4 v8 composite-state schema",
         )
         check(
             "dsv4_canonical_encoder_shim",
@@ -2659,7 +2659,7 @@ def live_audit(row: ModelRow, py: Path, port: int, timeout_load: int, keep_runni
             "dsv4_native_cache_capabilities",
             isinstance(native_caps, dict)
             and native_caps.get("family") == "deepseek_v4"
-            and native_caps.get("schema") == "deepseek_v4_v7"
+            and native_caps.get("schema") == "deepseek_v4_v8"
             and native_caps.get("cache_type") == "native_composite"
             and native_caps.get("generic_turboquant_kv", {}).get("enabled") is False,
             {"native_cache": native_caps},

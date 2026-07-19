@@ -466,7 +466,7 @@ def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
         capacity = int(args.paged_cache_block_size) * int(args.max_cache_blocks)
         lines = [
             (
-                "DSV4 native composite prefix cache: schema=deepseek_v4_v7, "
+                "DSV4 native composite prefix cache: schema=deepseek_v4_v8, "
                 f"block_size={args.paged_cache_block_size}, "
                 f"max_blocks={args.max_cache_blocks}, "
                 f"capacity={capacity} tokens (not generic paged KV)"
@@ -976,7 +976,7 @@ def serve_command(args):
         if _mc.family_name == "deepseek_v4":
             _is_dsv4_model = True
             _apply_dsv4_runtime_policy(args, logger)
-            # The DSV4-aware paged schema (scheduler.py: deepseek_v4_v7
+            # The DSV4-aware paged schema (scheduler.py: deepseek_v4_v8
             # nested-state serialization) handles the mixed KVCache /
             # DeepseekV4Cache layer layout after load_jangtq_dsv4 verifies
             # the installed native JANG attention mask/compressed-pool

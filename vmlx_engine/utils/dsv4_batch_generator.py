@@ -357,7 +357,19 @@ class DSV4BatchGenerator:
                     sliding_window = int(getattr(local, "max_size", 128) or 128)
                     compress_ratio = getattr(layer_cache, "compress_ratio", None)
 
-                    new_cache = DeepseekV4Cache(
+                    cache_cls = DeepseekV4Cache
+                    if cls_name == "PoolQuantizedV4Cache":
+                        # Preserve the native DSV4 pool codec across the clean
+                        # prompt-boundary snapshot. Downgrading this object to
+                        # DeepseekV4Cache changes how subsequent CSA/HCA pool
+                        # rows are appended after a prefix-cache restore.
+                        from jang_tools.dsv4.pool_quant_cache import (
+                            PoolQuantizedV4Cache,
+                        )
+
+                        cache_cls = PoolQuantizedV4Cache
+
+                    new_cache = cache_cls(
                         sliding_window=sliding_window,
                         compress_ratio=compress_ratio,
                     )
@@ -813,7 +825,6 @@ class DSV4BatchGenerator:
                             _ = self._prefill_last_logits(
                                 tail_head,
                                 r.cache,
-                                realize_before_clear=False,
                             )
                         try:
                             _t_snapshot = time.perf_counter()
@@ -844,13 +855,11 @@ class DSV4BatchGenerator:
                         last_logits = self._prefill_last_logits(
                             final_prompt_token,
                             r.cache,
-                            realize_before_clear=False,
                         )
                     else:
                         last_logits = self._prefill_last_logits(
                             r.prompt_tokens,
                             r.cache,
-                            realize_before_clear=False,
                         )
                     self._trace_timing(
                         "cache_hit_tail_prefill",

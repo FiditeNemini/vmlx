@@ -53,13 +53,24 @@ def _make_dsv4_state_cache():
     return c
 
 
+def _make_pool_quantized_dsv4_state_cache():
+    from jang_tools.dsv4.pool_quant_cache import PoolQuantizedV4Cache
+
+    c = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+    base = _make_dsv4_state_cache()
+    c.state = base.state
+    c.meta_state = base.meta_state
+    return c
+
+
 def _state_dict(c):
     return {
         "state": c.state,
         "meta_state": c.meta_state,
-        "class_name": "DeepseekV4Cache",
+        "class_name": type(c).__name__,
         "compress_ratio": 4,
         "sliding_window": 128,
+        "pool_quant": type(c).__name__ == "PoolQuantizedV4Cache",
     }
 
 
@@ -72,6 +83,32 @@ def test_pool_quantized_v4_cache_is_detected_as_dsv4_composite():
 
     assert Scheduler._is_dsv4_cache_object(cache)
     assert _is_dsv4_cache_class("PoolQuantizedV4Cache")
+
+
+def test_dsv4_prompt_snapshot_preserves_pool_quantized_cache_type():
+    from jang_tools.dsv4.pool_quant_cache import PoolQuantizedV4Cache
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    cache = _make_pool_quantized_dsv4_state_cache()
+    snapshot = DSV4BatchGenerator._snapshot_dsv4_cache([cache])
+
+    assert snapshot is not None
+    assert len(snapshot) == 1
+    assert isinstance(snapshot[0], PoolQuantizedV4Cache)
+    assert snapshot[0].compress_ratio == 4
+    assert snapshot[0].state[1][2].shape == (1, 2, 512)
+
+
+def test_dsv4_extraction_reports_pool_quantized_native_codec():
+    from vmlx_engine.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    extracted = scheduler._extract_cache_states(
+        [_make_pool_quantized_dsv4_state_cache()]
+    )
+
+    assert extracted[0]["class_name"] == "PoolQuantizedV4Cache"
+    assert extracted[0]["pool_quant"] is True
 
 
 def test_pool_quantized_v4_cache_does_not_route_to_hybrid_ssm():
@@ -816,6 +853,25 @@ def test_dsv4_paged_reconstruct_returns_deepseek_cache_not_ssm_partial():
     assert rebuilt[0].state[1][2].shape == (1, 2, 512)
 
 
+def test_dsv4_paged_reconstruct_preserves_pool_quantized_cache_type():
+    from jang_tools.dsv4.pool_quant_cache import PoolQuantizedV4Cache
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    pc = BlockAwarePrefixCache(model=None, paged_cache_manager=PagedCacheManager(4, 8))
+    c = _make_pool_quantized_dsv4_state_cache()
+    tokens = [11, 12, 13, 14, 15, 16, 17]
+    table = pc.store_cache("dsv4-pool-quant-test", tokens, [_state_dict(c)])
+
+    rebuilt = pc.reconstruct_cache(table)
+
+    assert rebuilt is not None
+    assert len(rebuilt) == 1
+    assert isinstance(rebuilt[0], PoolQuantizedV4Cache)
+    assert rebuilt[0].compress_ratio == 4
+    assert rebuilt[0].state[1][2].shape == (1, 2, 512)
+
+
 def test_dsv4_frugal_store_keeps_terminal_composite_block_in_ram(monkeypatch):
     """Immediate same-process DSV4 hits must not depend on async L2 visibility.
 
@@ -1174,7 +1230,7 @@ def test_dsv4_cli_cache_summary_names_native_composite_cache():
 
     joined = "\n".join(lines)
     assert "DSV4 native composite prefix cache" in joined
-    assert "deepseek_v4_v7" in joined
+    assert "deepseek_v4_v8" in joined
     assert "generic paged KV" in joined
     assert "Paged cache:" not in joined
 
@@ -1188,7 +1244,7 @@ def test_dsv4_scheduler_log_names_native_composite_block_index():
     source = inspect.getsource(Scheduler.__init__)
     assert "DSV4 native composite block index enabled" in source
     assert "not generic paged KV" in source
-    assert "deepseek_v4_v7" in source
+    assert "deepseek_v4_v8" in source
     assert 'f"Paged cache enabled: block_size=' in source
 
 

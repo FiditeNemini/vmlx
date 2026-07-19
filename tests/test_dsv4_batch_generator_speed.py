@@ -166,7 +166,7 @@ def test_dsv4_warmup_realizes_model_forward_before_sync(monkeypatch):
     ]
 
 
-def test_dsv4_cache_hit_tail_prefill_uses_cross_thread_safe_realization():
+def test_dsv4_cache_hit_tail_prefill_realizes_before_allocator_clear():
     from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator, _Request
 
     gen = DSV4BatchGenerator.__new__(DSV4BatchGenerator)
@@ -201,6 +201,6 @@ def test_dsv4_cache_hit_tail_prefill_uses_cross_thread_safe_realization():
 
     prompt_resps, gen_resps = gen.next()
 
-    assert calls == [([101], False)]
+    assert calls == [([101], True)]
     assert [resp.token for resp in prompt_resps] == [1]
     assert gen_resps == []

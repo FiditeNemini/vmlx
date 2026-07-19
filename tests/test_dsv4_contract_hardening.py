@@ -15,7 +15,7 @@ Specifically:
 2. The capabilities payload for ``family == "deepseek_v4"`` must report empty
    ``experimental_modes`` (no leftover ``raw-thinking`` shape).
 3. ``_native_cache_status`` for the DSV4 branch must report the
-   ``deepseek_v4_v7`` schema, ``cache_type == "native_composite"``, and
+   ``deepseek_v4_v8`` schema, ``cache_type == "native_composite"``, and
    ``generic_turboquant_kv.enabled is False`` (per
    ``~/wiki/research/topics/path-dependent-cache-restore.md`` the composite
    cache IS the cache-size strategy; layering generic TQ-KV on top would
@@ -112,12 +112,12 @@ def test_dsv4_capabilities_endpoint_emits_current_contract(monkeypatch):
     assert payload["experimental_modes"] == []
     assert payload["reasoning_efforts"] == ["high", "max"]
     assert payload["cache"]["native"]["family"] == "deepseek_v4"
-    assert payload["cache"]["native"]["schema"] == "deepseek_v4_v7"
+    assert payload["cache"]["native"]["schema"] == "deepseek_v4_v8"
     assert payload["cache"]["native"]["cache_type"] == "native_composite"
     assert payload["cache"]["native"]["generic_turboquant_kv"]["enabled"] is False
 
 
-def test_dsv4_native_cache_status_reports_native_composite_v7_schema():
+def test_dsv4_native_cache_status_reports_native_composite_v8_schema():
     """The DSV4 branch of ``_native_cache_status`` must keep its current shape.
 
     The shape is contract-checked live by
@@ -136,7 +136,7 @@ def test_dsv4_native_cache_status_reports_native_composite_v7_schema():
     status = server._native_cache_status(fake_scheduler, family="deepseek_v4", cfg=None)
 
     assert status["family"] == "deepseek_v4"
-    assert status["schema"] == "deepseek_v4_v7"
+    assert status["schema"] == "deepseek_v4_v8"
     assert status["cache_type"] == "native_composite"
     assert status["generic_turboquant_kv"]["enabled"] is False
     assert status["generic_turboquant_kv"]["reason"] == "native_dsv4_composite"
@@ -217,7 +217,7 @@ def test_dsv4_capability_runner_check_accepts_current_contract_only():
         "cache": {
             "native": {
                 "family": "deepseek_v4",
-                "schema": "deepseek_v4_v7",
+                "schema": "deepseek_v4_v8",
                 "cache_type": "native_composite",
                 "generic_turboquant_kv": {"enabled": False},
             }

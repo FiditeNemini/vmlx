@@ -962,7 +962,7 @@ class Scheduler:
             logger.info(
                 "DSV4 DeepseekV4Cache-aware paged prefix cache enabled — "
                 "terminal blocks store full SWA+CSA/HCA composite state and "
-                "block disk L2 uses deepseek_v4_v7 nested-state serialization "
+                "block disk L2 uses deepseek_v4_v8 nested-state serialization "
                 "with N-1 prompt-token keys."
             )
 
@@ -1010,7 +1010,7 @@ class Scheduler:
                                 f":dsv4_pool_quant={os.environ.get('DSV4_POOL_QUANT', '')}"
                                 f":dsv4_unsafe_trim={_unsafe_trim}"
                                 f":dsv4_paged_block_size={self.config.paged_cache_block_size}"
-                                ":dsv4_cache_schema=deepseek_v4_v7"
+                                ":dsv4_cache_schema=deepseek_v4_v8"
                             )
                         elif self._uses_zaya_cache:
                             zaya_scope = ":zaya_cache_schema=zaya_cca_v1"
@@ -1147,7 +1147,7 @@ class Scheduler:
                     logger.info(
                         "DSV4 native composite block index enabled: "
                         "block_size=%s, max_blocks=%s "
-                        "(not generic paged KV; records deepseek_v4_v7 "
+                        "(not generic paged KV; records deepseek_v4_v8 "
                         "SWA+CSA/HCA state)",
                         self.config.paged_cache_block_size,
                         self.config.max_cache_blocks,
@@ -4741,7 +4741,9 @@ class Scheduler:
                             entry["sliding_window"] = getattr(
                                 layer_cache, "_vmlx_dsv4_sliding_window", None
                             )
-                        entry["pool_quant"] = False
+                        entry["pool_quant"] = (
+                            cls_name == "PoolQuantizedV4Cache"
+                        )
                     extracted.append(entry)
                 else:
                     logger.debug(

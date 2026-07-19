@@ -228,7 +228,7 @@ def compute_model_cache_key(
         # keys so the last prompt token is always re-fed on prefix hits. This
         # intentionally invalidates older v2 disk blocks that were keyed by
         # the full prompt despite holding truncated cache state.
-        parts.append("dsv4_cache_schema=deepseek_v4_v7")
+        parts.append("dsv4_cache_schema=deepseek_v4_v8")
 
     if not parts:
         # Defensive: fall back to identity
@@ -3872,7 +3872,19 @@ class BlockAwarePrefixCache:
                         compress_ratio = cache_meta.get("compress_ratio")
                         if compress_ratio is not None:
                             compress_ratio = int(compress_ratio)
-                        cache = DeepseekV4Cache(
+                        cache_cls = DeepseekV4Cache
+                        if class_name == "PoolQuantizedV4Cache":
+                            # The class is part of DSV4's native cache
+                            # contract: it controls incremental q4 storage for
+                            # newly appended CSA/HCA pool rows. Reconstructing
+                            # it as the base cache changes warm-path math.
+                            from jang_tools.dsv4.pool_quant_cache import (
+                                PoolQuantizedV4Cache,
+                            )
+
+                            cache_cls = PoolQuantizedV4Cache
+
+                        cache = cache_cls(
                             sliding_window=sliding_window,
                             compress_ratio=compress_ratio,
                         )
@@ -3918,7 +3930,7 @@ class BlockAwarePrefixCache:
                     except Exception as e:
                         logger.warning(
                             f"Cannot reconstruct layer {layer_idx} "
-                            f"({class_name}) as DeepseekV4Cache: {e}"
+                            f"({class_name}) as native DSV4 cache: {e}"
                         )
                         return None
 

@@ -13249,7 +13249,7 @@ class TestTurboQuantKVTelemetry:
         status = _native_cache_status(scheduler)
 
         assert status["family"] == "deepseek_v4"
-        assert status["schema"] == "deepseek_v4_v7"
+        assert status["schema"] == "deepseek_v4_v8"
         assert status["cache_type"] == "native_composite"
         assert "swa_local" in status["components"]
         assert "csa_compressed_pool" in status["components"]

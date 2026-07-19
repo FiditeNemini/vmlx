@@ -8277,7 +8277,7 @@ def _native_cache_status(
             layout = {}
         status = {
             "family": "deepseek_v4",
-            "schema": "deepseek_v4_v7",
+            "schema": "deepseek_v4_v8",
             "cache_type": "native_composite",
             "components": [
                 "swa_local",

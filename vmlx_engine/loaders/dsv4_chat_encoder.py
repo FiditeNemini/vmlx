@@ -46,7 +46,7 @@ Long-context mode (``DSV4_LONG_CTX``):
     ``DeepseekV4Cache`` on ``compress_ratio>0`` layers (CSA/HCA + SWA
     composite) and plain ``KVCache`` on local-only layers.
   * Paged prefix cache uses a dedicated ``deepseek_v4`` block record with
-    ``deepseek_v4_v7`` metadata; v7 keys DSV4 prompt cache blocks at N-1
+    ``deepseek_v4_v8`` metadata; v8 keys DSV4 prompt cache blocks at N-1
     tokens so the last prompt token is re-fed on prefix hits. The loader
     installs the prefill mask-trim patch required for prompts beyond the
     sliding window.

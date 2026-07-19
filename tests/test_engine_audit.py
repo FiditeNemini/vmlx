@@ -8526,8 +8526,9 @@ class TestStartupCompatibilityGuards:
         assert "args.kv_cache_quantization_explicit = True" not in hybrid_block
         assert 'if _old_kvq in {"q4", "q8"}' in hybrid_block
         assert 'args.kv_cache_quantization = "none"' in hybrid_block
-        assert "auto lossy storage is disabled" in hybrid_block
-        assert "stored attention-KV" in hybrid_block
+        assert "avoid a second codec" in hybrid_block
+        assert "native architecture-selected" in hybrid_block
+        assert "attention-TQ storage remains enabled" in hybrid_block
         assert 'os.environ["VMLX_DISABLE_SSM_DISK_RESTORE"] = "1"' not in cli_source
         assert "Do not\n        # silently disable it by family" in cli_source
 

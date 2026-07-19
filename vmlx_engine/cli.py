@@ -1013,22 +1013,24 @@ def serve_command(args):
                 "nemotron_h",
             }:
                 if _mc.family_name in {"qwen3_5", "qwen3_5_moe"}:
-                    # Lossy attention-KV storage is not numerically stable
-                    # enough for long hybrid resumes: live Bonsai/Qwen3.5
-                    # multi-turn proof diverged after several paged+SSM hits
-                    # with both q4 and q8, while lossless stored attention KV
-                    # remained coherent in-process. Keep live TQ on, but
-                    # disable only the auto-selected stored-prefix codec.
-                    # Explicit user choices never reach this auto-policy branch.
+                    # The architecture-selected hybrid TurboQuant cache already
+                    # owns the attention-only storage codec and its per-model bit
+                    # policy. Disable the generic QuantizedKVCache wrapper here so
+                    # prefix/paged/L2 storage is not encoded a second time. This
+                    # does NOT disable native TQ storage: the block store preserves
+                    # TurboQuantKVCache objects and /health reports the effective
+                    # native bit policy. Explicit user choices never reach this
+                    # auto-policy branch.
                     if _old_kvq in {"q4", "q8"}:
                         args.kv_cache_quantization = "none"
                     logger.info(
                         "Qwen3.6 hybrid/path-dependent cache model detected — "
                         "keeping auto live TurboQuant enabled for attention KVCache "
                         "layers only; SSM/GatedDelta companion state remains native "
-                        "full precision. Stored attention-KV quantization=%s is used "
-                        "for prefix/paged/L2 boundaries (auto lossy storage is disabled "
-                        "for multi-turn numeric parity).",
+                        "full precision. Generic QuantizedKVCache storage=%s is disabled "
+                        "to avoid a second codec; native architecture-selected "
+                        "attention-TQ storage remains enabled for prefix/paged/L2 and "
+                        "reports its effective bit policy in /health.",
                         args.kv_cache_quantization,
                     )
                 else:

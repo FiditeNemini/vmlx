@@ -488,8 +488,13 @@ class AnthropicStreamAdapter:
         self._started = False
         self._thinking_block_open = False
         self._text_block_open = False
-        self._tool_blocks: list[dict] = []
+        # Chat Completions may split one function call across two deltas:
+        # first the id with an empty function name, then the name+arguments
+        # without the id. Anthropic requires the name in content_block_start,
+        # so retain incomplete metadata until both fields are available.
+        self._pending_tool_calls: dict[int, dict[str, str]] = {}
         self._tool_block_open = False
+        self._active_tool_index: int | None = None
         self._input_tokens = 0
         self._output_tokens = 0
         self._finish_reason: str | None = None
@@ -706,9 +711,44 @@ class AnthropicStreamAdapter:
         tool_calls = delta.get("tool_calls", [])
         for tc in tool_calls:
             tc_index = tc.get("index", 0)
+            function = tc.get("function", {}) or {}
+            args_delta = function.get("arguments", "") or ""
 
-            # Start new tool block
+            # Once a block is open, later argument fragments for that same
+            # call can be forwarded immediately.
+            if self._tool_block_open and self._active_tool_index == tc_index:
+                if args_delta:
+                    events.append(self._sse("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": self._content_index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": args_delta,
+                        },
+                    }))
+                continue
+
+            pending = self._pending_tool_calls.setdefault(
+                tc_index,
+                {"id": "", "name": "", "arguments": ""},
+            )
             if tc.get("id"):
+                pending["id"] = str(tc["id"])
+            name_delta = function.get("name", "") or ""
+            if name_delta:
+                # vMLX emits the complete name in the later delta. Preserve
+                # normal OpenAI split-name streams too, without duplicating an
+                # identical repeated name.
+                if not pending["name"]:
+                    pending["name"] = str(name_delta)
+                elif pending["name"] != str(name_delta):
+                    pending["name"] += str(name_delta)
+            if args_delta:
+                pending["arguments"] += str(args_delta)
+
+            # Anthropic has no name-delta event. Do not open a malformed
+            # tool_use block until both the id and non-empty name are known.
+            if pending["id"] and pending["name"]:
                 # Close any open blocks before starting tool block
                 if self._thinking_block_open:
                     self._close_thinking(events)
@@ -734,21 +774,23 @@ class AnthropicStreamAdapter:
                     "index": self._content_index,
                     "content_block": {
                         "type": "tool_use",
-                        "id": tc["id"],
-                        "name": tc.get("function", {}).get("name", ""),
+                        "id": pending["id"],
+                        "name": pending["name"],
                         "input": {},
                     },
                 }))
                 self._tool_block_open = True
-
-            # Stream tool arguments
-            args_delta = tc.get("function", {}).get("arguments", "")
-            if args_delta and self._tool_block_open:
-                events.append(self._sse("content_block_delta", {
-                    "type": "content_block_delta",
-                    "index": self._content_index,
-                    "delta": {"type": "input_json_delta", "partial_json": args_delta},
-                }))
+                self._active_tool_index = tc_index
+                if pending["arguments"]:
+                    events.append(self._sse("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": self._content_index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": pending["arguments"],
+                        },
+                    }))
+                self._pending_tool_calls.pop(tc_index, None)
 
         # Handle finish
         if finish_reason:
@@ -795,6 +837,7 @@ class AnthropicStreamAdapter:
             }))
             self._content_index += 1
             self._tool_block_open = False
+            self._active_tool_index = None
 
         # message_delta with final usage (include input_tokens since message_start
         # emits 0 — prompt tokens aren't known until the final streaming chunk)

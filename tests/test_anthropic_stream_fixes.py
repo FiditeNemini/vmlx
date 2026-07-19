@@ -91,3 +91,37 @@ def test_mid_stream_error_emits_error_event():
     assert saw_error, f"no error event in {out}"
     # finalize must not append a normal message_delta after error
     assert not any("message_delta" in e for e in out), "message_delta emitted after error"
+
+
+def test_split_tool_id_then_name_never_opens_empty_anthropic_name():
+    """Buffer vMLX's id-first tool delta until the required name arrives."""
+    adapter = AnthropicStreamAdapter("test-model", "msg_test")
+
+    first = adapter.process_chunk(_chunk({
+        "tool_calls": [{
+            "index": 0,
+            "id": "call_split",
+            "type": "function",
+            "function": {"name": "", "arguments": ""},
+        }]
+    }))
+    assert not any('"type": "tool_use"' in event for event in first)
+
+    second = adapter.process_chunk(_chunk({
+        "tool_calls": [{
+            "index": 0,
+            "function": {
+                "name": "file_info",
+                "arguments": '{"path":"panel/package.json"}',
+            },
+        }]
+    }, finish="tool_calls"))
+    final = adapter.finalize()
+    wire = "".join(first + second + final)
+
+    assert '"type": "tool_use"' in wire
+    assert '"id": "call_split"' in wire
+    assert '"name": "file_info"' in wire
+    assert '"name": ""' not in wire
+    assert '"partial_json": "{\\"path\\":\\"panel/package.json\\"}"' in wire
+    assert '"stop_reason": "tool_use"' in wire

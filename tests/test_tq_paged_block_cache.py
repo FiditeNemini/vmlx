@@ -207,12 +207,43 @@ def test_tq_block_decode_reuses_bounded_decoder_state():
     mx.eval(*(array for pair in decoded for array in pair))
     info = tq_disk_store._tq_decoder_pair.cache_info()
 
-    assert info.maxsize == 32
+    assert info.maxsize == 256
     assert info.currsize == 1
     assert info.misses == 1
     assert info.hits == 1
     assert decoded[0][0].shape[-2] == 8
     assert decoded[1][0].shape[-2] == 16
+
+
+def test_tq_decoder_startup_warmup_materializes_distinct_layer_seeds():
+    from jang_tools.turboquant.cache import TurboQuantKVCache
+    from vmlx_engine import tq_disk_store
+
+    caches = [
+        TurboQuantKVCache(
+            key_dim=64,
+            value_dim=64,
+            key_bits=4,
+            value_bits=4,
+            seed=seed,
+            compress_after=0,
+            sink_tokens=0,
+        )
+        for seed in (211, 212, 213)
+    ]
+    tq_disk_store._tq_decoder_pair.cache_clear()
+
+    stats = tq_disk_store.warm_tq_decoder_states(caches, probe_heads=2)
+    info = tq_disk_store._tq_decoder_pair.cache_info()
+
+    assert stats["configs"] == 3
+    assert stats["arrays"] > 0
+    assert stats["bytes"] > 0
+    assert stats["codec_probes"] == 3
+    assert stats["probe_tokens"] == 64
+    assert stats["probe_heads"] == 2
+    assert info.maxsize == 256
+    assert info.currsize == 3
 
 
 def test_tq_block_storage_encode_does_not_call_live_cache_compress(monkeypatch):

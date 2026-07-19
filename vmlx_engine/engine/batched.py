@@ -1116,6 +1116,19 @@ class BatchedEngine(BaseEngine):
             config=engine_config,
         )
 
+        # The scheduler reconstructs paged/L2 cache on the same pinned worker
+        # that loaded the model. Materialize native TurboQuant's exact per-layer
+        # storage decoder states there before the server reports ready; otherwise
+        # the first cache hit absorbs decoder initialization and presents as a
+        # multi-second TQ/L2 "restore" despite tiny persisted blocks.
+        _warm_tq_storage = getattr(
+            self._engine.engine.scheduler,
+            "warm_tq_storage_decoders",
+            None,
+        )
+        if callable(_warm_tq_storage):
+            await loop.run_in_executor(loader_executor, _warm_tq_storage)
+
         await self._engine.engine.start()
 
     async def stop(self) -> None:

@@ -1297,6 +1297,7 @@ class Scheduler:
         self._last_cache_reuse_partial: Optional[Dict[str, Any]] = None
         self._last_cache_selection: Optional[Dict[str, Any]] = None
         self._last_cache_execution: Optional[Dict[str, Any]] = None
+        self._tq_decoder_warmup_stats: Optional[Dict[str, Any]] = None
 
         # Periodic Metal memory cache cleanup timer.
         # During sustained multi-request traffic, self.running is never empty
@@ -3149,6 +3150,65 @@ class Scheduler:
             self.batch_generator = self._create_batch_generator(sampling_params)
             self._current_sampler_params = sampler_params
         return cleared_cache
+
+    def warm_tq_storage_decoders(self) -> Dict[str, Any]:
+        """Eagerly materialize native TQ restore codecs on the model worker.
+
+        This runs during engine start, before readiness is advertised, so the
+        first paged/L2 hit does not become the accidental synchronization point
+        for per-layer seeded TurboQuant decoder state.
+        """
+        stats: Dict[str, Any] = {
+            "enabled": False,
+            "configs": 0,
+            "arrays": 0,
+            "bytes": 0,
+            "probe_tokens": 0,
+            "probe_heads": 0,
+            "codec_probes": 0,
+            "seconds": 0.0,
+        }
+        if not (
+            self._tq_active
+            and self.config.enable_prefix_cache
+            and hasattr(self.model, "make_cache")
+        ):
+            self._tq_decoder_warmup_stats = stats
+            return stats
+
+        started = time.perf_counter()
+        cache_layers = None
+        try:
+            from .tq_disk_store import warm_tq_decoder_states
+
+            cache_layers = self.model.make_cache() or []
+            model_args = getattr(self.model, "args", None)
+            probe_heads = int(getattr(model_args, "num_key_value_heads", 1) or 1)
+            stats.update(
+                warm_tq_decoder_states(cache_layers, probe_heads=probe_heads)
+            )
+            stats["enabled"] = bool(stats.get("configs"))
+            stats["seconds"] = round(time.perf_counter() - started, 6)
+            logger.info(
+                "TurboQuant storage decoder startup warmup: configs=%d "
+                "arrays=%d bytes=%d codec_probes=%d probe_tokens=%d "
+                "probe_heads=%d seconds=%.3f",
+                stats["configs"],
+                stats["arrays"],
+                stats["bytes"],
+                stats["codec_probes"],
+                stats["probe_tokens"],
+                stats["probe_heads"],
+                stats["seconds"],
+            )
+        except Exception as exc:
+            stats["seconds"] = round(time.perf_counter() - started, 6)
+            stats["error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning("TurboQuant storage decoder startup warmup failed: %s", exc)
+        finally:
+            del cache_layers
+        self._tq_decoder_warmup_stats = stats
+        return stats
 
     def _validate_cache(self, cache: Any) -> bool:
         """
@@ -9189,6 +9249,7 @@ class Scheduler:
             "last_cache_reuse_partial": self._last_cache_reuse_partial,
             "last_cache_selection": self._last_cache_selection,
             "last_cache_execution": self._last_cache_execution,
+            "tq_decoder_warmup": self._tq_decoder_warmup_stats,
             "last_turboquant_cache": getattr(
                 self, "_last_turboquant_cache", None
             ),

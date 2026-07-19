@@ -73,7 +73,7 @@ def _restore_tq_dtype(value: Any, dtype_name: Any, label: str) -> Any:
     return value if value.dtype == target else value.astype(target)
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=256)
 def _tq_decoder_pair(
     key_dim: int,
     value_dim: int,
@@ -108,6 +108,113 @@ def _tq_decoder_pair(
             seed=seed + 500,
         ),
     )
+
+
+def warm_tq_decoder_states(
+    cache_layers: List[Any],
+    *,
+    probe_tokens: int = 64,
+    probe_heads: int = 1,
+) -> Dict[str, Any]:
+    """Materialize the exact per-layer TQ storage decoder state at model start.
+
+    Native TQ cache policies seed each attention layer independently. Large
+    models commonly expose 80-120 unique seeds, so a 32-entry decoder LRU
+    rebuilt rotation/QJL state on every paged or L2 restore. Worse, the first
+    reconstruction's ``mx.eval`` paid that lazy state-initialization cost and
+    made a millisecond block decode look like a multi-second disk-cache hit.
+
+    The live cache objects already own the authoritative dimensions, bit widths,
+    and seeds. Populate the bounded storage-decoder LRU from those exact values
+    and evaluate only its immutable codec tensors. No prompt, KV payload, or
+    model output is synthesized, and explicit non-TQ runs never call this path.
+    """
+    if not HAS_MLX:
+        return {
+            "configs": 0,
+            "arrays": 0,
+            "bytes": 0,
+            "probe_tokens": 0,
+            "probe_heads": 0,
+            "codec_probes": 0,
+        }
+
+    configs: List[Tuple[int, int, int, int, int]] = []
+    seen: set[Tuple[int, int, int, int, int]] = set()
+
+    def visit(layer: Any) -> None:
+        if type(layer).__name__ == _TQ_CLASS_NAME:
+            try:
+                config = (
+                    int(layer.key_dim),
+                    int(layer.value_dim),
+                    int(layer.key_bits),
+                    int(layer.value_bits),
+                    int(layer._seed),
+                )
+            except (AttributeError, TypeError, ValueError):
+                return
+            if config not in seen:
+                seen.add(config)
+                configs.append(config)
+            return
+        children = getattr(layer, "caches", None)
+        if isinstance(children, (list, tuple)):
+            for child in children:
+                visit(child)
+
+    for layer in cache_layers or []:
+        visit(layer)
+
+    arrays: List[Any] = []
+    total_bytes = 0
+    for config in configs:
+        for encoder in _tq_decoder_pair(*config):
+            for value in vars(encoder).values():
+                if isinstance(value, mx.array):
+                    arrays.append(value)
+                    total_bytes += int(value.nbytes)
+    if arrays:
+        mx.eval(*arrays)
+
+    # Exercise the real packed storage path at the paged block shape while the
+    # model is starting. Encoder-state materialization alone does not compile
+    # or allocate TurboQuant's packed encode/decode kernels; without this, the
+    # first L2 hit still pays that cost inside reconstruct_cache(). Keep the
+    # probe independent of prompts/model outputs and use the exact bundle-owned
+    # dimensions/bits/seeds discovered above.
+    token_count = max(1, int(probe_tokens or 1))
+    head_count = max(1, int(probe_heads or 1))
+    codec_probes = 0
+    probe_arrays: List[Any] = []
+    for key_dim, value_dim, key_bits, value_bits, seed in configs:
+        keys = mx.zeros((1, head_count, token_count, key_dim), dtype=mx.float16)
+        values = mx.zeros((1, head_count, token_count, value_dim), dtype=mx.float16)
+        entry = encode_tq_block(
+            keys,
+            values,
+            {
+                "key_bits": key_bits,
+                "value_bits": value_bits,
+                "seed": seed,
+            },
+        )
+        decoded_keys, decoded_values = decode_tq_block(entry)
+        probe_arrays.extend((decoded_keys, decoded_values))
+        codec_probes += 1
+    if probe_arrays:
+        # Submit all layer-specific codec graphs together. The layer seeds are
+        # still distinct, but one worker-stream synchronization avoids paying
+        # launch/synchronization overhead once per layer during model start.
+        mx.eval(*probe_arrays)
+    return {
+        "configs": len(configs),
+        "arrays": len(arrays),
+        "bytes": total_bytes,
+        "probe_tokens": token_count if configs else 0,
+        "probe_heads": head_count if configs else 0,
+        "codec_probes": codec_probes,
+    }
 
 
 def encode_tq_block(

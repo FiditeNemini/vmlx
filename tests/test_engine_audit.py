@@ -22,7 +22,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -15224,7 +15224,10 @@ class TestStreamUsagePropagatesCacheDetail:
                 _Engine(),
                 [{"role": "user", "content": "hi"}],
                 request,
-                fastapi_request=None,
+                fastapi_request=SimpleNamespace(
+                    headers={"x-vmlx-stream-usage": "incremental"},
+                    is_disconnected=AsyncMock(return_value=False),
+                ),
             )
         ]
 
@@ -15300,7 +15303,10 @@ class TestStreamUsagePropagatesCacheDetail:
                 _Engine(),
                 [{"role": "user", "content": "hi"}],
                 request,
-                fastapi_request=None,
+                fastapi_request=SimpleNamespace(
+                    headers={"x-vmlx-stream-usage": "incremental"},
+                    is_disconnected=AsyncMock(return_value=False),
+                ),
             )
         ]
 
@@ -15309,6 +15315,79 @@ class TestStreamUsagePropagatesCacheDetail:
         expected = {"cached_tokens": 123, "cache_detail": "memory"}
         assert usage["input_tokens_details"] == expected
         assert completed["input_tokens_details"] == expected
+
+    @pytest.mark.asyncio
+    async def test_standard_responses_stream_keeps_usage_on_terminal_event_only(
+        self, monkeypatch
+    ):
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest, StreamOptions
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                yield GenerationOutput(
+                    text="A",
+                    new_text="A",
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    finished=False,
+                )
+                yield GenerationOutput(
+                    text="AB",
+                    new_text="B",
+                    prompt_tokens=7,
+                    completion_tokens=2,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "responses-standard-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+
+        # Even a legacy Chat-style include_usage field does not add an unknown
+        # event to the public Responses union.  Usage is authoritative on the
+        # terminal response.completed object.
+        request = ResponsesRequest(
+            model="responses-standard-test",
+            input="hi",
+            stream=True,
+            stream_options=StreamOptions(include_usage=True),
+        )
+        events = [
+            event async for event in server.stream_responses_api(
+                _Engine(),
+                [{"role": "user", "content": "hi"}],
+                request,
+                fastapi_request=None,
+            )
+        ]
+        event_types = []
+        completed = None
+        for event in events:
+            data_line = next(
+                line for line in event.splitlines() if line.startswith("data: ")
+            )
+            payload = json.loads(data_line.removeprefix("data: "))
+            event_types.append(payload["type"])
+            if payload["type"] == "response.completed":
+                completed = payload["response"]
+
+        assert "response.usage" not in event_types
+        assert completed is not None
+        assert completed["usage"] == {
+            "input_tokens": 7,
+            "output_tokens": 2,
+            "total_tokens": 9,
+        }
 
     @pytest.mark.asyncio
     async def test_gemma4_responses_stream_reasoning_only_runs_visible_answer_pass(
@@ -15397,7 +15476,10 @@ class TestStreamUsagePropagatesCacheDetail:
                 _Engine(),
                 [{"role": "user", "content": "hi"}],
                 request,
-                fastapi_request=None,
+                fastapi_request=SimpleNamespace(
+                    headers={"x-vmlx-stream-usage": "incremental"},
+                    is_disconnected=AsyncMock(return_value=False),
+                ),
             )
         ]
 

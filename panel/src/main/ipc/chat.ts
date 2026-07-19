@@ -1890,7 +1890,6 @@ export function registerChatHandlers(
                 ? { max_output_tokens: resolvedOutputBudget }
                 : {}),
               stream: true,
-              stream_options: { include_usage: true },
             };
             if (stopSequences) obj.stop = stopSequences;
             const effectiveTopK = overrides?.topK;
@@ -2067,16 +2066,32 @@ export function registerChatHandlers(
         // Remote internet providers use Electron's net.fetch for certificates
         // and proxies; loopback model servers use Node streaming for SSE.
         const useNodeStreamingFetch = !isRemote || isLoopbackUrl(apiUrl);
+        // `response.usage` is a vMLX-only incremental telemetry extension.
+        // Negotiate it out-of-band only with a local engine.  The public
+        // Responses request body must not send Chat's non-standard
+        // stream_options.include_usage to OpenAI-compatible remote providers.
+        const vmlxResponsesUsageHeaders: Record<string, string> =
+          useResponsesApi && !isRemote
+            ? { "X-vMLX-Stream-Usage": "incremental" }
+            : {};
         const response = useNodeStreamingFetch
           ? await streamingFetch(apiUrl, {
               method: "POST",
-              headers: { "Content-Type": "application/json", ...authHeaders },
+              headers: {
+                "Content-Type": "application/json",
+                ...authHeaders,
+                ...vmlxResponsesUsageHeaders,
+              },
               body: requestBody,
               signal: abortController.signal,
             })
           : await remoteFetch(apiUrl, {
               method: "POST",
-              headers: { "Content-Type": "application/json", ...authHeaders },
+              headers: {
+                "Content-Type": "application/json",
+                ...authHeaders,
+                ...vmlxResponsesUsageHeaders,
+              },
               body: requestBody,
               signal: abortController.signal,
             });
@@ -2660,7 +2675,8 @@ export function registerChatHandlers(
                 );
               }
 
-              // Real-time usage from response.usage events (per-chunk, for live TPS accuracy)
+              // Real-time usage from the explicitly negotiated local vMLX
+              // response.usage extension (never part of a standard remote stream).
               if (responsesEventType === "response.usage" && parsed.usage) {
                 if (parsed.usage.output_tokens != null) {
                   tokenCount = parsed.usage.output_tokens;

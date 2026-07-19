@@ -154,4 +154,19 @@ describe('tool status responsiveness contract', () => {
     expect(responsesParser).toContain('const finalArguments =')
     expect(responsesParser).toContain('item.arguments || argsBuffer?.value || "{}"')
   })
+
+  it('negotiates incremental Responses usage only with the local vMLX engine', () => {
+    const source = readPanelSource('src/main/ipc/chat.ts')
+    const responsesBody = source.slice(
+      source.indexOf('if (useResponsesApi)'),
+      source.indexOf('} else {', source.indexOf('if (useResponsesApi)')),
+    )
+
+    expect(responsesBody).not.toContain('stream_options: { include_usage: true }')
+    expect(source).toContain(
+      'const vmlxResponsesUsageHeaders: Record<string, string> =',
+    )
+    expect(source).toContain('useResponsesApi && !isRemote')
+    expect(source).toContain('{ "X-vMLX-Stream-Usage": "incremental" }')
+  })
 })

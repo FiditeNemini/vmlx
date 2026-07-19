@@ -183,7 +183,12 @@ class ResponseFormat(BaseModel):
 class StreamOptions(BaseModel):
     """Options for streaming responses."""
 
-    include_usage: bool = False  # Include usage stats in final chunk
+    # Chat Completions option. Responses usage is already carried by its
+    # terminal response object; this field does not enable a Responses event.
+    include_usage: bool = False
+    # Standard Responses option. vMLX does not add padding today, but accepts
+    # the field so OpenAI-compatible clients can send their normal shape.
+    include_obfuscation: bool | None = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -826,7 +831,7 @@ class ResponsesRequest(BaseModel):
     max_output_tokens: int | None = None
     stop: str | list[str] | None = None
     stream: bool = False
-    stream_options: StreamOptions | None = None  # Streaming options (include_usage)
+    stream_options: StreamOptions | None = None  # Responses: include_obfuscation
     # Accept both flat (Responses API) and nested (Chat Completions) tool formats, plus built-in tools
     tools: list[dict] | None = None
     tool_choice: str | dict | None = None

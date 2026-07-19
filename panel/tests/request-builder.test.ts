@@ -93,8 +93,7 @@ function buildRequestBody(
             model: modelName,
             input: inputMessages,
             instructions,
-            stream: true,
-            stream_options: { include_usage: true }
+            stream: true
         }
         if (overrides?.temperature != null) obj.temperature = overrides.temperature
         if (overrides?.topP != null) obj.top_p = overrides.topP
@@ -606,6 +605,12 @@ describe('buildRequestBody — Responses API', () => {
         expect(body.top_p).toBeUndefined()
         expect(body.max_output_tokens).toBeUndefined()
         expect(body.repetition_penalty).toBeUndefined()
+    })
+
+    it('does not put Chat include_usage in a standard Responses request body', () => {
+        const body = buildRequestBody('responses', 'gpt-4', messages, undefined, true, true)
+        expect(body.stream).toBe(true)
+        expect(body.stream_options).toBeUndefined()
     })
 
     it('switching chats never carries a previous chat maxTokens into Auto Responses', () => {

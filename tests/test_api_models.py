@@ -846,6 +846,17 @@ class TestParameterValidation:
         assert req.temperature == 0.7
         assert req.max_output_tokens == 100
 
+    def test_responses_accepts_standard_stream_obfuscation_option(self):
+        req = ResponsesRequest(
+            model="test",
+            input="hi",
+            stream=True,
+            stream_options=StreamOptions(include_obfuscation=False),
+        )
+        assert req.stream_options is not None
+        assert req.stream_options.include_obfuscation is False
+        assert req.stream_options.include_usage is False
+
     def test_responses_stop_normalized(self):
         req = ResponsesRequest(model="test", input="hi", stop="<|end|>")
         assert req.stop == ["<|end|>"]

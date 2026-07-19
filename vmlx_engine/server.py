@@ -19015,8 +19015,20 @@ async def stream_responses_api(
     seq = 0
     created_at = int(time.time())
 
-    # Check if client wants per-chunk usage reporting
-    include_usage = request.stream_options and request.stream_options.include_usage
+    # ``response.usage`` is a private vMLX incremental-telemetry extension, not
+    # an OpenAI Responses stream event.  Standard Responses clients receive
+    # authoritative usage on response.completed.  Only an explicitly
+    # negotiated client (the local Electron panel) may receive the extension;
+    # a Chat-style stream_options.include_usage field alone must never alter
+    # the public Responses event union.
+    _usage_header = ""
+    if fastapi_request is not None:
+        _headers = getattr(fastapi_request, "headers", None)
+        if _headers is not None:
+            _usage_header = str(
+                _headers.get("x-vmlx-stream-usage", "")
+            ).strip().lower()
+    incremental_usage_extension = _usage_header == "incremental"
 
     def _sse(event_type: str, data: dict) -> str:
         nonlocal seq
@@ -19805,8 +19817,9 @@ async def stream_responses_api(
                                 },
                             )
 
-            # Emit per-chunk usage when include_usage is enabled (for real-time metrics)
-            if include_usage and (prompt_tokens or completion_tokens):
+            # Private local-panel telemetry.  Standard Responses usage remains
+            # on the terminal response.completed object below.
+            if incremental_usage_extension and (prompt_tokens or completion_tokens):
                 usage_obj = {
                     "input_tokens": prompt_tokens,
                     "output_tokens": completion_tokens,

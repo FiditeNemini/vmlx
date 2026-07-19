@@ -19130,6 +19130,7 @@ async def stream_responses_api(
     last_output = (
         None  # Track last engine output for finish_reason (status: incomplete)
     )
+    _stream_disconnected = False
 
     # Resolve effective enable_thinking:
     # Priority: top-level field > chat_template_kwargs > server default > auto-detect
@@ -19418,6 +19419,7 @@ async def stream_responses_api(
 
             if fastapi_request and await fastapi_request.is_disconnected():
                 logger.info(f"Client disconnected, aborting request {response_id}")
+                _stream_disconnected = True
                 if hasattr(engine, "abort_request"):
                     await engine.abort_request(response_id)
                 break
@@ -19892,9 +19894,9 @@ async def stream_responses_api(
                 },
             }
         yield _sse(
-            "response.completed",
+            "response.failed",
             {
-                "type": "response.completed",
+                "type": "response.failed",
                 "response": {
                     "id": response_id,
                     "object": "response",
@@ -19905,6 +19907,14 @@ async def stream_responses_api(
             },
         )
         return
+
+    _response_was_cancelled = bool(
+        _stream_disconnected
+        or (
+            last_output is not None
+            and getattr(last_output, "finish_reason", None) == "aborted"
+        )
+    )
 
     # Tool calls may share the reasoning rail (DSV4 emits canonical DSML there).
     # Preserve the raw accumulator for final tool parsing, but expose only the
@@ -19931,6 +19941,9 @@ async def stream_responses_api(
     # Build output items list for the completed response
     all_output_items = []
     output_index = 0
+    _response_output_status = (
+        "incomplete" if _response_was_cancelled else "completed"
+    )
 
     # Parse tool calls from the accumulated text (skip when tool_choice="none").
     # Strip think tags before parsing — reasoning text may precede tool calls
@@ -20129,7 +20142,7 @@ async def stream_responses_api(
         message_item = {
             "id": msg_id,
             "type": "message",
-            "status": "completed",
+            "status": _response_output_status,
             "role": "assistant",
             "content": [
                 {"type": "output_text", "text": final_text, "annotations": []}
@@ -20209,7 +20222,7 @@ async def stream_responses_api(
             fc_item = {
                 "id": fc_id,
                 "type": "function_call",
-                "status": "completed",
+                "status": _response_output_status,
                 "call_id": call_id,
                 "name": tc_name,
                 "arguments": tc_args,
@@ -20273,7 +20286,8 @@ async def stream_responses_api(
             if not reasoning_was_streamed:
                 display_text = clean_output_text(full_text) if full_text else ""
         if (
-            not display_text
+            not _response_was_cancelled
+            and not display_text
             and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
             and accumulated_reasoning.strip()
             and not tool_calls
@@ -20572,7 +20586,7 @@ async def stream_responses_api(
                 "item": {
                     "id": msg_id,
                     "type": "message",
-                    "status": "completed",
+                    "status": _response_output_status,
                     "role": "assistant",
                     "content": [
                         {"type": "output_text", "text": display_text, "annotations": []}
@@ -20584,7 +20598,7 @@ async def stream_responses_api(
             {
                 "id": msg_id,
                 "type": "message",
-                "status": "completed",
+                "status": _response_output_status,
                 "role": "assistant",
                 "content": [
                     {"type": "output_text", "text": display_text, "annotations": []}
@@ -20674,16 +20688,26 @@ async def stream_responses_api(
     # a response.completed envelope with status=incomplete breaks clients that
     # dispatch terminal handling by event type.
     _resp_finish = getattr(last_output, "finish_reason", None) if last_output else None
-    _resp_status = "incomplete" if _resp_finish == "length" else "completed"
+    _resp_status = (
+        "incomplete"
+        if _resp_finish in {"length", "aborted"} or _response_was_cancelled
+        else "completed"
+    )
     _resp_extra: dict = {}
     if _resp_status == "incomplete":
-        _resp_extra["incomplete_details"] = {"reason": "max_output_tokens"}
+        _resp_extra["incomplete_details"] = {
+            "reason": (
+                "cancelled"
+                if _response_was_cancelled or _resp_finish == "aborted"
+                else "max_output_tokens"
+            )
+        }
     if visible_reasoning_text and not suppress_reasoning:
         all_output_items.append(
             {
                 "id": f"rs_{uuid.uuid4().hex[:12]}",
                 "type": "reasoning",
-                "status": "completed",
+                "status": _response_output_status,
                 "role": "assistant",
                 "content": [{"type": "reasoning", "text": visible_reasoning_text}],
             }
@@ -20731,12 +20755,13 @@ async def stream_responses_api(
             ),
         },
     }
-    _responses_store_history(
-        response_id,
-        (history_messages if history_messages is not None else messages)
-        + _responses_output_to_assistant_messages(all_output_items),
-        reasoning_only=_stream_reasoning_only,
-    )
+    if not _response_was_cancelled:
+        _responses_store_history(
+            response_id,
+            (history_messages if history_messages is not None else messages)
+            + _responses_output_to_assistant_messages(all_output_items),
+            reasoning_only=_stream_reasoning_only,
+        )
     _terminal_response_event = (
         "response.incomplete" if _resp_status == "incomplete" else "response.completed"
     )

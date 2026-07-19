@@ -2604,6 +2604,153 @@ class TestOpenAILogprobsFormatting:
         assert done_text == "Answer  done"
 
     @pytest.mark.asyncio
+    async def test_streaming_responses_abort_is_incomplete_not_completed(
+        self, monkeypatch
+    ):
+        """An aborted engine stream must never finalize partial text as success."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                yield GenerationOutput(
+                    text="1, ",
+                    new_text="1, ",
+                    tokens=[1, 2, 3],
+                    prompt_tokens=7,
+                    completion_tokens=3,
+                    finished=False,
+                    finish_reason=None,
+                )
+                yield GenerationOutput(
+                    text="1, ",
+                    new_text="",
+                    tokens=[],
+                    prompt_tokens=7,
+                    completion_tokens=3,
+                    finished=True,
+                    finish_reason="aborted",
+                )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "abort-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+        server._responses_history.clear()
+
+        request = ResponsesRequest(
+            model="abort-test",
+            input="count slowly",
+            stream=True,
+            enable_thinking=False,
+        )
+
+        events = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": "count slowly"}],
+            request,
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        response_id = next(
+            event["response"]["id"]
+            for event in events
+            if event.get("type") == "response.created"
+        )
+        assert not any(event.get("type") == "response.completed" for event in events)
+        incomplete = [
+            event for event in events if event.get("type") == "response.incomplete"
+        ]
+        assert len(incomplete) == 1
+        assert incomplete[0]["response"]["status"] == "incomplete"
+        assert incomplete[0]["response"]["incomplete_details"] == {
+            "reason": "cancelled"
+        }
+        done_items = [
+            event["item"]
+            for event in events
+            if event.get("type") == "response.output_item.done"
+        ]
+        assert done_items[-1]["status"] == "incomplete"
+        assert response_id not in server._responses_history
+
+    @pytest.mark.asyncio
+    async def test_streaming_responses_midstream_exception_emits_failed_terminal(
+        self, monkeypatch
+    ):
+        """A mid-stream engine error must emit response.failed, never completed."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                yield GenerationOutput(
+                    text="partial",
+                    new_text="partial",
+                    tokens=[1],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    finished=False,
+                    finish_reason=None,
+                )
+                raise RuntimeError("MIDSTREAM PROBE FAILURE")
+
+            async def abort_request(self, request_id):
+                return True
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "failure-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+
+        request = ResponsesRequest(
+            model="failure-test",
+            input="fail after one delta",
+            stream=True,
+            enable_thinking=False,
+        )
+
+        events = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": "fail after one delta"}],
+            request,
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        assert len([event for event in events if event.get("type") == "error"]) == 1
+        failed = [event for event in events if event.get("type") == "response.failed"]
+        assert len(failed) == 1
+        assert failed[0]["response"]["status"] == "failed"
+        assert failed[0]["response"]["usage"] == {
+            "input_tokens": 5,
+            "output_tokens": 1,
+            "total_tokens": 6,
+        }
+        assert not any(event.get("type") == "response.completed" for event in events)
+
+    @pytest.mark.asyncio
     async def test_streaming_responses_tool_call_arguments_survive_buffering(
         self, monkeypatch
     ):

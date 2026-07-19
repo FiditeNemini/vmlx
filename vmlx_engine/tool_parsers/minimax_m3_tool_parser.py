@@ -44,6 +44,11 @@ from .abstract_tool_parser import (
 
 # Namespace separator token the M3 template prefixes before every element.
 NS_TOKEN = "]<]minimax[>["
+# A generation may stop immediately before the separator's final ``[``.  That
+# one-character terminal truncation is still control markup, not assistant
+# prose.  Keep this deliberately narrower than a general ``minimax`` regex so
+# normal visible text is never rewritten.
+NS_TOKEN_TRUNCATED = NS_TOKEN[:-1]
 
 _TOOLCALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 # Lenient: <tool_call> opened but truncated before </tool_call> (hit max_tokens).
@@ -135,6 +140,7 @@ class MiniMaxM3ToolParser(ToolParser):
 
     def _strip_noise(self, text: str) -> str:
         text = text.replace(NS_TOKEN, "")
+        text = text.replace(NS_TOKEN_TRUNCATED, "")
         text = _MM_THINK_RE.sub("", text)
         return text
 

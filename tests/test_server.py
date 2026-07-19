@@ -2350,6 +2350,112 @@ class TestOpenAILogprobsFormatting:
         assert visible == "2 < 3"
 
     @pytest.mark.asyncio
+    async def test_streaming_chat_minimax_truncated_namespace_emits_only_tool_call(
+        self, monkeypatch
+    ):
+        """A terminally truncated M3 namespace token must not leak as content."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.tool_parsers.minimax_m3_tool_parser import NS_TOKEN
+
+        raw = (
+            f"{NS_TOKEN[:-1]}<tool_call>\n"
+            f'{NS_TOKEN}<invoke name="file_info">\n'
+            f"{NS_TOKEN}<path>panel/package.json{NS_TOKEN}</path>\n"
+            f"{NS_TOKEN}</invoke>\n"
+            "</tool_call>"
+        )
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = ""
+                for index, character in enumerate(raw, start=1):
+                    text += character
+                    finished = index == len(raw)
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=character,
+                        tokens=list(range(index)),
+                        prompt_tokens=3,
+                        completion_tokens=index,
+                        finished=finished,
+                        finish_reason="stop" if finished else None,
+                    )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "minimax-m3-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", "minimax_m3")
+
+        request = ChatCompletionRequest(
+            model="minimax-m3-test",
+            messages=[Message(role="user", content="inspect panel/package.json")],
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ],
+        )
+
+        chunks = []
+        done_seen = False
+        async for line in server.stream_chat_completion(
+            _Engine(),
+            [m.model_dump(exclude_none=True) for m in request.messages],
+            request,
+            fastapi_request=None,
+        ):
+            if line.strip() == "data: [DONE]":
+                done_seen = True
+            elif line.startswith("data: "):
+                chunks.append(json.loads(line.removeprefix("data: ")))
+
+        visible = "".join(
+            choice.get("delta", {}).get("content") or ""
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+        )
+        tool_deltas = [
+            tool_call
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+            for tool_call in choice.get("delta", {}).get("tool_calls", [])
+        ]
+        finish_reasons = [
+            choice.get("finish_reason")
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+            if choice.get("finish_reason") is not None
+        ]
+
+        assert visible == ""
+        assert len(tool_deltas) == 2
+        assert tool_deltas[0]["function"] == {"name": "", "arguments": ""}
+        assert tool_deltas[1]["id"] == tool_deltas[0]["id"]
+        assert tool_deltas[1]["function"]["name"] == "file_info"
+        assert json.loads(tool_deltas[1]["function"]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+        assert finish_reasons == ["tool_calls"]
+        assert done_seen is True
+
+    @pytest.mark.asyncio
     async def test_streaming_chat_hides_zaya_visual_grounding_markup(self, monkeypatch):
         """ZAYA-VL point spans are control markup, not visible assistant text."""
         import json

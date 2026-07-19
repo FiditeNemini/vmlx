@@ -3477,6 +3477,7 @@ _TOOL_CALL_MARKERS = [
     "<function",
     "<function=",
     "<minimax:tool_call>",
+    "]<]minimax[>[",  # MiniMax-M3 namespace separator before native XML elements
     "[Calling tool:",
     "<|recipient|>",
     "<|tool_calls_section_begin|>",
@@ -3534,6 +3535,7 @@ _TOOL_MARKUP_RESIDUE_PATTERNS.extend(
         r"</?arg_key>?",
         r"</?arg_value>?",
         r"</?minimax:tool_call>?",
+        r"\]<\]minimax\[>\[?",  # complete M3 namespace or terminally missing '['
         r"</?zyphra_tool_call[^>\n]*>?",
         r"</?function[^>\n]*>?",
         r"</?\|tool_calls_section_begin\|>?",

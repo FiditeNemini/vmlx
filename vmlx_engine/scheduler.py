@@ -7185,22 +7185,17 @@ class Scheduler:
                                         ):
                                             logger.info(
                                                 "MiniMax-M3 paged prefix store using "
-                                                "clean prompt-boundary re-prefill "
+                                                "deferred clean prompt-boundary re-prefill "
                                                 "(%d cache-key tokens from %d prompt "
-                                                "tokens) after cache-hit tail replay.",
+                                                "tokens) after terminal dispatch.",
                                                 len(m3_key_tokens),
                                                 len(m3_prompt_tokens),
                                             )
-                                            cache_for_extract = (
-                                                self._prefill_for_prompt_only_cache(
-                                                    m3_key_tokens
-                                                )
-                                            )
-                                            if cache_for_extract is not None:
-                                                request._extracted_cache_key_tokens = (
-                                                    list(m3_key_tokens)
-                                                )
-                                                request._extracted_cache_from_prompt_snapshot = True
+                                            request._deferred_m3_prompt_cache = {
+                                                "mode": "paged",
+                                                "key_tokens": list(m3_key_tokens),
+                                            }
+                                            cache_for_extract = None
                                         else:
                                             # Cold M3 requests may safely use the
                                             # generator's clean prompt snapshot.
@@ -7329,6 +7324,15 @@ class Scheduler:
                                             )
                                     elif getattr(
                                         request,
+                                        "_deferred_m3_prompt_cache",
+                                        None,
+                                    ):
+                                        # The terminal output owns this scheduler
+                                        # step. Cleanup will materialize and store
+                                        # the clean M3 cache after dispatch.
+                                        pass
+                                    elif getattr(
+                                        request,
                                         "_dsv4_cache_hit_store_skipped",
                                         False,
                                     ):
@@ -7455,32 +7459,17 @@ class Scheduler:
                                     ):
                                         logger.info(
                                             "MiniMax-M3 prefix cache store using "
-                                            "clean prompt-boundary re-prefill "
+                                            "deferred clean prompt-boundary re-prefill "
                                             "(%d cache-key tokens from %d "
-                                            "prompt tokens) after cache-hit "
-                                            "tail replay.",
+                                            "prompt tokens) after terminal dispatch.",
                                             len(m3_key_tokens),
                                             len(m3_prompt_tokens),
                                         )
-                                        clean_cache = (
-                                            self._prefill_for_prompt_only_cache(
-                                                m3_key_tokens
-                                            )
-                                        )
-                                        if clean_cache is not None:
-                                            request._extracted_cache = clean_cache
-                                            request._extracted_cache_key_tokens = list(
-                                                m3_key_tokens
-                                            )
-                                            request._extracted_cache_from_prompt_snapshot = True
-                                        else:
-                                            logger.warning(
-                                                "Cannot produce MiniMax-M3 "
-                                                "prompt-only object cache for "
-                                                "%s, skipping prefix cache store",
-                                                request_id,
-                                            )
-                                            request._extracted_cache = None
+                                        request._deferred_m3_prompt_cache = {
+                                            "mode": "object",
+                                            "key_tokens": list(m3_key_tokens),
+                                        }
+                                        request._extracted_cache = None
                                     else:
                                         request._extracted_cache = (
                                             snapshot_cache
@@ -7527,6 +7516,117 @@ class Scheduler:
             outputs.append(output)
 
         return outputs, finished_ids
+
+    def _materialize_deferred_m3_prompt_cache(
+        self, request_id: str, request: Request
+    ) -> None:
+        """Build M3's clean hit-derived prefix only after terminal dispatch.
+
+        MiniMax-M3 sparse MSA state is path-dependent.  A cache hit followed by
+        tail replay must be re-prefilled from the clean N-1 prompt boundary
+        before it can be donated as a longer prefix.  Doing that work inside
+        ``_process_batch_responses`` delayed the terminal SSE event by the full
+        prefill duration.  EngineCore already dispatches terminal outputs before
+        calling ``_cleanup_finished`` and blocks next-turn admission until that
+        cleanup completes, so this is the safe ownership boundary for the work.
+        """
+        deferred = getattr(request, "_deferred_m3_prompt_cache", None)
+        if not isinstance(deferred, dict):
+            return
+
+        # Consume the marker first so an exception cannot accidentally retry the
+        # expensive re-prefill during a later cleanup path.
+        request._deferred_m3_prompt_cache = None
+        key_tokens = list(deferred.get("key_tokens") or [])
+        mode = deferred.get("mode")
+        if not key_tokens or mode not in {"paged", "object"}:
+            logger.warning(
+                "Ignoring invalid deferred MiniMax-M3 cache descriptor for %s",
+                request_id,
+            )
+            return
+
+        try:
+            logger.info(
+                "MiniMax-M3 %s prefix cleanup now running deferred clean "
+                "prompt-boundary re-prefill (%d cache-key tokens) after "
+                "terminal dispatch.",
+                mode,
+                len(key_tokens),
+            )
+            clean_cache = self._prefill_for_prompt_only_cache(key_tokens)
+            if clean_cache is None:
+                logger.warning(
+                    "Cannot produce deferred MiniMax-M3 prompt-only %s cache "
+                    "for %s; skipping prefix store",
+                    mode,
+                    request_id,
+                )
+                request._extracted_cache = None
+                return
+
+            request._extracted_cache_key_tokens = list(key_tokens)
+            request._extracted_cache_from_prompt_snapshot = True
+            if mode == "object":
+                request._extracted_cache = clean_cache
+                return
+
+            if getattr(self, "_kv_cache_bits", 0):
+                clean_cache = self._quantize_cache_for_storage(clean_cache)
+            extracted_cache = self._extract_cache_states(clean_cache)
+            if not extracted_cache:
+                logger.warning(
+                    "Deferred MiniMax-M3 cache extraction returned empty for %s",
+                    request_id,
+                )
+                request._extracted_cache = None
+                return
+
+            # Preserve the legacy prompt-level disk manager mirror when it is
+            # configured.  BlockDiskStore persistence still happens below via
+            # BlockAwarePrefixCache.store_cache().
+            if (
+                self.disk_cache is not None
+                and not self._is_hybrid
+                and not getattr(request, "_cache_extra_keys", None)
+            ):
+                try:
+                    from .mllm_batch_generator import _recompress_to_tq
+
+                    tq_for_disk = _recompress_to_tq(clean_cache, self.model)
+                    disk_store_tokens = list(request.prompt_token_ids)
+                    gen_prompt_len = getattr(request, "_gen_prompt_len", 0) or 0
+                    if 0 < gen_prompt_len < len(disk_store_tokens):
+                        disk_store_tokens = disk_store_tokens[:-gen_prompt_len]
+                    self.disk_cache.store(
+                        disk_store_tokens,
+                        tq_for_disk,
+                        cache_type=self._pick_cache_type_for_request(request),
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Deferred MiniMax-M3 disk cache store failed for %s: %s",
+                        request_id,
+                        exc,
+                    )
+
+            from .utils.turboquant_config import turboquant_cache_telemetry
+
+            self._last_turboquant_cache = turboquant_cache_telemetry(extracted_cache)
+            request._extracted_cache = extracted_cache
+            logger.info(
+                "Extracted %d deferred MiniMax-M3 layer states for request %s",
+                len(extracted_cache),
+                request_id,
+            )
+        except Exception as exc:
+            request._extracted_cache = None
+            logger.warning(
+                "Deferred MiniMax-M3 prompt cache materialization failed for %s: %s",
+                request_id,
+                exc,
+                exc_info=True,
+            )
 
     def _cleanup_finished(self, finished_ids: Set[str]) -> None:
         """Clean up finished requests and store caches for reuse."""
@@ -7589,6 +7689,12 @@ class Scheduler:
                 )
                 if hasattr(request, "_extracted_cache"):
                     request._extracted_cache = None
+
+            if request is not None:
+                if _skip_cache_store:
+                    request._deferred_m3_prompt_cache = None
+                else:
+                    self._materialize_deferred_m3_prompt_cache(request_id, request)
 
             # Always clean up paged cache tracking entries regardless of
             # cache skip, to prevent unbounded memory growth on benchmarks.

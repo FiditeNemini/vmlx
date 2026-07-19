@@ -238,3 +238,61 @@ def test_finished_stream_consumers_do_not_abort_deferred_cleanup() -> None:
 
     assert "RequestStatus.is_finished(request.status)" in llm_source
     assert "RequestStatus.is_finished(request.status)" in mllm_source
+
+
+def test_m3_hit_rederive_materializes_in_post_dispatch_cleanup_shape() -> None:
+    scheduler = Scheduler.__new__(Scheduler)
+    order: list[str] = []
+
+    def _prefill(tokens):
+        order.append("rederive")
+        assert tokens == [11, 12, 13]
+        return ["native-m3-cache"]
+
+    def _extract(cache):
+        order.append("extract")
+        assert cache == ["native-m3-cache"]
+        return [{"class_name": "MiniMaxM3SparseCache", "state": "typed"}]
+
+    scheduler._prefill_for_prompt_only_cache = _prefill
+    scheduler._extract_cache_states = _extract
+    scheduler._kv_cache_bits = 0
+    scheduler.disk_cache = None
+    scheduler._is_hybrid = False
+    request = SimpleNamespace(
+        prompt_token_ids=[11, 12, 13, 14],
+        _deferred_m3_prompt_cache={
+            "mode": "paged",
+            "key_tokens": [11, 12, 13],
+        },
+    )
+
+    # Terminal delivery happens in EngineCore before this cleanup helper is
+    # called; the descriptor itself must not do any eager work.
+    order.append("terminal-dispatch")
+    scheduler._materialize_deferred_m3_prompt_cache("m3", request)
+
+    assert order == ["terminal-dispatch", "rederive", "extract"]
+    assert request._deferred_m3_prompt_cache is None
+    assert request._extracted_cache_key_tokens == [11, 12, 13]
+    assert request._extracted_cache_from_prompt_snapshot is True
+    assert request._extracted_cache == [
+        {"class_name": "MiniMaxM3SparseCache", "state": "typed"}
+    ]
+
+
+def test_m3_response_finalization_only_schedules_clean_rederive() -> None:
+    source = inspect.getsource(Scheduler._process_batch_responses)
+    paged_marker = '"mode": "paged"'
+    object_marker = '"mode": "object"'
+
+    assert source.count("request._deferred_m3_prompt_cache = {") == 2
+    assert paged_marker in source
+    assert object_marker in source
+
+    # Both MiniMax-M3 hit branches now leave the expensive prefill for
+    # _cleanup_finished. Other architecture-specific rederive branches are
+    # audited separately and may still call this helper in finalization.
+    for marker in (paged_marker, object_marker):
+        branch = source[source.index(marker) - 900 : source.index(marker) + 250]
+        assert "_prefill_for_prompt_only_cache" not in branch

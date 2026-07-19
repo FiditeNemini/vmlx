@@ -1375,7 +1375,10 @@ def test_hybrid_ssm_companion_fetch_is_worker_deferred():
     assert "_hybrid_prompt_cache_needs_worker_ssm" in schedule_src
     assert "_finalize_hybrid_paged_cache_on_worker" in schedule_src
     assert "_ssm_state_cache.fetch(" in finalize_src
-    assert "hybrid paged HIT" in finalize_src
+    # The worker finalizer serves both Paged On and block-disk-only hybrid
+    # backends, so the production diagnostic intentionally uses the broader
+    # block-cache label.
+    assert "hybrid block-cache HIT" in finalize_src
 
 
 def test_hybrid_ssm_l2_is_model_scoped_and_block_disk_backed():

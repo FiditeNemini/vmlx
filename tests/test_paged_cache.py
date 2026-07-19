@@ -740,6 +740,57 @@ class TestBlockAwarePrefixCache:
         with pytest.raises(ValueError, match="disk_only requires a disk_store"):
             PagedCacheManager(block_size=4, max_blocks=8, disk_only=True)
 
+    def test_paged_with_l2_defaults_to_resident_ram_tier(self, monkeypatch):
+        """Block L2 must not silently turn Paged On into SSD-only caching."""
+        from vmlx_engine.paged_cache import PagedCacheManager
+
+        class _Disk:
+            def partial_token_counts(self, _block_size):
+                return []
+
+        monkeypatch.delenv("VMLX_PAGED_FRUGAL", raising=False)
+        manager = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=_Disk(),
+        )
+
+        assert manager.disk_only is False
+        assert manager.paged_frugal is False
+        assert manager.ram_mirror_policy == "resident"
+        stats = manager.get_memory_usage()
+        assert stats["paged_ram_enabled"] is True
+        assert stats["paged_frugal"] is False
+        assert stats["ram_mirror_policy"] == "resident"
+
+    def test_explicit_frugal_override_and_disk_only_are_truthful(self, monkeypatch):
+        from vmlx_engine.paged_cache import PagedCacheManager
+
+        class _Disk:
+            def partial_token_counts(self, _block_size):
+                return []
+
+        monkeypatch.setenv("VMLX_PAGED_FRUGAL", "1")
+        frugal = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=_Disk(),
+        )
+        assert frugal.disk_only is False
+        assert frugal.paged_frugal is True
+        assert frugal.ram_mirror_policy == "frugal_env"
+
+        monkeypatch.setenv("VMLX_PAGED_FRUGAL", "0")
+        disk_only = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=_Disk(),
+            disk_only=True,
+        )
+        assert disk_only.disk_only is True
+        assert disk_only.paged_frugal is True
+        assert disk_only.ram_mirror_policy == "disk_only"
+
     def test_disk_only_store_and_restart_restore_exact_partial_prefix(self, tmp_path):
         """SSD-only mode writes through, drops RAM payloads, and restores 7/8 tokens."""
         mx = pytest.importorskip("mlx.core")

@@ -11657,8 +11657,8 @@ class TestTurboQuantKVTelemetry:
         assert restored[0].offset == 20
         assert restored[1].offset == 20
 
-    def test_paged_cache_reconstruct_drops_promoted_disk_block_mirror(self):
-        """Disk-promoted block payloads must not stay pinned in L1 RAM."""
+    def test_paged_cache_reconstruct_keeps_promoted_block_as_evictable_l1(self):
+        """Paged On turns a successful SSD promotion into a reusable RAM hit."""
         import mlx.core as mx
         from mlx_lm.models.cache import KVCache
         from vmlx_engine.paged_cache import PagedCacheManager, BlockTable
@@ -11678,6 +11678,7 @@ class TestTurboQuantKVTelemetry:
         assert block.cache_data_from_disk is True
         assert block.resident_bytes > 0
         assert manager.resident_bytes == block.resident_bytes
+        resident_bytes = block.resident_bytes
 
         table = BlockTable(
             request_id="hit",
@@ -11689,16 +11690,17 @@ class TestTurboQuantKVTelemetry:
         assert restored is not None
         assert isinstance(restored[0], KVCache)
         assert restored[0].offset == 4
-        assert block.cache_data is None
+        assert block.cache_data is not None
         assert block.cache_data_from_disk is False
-        assert block.resident_bytes == 0
-        assert manager.resident_bytes == 0
+        assert block.keep_resident is False
+        assert block.resident_bytes == resident_bytes
+        assert manager.resident_bytes == resident_bytes
 
-    def test_paged_cache_reconstruct_drops_readable_l2_write_through_mirror(
+    def test_paged_cache_reconstruct_keeps_readable_l2_write_through_ram_tier(
         self,
         monkeypatch,
     ):
-        """Readable L2 write-through blocks should not pin parent KV slices."""
+        """Paged On + L2 keeps a bounded RAM tier until normal LRU eviction."""
         import mlx.core as mx
         from mlx_lm.models.cache import KVCache
         from vmlx_engine.paged_cache import PagedCacheManager
@@ -11707,20 +11709,26 @@ class TestTurboQuantKVTelemetry:
         class FakeDiskStore:
             def __init__(self):
                 self.blocks = {}
+                self.reads = 0
 
             def write_block_async(self, block_hash, cache_data, token_count):
                 self.blocks[block_hash] = cache_data
 
             def read_block(self, block_hash):
+                self.reads += 1
                 return self.blocks.get(block_hash)
 
-        monkeypatch.setenv("VMLX_PAGED_FRUGAL", "0")
+            def has_block(self, block_hash):
+                return block_hash in self.blocks
+
+        monkeypatch.delenv("VMLX_PAGED_FRUGAL", raising=False)
 
         disk = FakeDiskStore()
         manager = PagedCacheManager(
             block_size=4,
             max_blocks=4,
             disk_store=disk,
+            max_resident_bytes=10_000,
         )
         prefix = BlockAwarePrefixCache(object(), manager)
         cache = KVCache()
@@ -11737,16 +11745,40 @@ class TestTurboQuantKVTelemetry:
         assert table is not None
         [block_id] = table.block_ids
         block = manager.allocated_blocks[block_id]
+        assert manager.paged_frugal is False
+        assert manager.ram_mirror_policy == "resident"
         assert block.cache_data is not None
         assert block.cache_data_from_disk is False
+        resident_bytes = block.resident_bytes
+        assert resident_bytes > 0
 
         restored = prefix.reconstruct_cache(table)
 
         assert restored is not None
         assert isinstance(restored[0], KVCache)
         assert restored[0].offset == 4
-        assert block.cache_data is None
+        assert block.cache_data is not None
         assert block.cache_data_from_disk is False
+        assert block.resident_bytes == resident_bytes
+        assert manager.resident_bytes == resident_bytes
+        assert disk.reads == 0
+
+        # Once the bounded RAM tier evicts the free block, the same prefix is
+        # still recoverable from SSD and is promoted back into L1.
+        manager.release_request_refs(table)
+        assert manager._maybe_evict_cached_block(block) is True
+        assert block.cache_data is None
+
+        hit, remaining = prefix.fetch_cache("ssd-hit", list(range(4)) + [99])
+        assert hit is not None
+        assert hit.num_tokens == 4
+        assert remaining == [99]
+        restored_from_ssd = prefix.reconstruct_cache(hit)
+        assert restored_from_ssd is not None
+        assert disk.reads >= 1
+        promoted = manager.allocated_blocks[hit.block_ids[0]]
+        assert promoted.cache_data is not None
+        assert promoted.cache_data_from_disk is False
 
     def test_paged_cache_tensor_store_drops_full_request_cache_reference(self):
         """Block-backed tensor stores must not retain a duplicate full KV cache."""

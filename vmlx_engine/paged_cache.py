@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 import time
 from collections.abc import Iterable
@@ -588,6 +589,26 @@ class PagedCacheManager:
         self.disk_only = bool(disk_only)
         if self.disk_only and self._disk_store is None:
             raise ValueError("disk_only requires a disk_store")
+        # Paged RAM and block-disk L2 are independent tiers.  Enabling L2 must
+        # not silently turn a user-selected Paged On session into SSD-only
+        # reconstruction.  The legacy frugal behavior remains available as an
+        # explicit diagnostic/low-RAM override, while true disk-only launches
+        # always suppress persistent RAM payloads.
+        frugal_env = os.environ.get("VMLX_PAGED_FRUGAL", "").strip().lower()
+        frugal_requested = bool(frugal_env) and frugal_env not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        self.paged_frugal = self.disk_only or frugal_requested
+        self.ram_mirror_policy = (
+            "disk_only"
+            if self.disk_only
+            else "frugal_env"
+            if frugal_requested
+            else "resident"
+        )
         # RAM byte ceiling for the in-RAM block KV mirror. 0 = unbounded (legacy
         # behavior: the pool grows to max_blocks with no byte ceiling). When > 0,
         # enforce_byte_budget() evicts free (ref_count==0) cached blocks — writing
@@ -656,7 +677,8 @@ class PagedCacheManager:
             f"PagedCacheManager initialized: block_size={block_size}, "
             f"max_blocks={max_blocks}, usable_blocks={max_blocks - 1}, "
             f"max_tokens={block_size * (max_blocks - 1)}, "
-            f"backend={'block-disk-only' if self.disk_only else 'paged'}"
+            f"backend={'block-disk-only' if self.disk_only else 'paged'}, "
+            f"ram_mirror_policy={self.ram_mirror_policy}"
         )
 
     # =========================================================================
@@ -1740,6 +1762,8 @@ class PagedCacheManager:
                 "backend_mode": "block_disk_only" if self.disk_only else "paged",
                 "paged_ram_enabled": not self.disk_only,
                 "disk_only": self.disk_only,
+                "paged_frugal": self.paged_frugal,
+                "ram_mirror_policy": self.ram_mirror_policy,
                 "block_size": self.block_size,
                 "max_blocks": self.max_blocks,
                 "usable_blocks": usable_blocks,

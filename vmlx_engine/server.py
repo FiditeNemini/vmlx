@@ -8938,6 +8938,12 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
                     getattr(paged_mgr, "disk_only", False)
                 ),
                 "disk_only": bool(getattr(paged_mgr, "disk_only", False)),
+                "paged_frugal": bool(
+                    getattr(paged_mgr, "paged_frugal", False)
+                ),
+                "ram_mirror_policy": str(
+                    getattr(paged_mgr, "ram_mirror_policy", "resident")
+                ),
                 "resident_tokens": sum(
                     int(getattr(block, "token_count", 0) or 0)
                     for block in resident_blocks

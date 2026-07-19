@@ -809,6 +809,35 @@ def _block_payload_has_dsv4(cache_data) -> bool:
         return False
 
 
+def _block_payload_needs_native_residency(cache_data) -> bool:
+    """Return True for path-dependent native cache records.
+
+    These payloads are not interchangeable with ordinary positional KV.  When
+    an explicit frugal override is active, keep a successful reconstruction in
+    L1 long enough for same-process native reuse, then let the normal byte
+    budget evict it.  Nested ``cache_list`` records are traversed without
+    iterating array leaves.
+    """
+    native_tags = {
+        "deepseek_v4",
+        "deepseek_v4_pending",
+        "zaya_cca",
+        "rotating_kv",
+    }
+
+    def _has_native(value) -> bool:
+        if not isinstance(value, (tuple, list)):
+            return False
+        if value and isinstance(value[0], str) and value[0] in native_tags:
+            return True
+        return any(_has_native(item) for item in value)
+
+    try:
+        return _has_native(cache_data)
+    except Exception:
+        return False
+
+
 def _to_numpy_tree(obj):
     """Convert nested MLX-array state to numpy, preserving tuple/list shape."""
     import numpy as np
@@ -1907,24 +1936,13 @@ class BlockAwarePrefixCache:
 
         disk_store = self.paged_cache._disk_store  # May be None
         _disk_only = bool(getattr(self.paged_cache, "disk_only", False))
-        # Frugal mode: when block disk store is on, disk is authoritative for
-        # block KV data. The in-RAM `block.cache_data` MLX copy is then a
-        # ~26 GB duplicate (sized like the live KV cache) that
-        # `_promote_from_disk` re-creates lazily on L1 miss anyway. Skip the
-        # in-RAM mirror to keep total cache footprint at ~1× live-KV instead
-        # of ~3× during _store. Default ON whenever disk store is present;
-        # users can re-enable RAM-only via `VMLX_PAGED_FRUGAL=0`.
-        import os as _os
-        _frugal_env = _os.environ.get("VMLX_PAGED_FRUGAL", "").strip()
-        if _frugal_env == "":
-            _paged_frugal = disk_store is not None  # auto: on when disk has it
-        else:
-            _paged_frugal = _frugal_env not in ("0", "false", "False", "no")
-        if _disk_only:
-            # An explicit Paged Off / Block L2 On launch is a semantic promise:
-            # no persistent KV tensor mirror may remain in the block pool.
-            # Ignore the paged-frugal debug override in this backend.
-            _paged_frugal = True
+        # Paged RAM and block-disk L2 are separate cache tiers.  The manager
+        # defaults ordinary Paged On sessions to a resident L1 write-through
+        # mirror, while disk-only sessions and an explicit
+        # VMLX_PAGED_FRUGAL=1 override suppress that mirror.
+        _paged_frugal = bool(
+            getattr(self.paged_cache, "paged_frugal", _disk_only)
+        )
         logger.info(
             f"Block disk write-through: disk_store={'present' if disk_store else 'None'}, "
             f"is_tensor_data={is_tensor_data}, new_tokens={len(new_tokens)}, "
@@ -3357,7 +3375,7 @@ class BlockAwarePrefixCache:
 
         disk_backed_block_ids: set[int] = set()
         l2_readable_block_ids: set[int] = set()
-        dsv4_resident_block_ids: set[int] = set()
+        native_resident_block_ids: set[int] = set()
         reconstruction_succeeded = False
         try:
             # Collect cache data from all blocks
@@ -3424,8 +3442,8 @@ class BlockAwarePrefixCache:
                         except Exception:
                             pass
                 all_block_data.append(block.cache_data)
-                if _block_payload_has_dsv4(block.cache_data):
-                    dsv4_resident_block_ids.add(block_id)
+                if _block_payload_needs_native_residency(block.cache_data):
+                    native_resident_block_ids.add(block_id)
 
             if not all_block_data:
                 return None
@@ -4287,18 +4305,32 @@ class BlockAwarePrefixCache:
             logger.debug(traceback.format_exc())
             return None
         finally:
+            _disk_only = bool(getattr(self.paged_cache, "disk_only", False))
+            _paged_frugal = bool(
+                getattr(self.paged_cache, "paged_frugal", _disk_only)
+            )
             for block_id in disk_backed_block_ids | l2_readable_block_ids:
                 block = self.paged_cache.allocated_blocks.get(block_id)
                 if block is not None:
-                    if reconstruction_succeeded and block_id in dsv4_resident_block_ids:
-                        # DSV4's restored SWA+CSA/HCA state is a real L1 payload,
-                        # not a throwaway reconstruction buffer. Keep it in RAM
-                        # after a successful L2 restore so subsequent same-process
-                        # hits are RAM-first. Once L2 is readable it no longer needs
-                        # the async-write protection flag, so normal byte-budget LRU
-                        # eviction can spill it back to disk under pressure.
+                    keep_native = (
+                        bool(getattr(block, "keep_resident", False))
+                        or block_id in native_resident_block_ids
+                    )
+                    if (
+                        reconstruction_succeeded
+                        and not _disk_only
+                        and (not _paged_frugal or keep_native)
+                    ):
+                        # A successful reconstruction in Paged On mode promotes
+                        # L2 data into a real RAM tier.  Keep the payload for the
+                        # next same-process hit, but make it eligible for normal
+                        # byte-budget/LRU eviction. Native path-dependent state
+                        # (DSV4/ZAYA/rotating-SWA) retains the same guarantee even
+                        # under an explicit frugal override.
                         self.paged_cache.make_resident_payload_evictable(block)
                     else:
+                        # Disk-only and explicit generic frugal mode use the
+                        # payload only as a transient reconstruction buffer.
                         self.paged_cache.release_resident_payload(block)
 
     def _find_best_prefix_match(

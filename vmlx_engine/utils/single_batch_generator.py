@@ -90,6 +90,7 @@ class SingleBatchGenerator:
         prefill_batch_size: int = 1,
         prefill_step_size: int = 2048,
         max_kv_size: Optional[int] = None,
+        prompt_snapshot_max_bytes: Optional[int] = None,
         stream=None,
     ):
         self.model = model
@@ -100,6 +101,13 @@ class SingleBatchGenerator:
         self.prefill_batch_size = 1
         self.completion_batch_size = 1
         self.max_kv_size = max_kv_size
+        self.prompt_snapshot_max_bytes = (
+            None
+            if prompt_snapshot_max_bytes is None
+            else max(0, int(prompt_snapshot_max_bytes))
+        )
+        self.prompt_snapshot_oversize_skips = 0
+        self.prompt_snapshot_last_estimated_bytes = 0
         self.stop_tokens: set[Any] = set()
         stop_edges = []
         for seq in stop_tokens or []:
@@ -291,6 +299,39 @@ class SingleBatchGenerator:
         if any(c is None for c in cloned):
             return None
         return cloned
+
+    def _clone_admissible_prompt_cache_snapshot(self, cache):
+        """Clone a typed prompt boundary only when a cache backend can retain it.
+
+        Typed/path-dependent caches must be copied before decode mutates their
+        live state.  That copy can itself be enormous: a 43,979-token
+        openPangu composite was 22.1 GB and added roughly a minute of work only
+        to be rejected by both the RAM and disk budgets.  Estimate the live
+        boundary first; this read-only size walk does not materialize tensors.
+        """
+
+        if not cache or not any(self._cache_needs_prompt_snapshot(c) for c in cache):
+            return None
+        limit = self.prompt_snapshot_max_bytes
+        if limit is not None:
+            try:
+                from ..memory_cache import estimate_kv_cache_memory
+
+                estimated = int(estimate_kv_cache_memory(list(cache)))
+            except Exception as exc:
+                logger.debug("typed prompt snapshot size estimate failed: %s", exc)
+            else:
+                self.prompt_snapshot_last_estimated_bytes = estimated
+                if estimated > limit:
+                    self.prompt_snapshot_oversize_skips += 1
+                    logger.warning(
+                        "Skipping typed prompt snapshot before copy: estimated %.1fMB "
+                        "exceeds every enabled cache backend limit (%.1fMB)",
+                        estimated / (1024 * 1024),
+                        limit / (1024 * 1024),
+                    )
+                    return None
+        return self._clone_prompt_cache_snapshot(cache)
 
     def insert(
         self,
@@ -746,7 +787,9 @@ class SingleBatchGenerator:
         ):
             req.prompt_processed = True
             self._prefill_full_and_sample(req)
-            prompt_cache_snapshot = self._clone_prompt_cache_snapshot(req.cache)
+            prompt_cache_snapshot = self._clone_admissible_prompt_cache_snapshot(
+                req.cache
+            )
             req.prompt_cache_snapshot = prompt_cache_snapshot
             return self._yield_current_and_schedule_next(
                 req,
@@ -764,7 +807,9 @@ class SingleBatchGenerator:
         if uses_openpangu and any(
             int(getattr(layer, "offset", 0) or 0) > 0 for layer in req.cache
         ):
-            openpangu_prompt_snapshot = self._clone_prompt_cache_snapshot(req.cache)
+            openpangu_prompt_snapshot = self._clone_admissible_prompt_cache_snapshot(
+                req.cache
+            )
         last_token = int(req.prompt_tokens[-1])
         req.prompt_processed = True
         self._compute_next_from_input(req, last_token)
@@ -777,7 +822,7 @@ class SingleBatchGenerator:
         prompt_cache_snapshot = (
             openpangu_prompt_snapshot
             if uses_openpangu
-            else self._clone_prompt_cache_snapshot(req.cache)
+            else self._clone_admissible_prompt_cache_snapshot(req.cache)
         )
         req.prompt_cache_snapshot = prompt_cache_snapshot
         return self._yield_current_and_schedule_next(

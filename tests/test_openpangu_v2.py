@@ -468,6 +468,36 @@ def test_single_batch_snapshot_is_exact_n_minus_one(tiny_model):
     assert min(layer.offset for layer in response.prompt_cache) >= 4
 
 
+def test_single_batch_skips_oversize_snapshot_before_deep_copy(
+    tiny_model, monkeypatch, caplog
+):
+    from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
+
+    generator = SingleBatchGenerator(
+        tiny_model,
+        max_tokens=1,
+        prompt_snapshot_max_bytes=1,
+    )
+
+    def forbidden_copy(cls, cache_obj):
+        raise AssertionError("oversize typed cache must be rejected before cloning")
+
+    monkeypatch.setattr(
+        SingleBatchGenerator,
+        "_clone_cache_object",
+        classmethod(forbidden_copy),
+    )
+    generator.insert([[10, 11, 12, 13]])
+    with caplog.at_level("WARNING"):
+        prompt_responses, generation_responses = generator.next()
+
+    assert generation_responses == []
+    assert prompt_responses[0].prompt_cache_snapshot is None
+    assert generator.prompt_snapshot_oversize_skips == 1
+    assert generator.prompt_snapshot_last_estimated_bytes > 1
+    assert "Skipping typed prompt snapshot before copy" in caplog.text
+
+
 def test_memory_cache_clones_exact_composite_and_rejects_reverse_trim(tiny_model):
     from vmlx_engine.memory_cache import MemoryAwarePrefixCache, MemoryCacheConfig
     from vmlx_engine.models.openpangu_v2.cache import clone_openpangu_layer_cache

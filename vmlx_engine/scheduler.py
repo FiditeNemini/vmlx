@@ -2930,6 +2930,32 @@ class Scheduler:
             logger.debug(f"Native MTP generator detection failed: {_mtp_gen_err}")
 
         if int(getattr(self.config, "max_num_seqs", 1) or 1) <= 1:
+            # Typed prompt snapshots are deep-copied before decode because their
+            # path-dependent state cannot be rewound.  Give the generator the
+            # largest single-entry limit of the enabled RAM/disk backends so it
+            # can reject an oversize boundary before paying for that copy.
+            _snapshot_limits: list[int] = []
+            if self.memory_aware_cache is not None:
+                _memory_max = int(
+                    self.memory_aware_cache.get_stats().get("max_bytes", 0) or 0
+                )
+                if _memory_max > 0:
+                    _snapshot_limits.append(int(_memory_max * 0.95))
+            if self.disk_cache is not None:
+                _disk_max = int(
+                    getattr(self.disk_cache, "max_size_bytes", 0) or 0
+                )
+                if _disk_max <= 0:
+                    # Zero means an explicitly unbounded disk cache.
+                    _snapshot_limits = []
+                    _prompt_snapshot_max_bytes = None
+                else:
+                    _snapshot_limits.append(_disk_max)
+                    _prompt_snapshot_max_bytes = max(_snapshot_limits)
+            else:
+                _prompt_snapshot_max_bytes = (
+                    max(_snapshot_limits) if _snapshot_limits else None
+                )
             logger.info(
                 "max_num_seqs=1 — using vMLX SingleBatchGenerator "
                 "(raw native cache, scheduler-owned single-active path)"
@@ -2943,6 +2969,7 @@ class Scheduler:
                 prefill_batch_size=1,
                 completion_batch_size=1,
                 prefill_step_size=self.config.prefill_step_size,
+                prompt_snapshot_max_bytes=_prompt_snapshot_max_bytes,
             )
 
         return BatchGenerator(
@@ -9184,6 +9211,22 @@ class Scheduler:
                     stats["batch_generator"].update(native_mtp_stats)
             except Exception as exc:
                 logger.debug("Native MTP telemetry snapshot unavailable: %s", exc)
+        elif generator_cls == "SingleBatchGenerator":
+            stats["batch_generator"].update(
+                {
+                    "prompt_snapshot_max_bytes": getattr(
+                        self.batch_generator, "prompt_snapshot_max_bytes", None
+                    ),
+                    "prompt_snapshot_last_estimated_bytes": getattr(
+                        self.batch_generator,
+                        "prompt_snapshot_last_estimated_bytes",
+                        0,
+                    ),
+                    "prompt_snapshot_oversize_skips": getattr(
+                        self.batch_generator, "prompt_snapshot_oversize_skips", 0
+                    ),
+                }
+            )
         # Include cache stats
         if self.block_aware_cache is not None:
             stats["paged_cache"] = self.block_aware_cache.get_stats()
@@ -9247,6 +9290,24 @@ class Scheduler:
                 "single_active_decode": engine_path == "single_active",
                 "max_num_seqs": self.config.max_num_seqs,
             }
+            if generator_cls == "SingleBatchGenerator":
+                base["batch_generator"].update(
+                    {
+                        "prompt_snapshot_max_bytes": getattr(
+                            self.batch_generator, "prompt_snapshot_max_bytes", None
+                        ),
+                        "prompt_snapshot_last_estimated_bytes": getattr(
+                            self.batch_generator,
+                            "prompt_snapshot_last_estimated_bytes",
+                            0,
+                        ),
+                        "prompt_snapshot_oversize_skips": getattr(
+                            self.batch_generator,
+                            "prompt_snapshot_oversize_skips",
+                            0,
+                        ),
+                    }
+                )
         return base
 
     def _get_ssm_cache_stats(self) -> Optional[Dict[str, Any]]:

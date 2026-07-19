@@ -1904,14 +1904,19 @@ export function registerChatHandlers(
             // per-chat override of a bundle repetition penalty.
             if (overrides?.repeatPenalty != null)
               obj.repetition_penalty = overrides.repeatPenalty;
-            if (overrides?.builtinToolsEnabled) {
+            // An explicit current-turn no-tool directive is stronger than the
+            // chat's persistent built-in-tools toggle. Omitting the schemas is
+            // API-equivalent to tool_choice="none", avoids paying for an
+            // unusable catalog, and keeps the rendered prefix stable across
+            // Responses history replay (some native templates otherwise add a
+            // fallback schema block only on the follow-up turn).
+            if (overrides?.builtinToolsEnabled && !userForbidsToolCalls) {
               obj.tools = availableToolDefinitions().map((t) => ({
                 type: "function",
                 name: t.function.name,
                 description: t.function.description,
                 parameters: t.function.parameters,
               }));
-              if (userForbidsToolCalls) obj.tool_choice = "none";
             }
             // enable_thinking: explicit user override sent to both local and remote.
             // When undefined (auto), local omits the field so the native
@@ -1978,11 +1983,10 @@ export function registerChatHandlers(
             // per-chat override of a bundle repetition penalty.
             if (overrides?.repeatPenalty != null)
               obj.repetition_penalty = overrides.repeatPenalty;
-            if (overrides?.builtinToolsEnabled) {
+            if (overrides?.builtinToolsEnabled && !userForbidsToolCalls) {
               // Chat Completions API: tools must be in OpenAI format with "function" wrapper
               // e.g. {"type": "function", "function": {"name": ..., "parameters": ...}}
               obj.tools = availableToolDefinitions();
-              if (userForbidsToolCalls) obj.tool_choice = "none";
             }
             // enable_thinking: explicit user override sent to both local and remote.
             // When undefined (auto), local omits the field so the native

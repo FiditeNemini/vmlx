@@ -118,12 +118,12 @@ describe('tool auto-continue policy', () => {
     ).toBe(false)
   })
 
-  it('sends tool_choice none and suppresses the generic tool prompt when requested', () => {
+  it('omits unusable tool schemas and suppresses the generic tool prompt when requested', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
 
     expect(source).toContain('requestsNoToolCalls(latestUserText)')
-    expect(source.match(/obj\.tool_choice = "none"/g) || []).toHaveLength(2)
-    expect(source).toContain('!userForbidsToolCalls')
+    expect(source.match(/builtinToolsEnabled && !userForbidsToolCalls/g) || []).toHaveLength(2)
+    expect(source).not.toContain('obj.tool_choice = "none"')
   })
 
   it('checks the terminal AppleScript round before sending a follow-up', () => {

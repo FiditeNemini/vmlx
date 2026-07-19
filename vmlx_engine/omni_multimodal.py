@@ -18,9 +18,9 @@ Design:
     history not matching the running history-prefix), reset the session.
   - Extracts base64-encoded media into ``$TMPDIR/vmlx-omni-XXXX.{jpg,wav,mp4}``
     files because OmniChat's encoders expect file paths or PIL images.
-  - Returns plain text — the HTTP layer wraps it in OpenAI chat-completion
-    format (and emulates SSE by chunking the final text if streaming was
-    requested).
+  - Returns plain text for non-streaming requests and forwards real decode-time
+    token segments for streaming requests. The HTTP layer keeps reasoning and
+    visible content on separate OpenAI-compatible delta rails.
 
 Public surface:
   - ``is_omni_multimodal_bundle(model_path)`` — True iff bundle has
@@ -39,8 +39,9 @@ import os
 import shutil
 import tempfile
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -621,6 +622,16 @@ class OmniMultimodalDispatcher:
         self.bundle_path = bundle_path
         self._session = None
         self._lock = threading.Lock()
+        # The Stage-1 session owns both PyTorch/MPS encoder state and an MLX
+        # language model.  Creating a raw thread per streamed request is not
+        # safe: CPython 3.13 can tear down that thread while native MLX/PyTorch
+        # objects still run thread-local cleanup, aborting the whole server with
+        # `PyThreadState_Get ... GIL is released`.  Keep one long-lived owner
+        # thread for session construction, media encoding, and every decode.
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="vmlx-omni-model",
+        )
         self._last_signature: Optional[str] = None
         self._scratch_dir = Path(tempfile.gettempdir()) / "vmlx-omni-media"
         self._scratch_dir.mkdir(exist_ok=True)
@@ -630,6 +641,10 @@ class OmniMultimodalDispatcher:
             "OmniMultimodalDispatcher: bundle=%s, backend=%s, device=%s, scratch=%s",
             bundle_path, self._backend, self._device, self._scratch_dir,
         )
+
+    def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Future:
+        """Submit work to the persistent Omni native-runtime owner thread."""
+        return self._executor.submit(fn, *args, **kwargs)
 
     @staticmethod
     def _pick_backend() -> str:
@@ -757,6 +772,7 @@ class OmniMultimodalDispatcher:
         top_p: float = 0.95,
         force_reset: bool = False,
         enable_thinking: Optional[bool] = None,
+        token_callback: Optional[Callable[[Optional[int], str], None]] = None,
     ) -> Dict[str, Any]:
         """Run one OmniSession turn and return an OpenAI-shaped response."""
         with self._lock:
@@ -794,15 +810,25 @@ class OmniMultimodalDispatcher:
                 "yes" if audio else "no",
                 "yes" if video else "no",
             )
-            reply = self._session.turn(
-                text=text or "",
-                images=images or None,
-                audio=audio,
-                video=video,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-            )
+            turn_kwargs: Dict[str, Any] = {
+                "text": text or "",
+                "images": images or None,
+                "audio": audio,
+                "video": video,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "token_callback": token_callback,
+            }
+            # Stage-1 reads the flag through the prompt-builder override above.
+            # Stage-2 owns its prompt directly and must receive the same resolved
+            # value explicitly. Auto preserves Stage-2's native thinking-on
+            # default.
+            if getattr(self, "_backend", "stage1") == "stage2":
+                turn_kwargs["enable_thinking"] = (
+                    True if enable_thinking is None else bool(enable_thinking)
+                )
+            reply = self._session.turn(**turn_kwargs)
 
         # The OmniChat reasoning parser writes <think>…</think> inline in
         # ``reply``; we hand the raw text back so the standard server-side
@@ -812,6 +838,15 @@ class OmniMultimodalDispatcher:
             "n_images": len(images),
             "has_audio": bool(audio),
             "has_video": bool(video),
+            "prompt_tokens": int(
+                getattr(self._session, "_last_prompt_tokens", 0) or 0
+            ),
+            "completion_tokens": int(
+                getattr(self._session, "_last_completion_tokens", 0) or 0
+            ),
+            "finish_reason": str(
+                getattr(self._session, "_last_finish_reason", "stop") or "stop"
+            ),
         }
 
     def reset(self):
@@ -827,6 +862,110 @@ class OmniMultimodalDispatcher:
 # response (or SSE stream). Lives here (not in server.py) so the FastAPI
 # decorator that's directly above the route handler doesn't accidentally
 # bind to a helper function.
+
+
+class _OmniStreamCancelled(RuntimeError):
+    """Internal cooperative-cancellation signal for an Omni decode worker."""
+
+
+def _split_omni_reply(
+    raw: str,
+    *,
+    explicit_thinking_off: bool,
+) -> Tuple[Optional[str], str]:
+    """Split the completed native Omni reply without leaking think markers."""
+    reasoning_content: Optional[str] = None
+    content = raw or ""
+    if "<think>" in content and "</think>" in content:
+        a = content.index("<think>")
+        b = content.index("</think>") + len("</think>")
+        reasoning_content = content[a + len("<think>") : b - len("</think>")].strip()
+        content = (content[:a] + content[b:]).strip()
+    elif "</think>" in content:
+        b = content.index("</think>")
+        reasoning_content = content[:b].strip()
+        content = content[b + len("</think>") :].strip()
+    else:
+        content = content.strip()
+    if explicit_thinking_off:
+        reasoning_content = None
+    return reasoning_content, content
+
+
+class _OmniIncrementalRailSplitter:
+    """Incrementally separate Omni think text from visible content."""
+
+    _START = "<think>"
+    _END = "</think>"
+
+    def __init__(self, *, explicit_thinking_off: bool):
+        self._explicit_off = bool(explicit_thinking_off)
+        self._mode = "probe_off" if self._explicit_off else "reasoning"
+        self._buffer = ""
+
+    @staticmethod
+    def _marker_suffix_length(text: str) -> int:
+        keep = 0
+        for marker in (
+            _OmniIncrementalRailSplitter._START,
+            _OmniIncrementalRailSplitter._END,
+        ):
+            for length in range(1, min(len(text), len(marker) - 1) + 1):
+                if text.endswith(marker[:length]):
+                    keep = max(keep, length)
+        return keep
+
+    def feed(self, text: str, *, final: bool = False) -> List[Tuple[str, str]]:
+        self._buffer += text or ""
+        events: List[Tuple[str, str]] = []
+
+        while self._buffer:
+            if self._mode == "content":
+                events.append(("content", self._buffer))
+                self._buffer = ""
+                break
+
+            if self._mode == "probe_off":
+                if self._START.startswith(self._buffer) and not final:
+                    break
+                if self._buffer.startswith(self._START):
+                    self._buffer = self._buffer[len(self._START) :]
+                    self._mode = "discard_reasoning"
+                    continue
+                self._mode = "content"
+                continue
+
+            end_index = self._buffer.find(self._END)
+            start_index = self._buffer.find(self._START)
+            if start_index >= 0 and (end_index < 0 or start_index < end_index):
+                prefix = self._buffer[:start_index]
+                if prefix and not self._explicit_off:
+                    events.append(("reasoning", prefix))
+                self._buffer = self._buffer[start_index + len(self._START) :]
+                continue
+            if end_index >= 0:
+                prefix = self._buffer[:end_index]
+                if prefix and not self._explicit_off:
+                    events.append(("reasoning", prefix))
+                self._buffer = self._buffer[end_index + len(self._END) :]
+                self._mode = "content"
+                continue
+
+            keep = 0 if final else self._marker_suffix_length(self._buffer)
+            emit = self._buffer[:-keep] if keep else self._buffer
+            if emit and not self._explicit_off:
+                events.append(("reasoning", emit))
+            self._buffer = self._buffer[len(emit) :]
+            break
+
+        if final and self._buffer:
+            if self._mode == "content":
+                events.append(("content", self._buffer))
+            elif not self._explicit_off:
+                events.append(("reasoning", self._buffer))
+            self._buffer = ""
+        return events
+
 
 async def dispatch_omni_chat_completion(request, bundle_path: str):
     """Run a Nemotron Omni multimodal chat turn and return an OpenAI
@@ -891,66 +1030,51 @@ async def dispatch_omni_chat_completion(request, bundle_path: str):
     else:
         _enable_thinking = None
 
-    loop = asyncio.get_running_loop()
-    t_start = _time.time()
-    try:
-        result = await loop.run_in_executor(
-            None,
-            lambda: dispatcher.chat(
-                messages=msgs_dump,
-                max_tokens=int(_max_tokens),
-                temperature=float(_temperature),
-                top_p=float(_top_p),
-                enable_thinking=_enable_thinking,
-            ),
-        )
-    except Exception as e:
-        logger.error("Omni multimodal dispatch failed: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=500, detail=f"Omni multimodal generation failed: {e}"
-        )
-
-    elapsed = _time.time() - t_start
-    raw = result["content"] or ""
-    reasoning_content: Optional[str] = None
-    content = raw
     _explicit_thinking_off = _enable_thinking is False
-    if "<think>" in raw and "</think>" in raw:
-        a = raw.index("<think>")
-        b = raw.index("</think>") + len("</think>")
-        reasoning_content = raw[a + len("<think>"):b - len("</think>")].strip()
-        content = (raw[:a] + raw[b:]).strip()
-    elif "</think>" in raw:
-        # deepseek_r1 templates often emit only the closing tag (the open
-        # `<think>` is baked into the assistant prompt prefix). Treat
-        # everything before `</think>` as reasoning, after as content.
-        b = raw.index("</think>")
-        reasoning_content = raw[:b].strip()
-        content = raw[b + len("</think>"):].strip()
-    if _explicit_thinking_off:
-        reasoning_content = None
-
     completion_id = f"chatcmpl-{_uuid.uuid4().hex[:24]}"
     created = int(_time.time())
-    try:
-        prompt_tokens = sum(
-            len((m.get("content") or "").split()) if isinstance(m.get("content"), str) else 0
-            for m in msgs_dump
-        )
-    except Exception:
-        prompt_tokens = 0
-    completion_tokens = max(1, len(content.split()))
+    t_start = _time.time()
 
-    logger.info(
-        "Omni multimodal chat: %d images, audio=%s, video=%s — %d-char reply in %.2fs",
-        result.get("n_images", 0),
-        result.get("has_audio"),
-        result.get("has_video"),
-        len(content),
-        elapsed,
-    )
+    def _run_chat(token_callback=None):
+        return dispatcher.chat(
+            messages=msgs_dump,
+            max_tokens=int(_max_tokens),
+            temperature=float(_temperature),
+            top_p=float(_top_p),
+            enable_thinking=_enable_thinking,
+            token_callback=token_callback,
+        )
 
     if not getattr(request, "stream", False):
+        loop = asyncio.get_running_loop()
+        try:
+            result = await asyncio.wrap_future(
+                dispatcher.submit(_run_chat),
+                loop=loop,
+            )
+        except Exception as e:
+            logger.error("Omni multimodal dispatch failed: %s", e, exc_info=True)
+            raise HTTPException(
+                status_code=500, detail=f"Omni multimodal generation failed: {e}"
+            )
+
+        elapsed = _time.time() - t_start
+        reasoning_content, content = _split_omni_reply(
+            result.get("content") or "",
+            explicit_thinking_off=_explicit_thinking_off,
+        )
+        prompt_tokens = int(result.get("prompt_tokens") or 0)
+        completion_tokens = int(result.get("completion_tokens") or 0)
+        finish_reason = str(result.get("finish_reason") or "stop")
+        logger.info(
+            "Omni multimodal chat: %d images, audio=%s, video=%s — "
+            "%d-char reply in %.2fs",
+            result.get("n_images", 0),
+            result.get("has_audio"),
+            result.get("has_video"),
+            len(content),
+            elapsed,
+        )
         message: Dict[str, Any] = {"role": "assistant", "content": content}
         if reasoning_content:
             message["reasoning_content"] = reasoning_content
@@ -959,7 +1083,11 @@ async def dispatch_omni_chat_completion(request, bundle_path: str):
             "object": "chat.completion",
             "created": created,
             "model": request.model,
-            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason,
+            }],
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
@@ -967,45 +1095,185 @@ async def dispatch_omni_chat_completion(request, bundle_path: str):
             },
         }
 
+    event_queue: asyncio.Queue = asyncio.Queue()
+    cancel_event = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def _enqueue(event: tuple) -> None:
+        try:
+            loop.call_soon_threadsafe(event_queue.put_nowait, event)
+        except RuntimeError:
+            # The connection/event loop is already gone.  The next decode
+            # callback sees cancel_event and cooperatively stops the turn.
+            cancel_event.set()
+
+    def _on_token(token_id: Optional[int], text_delta: str) -> None:
+        if cancel_event.is_set():
+            raise _OmniStreamCancelled("Omni client disconnected")
+        _enqueue(("token", token_id, text_delta))
+
+    def _on_done(future: Future) -> None:
+        try:
+            _enqueue(("done", future.result()))
+        except _OmniStreamCancelled as exc:
+            dispatcher.reset()
+            _enqueue(("cancelled", exc))
+        except Exception as exc:  # pragma: no cover - exercised by live route
+            _enqueue(("error", exc))
+
     async def _sse_iter():
         first = {
-            "id": completion_id, "object": "chat.completion.chunk",
-            "created": created, "model": request.model,
-            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": request.model,
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant"},
+                "finish_reason": None,
+            }],
         }
         yield f"data: {_json.dumps(first)}\n\n"
-        if reasoning_content:
-            for i in range(0, len(reasoning_content), 80):
+        splitter = _OmniIncrementalRailSplitter(
+            explicit_thinking_off=_explicit_thinking_off
+        )
+        future = dispatcher.submit(_run_chat, _on_token)
+        future.add_done_callback(_on_done)
+        streamed_reasoning = ""
+        streamed_content = ""
+        result = None
+        try:
+            while True:
+                event = await event_queue.get()
+                kind = event[0]
+                if kind == "token":
+                    for rail, delta in splitter.feed(event[2]):
+                        if not delta:
+                            continue
+                        if rail == "reasoning":
+                            streamed_reasoning += delta
+                            delta_payload = {"reasoning_content": delta}
+                        else:
+                            streamed_content += delta
+                            delta_payload = {"content": delta}
+                        chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": request.model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": delta_payload,
+                                "finish_reason": None,
+                            }],
+                        }
+                        yield f"data: {_json.dumps(chunk)}\n\n"
+                    continue
+                if kind == "done":
+                    result = event[1]
+                    break
+                if kind == "cancelled":
+                    return
+                if kind == "error":
+                    logger.error(
+                        "Omni multimodal streaming dispatch failed: %s",
+                        event[1],
+                        exc_info=(
+                            type(event[1]),
+                            event[1],
+                            event[1].__traceback__,
+                        ),
+                    )
+                    yield "data: " + _json.dumps({
+                        "error": {
+                            "type": "server_error",
+                            "message": (
+                                "Omni multimodal generation failed: "
+                                f"{event[1]}"
+                            ),
+                        }
+                    }) + "\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
+            for rail, delta in splitter.feed("", final=True):
+                if not delta:
+                    continue
+                if rail == "reasoning":
+                    streamed_reasoning += delta
+                    delta_payload = {"reasoning_content": delta}
+                else:
+                    streamed_content += delta
+                    delta_payload = {"content": delta}
                 chunk = {
-                    "id": completion_id, "object": "chat.completion.chunk",
-                    "created": created, "model": request.model,
-                    "choices": [{"index": 0,
-                                 "delta": {"reasoning_content": reasoning_content[i:i + 80]},
-                                 "finish_reason": None}],
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": delta_payload,
+                        "finish_reason": None,
+                    }],
                 }
                 yield f"data: {_json.dumps(chunk)}\n\n"
-                await asyncio.sleep(0)
-        for i in range(0, len(content), 80):
-            chunk = {
-                "id": completion_id, "object": "chat.completion.chunk",
-                "created": created, "model": request.model,
-                "choices": [{"index": 0,
-                             "delta": {"content": content[i:i + 80]},
-                             "finish_reason": None}],
+
+            raw = (result or {}).get("content") or ""
+            final_reasoning, final_content = _split_omni_reply(
+                raw,
+                explicit_thinking_off=_explicit_thinking_off,
+            )
+            if final_reasoning and not final_reasoning.startswith(
+                streamed_reasoning.strip()
+            ):
+                logger.warning(
+                    "Omni reasoning stream/final reconciliation differs "
+                    "(streamed=%d final=%d)",
+                    len(streamed_reasoning),
+                    len(final_reasoning),
+                )
+            if final_content and not final_content.startswith(streamed_content.strip()):
+                logger.warning(
+                    "Omni content stream/final reconciliation differs "
+                    "(streamed=%d final=%d)",
+                    len(streamed_content),
+                    len(final_content),
+                )
+
+            prompt_tokens = int((result or {}).get("prompt_tokens") or 0)
+            completion_tokens = int((result or {}).get("completion_tokens") or 0)
+            finish_reason = str((result or {}).get("finish_reason") or "stop")
+            elapsed = _time.time() - t_start
+            logger.info(
+                "Omni multimodal stream: %d images, audio=%s, video=%s — "
+                "%d reasoning chars, %d content chars, %d tokens in %.2fs",
+                (result or {}).get("n_images", 0),
+                (result or {}).get("has_audio"),
+                (result or {}).get("has_video"),
+                len(streamed_reasoning),
+                len(streamed_content),
+                completion_tokens,
+                elapsed,
+            )
+            final = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": request.model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": finish_reason,
+                }],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
             }
-            yield f"data: {_json.dumps(chunk)}\n\n"
-            await asyncio.sleep(0)
-        final = {
-            "id": completion_id, "object": "chat.completion.chunk",
-            "created": created, "model": request.model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            },
-        }
-        yield f"data: {_json.dumps(final)}\n\n"
-        yield "data: [DONE]\n\n"
+            yield f"data: {_json.dumps(final)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            cancel_event.set()
 
     return StreamingResponse(_sse_iter(), media_type="text/event-stream")

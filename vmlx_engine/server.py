@@ -15580,6 +15580,291 @@ def _synthesize_tools_from_message_tool_calls(messages: list[dict]) -> list[dict
     return list(by_name.values())
 
 
+async def _adapt_omni_chat_stream_to_responses(
+    chat_stream: StreamingResponse,
+    request: ResponsesRequest,
+    *,
+    history_messages: list[dict] | None = None,
+) -> AsyncIterator[str]:
+    """Translate a live Omni Chat SSE stream into native Responses events."""
+    response_id = f"resp_{uuid.uuid4().hex[:12]}"
+    msg_id = f"item_{uuid.uuid4().hex[:12]}"
+    created_at = int(time.time())
+    seq = 0
+
+    def _sse(event_type: str, data: dict) -> str:
+        nonlocal seq
+        data["sequence_number"] = seq
+        seq += 1
+        return (
+            f"event: {event_type}\n"
+            f"data: {json.dumps(data, ensure_ascii=True)}\n\n"
+        )
+
+    yield _sse(
+        "response.created",
+        {
+            "type": "response.created",
+            "response": {
+                "id": response_id,
+                "object": "response",
+                "created_at": created_at,
+                "status": "in_progress",
+                "model": request.model,
+                "output": [],
+            },
+        },
+    )
+    yield _sse(
+        "response.output_item.added",
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": msg_id,
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            },
+        },
+    )
+    yield _sse(
+        "response.content_part.added",
+        {
+            "type": "response.content_part.added",
+            "item_id": msg_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        },
+    )
+
+    reasoning_text = ""
+    content_text = ""
+    finish_reason = "stop"
+    usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    raw_buffer = ""
+    stream_failed = False
+
+    async def _handle_payload(payload: dict) -> AsyncIterator[str]:
+        nonlocal reasoning_text, content_text, finish_reason, usage, stream_failed
+        if isinstance(payload.get("error"), dict):
+            stream_failed = True
+            error = payload["error"]
+            yield _sse(
+                "error",
+                {
+                    "type": "error",
+                    "error": {
+                        "type": error.get("type", "server_error"),
+                        "message": error.get(
+                            "message", "Omni multimodal generation failed"
+                        ),
+                    },
+                },
+            )
+            return
+        choices = payload.get("choices") or []
+        if choices:
+            choice = choices[0] or {}
+            delta = choice.get("delta") or {}
+            reasoning_delta = delta.get("reasoning_content") or ""
+            content_delta = delta.get("content") or ""
+            if reasoning_delta:
+                reasoning_text += reasoning_delta
+                yield _sse(
+                    "response.reasoning_summary_text.delta",
+                    {
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": msg_id,
+                        "output_index": 0,
+                        "summary_index": 0,
+                        "delta": reasoning_delta,
+                    },
+                )
+            if content_delta:
+                content_text += content_delta
+                yield _sse(
+                    "response.output_text.delta",
+                    {
+                        "type": "response.output_text.delta",
+                        "item_id": msg_id,
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": content_delta,
+                    },
+                )
+            if choice.get("finish_reason"):
+                finish_reason = str(choice["finish_reason"])
+        chat_usage = payload.get("usage")
+        if isinstance(chat_usage, dict):
+            prompt_tokens = int(chat_usage.get("prompt_tokens") or 0)
+            completion_tokens = int(chat_usage.get("completion_tokens") or 0)
+            usage = {
+                "input_tokens": prompt_tokens,
+                "output_tokens": completion_tokens,
+                "total_tokens": int(
+                    chat_usage.get("total_tokens")
+                    or prompt_tokens + completion_tokens
+                ),
+            }
+
+    async for raw in chat_stream.body_iterator:
+        raw_buffer += raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+        while "\n\n" in raw_buffer:
+            event_text, raw_buffer = raw_buffer.split("\n\n", 1)
+            for line in event_text.splitlines():
+                if not line.startswith("data: "):
+                    continue
+                data_text = line[6:]
+                if data_text == "[DONE]":
+                    continue
+                try:
+                    payload = json.loads(data_text)
+                except json.JSONDecodeError:
+                    continue
+                async for event in _handle_payload(payload):
+                    yield event
+            if stream_failed:
+                break
+        if stream_failed:
+            break
+
+    if stream_failed:
+        yield _sse(
+            "response.failed",
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_at,
+                    "status": "failed",
+                    "model": request.model,
+                    "output": [],
+                    "usage": usage,
+                },
+            },
+        )
+        return
+
+    reasoning_text = reasoning_text.strip()
+    content_text = content_text.strip()
+    if reasoning_text:
+        yield _sse(
+            "response.reasoning_summary_text.done",
+            {
+                "type": "response.reasoning_summary_text.done",
+                "item_id": msg_id,
+                "output_index": 0,
+                "summary_index": 0,
+                "text": reasoning_text,
+            },
+        )
+    if reasoning_text and not content_text:
+        yield _sse(
+            "response.warning",
+            {
+                "type": "response.warning",
+                "code": "reasoning_only_response",
+                "message": (
+                    "The model completed with reasoning but no visible answer. "
+                    "Increase max_output_tokens or disable thinking for a direct turn."
+                ),
+            },
+        )
+
+    response_status = "incomplete" if finish_reason == "length" else "completed"
+    output_status = "incomplete" if response_status == "incomplete" else "completed"
+    message_item = {
+        "id": msg_id,
+        "type": "message",
+        "status": output_status,
+        "role": "assistant",
+        "content": [{
+            "type": "output_text",
+            "text": content_text,
+            "annotations": [],
+        }],
+    }
+    yield _sse(
+        "response.output_text.done",
+        {
+            "type": "response.output_text.done",
+            "item_id": msg_id,
+            "output_index": 0,
+            "content_index": 0,
+            "text": content_text,
+        },
+    )
+    yield _sse(
+        "response.content_part.done",
+        {
+            "type": "response.content_part.done",
+            "item_id": msg_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+                "type": "output_text",
+                "text": content_text,
+                "annotations": [],
+            },
+        },
+    )
+    yield _sse(
+        "response.output_item.done",
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": message_item,
+        },
+    )
+
+    output_items: list[dict] = [message_item]
+    if reasoning_text:
+        output_items.append({
+            "id": f"rs_{uuid.uuid4().hex[:12]}",
+            "type": "reasoning",
+            "status": output_status,
+            "role": "assistant",
+            "content": [{"type": "reasoning", "text": reasoning_text}],
+        })
+    completed_response = {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "status": response_status,
+        "model": request.model,
+        "output_text": content_text,
+        "output": output_items,
+        "usage": usage,
+    }
+    if response_status == "incomplete":
+        completed_response["incomplete_details"] = {
+            "reason": "max_output_tokens"
+        }
+    else:
+        _responses_store_history(
+            response_id,
+            (history_messages or [])
+            + _responses_output_to_assistant_messages(output_items),
+            reasoning_only=bool(reasoning_text and not content_text),
+        )
+    terminal_event = (
+        "response.incomplete"
+        if response_status == "incomplete"
+        else "response.completed"
+    )
+    yield _sse(
+        terminal_event,
+        {
+            "type": terminal_event,
+            "response": completed_response,
+        },
+    )
+
+
 @app.post(
     "/v1/responses",
     dependencies=[
@@ -16133,7 +16418,6 @@ async def create_response(
             _omni_path_dispatch
             and _is_omni_resp(_omni_path_dispatch)
             and _has_mm_resp(messages)
-            and not request.stream
         ):
             from .api.models import ChatCompletionRequest as _CCR
             from starlette.responses import JSONResponse as _JR2
@@ -16143,11 +16427,24 @@ async def create_response(
                 temperature=request.temperature,
                 top_p=request.top_p,
                 max_tokens=request.max_output_tokens,
-                stream=False,
+                stream=bool(request.stream),
                 enable_thinking=request.enable_thinking,
                 reasoning_effort=request.reasoning_effort,
             )
             cc = await _omni_dispatch_resp(_cc_req, _omni_path_dispatch)
+            if isinstance(cc, StreamingResponse) and request.stream:
+                return StreamingResponse(
+                    _adapt_omni_chat_stream_to_responses(
+                        cc,
+                        request,
+                        history_messages=(
+                            history_messages
+                            if history_messages is not None
+                            else messages
+                        ),
+                    ),
+                    media_type="text/event-stream",
+                )
             cc_dict = None
             if isinstance(cc, _JR2):
                 cc_dict = json.loads(cc.body.decode("utf-8")) if cc.body else {}

@@ -1,9 +1,12 @@
 import json
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import pytest
 from fastapi import HTTPException
 
 from vmlx_engine.omni_multimodal import (
+    _OmniIncrementalRailSplitter,
     OmniMultimodalDispatcher,
     _build_omni_turn_prompt_with_thinking,
     dispatch_omni_chat_completion,
@@ -194,6 +197,164 @@ def test_omni_dispatcher_sets_thinking_flag_on_first_session_turn(tmp_path):
     )
 
     assert dispatcher._session._vmlx_enable_thinking is False
+
+
+def test_omni_stage2_dispatcher_forwards_reasoning_and_decode_callback(tmp_path):
+    captured = {}
+
+    class _FakeSession:
+        _last_prompt_tokens = 7
+        _last_completion_tokens = 3
+        _last_finish_reason = "stop"
+
+        def reset(self):
+            pass
+
+        def turn(self, **kwargs):
+            captured.update(kwargs)
+            return "visible"
+
+    dispatcher = OmniMultimodalDispatcher.__new__(OmniMultimodalDispatcher)
+    dispatcher.bundle_path = "/fake"
+    dispatcher._backend = "stage2"
+    dispatcher._session = _FakeSession()
+    dispatcher._lock = __import__("threading").Lock()
+    dispatcher._last_signature = None
+    dispatcher._scratch_dir = tmp_path
+    callback = lambda token_id, text: None
+
+    result = dispatcher.chat(
+        [{"role": "user", "content": "Describe directly."}],
+        enable_thinking=False,
+        token_callback=callback,
+    )
+
+    assert captured["enable_thinking"] is False
+    assert captured["token_callback"] is callback
+    assert result["prompt_tokens"] == 7
+    assert result["completion_tokens"] == 3
+    assert result["finish_reason"] == "stop"
+
+
+def test_omni_incremental_splitter_handles_fragmented_markers():
+    splitter = _OmniIncrementalRailSplitter(explicit_thinking_off=False)
+    events = []
+    for delta in ("<thi", "nk>private", " work</thi", "nk>visible", " answer"):
+        events.extend(splitter.feed(delta))
+    events.extend(splitter.feed("", final=True))
+
+    reasoning = "".join(text for rail, text in events if rail == "reasoning")
+    content = "".join(text for rail, text in events if rail == "content")
+    assert reasoning == "private work"
+    assert content == "visible answer"
+    assert "<think>" not in reasoning + content
+    assert "</think>" not in reasoning + content
+
+
+@pytest.mark.asyncio
+async def test_omni_stream_emits_generation_time_reasoning_content_and_usage(
+    tmp_path, monkeypatch
+):
+    bundle = _write_omni_bundle(tmp_path / "omni")
+
+    class _Dispatcher:
+        def chat(self, *, token_callback, **kwargs):
+            for token_id, delta in enumerate(
+                ("<think>", "private", "</think>", "visible", " answer"),
+                start=1,
+            ):
+                token_callback(token_id, delta)
+            return {
+                "content": "<think>private</think>visible answer",
+                "n_images": 1,
+                "has_audio": False,
+                "has_video": False,
+                "prompt_tokens": 23,
+                "completion_tokens": 5,
+                "finish_reason": "stop",
+            }
+
+        def reset(self):
+            pass
+
+        def submit(self, fn, /, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:
+                future.set_exception(exc)
+            return future
+
+    dispatcher = _Dispatcher()
+    monkeypatch.setattr(
+        OmniMultimodalDispatcher,
+        "get",
+        classmethod(lambda cls, path: dispatcher),
+    )
+
+    class _Request:
+        model = "omni"
+        stream = True
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAAA"},
+                },
+            ],
+        }]
+        max_tokens = 8
+        max_completion_tokens = None
+        temperature = 0
+        top_p = 1
+        chat_template_kwargs = {}
+        enable_thinking = True
+
+    response = await dispatch_omni_chat_completion(_Request(), str(bundle))
+    payloads = []
+    async for raw in response.body_iterator:
+        for line in str(raw).splitlines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                payloads.append(json.loads(line[6:]))
+
+    reasoning = "".join(
+        (payload.get("choices") or [{}])[0].get("delta", {}).get(
+            "reasoning_content", ""
+        )
+        for payload in payloads
+    )
+    content = "".join(
+        (payload.get("choices") or [{}])[0].get("delta", {}).get("content", "")
+        for payload in payloads
+    )
+    terminal = next(payload for payload in payloads if payload.get("usage"))
+
+    assert reasoning == "private"
+    assert content == "visible answer"
+    assert terminal["choices"][0]["finish_reason"] == "stop"
+    assert terminal["usage"] == {
+        "prompt_tokens": 23,
+        "completion_tokens": 5,
+        "total_tokens": 28,
+    }
+
+
+def test_omni_dispatcher_uses_one_persistent_native_runtime_owner_thread():
+    dispatcher = OmniMultimodalDispatcher.__new__(OmniMultimodalDispatcher)
+    dispatcher._executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="test-omni-owner",
+    )
+    try:
+        first = dispatcher.submit(threading.get_ident).result(timeout=2)
+        second = dispatcher.submit(threading.get_ident).result(timeout=2)
+    finally:
+        dispatcher._executor.shutdown(wait=True)
+
+    assert first == second
+    assert first != threading.get_ident()
 
 
 def test_omni_extracts_input_audio_shape_emitted_by_panel(tmp_path):

@@ -6790,6 +6790,110 @@ class TestAnthropicOmniStreamingAdapter:
         assert "enable_thinking=request.enable_thinking" in block
         assert "elif isinstance(cc, dict):" in block
         assert "cc_dict = cc" in block
+        assert "and not request.stream" not in block
+        assert "stream=bool(request.stream)" in block
+        assert "_adapt_omni_chat_stream_to_responses(" in block
+
+    @pytest.mark.asyncio
+    async def test_omni_chat_stream_translates_to_incremental_responses_events(
+        self, monkeypatch
+    ):
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from starlette.responses import StreamingResponse
+
+        async def _chat_sse():
+            chunks = [
+                {
+                    "choices": [{
+                        "delta": {"role": "assistant"},
+                        "finish_reason": None,
+                    }]
+                },
+                {
+                    "choices": [{
+                        "delta": {"reasoning_content": "private"},
+                        "finish_reason": None,
+                    }]
+                },
+                {
+                    "choices": [{
+                        "delta": {"content": "visible "},
+                        "finish_reason": None,
+                    }]
+                },
+                {
+                    "choices": [{
+                        "delta": {"content": "answer"},
+                        "finish_reason": None,
+                    }]
+                },
+                {
+                    "choices": [{
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {
+                        "prompt_tokens": 23,
+                        "completion_tokens": 5,
+                        "total_tokens": 28,
+                    },
+                },
+            ]
+            for chunk in chunks:
+                yield f"data: {json.dumps(chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        stored = {}
+        monkeypatch.setattr(
+            server,
+            "_responses_store_history",
+            lambda response_id, messages, reasoning_only=False: stored.update(
+                response_id=response_id,
+                messages=messages,
+                reasoning_only=reasoning_only,
+            ),
+        )
+        chat_stream = StreamingResponse(
+            _chat_sse(),
+            media_type="text/event-stream",
+        )
+        request = SimpleNamespace(model="omni-test")
+        events = []
+        async for raw in server._adapt_omni_chat_stream_to_responses(
+            chat_stream,
+            request,
+            history_messages=[{"role": "user", "content": "Describe."}],
+        ):
+            data_line = next(
+                line for line in raw.splitlines() if line.startswith("data: ")
+            )
+            events.append(json.loads(data_line[6:]))
+
+        assert "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.reasoning_summary_text.delta"
+        ) == "private"
+        assert "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        ) == "visible answer"
+        terminal = next(
+            event["response"]
+            for event in events
+            if event.get("type") == "response.completed"
+        )
+        assert terminal["output_text"] == "visible answer"
+        assert terminal["usage"] == {
+            "input_tokens": 23,
+            "output_tokens": 5,
+            "total_tokens": 28,
+        }
+        assert stored["reasoning_only"] is False
 
 
 class TestDSV4FastLoadSwitchGLUScope:

@@ -261,7 +261,8 @@ def test_m3_hit_rederive_materializes_in_post_dispatch_cleanup_shape() -> None:
     scheduler._is_hybrid = False
     request = SimpleNamespace(
         prompt_token_ids=[11, 12, 13, 14],
-        _deferred_m3_prompt_cache={
+        _deferred_prompt_cache={
+            "family": "MiniMax-M3",
             "mode": "paged",
             "key_tokens": [11, 12, 13],
         },
@@ -270,10 +271,10 @@ def test_m3_hit_rederive_materializes_in_post_dispatch_cleanup_shape() -> None:
     # Terminal delivery happens in EngineCore before this cleanup helper is
     # called; the descriptor itself must not do any eager work.
     order.append("terminal-dispatch")
-    scheduler._materialize_deferred_m3_prompt_cache("m3", request)
+    scheduler._materialize_deferred_prompt_cache("m3", request)
 
     assert order == ["terminal-dispatch", "rederive", "extract"]
-    assert request._deferred_m3_prompt_cache is None
+    assert request._deferred_prompt_cache is None
     assert request._extracted_cache_key_tokens == [11, 12, 13]
     assert request._extracted_cache_from_prompt_snapshot is True
     assert request._extracted_cache == [
@@ -286,7 +287,7 @@ def test_m3_response_finalization_only_schedules_clean_rederive() -> None:
     paged_marker = '"mode": "paged"'
     object_marker = '"mode": "object"'
 
-    assert source.count("request._deferred_m3_prompt_cache = {") == 2
+    assert source.count("request._deferred_prompt_cache = {") == 6
     assert paged_marker in source
     assert object_marker in source
 
@@ -296,3 +297,13 @@ def test_m3_response_finalization_only_schedules_clean_rederive() -> None:
     for marker in (paged_marker, object_marker):
         branch = source[source.index(marker) - 900 : source.index(marker) + 250]
         assert "_prefill_for_prompt_only_cache" not in branch
+
+
+def test_all_llm_terminal_response_paths_defer_clean_prompt_reprefill() -> None:
+    source = inspect.getsource(Scheduler._process_batch_responses)
+
+    assert "_prefill_for_prompt_only_cache" not in source
+    for family in ("DSV4", "ZAYA", "Mixed-SWA", "MiniMax-M3"):
+        assert f'"family": "{family}"' in source
+    assert source.count('"mode": "paged"') == 4
+    assert source.count('"mode": "object"') == 2

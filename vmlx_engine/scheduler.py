@@ -7015,22 +7015,20 @@ class Scheduler:
                                             elif dsv4_key_tokens:
                                                 logger.info(
                                                     "DSV4 prefix cache store using "
-                                                    "clean prompt-boundary re-prefill "
+                                                    "deferred clean prompt-boundary re-prefill "
                                                     "(%d cache-key tokens from %d "
-                                                    "prompt tokens).",
+                                                    "prompt tokens) after terminal dispatch.",
                                                     len(dsv4_key_tokens),
                                                     len(dsv4_prompt_tokens),
                                                 )
-                                                cache_for_extract = (
-                                                    self._prefill_for_prompt_only_cache(
+                                                request._deferred_prompt_cache = {
+                                                    "family": "DSV4",
+                                                    "mode": "paged",
+                                                    "key_tokens": list(
                                                         dsv4_key_tokens
-                                                    )
-                                                )
-                                                if cache_for_extract is not None:
-                                                    request._extracted_cache_key_tokens = (
-                                                        list(dsv4_key_tokens)
-                                                    )
-                                                    request._extracted_cache_from_prompt_snapshot = True
+                                                    ),
+                                                }
+                                                cache_for_extract = None
                                             else:
                                                 cache_for_extract = None
                                     elif self._uses_zaya_cache:
@@ -7068,22 +7066,18 @@ class Scheduler:
                                         if zaya_key_tokens:
                                             logger.info(
                                                 "ZAYA prefix cache store using "
-                                                "clean prompt-boundary re-prefill "
+                                                "deferred clean prompt-boundary re-prefill "
                                                 "(%d cache-key tokens from %d "
-                                                "prompt tokens).",
+                                                "prompt tokens) after terminal dispatch.",
                                                 len(zaya_key_tokens),
                                                 len(zaya_prompt_tokens),
                                             )
-                                            cache_for_extract = (
-                                                self._prefill_for_prompt_only_cache(
-                                                    zaya_key_tokens
-                                                )
-                                            )
-                                            if cache_for_extract is not None:
-                                                request._extracted_cache_key_tokens = (
-                                                    list(zaya_key_tokens)
-                                                )
-                                                request._extracted_cache_from_prompt_snapshot = True
+                                            request._deferred_prompt_cache = {
+                                                "family": "ZAYA",
+                                                "mode": "paged",
+                                                "key_tokens": list(zaya_key_tokens),
+                                            }
+                                            cache_for_extract = None
                                         else:
                                             cache_for_extract = None
                                     elif getattr(
@@ -7126,22 +7120,18 @@ class Scheduler:
                                         if mixed_key_tokens:
                                             logger.info(
                                                 "Mixed-SWA prefix cache store using "
-                                                "clean prompt-boundary re-prefill "
+                                                "deferred clean prompt-boundary re-prefill "
                                                 "(%d cache-key tokens from %d "
-                                                "prompt tokens).",
+                                                "prompt tokens) after terminal dispatch.",
                                                 len(mixed_key_tokens),
                                                 len(mixed_prompt_tokens),
                                             )
-                                            cache_for_extract = (
-                                                self._prefill_for_prompt_only_cache(
-                                                    mixed_key_tokens
-                                                )
-                                            )
-                                            if cache_for_extract is not None:
-                                                request._extracted_cache_key_tokens = (
-                                                    list(mixed_key_tokens)
-                                                )
-                                                request._extracted_cache_from_prompt_snapshot = True
+                                            request._deferred_prompt_cache = {
+                                                "family": "Mixed-SWA",
+                                                "mode": "paged",
+                                                "key_tokens": list(mixed_key_tokens),
+                                            }
+                                            cache_for_extract = None
                                         else:
                                             cache_for_extract = None
                                     elif getattr(
@@ -7191,7 +7181,8 @@ class Scheduler:
                                                 len(m3_key_tokens),
                                                 len(m3_prompt_tokens),
                                             )
-                                            request._deferred_m3_prompt_cache = {
+                                            request._deferred_prompt_cache = {
+                                                "family": "MiniMax-M3",
                                                 "mode": "paged",
                                                 "key_tokens": list(m3_key_tokens),
                                             }
@@ -7322,14 +7313,10 @@ class Scheduler:
                                                 f"Cache extraction returned empty "
                                                 f"for {request_id}"
                                             )
-                                    elif getattr(
-                                        request,
-                                        "_deferred_m3_prompt_cache",
-                                        None,
-                                    ):
+                                    elif getattr(request, "_deferred_prompt_cache", None):
                                         # The terminal output owns this scheduler
                                         # step. Cleanup will materialize and store
-                                        # the clean M3 cache after dispatch.
+                                        # the clean typed cache after dispatch.
                                         pass
                                     elif getattr(
                                         request,
@@ -7372,31 +7359,18 @@ class Scheduler:
                                     if mixed_key_tokens:
                                         logger.info(
                                             "Mixed-SWA prefix cache store using "
-                                            "clean prompt-boundary re-prefill "
+                                            "deferred clean prompt-boundary re-prefill "
                                             "(%d cache-key tokens from %d prompt "
-                                            "tokens, object cache).",
+                                            "tokens, object cache) after terminal dispatch.",
                                             len(mixed_key_tokens),
                                             len(mixed_prompt_tokens),
                                         )
-                                        clean_cache = (
-                                            self._prefill_for_prompt_only_cache(
-                                                mixed_key_tokens
-                                            )
-                                        )
-                                        if clean_cache is not None:
-                                            request._extracted_cache = clean_cache
-                                            request._extracted_cache_key_tokens = list(
-                                                mixed_key_tokens
-                                            )
-                                            request._extracted_cache_from_prompt_snapshot = True
-                                        else:
-                                            logger.warning(
-                                                "Cannot produce mixed-SWA prompt-only "
-                                                "object cache for %s, skipping "
-                                                "prefix cache store",
-                                                request_id,
-                                            )
-                                            request._extracted_cache = None
+                                        request._deferred_prompt_cache = {
+                                            "family": "Mixed-SWA",
+                                            "mode": "object",
+                                            "key_tokens": list(mixed_key_tokens),
+                                        }
+                                        request._extracted_cache = None
                                     else:
                                         request._extracted_cache = None
                                 elif getattr(self, "_uses_openpangu_cache", False):
@@ -7465,7 +7439,8 @@ class Scheduler:
                                             len(m3_key_tokens),
                                             len(m3_prompt_tokens),
                                         )
-                                        request._deferred_m3_prompt_cache = {
+                                        request._deferred_prompt_cache = {
+                                            "family": "MiniMax-M3",
                                             "mode": "object",
                                             "key_tokens": list(m3_key_tokens),
                                         }
@@ -7517,48 +7492,52 @@ class Scheduler:
 
         return outputs, finished_ids
 
-    def _materialize_deferred_m3_prompt_cache(
+    def _materialize_deferred_prompt_cache(
         self, request_id: str, request: Request
     ) -> None:
-        """Build M3's clean hit-derived prefix only after terminal dispatch.
+        """Build a path-dependent clean prefix only after terminal dispatch.
 
-        MiniMax-M3 sparse MSA state is path-dependent.  A cache hit followed by
-        tail replay must be re-prefilled from the clean N-1 prompt boundary
-        before it can be donated as a longer prefix.  Doing that work inside
-        ``_process_batch_responses`` delayed the terminal SSE event by the full
-        prefill duration.  EngineCore already dispatches terminal outputs before
-        calling ``_cleanup_finished`` and blocks next-turn admission until that
-        cleanup completes, so this is the safe ownership boundary for the work.
+        M3 sparse MSA, ZAYA CCA, DSV4 composite state, and mixed full/SWA cache
+        layouts cannot safely donate post-decode state.  Their clean N-1
+        re-prefill used to run inside ``_process_batch_responses`` and therefore
+        delayed terminal SSE/UI delivery by the full prefill duration.
+        EngineCore dispatches terminal outputs before ``_cleanup_finished`` and
+        blocks next-turn admission until cleanup completes, making this the safe
+        ownership boundary for the shared work.
         """
-        deferred = getattr(request, "_deferred_m3_prompt_cache", None)
+        deferred = getattr(request, "_deferred_prompt_cache", None)
         if not isinstance(deferred, dict):
             return
 
         # Consume the marker first so an exception cannot accidentally retry the
         # expensive re-prefill during a later cleanup path.
-        request._deferred_m3_prompt_cache = None
+        request._deferred_prompt_cache = None
+        family = str(deferred.get("family") or "path-dependent")
         key_tokens = list(deferred.get("key_tokens") or [])
         mode = deferred.get("mode")
         if not key_tokens or mode not in {"paged", "object"}:
             logger.warning(
-                "Ignoring invalid deferred MiniMax-M3 cache descriptor for %s",
+                "Ignoring invalid deferred %s cache descriptor for %s",
+                family,
                 request_id,
             )
             return
 
         try:
             logger.info(
-                "MiniMax-M3 %s prefix cleanup now running deferred clean "
+                "%s %s prefix cleanup now running deferred clean "
                 "prompt-boundary re-prefill (%d cache-key tokens) after "
                 "terminal dispatch.",
+                family,
                 mode,
                 len(key_tokens),
             )
             clean_cache = self._prefill_for_prompt_only_cache(key_tokens)
             if clean_cache is None:
                 logger.warning(
-                    "Cannot produce deferred MiniMax-M3 prompt-only %s cache "
-                    "for %s; skipping prefix store",
+                    "Cannot produce deferred %s prompt-only %s cache for %s; "
+                    "skipping prefix store",
+                    family,
                     mode,
                     request_id,
                 )
@@ -7573,10 +7552,20 @@ class Scheduler:
 
             if getattr(self, "_kv_cache_bits", 0):
                 clean_cache = self._quantize_cache_for_storage(clean_cache)
+            extract_started = time.perf_counter()
             extracted_cache = self._extract_cache_states(clean_cache)
+            if getattr(self, "_uses_dsv4_cache", False):
+                self._dsv4_trace_timing(
+                    "extract_cache_states",
+                    extract_started,
+                    request_id,
+                    layers=len(extracted_cache or []),
+                    deferred_family=family,
+                )
             if not extracted_cache:
                 logger.warning(
-                    "Deferred MiniMax-M3 cache extraction returned empty for %s",
+                    "Deferred %s cache extraction returned empty for %s",
+                    family,
                     request_id,
                 )
                 request._extracted_cache = None
@@ -7605,7 +7594,8 @@ class Scheduler:
                     )
                 except Exception as exc:
                     logger.debug(
-                        "Deferred MiniMax-M3 disk cache store failed for %s: %s",
+                        "Deferred %s disk cache store failed for %s: %s",
+                        family,
                         request_id,
                         exc,
                     )
@@ -7615,14 +7605,16 @@ class Scheduler:
             self._last_turboquant_cache = turboquant_cache_telemetry(extracted_cache)
             request._extracted_cache = extracted_cache
             logger.info(
-                "Extracted %d deferred MiniMax-M3 layer states for request %s",
+                "Extracted %d deferred %s layer states for request %s",
                 len(extracted_cache),
+                family,
                 request_id,
             )
         except Exception as exc:
             request._extracted_cache = None
             logger.warning(
-                "Deferred MiniMax-M3 prompt cache materialization failed for %s: %s",
+                "Deferred %s prompt cache materialization failed for %s: %s",
+                family,
                 request_id,
                 exc,
                 exc_info=True,
@@ -7692,9 +7684,9 @@ class Scheduler:
 
             if request is not None:
                 if _skip_cache_store:
-                    request._deferred_m3_prompt_cache = None
+                    request._deferred_prompt_cache = None
                 else:
-                    self._materialize_deferred_m3_prompt_cache(request_id, request)
+                    self._materialize_deferred_prompt_cache(request_id, request)
 
             # Always clean up paged cache tracking entries regardless of
             # cache skip, to prevent unbounded memory growth on benchmarks.

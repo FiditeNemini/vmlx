@@ -315,12 +315,13 @@ def test_scheduler_m3_cache_hit_store_rederives_clean_prompt_cache(monkeypatch):
 
     assert request.request_id in finished_ids
     assert rederive_calls == []
-    assert request._deferred_m3_prompt_cache == {
+    assert request._deferred_prompt_cache == {
+        "family": "MiniMax-M3",
         "mode": "object",
         "key_tokens": [11, 12, 13, 14, 15, 16],
     }
 
-    scheduler._materialize_deferred_m3_prompt_cache(request.request_id, request)
+    scheduler._materialize_deferred_prompt_cache(request.request_id, request)
 
     assert rederive_calls == [[11, 12, 13, 14, 15, 16]]
     assert getattr(request, "_extracted_cache", None) is clean_rederived
@@ -398,12 +399,13 @@ def test_scheduler_paged_m3_cache_hit_store_rederives_clean_prompt_cache(monkeyp
 
     assert request.request_id in finished_ids
     assert rederive_calls == []
-    assert request._deferred_m3_prompt_cache == {
+    assert request._deferred_prompt_cache == {
+        "family": "MiniMax-M3",
         "mode": "paged",
         "key_tokens": [11, 12, 13, 14, 15, 16],
     }
 
-    scheduler._materialize_deferred_m3_prompt_cache(request.request_id, request)
+    scheduler._materialize_deferred_prompt_cache(request.request_id, request)
 
     assert rederive_calls == [[11, 12, 13, 14, 15, 16]]
     assert request._extracted_cache is extracted

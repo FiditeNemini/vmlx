@@ -1576,7 +1576,13 @@ def test_dsv4_cache_hit_store_skips_sync_full_reprefill_when_snapshot_missing():
     assert "cached_tokens" in src
     assert "clean prompt-boundary re-prefill" in src
     assert "dsv4_key_tokens" in src
-    assert "_prefill_for_prompt_only_cache" in src
+    assert "_deferred_prompt_cache" in src
+    assert '"family": "DSV4"' in src
+    assert "_prefill_for_prompt_only_cache" not in src
+    cleanup_src = inspect.getsource(
+        scheduler.Scheduler._materialize_deferred_prompt_cache
+    )
+    assert "_prefill_for_prompt_only_cache" in cleanup_src
     helper_src = inspect.getsource(scheduler.Scheduler._prefill_for_prompt_only_cache)
     assert "chunk_size = len(prompt_tokens) if self._uses_dsv4_cache else 2048" in helper_src
 

@@ -36,6 +36,10 @@ class _FakeMemoryCache:
     def fetch(self, tokens):
         return self.cache, [tokens[-1]]
 
+    def get_stats(self):
+        """Match the production memory-cache capacity interface."""
+        return {"max_bytes": 1 << 30}
+
 
 def _request():
     request = Request(

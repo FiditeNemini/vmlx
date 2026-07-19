@@ -150,7 +150,14 @@ describe('MCP policy shared helpers', () => {
 
     expect(registrySource).toContain('export function isBuiltinTool')
     expect(registrySource).toContain('Injected into request.tools when builtinToolsEnabled = true')
-    expect(chatSource).toContain('if (overrides?.builtinToolsEnabled)')
+    const builtinInjectionGuards = chatSource.match(
+      /if \(overrides\?\.builtinToolsEnabled && !userForbidsToolCalls\)/g,
+    ) || []
+    // Responses and Chat Completions must independently honor the persistent
+    // built-in-tools toggle while allowing an explicit no-tool turn to omit
+    // the schema catalog. This is stronger than pinning an obsolete standalone
+    // `if (overrides?.builtinToolsEnabled)` source spelling.
+    expect(builtinInjectionGuards).toHaveLength(2)
     expect(chatSource).toContain('const availableToolDefinitions = () =>')
     expect(chatSource).toContain('filterTools(overrides || {}, {')
     expect(chatSource).toContain('obj.tools = availableToolDefinitions().map((t) => ({')

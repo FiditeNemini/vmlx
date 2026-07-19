@@ -1091,6 +1091,12 @@ def test_scheduler_uses_minimax_m3_logits_sampler_for_msa_cache(monkeypatch):
     scheduler = object.__new__(Scheduler)
     scheduler.model = _FakeM3Model()
     scheduler.config = SchedulerConfig(max_num_seqs=1)
+    # _create_batch_generator now sizes the typed prompt snapshot admission
+    # limit from the configured RAM and prompt-disk backends. This fixture
+    # intentionally bypasses Scheduler.__init__, so model the no-cache case
+    # explicitly instead of relying on missing attributes.
+    scheduler.memory_aware_cache = None
+    scheduler.disk_cache = None
     scheduler._long_repetition_context = False
     scheduler._uses_m3_msa_cache = True
     monkeypatch.setattr(Scheduler, "_get_stop_tokens", lambda _self: set())

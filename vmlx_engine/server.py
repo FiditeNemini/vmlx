@@ -8263,6 +8263,16 @@ def _native_cache_status(
         if paged_cache_manager is not None
         else None
     )
+    block_disk_only = bool(
+        block_aware_cache is not None
+        and paged_cache_manager is not None
+        and getattr(paged_cache_manager, "disk_only", False)
+    )
+    paged_backend_active = bool(
+        block_aware_cache is not None
+        and paged_cache_manager is not None
+        and not block_disk_only
+    )
     disk_cache = getattr(scheduler, "disk_cache", None)
 
     if getattr(scheduler, "_uses_dsv4_cache", False) or family_name == "deepseek_v4":
@@ -8342,7 +8352,8 @@ def _native_cache_status(
                 "cache_hit_restores_full_nested_state_and_refeeds_last_prompt_token",
             ],
             "prefix": bool(block_aware_cache is not None),
-            "paged": bool(block_aware_cache is not None and paged_cache_manager is not None),
+            "paged": paged_backend_active,
+            "block_disk_only": block_disk_only,
             "block_disk_l2": bool(block_disk_store is not None),
         }
         status.update(layout)
@@ -8462,7 +8473,8 @@ def _native_cache_status(
                 "prompt_disk_l2": "m3_sparse_cache_tuple",
             },
             "prefix": bool(block_aware_cache is not None),
-            "paged": bool(block_aware_cache is not None and paged_cache_manager is not None),
+            "paged": paged_backend_active,
+            "block_disk_only": block_disk_only,
             "prompt_disk_l2": bool(disk_cache is not None),
             "block_disk_l2": bool(block_disk_store is not None),
         }
@@ -8486,7 +8498,8 @@ def _native_cache_status(
             ],
             "generic_turboquant_kv": {"enabled": False, "reason": "cca_state_is_path_dependent"},
             "prefix": bool(block_aware_cache is not None),
-            "paged": bool(block_aware_cache is not None and paged_cache_manager is not None),
+            "paged": paged_backend_active,
+            "block_disk_only": block_disk_only,
             "block_disk_l2": bool(block_disk_store is not None),
         }
 
@@ -8599,7 +8612,8 @@ def _native_cache_status(
                 }
             ),
             "prefix": bool(block_aware_cache is not None),
-            "paged": bool(block_aware_cache is not None and paged_cache_manager is not None),
+            "paged": paged_backend_active,
+            "block_disk_only": block_disk_only,
             "block_disk_l2": bool(block_disk_store is not None),
             "ssm_entries": ssm_entries,
             "kv_layer_indices": list(
@@ -8668,7 +8682,8 @@ def _native_cache_status(
                 "metadata_policy": "preserve_rotating_window_metadata",
             },
             "prefix": bool(block_aware_cache is not None),
-            "paged": bool(block_aware_cache is not None and paged_cache_manager is not None),
+            "paged": paged_backend_active,
+            "block_disk_only": block_disk_only,
             "block_disk_l2": bool(block_disk_store is not None),
         }
 
@@ -8684,7 +8699,7 @@ def _native_cache_status(
     return {
         "family": family_name or scheduler_family or "plain_attention",
         "schema": "plain_kv_v1",
-        "cache_type": "paged_kv",
+        "cache_type": "block_disk_kv" if block_disk_only else "paged_kv",
         "components": ["attention_kv"],
         "generic_turboquant_kv": {
             "enabled": tq_enabled,
@@ -8696,7 +8711,8 @@ def _native_cache_status(
             "group_size": stored_kv_group if stored_kv_bits > 0 else None,
         },
         "prefix": bool(block_aware_cache is not None),
-        "paged": bool(block_aware_cache is not None and paged_cache_manager is not None),
+        "paged": paged_backend_active,
+        "block_disk_only": block_disk_only,
         "block_disk_l2": bool(block_disk_store is not None),
     }
 
@@ -8913,6 +8929,15 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
                 and int(getattr(block, "resident_bytes", 0) or 0) > 0
             ]
             paged_cache = {
+                "backend_mode": (
+                    "block_disk_only"
+                    if bool(getattr(paged_mgr, "disk_only", False))
+                    else "paged"
+                ),
+                "paged_ram_enabled": not bool(
+                    getattr(paged_mgr, "disk_only", False)
+                ),
+                "disk_only": bool(getattr(paged_mgr, "disk_only", False)),
                 "resident_tokens": sum(
                     int(getattr(block, "token_count", 0) or 0)
                     for block in resident_blocks
@@ -10280,8 +10305,13 @@ async def model_capabilities(model_id: str) -> dict:
     paged_cache_manager = getattr(scheduler, "paged_cache_manager", None)
     memory_aware_cache = getattr(scheduler, "memory_aware_cache", None)
     trie_prefix_cache = getattr(scheduler, "prefix_cache", None)
+    block_disk_only = bool(
+        block_aware_cache is not None
+        and paged_cache_manager is not None
+        and getattr(paged_cache_manager, "disk_only", False)
+    )
     if block_aware_cache is not None:
-        cache_type = "paged"
+        cache_type = "block_disk" if block_disk_only else "paged"
     elif memory_aware_cache is not None:
         cache_type = "memory_aware"
     elif trie_prefix_cache is not None:
@@ -10294,7 +10324,11 @@ async def model_capabilities(model_id: str) -> dict:
         or memory_aware_cache is not None
         or trie_prefix_cache is not None
     )
-    paged_cache_enabled = bool(block_aware_cache is not None and paged_cache_manager is not None)
+    paged_cache_enabled = bool(
+        block_aware_cache is not None
+        and paged_cache_manager is not None
+        and not block_disk_only
+    )
     block_disk_store = getattr(paged_cache_manager, "_disk_store", None)
     dsv4_composite_state = bool(
         family == "deepseek_v4"
@@ -10337,6 +10371,7 @@ async def model_capabilities(model_id: str) -> dict:
             "type": cache_type,
             "paged": paged_cache_enabled,
             "block_disk_l2": block_disk_store is not None,
+            "block_disk_only": block_disk_only,
             "dsv4_composite_state": dsv4_composite_state,
             "native": native_cache or None,
         },

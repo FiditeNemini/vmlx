@@ -71,6 +71,13 @@ def _typed_paged_cache_detail(cache_type: str, *, disk_hit: bool) -> str:
     return f"{base}+disk" if disk_hit else base
 
 
+def _block_cache_detail(paged_cache_manager: Any, *, disk_hit: bool) -> str:
+    """Report the effective block backend without calling disk-only RAM paged."""
+    if bool(getattr(paged_cache_manager, "disk_only", False)):
+        return "block-disk"
+    return "paged+disk" if disk_hit else "paged"
+
+
 def _m3_vl_cached_prefix_covers_media_tokens(model: Any, request: Any) -> bool:
     """Return True only when restored M3 state contains every media splice.
 
@@ -970,7 +977,11 @@ class Scheduler:
             logger.info(
                 "Prefix cache requires continuous batching — enabled automatically"
             )
-            if self.config.use_paged_cache:
+            if self.config.use_paged_cache or self.config.enable_block_disk_cache:
+                _block_disk_only = bool(
+                    self.config.enable_block_disk_cache
+                    and not self.config.use_paged_cache
+                )
                 # Create optional block-level disk store (L2)
                 block_disk_store = None
                 if self.config.enable_block_disk_cache:
@@ -1113,23 +1124,41 @@ class Scheduler:
                 # cached blocks, disk-L2 write-through first.
                 from .memory_cache import MemoryCacheConfig as _MemCacheCfg
 
-                _paged_resident_budget = _MemCacheCfg(
-                    max_memory_mb=self.config.cache_memory_mb,
-                    max_memory_percent=self.config.cache_memory_percent,
-                ).compute_memory_limit()
+                if _block_disk_only and block_disk_store is None:
+                    raise RuntimeError(
+                        "Block disk-only cache was requested but its SSD store "
+                        "could not be initialized; refusing to substitute a RAM backend"
+                    )
+
+                _paged_resident_budget = (
+                    0
+                    if _block_disk_only
+                    else _MemCacheCfg(
+                        max_memory_mb=self.config.cache_memory_mb,
+                        max_memory_percent=self.config.cache_memory_percent,
+                    ).compute_memory_limit()
+                )
                 self.paged_cache_manager = PagedCacheManager(
                     block_size=self.config.paged_cache_block_size,
                     max_blocks=self.config.max_cache_blocks,
                     disk_store=block_disk_store,
                     max_resident_bytes=_paged_resident_budget,
+                    disk_only=_block_disk_only,
                 )
-                logger.info(
-                    "Paged cache RAM ceiling: %.0f MB (%.0f%% of available); "
-                    "block pool max_blocks=%d",
-                    _paged_resident_budget / (1024 * 1024),
-                    self.config.cache_memory_percent * 100,
-                    self.config.max_cache_blocks,
-                )
+                if _block_disk_only:
+                    logger.info(
+                        "Block disk-only prefix backend: paged RAM disabled, "
+                        "max_index_blocks=%d; payloads restore transiently from SSD",
+                        self.config.max_cache_blocks,
+                    )
+                else:
+                    logger.info(
+                        "Paged cache RAM ceiling: %.0f MB (%.0f%% of available); "
+                        "block pool max_blocks=%d",
+                        _paged_resident_budget / (1024 * 1024),
+                        self.config.cache_memory_percent * 100,
+                        self.config.max_cache_blocks,
+                    )
                 self.block_aware_cache = BlockAwarePrefixCache(
                     model=model,
                     paged_cache_manager=self.paged_cache_manager,
@@ -1149,6 +1178,13 @@ class Scheduler:
                         "block_size=%s, max_blocks=%s "
                         "(not generic paged KV; records deepseek_v4_v8 "
                         "SWA+CSA/HCA state)",
+                        self.config.paged_cache_block_size,
+                        self.config.max_cache_blocks,
+                    )
+                elif _block_disk_only:
+                    logger.info(
+                        "Block disk-only cache enabled: block_size=%s, "
+                        "max_index_blocks=%s, persistent_ram_payloads=0",
                         self.config.paged_cache_block_size,
                         self.config.max_cache_blocks,
                     )
@@ -1997,7 +2033,7 @@ class Scheduler:
             # owner worker immediately before dequantization.
             # Paged cache reconstructs blocks immediately on the owner worker
             # and its typed serializer expects MLX arrays, so retain MLX there.
-            if self.config.use_paged_cache:
+            if self.block_aware_cache is not None:
                 return tuple(parts)
             return tuple(np.array(part) for part in parts)
         result = []
@@ -5137,13 +5173,17 @@ class Scheduler:
                             disk_hit=bool(getattr(request, "_paged_disk_hit", False)),
                         )
                     else:
-                        request._cache_detail = (
-                            "paged+disk"
-                            if getattr(request, "_paged_disk_hit", False)
-                            else "paged"
+                        request._cache_detail = _block_cache_detail(
+                            self.paged_cache_manager,
+                            disk_hit=bool(getattr(request, "_paged_disk_hit", False)),
                         )
+                    _block_backend_label = (
+                        "block disk-only"
+                        if bool(getattr(self.paged_cache_manager, "disk_only", False))
+                        else "paged"
+                    )
                     logger.info(
-                        f"Request {request.request_id}: paged cache hit, "
+                        f"Request {request.request_id}: {_block_backend_label} cache hit, "
                         f"{request.cached_tokens} tokens in "
                         f"{request.shared_prefix_blocks} blocks, "
                         f"{len(remaining)} remaining to process "
@@ -5151,8 +5191,13 @@ class Scheduler:
                     )
             else:
                 request.remaining_tokens = request.prompt_token_ids
+                _block_backend_label = (
+                    "block disk-only"
+                    if bool(getattr(self.paged_cache_manager, "disk_only", False))
+                    else "paged"
+                )
                 logger.info(
-                    f"Request {request.request_id}: paged cache miss, "
+                    f"Request {request.request_id}: {_block_backend_label} cache miss, "
                     f"processing all {len(request.prompt_token_ids)} tokens"
                 )
         elif (
@@ -6005,16 +6050,21 @@ class Scheduler:
                 if cache_to_use is not None and _reconstruct_disk_blocks > 0:
                     request._paged_disk_hit = True
                     _worker_detail = str(
-                        getattr(request, "_cache_detail", "") or "paged"
+                        getattr(request, "_cache_detail", "")
+                        or _block_cache_detail(
+                            self.paged_cache_manager,
+                            disk_hit=True,
+                        )
                     )
                     if "+disk" not in _worker_detail:
-                        _worker_detail += "+disk"
+                        if _worker_detail != "block-disk":
+                            _worker_detail += "+disk"
                     request._cache_detail = _worker_detail
                     if cache_execution is not None:
                         cache_execution["cache_detail"] = _worker_detail
                         cache_execution["disk_blocks"] = _reconstruct_disk_blocks
                     logger.info(
-                        "Request %s: worker reconstructed %d paged block(s) from L2",
+                        "Request %s: worker reconstructed %d block(s) from L2",
                         request.request_id,
                         _reconstruct_disk_blocks,
                     )

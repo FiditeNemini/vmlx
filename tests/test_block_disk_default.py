@@ -39,11 +39,18 @@ def test_explicit_block_disk_opt_out_is_preserved():
     assert args.enable_block_disk_cache is False
 
 
-def test_block_disk_default_stays_off_without_paged_cache():
+def test_block_disk_default_stays_on_without_paged_cache():
     args = _args(use_paged_cache=False)
 
-    assert _apply_paged_block_disk_default(args, _Logger()) is False
-    assert args.enable_block_disk_cache is False
+    assert _apply_paged_block_disk_default(args, _Logger()) is True
+    assert args.enable_block_disk_cache is True
+
+
+def test_explicit_block_disk_opt_in_is_preserved_without_paged_cache():
+    args = _args(use_paged_cache=False, enable_block_disk_cache=True)
+
+    assert _apply_paged_block_disk_default(args, _Logger()) is True
+    assert args.enable_block_disk_cache is True
 
 
 def test_block_disk_default_stays_off_without_prefix_cache():

@@ -60,7 +60,7 @@ describe('cache control policy', () => {
     ])
   })
 
-  it('clears block disk cache when paged cache is turned off', () => {
+  it('keeps block disk cache when paged RAM is turned off', () => {
     const updates = cacheControlUpdatesForPagedToggle(false, {
       continuousBatching: true,
       enablePrefixCache: true,
@@ -69,13 +69,10 @@ describe('cache control policy', () => {
       enableBlockDiskCache: true,
     })
 
-    expect(updates).toEqual([
-      ['enableBlockDiskCache', false],
-      ['usePagedCache', false],
-    ])
+    expect(updates).toEqual([['usePagedCache', false]])
   })
 
-  it('lets block disk cache opt in by enabling prefix and paged cache', () => {
+  it('lets block disk cache opt in by enabling prefix without forcing paged RAM', () => {
     const updates = cacheControlUpdatesForBlockDiskToggle(true, {
       continuousBatching: true,
       enablePrefixCache: false,
@@ -86,7 +83,6 @@ describe('cache control policy', () => {
 
     expect(updates).toEqual([
       ['enablePrefixCache', true],
-      ['usePagedCache', true],
       ['enableDiskCache', false],
       ['enableBlockDiskCache', true],
     ])
@@ -147,6 +143,21 @@ describe('cache control policy', () => {
 
     expect(policy.prefixCacheOff).toBe(false)
     expect(policy.effectiveUsePagedCache).toBe(true)
+    expect(policy.enableLegacyDiskCache).toBe(false)
+    expect(policy.enableBlockDiskCache).toBe(true)
+  })
+
+  it('launch policy emits a disk-only block backend when paged RAM is off', () => {
+    const policy = resolveCacheLaunchPolicy({
+      continuousBatching: true,
+      enablePrefixCache: true,
+      usePagedCache: false,
+      enableDiskCache: true,
+      enableBlockDiskCache: true,
+    })
+
+    expect(policy.prefixCacheOff).toBe(false)
+    expect(policy.effectiveUsePagedCache).toBe(false)
     expect(policy.enableLegacyDiskCache).toBe(false)
     expect(policy.enableBlockDiskCache).toBe(true)
   })

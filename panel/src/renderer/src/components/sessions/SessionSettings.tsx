@@ -483,6 +483,7 @@ function buildCommandPreview(
   })
   const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
   const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache
+  const blockDiskOnly = cacheLaunchPolicy.enableBlockDiskCache && !usePagedCache
 
   if (prefixCacheOff) {
     parts.push('--disable-prefix-cache')
@@ -500,17 +501,22 @@ function buildCommandPreview(
       // about the launch, including DSV4 native composite L1. Only
       // --cache-ttl-minutes is genuinely inert under paged.
       const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
-      if (cacheMemoryMb != null) parts.push('--cache-memory-mb', cacheMemoryMb.toString())
+      if (!blockDiskOnly && cacheMemoryMb != null) parts.push('--cache-memory-mb', cacheMemoryMb.toString())
       const cacheMemoryPercent = finitePositiveNumber(config.cacheMemoryPercent)
-      if (cacheMemoryPercent != null) parts.push('--cache-memory-percent', (cacheMemoryPercent / 100).toString())
+      if (!blockDiskOnly && cacheMemoryPercent != null) parts.push('--cache-memory-percent', (cacheMemoryPercent / 100).toString())
       const cacheTtlMinutes = finitePositiveNumber(config.cacheTtlMinutes)
-      if (cacheTtlMinutes != null && !usePagedCache) parts.push('--cache-ttl-minutes', cacheTtlMinutes.toString())
+      if (cacheTtlMinutes != null && !usePagedCache && !blockDiskOnly) parts.push('--cache-ttl-minutes', cacheTtlMinutes.toString())
     }
   }
 
   // Paged cache — requires prefix cache ON (works for both LLM and VLM)
   if (!prefixCacheOff && usePagedCache) {
     parts.push('--use-paged-cache')
+  } else if (!prefixCacheOff && !usePagedCache) {
+    // Explicit user Off remains real even when block SSD L2 stays enabled.
+    parts.push('--no-paged-cache')
+  }
+  if (!prefixCacheOff && (usePagedCache || cacheLaunchPolicy.enableBlockDiskCache)) {
     const effectivePagedCacheBlockSize = dsv4Active
       ? DSV4_PAGED_CACHE_BLOCK_SIZE
       : config.pagedCacheBlockSize
@@ -518,10 +524,6 @@ function buildCommandPreview(
     if (pagedCacheBlockSize != null) parts.push('--paged-cache-block-size', pagedCacheBlockSize.toString())
     const maxCacheBlocks = finitePositiveInteger(config.maxCacheBlocks)
     if (maxCacheBlocks != null) parts.push('--max-cache-blocks', maxCacheBlocks.toString())
-  } else if (!prefixCacheOff && !usePagedCache) {
-    // Parity with main launch (sessions.ts): emit explicit --no-paged-cache so the
-    // preview matches what the engine receives (paged default-ON reversal).
-    parts.push('--no-paged-cache')
   }
 
   // KV cache quantization — requires prefix cache ON (works for both LLM and VLM)
@@ -852,10 +854,12 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             base.noMemoryAwareCache = false
             base.kvCacheQuantization = 'none'
           } else {
-            const detectedPagedCache = detected.usePagedCache === true
-            base.usePagedCache = detectedPagedCache
-            base.enableDiskCache = !detectedPagedCache
-            base.enableBlockDiskCache = detectedPagedCache
+            base.usePagedCache = detected.usePagedCache === true
+            base.enableDiskCache = false
+            // Generic exact/partial-prefix L2 is independent of paged RAM.
+            // The launch policy still suppresses this for model families with
+            // explicit typed/native cache exceptions.
+            base.enableBlockDiskCache = true
           }
           // VLM models: set isMultimodal flag unless this model has a
           // runtime forceTextOnly policy. Set both sides explicitly: leaving

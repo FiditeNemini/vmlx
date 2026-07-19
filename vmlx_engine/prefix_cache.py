@@ -1906,6 +1906,7 @@ class BlockAwarePrefixCache:
                 )
 
         disk_store = self.paged_cache._disk_store  # May be None
+        _disk_only = bool(getattr(self.paged_cache, "disk_only", False))
         # Frugal mode: when block disk store is on, disk is authoritative for
         # block KV data. The in-RAM `block.cache_data` MLX copy is then a
         # ~26 GB duplicate (sized like the live KV cache) that
@@ -1919,6 +1920,11 @@ class BlockAwarePrefixCache:
             _paged_frugal = disk_store is not None  # auto: on when disk has it
         else:
             _paged_frugal = _frugal_env not in ("0", "false", "False", "no")
+        if _disk_only:
+            # An explicit Paged Off / Block L2 On launch is a semantic promise:
+            # no persistent KV tensor mirror may remain in the block pool.
+            # Ignore the paged-frugal debug override in this backend.
+            _paged_frugal = True
         logger.info(
             f"Block disk write-through: disk_store={'present' if disk_store else 'None'}, "
             f"is_tensor_data={is_tensor_data}, new_tokens={len(new_tokens)}, "
@@ -2084,6 +2090,8 @@ class BlockAwarePrefixCache:
             )
 
         pending_disk_writes: list = []
+        disk_only_fallbacks: dict = {}
+        disk_only_queued_hashes: set = set()
 
         for i in range(num_new_blocks):
             start_idx = i * self.block_size
@@ -2275,10 +2283,21 @@ class BlockAwarePrefixCache:
                     # native path-dependent records resident; L2 still gets the
                     # write-through copy for restart restore.
                     keep_in_ram = (
-                        has_dsv4_cache_data
-                        or has_zaya_cca_cache_data
-                        or has_rotating_kv_cache_data
+                        not _disk_only
+                        and (
+                            has_dsv4_cache_data
+                            or has_zaya_cca_cache_data
+                            or has_rotating_kv_cache_data
+                        )
                     )
+                    if _disk_only:
+                        # Hold a local fallback only until the durability barrier
+                        # below confirms the SSD record is index-readable. It is
+                        # installed into the block solely if persistence fails.
+                        disk_only_fallbacks[block_chain_hash] = (
+                            block,
+                            block_kv_data,
+                        )
                     if _paged_frugal and not keep_in_ram:
                         # Disk has it — skip the in-RAM duplicate. L1 lookup
                         # will fall through to L2 disk + _promote_from_disk
@@ -2369,11 +2388,12 @@ class BlockAwarePrefixCache:
                                     f"{block.block_id} ({_layer_summary}, "
                                     f"{len(block_tokens)} tokens)"
                                 )
-                                disk_store.write_block_async(
+                                if disk_store.write_block_async(
                                     block_chain_hash,
                                     np_block,
                                     len(block_tokens),
-                                )
+                                ):
+                                    disk_only_queued_hashes.add(block_chain_hash)
                             else:
                                 logger.info(
                                     f"Block disk: queuing write for block "
@@ -2422,11 +2442,54 @@ class BlockAwarePrefixCache:
             )
             for block_hash, block_data, tok_count in pending_disk_writes:
                 try:
-                    disk_store.write_block_async(block_hash, block_data, tok_count)
+                    if disk_store.write_block_async(block_hash, block_data, tok_count):
+                        disk_only_queued_hashes.add(block_hash)
                 except Exception as _wbe:
                     logger.warning(
                         f"Block disk: write_block_async failed: {_wbe}"
                     )
+
+        if _disk_only and disk_only_fallbacks:
+            wait_for_blocks = getattr(disk_store, "wait_for_blocks", None)
+            ready_hashes: set = set()
+            if callable(wait_for_blocks) and disk_only_queued_hashes:
+                try:
+                    ready_hashes = set(
+                        wait_for_blocks(list(disk_only_queued_hashes), timeout=5.0)
+                    )
+                except Exception as _wait_error:
+                    logger.warning(
+                        "Block-disk-only durability wait failed: %s",
+                        _wait_error,
+                    )
+
+            for ready_hash in ready_hashes:
+                disk_only_fallbacks.pop(ready_hash, None)
+
+            if disk_only_fallbacks:
+                # Correctness first: an uncommitted block must not be advertised
+                # as SSD-only. Retain only the failed payloads as explicit,
+                # telemetry-visible RAM fallbacks; subsequent L2 eviction/retry
+                # can make them durable. A healthy run leaves this count at zero.
+                for block, fallback_payload in disk_only_fallbacks.values():
+                    block.cache_data = fallback_payload
+                    block.cache_data_from_disk = False
+                    block.keep_resident = True
+                    self.paged_cache._note_resident(
+                        block,
+                        self.paged_cache.estimate_block_nbytes(fallback_payload),
+                    )
+                logger.error(
+                    "Block-disk-only durability barrier retained %d RAM fallback "
+                    "block(s); SSD writes were not readable within the timeout",
+                    len(disk_only_fallbacks),
+                )
+            else:
+                logger.info(
+                    "Block-disk-only durability barrier committed %d block(s); "
+                    "persistent RAM KV payloads=0",
+                    len(ready_hashes),
+                )
 
         # Update prefix index
         self._update_prefix_index(
@@ -4357,6 +4420,31 @@ class BlockAwarePrefixCache:
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
         paged_stats = self.paged_cache.get_memory_usage()
+        disk_store = getattr(self.paged_cache, "_disk_store", None)
+        if disk_store is not None and hasattr(disk_store, "get_stats"):
+            try:
+                disk_stats = disk_store.get_stats()
+                # PagedCacheManager's counters only cover blocks promoted into
+                # a new block-table slot. In SSD-only mode the hash/index block
+                # can remain present with cache_data=None, so reconstruction
+                # reads the payload from BlockDiskStore without counting a
+                # promotion. Preserve both meanings and make the public
+                # disk_hits/disk_misses fields reflect actual SSD reads.
+                paged_stats["disk_promotion_hits"] = int(
+                    paged_stats.get("disk_hits", 0) or 0
+                )
+                paged_stats["disk_lookup_misses"] = int(
+                    paged_stats.get("disk_misses", 0) or 0
+                )
+                paged_stats["disk_hits"] = int(
+                    disk_stats.get("disk_hits", 0) or 0
+                )
+                paged_stats["disk_misses"] = int(
+                    disk_stats.get("disk_misses", 0) or 0
+                )
+                paged_stats["disk_counter_source"] = "block_disk_store"
+            except Exception:
+                pass
         return {
             "hits": self._hits,
             "misses": self._misses,

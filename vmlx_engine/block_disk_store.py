@@ -561,7 +561,7 @@ class BlockDiskStore:
         block_hash: bytes,
         cache_data: List[Tuple],
         token_count: int,
-    ) -> None:
+    ) -> bool:
         """
         Queue a block for background writing to disk. Non-blocking.
 
@@ -580,11 +580,11 @@ class BlockDiskStore:
             token_count: Number of tokens in this block
         """
         if not HAS_MLX:
-            return
+            return False
 
         if _cache_data_has_tq(cache_data) and not self._allow_tq_native:
             logger.debug("Skipping TQ-native block write because persisted TQ is disabled")
-            return
+            return False
 
         hash_hex = block_hash.hex()
 
@@ -592,7 +592,7 @@ class BlockDiskStore:
         try:
             tensors, dtype, num_layers = _serialize_block(cache_data)
             if num_layers == 0:
-                return
+                return False
 
             # Normalize all tensors to MLX arrays that mx.save_safetensors
             # can handle: numpy ndarrays (from numpy-sliced block data) are
@@ -626,7 +626,7 @@ class BlockDiskStore:
             mx.save_safetensors(str(tmp_path), tensors)
         except Exception as e:
             logger.debug(f"Pre-serialize/write failed for block {hash_hex[:12]}: {e}")
-            return
+            return False
 
         # Queue only the rename + DB update for the background thread.
         # No MLX operations happen after this point.
@@ -637,6 +637,7 @@ class BlockDiskStore:
             if _cache_data_has_tq(cache_data):
                 with self._stats_lock:
                     self.tq_native_writes += 1
+            return True
         except queue.Full:
             # Clean up the temp file since background won't process it
             try:
@@ -644,6 +645,61 @@ class BlockDiskStore:
             except Exception:
                 pass
             logger.warning("BlockDiskStore write queue full (1000), dropping block write")
+            return False
+
+    def wait_for_blocks(
+        self,
+        block_hashes: List[bytes],
+        timeout: float = 5.0,
+    ) -> set[bytes]:
+        """Wait until queued block writes are index-readable.
+
+        Disk-only prefix mode cannot keep a speculative RAM payload while the
+        background writer performs its atomic rename and SQLite update. This
+        bounded durability barrier observes only filesystem/index state; it
+        never loads tensors or touches Metal. The returned set contains hashes
+        that became readable before the timeout so callers can retain a safe
+        in-memory fallback for any failed write instead of advertising a cache
+        entry that reconstructs as ``None``.
+        """
+        targets = {bytes(block_hash) for block_hash in block_hashes if block_hash}
+        if not targets:
+            return set()
+
+        target_by_hex = {block_hash.hex(): block_hash for block_hash in targets}
+        ready: set[bytes] = set()
+        deadline = time.monotonic() + max(0.0, float(timeout))
+
+        while True:
+            remaining_hex = [
+                hash_hex
+                for hash_hex, block_hash in target_by_hex.items()
+                if block_hash not in ready
+            ]
+            if not remaining_hex:
+                return ready
+
+            conn = sqlite3.connect(str(self._db_path), timeout=1.0)
+            try:
+                for start in range(0, len(remaining_hex), 500):
+                    chunk = remaining_hex[start : start + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = conn.execute(
+                        f"SELECT block_hash, file_name FROM blocks "
+                        f"WHERE block_hash IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                    for hash_hex, file_name in rows:
+                        if (self.cache_dir / file_name).exists():
+                            block_hash = target_by_hex.get(hash_hex)
+                            if block_hash is not None:
+                                ready.add(block_hash)
+            finally:
+                conn.close()
+
+            if len(ready) == len(targets) or time.monotonic() >= deadline:
+                return ready
+            time.sleep(0.005)
 
     def _background_writer(self) -> None:
         """Background thread: drain write queue and persist blocks.

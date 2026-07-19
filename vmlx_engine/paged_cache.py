@@ -569,6 +569,7 @@ class PagedCacheManager:
         enable_caching: bool = True,
         disk_store: "Optional[Any]" = None,
         max_resident_bytes: int = 0,
+        disk_only: bool = False,
     ):
         if block_size < 1:
             raise ValueError(f"block_size must be >= 1, got {block_size}")
@@ -579,6 +580,14 @@ class PagedCacheManager:
         self.enable_caching = enable_caching
         # Optional L2 disk store for block persistence (BlockDiskStore)
         self._disk_store = disk_store
+        # A block-aware hash/index is still required to discover exact and
+        # partial durable prefixes when the user explicitly disables paged RAM
+        # caching. In disk-only mode the manager owns only block metadata and
+        # transient reconstruction payloads; successful stores and restores do
+        # not leave KV tensors resident in the block pool.
+        self.disk_only = bool(disk_only)
+        if self.disk_only and self._disk_store is None:
+            raise ValueError("disk_only requires a disk_store")
         # RAM byte ceiling for the in-RAM block KV mirror. 0 = unbounded (legacy
         # behavior: the pool grows to max_blocks with no byte ceiling). When > 0,
         # enforce_byte_budget() evicts free (ref_count==0) cached blocks — writing
@@ -645,7 +654,9 @@ class PagedCacheManager:
 
         logger.info(
             f"PagedCacheManager initialized: block_size={block_size}, "
-            f"max_blocks={max_blocks}, max_tokens={block_size * max_blocks}"
+            f"max_blocks={max_blocks}, usable_blocks={max_blocks - 1}, "
+            f"max_tokens={block_size * (max_blocks - 1)}, "
+            f"backend={'block-disk-only' if self.disk_only else 'paged'}"
         )
 
     # =========================================================================
@@ -755,9 +766,12 @@ class PagedCacheManager:
         """Attribute ``nbytes`` of resident RAM to ``block``'s cache_data mirror.
 
         Idempotent per block: replaces any prior attribution so re-promotion or
-        re-store does not double-count. No-op when the byte ceiling is disabled.
+        re-store does not double-count. Normally a no-op when the byte ceiling is
+        disabled. Disk-only mode is the exception: its zero byte ceiling means
+        "no persistent payloads", so a failed SSD write fallback must still be
+        counted and exposed rather than disappearing from health telemetry.
         """
-        if self.max_resident_bytes <= 0:
+        if self.max_resident_bytes <= 0 and not self.disk_only:
             return
         nbytes = max(0, int(nbytes or 0))
         with self._lock:
@@ -1720,14 +1734,25 @@ class PagedCacheManager:
         with self._lock:
             stats = self.get_stats()
             total_hits = stats.cache_hits + stats.cache_misses
+            usable_blocks = max(0, self.max_blocks - 1)
+            allocated_usable_blocks = max(0, stats.allocated_blocks - 1)
             return {
+                "backend_mode": "block_disk_only" if self.disk_only else "paged",
+                "paged_ram_enabled": not self.disk_only,
+                "disk_only": self.disk_only,
                 "block_size": self.block_size,
                 "max_blocks": self.max_blocks,
+                "usable_blocks": usable_blocks,
+                "capacity_tokens": self.block_size * usable_blocks,
                 "allocated_blocks": stats.allocated_blocks,
                 "free_blocks": stats.free_blocks,
                 "shared_blocks": stats.shared_blocks,
                 "total_tokens_cached": stats.total_tokens_cached,
-                "utilization": stats.allocated_blocks / self.max_blocks,
+                "utilization": (
+                    allocated_usable_blocks / usable_blocks
+                    if usable_blocks > 0
+                    else 0.0
+                ),
                 "cache_hit_rate": stats.cache_hits / total_hits if total_hits > 0 else 0,
                 "cache_hits": stats.cache_hits,
                 "cache_misses": stats.cache_misses,

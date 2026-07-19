@@ -321,7 +321,13 @@ def _apply_dsv4_cache_policy(args, logger):
 
 
 def _apply_paged_block_disk_default(args, logger):
-    """Default paged-cache SSD L2 on while preserving an explicit opt-out."""
+    """Default block SSD L2 on for prefix caching, preserving explicit Off.
+
+    The block store can operate either behind paged RAM or as a disk-only
+    block-aware prefix backend. Architecture-specific scheduler gates still
+    fail closed for cache formats that cannot safely reconstruct arbitrary
+    blocks (for example openPangu's cumulative convolution state).
+    """
 
     explicit = getattr(args, "enable_block_disk_cache", None)
     if explicit is not None:
@@ -333,13 +339,12 @@ def _apply_paged_block_disk_default(args, logger):
     )
     enabled = bool(
         getattr(args, "continuous_batching", False)
-        and getattr(args, "use_paged_cache", False)
         and prefix_active
     )
     args.enable_block_disk_cache = enabled
     if enabled:
         logger.info(
-            "Paged cache active — enabling block disk cache (SSD L2) by default. "
+            "Prefix cache active — enabling block disk cache (SSD L2) by default. "
             "Pass --disable-block-disk-cache for an explicit opt-out."
         )
     return enabled
@@ -459,8 +464,21 @@ def _apply_dsv4_runtime_policy(args, logger, *, clamp_max_num_seqs: bool = False
 def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
     """Return user-facing cache startup summary lines for the active runtime."""
 
-    if not getattr(args, "use_paged_cache", False):
+    if not getattr(args, "use_paged_cache", False) and not getattr(
+        args, "enable_block_disk_cache", False
+    ):
         return []
+
+    if not getattr(args, "use_paged_cache", False):
+        return [
+            (
+                "Block disk-only prefix cache: "
+                f"block_size={args.paged_cache_block_size}, "
+                f"max_index_blocks={args.max_cache_blocks}, "
+                f"max={args.block_disk_cache_max_gb}GB "
+                "(paged RAM disabled; KV payloads restore from SSD transiently)"
+            )
+        ]
 
     if dsv4_model:
         capacity = int(args.paged_cache_block_size) * int(args.max_cache_blocks)
@@ -1599,10 +1617,9 @@ def serve_command(args):
         # Handle prefix cache flags
         enable_prefix_cache = args.enable_prefix_cache and not args.disable_prefix_cache
 
-        # Validate flag combinations BEFORE building config
-        if not args.use_paged_cache and args.enable_block_disk_cache:
-            print("  WARNING: --enable-block-disk-cache requires --use-paged-cache, disabling disk cache")
-            args.enable_block_disk_cache = False
+        # Block L2 is independent of paged RAM. With --no-paged-cache it uses
+        # the same chain-hash/partial-prefix index but stores KV payloads only
+        # on SSD and promotes them transiently for reconstruction.
         if args.use_paged_cache and (
             getattr(args, "cache_memory_mb", None)
             or getattr(args, "cache_memory_percent", 0) != 0.20

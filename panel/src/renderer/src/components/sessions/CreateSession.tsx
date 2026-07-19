@@ -111,12 +111,8 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         dsv4PoolQuant: detected?.family === 'deepseek-v4' ? true : prev.dsv4PoolQuant,
         enablePrefixCache: detected?.family === 'openpangu_v2' ? true : detected?.family === 'deepseek-v4' ? true : prev.enablePrefixCache,
         usePagedCache: detected?.family === 'deepseek-v4' ? true : detected?.usePagedCache,
-        enableDiskCache: detected?.family === 'openpangu_v2' ? true : detected?.family === 'deepseek-v4' || detected?.usePagedCache === true
-          ? false
-          : prev.enableDiskCache,
-        enableBlockDiskCache: detected?.family === 'deepseek-v4'
-          ? true
-          : detected?.usePagedCache === true,
+        enableDiskCache: detected?.family === 'openpangu_v2',
+        enableBlockDiskCache: detected?.family !== 'openpangu_v2',
         kvCacheQuantization: detected?.family === 'openpangu_v2' ? 'none' : prev.kvCacheQuantization,
         pagedCacheBlockSize: detected?.family === 'deepseek-v4' ? 256 : prev.pagedCacheBlockSize,
       }
@@ -239,8 +235,8 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             base.kvCacheQuantization = 'none'
           } else {
             base.usePagedCache = detected.usePagedCache
-            base.enableDiskCache = detected.usePagedCache === true ? false : base.enableDiskCache
-            base.enableBlockDiskCache = detected.usePagedCache === true
+            base.enableDiskCache = false
+            base.enableBlockDiskCache = true
           }
           setDetectedFamily(detected.family)
           setDetectedCacheSubtype(detected.cacheSubtype)
@@ -323,10 +319,10 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
     setLogs(['Creating session...'])
 
     try {
-      // Set model type so buildArgs skips text-specific flags for image models
-      const normalizedCacheConfig = config.usePagedCache
-        ? { ...config, enableDiskCache: false, enableBlockDiskCache: true }
-        : config
+      // Set model type so buildArgs skips text-specific flags for image models.
+      // Preserve explicit cache toggles exactly; shared launch policy resolves
+      // architecture prerequisites without silently undoing a user L2 opt-out.
+      const normalizedCacheConfig = config
       const launchConfig = (autoDetectedType || filterTypeProp) === 'image'
         ? { ...normalizedCacheConfig, modelType: 'image' as const }
         : normalizedCacheConfig

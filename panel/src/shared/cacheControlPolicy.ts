@@ -47,12 +47,13 @@ export function resolveCacheControlPolicy(state: CacheControlState): CacheContro
   const architectureForcedPagedActive = architectureRequiresPagedCache && !batchingOff && !prefixOff
   const userPagedCacheActive = !batchingOff && !prefixOff && !!state.usePagedCache
   const effectiveUsePagedCache = architectureForcedPagedActive || userPagedCacheActive
+  const blockDiskCacheActive = !batchingOff && !prefixOff && !!state.enableBlockDiskCache
   const pagedCacheDisabled = batchingOff || architectureForcedPagedActive
-  const legacyDiskCacheDisabled = batchingOff || effectiveUsePagedCache || (!batchingOff && architectureRequiresPagedCache)
+  const legacyDiskCacheDisabled = batchingOff || effectiveUsePagedCache || blockDiskCacheActive || (!batchingOff && architectureRequiresPagedCache)
   const blockDiskCacheVisible = !batchingOff
   const blockDiskCacheDisabled = batchingOff
   const legacyDiskCacheChecked = !!state.enableDiskCache && !legacyDiskCacheDisabled && !prefixOff
-  const blockDiskCacheChecked = !!state.enableBlockDiskCache && !batchingOff && !prefixOff && effectiveUsePagedCache
+  const blockDiskCacheChecked = blockDiskCacheActive
   const legacyDiskCacheUnavailableReason = batchingOff
     ? 'batching-off'
     : architectureRequiresPagedCache
@@ -87,12 +88,13 @@ export function resolveCacheLaunchPolicy(state: CacheControlState): CacheLaunchP
     architectureForcedPagedActive ||
     !!state.usePagedCache
   )
+  const enableBlockDiskCache = !!state.enableBlockDiskCache && prefixEnabled
 
   return {
     prefixCacheOff: !prefixEnabled,
     effectiveUsePagedCache,
-    enableLegacyDiskCache: !!state.enableDiskCache && prefixEnabled && !effectiveUsePagedCache,
-    enableBlockDiskCache: !!state.enableBlockDiskCache && prefixEnabled && effectiveUsePagedCache,
+    enableLegacyDiskCache: !!state.enableDiskCache && prefixEnabled && !effectiveUsePagedCache && !enableBlockDiskCache,
+    enableBlockDiskCache,
   }
 }
 
@@ -101,7 +103,6 @@ export function cacheControlUpdatesForPagedToggle(enabled: boolean, state: Cache
   if (enabled && !state.enablePrefixCache) updates.push(['enablePrefixCache', true])
   if (enabled && state.enableDiskCache) updates.push(['enableDiskCache', false])
   if (enabled && !state.enableBlockDiskCache) updates.push(['enableBlockDiskCache', true])
-  if (!enabled && state.enableBlockDiskCache) updates.push(['enableBlockDiskCache', false])
   updates.push(['usePagedCache', enabled])
   return updates
 }
@@ -118,7 +119,6 @@ export function cacheControlUpdatesForDiskToggle(enabled: boolean, state: CacheC
 export function cacheControlUpdatesForBlockDiskToggle(enabled: boolean, state: CacheControlState): CacheControlUpdate[] {
   const updates: CacheControlUpdate[] = []
   if (enabled && !state.enablePrefixCache) updates.push(['enablePrefixCache', true])
-  if (enabled && !state.usePagedCache) updates.push(['usePagedCache', true])
   if (enabled && state.enableDiskCache) updates.push(['enableDiskCache', false])
   updates.push(['enableBlockDiskCache', enabled])
   return updates

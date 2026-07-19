@@ -642,7 +642,7 @@ function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   return changed
 }
 
-const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 10
+const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 11
 
 function markCacheStackStartupDefaultsCurrent(config: Partial<ServerConfig>): boolean {
   if (config.cacheStackStartupDefaultsVersion === CACHE_STACK_STARTUP_DEFAULTS_VERSION) return false
@@ -652,19 +652,11 @@ function markCacheStackStartupDefaultsCurrent(config: Partial<ServerConfig>): bo
 
 function normalizeCacheStackMutualExclusion(config: Partial<ServerConfig>): boolean {
   // Persist the same mutually-exclusive L2 lane that buildArgs will launch.
-  // Paged cache uses block-disk L2; non-paged cache may use legacy prompt L2.
-  // Old/current-version rows can still contain both after UI detection changed,
-  // so this invariant must not depend on a one-time migration version.
-  if (config.usePagedCache === true && config.enableDiskCache === true) {
+  // Block-disk L2 works with paged RAM either On or Off; the legacy full-prompt
+  // store remains the exact typed exception lane (notably openPangu). Never
+  // retain both disk formats for one session.
+  if (config.enableBlockDiskCache === true && config.enableDiskCache === true) {
     config.enableDiskCache = false
-    return true
-  }
-  if (
-    config.usePagedCache !== true &&
-    config.enableDiskCache === true &&
-    config.enableBlockDiskCache === true
-  ) {
-    config.enableBlockDiskCache = false
     return true
   }
   return false
@@ -692,13 +684,18 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
   // 2026-07-12 (paged default ON): fresh sessions inherit the detected per-family
   // paged default so the UI shows — and the engine launches with — paged ON for
   // autodetected families with a safe generic or typed serializer. DSV4 uses its
-  // prefix opt-in. Block-disk L2 (paged-compatible) follows
-  // paged; non-paged families use the prompt-level L2 instead.
+  // prefix opt-in. Block-disk L2 is independent of paged RAM; non-paged
+  // generic families therefore use the SSD-only block-aware backend.
   const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : (detectedUsePaged ?? false)
-  // Every prefix-cache lane gets one appropriate L2 by default: block L2 for
-  // paged families, prompt L2 for non-paged families. Never default both on.
-  const defaultEnableDiskCache = !dsv4Active && !defaultUsePagedCache
-  const defaultEnableBlockDiskCache = dsv4Active ? dsv4PrefixOptIn : !!defaultUsePagedCache
+  // Every supported prefix-cache lane gets block SSD L2 by default, even when
+  // paged RAM is explicitly Off. openPangu is the path-dependent exact-snapshot
+  // exception and continues to use prompt-level typed L2.
+  const defaultEnableDiskCache = openPanguExactTypedCache
+  const defaultEnableBlockDiskCache = openPanguExactTypedCache
+    ? false
+    : dsv4Active
+      ? dsv4PrefixOptIn
+      : true
   const mutable = config as Record<string, any>
   let changed = false
 
@@ -731,11 +728,17 @@ function numericArgValue(args: string[], flag: string): number | null {
 }
 
 function pagedCacheCapacityLogLine(args: string[]): string | null {
-  if (!args.includes('--use-paged-cache')) return null
+  const pagedActive = args.includes('--use-paged-cache')
+  const blockDiskActive = args.includes('--enable-block-disk-cache')
+  if (!pagedActive && !blockDiskActive) return null
   const blockSize = numericArgValue(args, '--paged-cache-block-size') ?? 64
   const maxBlocks = numericArgValue(args, '--max-cache-blocks') ?? 1000
-  const capacity = blockSize * maxBlocks
-  return `Paged cache capacity: ${blockSize} tokens/block x ${maxBlocks} blocks = ${capacity} tokens. Token capacity is sized by Max Cache Blocks; --cache-memory-mb/--cache-memory-percent set the L1 RAM byte ceiling that evicts free blocks (they bound RAM, not token capacity).\n`
+  const usableBlocks = Math.max(0, maxBlocks - 1)
+  const capacity = blockSize * usableBlocks
+  if (!pagedActive) {
+    return `Block disk-only index capacity: ${blockSize} tokens/block x ${usableBlocks} usable blocks (${maxBlocks} configured; 1 reserved) = ${capacity} indexed tokens. Paged RAM is disabled; KV payloads persist on SSD and restore transiently.\n`
+  }
+  return `Paged cache capacity: ${blockSize} tokens/block x ${usableBlocks} usable blocks (${maxBlocks} configured; 1 reserved) = ${capacity} tokens. Token capacity is sized by the usable Max Cache Blocks; --cache-memory-mb/--cache-memory-percent set the L1 RAM byte ceiling that evicts free blocks (they bound RAM, not token capacity).\n`
 }
 
 function isZayaCacheStackMigrationTarget(modelPath?: string): boolean {
@@ -785,8 +788,8 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     config.usePagedCache === false
   // v2 migration pushed GENERIC (non-path-dependent) sessions to paged-ON
   // (usePagedCache=true, blockDisk, kvq=auto, 512/512, maxSeqs=1). Phase-1 (v3-v5)
-  // flipped to paged-OFF + legacy disk_cache, but block-disk-cache (the better SSD
-  // path) is paged-coupled. Phase-2 (v6, 2026-06-27) restores paged-ON + block-disk
+  // flipped to paged-OFF + legacy disk_cache. Phase-2 (v6, 2026-06-27) restored
+  // paged-ON + block-disk
   // for generics after live RAM-soak proved no leak (Ornith 9B-MXFP4: 30 turns mixed
   // mode, +5.4% RSS plateaued by turn 11).
   const staleV2GenericPagedOn =
@@ -874,6 +877,27 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     Number(config.maxCacheBlocks) === 1000 &&
     Number(config.pagedCacheBlockSize) === 64 &&
     Number(config.blockDiskCacheMaxGb) === 10
+  // v11: block L2 became independent of paged RAM. Migrate only the exact v10
+  // untouched non-paged default tuple from prompt-L2 to disk-only block L2;
+  // any divergent value remains an explicit user choice.
+  const staleV10NonPagedPromptL2 =
+    Number(config.cacheStackStartupDefaultsVersion || 0) === 10 &&
+    migrationDetectedFamily !== 'openpangu_v2' &&
+    migrationDetectedFamily !== 'deepseek-v4' &&
+    migrationDetectedUsePaged !== true &&
+    config.continuousBatching === true &&
+    config.enablePrefixCache === true &&
+    Number(config.maxNumSeqs) === 1 &&
+    Number(config.prefillBatchSize) === 512 &&
+    Number(config.prefillStepSize) === 2048 &&
+    Number(config.completionBatchSize) === 512 &&
+    config.usePagedCache === false &&
+    config.enableDiskCache === true &&
+    config.enableBlockDiskCache === false &&
+    config.kvCacheQuantization === 'auto' &&
+    Number(config.maxCacheBlocks) === 1000 &&
+    Number(config.pagedCacheBlockSize) === 64 &&
+    Number(config.blockDiskCacheMaxGb) === 10
   // v8 (2026-07-12): flip families that the v7 default left paged-OFF to their
   // detected paged default. Scoped to prefix-cache-on continuous-batching sessions.
   const staleV7GenericPagedOff =
@@ -910,6 +934,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     !staleExplicitNoneCacheCodecDefaults &&
     !stalePreV9PagedLegacyDiskWithoutBlockL2 &&
     !staleV9M3PagedOffWithLegacyL2 &&
+    !staleV10NonPagedPromptL2 &&
     !staleV2GenericPagedOn &&
     !stalePhase1GenericPagedOff &&
     !stalePhase2GenericPagedOn &&
@@ -938,19 +963,19 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     // Paged-off is the safe default; users who want the SSD prefix-hit
     // benefit toggle paged ON in the UI. The toggle must actually reach the
     // engine argv — verify --use-paged-cache appears when checkbox toggled.
-    // SSD block-disk-cache is paged-coupled so it defaults off with paged off.
+    // SSD block-disk-cache is independent of paged RAM and remains default-on.
     // Structural families (DSV4/ZAYA CCA/hybrid SSM SWA subtype) still route
     // through cacheTypeRequiresPaged/cacheSubtypeRequiresPaged at spawn time
     // and stay paged-required — that's a runtime constraint, not a default.
     // v8 (Eric 2026-07-12, reverses v7): paged cache defaults ON for autodetected
     // families whose registry declares a safe generic or typed paged serializer.
     // Derive from the fully-resolved detected capability so existing generic
-    // sessions inherit the new default; block-disk L2 (paged-compatible) follows.
+    // sessions inherit the detected paged default while block-disk L2 stays on.
     const migratedGenericPaged = migrationDetectedUsePaged ?? false
     config.usePagedCache = migratedGenericPaged
     config.maxCacheBlocks = config.maxCacheBlocks ?? 1000
     config.enableDiskCache = false
-    config.enableBlockDiskCache = migratedGenericPaged
+    config.enableBlockDiskCache = true
     config.blockDiskCacheMaxGb = config.blockDiskCacheMaxGb ?? 10
   }
   markCacheStackStartupDefaultsCurrent(config)
@@ -2530,15 +2555,20 @@ export class SessionManager extends EventEmitter {
           cacheMemoryMb: 0,
           cacheMemoryPercent: 15,
           noMemoryAwareCache: false,
-          // Phase-1 cache policy (2026-06-13): paged RAM block cache OFF by default; SSD prefix
-          // cache (disk_cache L2 + memory-aware L1) is the default. Path-dependent families
-          // (hybrid/mamba/rotating-qwen/zaya/step3p7/dsv4) still set detected.usePagedCache=true
-          // explicitly in the capability detector and stay paged until Phase-2 SSD typed-lane work.
+          // Paged RAM follows the model detector, while block SSD L2 defaults
+          // on independently. For ordinary KV models with paged Off this is a
+          // disk-only block-aware prefix backend; typed/path-dependent families
+          // still force their detected paged contract. openPangu is the exact
+          // typed exception and stays on prompt-level disk L2.
           usePagedCache: detectedFamily === 'deepseek-v4' ? dsv4DefaultCacheOptIn : detected.usePagedCache ?? false,
-          enableDiskCache: detectedFamily === 'openpangu_v2' ? true : detectedFamily === 'deepseek-v4' || detected.usePagedCache === true ? false : true,
+          enableDiskCache: detectedFamily === 'openpangu_v2',
           pagedCacheBlockSize: detectedFamily === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64,
           maxCacheBlocks: 1000,
-          enableBlockDiskCache: detectedFamily === 'deepseek-v4' ? dsv4DefaultCacheOptIn : detected.usePagedCache === true,
+          enableBlockDiskCache: detectedFamily === 'openpangu_v2'
+            ? false
+            : detectedFamily === 'deepseek-v4'
+              ? dsv4DefaultCacheOptIn
+              : true,
           blockDiskCacheMaxGb: 10,
           kvCacheQuantization: detectedFamily === 'openpangu_v2' ? 'none' : 'auto',
           cacheStackStartupDefaultsVersion: CACHE_STACK_STARTUP_DEFAULTS_VERSION,
@@ -3446,6 +3476,7 @@ export class SessionManager extends EventEmitter {
     })
     const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
     const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache
+    const blockDiskOnly = cacheLaunchPolicy.enableBlockDiskCache && !usePagedCache
 
     if (prefixCacheOff) {
       args.push('--disable-prefix-cache')
@@ -3470,16 +3501,16 @@ export class SessionManager extends EventEmitter {
         // paged and DSV4, so the app's visible value silently fell back to the
         // engine's 20%).
         const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
-        if (cacheMemoryMb != null) {
+        if (!blockDiskOnly && cacheMemoryMb != null) {
           args.push('--cache-memory-mb', cacheMemoryMb.toString())
         }
         const cacheMemoryPercent = finitePositiveNumber(config.cacheMemoryPercent)
-        if (cacheMemoryPercent != null) {
+        if (!blockDiskOnly && cacheMemoryPercent != null) {
           args.push('--cache-memory-percent', (cacheMemoryPercent / 100).toString())
         }
         // Cache TTL (time-to-live for cache entries) — only meaningful for memory-aware cache, not paged cache
         const cacheTtlMinutes = finitePositiveNumber(config.cacheTtlMinutes)
-        if (cacheTtlMinutes != null && !usePagedCache) {
+        if (cacheTtlMinutes != null && !usePagedCache && !blockDiskOnly) {
           args.push('--cache-ttl-minutes', cacheTtlMinutes.toString())
         }
       }
@@ -3488,6 +3519,11 @@ export class SessionManager extends EventEmitter {
     // Paged cache is a prefix cache backend — works for both LLMs and VLMs
     if (!prefixCacheOff && usePagedCache) {
       args.push('--use-paged-cache')
+    } else if (!prefixCacheOff && !usePagedCache) {
+      // Explicit user Off remains real even when block SSD L2 stays enabled.
+      args.push('--no-paged-cache')
+    }
+    if (!prefixCacheOff && (usePagedCache || cacheLaunchPolicy.enableBlockDiskCache)) {
       const effectivePagedCacheBlockSize = detectedFamily === 'deepseek-v4'
         ? DSV4_PAGED_CACHE_BLOCK_SIZE
         : config.pagedCacheBlockSize
@@ -3502,14 +3538,6 @@ export class SessionManager extends EventEmitter {
       if (maxCacheBlocks != null) {
         args.push('--max-cache-blocks', maxCacheBlocks.toString())
       }
-    } else if (!prefixCacheOff && !usePagedCache) {
-      // UI<->engine parity (2026-07-12): the engine now defaults paged cache ON
-      // for autodetected text families. When the app's effective policy is OFF
-      // (arch-incompatible family — M3/gemma4 mixed-SWA/openPangu; MLLM/VL pending
-      // #98; or an explicit user opt-out) we MUST emit --no-paged-cache so the
-      // engine matches the visible UI setting instead of silently falling through
-      // to its default-on. Never emit it when prefix cache is off (paged is moot).
-      args.push('--no-paged-cache')
     }
 
     // KV cache quantization for stored prefix cache entries

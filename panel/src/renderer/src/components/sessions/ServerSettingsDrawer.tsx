@@ -208,7 +208,8 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             base.kvCacheQuantization = 'none'
           } else {
             base.usePagedCache = detected.usePagedCache
-            base.enableBlockDiskCache = detected.usePagedCache === true
+            base.enableDiskCache = false
+            base.enableBlockDiskCache = true
           }
           setDetectedFamily(detected.family)
           setDetectedCacheSubtype(detected.cacheSubtype)

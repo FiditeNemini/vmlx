@@ -1841,6 +1841,34 @@ class TestSchedulerCacheResilience:
         assert scheduler.memory_aware_cache is not None
         assert scheduler.memory_aware_cache.memory_limit_mb > 0
 
+    def test_block_disk_only_backend_does_not_substitute_memory_cache(
+        self, mock_model, mock_tokenizer, tmp_path
+    ):
+        """Paged Off + block L2 On builds metadata+SSD, never the RAM backend."""
+        cache_dir = tmp_path / "block-l2"
+        scheduler = Scheduler(
+            model=mock_model,
+            tokenizer=mock_tokenizer,
+            config=SchedulerConfig(
+                enable_prefix_cache=True,
+                use_paged_cache=False,
+                use_memory_aware_cache=True,
+                enable_block_disk_cache=True,
+                block_disk_cache_dir=str(cache_dir),
+                max_cache_blocks=8,
+            ),
+        )
+        try:
+            assert scheduler.config.use_paged_cache is False
+            assert scheduler.block_aware_cache is not None
+            assert scheduler.paged_cache_manager is not None
+            assert scheduler.paged_cache_manager.disk_only is True
+            assert scheduler.paged_cache_manager.max_resident_bytes == 0
+            assert scheduler.memory_aware_cache is None
+            assert scheduler.paged_cache_manager._disk_store is not None
+        finally:
+            scheduler.shutdown()
+
     def test_cache_miss_no_error(self, mock_model, mock_tokenizer):
         """Cache miss should not cause any errors."""
         scheduler = Scheduler(

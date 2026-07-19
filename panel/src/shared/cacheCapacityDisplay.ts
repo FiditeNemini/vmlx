@@ -31,6 +31,7 @@ export const pagedCacheMemoryIgnoredText =
 export function resolvePagedCacheCapacity(input: PagedCacheCapacityInput): {
   blockSize: number
   maxBlocks: number
+  usableBlocks: number
   capacityTokens: number
 } {
   const blockSize = finitePositiveInteger(
@@ -41,26 +42,35 @@ export function resolvePagedCacheCapacity(input: PagedCacheCapacityInput): {
     input.maxBlocks,
     finitePositiveInteger(input.defaultMaxBlocks, DEFAULT_MAX_CACHE_BLOCKS),
   )
+  // PagedCacheManager permanently reserves block 0 as the null/placeholder
+  // block. max_blocks is the total allocation, so only max_blocks - 1 blocks
+  // can hold prefix payloads. Keep UI/preview capacity honest for very small
+  // pools where the difference is material (for example, 4 -> 3 usable).
+  const usableBlocks = Math.max(0, maxBlocks - 1)
   return {
     blockSize,
     maxBlocks,
-    capacityTokens: blockSize * maxBlocks,
+    usableBlocks,
+    capacityTokens: blockSize * usableBlocks,
   }
 }
 
 export function pagedCacheCapacityText(input: PagedCacheCapacityInput): string {
   const resolved = resolvePagedCacheCapacity(input)
-  return `Effective paged capacity: ${resolved.blockSize} tokens/block x ${resolved.maxBlocks} blocks = ${formatInteger(resolved.capacityTokens)} tokens`
+  return `Effective paged capacity: ${resolved.blockSize} tokens/block x ${resolved.usableBlocks} usable blocks (${resolved.maxBlocks} configured; 1 reserved) = ${formatInteger(resolved.capacityTokens)} tokens`
 }
 
-export function pagedCacheControlsState(effectiveUsePagedCache: boolean): PagedCacheControlsState {
+export function pagedCacheControlsState(
+  effectiveUsePagedCache: boolean,
+  blockDiskOnly = false,
+): PagedCacheControlsState {
   // Under paged cache the memory budget controls (Cache Memory Limit / %) stay
   // LIVE: they set the L1 RAM byte ceiling for the paged block pool (#98), so
   // the UI value must reach the engine. Only Cache TTL is inapplicable to the
   // paged backend.
   return {
-    memoryBudgetControlsDisabled: false,
-    cacheTtlDisabled: effectiveUsePagedCache,
-    memoryBudgetIgnored: false,
+    memoryBudgetControlsDisabled: blockDiskOnly,
+    cacheTtlDisabled: effectiveUsePagedCache || blockDiskOnly,
+    memoryBudgetIgnored: blockDiskOnly,
   }
 }

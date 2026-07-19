@@ -7,12 +7,15 @@ import {
 } from '../src/shared/cacheCapacityDisplay'
 
 describe('cache capacity display helpers', () => {
-  it('shows effective paged-cache capacity as block size times max blocks', () => {
+  it('subtracts the permanently reserved null block from effective capacity', () => {
     expect(pagedCacheCapacityText({ blockSize: 64, maxBlocks: 1000 })).toBe(
-      'Effective paged capacity: 64 tokens/block x 1000 blocks = 64,000 tokens',
+      'Effective paged capacity: 64 tokens/block x 999 usable blocks (1000 configured; 1 reserved) = 63,936 tokens',
     )
     expect(pagedCacheCapacityText({ blockSize: 256, maxBlocks: 64 })).toBe(
-      'Effective paged capacity: 256 tokens/block x 64 blocks = 16,384 tokens',
+      'Effective paged capacity: 256 tokens/block x 63 usable blocks (64 configured; 1 reserved) = 16,128 tokens',
+    )
+    expect(pagedCacheCapacityText({ blockSize: 64, maxBlocks: 4 })).toBe(
+      'Effective paged capacity: 64 tokens/block x 3 usable blocks (4 configured; 1 reserved) = 192 tokens',
     )
   })
 
@@ -36,6 +39,11 @@ describe('cache capacity display helpers', () => {
       memoryBudgetControlsDisabled: false,
       cacheTtlDisabled: false,
       memoryBudgetIgnored: false,
+    })
+    expect(pagedCacheControlsState(false, true)).toEqual({
+      memoryBudgetControlsDisabled: true,
+      cacheTtlDisabled: true,
+      memoryBudgetIgnored: true,
     })
   })
 })

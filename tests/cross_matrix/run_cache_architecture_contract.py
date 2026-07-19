@@ -168,7 +168,7 @@ REQUIRED_PANEL_CACHE_MARKERS = (
     "explains that MB/percent set the paged L1 RAM ceiling and only TTL is ignored",
     "derives disabled/ignored control state from effective paged cache state",
     "mutual exclusion: disk cache NOT emitted when paged cache is active",
-    "mutual exclusion: block disk cache only emitted when paged cache is active",
+    "block disk cache is emitted with paged RAM either active or disabled",
     "prefix cache disabled suppresses all cache sub-flags",
 )
 

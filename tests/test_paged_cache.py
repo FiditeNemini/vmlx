@@ -501,10 +501,23 @@ class TestStatistics:
 
         assert usage["block_size"] == 64
         assert usage["max_blocks"] == 100
+        assert usage["usable_blocks"] == 99
+        assert usage["capacity_tokens"] == 99 * 64
         assert usage["allocated_blocks"] == 26  # null block + 25
         assert usage["free_blocks"] == 74  # 99 - 25
-        assert usage["utilization"] == 0.26  # 26/100
+        assert usage["utilization"] == pytest.approx(25 / 99)
         assert usage["total_tokens_cached"] == 25 * 64
+
+    def test_reserved_null_block_is_zero_utilization(self):
+        """An idle pool must not report the reserved null block as user cache."""
+        from vmlx_engine.paged_cache import PagedCacheManager
+
+        usage = PagedCacheManager(block_size=64, max_blocks=4).get_memory_usage()
+
+        assert usage["usable_blocks"] == 3
+        assert usage["capacity_tokens"] == 192
+        assert usage["allocated_blocks"] == 1
+        assert usage["utilization"] == 0.0
 
     def test_reset_stats(self):
         """Test resetting statistics."""
@@ -720,6 +733,94 @@ class TestBlockAwarePrefixCache:
         assert table.num_tokens == 3
         assert remaining == [13, 14, 15]
         assert paged.stats.disk_hits >= 1
+
+    def test_disk_only_manager_requires_durable_store(self):
+        from vmlx_engine.paged_cache import PagedCacheManager
+
+        with pytest.raises(ValueError, match="disk_only requires a disk_store"):
+            PagedCacheManager(block_size=4, max_blocks=8, disk_only=True)
+
+    def test_disk_only_store_and_restart_restore_exact_partial_prefix(self, tmp_path):
+        """SSD-only mode writes through, drops RAM payloads, and restores 7/8 tokens."""
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.block_disk_store import BlockDiskStore
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        cache_dir = tmp_path / "disk-only-blocks"
+        tokens = list(range(7))
+        keys = mx.arange(14, dtype=mx.float32).reshape(1, 1, 7, 2)
+        values = (keys + 100).astype(mx.float32)
+        state = [{
+            "class_name": "KVCache",
+            "state": (keys, values),
+            "meta_state": ("7",),
+        }]
+
+        store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.01,
+            expected_num_layers=1,
+        )
+        manager = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+
+        table = cache.store_cache("writer", tokens, state)
+        assert table is not None
+        assert table.num_tokens == 7
+        assert all(
+            manager.allocated_blocks[block_id].cache_data is None
+            for block_id in table.block_ids
+        )
+        assert manager.resident_bytes == 0
+        store.shutdown()
+
+        restarted_store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.01,
+            expected_num_layers=1,
+        )
+        restarted_manager = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=restarted_store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        restarted = BlockAwarePrefixCache(
+            model=None,
+            paged_cache_manager=restarted_manager,
+        )
+        try:
+            hit, remaining = restarted.fetch_cache("reader", tokens + [99])
+            assert hit is not None
+            assert hit.num_tokens == 7
+            assert remaining == [99]
+            rebuilt = restarted.reconstruct_cache(hit)
+            assert rebuilt is not None
+            assert len(rebuilt) == 1
+            assert int(rebuilt[0].offset) == 7
+            assert restarted_manager.stats.disk_hits >= 2
+            public_stats = restarted.get_stats()
+            store_stats = restarted_store.get_stats()
+            assert public_stats["disk_counter_source"] == "block_disk_store"
+            assert public_stats["disk_hits"] == store_stats["disk_hits"]
+            assert public_stats["disk_misses"] == store_stats["disk_misses"]
+            assert public_stats["disk_promotion_hits"] >= 2
+            assert restarted_manager.resident_bytes == 0
+            assert all(
+                restarted_manager.allocated_blocks[block_id].cache_data is None
+                for block_id in hit.block_ids
+            )
+        finally:
+            restarted_store.shutdown()
 
     def test_extending_partial_prefix_realigns_durable_block_chain(self):
         """An extended partial tail must be replaced at block boundaries."""

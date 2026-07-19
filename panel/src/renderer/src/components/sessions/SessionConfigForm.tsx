@@ -141,7 +141,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
   kvCacheQuantization: 'auto',
   kvCacheGroupSize: 64,
   omniBackend: 'stage1',
-  enableDiskCache: true,
+  enableDiskCache: false,
   diskCacheMaxGb: 10,
   diskCacheDir: '',
   enableBlockDiskCache: true,
@@ -399,11 +399,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   }
   const cachePolicy = resolveCacheControlPolicy(cacheControlState)
   const effectiveUsePagedCache = cachePolicy.effectiveUsePagedCache
+  const blockDiskOnly = cachePolicy.blockDiskCacheChecked && !effectiveUsePagedCache
   const genericPagedCacheToggleDisabled = !dsv4Active && (cachePolicy.pagedCacheDisabled || openPanguExactTypedCache)
   const effectivePagedCacheBlockSize = dsv4CompositeRequiresPaged
     ? DSV4_PAGED_CACHE_BLOCK_SIZE
     : config.pagedCacheBlockSize
-  const pagedCacheUiState = pagedCacheControlsState(effectiveUsePagedCache)
+  const pagedCacheUiState = pagedCacheControlsState(effectiveUsePagedCache, blockDiskOnly)
   const effectivePagedCapacityText = pagedCacheCapacityText({
     blockSize: effectivePagedCacheBlockSize,
     maxBlocks: config.maxCacheBlocks,
@@ -931,7 +932,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   maxInput={100}
                   disabled={pagedCacheUiState.memoryBudgetControlsDisabled}
                 />
-                {pagedCacheUiState.memoryBudgetIgnored && <IncompatWarning text="Cache TTL has no effect when paged cache is enabled — paged cache uses block-count LRU eviction instead. To control paged cache size, adjust 'Max Cache Blocks' in the Paged KV Cache section below. To use time-based TTL, disable 'Use Paged KV Cache' in the Paged KV Cache section." />}
+                {blockDiskOnly && <IncompatWarning text="Paged RAM is Off and Block Disk Cache is authoritative, so Cache Memory Limit, Cache Memory %, and Cache TTL do not apply. Block Size and Max Cache Blocks bound the in-memory hash/index capacity; Block Cache Max bounds SSD usage." />}
                 <SliderField
                   label="Cache TTL (minutes)"
                   tooltip="Time-to-live for memory-aware cache entries. Entries not accessed within this window are evicted to free memory. 'No expiration' means entries are only evicted by memory pressure. Note: this setting has no effect when Paged KV Cache is enabled (paged cache uses its own LRU eviction based on Max Cache Blocks)."
@@ -1019,9 +1020,11 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!dsv4Active && (
           <CheckField label="Use Paged KV Cache" tooltip="Manages the KV cache in fixed-size pages instead of contiguous memory. Greatly reduces memory fragmentation and allows serving larger batches or larger contexts on limited GPU RAM. Extremely recommended for long conversations." checked={effectiveUsePagedCache} onChange={v => applyCacheControlUpdates(cacheControlUpdatesForPagedToggle(v, cacheControlState))} disabled={genericPagedCacheToggleDisabled} />
         )}
-        {effectiveUsePagedCache && (
+        {(effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked) && (
           <>
-            <InfoNote text={effectivePagedCapacityText} />
+            <InfoNote text={blockDiskOnly
+              ? effectivePagedCapacityText.replace('Effective paged capacity', 'Effective SSD block-index capacity')
+              : effectivePagedCapacityText} />
             <SliderField
               label="Block Size (tokens)"
               tooltip="Number of tokens per paged KV cache block. Smaller blocks reduce memory waste per sequence but increase overhead from managing more blocks. Default 64 is optimal for most models. DSV4 uses 256-token blocks for its native composite cache."
@@ -1035,10 +1038,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             />
             <SliderField
               label="Max Cache Blocks"
-              tooltip="Maximum total number of KV cache blocks allocated. Total cache capacity = block_size x max_blocks tokens. Default 1000 blocks x 64 tokens = 64K tokens capacity. Increase for longer contexts, decrease to save memory."
+              tooltip="Maximum total number of KV cache blocks allocated. Block 0 is permanently reserved as the null/placeholder block, so usable token capacity = block_size x (max_blocks - 1). Increase for longer contexts, decrease to save memory."
               value={config.maxCacheBlocks}
               onChange={v => onChange('maxCacheBlocks', v)}
-              min={1}
+              min={2}
               max={100000}
               step={100}
               defaultValue={DEFAULT_CONFIG.maxCacheBlocks}
@@ -1048,12 +1051,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             />
           </>
         )}
-        {!batchingOff && !effectiveUsePagedCache && <InfoNote text="Block Disk Cache is SSD L2 for paged/native cache blocks. Turning it on will enable Prefix Cache and Paged KV Cache." />}
+        {!batchingOff && !effectiveUsePagedCache && <InfoNote text="Block Disk Cache can run as a pure SSD prefix tier while Paged KV Cache remains Off. It keeps only the content-addressed block index in memory, restores KV payloads transiently from SSD, and still requires Prefix Cache." />}
         {(!dsv4Active || dsv4CompositeRequiresPaged) && <CheckField
           label={dsv4Active ? "DSV4 Block Disk Cache (L2)" : "Block Disk Cache (L2)"}
           tooltip={dsv4Active
             ? "Persist DeepSeek-V4 native SWA+CSA/HCA composite cache records to SSD. This is storage for the DSV4 Native Composite Prefix Cache path and does not enable prefix reuse by itself."
-            : "Persist individual paged cache blocks to SSD. When a block is evicted from RAM, it's saved to disk and can be reloaded later without recomputation. Dramatically speeds up cache warm-up for repeated system prompts and common prefixes. Uses content-addressable storage with background writes so disk I/O doesn't block inference. Compatible runtimes store compressed blocks in their native codec; path-dependent architectures use typed cache records instead of generic TurboQuant."}
+            : "Persist content-addressed prefix blocks to SSD. With Paged KV Cache On, SSD is L2 behind paged RAM. With Paged KV Cache Off, SSD is the authoritative block tier and KV payloads are restored only transiently for reconstruction. Compatible runtimes preserve native TurboQuant or typed cache records."}
           checked={cachePolicy.blockDiskCacheChecked}
           onChange={v => applyCacheControlUpdates(dsv4Active ? cacheControlUpdatesForDsv4BlockDiskToggle(v) : cacheControlUpdatesForBlockDiskToggle(v, cacheControlState))}
           disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || openPanguExactTypedCache}
@@ -1165,7 +1168,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             ? "DSV4 Flash stores persistent prefix state through Block Disk Cache (L2) in the native cache section. Legacy disk cache is disabled because DSV4 restores typed SWA+CSA/HCA composite records, not generic KV entries."
             : "DSV4 Flash native composite prefix and Block Disk Cache (L2) reuse are explicitly disabled for this session. Legacy disk cache is also unavailable for DSV4 typed cache records."} />
         ) : (
-          <InfoNote text="Legacy disk cache works with memory-aware prefix cache. Block disk cache (in the Paged KV Cache section) works with paged cache. Only one can be active at a time." />
+          <InfoNote text="Legacy prompt disk cache works with the memory-aware prefix backend. Block Disk Cache (L2) persists content-addressed blocks whether Paged RAM is on or explicitly off. Only one disk format can be active at a time." />
         )}
         {openPanguExactTypedCache && <InfoNote text="For openPangu this prompt-level disk cache stores the exact typed N-1 composite and restores it across process restarts. Block Disk Cache remains unavailable." />}
         {batchingOff && <IncompatWarning text="Disk cache requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above." />}

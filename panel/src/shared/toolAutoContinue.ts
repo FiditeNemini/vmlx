@@ -57,10 +57,13 @@ export function requestsDirectAnswerAfterSingleTool(text: string): boolean {
 }
 
 export function requestsNoToolCalls(text: string): boolean {
-  // Map an explicit current-turn user directive onto the standard API
-  // `tool_choice: "none"` contract. Keep this directive-shaped so quoted
-  // discussion of tool policy does not silently disable the catalog.
-  return /(?:^|[.!?\]\n])\s*(?:please\s+)?(?:do not|don['’]?t|dont|never)\s+(?:call|use)\s+(?:any\s+)?tools?\b(?!\s+unless)/i.test(
-    text,
-  )
+  // Keep these directive-shaped so quoted discussion of tool policy does not
+  // silently disable the catalog. The UI omits tool schemas entirely when
+  // this returns true; that is the stable no-tool request contract for both
+  // Responses and Chat Completions.
+  const explicitProhibition =
+    /(?:^|[.!?\]\n])\s*(?:please\s+)?(?:do not|don['’]?t|dont|never)\s+(?:call|use)\s+(?:any\s+)?tools?\b(?!\s+unless)/i
+  const explicitWithoutTools =
+    /(?:^|[.!?\]\n])\s*(?:please\s+)?without\s+(?:using\s+)?(?:any\s+)?tools?\b/i
+  return explicitProhibition.test(text) || explicitWithoutTools.test(text)
 }

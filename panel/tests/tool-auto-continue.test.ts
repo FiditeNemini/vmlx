@@ -111,10 +111,19 @@ describe('tool auto-continue policy', () => {
     ).toBe(true)
     expect(requestsNoToolCalls('Please never use tools. Answer directly.')).toBe(true)
     expect(
+      requestsNoToolCalls(
+        '[FOLLOW] Without tools, retrieve the value from the previous turn.',
+      ),
+    ).toBe(true)
+    expect(requestsNoToolCalls('Without using any tools, answer directly.')).toBe(true)
+    expect(
       requestsNoToolCalls('Do not call any tool unless the file is missing.'),
     ).toBe(false)
     expect(
       requestsNoToolCalls('Explain why someone might say "do not call any tool".'),
+    ).toBe(false)
+    expect(
+      requestsNoToolCalls('Explain the phrase "without tools" in this policy.'),
     ).toBe(false)
   })
 

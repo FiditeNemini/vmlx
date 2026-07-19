@@ -11,6 +11,33 @@ class _StopServe(RuntimeError):
     pass
 
 
+@pytest.fixture(autouse=True)
+def _restore_cli_policy_environment():
+    """Keep in-process CLI policy tests from leaking serve-time env state.
+
+    ``serve_command`` intentionally mutates these variables for the lifetime
+    of a real server process.  This module stops the command at ``uvicorn.run``
+    and then continues in the same pytest process, so direct mutations made by
+    the CLI are not automatically tracked by ``monkeypatch``.
+    """
+    names = (
+        "VMLX_DISABLE_TQ_KV",
+        "VMLX_FORCE_TQ_AUTO",
+        "VMLX_ALLOW_HYBRID_KV_QUANT",
+        "VMLX_DISABLE_SSM_DISK_RESTORE",
+        "VMLX_ALLOW_UNSAFE_QWEN_SSM_DISK_RESTORE",
+    )
+    original = {name: os.environ.get(name) for name in names}
+    try:
+        yield
+    finally:
+        for name, value in original.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def _serve_args(model_path: str, *, kv_cache_quantization):
     return Namespace(
         model=model_path,

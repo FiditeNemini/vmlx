@@ -261,7 +261,11 @@ class TestEnableThinkingTriState:
         assert "kwargs[\"max_tokens\"] = min(" in source
         assert "reasoning_content" in source
         assert "thinking_mode\"] = \"disabled\"" in source
-        assert "Responses API MiniMax-M3 visible answer pass" in source
+        # The family label now feeds the shared progressive visible-answer
+        # streamer; do not pin an obsolete family-specific log message.
+        assert '"MiniMax-M3"' in source
+        assert "async for answer_output in _stream_with_keepalive(" in source
+        assert '"response.output_text.delta"' in source
 
     def test_minimax_m3_tools_enabled_blank_turn_late_arms_answer_pass(self):
         """Rejected speculative tool markup must not leave M3 reasoning-only."""

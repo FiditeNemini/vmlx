@@ -6177,10 +6177,28 @@ class TestResponsesStreamingExactToolResult:
         import inspect
         import vmlx_engine.server as server
 
-        source = inspect.getsource(server)
-        assert source.count(
-            "not _stream_tools_available or _post_tool_continuation"
-        ) == 2
+        # Pin the shared policy's behavior directly instead of matching the
+        # pre-refactor inline conditional in the whole server module.
+        assert server._auto_thinking_partition_allowed(
+            None, "qwen3_5", tools_available=False
+        )
+        assert server._auto_thinking_partition_allowed(
+            None,
+            "qwen3_5_moe",
+            tools_available=True,
+            post_tool_continuation=True,
+        )
+        assert not server._auto_thinking_partition_allowed(
+            None, "minimax_m3", tools_available=False
+        )
+
+        # Both streaming API surfaces must use that same policy helper.
+        chat_source = inspect.getsource(server.stream_chat_completion)
+        responses_source = inspect.getsource(server.stream_responses_api)
+        for source in (chat_source, responses_source):
+            assert source.count("_auto_thinking_partition_allowed(") == 1
+            assert "tools_available=_stream_tools_available" in source
+            assert "post_tool_continuation=_post_tool_continuation" in source
 
     @pytest.mark.asyncio
     async def test_exact_once_tool_result_continuation_streams_visible_answer(

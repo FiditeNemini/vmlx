@@ -1287,6 +1287,12 @@ class BlockAwarePrefixCache:
         self._hits = 0
         self._misses = 0
         self._tokens_saved = 0
+        # Per-reconstruction source accounting. Fetch can discover a matching
+        # in-process block chain before frugal mode lazily reads its payloads
+        # from L2 on the worker, so fetch-time disk counters alone are not
+        # sufficient for truthful cache_detail telemetry.
+        self._last_reconstruct_disk_blocks = 0
+        self._last_reconstruct_tq_blocks = 0
         # Per-request credit lets a hybrid consumer roll back a KV lookup that
         # cannot actually be used without matching path-dependent companion
         # state.  Lookup success and execution success are not equivalent for
@@ -3277,6 +3283,7 @@ class BlockAwarePrefixCache:
             List of reconstructed cache objects (one per layer),
             or None if reconstruction fails
         """
+        self._last_reconstruct_disk_blocks = 0
         self._last_reconstruct_tq_blocks = 0
         if not block_table or not block_table.block_ids:
             return None
@@ -4206,6 +4213,7 @@ class BlockAwarePrefixCache:
                 f"{block_table.num_tokens} tokens from {len(block_table.block_ids)} blocks"
             )
 
+            self._last_reconstruct_disk_blocks = len(disk_backed_block_ids)
             self._last_reconstruct_tq_blocks = tq_native_entry_count
             reconstruction_succeeded = True
             return reconstructed_caches

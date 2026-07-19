@@ -470,6 +470,15 @@ def test_tq_paged_numpy_disk_path_keeps_native_entries(tmp_path):
             assert restored is not None
             assert restored[0][0] == "turboquant_kv"
             assert restored[0][3]["seed"] == 149
+
+        # Simulate frugal write-through: the chain remains indexed in L1 but
+        # each tensor payload must be lazily reconstructed from L2.
+        for block_id in table.block_ids:
+            manager.release_resident_payload(manager.allocated_blocks[block_id])
+        reconstructed = cache.reconstruct_cache(table)
+        assert reconstructed is not None
+        assert cache._last_reconstruct_disk_blocks == 2
+        assert cache._last_reconstruct_tq_blocks == 2
     finally:
         store.shutdown()
 

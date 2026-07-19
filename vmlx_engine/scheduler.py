@@ -5988,6 +5988,36 @@ class Scheduler:
                     )
                     cache_execution["reconstructed"] = cache_to_use is not None
                     cache_execution["reconstruction_ok"] = cache_to_use is not None
+                # In frugal paged mode fetch_cache() can match an L1 chain whose
+                # tensor payloads were intentionally released after L2
+                # write-through. The actual disk reads then happen here, on the
+                # worker, after add_request() took its fetch-time counter sample.
+                # Promote that worker-side source fact into the request detail so
+                # UI/API usage does not misreport a disk restore as RAM-only.
+                _reconstruct_disk_blocks = int(
+                    getattr(
+                        self.block_aware_cache,
+                        "_last_reconstruct_disk_blocks",
+                        0,
+                    )
+                    or 0
+                )
+                if cache_to_use is not None and _reconstruct_disk_blocks > 0:
+                    request._paged_disk_hit = True
+                    _worker_detail = str(
+                        getattr(request, "_cache_detail", "") or "paged"
+                    )
+                    if "+disk" not in _worker_detail:
+                        _worker_detail += "+disk"
+                    request._cache_detail = _worker_detail
+                    if cache_execution is not None:
+                        cache_execution["cache_detail"] = _worker_detail
+                        cache_execution["disk_blocks"] = _reconstruct_disk_blocks
+                    logger.info(
+                        "Request %s: worker reconstructed %d paged block(s) from L2",
+                        request.request_id,
+                        _reconstruct_disk_blocks,
+                    )
                 request._paged_block_table_needs_worker_reconstruct = False
                 if cache_to_use is None:
                     # mlxstudio#73: a failed reconstruct follows a fetch that

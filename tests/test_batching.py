@@ -1128,6 +1128,7 @@ class TestSchedulerBasic:
         scheduler._validate_cache = lambda cache: True
 
         class _BlockAwareCache:
+            _last_reconstruct_disk_blocks = 1
             _last_reconstruct_tq_blocks = 1
 
             def reconstruct_cache(self, block_table):
@@ -1189,7 +1190,11 @@ class TestSchedulerBasic:
         assert seen == {"cache": ["decoded-kv"], "model": mock_model}
         assert type(batch_generator.caches[0][0]).__name__ == "TurboQuantKVCache"
         assert request._tq_native_cache_hit is True
+        assert request._paged_disk_hit is True
+        assert request._cache_detail == "paged+disk+tq-native"
         execution = scheduler.get_stats()["last_cache_execution"]
+        assert execution["cache_detail"] == "paged+disk+tq-native"
+        assert execution["disk_blocks"] == 1
         assert execution["tq_native_blocks"] == 1
         assert execution["tq_rewrapped"] is True
         assert execution["tq_rewrap_seconds"] >= 0

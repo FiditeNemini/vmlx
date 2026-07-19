@@ -4702,3 +4702,149 @@ class TestDSV4RepetitionPenaltyDefaults:
         # Non-DSV4 families don't get the DSV4 floor — None or actual is fine.
         assert result is None or result < 1.15, (
             f"Floor leaked to non-DSV4 family: got {result}")
+
+
+class TestToolChoiceNonePromptParity:
+    def test_none_disables_public_and_engine_tool_sets(self):
+        """The payload may retain schemas, but none means no rendered tools."""
+        from vmlx_engine import server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+
+        request = ChatCompletionRequest(
+            model="minimax-test",
+            messages=[Message(role="user", content="answer directly")],
+            tool_choice="none",
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        )
+
+        assert not server._tools_available_for_generation(
+            request, engine_tools=[{"name": "file_info"}]
+        )
+
+    @pytest.mark.asyncio
+    async def test_streaming_chat_post_tool_direct_answer_is_visible(
+        self, monkeypatch
+    ):
+        """Schemas + tool_choice=none must not seed MiniMax inside reasoning.
+
+        This is the raw-API shape used after a client has executed a function
+        call: it commonly retains the schemas for history fidelity while
+        explicitly disabling another call.  The engine receives no tools.
+        """
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.model_config_registry as registry
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.minimax_m2_parser import MiniMaxM2ReasoningParser
+
+        class _Tokenizer:
+            has_thinking = True
+
+            def apply_chat_template(self, messages, **kwargs):
+                return "]~b]user\nanswer directly[e~[\n]~b]ai\n<think>\n"
+
+        class _Engine:
+            tokenizer = _Tokenizer()
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = ""
+                deltas = ["M27-CHAT-TOOL-", "CONTINUE-DONE SIZE=5.2 KB"]
+                for index, delta in enumerate(deltas, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=delta,
+                        tokens=[index],
+                        prompt_tokens=12,
+                        completion_tokens=index,
+                        finished=index == len(deltas),
+                        finish_reason="stop" if index == len(deltas) else None,
+                    )
+
+        config = SimpleNamespace(
+            family_name="minimax",
+            think_in_template=True,
+            reasoning_parser="minimax_m2",
+            tool_parser="minimax",
+            supports_thinking=True,
+        )
+        engine = _Engine()
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "MiniMax-M2.7-Small-JANGTQ")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", MiniMaxM2ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        monkeypatch.setattr(
+            registry,
+            "get_model_config_registry",
+            lambda: SimpleNamespace(lookup=lambda *args, **kwargs: config),
+        )
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                },
+            }
+        ]
+        request = ChatCompletionRequest(
+            model="minimax-test",
+            messages=[Message(role="user", content="answer directly")],
+            stream=True,
+            max_tokens=64,
+            enable_thinking=False,
+            tool_choice="none",
+            tools=tools,
+        )
+        server._attach_effective_tools_for_tool_parsing(request, [])
+
+        chunks = []
+        async for chunk in server.stream_chat_completion(
+            engine,
+            [{"role": "user", "content": "answer directly"}],
+            request,
+            fastapi_request=None,
+            enable_thinking=False,
+            max_tokens=64,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: ") and line != "data: [DONE]":
+                    chunks.append(json.loads(line.removeprefix("data: ")))
+
+        visible = "".join(
+            choice.get("delta", {}).get("content") or ""
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+        )
+        reasoning = "".join(
+            choice.get("delta", {}).get("reasoning_content") or ""
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+        )
+        finish_reasons = [
+            choice.get("finish_reason")
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+            if choice.get("finish_reason") is not None
+        ]
+
+        assert visible == "M27-CHAT-TOOL-CONTINUE-DONE SIZE=5.2 KB"
+        assert reasoning == ""
+        assert finish_reasons == ["stop"]

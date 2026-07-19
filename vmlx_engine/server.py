@@ -3395,6 +3395,23 @@ def _effective_tools_for_tool_parsing(request: Any) -> Any:
     return getattr(request, "tools", None)
 
 
+def _tools_available_for_generation(request: Any, engine_tools: Any = None) -> bool:
+    """Return whether tool schemas are active for this generation.
+
+    ``request.tools`` describes the public payload, not necessarily the prompt
+    the engine receives.  In particular, ``tool_choice="none"`` deliberately
+    strips those schemas before rendering.  Treating the original payload as
+    active after that point seeds thinking/tool parsers against a prompt that
+    does not exist; MiniMax M2.x then classifies a plain post-tool answer as
+    suppressed reasoning and Chat Completions ends empty.  Prefer the attached
+    effective tool set, while keeping ``engine_tools`` for historical/synthetic
+    schemas that were actually passed to the renderer.
+    """
+    if request is None or getattr(request, "tool_choice", None) == "none":
+        return False
+    return bool(engine_tools or _effective_tools_for_tool_parsing(request))
+
+
 def _attach_effective_tools_for_tool_parsing(request: Any, tools: list[Any]) -> None:
     """Attach merged request+MCP tools without mutating the public API payload."""
     if request is None:
@@ -13711,8 +13728,8 @@ async def create_chat_completion(
     # sizes off the full budget, not the capped thinking budget.
     _ns_answer_pass_original_cap = None
     _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
-    _ns_pre_tools_available = bool(
-        getattr(request, "tools", None) or chat_kwargs.get("tools")
+    _ns_pre_tools_available = _tools_available_for_generation(
+        request, chat_kwargs.get("tools")
     )
     if (
         chat_kwargs.get("enable_thinking") is not False
@@ -13846,7 +13863,9 @@ async def create_chat_completion(
             _prompt_enable_ns = (
                 True if _eff_thinking_ns is None else bool(_eff_thinking_ns)
             )
-            _tools_present_ns = bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
+            _tools_present_ns = _tools_available_for_generation(
+                request, chat_kwargs.get("tools")
+            )
             if _engine_prompt_starts_in_reasoning(
                 engine.tokenizer,
                 model_name=_model_name or request.model,
@@ -13952,9 +13971,9 @@ async def create_chat_completion(
     except Exception:
         _ns_family = None
     _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
-    _ns_tools_available = bool(
-        getattr(request, "tools", None) or chat_kwargs.get("tools")
-    ) and not _suppress_tools
+    _ns_tools_available = _tools_available_for_generation(
+        request, chat_kwargs.get("tools")
+    )
     _ns_m3_valid_tool_call = (
         _ns_is_m3
         and not _suppress_tools
@@ -16155,8 +16174,8 @@ async def create_response(
     # API non-stream surface hits the same runaway-reasoning empty-content bug.
     _ns_answer_pass_original_cap = None
     _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
-    _ns_pre_tools_available = bool(
-        getattr(request, "tools", None) or chat_kwargs.get("tools")
+    _ns_pre_tools_available = _tools_available_for_generation(
+        request, chat_kwargs.get("tools")
     )
     if (
         chat_kwargs.get("enable_thinking") is not False
@@ -16283,7 +16302,9 @@ async def create_response(
             _prompt_enable_ns = (
                 True if _eff_thinking_ns is None else bool(_eff_thinking_ns)
             )
-            _tools_present_ns = bool(getattr(request, "tools", None) or chat_kwargs.get("tools"))
+            _tools_present_ns = _tools_available_for_generation(
+                request, chat_kwargs.get("tools")
+            )
             if _engine_prompt_starts_in_reasoning(
                 engine.tokenizer,
                 model_name=_model_name or request.model,
@@ -16407,9 +16428,9 @@ async def create_response(
     except Exception:
         _ns_family = None
     _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
-    _ns_tools_available = bool(
-        getattr(request, "tools", None) or chat_kwargs.get("tools")
-    ) and not _suppress_tools
+    _ns_tools_available = _tools_available_for_generation(
+        request, chat_kwargs.get("tools")
+    )
     _ns_m3_valid_tool_call = (
         _ns_is_m3
         and not _suppress_tools
@@ -17288,7 +17309,9 @@ async def stream_chat_completion(
 
     if _reasoning_parser:
         _prompt_enable = True if _effective_thinking is None else bool(_effective_thinking)
-        _tools_present_for_prompt = bool(getattr(request, "tools", None) or kwargs.get("tools"))
+        _tools_present_for_prompt = _tools_available_for_generation(
+            request, kwargs.get("tools")
+        )
         if _engine_prompt_starts_in_reasoning(
             engine.tokenizer,
             model_name=_model_name or request.model,
@@ -17397,8 +17420,10 @@ async def stream_chat_completion(
     _suppress_tools = getattr(request, "tool_choice", None) == "none"
     # Auto-enable tool call detection when client sends tools in request (#46),
     # even if server wasn't started with --enable-auto-tool-choice
-    _request_has_tools = bool(getattr(request, "tools", None))
-    _stream_tools_available = bool(kwargs.get("tools")) or _request_has_tools
+    _request_has_tools = bool(_effective_tools_for_tool_parsing(request))
+    _stream_tools_available = _tools_available_for_generation(
+        request, kwargs.get("tools")
+    )
     tool_call_active = (
         _stream_tools_available
         and not _suppress_tools
@@ -19010,8 +19035,10 @@ async def stream_responses_api(
     _begin_tool_call_drop_capture()
 
     _suppress_tools = getattr(request, "tool_choice", None) == "none"
-    _request_has_tools = bool(getattr(request, "tools", None))
-    _stream_tools_available = bool(kwargs.get("tools")) or _request_has_tools
+    _request_has_tools = bool(_effective_tools_for_tool_parsing(request))
+    _stream_tools_available = _tools_available_for_generation(
+        request, kwargs.get("tools")
+    )
     tool_call_active = (
         _stream_tools_available
         and not _suppress_tools
@@ -19123,7 +19150,9 @@ async def stream_responses_api(
 
     if _reasoning_parser:
         _prompt_enable = True if _effective_thinking is None else bool(_effective_thinking)
-        _tools_present_for_prompt = bool(getattr(request, "tools", None) or kwargs.get("tools"))
+        _tools_present_for_prompt = _tools_available_for_generation(
+            request, kwargs.get("tools")
+        )
         if _engine_prompt_starts_in_reasoning(
             engine.tokenizer,
             model_name=_model_name or request.model,

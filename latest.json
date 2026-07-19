@@ -1,19 +1,19 @@
 {
-  "version": "1.5.67",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.5.67/vMLX-1.5.67-sequoia-arm64.dmg",
-  "sha256": "b2ed3947aacf03e37f7f375656c3268194c38988ae7c812b64645207385ef27c",
-  "sha512": "TTOHAX8BSAxYySd3vZKpJvQboSB2078xv9PIjHm9KtIAHVkRyM40uw+2QsxpSX8Fh6fPl3dCJTjDiB0bGd8E5w==",
+  "version": "1.6.11",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.11/vMLX-1.6.11-sequoia-arm64.dmg",
+  "sha256": "c1a8dcd17563a772b83e64bfb443aabedb46111a1e0e500ab69c4fc49143cb2b",
+  "sha512": "44nbyek4aiJsfFOsvDJU44S1Lp6iSG4yHATmPkdHRsmj1vJ9AeygrAKFyPTxmcICXJelZbMcFjWWedPKwN5Bkw==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.5.67/vMLX-1.5.67-sequoia-arm64.dmg",
-      "sha256": "b2ed3947aacf03e37f7f375656c3268194c38988ae7c812b64645207385ef27c",
-      "sha512": "TTOHAX8BSAxYySd3vZKpJvQboSB2078xv9PIjHm9KtIAHVkRyM40uw+2QsxpSX8Fh6fPl3dCJTjDiB0bGd8E5w=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.11/vMLX-1.6.11-sequoia-arm64.dmg",
+      "sha256": "c1a8dcd17563a772b83e64bfb443aabedb46111a1e0e500ab69c4fc49143cb2b",
+      "sha512": "44nbyek4aiJsfFOsvDJU44S1Lp6iSG4yHATmPkdHRsmj1vJ9AeygrAKFyPTxmcICXJelZbMcFjWWedPKwN5Bkw=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.5.67/vMLX-1.5.67-tahoe-arm64.dmg",
-      "sha256": "7cbefc2a79f436931ea762221b91cc8843f558fad1aeb2906ca5d2c9fa182074",
-      "sha512": "2kJkmO+UTw/al2WOofTtF/3FCV4aszjJikQEK2AF+oXOMQcVD+nXVhjVS2vZgMWBaxcujnTv8rrkraHefbegTA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.11/vMLX-1.6.11-tahoe-arm64.dmg",
+      "sha256": "26b0b30a80e3576d2a2f967d9882966fde9637ed85f5fee2f7ec95a265e74308",
+      "sha512": "iEOnukL53MXyaisCXzIQs+aHOg1mSGGckyH0tTLsMmT9HKTW7T8voYCmZH8mo6QzZNzpG1RUTeoDP0XIBa+dgQ=="
     }
   },
-  "notes": "vMLX 1.5.67\n\nHighlights:\n- MiniMax-M3 scoped compatibility release path retained from 1.5.66 with autodetection, reasoning/tool parser wiring, model-owned generation defaults, and native MSA prefix-cache handling.\n- Release preflight now accepts the 1.5.67 source/version lane and checks required Gemma 4 serving generation metadata for non-diffusion Gemma 4 rows.\n- Bundled runtime is built from clean JANG tools source and verifies critical vmlx_engine, JANG tools, Gemma 4, MLX, and mlx-vlm imports during packaging.\n\nVerification:\n- Source stamps are aligned at 1.5.67.\n- Scoped release preflight passed for expected version 1.5.67 before packaging.\n- Bundled Python verification passed for vmlx_engine 1.5.67 and critical bundled JANG/Gemma/MLX runtime imports.\n- Sequoia and Tahoe DMGs are Developer ID signed by ShieldStack LLC (55KGF2S5AY), Apple notarized, stapled, Gatekeeper accepted, and verified by the release DMG verifier.\n\nKnown follow-up:\n- Final-DMG live UI model stress was not rerun in this packaging pass; keep the broader MM3/Gemma live matrix open for the next release lane.\n- Broader non-scoped model-family matrix rows remain for follow-up.\n\nDMG SHA256:\n- Sequoia: b2ed3947aacf03e37f7f375656c3268194c38988ae7c812b64645207385ef27c\n- Tahoe: 7cbefc2a79f436931ea762221b91cc8843f558fad1aeb2906ca5d2c9fa182074"
+  "notes": "vMLX 1.6.11\n\nStreaming, typed-cache, and packaged-runtime checkpoint.\n\nHighlights:\n- Streams post-reasoning and post-tool visible answers progressively across Responses, Chat Completions, and Electron instead of withholding a second-pass answer until completion.\n- Hardens multi-turn tool continuation, terminal events, cancellation/recovery, and reasoning/content separation.\n- Extends architecture-typed prefix, paged, and block-disk L2 reuse for hybrid and mixed-attention families while keeping native exceptions explicit. TurboQuant is a KV-cache storage codec and remains distinct from JANG affine weights, JANGTQ/MXTQ Hadamard-codebook weights, and base MLX MXFP weights.\n- Improves model-derived cache/parser/reasoning settings parity, gateway port/LAN truth, model switching, missing-path handling, and narrow-window UI behavior.\n- Adds current media/cache routing work for supported Qwen, Bonsai, Gemma, Step, and MiniMax-M3 families; MiniMax-M2.7 remains text-only.\n\nVerification:\n- Source commit 95b2caa956c592a9caa706f2a790dcd5664721b7; tag v1.6.11.\n- Full Python suite: 6100 passed, 96 skipped, 92 deselected. Full panel suite: 2311 passed, 3 skipped; typecheck and production build passed.\n- Both DMGs passed bundled-runtime verification, Developer ID signing, Apple notarization, stapling, Gatekeeper, DMG verification, and isolated installed-app smoke.\n- Sequoia installed-app proof used the real Electron Start button and bundled engine for Gemma 4 12B, then completed three UI turns including exactly one real file_info tool, multi-turn recall, paged+mixed-SWA cache reuse, and raw Responses/Chat SSE. Tahoe independently loaded the same session and completed UI and Responses streaming.\n\nKnown follow-up:\n- This is a tested release checkpoint, not closure of every retained model-family stress row. Larger/longer media, Omni audio, gateway soak, and remaining family-specific PARTIAL rows continue after this release.\n\nDMG SHA256:\n- Sequoia: c1a8dcd17563a772b83e64bfb443aabedb46111a1e0e500ab69c4fc49143cb2b\n- Tahoe: 26b0b30a80e3576d2a2f967d9882966fde9637ed85f5fee2f7ec95a265e74308"
 }

@@ -6,6 +6,7 @@ export interface SessionSummary {
   modelName?: string
   host: string
   port: number
+  pid?: number
   status: 'running' | 'stopped' | 'error' | 'loading' | 'standby'
   standbyDepth?: 'soft' | 'deep' | null
   type?: 'local' | 'remote'
@@ -80,7 +81,7 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
         setLoadProgress(prev => { const next = new Map(prev); next.set(data.sessionId, { label: 'Ready', progress: 100 }); return next })
       }),
       window.api.sessions.onStopped((data: any) => {
-        setSessions(prev => prev.map(s => s.id === data.sessionId ? { ...s, status: 'stopped' as const } : s))
+        setSessions(prev => prev.map(s => s.id === data.sessionId ? { ...s, status: 'stopped' as const, pid: undefined } : s))
         setLoadProgress(prev => { const next = new Map(prev); next.delete(data.sessionId); return next })
       }),
       window.api.sessions.onError((data: any) => {
@@ -156,7 +157,12 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
             unsubReady()
             unsubErr()
             refreshSessions().then(() => {
-              resolve({ ...loading, status: 'running', ...(data.port ? { port: data.port } : {}) })
+              resolve({
+                ...loading,
+                status: 'running',
+                ...(data.pid ? { pid: data.pid } : {}),
+                ...(data.port ? { port: data.port } : {})
+              })
             })
           }
         })
@@ -214,7 +220,12 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
           unsubErr()
           setLoadingSessions(prev => { const next = new Set(prev); next.delete(modelPath); return next })
           refreshSessions().then(() => {
-            resolve({ ...session!, status: 'running', ...(data.port ? { port: data.port } : {}) })
+            resolve({
+              ...session!,
+              status: 'running',
+              ...(data.pid ? { pid: data.pid } : {}),
+              ...(data.port ? { port: data.port } : {})
+            })
           })
         }
       })

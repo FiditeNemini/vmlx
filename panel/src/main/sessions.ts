@@ -2173,7 +2173,11 @@ export class SessionManager extends EventEmitter {
       this.stopLoadResidentMonitor(sessionId)
       db.updateSession(sessionId, { status: 'running' })
       this.touchSession(sessionId)  // Start idle timer from model-ready time
-      this.emit('session:ready', { sessionId, port: session.port })
+      this.emit('session:ready', {
+        sessionId,
+        port: session.port,
+        ...(proc.pid ? { pid: proc.pid } : {})
+      })
     } catch (err) {
       this.stopLoadResidentMonitor(sessionId)
       db.updateSession(sessionId, { status: 'error' })
@@ -2639,7 +2643,11 @@ export class SessionManager extends EventEmitter {
                   // Model woke externally — sync DB to running
                   db.updateSession(session.id, { status: 'running', standbyDepth: null })
                   this.touchSession(session.id)
-                  this.emit('session:ready', { sessionId: session.id, port: session.port })
+                  this.emit('session:ready', {
+                    sessionId: session.id,
+                    port: session.port,
+                    ...(session.pid ? { pid: session.pid } : {})
+                  })
                   this.pushLog(session.id, '[Wake] Model woke externally — synced to running')
                 }
               }
@@ -2739,7 +2747,11 @@ export class SessionManager extends EventEmitter {
                 this.emit('session:loadProgress', { sessionId: session.id, label: 'Model ready', progress: 100 })
                 db.updateSession(session.id, { status: 'running', standbyDepth: null })
                 this.touchSession(session.id)
-                this.emit('session:ready', { sessionId: session.id, port: session.port })
+                this.emit('session:ready', {
+                  sessionId: session.id,
+                  port: session.port,
+                  ...(session.pid ? { pid: session.pid } : {})
+                })
               }
               // Sync server-side last_request_time to idle timer — catches direct API
               // requests (curl, benchmarks, external tools) that bypass Electron IPC

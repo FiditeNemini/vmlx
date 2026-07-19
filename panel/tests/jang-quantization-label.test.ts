@@ -21,6 +21,14 @@ describe('JANG quantization labels', () => {
     })).toBe('JANGTQ4 (4b)')
   })
 
+  it('uses the top-level profile shape emitted by current JANG sidecars', () => {
+    expect(formatJangQuantizationLabel({
+      weight_format: 'mxtq',
+      profile: 'JANGTQ2',
+      quantization: { bits: undefined },
+    })).toBe('JANGTQ2 (2b)')
+  })
+
   it('keeps explicit JANG actual bits for affine JANG profiles', () => {
     expect(formatJangQuantizationLabel({
       format: 'jang',

@@ -23,6 +23,35 @@ afterEach(() => {
   }
 })
 
+describe('detectModelConfigFromDir quantization label', () => {
+  it('returns the bundle-grounded JANGTQ label instead of a folder-name guess', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'qwen3_5_moe',
+        text_config: {
+          model_type: 'qwen3_5_moe_text',
+          layer_types: ['linear_attention', 'full_attention'],
+        },
+        weight_format: 'mxtq',
+      },
+      {
+        weight_format: 'mxtq',
+        profile: 'JANGTQ2',
+        quantization: { method: 'affine+mxtq', bits_default: 2 },
+        capabilities: {
+          family: 'qwen3_5_moe',
+          cache_type: 'hybrid',
+        },
+      },
+    )
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.isTurboQuant).toBe(true)
+    expect(detected.quantizationLabel).toBe('JANGTQ2 (2b)')
+  })
+})
+
 describe('detectModelConfigFromDir JANG multimodal detection', () => {
   it('marks Qwen3.6 VL JANG bundles with indexed MTP tensors as native MTP capable', () => {
     const dir = makeModelDir(

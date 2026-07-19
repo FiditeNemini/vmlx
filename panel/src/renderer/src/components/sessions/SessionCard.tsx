@@ -115,11 +115,15 @@ export function SessionCard({
 
   useEffect(() => {
     if (isRemote) return;
-    // Check if model directory name contains JANG/MXQ indicators.
-    // NOTE: JANG detection happens server-side (via jang_config.json parsing in the engine).
-    // Pre-start model info would require reading jang_config.json from the frontend,
-    // which is not currently implemented. This heuristic uses directory name patterns only.
-    const name = session.modelPath.toLowerCase();
+    // Show a cheap path-derived fallback immediately, then replace it with the
+    // authoritative bundle-derived label from config.json/jang_config.json. The
+    // fallback keeps missing/stale paths legible but must never collapse a real
+    // JANGTQ/MXTQ bundle to generic JANG once detection completes.
+    // Inspect only the bundle basename. Provider directories such as
+    // `jangq-ai/` are not evidence that an MXFP child bundle uses JANG.
+    const bundleName = session.modelPath.split("/").filter(Boolean).pop() || session.modelPath;
+    const name = bundleName.toLowerCase();
+    let fallbackLabel: string | undefined;
     if (
       name.includes("jang") ||
       name.includes("mxq") ||
@@ -127,8 +131,26 @@ export function SessionCard({
     ) {
       // Extract bits from patterns: JANG_4K, JANG_2S, JANG_2L, JANG-3.99-bit
       const match = name.match(/jang[_-](\d+\.?\d*)/i);
-      setJangLabel(match ? `JANG ${match[1]}-bit` : "JANG");
+      fallbackLabel = name.includes("jangtq")
+        ? "JANGTQ"
+        : match
+          ? `JANG ${match[1]}-bit`
+          : "JANG";
     }
+    setJangLabel(fallbackLabel);
+
+    let cancelled = false;
+    window.api.models.detectConfig(session.modelPath)
+      .then((detected) => {
+        // Replace the basename fallback only when bundle metadata supplies a
+        // more precise label. Some older JANG bundles have no complete sidecar,
+        // so absence of detector metadata is not evidence of base MLX weights.
+        if (!cancelled && detected?.quantizationLabel) {
+          setJangLabel(detected.quantizationLabel);
+        }
+      })
+      .catch(() => { /* retain path-derived fallback */ });
+    return () => { cancelled = true; };
   }, [session.modelPath, isRemote]);
 
   return (

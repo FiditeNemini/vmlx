@@ -10,6 +10,7 @@
 import { readFileSync, existsSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { formatJangQuantizationLabel } from '../shared/jangQuantization'
 
 /**
  * Resolve an HF repo id (e.g. `mlx-community/gemma-4-e2b-it-4bit`) to the
@@ -92,6 +93,7 @@ export interface DetectedConfig {
   // child env so images are preprocessed on the text-routed path.
   m3VlRoute?: boolean
   isTurboQuant?: boolean
+  quantizationLabel?: string
   nativeMtp?: {
     supported: boolean
     depth: number
@@ -945,6 +947,10 @@ function applyJangCapabilities(
   const caps = jangCfg?.capabilities
   const next = { ...detected }
   const zayaTypedCca = next.family === 'zaya' || next.family === 'zaya1-vl'
+  const quantizationLabel = formatJangQuantizationLabel(jangCfg ?? {})
+  if (quantizationLabel) {
+    next.quantizationLabel = quantizationLabel
+  }
   if (jangCfg?.weight_format === 'mxtq' || jangCfg?.format === 'mxtq') {
     next.isTurboQuant = true
   }

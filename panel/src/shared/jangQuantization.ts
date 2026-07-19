@@ -13,6 +13,7 @@ export function jangtqBitsFromProfile(profile: unknown): number | undefined {
 export function formatJangQuantizationLabel(config: {
   format?: unknown
   weight_format?: unknown
+  profile?: unknown
   quantization?: {
     profile?: unknown
     actual_bits?: unknown
@@ -25,7 +26,12 @@ export function formatJangQuantizationLabel(config: {
   const weightFormat =
     typeof config.weight_format === 'string' ? config.weight_format.toLowerCase() : ''
   const quant = config.quantization ?? {}
-  const profile = typeof quant.profile === 'string' ? quant.profile.trim() : undefined
+  const profile =
+    typeof config.profile === 'string'
+      ? config.profile.trim()
+      : typeof quant.profile === 'string'
+        ? quant.profile.trim()
+        : undefined
   const actualBits = numberOrUndefined(quant.actual_bits)
   const targetBits = numberOrUndefined(quant.target_bits)
   const containerBits = numberOrUndefined(quant.bits)

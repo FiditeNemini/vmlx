@@ -37,6 +37,7 @@ declare global {
           isMultimodal: boolean;
           forceTextOnly?: boolean;
           isTurboQuant?: boolean;
+          quantizationLabel?: string;
           description: string;
           maxContextLength?: number;
         }>;

@@ -5,6 +5,7 @@ import { ServerSettingsDrawer } from '../sessions/ServerSettingsDrawer'
 import { useSessionsContext, type SessionSummary } from '../../contexts/SessionsContext'
 import { isImageSession } from '../../../../shared/sessionUtils'
 import { canonicalizeReasoningParserForCli } from '../../../../shared/reasoningParserAliases'
+import { useTranslation } from '../../i18n'
 
 interface ChatModeToolbarProps {
   activeChatId: string | null
@@ -28,6 +29,7 @@ interface SessionDetail {
 }
 
 export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange, onOverridesChanged }: ChatModeToolbarProps) {
+  const { t } = useTranslation()
   const { sessions: allSessions } = useSessionsContext()
 
   // Filter out image sessions — they belong in the Image tab, not chat
@@ -97,8 +99,8 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
 
   const isRemote = displaySession?.type === 'remote'
   const shortName = displaySession
-    ? (displaySession.modelName || displaySession.modelPath.split('/').pop() || 'Model')
-    : 'No model selected'
+    ? (displaySession.modelName || displaySession.modelPath.split('/').pop() || t('layout.chatToolbar.modelFallback'))
+    : t('layout.chatToolbar.noModelSelected')
   const isRunning = displaySession?.status === 'running'
   const isStandby = displaySession?.status === 'standby'
   const isLoading = displaySession?.status === 'loading'
@@ -132,7 +134,7 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
         remoteModel: remoteModel.trim(),
       })
       if (!remoteResult.success) {
-        throw new Error(remoteResult.error || 'Failed to create remote session')
+        throw new Error(remoteResult.error || t('layout.chatToolbar.remoteCreateFailed'))
       }
       const session = remoteResult.session
 
@@ -145,7 +147,7 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
         setRemoteModel('')
         setRemoteApiKey('')
       } else {
-        setRemoteError(result.error || 'Failed to connect')
+        setRemoteError(result.error || t('layout.chatToolbar.remoteConnectFailed'))
       }
     } catch (error) {
       setRemoteError((error as Error).message)
@@ -163,7 +165,7 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
       <div className="flex flex-col border-b border-border bg-card/50 flex-shrink-0">
         <div className="flex items-center gap-2 px-3 py-1.5">
           <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground flex-shrink-0" />
-          <span className="text-xs text-muted-foreground">No models configured.</span>
+          <span className="text-xs text-muted-foreground">{t('layout.chatToolbar.noModels')}</span>
           <button
             onClick={() => {
               const event = new CustomEvent('vmlx:navigate', { detail: { mode: 'server', panel: 'create', modelPath: null } })
@@ -171,14 +173,14 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
             }}
             className="text-xs text-primary hover:text-primary/80 font-medium"
           >
-            Add local model
+            {t('layout.chatToolbar.addLocalModel')}
           </button>
-          <span className="text-xs text-muted-foreground">or</span>
+          <span className="text-xs text-muted-foreground">{t('common.or')}</span>
           <button
             onClick={() => { setShowRemoteForm(!showRemoteForm); setRemoteError(null) }}
             className="text-xs text-primary hover:text-primary/80 font-medium"
           >
-            Connect remote
+            {t('layout.chatToolbar.connectRemote')}
           </button>
         </div>
         {showRemoteForm && (
@@ -187,21 +189,21 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
               autoFocus
               value={remoteUrl}
               onChange={e => setRemoteUrl(e.target.value)}
-              placeholder="API URL (e.g. https://api.openai.com)"
+              placeholder={t('layout.chatToolbar.apiUrlPlaceholder')}
               className="w-full px-2 py-1.5 bg-background border border-input rounded text-xs focus:outline-none focus:ring-1 focus:ring-ring"
             />
             <div className="flex gap-2">
               <input
                 value={remoteModel}
                 onChange={e => setRemoteModel(e.target.value)}
-                placeholder="Model name (e.g. gpt-4o)"
+                placeholder={t('layout.chatToolbar.modelNamePlaceholder')}
                 className="flex-1 px-2 py-1.5 bg-background border border-input rounded text-xs focus:outline-none focus:ring-1 focus:ring-ring"
               />
               <input
                 type="password"
                 value={remoteApiKey}
                 onChange={e => setRemoteApiKey(e.target.value)}
-                placeholder="API key"
+                placeholder={t('layout.chatToolbar.apiKeyPlaceholder')}
                 className="flex-1 px-2 py-1.5 bg-background border border-input rounded text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
               />
             </div>
@@ -215,16 +217,16 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 transition-colors"
               >
                 {remoteConnecting ? (
-                  <><Loader2 className="h-3 w-3 animate-spin" /> Connecting...</>
+                  <><Loader2 className="h-3 w-3 animate-spin" /> {t('common.connecting')}</>
                 ) : (
-                  <><Globe className="h-3 w-3" /> Connect</>
+                  <><Globe className="h-3 w-3" /> {t('common.connect')}</>
                 )}
               </button>
               <button
                 onClick={() => setShowRemoteForm(false)}
                 className="text-xs text-muted-foreground hover:text-foreground px-2 py-1.5"
               >
-                Cancel
+                {t('common.cancel')}
               </button>
             </div>
           </div>
@@ -275,10 +277,10 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
                     }`} />
                     <span className="flex-1 truncate font-medium">{name}</span>
                     {s.type === 'remote' && (
-                      <span className="text-[10px] bg-primary/15 text-primary px-1 py-0.5 rounded">Remote</span>
+                      <span className="text-[10px] bg-primary/15 text-primary px-1 py-0.5 rounded">{t('layout.chatToolbar.remoteBadge')}</span>
                     )}
                     <span className="text-[10px] text-muted-foreground">
-                      {s.status === 'running' ? 'Running' : s.status === 'standby' ? 'Sleeping' : s.status === 'loading' ? 'Loading' : 'Stopped'}
+                      {s.status === 'running' ? t('status.running') : s.status === 'standby' ? t('status.sleeping') : s.status === 'loading' ? t('status.loading') : t('status.stopped')}
                     </span>
                   </button>
                 )
@@ -295,22 +297,22 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
                 className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
               >
                 <Plus className="h-3 w-3" />
-                Add local model
+                {t('layout.chatToolbar.addLocalModel')}
               </button>
               <button
                 onClick={() => { setShowRemoteForm(true); setRemoteError(null) }}
                 className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
               >
                 <Globe className="h-3 w-3" />
-                Connect remote endpoint
+                {t('layout.chatToolbar.connectRemoteEndpoint')}
               </button>
 
               {/* Inline remote form */}
               {showRemoteForm && (
                 <div className="border-t border-border mt-1 p-3 space-y-2" onClick={e => e.stopPropagation()}>
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-medium">Connect Remote</span>
-                    <button onClick={() => setShowRemoteForm(false)} className="text-muted-foreground hover:text-foreground">
+                    <span className="text-xs font-medium">{t('layout.chatToolbar.connectRemote')}</span>
+                    <button onClick={() => setShowRemoteForm(false)} className="text-muted-foreground hover:text-foreground" aria-label={t('common.close')} title={t('common.close')}>
                       <X className="h-3 w-3" />
                     </button>
                   </div>
@@ -318,20 +320,20 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
                     autoFocus
                     value={remoteUrl}
                     onChange={e => setRemoteUrl(e.target.value)}
-                    placeholder="API URL (e.g. https://api.openai.com)"
+                    placeholder={t('layout.chatToolbar.apiUrlPlaceholder')}
                     className="w-full px-2 py-1.5 bg-background border border-input rounded text-xs focus:outline-none focus:ring-1 focus:ring-ring"
                   />
                   <input
                     value={remoteModel}
                     onChange={e => setRemoteModel(e.target.value)}
-                    placeholder="Model name (e.g. gpt-4o)"
+                    placeholder={t('layout.chatToolbar.modelNamePlaceholder')}
                     className="w-full px-2 py-1.5 bg-background border border-input rounded text-xs focus:outline-none focus:ring-1 focus:ring-ring"
                   />
                   <input
                     type="password"
                     value={remoteApiKey}
                     onChange={e => setRemoteApiKey(e.target.value)}
-                    placeholder="API key (optional)"
+                    placeholder={t('layout.chatToolbar.apiKeyOptionalPlaceholder')}
                     className="w-full px-2 py-1.5 bg-background border border-input rounded text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
                   />
                   {remoteError && (
@@ -343,9 +345,9 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
                     className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 transition-colors"
                   >
                     {remoteConnecting ? (
-                      <><Loader2 className="h-3 w-3 animate-spin" /> Connecting...</>
+                      <><Loader2 className="h-3 w-3 animate-spin" /> {t('common.connecting')}</>
                     ) : (
-                      <><Globe className="h-3 w-3" /> Connect</>
+                      <><Globe className="h-3 w-3" /> {t('common.connect')}</>
                     )}
                   </button>
                 </div>
@@ -361,32 +363,32 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
               <button
                 onClick={handleStart}
                 className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-destructive/10 text-destructive hover:bg-destructive/20 border border-destructive/30 transition-colors"
-                title={isRemote ? 'Reconnect' : 'Restart model'}
+                title={isRemote ? t('common.reconnect') : t('sessions.toolbar.restartModel')}
               >
                 <RotateCw className="h-3 w-3" />
-                {isRemote ? 'Reconnect' : 'Restart'}
+                {isRemote ? t('common.reconnect') : t('sessions.toolbar.restart')}
               </button>
             )}
             {isStopped && !isError && (
               <button
                 onClick={handleStart}
                 className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-success text-success-foreground hover:bg-success/90 transition-colors"
-                title={isRemote ? 'Connect' : 'Start model'}
+                title={isRemote ? t('common.connect') : t('sessions.toolbar.startModel')}
               >
                 <Play className="h-3 w-3" />
-                {isRemote ? 'Connect' : 'Start'}
+                {isRemote ? t('common.connect') : t('common.start')}
               </button>
             )}
             {isLoading && (
               <>
                 <span className="flex items-center gap-1 text-xs px-2 py-1 text-warning">
                   <Loader2 className="h-3 w-3 animate-spin" />
-                  {isRemote ? 'Connecting...' : 'Loading...'}
+                  {isRemote ? t('common.connecting') : t('common.loading')}
                 </span>
                 <button
                   onClick={handleStop}
                   className="text-xs px-1.5 py-0.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-                  title="Cancel"
+                  title={t('common.cancel')}
                 >
                   <X className="h-3 w-3" />
                 </button>
@@ -396,10 +398,10 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
               <button
                 onClick={handleStop}
                 className="flex items-center gap-1 text-xs px-2 py-1 rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
-                title={isRemote ? 'Disconnect' : 'Stop model'}
+                title={isRemote ? t('common.disconnect') : t('sessions.toolbar.stopModel')}
               >
                 <Square className="h-3 w-3" />
-                {isRemote ? 'Disconnect' : 'Stop'}
+                {isRemote ? t('common.disconnect') : t('common.stop')}
               </button>
             )}
           </div>
@@ -416,20 +418,20 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
               className={`flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors ${
                 showChatSettings ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
               }`}
-              title="Chat inference settings (temperature, system prompt, tools, etc.)"
+              title={t('sessions.view.chatSettingsTitle')}
             >
               <Settings className="h-3 w-3" />
-              Chat
+              {t('sessions.view.chatLabel')}
             </button>
             <button
               onClick={() => { setShowServerSettings(!showServerSettings); setShowChatSettings(false) }}
               className={`flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors ${
                 showServerSettings ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
               }`}
-              title={isRemote ? 'Connection settings' : 'Server settings'}
+              title={isRemote ? t('sessions.view.connectionTitle') : t('sessions.view.serverSettingsTitle')}
             >
               <Server className="h-3 w-3" />
-              {isRemote ? 'Connection' : 'Server'}
+              {isRemote ? t('sessions.view.connection') : t('sessions.view.server')}
             </button>
           </div>
         )}

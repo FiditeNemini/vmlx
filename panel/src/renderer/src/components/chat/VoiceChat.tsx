@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { useTranslation } from '../../i18n'
 
 interface VoiceChatProps {
   onTranscription: (text: string) => void
@@ -220,6 +221,7 @@ interface TTSPlayerProps {
  * TTS settings resolution: explicit prop > settings('ttsModel'/'ttsVoice'/'ttsSpeed') > defaults
  */
 export function TTSPlayer({ text, endpoint, sessionId, ttsModel, voice, speed, autoPlay }: TTSPlayerProps) {
+  const { t } = useTranslation()
   const [playing, setPlaying] = useState(false)
   const [loading, setLoading] = useState(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -288,7 +290,7 @@ export function TTSPlayer({ text, endpoint, sessionId, ttsModel, voice, speed, a
       onClick={playing ? stop : play}
       disabled={loading}
       className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors ml-2"
-      title={playing ? 'Stop playback' : 'Read aloud'}
+      title={playing ? t('chat.tts.stopTitle') : t('chat.tts.readAloudTitle')}
     >
       {loading ? (
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin">
@@ -306,7 +308,7 @@ export function TTSPlayer({ text, endpoint, sessionId, ttsModel, voice, speed, a
           <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
         </svg>
       )}
-      {playing ? 'stop' : 'speak'}
+      {playing ? t('chat.tts.stop') : t('chat.tts.speak')}
     </button>
   )
 }

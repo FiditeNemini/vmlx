@@ -25,6 +25,7 @@ import { isImageSession, sessionMatchesModelPath } from '../../shared/sessionUti
 import { useTranslation, LOCALE_NAMES, LOCALE_FLAGS, type Locale } from './i18n'
 
 function App() {
+  const { t } = useTranslation()
   const [setupDone, setSetupDone] = useState(false)
   const [checkingSetup, setCheckingSetup] = useState(true)
   const { state, dispatch, setMode, openChat } = useAppState()
@@ -148,9 +149,9 @@ function App() {
       return
     }
 
-    const modelName = target.modelName || target.modelPath.split('/').pop() || 'New Chat'
+    const modelName = target.modelName || target.modelPath.split('/').pop() || t('chat.interface.newChat')
     const result = await window.api.chat.create(
-      `Chat with ${modelName}`,
+      t('chat.quickStart.chatWithModel', { model: modelName }),
       target.modelPath,
       undefined,
       target.modelPath
@@ -158,7 +159,7 @@ function App() {
     if (result?.id) {
       openChat(result.id, target.id)
     }
-  }, [sessions, state.activeSessionId, setMode, dispatch, openChat])
+  }, [sessions, state.activeSessionId, setMode, dispatch, openChat, t])
 
   const handleSessionChange = useCallback(async (sessionId: string) => {
     if (!state.activeChatId) return
@@ -212,12 +213,12 @@ function App() {
                 <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 flex items-center justify-center mb-4">
                   <Terminal className="h-8 w-8 text-emerald-500" />
                 </div>
-                <h2 className="text-lg font-semibold mb-2">Code</h2>
+                <h2 className="text-lg font-semibold mb-2">{t('app.code.title')}</h2>
                 <p className="text-sm text-muted-foreground max-w-sm">
-                  IDE-like coding environment with AI agent, file browser, and integrated terminal.
+                  {t('app.code.description')}
                 </p>
                 <span className="mt-4 px-3 py-1 text-xs font-medium bg-emerald-500/10 text-emerald-500 rounded-full">
-                  Coming Soon
+                  {t('app.code.comingSoon')}
                 </span>
               </div>
             )}
@@ -293,59 +294,57 @@ function ChatModeContent({ activeChatId, sessionEndpoint, sessionStatus, activeS
 
 // vMLX / mlxstudio — authored by Jinho Jang
 function ChatEmptyState({ onNewChat }: { onNewChat: () => void }) {
+  const { t } = useTranslation()
   return (
     <div className="flex flex-col items-center justify-center h-full text-center px-8 overflow-auto" data-mlx-studio="jinhojang">
       <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4 flex-shrink-0">
         <MessageSquare className="h-8 w-8 text-primary" />
       </div>
-      <h2 className="text-lg font-semibold mb-2">Start a conversation</h2>
+      <h2 className="text-lg font-semibold mb-2">{t('chat.interface.emptyStateTitle')}</h2>
       <p className="text-sm text-muted-foreground mb-4 max-w-md">
-        Load a model from the <strong>Server</strong> tab, then come back here to chat.
+        {t('chat.quickStart.emptyBody')}
       </p>
       <button
         onClick={onNewChat}
         className="px-4 py-2 bg-primary text-primary-foreground text-sm rounded-md hover:bg-primary/90 transition-colors mb-6"
       >
-        New Chat
+        {t('chat.interface.newChat')}
       </button>
 
       <div className="text-left max-w-lg space-y-3 text-xs text-muted-foreground border-t border-border pt-4">
-        <p className="font-semibold text-foreground text-sm">Quick Start Guide</p>
+        <p className="font-semibold text-foreground text-sm">{t('chat.quickStart.title')}</p>
 
         <div>
-          <p className="font-medium text-foreground">Text Models</p>
-          <p>Best for chat, coding, reasoning. Works with any MLX or JANG model.</p>
+          <p className="font-medium text-foreground">{t('chat.quickStart.textModelsTitle')}</p>
+          <p>{t('chat.quickStart.textModelsBody')}</p>
           <p className="text-muted-foreground/70 mt-0.5">
-            Recommended: Qwen3, Llama 4, Gemma 4, Nemotron, DeepSeek, Mistral
+            {t('chat.quickStart.textModelsRecommended')}
           </p>
         </div>
 
         <div>
-          <p className="font-medium text-foreground">Vision Models (VLM)</p>
-          <p>Attach images in chat. The model auto-detects as VLM if it has a vision encoder.</p>
+          <p className="font-medium text-foreground">{t('chat.quickStart.visionModelsTitle')}</p>
+          <p>{t('chat.quickStart.visionModelsBody')}</p>
           <p className="text-muted-foreground/70 mt-0.5">
-            Recommended: Gemma 4 E2B/E4B (standard 4-bit), Qwen3.5-VL, Mistral Small 4
+            {t('chat.quickStart.visionModelsRecommended')}
           </p>
         </div>
 
         <div>
-          <p className="font-medium text-foreground">Large MoE Models + Smelt</p>
-          <p>
-            Models too big for RAM? Enable <strong>Smelt</strong> in Server Settings to load only a
-            fraction of experts. Trades speed for RAM — 45-68% less memory.
-          </p>
+          <p className="font-medium text-foreground">{t('chat.quickStart.smeltTitle')}</p>
+          <p>{t('chat.quickStart.smeltBody')}</p>
           <p className="text-muted-foreground/70 mt-0.5">
-            Smelt disables VLM mode (vision). Use text-only models with Smelt.
+            {t('chat.quickStart.smeltNote')}
           </p>
         </div>
 
         <div>
-          <p className="font-medium text-foreground">Tips</p>
+          <p className="font-medium text-foreground">{t('chat.quickStart.tipsTitle')}</p>
           <ul className="list-disc list-inside space-y-0.5 text-muted-foreground/80">
-            <li>Looping? Increase <strong>Repetition Penalty</strong> in Chat Settings (try 1.1-1.3)</li>
-            <li>Slow first response? That's model weight paging — second message is faster</li>
-            <li>JANG 2-bit models are compact but lower quality. Try JANG 4M or standard 4-bit for best results</li>
-            <li>All settings auto-save per model. Switch models and your settings follow</li>
+            <li>{t('chat.quickStart.tipLooping')}</li>
+            <li>{t('chat.quickStart.tipFirstResponse')}</li>
+            <li>{t('chat.quickStart.tipJang')}</li>
+            <li>{t('chat.quickStart.tipSettings')}</li>
           </ul>
         </div>
       </div>
@@ -506,19 +505,21 @@ function ToolsModeContent() {
 // ─── Shared Components ──────────────────────────────────────────────────────
 
 function AppVersion() {
+  const { t } = useTranslation()
   const [version, setVersion] = useState('...')
   useEffect(() => {
     window.api.app.getVersion().then((v: string) => setVersion(v)).catch(() => setVersion('unknown'))
   }, [])
   return (
     <div className="text-xs text-muted-foreground space-y-1">
-      <p>Version {version}</p>
-      <p>&copy; {new Date().getFullYear()} Eric Jang. All rights reserved.</p>
+      <p>{t('app.about.version', { version })}</p>
+      <p>{t('app.about.copyright', { year: new Date().getFullYear() })}</p>
     </div>
   )
 }
 
 function ApiKeysSection() {
+  const { t } = useTranslation()
   const [braveKey, setBraveKey] = useState('')
   const [hfToken, setHfToken] = useState('')
   const [saved, setSaved] = useState(false)
@@ -566,19 +567,19 @@ function ApiKeysSection() {
 
   return (
     <div className="border border-border rounded-lg p-5">
-      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">API Keys</h3>
+      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">{t('app.about.apiKeysTitle')}</h3>
       <div className="space-y-3">
         <div>
-          <label className="text-sm font-medium">Brave Search API Key</label>
+          <label className="text-sm font-medium">{t('app.about.braveKey')}</label>
           <p className="text-xs text-muted-foreground mt-0.5 mb-2">
-            Required for the <code className="text-xs bg-muted px-1 py-0.5 rounded">web_search</code> tool when built-in tools are enabled.{' '}
+            {t('app.about.braveRequired')}{' '}
             <a
               href="https://brave.com/search/api/"
               target="_blank"
               rel="noopener noreferrer"
               className="text-primary hover:underline"
             >
-              Get a free key
+              {t('app.about.getFreeKey')}
             </a>
           </p>
           <div className="flex gap-2">
@@ -587,36 +588,36 @@ function ApiKeysSection() {
                 type={showKey ? 'text' : 'password'}
                 value={braveKey}
                 onChange={e => { setBraveKey(e.target.value); setSaved(false) }}
-                placeholder={hasSavedBraveKey ? 'Saved key configured (enter a new key to replace)' : 'BSA...'}
+                placeholder={hasSavedBraveKey ? t('app.about.savedKeyPlaceholder') : 'BSA...'}
                 className="w-full px-3 py-2 bg-background border border-input rounded text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring pr-10"
               />
               <button
                 onClick={() => setShowKey(!showKey)}
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground text-xs"
-                title={showKey ? 'Hide' : 'Show'}
+                title={showKey ? t('app.about.hide') : t('app.about.show')}
               >
-                {showKey ? 'Hide' : 'Show'}
+                {showKey ? t('app.about.hide') : t('app.about.show')}
               </button>
             </div>
             <button
               onClick={handleSave}
               className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded hover:bg-primary/90"
             >
-              {saved ? 'Saved' : 'Save'}
+              {saved ? t('app.about.saved') : t('common.save')}
             </button>
           </div>
         </div>
         <div className="mt-4 pt-4 border-t border-border">
-          <label className="text-sm font-medium">HuggingFace Token</label>
+          <label className="text-sm font-medium">{t('app.about.hfToken')}</label>
           <p className="text-xs text-muted-foreground mt-0.5 mb-2">
-            Required for downloading gated models (Flux, Llama, etc.).{' '}
+            {t('app.about.hfRequired')}{' '}
             <a
               href="https://huggingface.co/settings/tokens"
               target="_blank"
               rel="noopener noreferrer"
               className="text-primary hover:underline"
             >
-              Get your token
+              {t('app.about.getToken')}
             </a>
           </p>
           <div className="flex gap-2">
@@ -625,22 +626,22 @@ function ApiKeysSection() {
                 type={showHfKey ? 'text' : 'password'}
                 value={hfToken}
                 onChange={e => { setHfToken(e.target.value); setHfSaved(false) }}
-                placeholder={hasSavedHfToken ? 'Saved token configured (enter a new token to replace)' : 'hf_...'}
+                placeholder={hasSavedHfToken ? t('app.about.savedTokenPlaceholder') : 'hf_...'}
                 className="w-full px-3 py-2 bg-background border border-input rounded text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring pr-10"
               />
               <button
                 onClick={() => setShowHfKey(!showHfKey)}
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground text-xs"
-                title={showHfKey ? 'Hide' : 'Show'}
+                title={showHfKey ? t('app.about.hide') : t('app.about.show')}
               >
-                {showHfKey ? 'Hide' : 'Show'}
+                {showHfKey ? t('app.about.hide') : t('app.about.show')}
               </button>
             </div>
             <button
               onClick={handleHfSave}
               className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded hover:bg-primary/90"
             >
-              {hfSaved ? 'Saved' : 'Save'}
+              {hfSaved ? t('app.about.saved') : t('common.save')}
             </button>
           </div>
         </div>

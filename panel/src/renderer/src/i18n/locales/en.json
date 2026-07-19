@@ -32,7 +32,8 @@
     "retry": "Retry",
     "open": "Open",
     "dismiss": "Dismiss",
-    "language": "Language"
+    "language": "Language",
+    "or": "or"
   },
   "status": {
     "running": "Running",
@@ -147,6 +148,11 @@
     "quickStart": "Quick Start"
   },
   "app": {
+    "code": {
+      "title": "Code",
+      "description": "IDE-like coding environment with AI agent, file browser, and integrated terminal.",
+      "comingSoon": "Coming Soon"
+    },
     "mode": {
       "code": "Code",
       "chat": "Chat",
@@ -164,7 +170,21 @@
       "desc": "Local AI inference for Apple Silicon",
       "creator": "Created by Jinho Jang",
       "language": "Language",
-      "settings": "About & Settings"
+      "settings": "About & Settings",
+      "version": "Version {version}",
+      "copyright": "© {year} Eric Jang. All rights reserved.",
+      "apiKeysTitle": "API Keys",
+      "braveKey": "Brave Search API Key",
+      "braveRequired": "Required for the web_search tool when built-in tools are enabled.",
+      "getFreeKey": "Get a free key",
+      "savedKeyPlaceholder": "Saved key configured (enter a new key to replace)",
+      "show": "Show",
+      "hide": "Hide",
+      "saved": "Saved",
+      "hfToken": "HuggingFace Token",
+      "hfRequired": "Required for downloading gated models (Flux, Llama, etc.).",
+      "getToken": "Get your token",
+      "savedTokenPlaceholder": "Saved token configured (enter a new token to replace)"
     }
   },
   "titlebar": {
@@ -187,10 +207,30 @@
       "empty": "No chats yet",
       "emptyHint": "Start a new chat to begin",
       "clearAllAria": "Clear all chats",
-      "clearAllTitle": "Delete every chat across every model (with confirm)"
+      "clearAllTitle": "Delete every chat across every model (with confirm)",
+      "clearAll": "Clear All",
+      "clearAllConfirm": "Delete ALL {n} chat(s) across every model?\n\nThis wipes the chat rows and their messages. Cannot be undone.",
+      "chatCountHint": "{n} chat(s) • shift-click × to skip confirm",
+      "groupToday": "Today",
+      "groupYesterday": "Yesterday",
+      "groupThisWeek": "This Week",
+      "groupThisMonth": "This Month",
+      "groupOlder": "Older"
+    },
+    "inferenceMode": {
+      "casual": "Casual",
+      "expert": "Expert",
+      "casualTitle": "Casual mode — simplified chat controls",
+      "expertTitle": "Expert mode — full inference controls"
     },
     "chatToolbar": {
       "noModels": "No models configured.",
+      "addLocalModel": "Add local model",
+      "connectRemoteEndpoint": "Connect remote endpoint",
+      "modelFallback": "Model",
+      "noModelSelected": "No model selected",
+      "remoteCreateFailed": "Failed to create remote session",
+      "remoteConnectFailed": "Failed to connect",
       "apiUrlPlaceholder": "API URL (e.g. https://api.openai.com)",
       "modelNamePlaceholder": "Model name (e.g. gpt-4o)",
       "apiKeyPlaceholder": "API key",
@@ -225,6 +265,25 @@
         "unknownError": "Unknown error",
         "failedToStart": "Failed to start"
       }
+    },
+    "quickStart": {
+      "emptyBody": "Load a model from the Server tab, then come back here to chat.",
+      "chatWithModel": "Chat with {model}",
+      "title": "Quick Start Guide",
+      "textModelsTitle": "Text Models",
+      "textModelsBody": "Best for chat, coding, and reasoning. Works with any MLX or JANG model.",
+      "textModelsRecommended": "Recommended: Qwen3, Llama 4, Gemma 4, Nemotron, DeepSeek, Mistral",
+      "visionModelsTitle": "Vision Models (VLM)",
+      "visionModelsBody": "Attach images in chat. The model is detected as a VLM when it has a vision encoder.",
+      "visionModelsRecommended": "Recommended: Gemma 4 E2B/E4B (standard 4-bit), Qwen3.5-VL, Mistral Small 4",
+      "smeltTitle": "Large MoE Models + Smelt",
+      "smeltBody": "Models too big for RAM? Enable Smelt in Server Settings to load only a fraction of experts. This trades speed for 45-68% less memory.",
+      "smeltNote": "Smelt disables VLM mode (vision). Use text-only models with Smelt.",
+      "tipsTitle": "Tips",
+      "tipLooping": "Looping? Increase Repetition Penalty in Chat Settings (try 1.1-1.3).",
+      "tipFirstResponse": "Slow first response? That is model weight paging; the second message is faster.",
+      "tipJang": "JANG 2-bit models are compact but lower quality. Try JANG 4M or standard 4-bit for best results.",
+      "tipSettings": "All settings auto-save per model. Switch models and your settings follow."
     },
     "list": {
       "newChat": "+ New Chat",
@@ -390,7 +449,9 @@
       "send": "Send",
       "editTitle": "Edit & resend",
       "copyTitle": "Copy response",
-      "regenerateTitle": "Regenerate response"
+      "regenerateTitle": "Regenerate response",
+      "waitingForResponse": "Waiting for model response...",
+      "noVisibleResponse": "No visible response was produced."
     },
     "messages": {
       "emptyPrimary": "Send a message to start the conversation",
@@ -452,6 +513,12 @@
     }
   },
   "sessions": {
+    "toolbar": {
+      "restartModel": "Restart model",
+      "restart": "Restart",
+      "startModel": "Start model",
+      "stopModel": "Stop model"
+    },
     "card": {
       "remoteBadge": "Remote",
       "imageBadge": "Image",
@@ -537,8 +604,13 @@
     },
     "create": {
       "title": "Create Session",
+      "localModel": "Local Model",
+      "download": "Download",
+      "remoteEndpoint": "Remote Endpoint",
+      "remoteHint": "Connect to any OpenAI-compatible API endpoint.",
       "apiBaseUrl": "API Base URL *",
       "apiBaseUrlPlaceholder": "https://api.openai.com",
+      "apiBaseUrlHelp": "Base URL of the OpenAI-compatible API (e.g., https://api.openai.com, http://localhost:8000)",
       "modelName": "Model Name *",
       "modelNamePlaceholder": "gpt-4o, llama-3.1-8b, etc.",
       "apiKey": "API Key",
@@ -547,12 +619,19 @@
       "organizationPlaceholder": "Optional",
       "localHint": "Select a local MLX model to serve",
       "filterPlaceholder": "Filter models...",
+      "rescan": "Rescan",
+      "directories": "Directories",
+      "manageDirectories": "Manage Directories",
       "scanning": "Scanning for models...",
       "noModels": "No models found",
+      "noModelsHelp": "Click \"Directories\" above to add your model folders, or place models in ~/.mlxstudio/models/ or ~/.cache/huggingface/hub/",
       "downloadHint": "To download a model, run in Terminal:",
+      "browseModels": "Browse more MLX models at",
       "deleteFailed": "Failed to delete: {error}",
       "loadingModel": "Loading Model",
       "launchFailed": "Launch Failed",
+      "backToConfig": "Back to Config",
+      "launchSession": "Launch Session",
       "step2": "Step 2: Configure",
       "imageServerSettings": "Image Server Settings",
       "imageMode": "Image Mode",
@@ -656,11 +735,21 @@
       "jangNoticeBody": "As of 3/19/2026, all JANG models must be re-downloaded from HuggingFace (JANGQ-AI) to include proper chat templates. Without updated models, thinking on/off may not work correctly and some models may loop.",
       "imageEditHeader": "Image Edit Server",
       "imageGenHeader": "Image Generation Server",
+      "imageEditBadge": "Image Edit",
+      "imageGenBadge": "Image Gen",
+      "switchImageEditor": "Switch to Image Editor",
+      "switchImageGenerator": "Switch to Image Generator",
+      "imageEditor": "Image Editor",
+      "imageGenerator": "Image Gen",
       "imageEditBody": "This is an image editing model. Use the Image tab to upload images and edit them with prompts.",
       "imageGenBody": "This is an image generation model. Use the Image tab to generate images from text prompts.",
       "openImageEditor": "Open Image Editor",
       "openImageGenerator": "Open Image Generator",
       "loadProgressFallback": "Starting server...",
+      "loadingSession": "Loading session...",
+      "benchPanelTitle": "Benchmark",
+      "embeddingsPanelTitle": "Embeddings",
+      "performancePanelTitle": "Performance",
       "toast": {
         "failedToStartChat": "Failed to create chat",
         "failedToStopServer": "Failed to stop server",

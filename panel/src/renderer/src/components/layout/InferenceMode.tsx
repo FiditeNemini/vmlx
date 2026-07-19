@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { CASUAL_CONFIG, EXPERT_CONFIG, SessionConfig } from '../sessions/SessionConfigForm'
+import { useTranslation } from '../../i18n'
 
 export type InferenceMode = 'casual' | 'expert'
 
@@ -23,6 +24,7 @@ export function useInferenceMode() {
 }
 
 export function InferenceModeToggle({ mode, onToggle }: { mode: InferenceMode; onToggle: (m: InferenceMode) => void }) {
+  const { t } = useTranslation()
   const isCasual = mode === 'casual'
   return (
     <button
@@ -33,10 +35,10 @@ export function InferenceModeToggle({ mode, onToggle }: { mode: InferenceMode; o
           : 'bg-blue-500/15 text-blue-400 border-blue-500/30 hover:bg-blue-500/25'
       }`}
       title={isCasual
-        ? 'Casual: Safe defaults for all machines. Click for Expert mode.'
-        : 'Expert: Full control, high resource ceilings. Click for Casual mode.'}
+        ? t('layout.inferenceMode.casualTitle')
+        : t('layout.inferenceMode.expertTitle')}
     >
-      {isCasual ? 'Casual' : 'Expert'}
+      {isCasual ? t('layout.inferenceMode.casual') : t('layout.inferenceMode.expert')}
     </button>
   )
 }

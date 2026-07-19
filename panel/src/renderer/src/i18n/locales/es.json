@@ -32,7 +32,8 @@
     "retry": "Reintentar",
     "open": "Abrir",
     "dismiss": "Descartar",
-    "language": "Idioma"
+    "language": "Idioma",
+    "or": "o"
   },
   "status": {
     "running": "En ejecución",
@@ -147,6 +148,11 @@
     "quickStart": "Inicio rápido"
   },
   "app": {
+    "code": {
+      "title": "Código",
+      "description": "Entorno de programación tipo IDE con agente de IA, explorador de archivos y terminal integrado.",
+      "comingSoon": "Próximamente"
+    },
     "mode": {
       "code": "Código",
       "chat": "Chat",
@@ -164,7 +170,21 @@
       "desc": "Inferencia de IA local para Apple Silicon",
       "creator": "Creado por Jinho Jang",
       "language": "Idioma",
-      "settings": "Acerca de y configuración"
+      "settings": "Acerca de y configuración",
+      "version": "Versión {version}",
+      "copyright": "© {year} Eric Jang. Todos los derechos reservados.",
+      "apiKeysTitle": "Claves de API",
+      "braveKey": "Clave de API de Brave Search",
+      "braveRequired": "Necesaria para la herramienta web_search cuando las herramientas integradas están activadas.",
+      "getFreeKey": "Obtener una clave gratis",
+      "savedKeyPlaceholder": "Clave guardada configurada (introduzca una nueva para reemplazarla)",
+      "show": "Mostrar",
+      "hide": "Ocultar",
+      "saved": "Guardada",
+      "hfToken": "Token de HuggingFace",
+      "hfRequired": "Necesario para descargar modelos restringidos (Flux, Llama, etc.).",
+      "getToken": "Obtener token",
+      "savedTokenPlaceholder": "Token guardado configurado (introduzca uno nuevo para reemplazarlo)"
     }
   },
   "titlebar": {
@@ -187,10 +207,30 @@
       "empty": "Aún no hay chats",
       "emptyHint": "Inicie un nuevo chat para comenzar",
       "clearAllAria": "Borrar todos los chats",
-      "clearAllTitle": "Eliminar todos los chats de todos los modelos (con confirmación)"
+      "clearAllTitle": "Eliminar todos los chats de todos los modelos (con confirmación)",
+      "clearAll": "Borrar todo",
+      "clearAllConfirm": "¿Eliminar los {n} chats de todos los modelos?\n\nEsto borra los chats y sus mensajes. No se puede deshacer.",
+      "chatCountHint": "{n} chats • Mayús-clic en × omite la confirmación",
+      "groupToday": "Hoy",
+      "groupYesterday": "Ayer",
+      "groupThisWeek": "Esta semana",
+      "groupThisMonth": "Este mes",
+      "groupOlder": "Anteriores"
+    },
+    "inferenceMode": {
+      "casual": "Casual",
+      "expert": "Experto",
+      "casualTitle": "Modo casual — controles de chat simplificados",
+      "expertTitle": "Modo experto — controles de inferencia completos"
     },
     "chatToolbar": {
       "noModels": "No hay modelos configurados.",
+      "addLocalModel": "Añadir modelo local",
+      "connectRemoteEndpoint": "Conectar endpoint remoto",
+      "modelFallback": "Modelo",
+      "noModelSelected": "Ningún modelo seleccionado",
+      "remoteCreateFailed": "No se pudo crear la sesión remota",
+      "remoteConnectFailed": "No se pudo conectar",
       "apiUrlPlaceholder": "URL de la API (p. ej., https://api.openai.com)",
       "modelNamePlaceholder": "Nombre del modelo (p. ej., gpt-4o)",
       "apiKeyPlaceholder": "API key",
@@ -225,6 +265,25 @@
         "unknownError": "Error desconocido",
         "failedToStart": "No se pudo iniciar"
       }
+    },
+    "quickStart": {
+      "emptyBody": "Carga un modelo desde la pestaña Servidor y vuelve aquí para chatear.",
+      "chatWithModel": "Chat con {model}",
+      "title": "Guía de inicio rápido",
+      "textModelsTitle": "Modelos de texto",
+      "textModelsBody": "Ideales para chat, programación y razonamiento. Funcionan con cualquier modelo MLX o JANG.",
+      "textModelsRecommended": "Recomendados: Qwen3, Llama 4, Gemma 4, Nemotron, DeepSeek, Mistral",
+      "visionModelsTitle": "Modelos de visión (VLM)",
+      "visionModelsBody": "Adjunta imágenes en el chat. Los modelos con codificador visual se detectan como VLM.",
+      "visionModelsRecommended": "Recomendados: Gemma 4 E2B/E4B (4 bits estándar), Qwen3.5-VL, Mistral Small 4",
+      "smeltTitle": "Modelos MoE grandes + Smelt",
+      "smeltBody": "¿El modelo no cabe en la RAM? Activa Smelt en Ajustes del servidor para cargar solo parte de los expertos. Reduce la memoria un 45-68% a cambio de velocidad.",
+      "smeltNote": "Smelt desactiva el modo VLM (visión). Úsalo con modelos de solo texto.",
+      "tipsTitle": "Consejos",
+      "tipLooping": "¿Se repite? Aumenta la penalización por repetición en Ajustes del chat (prueba 1.1-1.3).",
+      "tipFirstResponse": "¿La primera respuesta es lenta? Se debe a la paginación de pesos; el segundo mensaje será más rápido.",
+      "tipJang": "Los modelos JANG de 2 bits son compactos pero de menor calidad. Prueba JANG 4M o 4 bits estándar para obtener mejores resultados.",
+      "tipSettings": "Los ajustes se guardan automáticamente por modelo y te siguen al cambiar de modelo."
     },
     "list": {
       "newChat": "+ Nuevo chat",
@@ -390,7 +449,9 @@
       "send": "Enviar",
       "editTitle": "Editar y reenviar",
       "copyTitle": "Copiar respuesta",
-      "regenerateTitle": "Regenerar respuesta"
+      "regenerateTitle": "Regenerar respuesta",
+      "waitingForResponse": "Esperando la respuesta del modelo...",
+      "noVisibleResponse": "No se generó ninguna respuesta visible."
     },
     "messages": {
       "emptyPrimary": "Envíe un mensaje para iniciar la conversación",
@@ -452,6 +513,12 @@
     }
   },
   "sessions": {
+    "toolbar": {
+      "restartModel": "Reiniciar modelo",
+      "restart": "Reiniciar",
+      "startModel": "Iniciar modelo",
+      "stopModel": "Detener modelo"
+    },
     "card": {
       "remoteBadge": "Remoto",
       "imageBadge": "Imagen",
@@ -537,8 +604,13 @@
     },
     "create": {
       "title": "Crear sesión",
+      "localModel": "Modelo local",
+      "download": "Descargar",
+      "remoteEndpoint": "Endpoint remoto",
+      "remoteHint": "Conéctese a cualquier endpoint de API compatible con OpenAI.",
       "apiBaseUrl": "URL base de la API *",
       "apiBaseUrlPlaceholder": "https://api.openai.com",
+      "apiBaseUrlHelp": "URL base de la API compatible con OpenAI (p. ej., https://api.openai.com, http://localhost:8000)",
       "modelName": "Nombre del modelo *",
       "modelNamePlaceholder": "gpt-4o, llama-3.1-8b, etc.",
       "apiKey": "API Key",
@@ -547,12 +619,19 @@
       "organizationPlaceholder": "Opcional",
       "localHint": "Seleccione un modelo MLX local para servir",
       "filterPlaceholder": "Filtrar modelos...",
+      "rescan": "Volver a escanear",
+      "directories": "Directorios",
+      "manageDirectories": "Administrar directorios",
       "scanning": "Buscando modelos...",
       "noModels": "No se encontraron modelos",
+      "noModelsHelp": "Haga clic en \"Directorios\" arriba para agregar sus carpetas de modelos, o coloque los modelos en ~/.mlxstudio/models/ o ~/.cache/huggingface/hub/.",
       "downloadHint": "Para descargar un modelo, ejecute en la Terminal:",
+      "browseModels": "Explore más modelos MLX en",
       "deleteFailed": "No se pudo eliminar: {error}",
       "loadingModel": "Cargando modelo",
       "launchFailed": "Error al iniciar",
+      "backToConfig": "Volver a la configuración",
+      "launchSession": "Iniciar sesión",
       "step2": "Paso 2: Configurar",
       "imageServerSettings": "Configuración del servidor de imágenes",
       "imageMode": "Modo de imagen",
@@ -656,11 +735,21 @@
       "jangNoticeBody": "A partir del 19/03/2026, todos los modelos JANG deben descargarse nuevamente desde HuggingFace (JANGQ-AI) para incluir las plantillas de chat correctas. Sin los modelos actualizados, activar/desactivar el pensamiento puede no funcionar correctamente y algunos modelos pueden entrar en bucle.",
       "imageEditHeader": "Servidor de edición de imágenes",
       "imageGenHeader": "Servidor de generación de imágenes",
+      "imageEditBadge": "Edición de imagen",
+      "imageGenBadge": "Generación de imagen",
+      "switchImageEditor": "Cambiar al editor de imágenes",
+      "switchImageGenerator": "Cambiar al generador de imágenes",
+      "imageEditor": "Editor de imágenes",
+      "imageGenerator": "Generación de imagen",
       "imageEditBody": "Este es un modelo de edición de imágenes. Use la pestaña Imagen para subir imágenes y editarlas con prompts.",
       "imageGenBody": "Este es un modelo de generación de imágenes. Use la pestaña Imagen para generar imágenes a partir de prompts de texto.",
       "openImageEditor": "Abrir editor de imágenes",
       "openImageGenerator": "Abrir generador de imágenes",
       "loadProgressFallback": "Iniciando servidor...",
+      "loadingSession": "Cargando sesión...",
+      "benchPanelTitle": "Benchmark",
+      "embeddingsPanelTitle": "Embeddings",
+      "performancePanelTitle": "Rendimiento",
       "toast": {
         "failedToStartChat": "No se pudo crear el chat",
         "failedToStopServer": "No se pudo detener el servidor",

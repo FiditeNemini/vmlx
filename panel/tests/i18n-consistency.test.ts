@@ -150,6 +150,133 @@ describe('i18n locale consistency', () => {
     expect(indexSrc).toContain('localStorage.getItem')
   })
 
+  it('session creation and narrow session drawers use the shared locale catalog', () => {
+    const createSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'sessions', 'CreateSession.tsx'),
+      'utf-8',
+    )
+    const drawerSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'sessions', 'ServerSettingsDrawer.tsx'),
+      'utf-8',
+    )
+    const viewSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'sessions', 'SessionView.tsx'),
+      'utf-8',
+    )
+    const chatToolbarSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'layout', 'ChatModeToolbar.tsx'),
+      'utf-8',
+    )
+
+    for (const key of [
+      'sessions.create.title',
+      'sessions.create.localModel',
+      'sessions.create.remoteEndpoint',
+      'sessions.create.filterPlaceholder',
+      'sessions.create.launchSession',
+    ]) {
+      expect(createSrc).toContain(`t('${key}')`)
+    }
+    for (const key of [
+      'sessions.view.serverSettingsTitle',
+      'sessions.settings.runningWarning',
+      'sessions.settings.saveAndRestart',
+      'common.close',
+    ]) {
+      expect(drawerSrc).toContain(`t('${key}')`)
+    }
+    for (const key of [
+      'sessions.view.chatButton',
+      'sessions.view.server',
+      'sessions.view.logs',
+      'sessions.view.wake',
+      'sessions.view.loadingSession',
+      'sessions.view.cacheTitle',
+      'sessions.view.benchPanelTitle',
+      'sessions.view.embeddingsPanelTitle',
+      'sessions.view.performancePanelTitle',
+    ]) {
+      expect(viewSrc).toContain(`t('${key}')`)
+    }
+    for (const key of [
+      'sessions.view.chatLabel',
+      'sessions.view.server',
+      'sessions.toolbar.startModel',
+      'sessions.toolbar.stopModel',
+      'layout.chatToolbar.addLocalModel',
+      'layout.chatToolbar.connectRemoteEndpoint',
+      'layout.chatToolbar.apiUrlPlaceholder',
+    ]) {
+      expect(chatToolbarSrc).toContain(`t('${key}')`)
+    }
+  })
+
+  it('chat history, inference mode, message actions, voice, and API keys use the locale catalog', () => {
+    const chatHistorySrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'layout', 'ChatHistory.tsx'),
+      'utf-8',
+    )
+    const inferenceModeSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'layout', 'InferenceMode.tsx'),
+      'utf-8',
+    )
+    const messageBubbleSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'chat', 'MessageBubble.tsx'),
+      'utf-8',
+    )
+    const voiceChatSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'chat', 'VoiceChat.tsx'),
+      'utf-8',
+    )
+    const appSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'App.tsx'),
+      'utf-8',
+    )
+
+    for (const key of [
+      'layout.chatHistory.clearAll',
+      'layout.chatHistory.clearAllConfirm',
+      'layout.chatHistory.chatCountHint',
+    ]) {
+      expect(chatHistorySrc).toContain(`t('${key}'`)
+    }
+    for (const key of [
+      'layout.inferenceMode.casual',
+      'layout.inferenceMode.expert',
+      'layout.inferenceMode.casualTitle',
+      'layout.inferenceMode.expertTitle',
+    ]) {
+      expect(inferenceModeSrc).toContain(`t('${key}')`)
+    }
+    for (const key of [
+      'chat.bubble.editTitle',
+      'chat.bubble.copyTitle',
+      'chat.bubble.regenerateTitle',
+      'chat.bubble.codeCopy',
+      'chat.bubble.codeCopied',
+      'chat.bubble.waitingForResponse',
+      'chat.bubble.noVisibleResponse',
+    ]) {
+      expect(messageBubbleSrc).toContain(`t('${key}')`)
+    }
+    for (const key of ['chat.tts.stopTitle', 'chat.tts.readAloudTitle', 'chat.tts.speak']) {
+      expect(voiceChatSrc).toContain(`t('${key}')`)
+    }
+    for (const key of [
+      'app.about.version',
+      'app.about.apiKeysTitle',
+      'app.about.braveKey',
+      'app.about.hfToken',
+      'app.code.title',
+      'app.code.description',
+      'app.code.comingSoon',
+      'chat.quickStart.title',
+      'chat.quickStart.tipSettings',
+    ]) {
+      expect(appSrc).toContain(`t('${key}'`)
+    }
+  })
+
   it('release update notice is localized and covers v1.5.45 release-critical items', () => {
     const updateNoticeSrc = readFileSync(
       resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'UpdateNotice.tsx'),

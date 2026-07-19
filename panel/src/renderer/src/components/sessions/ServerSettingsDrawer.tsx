@@ -255,8 +255,8 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
     <div className="w-96 h-full border-l border-border bg-card flex flex-col overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border flex-shrink-0">
-        <span className="font-medium text-sm">{isRemote ? 'Connection Settings' : 'Server Settings'}</span>
-        <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-sm px-1">
+        <span className="font-medium text-sm">{isRemote ? t('sessions.view.connectionTitle') : t('sessions.view.serverSettingsTitle')}</span>
+        <button onClick={onClose} aria-label={t('common.close')} title={t('common.close')} className="text-muted-foreground hover:text-foreground text-sm px-1">
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
@@ -274,7 +274,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
 
         {isRunning && !restarting && !isRemote && (
           <div className="p-2 bg-warning/10 border border-warning/30 rounded text-xs text-warning">
-            Session is running. Save & Restart to apply changes.
+            {t('sessions.settings.runningWarning')}
           </div>
         )}
 
@@ -289,6 +289,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
               </div>
               <button
                 onClick={handleGatewaySingleModelModeToggle}
+                aria-label={t('main.tray.singleModelMode')}
                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors flex-shrink-0 ${singleModelMode ? 'bg-primary' : 'bg-muted'}`}
               >
                 <span
@@ -303,7 +304,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         {isRemote ? (
           <div className="space-y-3">
             <SliderField
-              label="Request Timeout (seconds)"
+              label={t('sessions.config.timeout')}
               tooltip="Maximum time to wait for a response from the remote server before timing out. Increase this for slow models, long generations, or high-latency connections. Default 300s (5 minutes)."
               value={config.timeout}
               onChange={v => handleChange('timeout', v)}
@@ -313,7 +314,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
               defaultValue={DEFAULT_CONFIG.timeout}
               allowUnlimited
               unlimitedValue={0}
-              unlimitedLabel="No limit"
+              unlimitedLabel={t('sessions.config.timeoutNoLimit')}
             />
           </div>
         ) : (
@@ -329,7 +330,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           disabled={!dirty || saving || restarting}
           className="flex-1 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-40"
         >
-          {saving && !restarting ? 'Saving...' : 'Save'}
+          {saving && !restarting ? t('common.saving') : t('common.save')}
         </button>
         {isRunning && !isRemote && (
           <button
@@ -338,7 +339,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             disabled={saving || restarting}
             className="flex-1 px-3 py-1.5 text-sm bg-success text-success-foreground rounded hover:bg-success/90 disabled:opacity-40"
           >
-            {restarting ? 'Restarting...' : 'Save & Restart'}
+            {restarting ? t('sessions.settings.restarting') : t('sessions.settings.saveAndRestart')}
           </button>
         )}
         <button
@@ -346,7 +347,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           disabled={restarting}
           className="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent disabled:opacity-40"
         >
-          Reset
+          {t('common.reset')}
         </button>
       </div>
     </div>

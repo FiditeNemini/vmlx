@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Pencil, Trash2, X, Check, MessageSquare, Search, Trash } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 interface ChatSummary {
   id: string
@@ -51,6 +52,7 @@ function groupByDate(chats: ChatSummary[]): DateGroup[] {
 }
 
 export function ChatHistory({ currentChatId, onChatSelect, searchQuery }: ChatHistoryProps) {
+  const { t } = useTranslation()
   const [chats, setChats] = useState<ChatSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -100,7 +102,7 @@ export function ChatHistory({ currentChatId, onChatSelect, searchQuery }: ChatHi
     // vmlx#70: shift-click skips the confirm dialog for quick-delete mode
     // (matches the convention @scannermobs asked for — other apps use
     // shift as a modifier for destructive actions).
-    if (!e.shiftKey && !confirm('Delete this chat?')) return
+    if (!e.shiftKey && !confirm(t('layout.chatHistory.deleteConfirm'))) return
     await window.api.chat.delete(id)
     // Deselect if the deleted chat was the active one
     if (id === currentChatId) {
@@ -116,10 +118,7 @@ export function ChatHistory({ currentChatId, onChatSelect, searchQuery }: ChatHi
   const handleClearAll = async () => {
     const total = chats.length
     if (total === 0) return
-    if (!confirm(
-      `Delete ALL ${total} chat${total === 1 ? '' : 's'} across every model?\n\n` +
-      `This wipes the chat rows and their messages. Cannot be undone.`
-    )) return
+    if (!confirm(t('layout.chatHistory.clearAllConfirm', { n: total }))) return
     try {
       const res = await window.api.chat.deleteAll()
       if (!res?.success) {
@@ -141,7 +140,7 @@ export function ChatHistory({ currentChatId, onChatSelect, searchQuery }: ChatHi
   const groups = groupByDate(filtered)
 
   if (loading) {
-    return <div className="px-3 py-4 text-xs text-muted-foreground">Loading chats...</div>
+    return <div className="px-3 py-4 text-xs text-muted-foreground">{t('layout.chatHistory.loading')}</div>
   }
 
   if (filtered.length === 0) {
@@ -150,13 +149,13 @@ export function ChatHistory({ currentChatId, onChatSelect, searchQuery }: ChatHi
         {searchQuery ? (
           <>
             <Search className="h-5 w-5 text-muted-foreground/40 mb-2" />
-            <span className="text-xs text-muted-foreground">No chats match your search</span>
+            <span className="text-xs text-muted-foreground">{t('layout.chatHistory.noResults')}</span>
           </>
         ) : (
           <>
             <MessageSquare className="h-5 w-5 text-muted-foreground/40 mb-2" />
-            <span className="text-xs text-muted-foreground">No chats yet</span>
-            <span className="text-[10px] text-muted-foreground/50 mt-0.5">Start a new chat to begin</span>
+            <span className="text-xs text-muted-foreground">{t('layout.chatHistory.empty')}</span>
+            <span className="text-[10px] text-muted-foreground/50 mt-0.5">{t('layout.chatHistory.emptyHint')}</span>
           </>
         )}
       </div>
@@ -169,24 +168,24 @@ export function ChatHistory({ currentChatId, onChatSelect, searchQuery }: ChatHi
       {chats.length > 0 && !searchQuery && (
         <div className="px-3 pt-2 pb-1 flex items-center justify-between border-b border-border/40">
           <span className="text-[10px] text-muted-foreground/70">
-            {chats.length} chat{chats.length === 1 ? '' : 's'} • shift-click × to skip confirm
+            {t('layout.chatHistory.chatCountHint', { n: chats.length })}
           </span>
           <button
             type="button"
             onClick={handleClearAll}
             className="text-[10px] text-destructive hover:text-destructive/80 hover:underline flex items-center gap-1"
-            aria-label="Clear all chats"
-            title="Delete every chat across every model (with confirm)"
+            aria-label={t('layout.chatHistory.clearAllAria')}
+            title={t('layout.chatHistory.clearAllTitle')}
           >
             <Trash className="h-3 w-3" />
-            Clear All
+            {t('layout.chatHistory.clearAll')}
           </button>
         </div>
       )}
       {groups.map(group => (
         <div key={group.label}>
           <div className="px-3 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            {group.label}
+            {t(`layout.chatHistory.group${group.label.replace(/\s+/g, '')}`)}
           </div>
           {group.chats.map(chat => (
             <div

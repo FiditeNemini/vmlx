@@ -32,7 +32,8 @@
     "retry": "再試行",
     "open": "開く",
     "dismiss": "閉じる",
-    "language": "言語"
+    "language": "言語",
+    "or": "または"
   },
   "status": {
     "running": "実行中",
@@ -147,6 +148,11 @@
     "quickStart": "クイックスタート"
   },
   "app": {
+    "code": {
+      "title": "コード",
+      "description": "AI エージェント、ファイルブラウザー、統合ターミナルを備えた IDE 風のコーディング環境です。",
+      "comingSoon": "近日公開"
+    },
     "mode": {
       "code": "コード",
       "chat": "チャット",
@@ -164,7 +170,21 @@
       "desc": "Apple Silicon 向けローカル AI 推論",
       "creator": "Jinho Jang が作成",
       "language": "言語",
-      "settings": "情報と設定"
+      "settings": "情報と設定",
+      "version": "バージョン {version}",
+      "copyright": "© {year} Eric Jang. All rights reserved.",
+      "apiKeysTitle": "API キー",
+      "braveKey": "Brave Search API キー",
+      "braveRequired": "組み込みツールが有効な場合、web_search ツールに必要です。",
+      "getFreeKey": "無料キーを取得",
+      "savedKeyPlaceholder": "保存済みキーが設定されています（新しいキーで置換）",
+      "show": "表示",
+      "hide": "非表示",
+      "saved": "保存済み",
+      "hfToken": "HuggingFace トークン",
+      "hfRequired": "制限付きモデル（Flux、Llama など）のダウンロードに必要です。",
+      "getToken": "トークンを取得",
+      "savedTokenPlaceholder": "保存済みトークンが設定されています（新しいトークンで置換）"
     }
   },
   "titlebar": {
@@ -187,10 +207,30 @@
       "empty": "チャットがありません",
       "emptyHint": "新規チャットを開始してください",
       "clearAllAria": "すべてのチャットをクリア",
-      "clearAllTitle": "すべてのモデルのすべてのチャットを削除（確認あり）"
+      "clearAllTitle": "すべてのモデルのすべてのチャットを削除（確認あり）",
+      "clearAll": "すべて消去",
+      "clearAllConfirm": "すべてのモデルのチャット {n} 件を削除しますか？\n\nチャットとメッセージが削除され、元に戻せません。",
+      "chatCountHint": "チャット {n} 件 • Shift を押しながら × をクリックすると確認を省略",
+      "groupToday": "今日",
+      "groupYesterday": "昨日",
+      "groupThisWeek": "今週",
+      "groupThisMonth": "今月",
+      "groupOlder": "それ以前"
+    },
+    "inferenceMode": {
+      "casual": "カジュアル",
+      "expert": "エキスパート",
+      "casualTitle": "カジュアルモード — 簡易チャット操作",
+      "expertTitle": "エキスパートモード — すべての推論操作"
     },
     "chatToolbar": {
       "noModels": "モデルが設定されていません。",
+      "addLocalModel": "ローカルモデルを追加",
+      "connectRemoteEndpoint": "リモートエンドポイントに接続",
+      "modelFallback": "モデル",
+      "noModelSelected": "モデルが選択されていません",
+      "remoteCreateFailed": "リモートセッションの作成に失敗しました",
+      "remoteConnectFailed": "接続に失敗しました",
       "apiUrlPlaceholder": "API URL (例: https://api.openai.com)",
       "modelNamePlaceholder": "モデル名 (例: gpt-4o)",
       "apiKeyPlaceholder": "API キー",
@@ -225,6 +265,25 @@
         "unknownError": "不明なエラー",
         "failedToStart": "起動に失敗しました"
       }
+    },
+    "quickStart": {
+      "emptyBody": "サーバータブでモデルを読み込み、ここに戻ってチャットを開始してください。",
+      "chatWithModel": "{model} とチャット",
+      "title": "クイックスタートガイド",
+      "textModelsTitle": "テキストモデル",
+      "textModelsBody": "チャット、コーディング、推論に最適です。すべての MLX または JANG モデルに対応します。",
+      "textModelsRecommended": "推奨: Qwen3、Llama 4、Gemma 4、Nemotron、DeepSeek、Mistral",
+      "visionModelsTitle": "ビジョンモデル (VLM)",
+      "visionModelsBody": "チャットに画像を添付できます。ビジョンエンコーダーを持つモデルは VLM として検出されます。",
+      "visionModelsRecommended": "推奨: Gemma 4 E2B/E4B（標準 4 ビット）、Qwen3.5-VL、Mistral Small 4",
+      "smeltTitle": "大規模 MoE モデル + Smelt",
+      "smeltBody": "モデルが RAM に収まりませんか？サーバー設定で Smelt を有効にすると、一部のエキスパートだけを読み込みます。速度と引き換えにメモリを 45-68% 節約します。",
+      "smeltNote": "Smelt は VLM（ビジョン）モードを無効にします。テキスト専用モデルで使用してください。",
+      "tipsTitle": "ヒント",
+      "tipLooping": "ループする場合は、チャット設定の反復ペナルティを上げてください（1.1-1.3 を推奨）。",
+      "tipFirstResponse": "最初の応答が遅い場合はモデル重みのページングが原因です。2 回目は速くなります。",
+      "tipJang": "JANG 2 ビットモデルは小型ですが品質が低めです。最良の結果には JANG 4M または標準 4 ビットをお試しください。",
+      "tipSettings": "すべての設定はモデルごとに自動保存され、モデルを切り替えると設定も追従します。"
     },
     "list": {
       "newChat": "+ 新規チャット",
@@ -390,7 +449,9 @@
       "send": "送信",
       "editTitle": "編集して再送信",
       "copyTitle": "応答をコピー",
-      "regenerateTitle": "応答を再生成"
+      "regenerateTitle": "応答を再生成",
+      "waitingForResponse": "モデルの応答を待っています...",
+      "noVisibleResponse": "表示可能な応答は生成されませんでした。"
     },
     "messages": {
       "emptyPrimary": "メッセージを送信して会話を開始",
@@ -452,6 +513,12 @@
     }
   },
   "sessions": {
+    "toolbar": {
+      "restartModel": "モデルを再起動",
+      "restart": "再起動",
+      "startModel": "モデルを起動",
+      "stopModel": "モデルを停止"
+    },
     "card": {
       "remoteBadge": "リモート",
       "imageBadge": "画像",
@@ -537,8 +604,13 @@
     },
     "create": {
       "title": "セッションを作成",
+      "localModel": "ローカルモデル",
+      "download": "ダウンロード",
+      "remoteEndpoint": "リモートエンドポイント",
+      "remoteHint": "OpenAI 互換 API エンドポイントに接続します。",
       "apiBaseUrl": "API ベース URL *",
       "apiBaseUrlPlaceholder": "https://api.openai.com",
+      "apiBaseUrlHelp": "OpenAI 互換 API のベース URL（例: https://api.openai.com、http://localhost:8000）",
       "modelName": "モデル名 *",
       "modelNamePlaceholder": "gpt-4o、llama-3.1-8b など",
       "apiKey": "API キー",
@@ -547,12 +619,19 @@
       "organizationPlaceholder": "任意",
       "localHint": "サーブするローカル MLX モデルを選択",
       "filterPlaceholder": "モデルを絞り込み...",
+      "rescan": "再スキャン",
+      "directories": "ディレクトリ",
+      "manageDirectories": "ディレクトリを管理",
       "scanning": "モデルをスキャン中...",
       "noModels": "モデルが見つかりません",
+      "noModelsHelp": "上の「ディレクトリ」をクリックしてモデルフォルダを追加するか、モデルを ~/.mlxstudio/models/ または ~/.cache/huggingface/hub/ に配置してください。",
       "downloadHint": "モデルをダウンロードするには、ターミナルで実行:",
+      "browseModels": "その他の MLX モデルを見る:",
       "deleteFailed": "削除に失敗しました: {error}",
       "loadingModel": "モデルを読み込み中",
       "launchFailed": "起動に失敗しました",
+      "backToConfig": "設定に戻る",
+      "launchSession": "セッションを起動",
       "step2": "ステップ 2: 構成",
       "imageServerSettings": "画像サーバー設定",
       "imageMode": "画像モード",
@@ -656,11 +735,21 @@
       "jangNoticeBody": "2026/3/19 以降、すべての JANG モデルは適切なチャットテンプレートを含めるため HuggingFace (JANGQ-AI) から再ダウンロードする必要があります。更新されていないモデルでは思考のオン/オフが正しく動作しないか、一部モデルがループする可能性があります。",
       "imageEditHeader": "画像編集サーバー",
       "imageGenHeader": "画像生成サーバー",
+      "imageEditBadge": "画像編集",
+      "imageGenBadge": "画像生成",
+      "switchImageEditor": "画像エディターに切り替え",
+      "switchImageGenerator": "画像ジェネレーターに切り替え",
+      "imageEditor": "画像エディター",
+      "imageGenerator": "画像生成",
       "imageEditBody": "これは画像編集モデルです。Image タブで画像をアップロードし、プロンプトで編集してください。",
       "imageGenBody": "これは画像生成モデルです。Image タブでテキストプロンプトから画像を生成してください。",
       "openImageEditor": "画像エディタを開く",
       "openImageGenerator": "画像ジェネレータを開く",
       "loadProgressFallback": "サーバーを起動中...",
+      "loadingSession": "セッションを読み込み中...",
+      "benchPanelTitle": "ベンチマーク",
+      "embeddingsPanelTitle": "埋め込み",
+      "performancePanelTitle": "パフォーマンス",
       "toast": {
         "failedToStartChat": "チャットの作成に失敗しました",
         "failedToStopServer": "サーバーの停止に失敗しました",

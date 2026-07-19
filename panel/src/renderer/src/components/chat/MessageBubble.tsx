@@ -10,6 +10,7 @@ import { InlineToolCall, InlineToolGroup } from './InlineToolCall'
 import { TTSPlayer } from './VoiceChat'
 import { formatTimestamp, parseContentArray, getMetricsItems, type MessageMetrics } from './chat-utils'
 import { reasoningSegmentsForDisplay as getReasoningSegmentsForDisplay } from '../../../../shared/interleavedReasoning'
+import { useTranslation } from '../../i18n'
 
 interface Message {
   id: string
@@ -35,25 +36,21 @@ interface MessageBubbleProps {
   onEdit?: (messageId: string, newContent: string) => void
 }
 
-// Custom renderer: wraps code blocks with a header bar (language label + copy button)
-const renderer = new marked.Renderer()
-renderer.code = (code, lang) => {
+// Custom renderer: wraps code blocks with a localized header bar.
+function parseMarkdown(markdown: string, defaultLanguage: string, copyLabel: string): string {
+  const renderer = new marked.Renderer()
+  renderer.code = (code, lang) => {
   let highlighted: string
   if (lang && hljs.getLanguage(lang)) {
     highlighted = hljs.highlight(code, { language: lang }).value
   } else {
     highlighted = hljs.highlightAuto(code).value
   }
-  const headerHtml = `<div class="code-header"><span class="code-lang">${lang || 'code'}</span><button class="code-copy-btn">Copy</button></div>`
+  const headerHtml = `<div class="code-header"><span class="code-lang">${lang || defaultLanguage}</span><button class="code-copy-btn">${copyLabel}</button></div>`
   return `<div class="code-block-wrapper">${headerHtml}<pre><code class="hljs language-${lang || 'plaintext'}">${highlighted}</code></pre></div>`
+  }
+  return marked.parse(markdown, { renderer, breaks: true, gfm: true }) as string
 }
-
-// Configure marked with code highlighting and custom renderer
-marked.setOptions({
-  renderer,
-  breaks: true,
-  gfm: true
-})
 
 /**
  * Sanitize HTML using DOMPurify — allows safe markdown output, blocks XSS.
@@ -177,6 +174,7 @@ function useTypewriter(fullContent: string, isStreaming: boolean): string {
 }
 
 export const MessageBubble = memo(function MessageBubble({ message, isStreaming, metrics, reasoningContent, reasoningSegments, reasoningDone, toolStatuses, warnings, sessionId, sessionEndpoint, isLastAssistant, onRegenerate, onEdit }: MessageBubbleProps) {
+  const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
   const [zoomedImage, setZoomedImage] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
@@ -195,10 +193,10 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
     const code = btn.closest('.code-block-wrapper')?.querySelector('code')
     if (code) {
       navigator.clipboard.writeText(code.textContent || '')
-      btn.textContent = 'Copied!'
-      setTimeout(() => { btn.textContent = 'Copy' }, 1500)
+      btn.textContent = t('chat.bubble.codeCopied')
+      setTimeout(() => { btn.textContent = t('chat.bubble.codeCopy') }, 1500)
     }
-  }, [])
+  }, [t])
 
   // Group tool statuses for inline rendering
   const toolGroups = useMemo(() => {
@@ -237,7 +235,11 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
   // Render a DOMPurify-sanitized markdown segment
   const renderMarkdownSegment = useCallback((text: string, key: string) => {
     if (!text) return null
-    const safeHtml = sanitizeHtml(marked.parse(text) as string)
+    const safeHtml = sanitizeHtml(parseMarkdown(
+      text,
+      t('chat.bubble.codeDefaultLang'),
+      t('chat.bubble.codeCopy')
+    ))
     return (
       <div
         key={key}
@@ -246,7 +248,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
         onClick={handleProseClick}
       />
     )
-  }, [handleProseClick])
+  }, [handleProseClick, t])
 
   const renderUserContent = () => {
     const contentParts = parseContentArray(message.content)
@@ -273,7 +275,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
                 <img
                   key={i}
                   src={img.image_url!.url}
-                  alt={`Attached image ${i + 1}`}
+                  alt={t('chat.bubble.imageAlt', { n: i + 1 })}
                   className="max-w-[300px] max-h-[200px] rounded-md border border-white/10 cursor-pointer hover:opacity-90 transition-opacity object-contain"
                   onClick={() => setZoomedImage(img.image_url!.url)}
                 />
@@ -340,7 +342,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
         elements.push(
           <div key="processing" className="flex items-center gap-2 text-muted-foreground text-xs py-1">
             <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${isGenerating ? 'bg-primary' : 'bg-warning'}`} />
-            <span>{isGenerating ? 'Generating tool call...' : 'Processing tool results...'}</span>
+            <span>{isGenerating ? t('chat.bubble.generatingTool') : t('chat.bubble.processingTool')}</span>
           </div>
         )
       }
@@ -353,7 +355,11 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
     }
 
     if (!content.trim()) return null
-    const safeHtml = sanitizeHtml(marked.parse(content) as string)
+    const safeHtml = sanitizeHtml(parseMarkdown(
+      content,
+      t('chat.bubble.codeDefaultLang'),
+      t('chat.bubble.codeCopy')
+    ))
     return (
       <div
         className={proseClasses}
@@ -420,8 +426,8 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
               }}
             />
             <div className="flex gap-2 mt-1.5">
-              <button onClick={() => setEditing(false)} className="text-xs text-muted-foreground hover:text-foreground px-2 py-1">Cancel</button>
-              <button onClick={() => { if (editText.trim()) { onEdit(message.id, editText.trim()); setEditing(false) } }} className="text-xs bg-primary text-primary-foreground px-3 py-1 rounded hover:bg-primary/90">Send</button>
+              <button onClick={() => setEditing(false)} className="text-xs text-muted-foreground hover:text-foreground px-2 py-1">{t('chat.bubble.cancel')}</button>
+              <button onClick={() => { if (editText.trim()) { onEdit(message.id, editText.trim()); setEditing(false) } }} className="text-xs bg-primary text-primary-foreground px-3 py-1 rounded hover:bg-primary/90">{t('chat.bubble.send')}</button>
             </div>
           </div>
         </div>
@@ -441,7 +447,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
                 setEditing(true)
               }}
               className="text-muted-foreground/40 hover:text-foreground transition-colors p-1"
-              title="Edit & resend"
+              title={t('chat.bubble.editTitle')}
             >
               <Pencil className="h-3 w-3" />
             </button>
@@ -467,13 +473,15 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
           >
             <img
               src={zoomedImage}
-              alt="Zoomed"
+              alt={t('chat.bubble.zoomedAlt')}
               className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg"
               onClick={e => e.stopPropagation()}
             />
             <button
               onClick={() => setZoomedImage(null)}
               className="absolute top-4 right-4 text-white/80 hover:text-white text-2xl font-bold"
+              aria-label={t('common.close')}
+              title={t('common.close')}
             >
               x
             </button>
@@ -501,7 +509,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
               <button
                 onClick={() => copyToClipboard(message.content)}
                 className="text-muted-foreground/50 hover:text-foreground transition-colors"
-                title="Copy response"
+                title={t('chat.bubble.copyTitle')}
               >
                 {copied
                   ? <Check className="h-3 w-3 text-success" />
@@ -512,7 +520,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
                 <button
                   onClick={onRegenerate}
                   className="text-muted-foreground/50 hover:text-foreground transition-colors"
-                  title="Regenerate response"
+                  title={t('chat.bubble.regenerateTitle')}
                 >
                   <RefreshCw className="h-3 w-3" />
                 </button>
@@ -545,13 +553,13 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
           {isEmptyAssistant && isStreaming && (
             <div className="flex items-center gap-2 text-muted-foreground py-1">
               <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-              <span>Waiting for model response...</span>
+              <span>{t('chat.bubble.waitingForResponse')}</span>
             </div>
           )}
           {isEmptyAssistant && !isStreaming && (
             <div className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning-foreground/90">
               <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 text-warning" />
-              <span>No visible response was produced.</span>
+              <span>{t('chat.bubble.noVisibleResponse')}</span>
             </div>
           )}
         </div>

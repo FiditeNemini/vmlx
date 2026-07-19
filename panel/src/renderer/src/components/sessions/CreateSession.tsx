@@ -3,6 +3,7 @@ import { ArrowLeft } from 'lucide-react'
 import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG } from './SessionConfigForm'
 import { DownloadTab } from './DownloadTab'
 import { DirectoryManager } from './DirectoryManager'
+import { useTranslation } from '../../i18n'
 
 function hasDeclaredSamplingDefaults(gen: any): boolean {
   return !!gen && (
@@ -60,6 +61,7 @@ interface CreateSessionProps {
 }
 
 export function CreateSession({ initialModelPath, onBack, onCreated, filterType: filterTypeProp }: CreateSessionProps) {
+  const { t } = useTranslation()
   const [sessionType, setSessionType] = useState<'local' | 'remote' | 'download'>('local')
   const [step, setStep] = useState<1 | 2>(initialModelPath ? 2 : 1)
   const [models, setModels] = useState<ModelInfo[]>([])
@@ -429,9 +431,9 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         <div className="max-w-3xl mx-auto">
           <div className="flex items-center gap-3 mb-6">
             <button onClick={onBack} className="text-muted-foreground hover:text-foreground flex items-center gap-1">
-              <ArrowLeft className="h-3.5 w-3.5" /> Back
+              <ArrowLeft className="h-3.5 w-3.5" /> {t('common.back')}
             </button>
-            <h1 className="text-2xl font-bold">Create Session</h1>
+            <h1 className="text-2xl font-bold">{t('sessions.create.title')}</h1>
           </div>
 
           {/* Session Type Selector */}
@@ -443,7 +445,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                 : 'hover:bg-accent text-muted-foreground'
                 }`}
             >
-              Local Model
+              {t('sessions.create.localModel')}
             </button>
             <button
               onClick={() => setSessionType('download')}
@@ -452,7 +454,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                 : 'hover:bg-accent text-muted-foreground'
                 }`}
             >
-              Download
+              {t('sessions.create.download')}
             </button>
             <button
               onClick={() => setSessionType('remote')}
@@ -461,7 +463,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                 : 'hover:bg-accent text-muted-foreground'
                 }`}
             >
-              Remote Endpoint
+              {t('sessions.create.remoteEndpoint')}
             </button>
           </div>
 
@@ -471,28 +473,28 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           ) : sessionType === 'remote' ? (
             <div className="space-y-4">
               <p className="text-sm text-muted-foreground">
-                Connect to any OpenAI-compatible API endpoint.
+                {t('sessions.create.remoteHint')}
               </p>
 
               <div>
-                <label className="text-sm font-medium block mb-1">API Base URL *</label>
+                <label className="text-sm font-medium block mb-1">{t('sessions.create.apiBaseUrl')}</label>
                 <input
                   type="url"
-                  placeholder="https://api.openai.com"
+                  placeholder={t('sessions.create.apiBaseUrlPlaceholder')}
                   value={remoteUrl}
                   onChange={(e) => setRemoteUrl(e.target.value)}
                   className="w-full px-3 py-2 bg-background border border-input rounded text-sm"
                 />
                 <p className="text-xs text-muted-foreground mt-1">
-                  Base URL of the OpenAI-compatible API (e.g., https://api.openai.com, http://localhost:8000)
+                  {t('sessions.create.apiBaseUrlHelp')}
                 </p>
               </div>
 
               <div>
-                <label className="text-sm font-medium block mb-1">Model Name *</label>
+                <label className="text-sm font-medium block mb-1">{t('sessions.create.modelName')}</label>
                 <input
                   type="text"
-                  placeholder="gpt-4o, llama-3.1-8b, etc."
+                  placeholder={t('sessions.create.modelNamePlaceholder')}
                   value={remoteModel}
                   onChange={(e) => setRemoteModel(e.target.value)}
                   className="w-full px-3 py-2 bg-background border border-input rounded text-sm"
@@ -500,10 +502,10 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
               </div>
 
               <div>
-                <label className="text-sm font-medium block mb-1">API Key</label>
+                <label className="text-sm font-medium block mb-1">{t('sessions.create.apiKey')}</label>
                 <input
                   type="password"
-                  placeholder="sk-..."
+                  placeholder={t('sessions.create.apiKeyPlaceholder')}
                   value={remoteApiKey}
                   onChange={(e) => setRemoteApiKey(e.target.value)}
                   className="w-full px-3 py-2 bg-background border border-input rounded text-sm"
@@ -511,10 +513,10 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
               </div>
 
               <div>
-                <label className="text-sm font-medium block mb-1">Organization</label>
+                <label className="text-sm font-medium block mb-1">{t('sessions.create.organization')}</label>
                 <input
                   type="text"
-                  placeholder="Optional"
+                  placeholder={t('sessions.create.organizationPlaceholder')}
                   value={remoteOrganization}
                   onChange={(e) => setRemoteOrganization(e.target.value)}
                   className="w-full px-3 py-2 bg-background border border-input rounded text-sm"
@@ -532,18 +534,18 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                 disabled={remoteConnecting || !remoteUrl.trim() || !remoteModel.trim()}
                 className="px-6 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {remoteConnecting ? 'Connecting...' : 'Connect'}
+                {remoteConnecting ? t('common.connecting') : t('common.connect')}
               </button>
             </div>
           ) : (
             <>
-              <span className="text-sm text-muted-foreground block mb-4">Select a local MLX model to serve</span>
+              <span className="text-sm text-muted-foreground block mb-4">{t('sessions.create.localHint')}</span>
 
               {/* Search + Actions Row */}
               <div className="flex items-center gap-2 mb-4">
                 <input
                   type="text"
-                  placeholder="Filter models..."
+                  placeholder={t('sessions.create.filterPlaceholder')}
                   value={modelFilter}
                   onChange={(e) => setModelFilter(e.target.value)}
                   className="flex-1 px-3 py-2 bg-background border border-input rounded text-sm"
@@ -553,14 +555,14 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                   disabled={scanLoading}
                   className="px-3 py-2 text-sm border border-border rounded hover:bg-accent disabled:opacity-50 whitespace-nowrap"
                 >
-                  {scanLoading ? 'Scanning...' : 'Rescan'}
+                  {scanLoading ? t('sessions.create.scanning') : t('sessions.create.rescan')}
                 </button>
                 <button
                   onClick={() => setShowDirManager(!showDirManager)}
                   className={`px-3 py-2 text-sm border rounded whitespace-nowrap ${showDirManager ? 'border-primary bg-primary/10 text-primary' : 'border-border hover:bg-accent'
                     }`}
                 >
-                  Directories
+                  {t('sessions.create.directories')}
                 </button>
               </div>
 
@@ -580,21 +582,20 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
               )}
 
               {scanLoading ? (
-                <p className="text-muted-foreground">Scanning for models...</p>
+                <p className="text-muted-foreground">{t('sessions.create.scanning')}</p>
               ) : filteredModels.length === 0 ? (
                 <div className="text-center py-8">
-                  <p className="text-muted-foreground mb-2">No models found</p>
+                  <p className="text-muted-foreground mb-2">{t('sessions.create.noModels')}</p>
                   <p className="text-xs text-muted-foreground mb-4">
-                    Click "Directories" above to add your model folders,
-                    or place models in ~/.mlxstudio/models/ or ~/.cache/huggingface/hub/
+                    {t('sessions.create.noModelsHelp')}
                   </p>
                   <div className="mb-4 p-3 bg-card border border-border rounded-lg text-left">
-                    <p className="text-xs text-muted-foreground mb-2">To download a model, run in Terminal:</p>
+                    <p className="text-xs text-muted-foreground mb-2">{t('sessions.create.downloadHint')}</p>
                     <div className="p-2 bg-muted rounded font-mono text-[11px] text-foreground select-all">
                       huggingface-cli download mlx-community/Llama-3.2-3B-Instruct-4bit --local-dir ~/.cache/huggingface/hub/mlx-community/Llama-3.2-3B-Instruct-4bit
                     </div>
                     <p className="text-[10px] text-muted-foreground mt-2">
-                      Browse more MLX models at{' '}
+                      {t('sessions.create.browseModels')}{' '}
                       <span className="text-primary select-all">huggingface.co/mlx-community</span>
                     </p>
                   </div>
@@ -602,7 +603,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                     onClick={() => setShowDirManager(true)}
                     className="px-4 py-2 text-sm border border-border rounded hover:bg-accent"
                   >
-                    Manage Directories
+                    {t('sessions.create.manageDirectories')}
                   </button>
                 </div>
               ) : (
@@ -751,7 +752,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
     return (
       <div className="p-6 overflow-auto h-full">
         <div className="max-w-3xl mx-auto">
-          <h1 className="text-2xl font-bold mb-2">Loading Model</h1>
+          <h1 className="text-2xl font-bold mb-2">{t('sessions.create.loadingModel')}</h1>
           <p className="text-muted-foreground text-sm mb-4">
             {selectedModel.split('/').pop()}
           </p>
@@ -766,7 +767,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
 
           {launchError && (
             <div className="mt-4 p-4 bg-destructive/10 border border-destructive/30 rounded-lg">
-              <h3 className="text-sm font-bold text-destructive mb-2">Launch Failed</h3>
+              <h3 className="text-sm font-bold text-destructive mb-2">{t('sessions.create.launchFailed')}</h3>
               <p className="text-sm text-destructive/90 whitespace-pre-wrap">{launchError}</p>
               <div className="flex gap-2 mt-3">
                 <button
@@ -777,7 +778,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                   }}
                   className="px-4 py-1.5 text-sm bg-destructive text-destructive-foreground rounded hover:bg-destructive/90"
                 >
-                  Back to Config
+                  {t('sessions.create.backToConfig')}
                 </button>
                 <button
                   onClick={() => {
@@ -787,7 +788,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                   }}
                   className="px-4 py-1.5 text-sm border border-border rounded hover:bg-accent"
                 >
-                  Retry
+                  {t('common.retry')}
                 </button>
               </div>
             </div>
@@ -803,10 +804,10 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
       <div className="max-w-2xl mx-auto">
         <div className="flex items-center gap-3 mb-6">
           <button onClick={() => setStep(1)} className="text-muted-foreground hover:text-foreground flex items-center gap-1">
-            <ArrowLeft className="h-3.5 w-3.5" /> Back
+            <ArrowLeft className="h-3.5 w-3.5" /> {t('common.back')}
           </button>
-          <h1 className="text-2xl font-bold">Create Session</h1>
-          <span className="text-sm text-muted-foreground">Step 2: Configure</span>
+          <h1 className="text-2xl font-bold">{t('sessions.create.title')}</h1>
+          <span className="text-sm text-muted-foreground">{t('sessions.create.step2')}</span>
         </div>
 
         {/* Pre-launch error banner */}
@@ -818,44 +819,44 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
 
         {/* Selected model */}
         <div className="mb-4 p-3 bg-card border border-border rounded">
-          <span className="text-xs text-muted-foreground">Model</span>
+          <span className="text-xs text-muted-foreground">{t('sessions.create.modelLabel')}</span>
           <p className="font-medium text-sm truncate">{selectedModel}</p>
         </div>
 
         {/* Config Form — image models get simplified settings */}
         {(autoDetectedType || filterTypeProp) === 'image' ? (
           <div className="space-y-4 border border-border rounded p-4">
-            <h3 className="text-sm font-medium">Image Server Settings</h3>
+            <h3 className="text-sm font-medium">{t('sessions.create.imageServerSettings')}</h3>
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div>
-                <label className="text-xs text-muted-foreground block mb-1">Image Mode</label>
+                <label className="text-xs text-muted-foreground block mb-1">{t('sessions.create.imageMode')}</label>
                 <select value={config.imageMode || 'generate'} onChange={e => handleChange('imageMode', e.target.value)} className="w-full px-2 py-1.5 bg-background border border-input rounded text-sm">
-                  <option value="generate">Image Generation</option>
-                  <option value="edit">Image Editing</option>
+                  <option value="generate">{t('sessions.create.imageModeGen')}</option>
+                  <option value="edit">{t('sessions.create.imageModeEdit')}</option>
                 </select>
               </div>
               <div>
-                <label className="text-xs text-muted-foreground block mb-1">Quantization</label>
+                <label className="text-xs text-muted-foreground block mb-1">{t('sessions.create.quantization')}</label>
                 <select value={config.imageQuantize ?? 0} onChange={e => handleChange('imageQuantize', parseInt(e.target.value))} className="w-full px-2 py-1.5 bg-background border border-input rounded text-sm">
-                  <option value={0}>Full Precision</option>
+                  <option value={0}>{t('sessions.create.quantFullPrecision')}</option>
                   <option value={4}>4-bit</option>
                   <option value={8}>8-bit</option>
                 </select>
               </div>
               <div>
-                <label className="text-xs text-muted-foreground block mb-1">Host</label>
+                <label className="text-xs text-muted-foreground block mb-1">{t('sessions.create.host')}</label>
                 <input type="text" value={config.host} onChange={e => handleChange('host', e.target.value)} className="w-full px-2 py-1.5 bg-background border border-input rounded text-sm" />
               </div>
               <div>
-                <label className="text-xs text-muted-foreground block mb-1">Port</label>
+                <label className="text-xs text-muted-foreground block mb-1">{t('sessions.create.port')}</label>
                 <input type="number" value={config.port} onChange={e => handleChange('port', parseInt(e.target.value) || 8000)} className="w-full px-2 py-1.5 bg-background border border-input rounded text-sm" />
               </div>
               <div>
-                <label className="text-xs text-muted-foreground block mb-1">API Key (optional)</label>
-                <input type="password" value={config.apiKey} onChange={e => handleChange('apiKey', e.target.value)} placeholder="Leave empty for no auth" className="w-full px-2 py-1.5 bg-background border border-input rounded text-sm" />
+                <label className="text-xs text-muted-foreground block mb-1">{t('sessions.create.apiKeyOptional')}</label>
+                <input type="password" value={config.apiKey} onChange={e => handleChange('apiKey', e.target.value)} placeholder={t('sessions.config.apiKeyPlaceholder')} className="w-full px-2 py-1.5 bg-background border border-input rounded text-sm" />
               </div>
               <div>
-                <label className="text-xs text-muted-foreground block mb-1">Log Level</label>
+                <label className="text-xs text-muted-foreground block mb-1">{t('sessions.create.logLevel')}</label>
                 <select value={config.logLevel || 'INFO'} onChange={e => handleChange('logLevel', e.target.value)} className="w-full px-2 py-1.5 bg-background border border-input rounded text-sm">
                   <option value="DEBUG">DEBUG</option>
                   <option value="INFO">INFO</option>
@@ -866,8 +867,8 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             </div>
             <p className="text-xs text-muted-foreground">
               {(config.imageMode === 'edit')
-                ? <>The image server exposes a <code>/v1/images/edits</code> endpoint for editing images with prompts. Use the Image tab or any API client.</>
-                : <>The image server exposes a <code>/v1/images/generations</code> endpoint (OpenAI-compatible). Use the Image tab or any API client to generate images.</>
+                ? t('sessions.create.imageServerEditHint')
+                : t('sessions.create.imageServerGenHint')
               }
             </p>
           </div>
@@ -878,14 +879,14 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         {/* Launch */}
         <div className="flex gap-3 mt-6 pb-6">
           <button onClick={() => setStep(1)} className="px-4 py-2 border border-border rounded hover:bg-accent">
-            Back
+            {t('common.back')}
           </button>
           <button
             onClick={handleLaunch}
             disabled={launching || !selectedModel}
             className="px-6 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Launch Session
+            {t('sessions.create.launchSession')}
           </button>
         </div>
       </div>

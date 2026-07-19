@@ -10142,9 +10142,9 @@ class TestChatHistoryClearAllButton:
     def test_chat_history_has_clear_all_button(self):
         """Clear All button must be rendered with an accessible label."""
         src = Path(self.PANEL_CH).read_text()
-        assert 'aria-label="Clear all chats"' in src, (
-            "ChatHistory must expose Clear All button with accessible "
-            "label for screen readers + keyboard navigation"
+        assert "aria-label={t('layout.chatHistory.clearAllAria')}" in src, (
+            "ChatHistory must expose a localized Clear All accessible "
+            "label for screen readers and keyboard navigation"
         )
 
     def test_chat_history_has_shift_click_quick_delete(self):

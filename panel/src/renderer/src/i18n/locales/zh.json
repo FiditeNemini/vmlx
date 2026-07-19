@@ -32,7 +32,8 @@
     "retry": "重试",
     "open": "打开",
     "dismiss": "关闭",
-    "language": "语言"
+    "language": "语言",
+    "or": "或"
   },
   "status": {
     "running": "运行中",
@@ -147,6 +148,11 @@
     "quickStart": "快速开始"
   },
   "app": {
+    "code": {
+      "title": "代码",
+      "description": "集成 AI 智能体、文件浏览器和终端的 IDE 式编码环境。",
+      "comingSoon": "即将推出"
+    },
     "mode": {
       "code": "代码",
       "chat": "聊天",
@@ -164,7 +170,21 @@
       "desc": "Apple Silicon 的本地 AI 推理",
       "creator": "由 Jinho Jang 创建",
       "language": "语言",
-      "settings": "关于 & 设置"
+      "settings": "关于 & 设置",
+      "version": "版本 {version}",
+      "copyright": "© {year} Eric Jang。保留所有权利。",
+      "apiKeysTitle": "API 密钥",
+      "braveKey": "Brave Search API 密钥",
+      "braveRequired": "启用内置工具时，web_search 工具需要此密钥。",
+      "getFreeKey": "获取免费密钥",
+      "savedKeyPlaceholder": "已配置密钥（输入新密钥以替换）",
+      "show": "显示",
+      "hide": "隐藏",
+      "saved": "已保存",
+      "hfToken": "HuggingFace 令牌",
+      "hfRequired": "下载受限模型（Flux、Llama 等）时需要此令牌。",
+      "getToken": "获取令牌",
+      "savedTokenPlaceholder": "已配置令牌（输入新令牌以替换）"
     }
   },
   "titlebar": {
@@ -187,10 +207,30 @@
       "empty": "暂无聊天",
       "emptyHint": "开始新聊天以开始",
       "clearAllAria": "清除所有聊天",
-      "clearAllTitle": "删除每个模型下的所有聊天(会要求确认)"
+      "clearAllTitle": "删除每个模型下的所有聊天(会要求确认)",
+      "clearAll": "全部清除",
+      "clearAllConfirm": "删除所有模型中的全部 {n} 个聊天？\n\n这会清除聊天记录及其消息，且无法撤销。",
+      "chatCountHint": "{n} 个聊天 • 按住 Shift 点击 × 可跳过确认",
+      "groupToday": "今天",
+      "groupYesterday": "昨天",
+      "groupThisWeek": "本周",
+      "groupThisMonth": "本月",
+      "groupOlder": "更早"
+    },
+    "inferenceMode": {
+      "casual": "轻松",
+      "expert": "专家",
+      "casualTitle": "轻松模式 — 简化的聊天控制",
+      "expertTitle": "专家模式 — 完整的推理控制"
     },
     "chatToolbar": {
       "noModels": "未配置模型。",
+      "addLocalModel": "添加本地模型",
+      "connectRemoteEndpoint": "连接远程端点",
+      "modelFallback": "模型",
+      "noModelSelected": "未选择模型",
+      "remoteCreateFailed": "创建远程会话失败",
+      "remoteConnectFailed": "连接失败",
       "apiUrlPlaceholder": "API URL(例如 https://api.openai.com)",
       "modelNamePlaceholder": "模型名称(例如 gpt-4o)",
       "apiKeyPlaceholder": "API 密钥",
@@ -225,6 +265,25 @@
         "unknownError": "未知错误",
         "failedToStart": "启动失败"
       }
+    },
+    "quickStart": {
+      "emptyBody": "请先从服务器标签页加载模型，然后返回此处聊天。",
+      "chatWithModel": "与 {model} 聊天",
+      "title": "快速入门指南",
+      "textModelsTitle": "文本模型",
+      "textModelsBody": "适合聊天、编程和推理。支持任何 MLX 或 JANG 模型。",
+      "textModelsRecommended": "推荐：Qwen3、Llama 4、Gemma 4、Nemotron、DeepSeek、Mistral",
+      "visionModelsTitle": "视觉模型 (VLM)",
+      "visionModelsBody": "在聊天中附加图像。具有视觉编码器的模型会被识别为 VLM。",
+      "visionModelsRecommended": "推荐：Gemma 4 E2B/E4B（标准 4 位）、Qwen3.5-VL、Mistral Small 4",
+      "smeltTitle": "大型 MoE 模型 + Smelt",
+      "smeltBody": "模型太大无法装入内存？在服务器设置中启用 Smelt，仅加载部分专家。它以速度换取 45-68% 的内存节省。",
+      "smeltNote": "Smelt 会禁用 VLM（视觉）模式。请将 Smelt 用于纯文本模型。",
+      "tipsTitle": "提示",
+      "tipLooping": "出现循环？请在聊天设置中提高重复惩罚（建议 1.1-1.3）。",
+      "tipFirstResponse": "首次响应较慢？这是模型权重分页；第二条消息会更快。",
+      "tipJang": "JANG 2 位模型更紧凑但质量较低。为获得最佳效果，请尝试 JANG 4M 或标准 4 位。",
+      "tipSettings": "所有设置都会按模型自动保存。切换模型时，相应设置会自动跟随。"
     },
     "list": {
       "newChat": "+ 新建聊天",
@@ -390,7 +449,9 @@
       "send": "发送",
       "editTitle": "编辑并重新发送",
       "copyTitle": "复制响应",
-      "regenerateTitle": "重新生成响应"
+      "regenerateTitle": "重新生成响应",
+      "waitingForResponse": "正在等待模型响应...",
+      "noVisibleResponse": "未生成可见响应。"
     },
     "messages": {
       "emptyPrimary": "发送消息以开始对话",
@@ -452,6 +513,12 @@
     }
   },
   "sessions": {
+    "toolbar": {
+      "restartModel": "重启模型",
+      "restart": "重启",
+      "startModel": "启动模型",
+      "stopModel": "停止模型"
+    },
     "card": {
       "remoteBadge": "远程",
       "imageBadge": "图像",
@@ -537,8 +604,13 @@
     },
     "create": {
       "title": "创建会话",
+      "localModel": "本地模型",
+      "download": "下载",
+      "remoteEndpoint": "远程端点",
+      "remoteHint": "连接到任何兼容 OpenAI 的 API 端点。",
       "apiBaseUrl": "API 基础 URL *",
       "apiBaseUrlPlaceholder": "https://api.openai.com",
+      "apiBaseUrlHelp": "兼容 OpenAI 的 API 基础 URL（例如 https://api.openai.com、http://localhost:8000）",
       "modelName": "模型名称 *",
       "modelNamePlaceholder": "gpt-4o、llama-3.1-8b 等",
       "apiKey": "API 密钥",
@@ -547,12 +619,19 @@
       "organizationPlaceholder": "可选",
       "localHint": "选择要服务的本地 MLX 模型",
       "filterPlaceholder": "筛选模型...",
+      "rescan": "重新扫描",
+      "directories": "目录",
+      "manageDirectories": "管理目录",
       "scanning": "正在扫描模型...",
       "noModels": "未找到模型",
+      "noModelsHelp": "点击上方“目录”添加模型文件夹，或将模型放入 ~/.mlxstudio/models/ 或 ~/.cache/huggingface/hub/。",
       "downloadHint": "如需下载模型,请在终端运行:",
+      "browseModels": "浏览更多 MLX 模型：",
       "deleteFailed": "删除失败: {error}",
       "loadingModel": "加载模型",
       "launchFailed": "启动失败",
+      "backToConfig": "返回配置",
+      "launchSession": "启动会话",
       "step2": "第 2 步: 配置",
       "imageServerSettings": "图像服务器设置",
       "imageMode": "图像模式",
@@ -656,11 +735,21 @@
       "jangNoticeBody": "自 2026/3/19 起,所有 JANG 模型都必须从 HuggingFace (JANGQ-AI) 重新下载,以包含正确的聊天模板。如未更新模型,思考开关可能无法正常工作,部分模型可能出现循环。",
       "imageEditHeader": "图像编辑服务器",
       "imageGenHeader": "图像生成服务器",
+      "imageEditBadge": "图像编辑",
+      "imageGenBadge": "图像生成",
+      "switchImageEditor": "切换到图像编辑器",
+      "switchImageGenerator": "切换到图像生成器",
+      "imageEditor": "图像编辑器",
+      "imageGenerator": "图像生成",
       "imageEditBody": "这是一个图像编辑模型。请使用 Image 标签页上传图像并通过提示词进行编辑。",
       "imageGenBody": "这是一个图像生成模型。请使用 Image 标签页,通过文本提示词生成图像。",
       "openImageEditor": "打开图像编辑器",
       "openImageGenerator": "打开图像生成器",
       "loadProgressFallback": "启动服务器中...",
+      "loadingSession": "正在加载会话...",
+      "benchPanelTitle": "基准测试",
+      "embeddingsPanelTitle": "嵌入",
+      "performancePanelTitle": "性能",
       "toast": {
         "failedToStartChat": "创建聊天失败",
         "failedToStopServer": "停止服务器失败",

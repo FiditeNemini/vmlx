@@ -13,6 +13,7 @@ import { useToast } from '../Toast'
 import { useAppState } from '../../contexts/AppStateContext'
 import { useSessionsContext } from '../../contexts/SessionsContext'
 import { canonicalizeReasoningParserForCli } from '../../../../shared/reasoningParserAliases'
+import { useTranslation } from '../../i18n'
 
 interface Session {
   id: string
@@ -37,6 +38,7 @@ interface SessionViewProps {
 }
 
 export function SessionView({ sessionId, onBack }: SessionViewProps) {
+  const { t } = useTranslation()
   const { showToast } = useToast()
   const { setMode } = useAppState()
   const [session, setSession] = useState<Session | null>(null)
@@ -194,7 +196,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
       setCurrentChatId(chat.id)
       setShowChatList(false)
     } catch (error) {
-      showToast('error', 'Failed to create chat', (error as Error).message)
+      showToast('error', t('sessions.view.toast.failedToStartChat'), (error as Error).message)
     }
   }
 
@@ -207,7 +209,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
     if (!session) return
     const result = await window.api.sessions.stop(session.id)
     if (!result.success) {
-      showToast('error', 'Failed to stop server', result.error)
+      showToast('error', t('sessions.view.toast.failedToStopServer'), result.error)
     }
   }
 
@@ -217,14 +219,14 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
     const result = await window.api.sessions.start(session.id)
     if (!result.success) {
       setSession(prev => prev ? { ...prev, status: 'error' } : prev)
-      showToast('error', 'Failed to start server', result.error)
+      showToast('error', t('sessions.view.toast.failedToStartServer'), result.error)
     }
   }
 
   if (!session) {
     return (
       <div className="flex items-center justify-center h-full">
-        <p className="text-muted-foreground">Loading session...</p>
+        <p className="text-muted-foreground">{t('sessions.view.loadingSession')}</p>
       </div>
     )
   }
@@ -248,7 +250,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
       {/* Session Header */}
       <div className="flex flex-wrap items-center gap-3 px-4 py-2 border-b border-border bg-card/50 flex-shrink-0 overflow-x-hidden">
         <button onClick={onBack} className="text-muted-foreground hover:text-foreground text-sm flex items-center gap-1 flex-shrink-0">
-          <ArrowLeft className="h-3.5 w-3.5" /> Sessions
+          <ArrowLeft className="h-3.5 w-3.5" /> {t('sessions.view.back')}
         </button>
         <div className="w-px h-4 bg-border flex-shrink-0" />
 
@@ -261,7 +263,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
             <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0 ${
               isImageEdit ? 'bg-violet-500/15 text-violet-400' : 'bg-blue-500/15 text-blue-400'
             }`}>
-              {isImageEdit ? 'Image Edit' : 'Image Gen'}
+              {isImageEdit ? t('sessions.view.imageEditBadge') : t('sessions.view.imageGenBadge')}
             </span>
           )}
           {jangLabel && (
@@ -292,14 +294,14 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
                 onClick={handleNewChat}
                 className="text-sm hover:bg-accent px-2 py-1 rounded"
               >
-                + Chat
+                {t('sessions.view.chatButton')}
               </button>
               <button
                 onClick={() => { setShowSettings(!showSettings); if (!showSettings) { setShowServerSettings(false); setShowCache(false); setShowBenchmark(false); setShowEmbeddings(false); setShowPerformance(false); setShowLogs(false) } }}
                 className={`text-sm px-2 py-1 rounded flex items-center gap-1 ${showSettings ? 'bg-accent' : 'hover:bg-accent'}`}
-                title="Chat inference settings"
+                title={t('sessions.view.chatSettingsTitle')}
               >
-                <Settings className="h-3.5 w-3.5" /> Chat
+                <Settings className="h-3.5 w-3.5" /> {t('sessions.view.chatLabel')}
               </button>
             </>
           )}
@@ -307,76 +309,78 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
             <button
               onClick={() => setMode('image')}
               className="text-sm hover:bg-accent px-2 py-1 rounded flex items-center gap-1"
-              title={isImageEdit ? 'Switch to Image Editor' : 'Switch to Image Generator'}
+              title={isImageEdit ? t('sessions.view.switchImageEditor') : t('sessions.view.switchImageGenerator')}
             >
-              <ImageIcon className="h-3.5 w-3.5" /> {isImageEdit ? 'Image Editor' : 'Image Gen'}
+              <ImageIcon className="h-3.5 w-3.5" /> {isImageEdit ? t('sessions.view.imageEditor') : t('sessions.view.imageGenerator')}
             </button>
           )}
           <button
             onClick={() => { setShowServerSettings(!showServerSettings); if (!showServerSettings) { setShowSettings(false); setShowCache(false); setShowBenchmark(false); setShowEmbeddings(false); setShowPerformance(false); setShowLogs(false) } }}
             className={`text-sm px-2 py-1 rounded flex items-center gap-1 ${showServerSettings ? 'bg-accent' : 'hover:bg-accent'}`}
-            title={isRemote ? 'Connection Settings' : 'Server Settings'}
+            title={isRemote ? t('sessions.view.connectionTitle') : t('sessions.view.serverSettingsTitle')}
           >
-            <Settings className="h-3.5 w-3.5" /> {isRemote ? 'Connection' : 'Server'}
+            <Settings className="h-3.5 w-3.5" /> {isRemote ? t('sessions.view.connection') : t('sessions.view.server')}
           </button>
           {!isRemote && !isImage && session.status === 'running' && (
             <>
               <button
                 onClick={() => { setShowCache(!showCache); if (!showCache) { setShowSettings(false); setShowServerSettings(false); setShowBenchmark(false); setShowEmbeddings(false); setShowPerformance(false); setShowLogs(false) } }}
                 className={`text-sm px-2 py-1 rounded ${showCache ? 'bg-accent' : 'hover:bg-accent'}`}
-                title="Cache Management"
+                title={t('sessions.view.cacheTitle')}
               >
-                Cache
+                {t('sessions.view.cache')}
               </button>
               <button
                 onClick={() => { setShowBenchmark(!showBenchmark); if (!showBenchmark) { setShowSettings(false); setShowServerSettings(false); setShowCache(false); setShowEmbeddings(false); setShowPerformance(false); setShowLogs(false) } }}
                 className={`text-sm px-2 py-1 rounded ${showBenchmark ? 'bg-accent' : 'hover:bg-accent'}`}
-                title="Run Benchmark"
+                title={t('sessions.view.benchTitle')}
               >
-                Bench
+                {t('sessions.view.bench')}
               </button>
               <button
                 onClick={() => { setShowEmbeddings(!showEmbeddings); if (!showEmbeddings) { setShowSettings(false); setShowServerSettings(false); setShowCache(false); setShowBenchmark(false); setShowPerformance(false); setShowLogs(false) } }}
                 className={`text-sm px-2 py-1 rounded ${showEmbeddings ? 'bg-accent' : 'hover:bg-accent'}`}
-                title="Embeddings"
+                title={t('sessions.view.embedTitle')}
               >
-                Embed
+                {t('sessions.view.embed')}
               </button>
               <button
                 onClick={() => { setShowPerformance(!showPerformance); if (!showPerformance) { setShowSettings(false); setShowServerSettings(false); setShowCache(false); setShowBenchmark(false); setShowEmbeddings(false); setShowLogs(false) } }}
                 className={`text-sm px-2 py-1 rounded ${showPerformance ? 'bg-accent' : 'hover:bg-accent'}`}
-                title="Performance Monitor"
+                title={t('sessions.view.perfTitle')}
               >
-                Perf
+                {t('sessions.view.perf')}
               </button>
             </>
           )}
           <button
             onClick={() => { setShowLogs(!showLogs); if (!showLogs) { setShowSettings(false); setShowServerSettings(false); setShowCache(false); setShowBenchmark(false); setShowEmbeddings(false); setShowPerformance(false) } }}
             className={`text-sm px-2 py-1 rounded ${showLogs ? 'bg-accent' : 'hover:bg-accent'}`}
-            title={isRemote ? 'Connection Logs' : 'Server Logs'}
+            title={isRemote ? t('sessions.view.connectionLogs') : t('sessions.view.serverLogs')}
           >
-            Logs
+            {t('sessions.view.logs')}
           </button>
           {session.status === 'running' && (
             <>
               {isRemote && (
                 <span className="text-xs text-success font-medium px-1">
-                  Connected{session.latencyMs != null ? ` · ${session.latencyMs}ms` : ''}
+                  {session.latencyMs != null
+                    ? t('sessions.view.connectedWithLatency', { latency: session.latencyMs })
+                    : t('sessions.view.connected')}
                 </span>
               )}
               <button
                 onClick={handleStop}
                 className="text-xs px-2 py-1 bg-destructive text-destructive-foreground rounded hover:bg-destructive/90"
               >
-                {isRemote ? 'Disconnect' : 'Stop'}
+                {isRemote ? t('sessions.view.disconnect') : t('sessions.view.stop')}
               </button>
             </>
           )}
           {session.status === 'standby' && (
             <>
               <span className="text-xs text-blue-400 font-medium px-1">
-                {(session as any).standbyDepth === 'deep' ? 'Deep Sleep' : 'Light Sleep'}
+                {(session as any).standbyDepth === 'deep' ? t('sessions.view.deepSleep') : t('sessions.view.lightSleep')}
               </span>
               <button
                 onClick={async () => {
@@ -384,39 +388,41 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
                 }}
                 className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
               >
-                Wake
+                {t('sessions.view.wake')}
               </button>
               <button
                 onClick={handleStop}
                 className="text-xs px-2 py-1 border border-border text-muted-foreground rounded hover:bg-destructive hover:text-destructive-foreground"
               >
-                Stop
+                {t('sessions.view.stop')}
               </button>
             </>
           )}
           {(session.status === 'stopped' || session.status === 'error') && (
             <>
               {isRemote && (
-                <span className="text-xs text-destructive font-medium px-1">Disconnected</span>
+                <span className="text-xs text-destructive font-medium px-1">{t('sessions.view.disconnected')}</span>
               )}
               <button
                 onClick={handleStart}
                 className="text-xs px-2 py-1 bg-success text-success-foreground rounded hover:bg-success/90"
               >
-                {isRemote ? (session.status === 'error' ? 'Reconnect' : 'Connect') : 'Start'}
+                {isRemote
+                  ? (session.status === 'error' ? t('sessions.view.reconnect') : t('sessions.view.connect'))
+                  : t('common.start')}
               </button>
             </>
           )}
           {session.status === 'loading' && (
             <>
               <span className="text-xs text-muted-foreground px-2 py-1 animate-pulse">
-                {isRemote ? 'Connecting...' : 'Starting...'}
+                {isRemote ? t('common.connecting') : t('common.starting')}
               </span>
               <button
                 onClick={handleStop}
                 className="text-xs px-2 py-1 border border-destructive/40 text-destructive rounded hover:bg-destructive/10"
               >
-                Cancel
+                {t('common.cancel')}
               </button>
             </>
           )}
@@ -431,9 +437,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
         <div className="flex items-start gap-2 px-4 py-2 bg-amber-500/10 border-b border-amber-500/20 flex-shrink-0">
           <AlertTriangle className="h-3.5 w-3.5 text-amber-400 flex-shrink-0 mt-0.5" />
           <p className="text-xs text-amber-300/90 flex-1">
-            <span className="font-semibold">JANG Model Update Required:</span>{' '}
-            As of 3/19/2026, all JANG models must be re-downloaded from HuggingFace (JANGQ-AI) to include proper chat templates.
-            Without updated models, thinking on/off may not work correctly and some models may loop.
+            <span className="font-semibold">{t('sessions.view.jangNoticeHeader')}</span>{' '}
+            {t('sessions.view.jangNoticeBody')}
           </p>
           <button
             onClick={() => {
@@ -472,12 +477,12 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
                 <ImageIcon className={`h-8 w-8 ${isImageEdit ? 'text-violet-400' : 'text-blue-400'}`} />
               </div>
               <h2 className="text-lg font-semibold mb-2">
-                {isImageEdit ? 'Image Edit Server' : 'Image Generation Server'}
+                {isImageEdit ? t('sessions.view.imageEditHeader') : t('sessions.view.imageGenHeader')}
               </h2>
               <p className="text-sm text-muted-foreground mb-6 max-w-sm">
                 {isImageEdit
-                  ? 'This is an image editing model. Use the Image tab to upload images and edit them with prompts.'
-                  : 'This is an image generation model. Use the Image tab to generate images from text prompts.'
+                  ? t('sessions.view.imageEditBody')
+                  : t('sessions.view.imageGenBody')
                 }
               </p>
               <button
@@ -487,7 +492,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
                 }`}
               >
                 <ImageIcon className="h-4 w-4" />
-                {isImageEdit ? 'Open Image Editor' : 'Open Image Generator'}
+                {isImageEdit ? t('sessions.view.openImageEditor') : t('sessions.view.openImageGenerator')}
               </button>
             </div>
           ) : (
@@ -534,8 +539,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
         {showCache && (
           <div className="w-80 border-l border-border bg-card overflow-y-auto flex-shrink-0">
             <div className="flex items-center justify-between p-3 border-b border-border">
-              <h3 className="text-sm font-medium">Cache Management</h3>
-              <button onClick={() => setShowCache(false)} className="text-muted-foreground hover:text-foreground text-sm"><X className="h-3.5 w-3.5" /></button>
+              <h3 className="text-sm font-medium">{t('sessions.view.cacheTitle')}</h3>
+              <button onClick={() => setShowCache(false)} className="text-muted-foreground hover:text-foreground text-sm" aria-label={t('common.close')} title={t('common.close')}><X className="h-3.5 w-3.5" /></button>
             </div>
             <div className="p-3">
               <CachePanel endpoint={{ host: session.host, port: session.port }} sessionStatus={session.status} sessionId={session.id} />
@@ -545,8 +550,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
         {showBenchmark && (
           <div className="w-96 border-l border-border bg-card overflow-y-auto flex-shrink-0">
             <div className="flex items-center justify-between p-3 border-b border-border">
-              <h3 className="text-sm font-medium">Benchmark</h3>
-              <button onClick={() => setShowBenchmark(false)} className="text-muted-foreground hover:text-foreground text-sm"><X className="h-3.5 w-3.5" /></button>
+              <h3 className="text-sm font-medium">{t('sessions.view.benchPanelTitle')}</h3>
+              <button onClick={() => setShowBenchmark(false)} className="text-muted-foreground hover:text-foreground text-sm" aria-label={t('common.close')} title={t('common.close')}><X className="h-3.5 w-3.5" /></button>
             </div>
             <div className="p-3">
               <BenchmarkPanel
@@ -562,8 +567,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
         {showEmbeddings && (
           <div className="w-80 border-l border-border bg-card overflow-y-auto flex-shrink-0">
             <div className="flex items-center justify-between p-3 border-b border-border">
-              <h3 className="text-sm font-medium">Embeddings</h3>
-              <button onClick={() => setShowEmbeddings(false)} className="text-muted-foreground hover:text-foreground text-sm"><X className="h-3.5 w-3.5" /></button>
+              <h3 className="text-sm font-medium">{t('sessions.view.embeddingsPanelTitle')}</h3>
+              <button onClick={() => setShowEmbeddings(false)} className="text-muted-foreground hover:text-foreground text-sm" aria-label={t('common.close')} title={t('common.close')}><X className="h-3.5 w-3.5" /></button>
             </div>
             <div className="p-3">
               <EmbeddingsPanel
@@ -577,8 +582,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
         {showPerformance && (
           <div className="w-80 border-l border-border bg-card overflow-y-auto flex-shrink-0">
             <div className="flex items-center justify-between p-3 border-b border-border">
-              <h3 className="text-sm font-medium">Performance</h3>
-              <button onClick={() => setShowPerformance(false)} className="text-muted-foreground hover:text-foreground text-sm"><X className="h-3.5 w-3.5" /></button>
+              <h3 className="text-sm font-medium">{t('sessions.view.performancePanelTitle')}</h3>
+              <button onClick={() => setShowPerformance(false)} className="text-muted-foreground hover:text-foreground text-sm" aria-label={t('common.close')} title={t('common.close')}><X className="h-3.5 w-3.5" /></button>
             </div>
             <div className="p-3">
               <PerformancePanel
@@ -591,8 +596,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
         {showLogs && (
           <div className="w-96 border-l border-border bg-card flex-shrink-0 flex flex-col min-h-0 overflow-hidden">
             <div className="flex items-center justify-between p-3 border-b border-border flex-shrink-0">
-              <h3 className="text-sm font-medium">{isRemote ? 'Connection Logs' : 'Server Logs'}</h3>
-              <button onClick={() => setShowLogs(false)} className="text-muted-foreground hover:text-foreground text-sm"><X className="h-3.5 w-3.5" /></button>
+              <h3 className="text-sm font-medium">{isRemote ? t('sessions.view.connectionLogs') : t('sessions.view.serverLogs')}</h3>
+              <button onClick={() => setShowLogs(false)} className="text-muted-foreground hover:text-foreground text-sm" aria-label={t('common.close')} title={t('common.close')}><X className="h-3.5 w-3.5" /></button>
             </div>
             <LogsPanel sessionId={session.id} sessionStatus={session.status} isRemote={isRemote} />
           </div>
@@ -617,6 +622,7 @@ function formatResidentLoad(progress?: { residentMb?: number; modelBytes?: numbe
 }
 
 function SessionViewLoadBar({ sessionId }: { sessionId: string }) {
+  const { t } = useTranslation()
   const { loadProgress } = useSessionsContext()
   const progress = loadProgress.get(sessionId)
   const residentLoad = formatResidentLoad(progress)
@@ -629,7 +635,7 @@ function SessionViewLoadBar({ sessionId }: { sessionId: string }) {
         />
       </div>
       <p className="text-[10px] text-muted-foreground mt-1">
-        {progress?.label ?? 'Starting server...'} {progress ? `(${progress.progress}%)` : ''}
+        {progress?.label ?? t('sessions.view.loadProgressFallback')} {progress ? `(${progress.progress}%)` : ''}
       </p>
       {formatModelBytes(progress?.modelBytes) && (
         <p className="text-[10px] text-muted-foreground/80 mt-0.5">

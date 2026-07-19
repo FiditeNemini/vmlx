@@ -248,6 +248,19 @@ class DiskCacheManager:
             )
         except sqlite3.OperationalError:
             pass  # Column already exists
+        # Prompt-cache payloads are deliberately N-1: the SQLite key describes
+        # the full rendered prompt while the serialized cache covers every
+        # token except its final generation sentinel.  Multi-turn templates can
+        # legitimately replace that last sentinel (for example <think> with
+        # </think>) while preserving the entire reusable payload prefix.  Keep
+        # a second hash for the state the file actually owns so SSD/L2 lookup
+        # can find that reusable boundary without storing raw prompt tokens.
+        try:
+            conn.execute(
+                "ALTER TABLE cache_entries ADD COLUMN payload_prefix_hash TEXT"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_last_accessed
             ON cache_entries(last_accessed)
@@ -255,6 +268,10 @@ class DiskCacheManager:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_cache_type
             ON cache_entries(cache_type)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_payload_prefix_hash
+            ON cache_entries(payload_prefix_hash, num_tokens)
         """)
         conn.commit()
         conn.close()
@@ -327,12 +344,35 @@ class DiskCacheManager:
 
     def fetch(self, tokens: List[int]) -> Optional[List[Any]]:
         """Load a disk cache on the thread that owns the model's MLX stream."""
+        return self._fetch_on_owner(tokens)
+
+    def _fetch_on_owner(
+        self,
+        tokens: List[int],
+        *,
+        token_hash_override: Optional[str] = None,
+    ) -> Optional[List[Any]]:
+        """Load one indexed record, optionally by its stored full-key hash.
+
+        The override is used only after ``fetch_longest_prefix`` has matched a
+        record's N-1 payload hash.  ``tokens`` remains the current prompt prefix
+        for accurate diagnostics; all file/class/runtime validation still runs
+        through the ordinary fetch implementation.
+        """
         executor = getattr(self, "_load_executor", None)
         prefix = getattr(self, "_load_worker_prefix", "llm-worker")
         if executor is None or threading.current_thread().name.startswith(prefix):
-            return self._fetch_impl(tokens)
+            if token_hash_override is None:
+                return self._fetch_impl(tokens)
+            return self._fetch_impl(tokens, token_hash_override)
         try:
-            return executor.submit(self._fetch_impl, tokens).result()
+            if token_hash_override is None:
+                return executor.submit(self._fetch_impl, tokens).result()
+            return executor.submit(
+                self._fetch_impl,
+                tokens,
+                token_hash_override,
+            ).result()
         except Exception as exc:
             logger.warning(
                 "Disk cache worker-owned load failed; treating as miss: %s",
@@ -342,14 +382,29 @@ class DiskCacheManager:
                 self.misses += 1
             return None
 
-    def _fetch_impl(self, tokens: List[int]) -> Optional[List[Any]]:
+    def _fetch_indexed_hash(
+        self,
+        token_hash: str,
+        current_prefix_tokens: List[int],
+    ) -> Optional[List[Any]]:
+        """Load a record selected by its N-1 payload-prefix index."""
+        return self._fetch_on_owner(
+            current_prefix_tokens,
+            token_hash_override=token_hash,
+        )
+
+    def _fetch_impl(
+        self,
+        tokens: List[int],
+        token_hash_override: Optional[str] = None,
+    ) -> Optional[List[Any]]:
         """
         Look up a cached KV state for the given token sequence.
 
         Returns the cache object list if found, None on miss.
         The returned cache is ready to be used as prompt_cache in BatchGenerator.
         """
-        token_hash = _hash_tokens(tokens)
+        token_hash = token_hash_override or _hash_tokens(tokens)
 
         conn = self._pool.get()
         try:
@@ -650,7 +705,9 @@ class DiskCacheManager:
         prompts, but chat reuse after an engine restart needs SSD L2 to behave
         like a prefix cache: if a previous turn stored prompt key ``P`` and the
         current prompt ``F`` starts with ``P``, restore ``P`` and let the
-        scheduler replay the uncached tail.
+        scheduler replay the uncached tail. Prompt payloads cover ``P[:-1]``;
+        the N-1 payload hash also permits reuse when only the final rendered
+        generation sentinel changed between turns.
 
         The SQLite index stores prompt lengths, so this avoids an O(prompt_len)
         blind scan. We only test hashes for lengths that are actually present
@@ -668,7 +725,8 @@ class DiskCacheManager:
         conn = self._pool.get()
         try:
             rows = conn.execute(
-                "SELECT token_hash, num_tokens FROM cache_entries "
+                "SELECT token_hash, num_tokens, payload_prefix_hash "
+                "FROM cache_entries "
                 "WHERE num_tokens <= ? AND num_tokens >= ? "
                 "ORDER BY num_tokens DESC",
                 (len(full_tokens), min_tokens),
@@ -683,7 +741,7 @@ class DiskCacheManager:
 
         prefix_hash_by_len: Dict[int, str] = {}
         attempted_load = False
-        for stored_hash, num_tokens in rows:
+        for stored_hash, num_tokens, stored_payload_hash in rows:
             try:
                 n = int(num_tokens)
             except (TypeError, ValueError):
@@ -695,6 +753,34 @@ class DiskCacheManager:
                 prefix_hash = _hash_tokens(full_tokens[:n])
                 prefix_hash_by_len[n] = prefix_hash
             if stored_hash != prefix_hash:
+                # The persisted cache owns N-1 tokens even though its exact
+                # lookup key includes the rendered generation sentinel at N.
+                # If the current prompt shares that whole payload but changes
+                # only token N (e.g. <think> -> </think>), load the stored file
+                # by its full-key hash and re-feed the current boundary token.
+                covered = n - 1
+                if covered < min_tokens or not stored_payload_hash:
+                    continue
+                payload_hash = prefix_hash_by_len.get(covered)
+                if payload_hash is None:
+                    payload_hash = _hash_tokens(full_tokens[:covered])
+                    prefix_hash_by_len[covered] = payload_hash
+                if stored_payload_hash != payload_hash:
+                    continue
+
+                attempted_load = True
+                matched_tokens = full_tokens[:n]
+                cache = self._fetch_indexed_hash(stored_hash, matched_tokens)
+                if cache is not None:
+                    logger.info(
+                        "Disk cache N-1 payload prefix hit: restored %d cached "
+                        "tokens from %d-token key against %d-token prompt; "
+                        "re-feeding current boundary token",
+                        covered,
+                        n,
+                        len(full_tokens),
+                    )
+                    return cache, matched_tokens
                 continue
 
             attempted_load = True
@@ -748,6 +834,7 @@ class DiskCacheManager:
             True if enqueued or already cached, False otherwise.
         """
         token_hash = _hash_tokens(tokens)
+        payload_prefix_hash = _hash_tokens(tokens[:-1]) if len(tokens) > 1 else None
 
         # Quick check if already cached (read-only, no write lock needed)
         conn = self._pool.get()
@@ -756,6 +843,15 @@ class DiskCacheManager:
                 "SELECT 1 FROM cache_entries WHERE token_hash = ?",
                 (token_hash,)
             ).fetchone()
+            if existing and payload_prefix_hash:
+                # Opportunistically migrate an exact-hit legacy row while the
+                # caller still has its prompt tokens in hand.
+                conn.execute(
+                    "UPDATE cache_entries SET payload_prefix_hash = ? "
+                    "WHERE token_hash = ? AND payload_prefix_hash IS NULL",
+                    (payload_prefix_hash, token_hash),
+                )
+                conn.commit()
         finally:
             self._pool.put(conn)
 
@@ -1055,10 +1151,13 @@ class DiskCacheManager:
             try:
                 conn.execute(
                     "INSERT OR REPLACE INTO cache_entries "
-                    "(token_hash, file_name, num_tokens, file_size, created_at, last_accessed, access_count, metadata, cache_type) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                    "(token_hash, file_name, num_tokens, file_size, created_at, "
+                    "last_accessed, access_count, metadata, cache_type, "
+                    "payload_prefix_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
                     (token_hash, file_name, len(tokens), file_size, now, now,
-                     json.dumps(db_meta), cache_type)
+                     json.dumps(db_meta), cache_type,
+                     _hash_tokens(tokens[:-1]) if len(tokens) > 1 else None)
                 )
                 conn.commit()
             finally:
@@ -1147,9 +1246,20 @@ class DiskCacheManager:
                 conn.execute(
                     "INSERT OR REPLACE INTO cache_entries "
                     "(token_hash, file_name, num_tokens, file_size, "
-                    "created_at, last_accessed, access_count, metadata, cache_type) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
-                    (token_hash, file_name, len(tokens), file_size, now, now, db_meta, cache_type)
+                    "created_at, last_accessed, access_count, metadata, cache_type, "
+                    "payload_prefix_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                    (
+                        token_hash,
+                        file_name,
+                        len(tokens),
+                        file_size,
+                        now,
+                        now,
+                        db_meta,
+                        cache_type,
+                        _hash_tokens(tokens[:-1]) if len(tokens) > 1 else None,
+                    )
                 )
                 conn.commit()
             finally:

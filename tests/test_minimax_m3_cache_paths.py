@@ -532,6 +532,125 @@ def test_disk_cache_fetch_longest_prefix_uses_stored_prompt_lengths(tmp_path, mo
         mgr.shutdown()
 
 
+def test_disk_cache_fetch_longest_prefix_accepts_shared_n_minus_1_payload(
+    tmp_path, monkeypatch
+):
+    """A changed generation sentinel must not hide a reusable N-1 payload.
+
+    Reasoning templates can render a base prompt ending in ``<think>`` and its
+    multi-turn replay ending in ``</think>`` at the same boundary. The stored
+    cache owns only the tokens before that sentinel, so the full-key hash is
+    allowed to differ when the complete N-1 payload prefix still matches.
+    """
+    import sqlite3
+
+    from vmlx_engine.disk_cache import DiskCacheManager, _hash_tokens
+    from vmlx_engine.scheduler import Scheduler
+
+    mgr = DiskCacheManager(str(tmp_path), max_size_gb=0)
+    try:
+        stored_tokens = [7, 8, 9, 10]  # token 10 is the old generation sentinel
+        stored_hash = _hash_tokens(stored_tokens)
+        conn = sqlite3.connect(mgr._db_path)
+        now = 1.0
+        try:
+            conn.execute(
+                "INSERT INTO cache_entries "
+                "(token_hash, file_name, num_tokens, file_size, created_at, "
+                "last_accessed, access_count, metadata, cache_type, "
+                "payload_prefix_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    stored_hash,
+                    "n-minus-1.safetensors",
+                    len(stored_tokens),
+                    1,
+                    now,
+                    now,
+                    1,
+                    "{}",
+                    "user",
+                    _hash_tokens(stored_tokens[:-1]),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        fetched = []
+        sentinel = [object()]
+
+        def fake_fetch_indexed(token_hash, current_prefix_tokens):
+            fetched.append((token_hash, list(current_prefix_tokens)))
+            return sentinel
+
+        monkeypatch.setattr(mgr, "_fetch_indexed_hash", fake_fetch_indexed)
+
+        current = [7, 8, 9, 99, 100, 101]  # token 99 replaces old sentinel 10
+        cache, matched_tokens = mgr.fetch_longest_prefix(current)
+
+        assert cache is sentinel
+        assert matched_tokens == [7, 8, 9, 99]
+        assert fetched == [(stored_hash, [7, 8, 9, 99])]
+
+        tail, cached = Scheduler._disk_prefix_hit_tail_and_cached_tokens(
+            fetch_tokens=current,
+            matched_tokens=matched_tokens,
+            gen_prompt_suffix=[],
+        )
+        assert cached == 3
+        assert tail == [99, 100, 101]
+    finally:
+        mgr.shutdown()
+
+
+def test_disk_cache_n_minus_1_index_does_not_accept_earlier_divergence(
+    tmp_path, monkeypatch
+):
+    """The N-1 alias is exact over the payload; earlier divergence is a miss."""
+    import sqlite3
+
+    from vmlx_engine.disk_cache import DiskCacheManager, _hash_tokens
+
+    mgr = DiskCacheManager(str(tmp_path), max_size_gb=0)
+    try:
+        stored_tokens = [7, 8, 9, 10]
+        conn = sqlite3.connect(mgr._db_path)
+        now = 1.0
+        try:
+            conn.execute(
+                "INSERT INTO cache_entries "
+                "(token_hash, file_name, num_tokens, file_size, created_at, "
+                "last_accessed, access_count, metadata, cache_type, "
+                "payload_prefix_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    _hash_tokens(stored_tokens),
+                    "wrong-branch.safetensors",
+                    len(stored_tokens),
+                    1,
+                    now,
+                    now,
+                    1,
+                    "{}",
+                    "user",
+                    _hash_tokens(stored_tokens[:-1]),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        monkeypatch.setattr(
+            mgr,
+            "_fetch_indexed_hash",
+            lambda *_args, **_kwargs: pytest.fail("divergent payload must not load"),
+        )
+        cache, matched = mgr.fetch_longest_prefix([7, 80, 9, 99, 100])
+        assert cache is None
+        assert matched == []
+    finally:
+        mgr.shutdown()
+
+
 def test_scheduler_disk_l2_prefix_hit_replays_uncached_tail(monkeypatch):
     """Disk L2 prefix hits must replay P[-1] plus current prompt tail.
 

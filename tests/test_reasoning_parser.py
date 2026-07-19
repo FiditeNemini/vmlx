@@ -1018,6 +1018,44 @@ class TestImplicitReasoningStreaming:
         assert result.content == "Hello"
         assert result.reasoning is None
 
+    @pytest.mark.parametrize("parser_name", ["qwen3", "deepseek_r1", "minimax_m2"])
+    def test_streaming_drops_only_structural_post_think_newlines(self, parser_name):
+        """Split close/newline deltas must match stripped complete extraction."""
+        parser = get_parser(parser_name)()
+        parser.reset_state(think_in_prompt=True)
+        tokens = ["private", " reasoning", "</think>", "\n", "\n", "answer", "\nnext"]
+        accumulated = ""
+        content_parts = []
+
+        for token in tokens:
+            previous = accumulated
+            accumulated += token
+            result = parser.extract_reasoning_streaming(
+                previous,
+                accumulated,
+                token,
+            )
+            if result and result.content:
+                content_parts.append(result.content)
+
+        assert "".join(content_parts) == "answer\nnext"
+
+    @pytest.mark.parametrize("parser_name", ["qwen3", "deepseek_r1", "minimax_m2"])
+    def test_transition_delta_drops_structural_post_think_newlines(self, parser_name):
+        """The same normalization applies when close and answer share a delta."""
+        parser = get_parser(parser_name)()
+        parser.reset_state(think_in_prompt=True)
+        previous = "private reasoning"
+        delta = "</think>\n\nanswer"
+        result = parser.extract_reasoning_streaming(
+            previous,
+            previous + delta,
+            delta,
+        )
+
+        assert result is not None
+        assert result.content == "answer"
+
 
 class TestLLMStopSequences:
     """Tests for Fix #5: LLM non-streaming stop sequence support.

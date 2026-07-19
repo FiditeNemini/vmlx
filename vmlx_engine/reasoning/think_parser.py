@@ -182,7 +182,12 @@ class BaseThinkingReasoningParser(ReasoningParser):
         # Case 2: No <think> but </think> found - implicit reasoning mode
         # This handles when <think> was injected in the prompt
         if self.end_token in current_text:
-            return self._handle_implicit_think(delta_text, end_in_prev, end_in_delta)
+            return self._handle_implicit_think(
+                previous_text,
+                delta_text,
+                end_in_prev,
+                end_in_delta,
+            )
 
         # Case 3: No think tags seen yet in the output.
         # If <think> was in the prompt (implicit mode), treat as reasoning
@@ -209,14 +214,22 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # Transition: end token in this delta
                 idx = delta_text.find(self.end_token)
                 reasoning_part = delta_text[:idx]
-                content_part = delta_text[idx + len(self.end_token) :]
+                content_part = delta_text[idx + len(self.end_token) :].lstrip()
                 return DeltaMessage(
                     reasoning=reasoning_part if reasoning_part else None,
                     content=content_part if content_part else None,
                 )
             elif end_in_prev:
                 # Already past reasoning phase - pure content
-                return DeltaMessage(content=delta_text)
+                content_part = self._content_after_reasoning_boundary(
+                    previous_text,
+                    delta_text,
+                )
+                return (
+                    DeltaMessage(content=content_part)
+                    if content_part
+                    else None
+                )
             else:
                 # Still in reasoning phase
                 return DeltaMessage(reasoning=delta_text)
@@ -229,7 +242,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # Both tokens in this delta
                 end_idx = delta_text.find(self.end_token)
                 reasoning_part = delta_text[start_idx + len(self.start_token) : end_idx]
-                content_part = delta_text[end_idx + len(self.end_token) :]
+                content_part = delta_text[end_idx + len(self.end_token) :].lstrip()
                 return DeltaMessage(
                     reasoning=reasoning_part if reasoning_part else None,
                     content=content_part if content_part else None,
@@ -246,6 +259,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
 
     def _handle_implicit_think(
         self,
+        previous_text: str,
         delta_text: str,
         end_in_prev: bool,
         end_in_delta: bool,
@@ -255,14 +269,36 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # Transition: end token in this delta
             idx = delta_text.find(self.end_token)
             reasoning_part = delta_text[:idx]
-            content_part = delta_text[idx + len(self.end_token) :]
+            content_part = delta_text[idx + len(self.end_token) :].lstrip()
             return DeltaMessage(
                 reasoning=reasoning_part if reasoning_part else None,
                 content=content_part if content_part else None,
             )
         elif end_in_prev:
             # Already past reasoning phase - pure content
-            return DeltaMessage(content=delta_text)
+            content_part = self._content_after_reasoning_boundary(
+                previous_text,
+                delta_text,
+            )
+            return DeltaMessage(content=content_part) if content_part else None
         else:
             # Still in implicit reasoning phase
             return DeltaMessage(reasoning=delta_text)
+
+    def _content_after_reasoning_boundary(
+        self,
+        previous_text: str,
+        delta_text: str,
+    ) -> str:
+        """Drop only the structural separator after the reasoning close.
+
+        Complete extraction already applies ``strip()`` to content after the
+        end marker. Streaming previously exposed the common ``\n\n`` separator
+        as visible API content when the close marker and newlines arrived in
+        separate deltas. Keep stripping while the accumulated post-reasoning
+        content is whitespace-only, then preserve every later delta verbatim.
+        """
+        _, marker, previous_content = previous_text.partition(self.end_token)
+        if marker and not previous_content.strip():
+            return delta_text.lstrip()
+        return delta_text

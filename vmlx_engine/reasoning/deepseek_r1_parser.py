@@ -137,7 +137,10 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
                         content=content_part if content_part else None,
                     )
                 reasoning_part = delta_text[:idx]
-                content_part = delta_text[idx + len(self.end_token) :]
+                # Match complete extraction and the shared think-tag stream:
+                # whitespace directly after the close is a structural rail
+                # separator, not visible assistant content.
+                content_part = delta_text[idx + len(self.end_token) :].lstrip()
                 if not reasoning_part:
                     return DeltaMessage(
                         content=content_part if content_part else None,

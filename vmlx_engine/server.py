@@ -19998,12 +19998,31 @@ async def stream_responses_api(
             cleaned_text = (_tc_cleaned or "").strip()
             tool_calls = _tc_calls
 
+    _buffered_reasoning_only = False
     if tool_call_buffering and not tool_calls:
         # The stream advertised only a speculative buffering heartbeat. A
         # malformed/truncated or schema-rejected native call is not a function
         # call and its raw XML/JSON control suffix is not assistant prose.
         # Reconcile the final Responses text to the already-visible safe prefix.
-        _buffered_candidate = accumulated_content or cleaned_text or full_text
+        # If the candidate came from the reasoning rail, keep it on that rail.
+        # Falling back to ``full_text`` here used to copy already-streamed private
+        # Qwen reasoning into ``accumulated_content`` after an incomplete
+        # post-tool ``<tool_call>`` suffix. Besides leaking reasoning as terminal
+        # output_text, that made the visible-answer gate think content existed and
+        # skipped its bounded direct-answer pass.
+        _buffered_reasoning_only = bool(
+            _tool_parse_from_reasoning_only
+            or (
+                request_parser is not None
+                and accumulated_reasoning.strip()
+                and not accumulated_content.strip()
+            )
+        )
+        _buffered_candidate = (
+            accumulated_reasoning
+            if _buffered_reasoning_only
+            else (accumulated_content or cleaned_text or full_text)
+        )
         _safe_visible_prefix = _visible_prefix_before_unparsed_tool_markup(
             _buffered_candidate
         )
@@ -20019,22 +20038,15 @@ async def stream_responses_api(
                 "function call. The incomplete control suffix was hidden; try a "
                 "clearer tool-use prompt or raise max_output_tokens."
             )
-            accumulated_content = _safe_visible_prefix
-            cleaned_text = _safe_visible_prefix
-
-    logger.debug(
-        "Responses reasoning-answer fallback gate: family=%s "
-        "effective_thinking=%r tools_available=%s enabled=%s "
-        "fallback_budget=%s content_chars=%d reasoning_chars=%d tool_calls=%s",
-        _family_name,
-        _effective_thinking,
-        _stream_tools_available,
-        reasoning_only_answer_enabled,
-        reasoning_tools_fallback_answer_budget,
-        len(accumulated_content),
-        len(accumulated_reasoning),
-        len(tool_calls or []),
-    )
+            if _buffered_reasoning_only:
+                # The safe prefix is still reasoning, not assistant-visible text.
+                # ``visible_reasoning_text`` was independently cleaned above for
+                # reasoning-summary finalization.
+                accumulated_content = ""
+                cleaned_text = ""
+            else:
+                accumulated_content = _safe_visible_prefix
+                cleaned_text = _safe_visible_prefix
 
     # When the reasoning parser already separated a private rail, only its
     # accumulated CONTENT can satisfy the visible-answer gate.  A tool_choice=none
@@ -20055,6 +20067,33 @@ async def stream_responses_api(
         _fallback_visible_content = (
             cleaned_text if _suppress_tools else accumulated_content
         )
+    _explicit_tool_intent = _request_explicitly_requests_tool_use(request)
+
+    logger.debug(
+        "Responses reasoning-answer fallback gate: family=%s "
+        "effective_thinking=%r tools_available=%s enabled=%s "
+        "fallback_budget=%s content_chars=%d fallback_chars=%d "
+        "reasoning_chars=%d tool_calls=%s explicit_tool_intent=%s",
+        _family_name,
+        _effective_thinking,
+        _stream_tools_available,
+        reasoning_only_answer_enabled,
+        reasoning_tools_fallback_answer_budget,
+        len(accumulated_content),
+        len(_fallback_visible_content or ""),
+        len(accumulated_reasoning),
+        len(tool_calls or []),
+        _explicit_tool_intent,
+    )
+
+    _rearm_reasoning_answer = bool(
+        not tool_calls
+        and not (_fallback_visible_content or "").strip()
+        and not reasoning_only_answer_enabled
+        and reasoning_tools_fallback_answer_budget is not None
+        and accumulated_reasoning.strip()
+        and not _explicit_tool_intent
+    )
 
     if (
         not tool_calls
@@ -20073,14 +20112,7 @@ async def stream_responses_api(
         m3_reasoning_only_answer_budget = m3_tools_fallback_answer_budget
         m3_reasoning_only_answer_enabled = True
 
-    if (
-        not tool_calls
-        and not (_fallback_visible_content or "").strip()
-        and not reasoning_only_answer_enabled
-        and reasoning_tools_fallback_answer_budget is not None
-        and accumulated_reasoning.strip()
-        and not _request_explicitly_requests_tool_use(request)
-    ):
+    if _rearm_reasoning_answer:
         # Tools were offered, but the finalized parser found no call. Re-arm
         # the established bounded direct-answer pass so an ordinary no-tool
         # answer cannot end as a reasoning-only/blank assistant row.
@@ -20247,6 +20279,7 @@ async def stream_responses_api(
             elif (
                 accumulated_reasoning
                 and not reasoning_was_streamed
+                and not _buffered_reasoning_only
                 and not suppress_reasoning
                 and not _is_minimax_m3
             ):
@@ -20283,7 +20316,7 @@ async def stream_responses_api(
             # output_text is the correct signal — client renders the
             # already-streamed reasoning_content. Falling back to full_text
             # here was the bug that pollutes history.
-            if not reasoning_was_streamed:
+            if not reasoning_was_streamed and not _buffered_reasoning_only:
                 display_text = clean_output_text(full_text) if full_text else ""
         if (
             not _response_was_cancelled

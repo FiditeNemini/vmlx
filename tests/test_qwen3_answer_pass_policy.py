@@ -134,6 +134,44 @@ class _Qwen35SuppressedRepeatToolEngine:
         )
 
 
+class _Qwen35IncompleteReasoningToolSuffixEngine:
+    """Post-tool reasoning ends in a rejected native-call prefix."""
+
+    tokenizer = SimpleNamespace(has_thinking=False)
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def stream_chat(self, *, messages, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("enable_thinking") is False:
+            text = ""
+            for index, delta in enumerate(("Q35-", "POSTTOOL-DONE"), start=1):
+                text += delta
+                yield GenerationOutput(
+                    text=text,
+                    new_text=delta,
+                    tokens=[],
+                    prompt_tokens=11,
+                    completion_tokens=index,
+                    finished=index == 2,
+                    finish_reason="stop" if index == 2 else None,
+                )
+            return
+
+        raw = "<think>private post-tool planning must stay private\n<tool_call>"
+        yield GenerationOutput(
+            text=raw,
+            raw_text=raw,
+            new_text=raw,
+            tokens=[],
+            prompt_tokens=17,
+            completion_tokens=int(kwargs["max_tokens"]),
+            finished=True,
+            finish_reason="length",
+        )
+
+
 def _install_qwen_policy(monkeypatch, family_name: str = "qwen3") -> None:
     config = SimpleNamespace(
         family_name=family_name,
@@ -537,6 +575,61 @@ async def test_qwen35_responses_suppressed_repeat_tool_streams_direct_answer(
     )
     assert completed["output_text"] == "Q35-SUPPRESSED-DONE"
     assert "<tool_call>" not in json.dumps(events)
+
+
+@pytest.mark.asyncio
+async def test_qwen35_responses_incomplete_reasoning_tool_suffix_stays_private(
+    monkeypatch,
+):
+    """A rejected post-tool suffix cannot promote reasoning into output_text."""
+    _install_qwen_policy(monkeypatch, "qwen3_5")
+    engine = _Qwen35IncompleteReasoningToolSuffixEngine()
+    tool = _responses_file_info_tool()
+    request = ResponsesRequest(
+        model="jangq-ai/Bonsai-27b-1bit-JANG",
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": "call_prior",
+                "output": "Size: 5.2 KB",
+            }
+        ],
+        stream=True,
+        enable_thinking=True,
+        tool_choice="auto",
+        tools=[tool],
+        max_output_tokens=112,
+    )
+
+    chunks = []
+    async for chunk in server.stream_responses_api(
+        engine,
+        [
+            {"role": "assistant", "content": "", "tool_calls": []},
+            {"role": "tool", "tool_call_id": "call_prior", "content": "Size: 5.2 KB"},
+        ],
+        request,
+        fastapi_request=None,
+        max_tokens=112,
+        tools=[tool],
+    ):
+        chunks.append(chunk)
+
+    events = _data_events(chunks)
+    assert len(engine.calls) == 2
+    assert engine.calls[1]["enable_thinking"] is False
+    assert "tools" not in engine.calls[1]
+    assert [
+        event["delta"]
+        for event in events
+        if event.get("type") == "response.output_text.delta"
+    ] == ["Q35-", "POSTTOOL-DONE"]
+    completed = next(
+        event["response"] for event in events if event.get("type") == "response.completed"
+    )
+    assert completed["output_text"] == "Q35-POSTTOOL-DONE"
+    assert "private post-tool planning" not in completed["output_text"]
+    assert not any(event.get("type") == "response.incomplete" for event in events)
 
 
 @pytest.mark.asyncio

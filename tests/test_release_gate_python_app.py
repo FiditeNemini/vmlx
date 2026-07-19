@@ -436,6 +436,16 @@ def test_bundle_python_relocates_local_source_console_scripts_after_install():
     assert '[[ "$FIRST_LINE" == \'#!\'*python* ]]' in local_install_block
 
 
+def test_bundle_python_preserves_release_gate_evidence_directory():
+    bundler = Path("panel/scripts/bundle-python.sh").read_text()
+
+    assert 'rm -rf "$VMLX_LOCAL/build"' not in bundler
+    assert '"$VMLX_LOCAL/build/lib"' in bundler
+    assert '"$VMLX_LOCAL/build"/bdist.*' in bundler
+    assert '"$VMLX_LOCAL/build"/temp.*' in bundler
+    assert "tracked release-gate evidence" in bundler
+
+
 def test_release_gate_uses_anthropic_native_thinking_disable():
     gate_module = _load_gate_module()
 

@@ -191,11 +191,16 @@ echo "==> Installing vmlx-engine + jang_tools (local source)..."
 VMLX_LOCAL="$(cd "$(dirname "$0")/../.." && pwd)"
 if [ -f "$VMLX_LOCAL/pyproject.toml" ] && [ -d "$VMLX_LOCAL/vmlx_engine" ]; then
   echo "    using local vmlx at $VMLX_LOCAL"
-  # Setuptools can reuse stale build/lib files when rebuilding the local wheel,
-  # which silently ships old Python modules even though the source tree changed.
-  # Remove local build metadata before every bundle install so the packaged
-  # vmlx_engine exactly matches this checkout.
-  rm -rf "$VMLX_LOCAL/build" "$VMLX_LOCAL"/*.egg-info
+  # Setuptools can reuse stale wheel scratch under build/lib when rebuilding
+  # the local wheel.  Clean only packaging-owned subdirectories: this repo's
+  # build/ root also contains tracked release-gate evidence and must never be
+  # erased by a bundle operation.
+  rm -rf \
+    "$VMLX_LOCAL/build/lib" \
+    "$VMLX_LOCAL/build"/bdist.* \
+    "$VMLX_LOCAL/build"/temp.* \
+    "$VMLX_LOCAL/build"/scripts-* \
+    "$VMLX_LOCAL"/*.egg-info
   "$PYTHON" -m pip install --force-reinstall --no-deps --no-cache-dir "$VMLX_LOCAL"
 else
   echo "    local vmlx missing, falling back to PyPI"

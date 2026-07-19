@@ -17338,10 +17338,10 @@ async def stream_chat_completion(
     tool_call_buffering_notified = False  # Have we sent the buffering signal?
     tool_calls_emitted = False  # Were actual tool calls parsed and emitted?
     # #219 follow-up: the START tool_calls delta emitted at first buffer tick
-    # generates its own random id. Cache it here so the final tool_calls data
-    # delta reuses the same id — per OpenAI SDK spec, all streaming deltas for
-    # the same tool_call MUST share the same id, otherwise SDK clients treat
-    # them as two separate tool_calls and fail to reconcile the arguments.
+    # generates its own random id. Cache it here so the final arguments delta
+    # can continue index 0 without emitting a second id fragment. OpenAI SDKs
+    # concatenate string fields across deltas; repeating the full id would
+    # reconstruct ``call_abccall_abc`` instead of one call identifier.
     _stream_tool_call_start_id: str | None = None
     _suppress_tools = getattr(request, "tool_choice", None) == "none"
     # Auto-enable tool call detection when client sends tools in request (#46),
@@ -18204,24 +18204,25 @@ async def stream_chat_completion(
             # Chunk 2: empty delta with finish_reason="tool_calls"
             # This split is required for CLI clients (Claude Code, OpenCode, etc.)
             #
-            # #219 follow-up: if a START tool_calls delta was already emitted
-            # (empty name/arguments) with a specific id, the FIRST tool_call
-            # here MUST reuse that same id — OpenAI SDKs match START + arg
-            # deltas by id, and a mismatch causes them to treat the arg delta
-            # as a NEW tool_call (which fails because there's no matching START).
-            # Subsequent tool_calls (multi-call turns) keep their parser ids.
-            tc_deltas = [
-                {
+            # #219 follow-up: when a START delta already introduced index 0's
+            # id/type, the final data delta must omit those string fields and
+            # carry only the remaining function name/arguments fragments.
+            # Official SDK accumulation appends string deltas; repeating the
+            # same full id corrupts it. Subsequent calls did not receive an
+            # early START, so they still introduce their parser id/type here.
+            tc_deltas = []
+            for i, tc in enumerate(tool_calls):
+                tc_delta = {
                     "index": i,
-                    "id": _stream_tool_call_start_id if (i == 0 and _stream_tool_call_start_id is not None) else tc.id,
-                    "type": "function",
                     "function": {
                         "name": tc.function.name,
                         "arguments": tc.function.arguments,
                     },
                 }
-                for i, tc in enumerate(tool_calls)
-            ]
+                if not (i == 0 and _stream_tool_call_start_id is not None):
+                    tc_delta["id"] = tc.id
+                    tc_delta["type"] = "function"
+                tc_deltas.append(tc_delta)
             # Build tool_calls chunk matching OpenAI's exact format (#46):
             # - role: "assistant" required for SDK message assembly
             # - content omitted (not null) — OpenAI omits it in tool_calls deltas
@@ -18233,10 +18234,11 @@ async def stream_chat_completion(
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "tool_calls": tc_deltas,
-                        },
+                        "delta": (
+                            {"tool_calls": tc_deltas}
+                            if _stream_tool_call_start_id is not None
+                            else {"role": "assistant", "tool_calls": tc_deltas}
+                        ),
                         "finish_reason": None,
                     }
                 ],

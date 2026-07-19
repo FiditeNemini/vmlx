@@ -613,11 +613,23 @@ class TestOpenPanguStreamEarlyStop:
         assert tc["function"]["name"] == "get_weather"
         assert json.loads(tc["function"]["arguments"]) == {"location": "Paris"}
         assert data_chunk["choices"][0]["finish_reason"] is None
-        # #219: the final data delta reuses the START delta's id.
+        # #219: START introduces the id exactly once. The following function
+        # delta continues index 0 without repeating the full string, because
+        # OpenAI SDK accumulation concatenates string-valued delta fields.
         start_chunk = tc_chunks[0]
-        assert (
-            tc["id"] == start_chunk["choices"][0]["delta"]["tool_calls"][0]["id"]
-        )
+        start_tc = start_chunk["choices"][0]["delta"]["tool_calls"][0]
+        assert start_tc["id"].startswith("call_")
+        assert "id" not in tc
+        assert "type" not in tc
+        assert "role" not in data_chunk["choices"][0]["delta"]
+
+        # Simulate the official SDK's string-fragment accumulator. The final
+        # reconstructed call id stays equal to the single START id.
+        reconstructed_id = ""
+        for chunk in tc_chunks:
+            delta_tc = chunk["choices"][0]["delta"]["tool_calls"][0]
+            reconstructed_id += delta_tc.get("id") or ""
+        assert reconstructed_id == start_tc["id"]
 
         finish_reasons = [
             c["choices"][0].get("finish_reason")

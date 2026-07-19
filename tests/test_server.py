@@ -2447,7 +2447,12 @@ class TestOpenAILogprobsFormatting:
         assert visible == ""
         assert len(tool_deltas) == 2
         assert tool_deltas[0]["function"] == {"name": "", "arguments": ""}
-        assert tool_deltas[1]["id"] == tool_deltas[0]["id"]
+        assert tool_deltas[0]["id"].startswith("call_")
+        assert "id" not in tool_deltas[1]
+        assert "type" not in tool_deltas[1]
+        assert "".join(
+            delta.get("id") or "" for delta in tool_deltas
+        ) == tool_deltas[0]["id"]
         assert tool_deltas[1]["function"]["name"] == "file_info"
         assert json.loads(tool_deltas[1]["function"]["arguments"]) == {
             "path": "panel/package.json"

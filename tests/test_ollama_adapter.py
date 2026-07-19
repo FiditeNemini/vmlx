@@ -294,6 +294,96 @@ def test_chat_stream_chunk_converts_to_ollama_generate_ndjson():
     assert out["done"] is False
 
 
+def test_ollama_chat_preserves_two_tool_results_for_continuation():
+    from vmlx_engine.api.ollama_adapter import ollama_chat_to_openai
+
+    messages = [
+        {"role": "user", "content": "use both tools"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "file_info",
+                        "arguments": {"path": "panel/package.json"},
+                    }
+                },
+                {
+                    "function": {
+                        "name": "run_command",
+                        "arguments": {"command": "pwd"},
+                    }
+                },
+            ],
+        },
+        {"role": "tool", "tool_name": "file_info", "content": "Size: 5.2 KB"},
+        {
+            "role": "tool",
+            "tool_name": "run_command",
+            "content": "/Users/example/mlx/vllm-mlx",
+        },
+    ]
+
+    converted = ollama_chat_to_openai(
+        {"model": "minimax", "messages": messages, "tools": [{"type": "function"}]}
+    )
+
+    assert converted["messages"] == messages
+    assert converted["tools"] == [{"type": "function"}]
+
+
+def test_ollama_stream_terminal_preserves_two_object_argument_tool_calls():
+    from vmlx_engine.api.ollama_adapter import openai_chat_chunk_to_ollama_ndjson
+
+    line = "data: " + json.dumps(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_file",
+                                "function": {
+                                    "name": "file_info",
+                                    "arguments": '{"path":"panel/package.json"}',
+                                },
+                            },
+                            {
+                                "index": 1,
+                                "id": "call_pwd",
+                                "function": {
+                                    "name": "run_command",
+                                    "arguments": '{"command":"pwd"}',
+                                },
+                            },
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 304, "completion_tokens": 67},
+        }
+    )
+
+    out = json.loads(openai_chat_chunk_to_ollama_ndjson(line, "minimax"))
+
+    assert out["done"] is True
+    assert out["done_reason"] == "tool_calls"
+    assert out["prompt_eval_count"] == 304
+    assert out["eval_count"] == 67
+    assert out["message"]["tool_calls"] == [
+        {
+            "function": {
+                "name": "file_info",
+                "arguments": {"path": "panel/package.json"},
+            }
+        },
+        {"function": {"name": "run_command", "arguments": {"command": "pwd"}}},
+    ]
+
+
 def test_hy3_answer_pass_streams_final_text_as_ollama_content():
     """Hy3's bounded retry must leave the high-effort thinking rail.
 

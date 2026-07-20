@@ -189,6 +189,22 @@ describe('cache control policy', () => {
     expect(launch.enableBlockDiskCache).toBe(true)
   })
 
+  it('lets a rotating mixed-SWA architecture use typed block SSD L2 without paged RAM', () => {
+    const policy = resolveCacheLaunchPolicy({
+      continuousBatching: true,
+      enablePrefixCache: true,
+      usePagedCache: false,
+      enableDiskCache: false,
+      enableBlockDiskCache: true,
+      architectureRequiresPagedCache: true,
+      architectureSupportsBlockDiskOnly: true,
+    })
+
+    expect(policy.effectiveUsePagedCache).toBe(false)
+    expect(policy.enableBlockDiskCache).toBe(true)
+    expect(policy.enableLegacyDiskCache).toBe(false)
+  })
+
   it('still forces paged cache for a hybrid architecture without block SSD L2', () => {
     const policy = resolveCacheLaunchPolicy({
       continuousBatching: true,

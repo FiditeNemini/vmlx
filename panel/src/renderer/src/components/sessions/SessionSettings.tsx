@@ -46,6 +46,14 @@ function cacheSubtypeRequiresPaged(cacheSubtype?: string): boolean {
   return cacheSubtype === 'step3p7_full_sliding_kv' || cacheSubtype === 'mixed_swa_kv'
 }
 
+function cacheTypeSupportsBlockDiskOnly(cacheType?: string): boolean {
+  return cacheType === 'hybrid' || cacheType === 'mamba' || cacheType === 'rotating_kv'
+}
+
+function cacheSubtypeSupportsBlockDiskOnly(cacheSubtype?: string): boolean {
+  return cacheSubtype === 'mixed_swa_kv'
+}
+
 const DSV4_PAGED_CACHE_BLOCK_SIZE = 256
 const GENERIC_DEFAULT_TIMEOUT_SECONDS = 300
 const DSV4_DEFAULT_TIMEOUT_SECONDS = 900
@@ -406,8 +414,9 @@ function buildCommandPreview(
   const zayaCcaActive = isZayaCcaFamily(detectedFamily)
   const turboQuantActive = !!detected?.isTurboQuant
   const hybridCacheActive = cacheTypeRequiresPaged(detected?.cacheType)
-  const hybridSsmBlockDiskOnlySupported =
-    (detected?.cacheType === 'hybrid' || detected?.cacheType === 'mamba') &&
+  const architectureBlockDiskOnlySupported =
+    (cacheTypeSupportsBlockDiskOnly(detected?.cacheType) ||
+      cacheSubtypeSupportsBlockDiskOnly(detected?.cacheSubtype)) &&
     !zayaCcaActive &&
     !dsv4Active &&
     !openPanguExactTypedCache
@@ -485,7 +494,7 @@ function buildCommandPreview(
       ? dsv4PrefixCacheOptIn && !!config.enableBlockDiskCache
       : !!config.enableBlockDiskCache,
     architectureRequiresPagedCache,
-    architectureSupportsBlockDiskOnly: hybridSsmBlockDiskOnlySupported,
+    architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
   })
   const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
   const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache

@@ -18,8 +18,9 @@ export interface CacheControlState {
   /**
    * The architecture has non-KV companion state, but the engine can pair the
    * disk-only KV block index with a typed companion SSD store/rederive path.
-   * This is currently true for hybrid/Mamba SSM caches, not for native typed
-   * DSV4/ZAYA/M3/openPangu cache contracts.
+   * This is true for hybrid/Mamba SSM caches and native rotating/mixed-SWA
+   * caches whose typed metadata is carried in each block record. It is not
+   * true for DSV4/ZAYA/M3/openPangu path-dependent cache contracts.
    */
   architectureSupportsBlockDiskOnly?: boolean
 }

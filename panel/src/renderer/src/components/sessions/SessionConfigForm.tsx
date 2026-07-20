@@ -368,8 +368,13 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     detectedCacheType === 'mamba' ||
     detectedCacheType === 'hybrid' ||
     detectedCacheType === 'rotating_kv'
-  const hybridSsmBlockDiskOnlySupported =
-    (detectedCacheType === 'mamba' || detectedCacheType === 'hybrid') &&
+  const mixedSwaBlockDiskOnlySupported =
+    detectedCacheType === 'rotating_kv' ||
+    detectedCacheSubtype === 'mixed_swa_kv'
+  const architectureBlockDiskOnlySupported =
+    (detectedCacheType === 'mamba' ||
+      detectedCacheType === 'hybrid' ||
+      mixedSwaBlockDiskOnlySupported) &&
     !zayaCcaActive &&
     !dsv4Active &&
     !openPanguExactTypedCache
@@ -400,7 +405,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     enableDiskCache: config.enableDiskCache,
     enableBlockDiskCache: dsv4Active ? dsv4CompositeCacheOptIn && config.enableBlockDiskCache : openPanguExactTypedCache ? false : config.enableBlockDiskCache,
     architectureRequiresPagedCache,
-    architectureSupportsBlockDiskOnly: hybridSsmBlockDiskOnlySupported,
+    architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
   }
   const cachePolicy = resolveCacheControlPolicy(cacheControlState)
   const nativeCacheRequiresPaged = cachePolicy.architectureForcedPagedActive && nativePagedFamilyActive
@@ -1020,7 +1025,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!batchingOff && prefixOff && cachePolicy.architectureRequiresPagedCache && <IncompatWarning text="This model uses native/paged cache when Prefix Cache is enabled. Enable Prefix Cache above to activate the architecture-specific cache stack." />}
         {zayaTypedCacheRequiresPaged && <InfoNote text="ZAYA typed CCA cache requires paged cache while prefix cache is enabled. Turn off Prefix Cache to disable this cache stack for ZAYA." />}
         {nativeCacheRequiresPaged && !zayaTypedCacheRequiresPaged && !dsv4CompositeRequiresPaged && <InfoNote text="This native cache route requires paged cache while prefix cache is enabled so KV blocks and path-dependent state stay in the same cache contract." />}
-        {hybridSsmBlockDiskOnlySupported && cachePolicy.blockDiskCacheChecked && <InfoNote text="Hybrid/Mamba SSD-only mode is available: turn Paged KV Cache Off to keep attention KV blocks in Block Disk L2 while restoring full-precision SSM/GDN companion state from its typed SSD store or clean-prefill rederive." />}
+        {architectureBlockDiskOnlySupported && cachePolicy.blockDiskCacheChecked && <InfoNote text={mixedSwaBlockDiskOnlySupported
+          ? "Native sliding/mixed-SWA SSD-only mode is available: turn Paged KV Cache Off to keep typed KV blocks and rotating-window metadata in Block Disk L2 without retaining RAM payloads."
+          : "Hybrid/Mamba SSD-only mode is available: turn Paged KV Cache Off to keep attention KV blocks in Block Disk L2 while restoring full-precision SSM/GDN companion state from its typed SSD store or clean-prefill rederive."} />}
         {dsv4CompositeRequiresPaged && <InfoNote text="DSV4 uses native SWA+CSA/HCA composite cache snapshots, so paged cache stays on and block size is fixed to 256 tokens for diagnostic decode-cache testing." />}
         {m3Active && <InfoNote text="MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets. Block Disk Cache provides its persistent L2; generic KV q4/q8 remains disabled." />}
         {openPanguExactTypedCache && <InfoNote text="openPangu does not use generic paged blocks: causal-convolution state is cumulative and cannot be reconstructed from an arbitrary block. Use Prefix Cache plus prompt-level Disk Cache (L2) instead." />}

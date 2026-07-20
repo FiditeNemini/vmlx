@@ -212,6 +212,14 @@ function cacheSubtypeRequiresPaged(cacheSubtype?: string): boolean {
     return cacheSubtype === 'step3p7_full_sliding_kv' || cacheSubtype === 'mixed_swa_kv'
 }
 
+function cacheTypeSupportsBlockDiskOnly(cacheType?: string): boolean {
+    return cacheType === 'hybrid' || cacheType === 'mamba' || cacheType === 'rotating_kv'
+}
+
+function cacheSubtypeSupportsBlockDiskOnly(cacheSubtype?: string): boolean {
+    return cacheSubtype === 'mixed_swa_kv'
+}
+
 const DSV4_PAGED_CACHE_BLOCK_SIZE = 256
 const GENERIC_DEFAULT_TIMEOUT_SECONDS = 300
 const DSV4_DEFAULT_TIMEOUT_SECONDS = 900
@@ -336,8 +344,10 @@ function buildCommandPreview(
                 : false
     const zayaCcaActive = isZayaCcaFamily(detectedFamily)
     const hybridCacheActive = detected?.cacheType === 'hybrid' || detected?.cacheType === 'mamba'
-    const hybridSsmBlockDiskOnlySupported =
-        hybridCacheActive && !zayaCcaActive && !dsv4Active && detectedFamily !== 'openpangu_v2'
+    const architectureBlockDiskOnlySupported =
+        (cacheTypeSupportsBlockDiskOnly(detected?.cacheType) ||
+            cacheSubtypeSupportsBlockDiskOnly(detected?.cacheSubtype)) &&
+        !zayaCcaActive && !dsv4Active && detectedFamily !== 'openpangu_v2'
     const effectiveDistributed = requestedDistributed && !dsv4Active
     const effectiveFlashMoe = requestedFlashMoe && !effectiveDistributed && !dsv4Active
     const effectiveEnableJit = !!config.enableJit && !isVLM && !effectiveFlashMoe && !effectiveDistributed && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !hybridCacheActive
@@ -396,7 +406,7 @@ function buildCommandPreview(
             zayaCcaActive ||
             dsv4PrefixCacheOptIn ||
             ((cacheTypeRequiresPaged(detected?.cacheType) || cacheSubtypeRequiresPaged(detected?.cacheSubtype)) && detected?.usePagedCache === true),
-        architectureSupportsBlockDiskOnly: hybridSsmBlockDiskOnlySupported,
+        architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
     })
     const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
     const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache
@@ -2353,7 +2363,7 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(kvOut, '--use-paged-cache')).toBe(false)
     })
 
-    it('detected Gemma4 mixed-SWA rotating KV forces paged cache over stale saved false', () => {
+    it('detected Gemma4 mixed-SWA rotating KV honors SSD-only mode with Block L2', () => {
         const out = preview(
             {
                 enablePrefixCache: true,
@@ -2373,11 +2383,32 @@ describe('No Hardcoded Values', () => {
         )
 
         expect(hasFlag(out, '--is-mllm')).toBe(true)
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-disk-cache')).toBe(false)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
-        // #98/H1: cache-memory-% sets the paged L1 RAM byte ceiling → emitted.
-        expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.15')
+        // SSD-only mode does not retain a paged L1 payload mirror.
+        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
+    })
+
+    it('detected Gemma4 mixed-SWA rotating KV still forces paged cache without Block L2', () => {
+        const out = preview(
+            {
+                enablePrefixCache: true,
+                usePagedCache: false,
+                enableBlockDiskCache: false,
+            },
+            {
+                family: 'gemma4',
+                cacheType: 'rotating_kv',
+                cacheSubtype: 'mixed_swa_kv',
+                usePagedCache: true,
+                isMultimodal: true,
+            },
+        )
+
+        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--enable-block-disk-cache')).toBe(false)
     })
 
     it('changing maxCacheBlocks produces different CLI output', () => {

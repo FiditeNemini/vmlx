@@ -464,6 +464,28 @@ describe('TitleBar narrow-width controls', () => {
   })
 })
 
+describe('ChatModeToolbar narrow-width controls', () => {
+  const toolbarSource = readFileSync('src/renderer/src/components/layout/ChatModeToolbar.tsx', 'utf8')
+  const chatSettingsSource = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
+  const serverSettingsSource = readFileSync('src/renderer/src/components/sessions/ServerSettingsDrawer.tsx', 'utf8')
+
+  it('wraps settings below the shrinkable model and lifecycle controls', () => {
+    expect(toolbarSource).toContain('flex flex-wrap items-center gap-2')
+    expect(toolbarSource).toContain('relative flex-1 min-w-0')
+    expect(toolbarSource).toContain('flex w-full items-center gap-1.5')
+    expect(toolbarSource).toContain('flex-1 max-[800px]:hidden')
+    expect(toolbarSource).toContain('max-[800px]:basis-full max-[800px]:justify-end')
+  })
+
+  it('bounds both settings drawers to the visible main pane', () => {
+    expect(toolbarSource).toContain('flex w-full max-w-80 justify-end')
+    expect(toolbarSource).toContain('flex w-full max-w-96 justify-end')
+    expect(chatSettingsSource).toContain('w-full max-w-80 h-full')
+    expect(serverSettingsSource).toContain('w-full max-w-96 h-full')
+    expect(serverSettingsSource).not.toContain('className="w-96 h-full')
+  })
+})
+
 describe('Date Grouping (ChatHistory)', () => {
   const now = Date.now()
   const today = new Date(); today.setHours(0, 0, 0, 0)

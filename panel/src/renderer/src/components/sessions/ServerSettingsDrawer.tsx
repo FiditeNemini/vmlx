@@ -253,7 +253,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
   const isRunning = session.status === 'running' || session.status === 'loading'
 
   return (
-    <div className="w-96 h-full border-l border-border bg-card flex flex-col overflow-hidden">
+    <div className="w-full max-w-96 h-full border-l border-border bg-card flex flex-col overflow-hidden flex-shrink-0">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border flex-shrink-0">
         <span className="font-medium text-sm">{isRemote ? t('sessions.view.connectionTitle') : t('sessions.view.serverSettingsTitle')}</span>

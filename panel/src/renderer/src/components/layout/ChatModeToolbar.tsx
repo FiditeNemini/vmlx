@@ -238,12 +238,12 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
   return (
     <>
       {/* Compact toolbar */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-card/50 flex-shrink-0">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-1.5 border-b border-border bg-card/50 flex-shrink-0">
         {/* Model selector */}
-        <div className="relative" ref={pickerRef}>
+        <div className="relative flex-1 min-w-0" ref={pickerRef}>
           <button
             onClick={() => setShowModelPicker(!showModelPicker)}
-            className="flex items-center gap-1.5 text-xs px-2 py-1 rounded border border-border hover:bg-accent transition-colors min-w-0 max-w-[280px]"
+            className="flex w-full items-center gap-1.5 text-xs px-2 py-1 rounded border border-border hover:bg-accent transition-colors min-w-0 max-w-[280px]"
           >
             <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
               isRunning ? 'bg-success' : isStandby ? 'bg-blue-400' : isLoading ? 'bg-warning animate-pulse' : 'bg-muted-foreground'
@@ -358,7 +358,7 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
 
         {/* Start / Stop / Restart controls */}
         {displaySession && (
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 flex-shrink-0">
             {isError && (
               <button
                 onClick={handleStart}
@@ -408,11 +408,11 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
         )}
 
         {/* Spacer */}
-        <div className="flex-1" />
+        <div className="flex-1 max-[800px]:hidden" />
 
         {/* Settings buttons */}
         {displaySession && (
-          <div className="flex items-center gap-1 flex-shrink-0">
+          <div className="flex items-center gap-1 flex-shrink-0 max-[800px]:basis-full max-[800px]:justify-end">
             <button
               onClick={() => { setShowChatSettings(!showChatSettings); setShowServerSettings(false) }}
               className={`flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors ${
@@ -439,7 +439,7 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
 
       {/* Settings drawers */}
       {showChatSettings && activeChatId && displaySession && (
-        <div className="absolute right-0 top-0 bottom-0 z-20">
+        <div className="absolute right-0 top-0 bottom-0 z-20 flex w-full max-w-80 justify-end">
           <ChatSettings
             chatId={activeChatId}
             session={{
@@ -460,7 +460,7 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
         </div>
       )}
       {showServerSettings && displaySession && (
-        <div className="absolute right-0 top-0 bottom-0 z-20">
+        <div className="absolute right-0 top-0 bottom-0 z-20 flex w-full max-w-96 justify-end">
           <ServerSettingsDrawer
             session={displaySession}
             isRemote={isRemote}

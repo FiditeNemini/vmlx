@@ -277,6 +277,47 @@ describe('i18n locale consistency', () => {
     }
   })
 
+  it('chat settings agentic controls and accessibility labels use the locale catalog', () => {
+    const chatSettingsSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'chat', 'ChatSettings.tsx'),
+      'utf-8',
+    )
+
+    for (const key of [
+      'common.close',
+      'chat.settings.wireCompletions',
+      'chat.settings.wireResponses',
+      'chat.settings.maxToolIterations',
+      'chat.settings.enableBuiltinTools',
+      'chat.settings.workingDirectory',
+      'chat.settings.browse',
+      'chat.settings.toolCategories',
+      'chat.settings.toolFileIO',
+      'chat.settings.toolSearch',
+      'chat.settings.toolShell',
+      'chat.settings.toolWebSearch',
+      'chat.settings.toolUrlFetch',
+      'chat.settings.toolGit',
+      'chat.settings.toolUtilities',
+      'chat.settings.toolResultLimit',
+      'chat.settings.hideToolStatus',
+      'chat.settings.reset',
+      'chat.settings.braveSearch',
+    ]) {
+      expect(chatSettingsSrc).toContain(`t('${key}'`)
+    }
+    for (const staleLiteral of [
+      'label="Max Tool Iterations"',
+      '>Enable Built-in Coding Tools<',
+      '>Working Directory<',
+      '>Tool Categories<',
+      '>Hide Tool Status<',
+      '>Reset<',
+    ]) {
+      expect(chatSettingsSrc).not.toContain(staleLiteral)
+    }
+  })
+
   it('release update notice is localized and covers v1.5.45 release-critical items', () => {
     const updateNoticeSrc = readFileSync(
       resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'UpdateNotice.tsx'),

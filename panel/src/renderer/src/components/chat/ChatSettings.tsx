@@ -240,10 +240,19 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const handleSetDefault = async (profile: ChatProfile) => {
     await window.api.chat.updateProfile(profile.id, profile.name, profile.overrides, !profile.isDefault)
     loadProfiles()
-    showToast('success', profile.isDefault ? `Removed default` : `Set "${profile.name}" as default`)
+    showToast('success', t(profile.isDefault ? 'chat.settings.removeDefaultTitle' : 'chat.settings.setDefaultTitle'))
   }
 
   const shortModel = session.modelName || session.modelPath.split('/').pop() || session.modelPath
+  const localizedStatus = session.status === 'running'
+    ? t('status.running')
+    : session.status === 'loading'
+      ? t('status.loading')
+      : session.status === 'standby'
+        ? t('status.sleeping')
+        : session.status === 'error'
+          ? t('status.error')
+          : t('status.stopped')
   const isImageModel = session.modelType === 'image'
   const compatibilityWarnings = buildChatSettingsCompatibilityWarnings({
     messageCount,
@@ -256,7 +265,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   })
 
   return (
-    <div className="w-80 h-full border-l border-border bg-card flex flex-col overflow-hidden">
+    <div className="w-full max-w-80 h-full border-l border-border bg-card flex flex-col overflow-hidden flex-shrink-0">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border flex-shrink-0">
         <span className="font-medium text-sm">{t('chat.settings.header')}</span>
@@ -266,6 +275,8 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
             onClose()
           }}
           className="text-muted-foreground hover:text-foreground text-sm px-1"
+          aria-label={t('common.close')}
+          title={t('common.close')}
         >
           <X className="h-3.5 w-3.5" />
         </button>
@@ -306,7 +317,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">{t('chat.settings.status')}</span>
                   <span className={session.status === 'running' ? 'text-primary' : 'text-destructive'}>
-                    {session.status}
+                    {localizedStatus}
                   </span>
                 </div>
                 {session.pid && (
@@ -370,7 +381,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                     <button
                       onClick={() => handleLoadProfile(p)}
                       className="flex-1 text-left text-xs px-2 py-1.5 rounded border border-border hover:bg-accent truncate"
-                      title={`Load "${p.name}"`}
+                      title={t('chat.settings.loadProfileTitle', { name: p.name })}
                     >
                       {p.isDefault && <Star className="inline h-3 w-3 mr-1 text-yellow-500 fill-yellow-500" />}
                       {p.name}
@@ -538,7 +549,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                           : 'hover:bg-accent text-muted-foreground'
                       }`}
                     >
-                      Auto
+                      {t('chat.settings.thinkingAuto')}
                     </button>
                     {showLowEffort && (
                       <>
@@ -550,7 +561,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                               : 'hover:bg-accent text-muted-foreground'
                           }`}
                         >
-                          Low
+                          {t('chat.settings.effortLow')}
                         </button>
                         {showMediumEffort && (
                           <button
@@ -561,7 +572,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                                 : 'hover:bg-accent text-muted-foreground'
                             }`}
                           >
-                            Medium
+                            {t('chat.settings.effortMedium')}
                           </button>
                         )}
                       </>
@@ -686,8 +697,8 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
             onChange={e => update('wireApi', e.target.value as 'completions' | 'responses')}
             className="w-full px-3 py-2 bg-background border border-input rounded text-sm focus:outline-none focus:ring-1 focus:ring-ring"
           >
-            <option value="completions">Chat Completions (/v1/chat/completions)</option>
-            <option value="responses">Responses (/v1/responses)</option>
+            <option value="completions">{t('chat.settings.wireCompletions')}</option>
+            <option value="responses">{t('chat.settings.wireResponses')}</option>
           </select>
           <p className="text-xs text-muted-foreground mt-1">{t('chat.settings.wireHelp')}</p>
         </div>
@@ -699,11 +710,11 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
           <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">{t('chat.settings.agentic')}</h3>
           <div className="space-y-4">
             <NumberField
-              label="Max Tool Iterations"
+              label={t('chat.settings.maxToolIterations')}
               value={overrides.maxToolIterations}
               onChange={v => update('maxToolIterations', v)}
-              placeholder="10 (default)"
-              help="Maximum MCP tool call rounds per message. Higher = more autonomous."
+              placeholder={t('chat.settings.maxToolIterationsPlaceholder')}
+              help={t('chat.settings.maxToolIterationsHelp')}
             />
 
             <div className="border-t border-border pt-4">
@@ -714,18 +725,18 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                   onChange={e => update('builtinToolsEnabled', e.target.checked || undefined)}
                   className="w-4 h-4 accent-primary"
                 />
-                <span className="font-medium">Enable Built-in Coding Tools</span>
+                <span className="font-medium">{t('chat.settings.enableBuiltinTools')}</span>
               </label>
               <p className="text-xs text-muted-foreground mt-1 ml-6">
-                File I/O, code search, shell commands, web search, and URL fetching. Full agentic coding environment.
+                {t('chat.settings.enableBuiltinToolsHelp')}
               </p>
 
               {overrides.builtinToolsEnabled && (
                 <div className="mt-3 ml-6 space-y-2">
-                  <label className="text-sm">Working Directory</label>
+                  <label className="text-sm">{t('chat.settings.workingDirectory')}</label>
                   {!overrides.workingDirectory && (
                     <div className="px-2 py-1.5 rounded text-[11px] bg-warning/10 border border-warning/30 text-warning leading-tight">
-                      Working directory required. Tools will fail without a directory set.
+                      {t('chat.settings.workingDirectoryRequired')}
                     </div>
                   )}
                   <div className="flex gap-2">
@@ -734,7 +745,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                       value={overrides.workingDirectory ?? ''}
                       onChange={e => update('workingDirectory', e.target.value)}
                       spellCheck={false}
-                      placeholder="Type a path or use Browse..."
+                      placeholder={t('chat.settings.workingDirectoryPlaceholder')}
                       className="flex-1 px-3 py-1.5 bg-background border border-input rounded text-sm font-mono truncate focus:outline-none"
                     />
                     <button
@@ -746,67 +757,67 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                       }}
                       className="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent whitespace-nowrap"
                     >
-                      Browse
+                      {t('chat.settings.browse')}
                     </button>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    All file operations and commands execute within this directory.
+                    {t('chat.settings.workingDirectoryHelp')}
                   </p>
 
                   <div className="mt-3 pt-3 border-t border-border space-y-2">
-                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Tool Categories</p>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('chat.settings.toolCategories')}</p>
                     <ToolToggle
-                      label="File I/O"
+                      label={t('chat.settings.toolFileIO')}
                       checked={overrides.fileToolsEnabled !== false}
                       onChange={v => update('fileToolsEnabled', v)}
-                      help="read, write, edit, copy, move, delete files and directories"
+                      help={t('chat.settings.toolFileIOHelp')}
                     />
                     <ToolToggle
-                      label="Search"
+                      label={t('chat.settings.toolSearch')}
                       checked={overrides.searchToolsEnabled !== false}
                       onChange={v => update('searchToolsEnabled', v)}
-                      help="search file contents, find files, file info"
+                      help={t('chat.settings.toolSearchHelp')}
                     />
                     <ToolToggle
-                      label="Shell"
+                      label={t('chat.settings.toolShell')}
                       checked={overrides.shellEnabled !== false}
                       onChange={v => update('shellEnabled', v)}
-                      help="execute shell commands in working directory"
+                      help={t('chat.settings.toolShellHelp')}
                     />
                     <ToolToggle
-                      label="Web Search (DuckDuckGo)"
+                      label={t('chat.settings.toolWebSearch')}
                       checked={overrides.webSearchEnabled !== false}
                       onChange={v => update('webSearchEnabled', v)}
-                      help="free web search — no API key needed"
+                      help={t('chat.settings.toolWebSearchHelp')}
                     />
                     <BraveSearchToggle
                       checked={overrides.braveSearchEnabled === true}
                       onChange={v => update('braveSearchEnabled', v)}
                     />
                     <ToolToggle
-                      label="URL Fetch"
+                      label={t('chat.settings.toolUrlFetch')}
                       checked={overrides.fetchUrlEnabled !== false}
                       onChange={v => update('fetchUrlEnabled', v)}
-                      help="fetch and read web page content"
+                      help={t('chat.settings.toolUrlFetchHelp')}
                     />
                     <ToolToggle
-                      label="Git"
+                      label={t('chat.settings.toolGit')}
                       checked={overrides.gitEnabled !== false}
                       onChange={v => update('gitEnabled', v)}
-                      help="git status, diff, log, blame, commit, branch, stash"
+                      help={t('chat.settings.toolGitHelp')}
                     />
                     <ToolToggle
-                      label="Utilities"
+                      label={t('chat.settings.toolUtilities')}
                       checked={overrides.utilityToolsEnabled !== false}
                       onChange={v => update('utilityToolsEnabled', v)}
-                      help="token count, clipboard read/write, ask user"
+                      help={t('chat.settings.toolUtilitiesHelp')}
                     />
                   </div>
 
                   <div className="mt-3 pt-3 border-t border-border">
-                    <label className="text-sm font-medium">Tool Result Limit</label>
+                    <label className="text-sm font-medium">{t('chat.settings.toolResultLimit')}</label>
                     <p className="text-xs text-muted-foreground mt-0.5 mb-2">
-                      Max characters per tool result. Lower values reduce context usage. Default 50,000 (~12k tokens).
+                      {t('chat.settings.toolResultLimitHelp')}
                     </p>
                     <div className="flex items-center gap-2">
                       <input
@@ -838,10 +849,10 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                   onChange={e => update('hideToolStatus', e.target.checked)}
                   className="w-4 h-4 accent-primary"
                 />
-                <span className="font-medium">Hide Tool Status</span>
+                <span className="font-medium">{t('chat.settings.hideToolStatus')}</span>
               </label>
               <p className="text-xs text-muted-foreground mt-1 ml-6">
-                Hide tool execution details from the chat. Tools still execute normally.
+                {t('chat.settings.hideToolStatusHelp')}
               </p>
             </div>
           </div>
@@ -862,7 +873,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
           onClick={handleReset}
           className="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent"
         >
-          Reset
+          {t('chat.settings.reset')}
         </button>
       </div>
     </div>
@@ -914,6 +925,7 @@ function NumberField({ label, value, onChange, placeholder, help }: {
 }
 
 function BraveSearchToggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  const { t } = useTranslation()
   const [key, setKey] = useState('')
   const [hasKey, setHasKey] = useState(false)
   const checkedRef = useRef(checked)
@@ -955,9 +967,9 @@ function BraveSearchToggle({ checked, onChange }: { checked: boolean; onChange: 
           className="w-3.5 h-3.5 accent-primary mt-0.5"
         />
         <span>
-          <span>Brave Search</span>
+          <span>{t('chat.settings.braveSearch')}</span>
           <span className="block text-xs text-muted-foreground">
-            {hasKey ? 'premium web search with API key' : 'requires API key — enter below'}
+            {t(hasKey ? 'chat.settings.braveWithKey' : 'chat.settings.braveNoKey')}
           </span>
         </span>
       </label>
@@ -967,7 +979,7 @@ function BraveSearchToggle({ checked, onChange }: { checked: boolean; onChange: 
           value={key}
           onChange={e => setKey(e.target.value)}
           onBlur={e => saveKey(e.target.value)}
-          placeholder={hasKey ? 'Saved key configured (enter a new key to replace)' : 'Brave Search API key...'}
+          placeholder={t('chat.settings.braveKeyPlaceholder')}
           className="w-full px-2 py-1 bg-background border border-input rounded text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
         />
         <a
@@ -976,7 +988,7 @@ function BraveSearchToggle({ checked, onChange }: { checked: boolean; onChange: 
           rel="noopener noreferrer"
           className="text-[10px] text-primary hover:underline mt-0.5 inline-block"
         >
-          Get a free API key →
+          {t('chat.settings.braveGetKey')}
         </a>
       </div>
     </div>

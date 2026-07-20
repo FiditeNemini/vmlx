@@ -5,7 +5,7 @@ import { EventEmitter } from 'events'
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
 import { createServer } from 'net'
 import { homedir, totalmem, freemem } from 'os'
-import { join, basename } from 'path'
+import { join, basename, dirname } from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import { db, Session } from './database'
 import { resolveImageModelFromDirectoryName } from '../shared/imageModels'
@@ -2064,6 +2064,10 @@ export class SessionManager extends EventEmitter {
         ...spawnEnv,
         PYTHONDONTWRITEBYTECODE: '1',
         PYTHONNOUSERSITE: '1',  // Extra safety: disable user site-packages
+        // Do not prepend the launcher's cwd to sys.path. A packaged app started
+        // from $HOME can otherwise treat a sibling repo directory named `mlx`
+        // as a second package location and abort before model loading.
+        PYTHONSAFEPATH: '1',
         PYTHONPATH: undefined,  // Clear any inherited PYTHONPATH
         // vmlx#102/#116: brew-installed mlx/mlx-c can collide with bundled mlx
         // via DYLD_*. Clearing those forces the bundled libmlx to be the only
@@ -2077,6 +2081,7 @@ export class SessionManager extends EventEmitter {
       this.emit('session:log', { sessionId, data: `$ ${fullCmd}\n` })
       proc = spawn(engineResult.pythonPath, ['-B', '-s', '-m', 'vmlx_engine.cli', ...args], {
         env: bundledEnv,
+        cwd: dirname(engineResult.pythonPath),
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,  // Separate process group so we can kill entire group
       })
@@ -2087,6 +2092,7 @@ export class SessionManager extends EventEmitter {
       this.emit('session:log', { sessionId, data: `$ ${fullCmd}\n` })
       proc = spawn(engineResult.binaryPath, args, {
         env: spawnEnv,
+        cwd: dirname(engineResult.binaryPath),
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,
       })

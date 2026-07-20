@@ -2,6 +2,42 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.14] - 2026-07-20
+
+### Changed
+- Gemma 4 image composition now preserves the bundle-native media-before-text
+  order and exposes the supported 70/140/280/560/1120 image-token budgets
+  through the Electron and Responses paths. Media cache identity includes the
+  selected budget so incompatible vision prefixes cannot alias.
+- Laguna and LFM use their native model/template reasoning policy in Auto mode
+  instead of inheriting a generic family override. Reasoning and visible
+  content remain separate on the API and Electron streaming rails.
+- Narrow settings drawers and icon-only accessibility states remain usable at
+  minimum window widths, and Ollama preserves backend error details.
+
+### Fixed
+- Gemma reasoning-only recovery stays on a fresh direct context and no longer
+  replays an invalid reasoning-only assistant turn through the real Gemma
+  template. The degraded control prefix is buffered rather than leaking into
+  visible content.
+- Nemotron Omni conversation identity now includes media bytes. Replaying the
+  same text with different audio resets stale persistent KV/SSM state, and a
+  post-media Electron follow-up preserves and rehydrates the prior media only
+  for a bundle-grounded `nemotron-h` Omni route.
+
+### Verified checkpoint boundary
+- Current-source proof on `test-host.local` covers real Electron Start
+  materialization, Gemma image/cache/reasoning rows, Nemotron Omni audio
+  attachment and no-attachment continuation, and progressive Chat and
+  Responses reasoning/content/terminal events. The release record contains
+  the exact screenshots, sanitized database rows, health snapshots, and raw
+  SSE timing artifacts.
+- This checkpoint does not promote retained PARTIAL/OPEN rows. Gemma exact
+  small-text OCR, stochastic strict-format reliability, Omni process-restart
+  media-state restoration, broader signed-app family repetition, long-context
+  and network-failure soaks, and the remaining model/parser/media matrix stay
+  explicitly deferred.
+
 ## [1.6.13] - 2026-07-20
 
 ### Fixed

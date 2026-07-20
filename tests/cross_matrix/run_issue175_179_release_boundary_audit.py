@@ -198,10 +198,10 @@ def build_audit(root: Path) -> dict[str, Any]:
             and "block.cache_data = None" in paged_cache
             and "block.cache_data_from_disk = False" in paged_cache
         ),
-        "regression_test_present": "test_paged_cache_reconstruct_drops_promoted_disk_block_mirror"
+        "regression_test_present": "test_paged_cache_reconstruct_keeps_promoted_block_as_evictable_l1"
         in _read(root / "tests/test_engine_audit.py"),
         "l2_readable_write_through_regression_test_present": (
-            "test_paged_cache_reconstruct_drops_readable_l2_write_through_mirror"
+            "test_paged_cache_reconstruct_keeps_readable_l2_write_through_ram_tier"
             in _read(root / "tests/test_engine_audit.py")
         ),
         "installed_app_promoted_block_cleanup_proven": installed_app_promoted_block_cleanup_proven,

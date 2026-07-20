@@ -167,8 +167,8 @@ def test_nemotron_omni_is_selective_attention_kv_allowlisted():
     assert not is_selective_hybrid_tq_supported(
         {"model_type": "unknown_hybrid"}, ["ssm", "attention"]
     )
-    cli = open("vmlx_engine/cli.py").read()
-    assert '"nemotron_h",' in cli
+    selective_tq = open("vmlx_engine/utils/hybrid_tq_cache.py").read()
+    assert '"nemotron_h",' in selective_tq
 
 
 def test_gemma4_mixed_swa_tq_uses_global_attention_head_dim():

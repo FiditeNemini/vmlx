@@ -8624,9 +8624,10 @@ class TestStartupCompatibilityGuards:
         ).read_text()
 
         assert 'getattr(_mc, "cache_type", None) == "hybrid"' in cli_source
-        assert "Qwen3.6 hybrid/path-dependent cache model detected" in cli_source
+        assert '"%s hybrid/path-dependent cache model detected' in cli_source
+        assert '"LFM2" if _mc.family_name == "lfm2" else "Qwen3.6"' in cli_source
         assert "attention KVCache" in cli_source
-        assert "Qwen3.6 and Nemotron-H have a" in cli_source
+        assert "Qwen3.6, Nemotron-H, and LFM2 have a" in cli_source
         assert "Nemotron-H hybrid/path-dependent cache model detected" in cli_source
         hybrid_idx = cli_source.index('getattr(_mc, "cache_type", None) == "hybrid"')
         hybrid_block = cli_source[hybrid_idx : cli_source.index("if _mc.family_name !=", hybrid_idx)]

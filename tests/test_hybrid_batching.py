@@ -110,7 +110,8 @@ class TestHybridBatching:
             # The system warns the user
             mock_logger.info.assert_any_call(
                 "Non-standard cache model detected (MambaCache/hybrid layers). "
-                "Auto-switching to paged cache for correct cache reuse."
+                "Auto-switching to paged cache because neither paged RAM nor "
+                "Block Disk L2 is available for correct cache reuse."
             )
 
     @patch("vmlx_engine.scheduler.Scheduler._is_hybrid_model")

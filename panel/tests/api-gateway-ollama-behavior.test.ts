@@ -82,6 +82,27 @@ async function startCaptureBackend(): Promise<BackendHandle> {
   return { server, port: await listen(server), bodies, paths };
 }
 
+async function startDetailErrorBackend(): Promise<BackendHandle> {
+  const bodies: any[] = [];
+  const paths: string[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => {
+      paths.push(req.url || "");
+      const raw = Buffer.concat(chunks).toString("utf8");
+      bodies.push(raw ? JSON.parse(raw) : {});
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          detail: "lfm2 does not expose a native thinking-off/instruct mode",
+        }),
+      );
+    });
+  });
+  return { server, port: await listen(server), bodies, paths };
+}
+
 async function startStreamingChatBackend(): Promise<BackendHandle> {
   const bodies: any[] = [];
   const paths: string[] = [];
@@ -344,6 +365,38 @@ describe("Ollama gateway request translation behavior", () => {
   afterEach(async () => {
     if (gateway) await gateway.stop();
     if (backend) await close(backend.server);
+  });
+
+  it("preserves FastAPI detail messages and status for Ollama chat and generate", async () => {
+    backend = await startDetailErrorBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    const requests = [
+      ["/api/chat", { model: "hy3-model", stream: false, messages: [] }],
+      ["/api/chat", { model: "hy3-model", stream: true, messages: [] }],
+      ["/api/generate", { model: "hy3-model", stream: false, prompt: "hi" }],
+      ["/api/generate", { model: "hy3-model", stream: true, prompt: "hi" }],
+    ] as const;
+
+    for (const [route, body] of requests) {
+      const response = await fetch(`http://127.0.0.1:${started.port}${route}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: "lfm2 does not expose a native thinking-off/instruct mode",
+      });
+    }
+
+    expect(backend.paths).toEqual([
+      "/v1/chat/completions",
+      "/v1/chat/completions",
+      "/v1/chat/completions",
+      "/v1/chat/completions",
+    ]);
   });
 
   it("omits unset and disabled sampling sentinels without dropping explicit overrides", async () => {

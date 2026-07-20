@@ -2197,13 +2197,24 @@ export class ApiGateway extends EventEmitter {
       }
     }
     const error = (payload as any)?.error;
+    const detail = (payload as any)?.detail;
+    const detailMessage =
+      typeof detail === "string"
+        ? detail
+        : typeof detail?.message === "string"
+          ? detail.message
+          : undefined;
     const message =
       typeof error === "string"
         ? error
-        : error?.message || (payload as any)?.message || "Backend request failed";
+        : error?.message ||
+          detailMessage ||
+          (payload as any)?.message ||
+          "Backend request failed";
+    const code = error?.code || detail?.code || (payload as any)?.code;
     this.sendJson(res, status, {
       error: message,
-      ...(error?.code ? { code: error.code } : {}),
+      ...(code ? { code } : {}),
     });
   }
 }

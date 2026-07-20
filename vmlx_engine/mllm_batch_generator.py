@@ -105,6 +105,7 @@ import importlib
 import logging
 import inspect
 import os
+import threading
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
@@ -925,19 +926,24 @@ def _seed_text_rope_delta_for_decode(language_model: Any, input_ids: mx.array) -
 #
 # Lazy-created on first use so the device handle binds at runtime.
 _GENERATION_STREAM: Optional[Any] = None
+_GENERATION_STREAM_OWNER: int | None = None
 
 
 def _gen_stream() -> Any:
     """Lazily create the dedicated GPU stream for prefill/decode work."""
-    global _GENERATION_STREAM
-    if _GENERATION_STREAM is None:
+    global _GENERATION_STREAM, _GENERATION_STREAM_OWNER
+    owner = threading.get_ident()
+    if _GENERATION_STREAM is None or _GENERATION_STREAM_OWNER != owner:
         try:
             _GENERATION_STREAM = mx.new_stream(mx.default_device())
+            _GENERATION_STREAM_OWNER = owner
         except Exception:
             try:
                 _GENERATION_STREAM = mx.default_stream(mx.default_device())
+                _GENERATION_STREAM_OWNER = owner
             except Exception:
                 _GENERATION_STREAM = None
+                _GENERATION_STREAM_OWNER = owner
     # P0 VL/audio stream bug: mlx_vlm.generate.generation_stream is a module
     # global bound to the IMPORT thread; mlx_vlm internals (wired_limit /
     # generate) call mx.synchronize(generation_stream), which raises "There is
@@ -966,8 +972,9 @@ def reset_generation_streams() -> None:
     worker on wake. Keeping these globals across that lifecycle can make the
     next generation try to use a stream from the old thread.
     """
-    global _GENERATION_STREAM
+    global _GENERATION_STREAM, _GENERATION_STREAM_OWNER
     _GENERATION_STREAM = None
+    _GENERATION_STREAM_OWNER = None
     cls = globals().get("MLLMBatchGenerator")
     if cls is not None:
         try:

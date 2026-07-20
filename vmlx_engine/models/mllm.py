@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 _VLM_STREAM = None
+_VLM_STREAM_OWNER: int | None = None
 
 
 def _register_local_mlx_vlm_runtime_if_needed(model_path: str | Path) -> None:
@@ -3305,19 +3306,23 @@ def _vlm_stream():
     SimpleEngine's direct `mlx_vlm.stream_generate` path must do the same or
     JANGTQ/VL kernels can later materialize on a thread with no MLX stream.
     """
-    global _VLM_STREAM
-    if _VLM_STREAM is None:
+    global _VLM_STREAM, _VLM_STREAM_OWNER
+    owner = threading.get_ident()
+    if _VLM_STREAM is None or _VLM_STREAM_OWNER != owner:
         try:
             import mlx.core as mx
 
             _VLM_STREAM = mx.new_stream(mx.default_device())
+            _VLM_STREAM_OWNER = owner
         except Exception:
             try:
                 import mlx.core as mx
 
                 _VLM_STREAM = mx.default_stream(mx.default_device())
+                _VLM_STREAM_OWNER = owner
             except Exception:
                 _VLM_STREAM = False
+                _VLM_STREAM_OWNER = owner
     stream = None if _VLM_STREAM is False else _VLM_STREAM
     if stream is not None:
         # mlx-vlm also owns a module-global generation stream.  The module
@@ -3344,8 +3349,9 @@ def reset_vlm_stream() -> None:
     thread and raises ``RuntimeError: There is no Stream(gpu, N) in current
     thread``.
     """
-    global _VLM_STREAM
+    global _VLM_STREAM, _VLM_STREAM_OWNER
     _VLM_STREAM = None
+    _VLM_STREAM_OWNER = None
 
 
 def _set_vlm_inference_mode(model: Any) -> None:

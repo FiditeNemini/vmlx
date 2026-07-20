@@ -49,6 +49,7 @@ import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedTool
 import { replayPersistedAssistantHistory } from "../../shared/toolHistoryReplay";
 import {
   ChatStreamServerEventError,
+  chatStreamServerEventErrorDetail,
   shouldRethrowChatStreamLineError,
 } from "../../shared/chatStreamErrors";
 import {
@@ -2126,6 +2127,11 @@ export function registerChatHandlers(
         reasoningContent = "";
         isReasoning = false;
         let currentEventType = ""; // Track SSE event type for Responses API
+        // The server deliberately emits the error signal before its terminal
+        // usage event (Chat: usage chunk + [DONE], Responses: response.failed).
+        // Keep reading long enough to consume authoritative partial usage, then
+        // throw through the normal partial-response persistence path.
+        let pendingStreamServerError: ChatStreamServerEventError | null = null;
         const seenResponsesApiEvents = new Set<string>();
         const responsesFunctionCallArgsByKey = new Map<
           string,
@@ -2476,7 +2482,8 @@ export function registerChatHandlers(
               typeof parsed.type === "string" ? parsed.type : currentEventType;
             const isResponsesTerminalEvent =
               responsesEventType === "response.completed" ||
-              responsesEventType === "response.incomplete";
+              responsesEventType === "response.incomplete" ||
+              responsesEventType === "response.failed";
 
             if (useResponsesApi && responsesEventType) {
               const seq = parsed.sequence_number;
@@ -2698,23 +2705,22 @@ export function registerChatHandlers(
                 recordCacheUsage(parsed.usage.input_tokens_details);
               }
 
-              // Handle error events from Responses API
-              // Server may emit "error", "response.error", or "response.failed" event types
-              if (
-                responsesEventType === "error" ||
-                responsesEventType === "response.error" ||
-                responsesEventType === "response.failed"
-              ) {
-                const errDetail =
-                  parsed.error?.message ||
-                  parsed.error?.code ||
-                  parsed.detail ||
-                  JSON.stringify(parsed);
+              // Defer Responses failures until the response.failed terminal has
+              // supplied partial usage. Throwing on the preceding error event
+              // cancels the reader and loses the authoritative token counts.
+              const responsesErrorDetail = chatStreamServerEventErrorDetail(
+                parsed,
+                responsesEventType,
+              );
+              if (responsesErrorDetail) {
+                const errDetail = responsesErrorDetail;
                 if (isExpectedChatBackendDisconnectError(errDetail)) {
                   throw expectedChatBackendDisconnectError();
                 }
                 console.error(`[CHAT] Responses API error event: ${errDetail}`);
-                throw new ChatStreamServerEventError(`Server error: ${errDetail}`);
+                pendingStreamServerError = new ChatStreamServerEventError(
+                  `Server error: ${errDetail}`,
+                );
               }
 
               if (responsesEventType === "response.warning") {
@@ -2807,19 +2813,20 @@ export function registerChatHandlers(
               const finishReason = parsed.choices?.[0]?.finish_reason;
               if (finishReason) lastFinishReason = finishReason;
 
-              // Handle error chunks from Chat Completions (tool_choice/JSON schema failures)
-              if (parsed.error) {
-                const errDetail =
-                  parsed.error.message ||
-                  parsed.error.code ||
-                  JSON.stringify(parsed.error);
+              // Chat Completions sends partial usage after its error chunk.
+              // Preserve the failure now and throw only after the stream closes.
+              const chatErrorDetail = chatStreamServerEventErrorDetail(parsed);
+              if (chatErrorDetail) {
+                const errDetail = chatErrorDetail;
                 if (isExpectedChatBackendDisconnectError(errDetail)) {
                   throw expectedChatBackendDisconnectError();
                 }
                 console.error(
                   `[CHAT] Chat completions error chunk: ${errDetail}`,
                 );
-                throw new ChatStreamServerEventError(`Server error: ${errDetail}`);
+                pendingStreamServerError = new ChatStreamServerEventError(
+                  `Server error: ${errDetail}`,
+                );
               }
 
               // Handle reasoning_content from reasoning parser
@@ -3160,6 +3167,7 @@ export function registerChatHandlers(
         };
 
         await streamSSE(reader);
+        if (pendingStreamServerError) throw pendingStreamServerError;
         reconcileResponsesToolBuffer();
 
         // ─── Helper: send follow-up request and stream response ────────────
@@ -3172,6 +3180,7 @@ export function registerChatHandlers(
           cachedTokens = 0;
           // Reset SSE parser state from previous stream
           currentEventType = "";
+          pendingStreamServerError = null;
           seenResponsesApiEvents.clear();
           _sawResponsesTextDelta = false;
           responsesFinalText = "";
@@ -3210,6 +3219,7 @@ export function registerChatHandlers(
           const followUpReader = res.body?.getReader();
           if (!followUpReader) return false;
           await streamSSE(followUpReader);
+          if (pendingStreamServerError) throw pendingStreamServerError;
           reconcileResponsesToolBuffer();
           return true;
         };

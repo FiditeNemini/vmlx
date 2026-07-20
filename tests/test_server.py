@@ -2847,6 +2847,7 @@ class TestOpenAILogprobsFormatting:
 
         class _Engine:
             tokenizer = SimpleNamespace(has_thinking=False)
+            aborted = []
 
             async def stream_chat(self, *, messages, **kwargs):
                 yield GenerationOutput(
@@ -2861,6 +2862,7 @@ class TestOpenAILogprobsFormatting:
                 raise RuntimeError("MIDSTREAM PROBE FAILURE")
 
             async def abort_request(self, request_id):
+                self.aborted.append(request_id)
                 return True
 
         monkeypatch.setattr(server, "_default_timeout", 5.0)
@@ -2887,6 +2889,7 @@ class TestOpenAILogprobsFormatting:
                 if line.startswith("data: "):
                     events.append(json.loads(line.removeprefix("data: ")))
 
+        event_types = [event.get("type") for event in events]
         assert len([event for event in events if event.get("type") == "error"]) == 1
         failed = [event for event in events if event.get("type") == "response.failed"]
         assert len(failed) == 1
@@ -2896,7 +2899,88 @@ class TestOpenAILogprobsFormatting:
             "output_tokens": 1,
             "total_tokens": 6,
         }
+        assert "response.output_text.delta" in event_types
+        assert event_types.index("error") < event_types.index("response.failed")
         assert not any(event.get("type") == "response.completed" for event in events)
+        assert len(_Engine.aborted) == 1
+
+    @pytest.mark.asyncio
+    async def test_streaming_chat_midstream_exception_keeps_delta_usage_and_done(
+        self, monkeypatch
+    ):
+        """Chat SSE keeps visible prefix and authoritative usage before [DONE]."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+            aborted = []
+
+            async def stream_chat(self, *, messages, **kwargs):
+                yield GenerationOutput(
+                    text="partial",
+                    new_text="partial",
+                    tokens=[1],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    finished=False,
+                    finish_reason=None,
+                )
+                raise RuntimeError("MIDSTREAM CHAT PROBE FAILURE")
+
+            async def abort_request(self, request_id):
+                self.aborted.append(request_id)
+                return True
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "failure-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+
+        request = ChatCompletionRequest(
+            model="failure-test",
+            messages=[{"role": "user", "content": "fail after one delta"}],
+            stream=True,
+            stream_options={"include_usage": True},
+            enable_thinking=False,
+        )
+
+        raw_chunks = []
+        async for chunk in server.stream_chat_completion(
+            _Engine(),
+            request.messages,
+            request,
+            fastapi_request=None,
+        ):
+            raw_chunks.append(chunk)
+
+        data = [
+            line.removeprefix("data: ")
+            for chunk in raw_chunks
+            for line in chunk.splitlines()
+            if line.startswith("data: ")
+        ]
+        parsed = [json.loads(item) for item in data if item != "[DONE]"]
+        assert any(
+            chunk.get("choices", [{}])[0].get("delta", {}).get("content") == "partial"
+            for chunk in parsed
+            if chunk.get("choices")
+        )
+        error_index = next(i for i, chunk in enumerate(parsed) if chunk.get("error"))
+        usage_index = next(i for i, chunk in enumerate(parsed) if chunk.get("usage"))
+        assert error_index < usage_index
+        assert parsed[usage_index]["usage"] == {
+            "prompt_tokens": 5,
+            "completion_tokens": 1,
+            "total_tokens": 6,
+        }
+        assert data[-1] == "[DONE]"
+        assert len(_Engine.aborted) == 1
 
     @pytest.mark.asyncio
     async def test_streaming_responses_tool_call_arguments_survive_buffering(

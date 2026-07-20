@@ -1221,7 +1221,7 @@ class TestServerErrorEventHandling:
     """Regression: server-side error SSE events must be caught in both API paths."""
 
     def test_chat_completions_handles_parsed_error(self):
-        """Chat completions SSE path must check parsed.error."""
+        """Chat completions SSE path must route parsed errors to the shared decoder."""
         import os
 
         chat_ts = os.path.join(
@@ -1231,9 +1231,9 @@ class TestServerErrorEventHandling:
         with open(chat_ts) as f:
             source = f.read()
 
-        assert "parsed.error" in source, (
-            "Chat completions SSE parser must handle parsed.error field "
-            "from server-side error events"
+        assert "chatStreamServerEventErrorDetail(parsed)" in source, (
+            "Chat completions SSE parser must route the parsed payload through "
+            "the shared server-error decoder"
         )
 
     def test_responses_api_handles_error_event_type(self):

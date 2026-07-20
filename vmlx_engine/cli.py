@@ -1024,13 +1024,11 @@ def serve_command(args):
             getattr(_mc, "cache_type", None) == "hybrid"
             and not getattr(args, "kv_cache_quantization_explicit", False)
         ):
+            from .utils.hybrid_tq_cache import SELECTIVE_HYBRID_TQ_FAMILIES
+
             _old_kvq = args.kv_cache_quantization
-            if _mc.family_name in {
-                "qwen3_5",
-                "qwen3_5_moe",
-                "nemotron_h",
-            }:
-                if _mc.family_name in {"qwen3_5", "qwen3_5_moe"}:
+            if _mc.family_name in SELECTIVE_HYBRID_TQ_FAMILIES:
+                if _mc.family_name in {"qwen3_5", "qwen3_5_moe", "lfm2"}:
                     # The architecture-selected hybrid TurboQuant cache already
                     # owns the attention-only storage codec and its per-model bit
                     # policy. Disable the generic QuantizedKVCache wrapper here so
@@ -1042,13 +1040,14 @@ def serve_command(args):
                     if _old_kvq in {"q4", "q8"}:
                         args.kv_cache_quantization = "none"
                     logger.info(
-                        "Qwen3.6 hybrid/path-dependent cache model detected — "
+                        "%s hybrid/path-dependent cache model detected — "
                         "keeping auto live TurboQuant enabled for attention KVCache "
                         "layers only; SSM/GatedDelta companion state remains native "
                         "full precision. Generic QuantizedKVCache storage=%s is disabled "
                         "to avoid a second codec; native architecture-selected "
                         "attention-TQ storage remains enabled for prefix/paged/L2 and "
                         "reports its effective bit policy in /health.",
+                        "LFM2" if _mc.family_name == "lfm2" else "Qwen3.6",
                         args.kv_cache_quantization,
                     )
                 else:
@@ -1062,7 +1061,7 @@ def serve_command(args):
                     )
             else:
                 # Hybrid/path-dependent models carry cumulative non-KV state in
-                # addition to attention KV. Qwen3.6 and Nemotron-H have a
+                # addition to attention KV. Qwen3.6, Nemotron-H, and LFM2 have a
                 # selective live TQ path; other hybrid families keep the generic
                 # loader patch disabled until their typed partial codec is proven.
                 os.environ["VMLX_DISABLE_TQ_KV"] = "1"

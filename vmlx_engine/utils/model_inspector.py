@@ -36,8 +36,31 @@ def _detect_turboquant_layer_types(
         layer_types[i] is "attention" or "ssm".
     """
     model_type = str(text_cfg.get("model_type", "") or "").lower()
-    key_dim = text_cfg.get("head_dim", 128)
-    val_dim = text_cfg.get("head_dim", 128)
+
+    def _positive_int(value: Any) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    # Several standard MLX families (including LFM2/LFM2-MoE) do not serialize
+    # head_dim even though their runtime derives it as hidden_size / n_heads.
+    # Falling back to 128 silently constructs an incompatible TQ encoder for
+    # LFM2's real 64-wide KV heads.  Derive only when the division is exact;
+    # otherwise retain the conservative historical fallback.
+    key_dim = _positive_int(text_cfg.get("head_dim"))
+    if key_dim is None:
+        hidden_size = _positive_int(text_cfg.get("hidden_size"))
+        n_heads = _positive_int(text_cfg.get("num_attention_heads"))
+        if (
+            hidden_size is not None
+            and n_heads is not None
+            and hidden_size % n_heads == 0
+        ):
+            key_dim = hidden_size // n_heads
+    key_dim = key_dim or 128
+    val_dim = key_dim
     if model_type in {
         "gemma4",
         "gemma4_text",

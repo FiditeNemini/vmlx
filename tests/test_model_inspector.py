@@ -14,6 +14,31 @@ from pathlib import Path
 import pytest
 
 
+def test_lfm_head_dim_is_derived_from_hidden_size_and_attention_heads():
+    from vmlx_engine.utils.model_inspector import _detect_turboquant_layer_types
+
+    cfg = {
+        "model_type": "lfm2_moe",
+        "hidden_size": 2048,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 6,
+        "layer_types": [
+            "conv",
+            "full_attention",
+            "conv",
+            "conv",
+            "full_attention",
+            "conv",
+        ],
+    }
+
+    layer_types, key_dim, value_dim = _detect_turboquant_layer_types(cfg, 6)
+
+    assert layer_types == ["ssm", "attention", "ssm", "ssm", "attention", "ssm"]
+    assert key_dim == 64
+    assert value_dim == 64
+
+
 def test_bailing_hybrid_is_not_compressed_latent_mla_for_cache_policy():
     """Ling/Bailing has kv_lora_rank but stores expanded KV on global layers."""
     from vmlx_engine.utils.model_inspector import (

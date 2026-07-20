@@ -28,6 +28,26 @@ NEMOTRON_OMNI_HYBRID_MODEL_TYPES = frozenset(
     }
 )
 
+LFM_HYBRID_MODEL_TYPES = frozenset(
+    {
+        "lfm2",
+        "lfm2_moe",
+    }
+)
+
+# Registry family names whose native cache layout has a live-gated selective
+# TurboQuant path.  The model-type check below remains authoritative after load;
+# this set only keeps the CLI from disabling that path before the real native
+# cache factory can be inspected.
+SELECTIVE_HYBRID_TQ_FAMILIES = frozenset(
+    {
+        "qwen3_5",
+        "qwen3_5_moe",
+        "nemotron_h",
+        "lfm2",
+    }
+)
+
 TURBOQUANT_MAKE_CACHE_NAMES = frozenset(
     {
         "_tq_make_cache",
@@ -116,7 +136,11 @@ def is_selective_hybrid_tq_supported(
         return False
     if is_qwen36_hybrid_tq_supported(model_config, layer_types):
         return True
-    return bool(_model_types(model_config) & NEMOTRON_OMNI_HYBRID_MODEL_TYPES)
+    model_types = _model_types(model_config)
+    return bool(
+        model_types
+        & (NEMOTRON_OMNI_HYBRID_MODEL_TYPES | LFM_HYBRID_MODEL_TYPES)
+    )
 
 
 def is_turboquant_make_cache(make_cache: Any) -> bool:

@@ -17,6 +17,24 @@ def _qwen_hybrid_model_config():
     }
 
 
+def _lfm_hybrid_model_config():
+    return {
+        "model_type": "lfm2_moe",
+        "num_hidden_layers": 6,
+        "hidden_size": 2048,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "layer_types": [
+            "conv",
+            "full_attention",
+            "conv",
+            "conv",
+            "full_attention",
+            "conv",
+        ],
+    }
+
+
 def test_qwen_hybrid_auto_keeps_live_transition_off(monkeypatch):
     from vmlx_engine.utils.turboquant_config import (
         QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER,
@@ -73,6 +91,17 @@ def test_qwen_cache_classifier_distinguishes_subtypes():
     assert classify_qwen_cache_architecture(
         {"model_type": "qwen3_vl"}, hybrid
     ) == "unsupported"
+
+
+def test_lfm_hybrid_is_selective_tq_supported_only_with_attention_and_companions():
+    from vmlx_engine.utils.hybrid_tq_cache import is_selective_hybrid_tq_supported
+
+    config = _lfm_hybrid_model_config()
+    assert is_selective_hybrid_tq_supported(
+        config, ["ssm", "attention", "ssm"]
+    ) is True
+    assert is_selective_hybrid_tq_supported(config, ["ssm"] * 3) is False
+    assert is_selective_hybrid_tq_supported(config, ["attention"] * 3) is False
 
 
 def test_uncalibrated_qwen_hybrid_auto_uses_tq4_on_real_kv_positions():
@@ -328,6 +357,23 @@ class FakeHybridModel:
         ]
 
 
+class FakeLFMModel:
+    def __init__(self):
+        self.layers = [object()] * 6
+
+    def make_cache(self):
+        from mlx_lm.models.cache import ArraysCache, KVCache
+
+        return [
+            ArraysCache(size=1),
+            KVCache(),
+            ArraysCache(size=1),
+            ArraysCache(size=1),
+            KVCache(),
+            ArraysCache(size=1),
+        ]
+
+
 class FakeBonsaiModel:
     def __init__(self):
         self.layers = [object()] * 64
@@ -380,6 +426,12 @@ def _write_qwen36_hybrid_config(path):
     return config
 
 
+def _write_lfm_hybrid_config(path):
+    config = _lfm_hybrid_model_config()
+    (path / "config.json").write_text(json.dumps(config))
+    return config
+
+
 def test_standard_qwen_hybrid_tq_patches_attention_cache_only(tmp_path, monkeypatch):
     from vmlx_engine.utils.tokenizer import _apply_turboquant_to_model
 
@@ -400,6 +452,45 @@ def test_standard_qwen_hybrid_tq_patches_attention_cache_only(tmp_path, monkeypa
     assert getattr(model.make_cache, "_vmlx_hybrid_tq_policy") == "attention_kv_only"
     assert getattr(model.make_cache, "_vmlx_hybrid_tq_attention_layers") == (0, 2)
     assert getattr(model.make_cache, "_vmlx_hybrid_tq_companion_layers") == (1, 3)
+
+
+def test_standard_lfm_hybrid_auto_uses_q4_tq_on_real_kv_slots_only(
+    tmp_path, monkeypatch
+):
+    from vmlx_engine.utils.tokenizer import _apply_turboquant_to_model
+
+    _write_lfm_hybrid_config(tmp_path)
+    model = FakeLFMModel()
+    monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
+    monkeypatch.setenv("VMLX_FORCE_TQ_AUTO", "1")
+
+    _apply_turboquant_to_model(model, str(tmp_path))
+
+    cache = model.make_cache()
+    assert [type(slot).__name__ for slot in cache] == [
+        "ArraysCache",
+        "TurboQuantKVCache",
+        "ArraysCache",
+        "ArraysCache",
+        "TurboQuantKVCache",
+        "ArraysCache",
+    ]
+    assert getattr(model.make_cache, "_vmlx_hybrid_tq_attention_layers") == (1, 4)
+    assert getattr(model.make_cache, "_vmlx_hybrid_tq_companion_layers") == (
+        0,
+        2,
+        3,
+        5,
+    )
+    assert getattr(model.make_cache, "_vmlx_tq_auto_policy") == (
+        "uncalibrated_selective_attention_kv_storage_tq4"
+    )
+    for index in (1, 4):
+        assert cache[index].key_bits == 4
+        assert cache[index].value_bits == 4
+        assert cache[index].key_dim == 64
+        assert cache[index].value_dim == 64
+        assert cache[index].compress_after == 0
 
 
 def test_jang_qwen_hybrid_tq_patches_attention_cache_only(monkeypatch):

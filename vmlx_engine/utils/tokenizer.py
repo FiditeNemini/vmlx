@@ -249,8 +249,8 @@ def _apply_turboquant_to_model(model, model_path: str):
         if _is_hybrid and not _supports_selective_hybrid_tq:
             logger.info(
                 "  TurboQuant skipped: hybrid/path-dependent cache detected; "
-                "only live-gated Qwen3.6/Nemotron-Omni selective attention-KV "
-                "TQ is supported. "
+                "only live-gated Qwen3.6/Nemotron-Omni/LFM2 selective "
+                "attention-KV TQ is supported. "
                 "Native KV + non-KV state remains active for this family."
             )
             return

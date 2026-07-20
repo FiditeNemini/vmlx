@@ -881,6 +881,17 @@ class TestModelConfigs:
         config = self._lookup(registry, "Qwen-Mamba-7B", "qwen_mamba")
         assert config.cache_type == "mamba"
 
+    def test_laguna_auto_uses_native_thinking_off_default(self, registry):
+        config = self._lookup(
+            registry,
+            "JANGQ-AI/Laguna-XS.2-JANGTQ",
+            "laguna",
+        )
+        assert config.family_name == "laguna"
+        assert config.supports_thinking is True
+        assert config.reasoning_parser == "qwen3"
+        assert config.architecture_hints["default_enable_thinking"] is False
+
     # Llama family
     def test_llama_config(self, registry):
         config = self._lookup(registry, "mlx-community/Llama-3.2-3B-Instruct-4bit", "llama")

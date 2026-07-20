@@ -239,17 +239,15 @@ def register_all(registry=None):
             # False (otherwise the Auto path mis-seeds the qwen3 parser
             # reasoning-first even when reasoning is off).
             #
-            # Per Eric's directive, ALL reasoning-capable families default
-            # reasoning ON (API + UI), so architecture_hints.default_enable_thinking
-            # = True → Auto resolves to reasoning-ON (template renders `<think>`).
-            # Laguna reasons verbosely (~400+ tok before it closes `</think>`), so
-            # on a tight budget reasoning-on would truncate to empty content; the
-            # family is therefore in _REASONING_ANSWER_PASS_FAMILIES (server.py)
-            # which caps the thinking pass at max_thinking_tokens then runs a
-            # bounded thinking-off answer pass, guaranteeing a visible answer.
+            # Auto must follow the bundle's native default (false), not force the
+            # optional `<think>` rail on. A live Electron run with Auto forced ON
+            # produced 1,978 reasoning tokens and a deterministic-looking
+            # `tenant` repetition before manual abort, while the same artifact's
+            # native/default direct rail and explicit bounded reasoning rail both
+            # completed. Explicit On remains available and still resolves True.
             think_in_template=False,
             supports_thinking=True,
-            architecture_hints={"default_enable_thinking": True},
+            architecture_hints={"default_enable_thinking": False},
             is_mllm=False,
             priority=10,
         )

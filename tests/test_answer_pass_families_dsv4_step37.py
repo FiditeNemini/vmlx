@@ -49,7 +49,7 @@ def test_answer_pass_fresh_context_families():
     """Malformed/double assistant templates and Qwen's live-proven planning
     continuation must re-run the ORIGINAL messages with nothing appended."""
     for fam in (
-        "deepseek_v4", "gemma4", "step3p7", "minimax", "minimax_m2",
+        "deepseek_v4", "gemma4", "laguna", "step3p7", "minimax", "minimax_m2",
         "qwen3", "qwen3_5", "qwen3_5_moe",
     ):
         out = server_mod._answer_pass_messages(_MSGS, fam, _TRUNC)
@@ -60,7 +60,7 @@ def test_answer_pass_fresh_context_families():
 def test_answer_pass_appends_reasoning_turn_for_legacy_families():
     """Other legacy families keep the truncated
     reasoning rides along as an assistant turn."""
-    for fam in ("hy_v3", "laguna", "openpangu_v2", None,
+    for fam in ("hy_v3", "openpangu_v2", None,
                 "reasoning model"):
         out = server_mod._answer_pass_messages(_MSGS, fam, _TRUNC)
         assert out[:-1] == _MSGS

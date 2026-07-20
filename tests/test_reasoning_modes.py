@@ -868,6 +868,49 @@ def test_enable_thinking_explicit_values_still_win_for_reasoning_families(monkey
     ) is False
 
 
+def test_laguna_auto_honors_native_default_but_explicit_on_still_works(
+    tmp_path, monkeypatch
+):
+    """Laguna's template declares enable_thinking|default(false).
+
+    Auto follows that native contract; an explicit user On still opens the
+    optional reasoning rail and remains independently testable.
+    """
+    import json
+
+    import vmlx_engine.model_config_registry as mcr
+    from vmlx_engine import server
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "laguna"}))
+    mcr.ModelConfigRegistry._instance = None
+    mcr._configs_loaded = False
+    registry = mcr.get_model_config_registry()
+    registry.clear_cache()
+    monkeypatch.setattr(server, "_default_enable_thinking", None)
+
+    assert server._resolve_enable_thinking(
+        request_value=None,
+        ct_kwargs={},
+        tools_present=False,
+        model_key=str(tmp_path),
+        auto_detect=True,
+    ) is False
+    assert server._resolve_enable_thinking(
+        request_value=True,
+        ct_kwargs={},
+        tools_present=False,
+        model_key=str(tmp_path),
+        auto_detect=True,
+    ) is True
+    assert server._resolve_enable_thinking(
+        request_value=False,
+        ct_kwargs={},
+        tools_present=False,
+        model_key=str(tmp_path),
+        auto_detect=True,
+    ) is False
+
+
 def test_step37_rejects_instruct_mode_but_keeps_native_reasoning_controls(monkeypatch):
     """A template that always opens <think> must not advertise or fabricate Off."""
     from fastapi import HTTPException

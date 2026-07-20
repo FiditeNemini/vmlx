@@ -208,7 +208,7 @@ registerFamily('nemotron', { cacheType: 'kv', toolParser: 'nemotron', reasoningP
 registerFamily('nemotron-h', { cacheType: 'hybrid', cacheSubtype: 'nemotron_h_ssm_attention', architectureHints: { attentionArch: 'hybrid_ssm_attention' }, toolParser: 'nemotron', reasoningParser: 'deepseek_r1', usePagedCache: true, description: 'Nemotron Hybrid', priority: 10 })
 
 // Poolside / Laguna
-registerFamily('laguna', { cacheType: 'kv', toolParser: 'glm47', reasoningParser: 'qwen3', supportsThinking: true, supportsThinkingBudget: true, thinkInTemplate: false, defaultEnableThinking: true, enableAutoToolChoice: true, description: 'Laguna / Poolside coding model', priority: 10 })
+registerFamily('laguna', { cacheType: 'kv', toolParser: 'glm47', reasoningParser: 'qwen3', supportsThinking: true, supportsThinkingBudget: true, thinkInTemplate: false, defaultEnableThinking: false, enableAutoToolChoice: true, description: 'Laguna / Poolside coding model', priority: 10 })
 
 // Jamba
 registerFamily('jamba', { cacheType: 'hybrid', usePagedCache: true, description: 'Jamba (Hybrid)', priority: 10 })

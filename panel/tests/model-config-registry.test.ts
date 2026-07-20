@@ -1484,6 +1484,16 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
     })
   }
 
+  it('keeps Laguna reasoning available while Auto follows the native off default', () => {
+    const dir = makeModelDir({ model_type: 'laguna' })
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('laguna')
+    expect(detected.supportsThinking).toBe(true)
+    expect(detected.reasoningParser).toBe('qwen3')
+    expect(detected.defaultEnableThinking).toBe(false)
+  })
+
   it('enables MiMo-V2 JANG_2L xml_function tools from verified capability stamps', () => {
     const dir = makeModelDir(
       {

@@ -2079,6 +2079,12 @@ _ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
         # model turn followed by a second generation prompt.  Re-run the
         # original media conversation on the bundle's real thinking-off rail.
         "gemma4",
+        # Laguna's template does not faithfully render a truncated prior
+        # reasoning_content assistant turn. Replaying it made the bounded
+        # thinking-off pass continue planning as visible content (live seed-0
+        # Responses repro: content began mid-sentence before the requested
+        # numbered answer). The original-message direct rail answers cleanly.
+        "laguna",
         "step3p7",
         "minimax",
         "minimax_m2",
@@ -3349,11 +3355,11 @@ def _resolve_enable_thinking(
         return default_hint
 
     # Eric directive: reasoning-capable families default reasoning ON when the
-    # request is Auto (no explicit value / server default / family hint). Most
-    # reasoning templates already default ON, but some (e.g. gemma4, laguna) have
-    # jinja templates that default OFF, so returning True here makes the
-    # ON-by-default behavior uniform across api + ui. Non-reasoning families stay
-    # None (template decides -> no think rail). Effort-based families
+    # request is Auto (no explicit value / server default / family hint). A
+    # family whose native Auto contract differs must declare the authoritative
+    # ``default_enable_thinking`` hint above (Laguna does: false). This fallback
+    # therefore applies only when no such family contract exists. Non-reasoning
+    # families stay None (template decides -> no think rail). Effort-based families
     # (deepseek-v4, mistral4) have downstream policy resolvers that override this.
     #
     # An explicit disable-effort (reasoning_effort="none"/"off"/...) is NOT a

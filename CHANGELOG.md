@@ -2,6 +2,27 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.13] - 2026-07-20
+
+### Fixed
+- Electron now preserves authoritative terminal usage and failure state after
+  a Chat Completions or Responses stream emits progressive partial output and
+  then fails. The safe partial prefix remains visible, interruption UI is not
+  replayed into model history, and immediate same-chat recovery completes.
+- Anthropic Messages and every Ollama streaming rail now terminate injected
+  mid-stream engine failures in their native wire format. Ollama chat,
+  templated generate, and raw generate emit `{"error":"..."}` and never
+  synthesize a false `done:true` after the failure.
+
+### Verified checkpoint boundary
+- Literal unbuffered HTTP failure/recovery pairs cover Chat Completions,
+  Responses, Anthropic Messages, Ollama chat, templated generate, and raw
+  generate. Real Electron dev proof covers the Chat and Responses UI failure
+  surfaces; adapter routes have current production-handler live proof.
+- This checkpoint preserves the v1.6.12 model/cache/media evidence and its
+  explicit deferred rows. Packaging does not promote untested family,
+  long-context, stochastic, media, parser, or signed-app repetition rows.
+
 ## [1.6.12] - 2026-07-19
 
 ### Changed

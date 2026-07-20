@@ -507,3 +507,49 @@ def test_ollama_generate_terminal_merge_retains_usage_on_single_done_row():
     assert merged["done_reason"] == "stop"
     assert merged["eval_count"] == 215
     assert merged["prompt_eval_count"] == 78
+
+
+def test_ollama_chat_stream_maps_upstream_error_to_native_error_row():
+    from vmlx_engine.api.ollama_adapter import openai_chat_chunk_to_ollama_ndjson
+
+    line = "data: " + json.dumps(
+        {
+            "error": {
+                "type": "server_error",
+                "message": "CHAT MIDSTREAM PROBE FAILURE",
+                "code": "internal_error",
+            }
+        }
+    )
+
+    assert json.loads(openai_chat_chunk_to_ollama_ndjson(line, "probe")) == {
+        "error": "CHAT MIDSTREAM PROBE FAILURE"
+    }
+
+
+def test_ollama_templated_generate_stream_preserves_native_error_row():
+    from vmlx_engine.api.ollama_adapter import (
+        openai_chat_chunk_to_ollama_generate_ndjson,
+    )
+
+    line = "data: " + json.dumps(
+        {"error": {"type": "server_error", "message": "TEMPLATE FAILURE"}}
+    )
+
+    assert json.loads(
+        openai_chat_chunk_to_ollama_generate_ndjson(line, "probe")
+    ) == {"error": "TEMPLATE FAILURE"}
+
+
+def test_ollama_raw_generate_stream_maps_upstream_error_to_native_error_row():
+    from vmlx_engine.api.ollama_adapter import (
+        openai_completion_chunk_to_ollama_ndjson,
+    )
+
+    line = "data: " + json.dumps(
+        {"error": {"type": "server_error", "message": "RAW FAILURE"}}
+    )
+
+    assert json.loads(openai_completion_chunk_to_ollama_ndjson(line, "probe")) == {
+        "error": "RAW FAILURE"
+    }

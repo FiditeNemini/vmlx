@@ -56,6 +56,7 @@ def _latest_user_text(messages: list[Any]) -> str:
 
 class FailureProofEngine:
     is_mllm = False
+    preserve_native_tool_format = False
     tokenizer = SimpleNamespace(has_thinking=False)
 
     def __init__(self) -> None:
@@ -63,8 +64,13 @@ class FailureProofEngine:
 
     async def stream_chat(self, *, messages: list[Any], **kwargs: Any):
         prompt = _latest_user_text(messages)
-        is_chat = "UI-CHAT" in prompt or "RAW-CHAT" in prompt
-        prefix = "CHAT-" if is_chat else "RESP-"
+        if "ANTHROPIC" in prompt:
+            prefix = "ANTHROPIC-"
+        elif "OLLAMA" in prompt:
+            prefix = "OLLAMA-"
+        else:
+            is_chat = "UI-CHAT" in prompt or "RAW-CHAT" in prompt
+            prefix = "CHAT-" if is_chat else "RESP-"
         if "FAIL" in prompt:
             chunks = (f"{prefix}PARTIAL-", "VISIBLE")
             text = ""
@@ -98,6 +104,40 @@ class FailureProofEngine:
             )
             await asyncio.sleep(0.25)
 
+    async def stream_generate(self, *, prompt: str, **kwargs: Any):
+        if "FAIL" in prompt:
+            chunks = ("OLLAMA-RAW-PARTIAL-", "VISIBLE")
+            text = ""
+            for index, delta in enumerate(chunks, start=1):
+                text += delta
+                yield GenerationOutput(
+                    text=text,
+                    new_text=delta,
+                    tokens=[index],
+                    prompt_tokens=4,
+                    completion_tokens=index,
+                    finished=False,
+                    finish_reason=None,
+                )
+                await asyncio.sleep(0.35)
+            await asyncio.sleep(0.45)
+            raise RuntimeError("OLLAMA-RAW-MIDSTREAM-PROBE-FAILURE")
+
+        chunks = ("OLLAMA-RAW-RECOVERY-", "OK")
+        text = ""
+        for index, delta in enumerate(chunks, start=1):
+            text += delta
+            yield GenerationOutput(
+                text=text,
+                new_text=delta,
+                tokens=[index],
+                prompt_tokens=4,
+                completion_tokens=index,
+                finished=index == len(chunks),
+                finish_reason="stop" if index == len(chunks) else None,
+            )
+            await asyncio.sleep(0.25)
+
     async def abort_request(self, request_id: str) -> bool:
         self.aborted.append(request_id)
         return True
@@ -109,6 +149,7 @@ def build_app(request_log: Path) -> FastAPI:
 
     server._model_name = MODEL_ID
     server._model_path = None
+    server._engine = engine
     server._reasoning_parser = None
     server._tool_call_parser = None
     server._tool_call_parser_disabled_explicitly = True
@@ -181,6 +222,24 @@ def build_app(request_log: Path) -> FastAPI:
             ),
             media_type="text/event-stream",
         )
+
+    @app.post("/v1/messages")
+    async def anthropic_messages(request: Request):
+        body = await request.json()
+        record("/v1/messages", body)
+        return await server.create_anthropic_message(request)
+
+    @app.post("/api/chat")
+    async def ollama_chat(request: Request):
+        body = await request.json()
+        record("/api/chat", body)
+        return await server.ollama_chat(request)
+
+    @app.post("/api/generate")
+    async def ollama_generate(request: Request):
+        body = await request.json()
+        record("/api/generate", body)
+        return await server.ollama_generate(request)
 
     return app
 

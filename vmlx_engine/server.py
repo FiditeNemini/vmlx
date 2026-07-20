@@ -11567,9 +11567,12 @@ async def ollama_chat(fastapi_request: Request):
     async def ndjson_stream():
         buffered_tcs: list[dict] = []  # ollama-shape {function:{name,arguments}}
         pending_done: dict | None = None
+        stream_errored = False
         async for sse_line in _terminal_finish_guard(stream_chat_completion(
             engine, messages, chat_req, fastapi_request=fastapi_request, **chat_kwargs
         )):
+            if stream_errored:
+                continue
             # Ollama permits exactly one terminal line, and it must follow all
             # message content. Chat streaming may produce a provisional
             # first-pass length terminal before the bounded answer pass. Hold
@@ -11655,6 +11658,12 @@ async def ollama_chat(fastapi_request: Request):
                     pass
             try:
                 _ndjson_done_obj = json.loads(ndjson)
+                if "error" in _ndjson_done_obj:
+                    buffered_tcs = []
+                    pending_done = None
+                    stream_errored = True
+                    yield ndjson
+                    continue
                 if _ndjson_done_obj.get("done") is True:
                     _terminal_message = dict(
                         _ndjson_done_obj.get("message") or {}
@@ -11684,7 +11693,7 @@ async def ollama_chat(fastapi_request: Request):
             except (json.JSONDecodeError, TypeError):
                 pass
             yield ndjson
-        if pending_done is not None:
+        if pending_done is not None and not stream_errored:
             yield json.dumps(pending_done) + "\n"
 
     return _SR(ndjson_stream(), media_type="application/x-ndjson")
@@ -11749,9 +11758,12 @@ async def ollama_generate(fastapi_request: Request):
 
         async def templated_ndjson_stream():
             pending_done: dict[str, Any] | None = None
+            stream_errored = False
             async for sse_line in streaming_response.body_iterator:
                 if isinstance(sse_line, bytes):
                     sse_line = sse_line.decode("utf-8", "replace")
+                if stream_errored:
+                    continue
                 if sse_line.strip() == "data: [DONE]":
                     if pending_done is None:
                         pending_done = {
@@ -11773,6 +11785,11 @@ async def ollama_generate(fastapi_request: Request):
                 if ndjson:
                     try:
                         _ndjson_obj = json.loads(ndjson)
+                        if "error" in _ndjson_obj:
+                            pending_done = None
+                            stream_errored = True
+                            yield ndjson
+                            continue
                         if _ndjson_obj.get("done") is True:
                             pending_done = merge_ollama_generate_stream_terminal(
                                 pending_done,
@@ -11782,7 +11799,7 @@ async def ollama_generate(fastapi_request: Request):
                     except (json.JSONDecodeError, TypeError):
                         pass
                     yield ndjson
-            if pending_done is not None:
+            if pending_done is not None and not stream_errored:
                 yield json.dumps(pending_done) + "\n"
 
         return _SR(templated_ndjson_stream(), media_type="application/x-ndjson")
@@ -11846,11 +11863,18 @@ async def ollama_generate(fastapi_request: Request):
 
     async def ndjson_stream():
         done_sent = False
+        stream_errored = False
         async for sse_line in stream_completions_multi(engine, prompts, comp_req):
+            if stream_errored:
+                continue
             ndjson = openai_completion_chunk_to_ollama_ndjson(sse_line, model_name)
             if ndjson:
                 try:
                     _ndjson_obj = json.loads(ndjson)
+                    if "error" in _ndjson_obj:
+                        stream_errored = True
+                        yield ndjson
+                        continue
                     if _ndjson_obj.get("done") is True:
                         if done_sent:
                             continue

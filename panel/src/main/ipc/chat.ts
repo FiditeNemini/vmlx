@@ -321,6 +321,7 @@ function summarizeRequestForLog(bodyJson: string, useResponsesApi: boolean): Rec
       thinking_mode: body.thinking_mode,
       reasoning_effort: body.reasoning_effort,
       max_thinking_tokens: body.max_thinking_tokens,
+      image_token_budget: body.image_token_budget,
       thinking_budget: body.chat_template_kwargs?.thinking_budget,
       previous_response_id: body.previous_response_id ? "<present>" : undefined,
       has_tools: Array.isArray(body.tools) && body.tools.length > 0,
@@ -1025,6 +1026,7 @@ export function registerChatHandlers(
       let thinkingBudgetSupported: boolean | undefined;
       let supportsThinkingBudget: boolean | undefined;
       let supportsInstructMode: boolean | undefined;
+      let sessionImageTokenBudget: number | undefined;
       // VLM video sampling (Qwen 3.6, Qwen3.5-VL, etc.) — forwarded as
       // video_fps / video_max_frames on the request body when present.
       // Default undefined = engine default (2.0 fps, 8 max frames).
@@ -1119,6 +1121,12 @@ export function registerChatHandlers(
               isHarmonyModel = detected.reasoningParser === "openai_gptoss";
             }
             // VLM video sampling knobs (undefined → engine default)
+            if (
+              chatDetectedFamily === "gemma4" &&
+              typeof sessionConfig.imageTokenBudget === "number" &&
+              sessionConfig.imageTokenBudget > 0
+            )
+              sessionImageTokenBudget = sessionConfig.imageTokenBudget;
             if (typeof sessionConfig.videoFps === "number" && sessionConfig.videoFps > 0)
               sessionVideoFps = sessionConfig.videoFps;
             if (typeof sessionConfig.videoMaxFrames === "number" && sessionConfig.videoMaxFrames > 0)
@@ -1954,6 +1962,8 @@ export function registerChatHandlers(
             // VLM video sampling — forward to engine only when session
             // config has non-default values. Remote OpenAI-compatible
             // providers don't support these fields, so skip there.
+            if (!isRemote && sessionImageTokenBudget !== undefined)
+              obj.image_token_budget = sessionImageTokenBudget;
             if (!isRemote && sessionVideoFps !== undefined)
               obj.video_fps = sessionVideoFps;
             if (!isRemote && sessionVideoMaxFrames !== undefined)
@@ -2038,6 +2048,8 @@ export function registerChatHandlers(
             }
             // VLM video sampling — local engine only (strict 3rd-party APIs
             // reject unknown fields, remote OpenAI-compat doesn't support it).
+            if (!isRemote && sessionImageTokenBudget !== undefined)
+              obj.image_token_budget = sessionImageTokenBudget;
             if (!isRemote && sessionVideoFps !== undefined)
               obj.video_fps = sessionVideoFps;
             if (!isRemote && sessionVideoMaxFrames !== undefined)

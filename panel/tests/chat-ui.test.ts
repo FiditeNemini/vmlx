@@ -1303,6 +1303,20 @@ describe('Media attachment product path', () => {
     expect(source).toContain('format: audioFormatFromDataUrl(a.dataUrl)')
   })
 
+  it('forwards the selected Gemma 4 image token budget on both local chat APIs', () => {
+    const chat = readFileSync('src/main/ipc/chat.ts', 'utf8')
+    const settings = readFileSync(
+      'src/renderer/src/components/sessions/SessionConfigForm.tsx',
+      'utf8',
+    )
+
+    expect(chat).toContain('sessionImageTokenBudget')
+    expect(chat.match(/obj\.image_token_budget = sessionImageTokenBudget/g)).toHaveLength(2)
+    expect(chat).toContain('image_token_budget: body.image_token_budget')
+    expect(settings).toContain('label="Image Token Budget"')
+    expect(settings).toContain("{ value: '1120', label: '1120 — OCR / small text' }")
+  })
+
   it('text-file attachments stay plain text instead of forcing multimodal routing', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
     expect(source).toContain('inferKind(a) !== "text"')

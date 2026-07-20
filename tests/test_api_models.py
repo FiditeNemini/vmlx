@@ -280,9 +280,11 @@ class TestChatCompletion:
             messages=[Message(role="user", content="Hello")],
             video_fps=1.0,
             video_max_frames=16,
+            image_token_budget=1120,
         )
         assert req.video_fps == 1.0
         assert req.video_max_frames == 16
+        assert req.image_token_budget == 1120
 
     def test_assistant_message_reasoning(self):
         msg = AssistantMessage(
@@ -837,6 +839,15 @@ class TestParameterValidation:
     def test_responses_max_output_tokens_rejected(self):
         with pytest.raises(ValueError, match="max_output_tokens must be at least 1"):
             ResponsesRequest(model="test", input="hi", max_output_tokens=0)
+
+    @pytest.mark.parametrize("budget", [70, 140, 280, 560, 1120])
+    def test_responses_accepts_supported_gemma4_image_token_budgets(self, budget):
+        req = ResponsesRequest(model="test", input="hi", image_token_budget=budget)
+        assert req.image_token_budget == budget
+
+    def test_responses_rejects_unsupported_gemma4_image_token_budget(self):
+        with pytest.raises(ValueError, match="image_token_budget must be one of"):
+            ResponsesRequest(model="test", input="hi", image_token_budget=1000)
 
     def test_responses_valid_params(self):
         req = ResponsesRequest(

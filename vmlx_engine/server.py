@@ -13701,6 +13701,8 @@ async def create_chat_completion(
     if has_media:
         chat_kwargs["images"] = images if images else None
         chat_kwargs["videos"] = videos if videos else None
+    if request.image_token_budget:
+        chat_kwargs["image_token_budget"] = request.image_token_budget
     # Video controls — passed regardless of has_media since MLLM models
     # extract media from messages internally (has_media is always False for them)
     if request.video_fps:
@@ -16342,6 +16344,8 @@ async def create_response(
     )
 
     # Video processing controls (MLLM models)
+    if request.image_token_budget:
+        chat_kwargs["image_token_budget"] = request.image_token_budget
     if request.video_fps:
         chat_kwargs["video_fps"] = request.video_fps
     if request.video_max_frames:

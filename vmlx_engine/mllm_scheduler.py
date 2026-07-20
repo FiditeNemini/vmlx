@@ -310,6 +310,7 @@ class MLLMRequest:
     num_output_tokens: int = 0
 
     # Video processing parameters (per-request overrides)
+    image_token_budget: Optional[int] = None
     video_fps: Optional[float] = None
     video_max_frames: Optional[int] = None
     extra_kwargs: Dict[str, Any] = field(default_factory=dict)
@@ -2398,6 +2399,7 @@ class MLLMScheduler:
             videos=videos,
             audio=audio,
             sampling_params=sampling_params,
+            image_token_budget=kwargs.get("image_token_budget"),
             video_fps=kwargs.get("video_fps"),
             video_max_frames=kwargs.get("video_max_frames"),
         )
@@ -2598,6 +2600,7 @@ class MLLMScheduler:
                 seed=request.sampling_params.seed,
                 max_prompt_tokens=int(getattr(request, "_max_prompt_tokens", 0) or 0),
                 enable_thinking=getattr(request, "enable_thinking", None),
+                image_token_budget=request.image_token_budget,
                 video_fps=request.video_fps,
                 video_max_frames=request.video_max_frames,
             )

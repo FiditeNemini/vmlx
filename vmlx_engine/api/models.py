@@ -40,6 +40,16 @@ def _validate_prompt_context_limit(v):
     return v
 
 
+_GEMMA4_IMAGE_TOKEN_BUDGETS = {70, 140, 280, 560, 1120}
+
+
+def _validate_image_token_budget(v):
+    if v is not None and v not in _GEMMA4_IMAGE_TOKEN_BUDGETS:
+        allowed = ", ".join(str(value) for value in sorted(_GEMMA4_IMAGE_TOKEN_BUDGETS))
+        raise ValueError(f"image_token_budget must be one of: {allowed}")
+    return v
+
+
 # =============================================================================
 # Content Types (for multimodal messages)
 # =============================================================================
@@ -223,6 +233,9 @@ class ChatCompletionRequest(BaseModel):
     # Structured output
     response_format: ResponseFormat | dict | None = None
     # MLLM-specific parameters
+    # Gemma 4 supports these exact visual soft-token budgets. Higher values
+    # improve OCR/small-text fidelity at a proportional prefill cost.
+    image_token_budget: int | None = None
     video_fps: float | None = None
     video_max_frames: int | None = None
     # Request timeout in seconds (None = use server default)
@@ -339,6 +352,11 @@ class ChatCompletionRequest(BaseModel):
     @classmethod
     def validate_prompt_context_limit(cls, v):
         return _validate_prompt_context_limit(v)
+
+    @field_validator("image_token_budget")
+    @classmethod
+    def validate_image_token_budget(cls, v):
+        return _validate_image_token_budget(v)
 
     @field_validator("temperature")
     @classmethod
@@ -854,6 +872,7 @@ class ResponsesRequest(BaseModel):
     max_context_tokens: int | None = None
     max_context: int | None = None
     # Video processing controls (MLLM models)
+    image_token_budget: int | None = None
     video_fps: float | None = None
     video_max_frames: int | None = None
     # Cache bypass — parity with ChatCompletionRequest.cache_salt /
@@ -916,6 +935,11 @@ class ResponsesRequest(BaseModel):
     @classmethod
     def validate_prompt_context_limit(cls, v):
         return _validate_prompt_context_limit(v)
+
+    @field_validator("image_token_budget")
+    @classmethod
+    def validate_image_token_budget(cls, v):
+        return _validate_image_token_budget(v)
 
     @field_validator("temperature")
     @classmethod

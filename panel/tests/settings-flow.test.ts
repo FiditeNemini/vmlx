@@ -86,6 +86,7 @@ interface SessionConfig {
     corsOrigins: string
     maxContextLength: number
     chatTemplate?: string
+    imageTokenBudget?: number
     videoFps?: number
     videoMaxFrames?: number
     distributedEnabled?: boolean
@@ -3681,7 +3682,7 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         'nativeMtpMode', 'nativeMtpDepth', 'nativeMtpDepthOverride',
         'embeddingModel', 'additionalArgs',
         'enableJit', 'logLevel', 'corsOrigins', 'maxContextLength',
-        'chatTemplate', 'videoFps', 'videoMaxFrames',
+        'chatTemplate', 'imageTokenBudget', 'videoFps', 'videoMaxFrames',
         'distributedEnabled', 'distributedMode', 'distributedSecret', 'distributedNodes',
         'idleTimeoutSoftMin', 'idleTimeoutHardMin', 'autoSleepEnabled',
     ]
@@ -3698,6 +3699,7 @@ describe('Settings → CLI Round-Trip Completeness', () => {
             'enableAutoToolChoice',
             'isMultimodal',
             'chatTemplate',
+            'imageTokenBudget',
             'videoFps',
             'videoMaxFrames',
             'distributedEnabled',

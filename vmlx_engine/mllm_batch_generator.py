@@ -108,6 +108,7 @@ import os
 import threading
 import time
 from collections import OrderedDict, deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
@@ -246,6 +247,8 @@ def _mllm_media_cache_extra_keys(request: Any) -> Optional[Dict[str, str]]:
 
     for source in getattr(request, "images", None) or []:
         _hash_media_source("image", source)
+    if getattr(request, "images", None):
+        _hash_text("image_token_budget", getattr(request, "image_token_budget", None))
     for source in getattr(request, "videos", None) or []:
         _hash_media_source("video", source)
     if getattr(request, "videos", None):
@@ -1094,7 +1097,7 @@ def _load_audio_waveforms_for_processor(processor: Any, audio: List[Any]) -> Lis
     return out
 
 
-def _call_processor_direct(
+def _call_processor_direct_unscoped(
     processor: Any,
     *,
     prompts: Any,
@@ -1171,6 +1174,74 @@ def _call_processor_direct(
     if params and not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
         kwargs = {k: v for k, v in kwargs.items() if k in params}
     return _as_input_mapping(processor(**kwargs))
+
+
+_GEMMA4_IMAGE_TOKEN_BUDGETS = {70, 140, 280, 560, 1120}
+
+
+@contextmanager
+def _temporary_gemma4_image_token_budget(processor: Any, budget: Optional[int]):
+    """Apply a request-local Gemma 4 visual budget and restore the processor.
+
+    Gemma4Processor does not forward arbitrary kwargs to its image processor;
+    it reads ``image_processor.max_soft_tokens`` synchronously. The MLLM
+    scheduler preprocesses requests serially, so a tightly-scoped mutation is
+    safe and avoids changing the model bundle's configured default.
+    """
+    if budget is None:
+        yield
+        return
+    if budget not in _GEMMA4_IMAGE_TOKEN_BUDGETS:
+        allowed = ", ".join(str(value) for value in sorted(_GEMMA4_IMAGE_TOKEN_BUDGETS))
+        raise ValueError(f"image_token_budget must be one of: {allowed}")
+
+    processor_type = type(processor)
+    processor_blob = " ".join(
+        str(item)
+        for item in (
+            getattr(processor_type, "__module__", ""),
+            getattr(processor_type, "__name__", ""),
+            getattr(processor, "model_type", ""),
+            getattr(getattr(processor, "config", None), "model_type", ""),
+        )
+    ).lower()
+    if "gemma4" not in processor_blob and "gemma_4" not in processor_blob:
+        yield
+        return
+
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is None or not hasattr(image_processor, "max_soft_tokens"):
+        raise TypeError(
+            f"Gemma 4 processor {type(processor).__name__} has no mutable "
+            "image_processor.max_soft_tokens"
+        )
+    previous = image_processor.max_soft_tokens
+    image_processor.max_soft_tokens = int(budget)
+    try:
+        yield
+    finally:
+        image_processor.max_soft_tokens = previous
+
+
+def _call_processor_direct(
+    processor: Any,
+    *,
+    prompts: Any,
+    images: Optional[List[str]],
+    videos: Optional[List[Any]] = None,
+    audio: Optional[List[Any]] = None,
+    add_special_tokens: bool,
+    image_token_budget: Optional[int] = None,
+) -> Dict[str, Any]:
+    with _temporary_gemma4_image_token_budget(processor, image_token_budget):
+        return _call_processor_direct_unscoped(
+            processor,
+            prompts=prompts,
+            images=images,
+            videos=videos,
+            audio=audio,
+            add_special_tokens=add_special_tokens,
+        )
 
 
 def _resolve_mimo_audio_bundle_path(model: Any, processor: Any) -> Optional[Path]:
@@ -3350,6 +3421,7 @@ class MLLMBatchRequest:
     enable_thinking: Optional[bool] = None
 
     # Video processing parameters (per-request overrides)
+    image_token_budget: Optional[int] = None
     video_fps: Optional[float] = None
     video_max_frames: Optional[int] = None
 
@@ -4595,11 +4667,16 @@ class MLLMBatchGenerator:
 
         # Check pixel cache first
         media_cache_sources = all_images + video_cache_sources + all_audio
+        pixel_cache_prompt = request.prompt
+        if request.image_token_budget is not None:
+            pixel_cache_prompt += (
+                f"\n\x00vmlx:image_token_budget={int(request.image_token_budget)}"
+            )
         _mllm_bypass = bool(getattr(request, "_bypass_prefix_cache", False))
         cached_pixels = None
         if not _mllm_bypass:
             cached_pixels = self.vision_cache.get_pixel_cache(
-                media_cache_sources, request.prompt
+                media_cache_sources, pixel_cache_prompt
             )
         if cached_pixels is not None:
             # Cache hit - use cached pixel values
@@ -4646,6 +4723,7 @@ class MLLMBatchGenerator:
                 videos=video_inputs,
                 audio=all_audio,
                 add_special_tokens=False,
+                image_token_budget=request.image_token_budget,
             )
         else:
             inputs = _as_input_mapping(prepare_inputs(
@@ -4810,7 +4888,7 @@ class MLLMBatchGenerator:
         ):
             self.vision_cache.set_pixel_cache(
                 images=media_cache_sources,
-                prompt=request.prompt,
+                prompt=pixel_cache_prompt,
                 pixel_values=request.pixel_values,
                 input_ids=request.input_ids,
                 attention_mask=request.attention_mask,

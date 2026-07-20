@@ -104,6 +104,7 @@ export interface SessionConfig {
   imageMode?: string
   imageQuantize?: number
   // VLM video sampling — forwarded as video_fps / video_max_frames on request
+  imageTokenBudget?: number
   videoFps?: number
   videoMaxFrames?: number
   // Distributed compute
@@ -1524,6 +1525,21 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             options={[
               { value: 'stage1', label: 'Stage 1 correctness' },
               { value: 'stage2', label: 'Stage 2 native MLX' },
+            ]}
+          />
+        )}
+        {normalizedDetectedFamily === 'gemma4' && multimodalActive && (
+          <SelectField
+            label="Image Token Budget"
+            tooltip="Gemma 4 visual soft-token budget per image. 280 is the bundle default; use 560 or 1120 for OCR and small text at higher prefill cost. The selected value is sent as image_token_budget and is part of the media cache identity."
+            value={String(config.imageTokenBudget ?? 280)}
+            onChange={v => onChange('imageTokenBudget', Number(v))}
+            options={[
+              { value: '70', label: '70 — fastest / lowest detail' },
+              { value: '140', label: '140 — low detail' },
+              { value: '280', label: '280 — bundle default' },
+              { value: '560', label: '560 — detailed' },
+              { value: '1120', label: '1120 — OCR / small text' },
             ]}
           />
         )}

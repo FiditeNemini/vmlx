@@ -49,7 +49,7 @@ def test_answer_pass_fresh_context_families():
     """Malformed/double assistant templates and Qwen's live-proven planning
     continuation must re-run the ORIGINAL messages with nothing appended."""
     for fam in (
-        "deepseek_v4", "step3p7", "minimax", "minimax_m2",
+        "deepseek_v4", "gemma4", "step3p7", "minimax", "minimax_m2",
         "qwen3", "qwen3_5", "qwen3_5_moe",
     ):
         out = server_mod._answer_pass_messages(_MSGS, fam, _TRUNC)
@@ -60,7 +60,7 @@ def test_answer_pass_fresh_context_families():
 def test_answer_pass_appends_reasoning_turn_for_legacy_families():
     """Other legacy families keep the truncated
     reasoning rides along as an assistant turn."""
-    for fam in ("gemma4", "hy_v3", "laguna", "openpangu_v2", None,
+    for fam in ("hy_v3", "laguna", "openpangu_v2", None,
                 "reasoning model"):
         out = server_mod._answer_pass_messages(_MSGS, fam, _TRUNC)
         assert out[:-1] == _MSGS
@@ -94,6 +94,24 @@ def test_thinking_reentry_matches_tag_variants():
     assert not reentry("A clean answer: BLUE-FALCON 37 Paris.")
     assert not reentry("")
     assert not reentry(None)
+
+
+def test_answer_pass_buffers_degraded_gemma_thought_prefix():
+    """The Gemma detokenizer may emit ``thought`` before its newline.
+
+    Streaming that first chunk is irreversible; wait until the native channel
+    either closes (then expose only the answer) or ends unclosed (hide it).
+    """
+    visible = server_mod._answer_pass_safe_visible_raw
+    for partial in ("t", "thoug", "thought"):
+        assert visible(partial, finished=False) is None
+    assert visible("thought\nprivate", finished=False) is None
+    assert visible("thought\nprivate", finished=True) == ""
+    assert (
+        visible("thought\nprivate<channel|>VISIBLE", finished=False)
+        == "VISIBLE"
+    )
+    assert visible("thoughtful response", finished=False) == "thoughtful response"
 
 
 def test_minimax_family_armed_for_answer_pass():

@@ -1126,6 +1126,12 @@ def _main_pass_finish_reason(
 _ANSWER_PASS_CONTROL_PREFIXES = (
     "<|channel>",
     "<channel|>",
+    # Gemma 4's detokenizer can consume the leading <|channel> special token
+    # and stream the native thought header as the literal ``thought\n``.  The
+    # first decoded chunk is commonly just ``thought``; treat that incomplete
+    # degraded header like every other control-token prefix so it cannot escape
+    # as visible content before the newline resolves the channel.
+    "thought\n",
     "<think>",
     "</think>",
     "<thinking>",
@@ -2068,6 +2074,11 @@ def _reasoning_answer_pass_family_label(family_name: str) -> str:
 _ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
     {
         "deepseek_v4",
+        # Gemma 4 renders reasoning_content only on assistant tool-call turns.
+        # Appending a reasoning-only assistant turn therefore becomes an empty
+        # model turn followed by a second generation prompt.  Re-run the
+        # original media conversation on the bundle's real thinking-off rail.
+        "gemma4",
         "step3p7",
         "minimax",
         "minimax_m2",

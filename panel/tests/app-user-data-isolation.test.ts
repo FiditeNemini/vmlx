@@ -23,6 +23,18 @@ describe('app user-data isolation bootstrap', () => {
     expect(bootstrapIndex).toBeLessThan(lockIndex)
   })
 
+  it('honors the isolated-secondary proof gate before taking the app-wide lock', () => {
+    const main = source()
+
+    expect(main).toContain("import { shouldAllowSecondaryInstance } from '../shared/userDataOverride'")
+    expect(main).toContain(
+      'const allowSecondaryInstance = shouldAllowSecondaryInstance(process.argv, process.env)',
+    )
+    expect(main).toContain(
+      'const gotTheLock = allowSecondaryInstance || app.requestSingleInstanceLock()',
+    )
+  })
+
   it('supports environment override for non-UI packaged smoke tests', () => {
     expect(resolveUserDataDirOverride(['vMLX'], { VMLX_USER_DATA_DIR: 'build/user-data' })).toMatch(
       /build\/user-data$/,

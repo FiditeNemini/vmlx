@@ -31,6 +31,7 @@ import { registerModelSettingsHandlers } from './db/model-settings'
 import { registerImageHandlers } from './ipc/image'
 import { networkInterfaces } from 'os'
 import { selectLanAddress, type NetworkInterfaceMap } from './network-address'
+import { shouldAllowSecondaryInstance } from '../shared/userDataOverride'
 
 // Dev-only: expose Chrome DevTools Protocol for live UI automation when
 // VMLX_REMOTE_DEBUG_PORT is set. No-op in normal/production launches.
@@ -124,7 +125,11 @@ process.on('unhandledRejection', (reason) => {
 })
 
 // Prevent multiple instances — second instance would corrupt SQLite
-const gotTheLock = app.requestSingleInstanceLock()
+const allowSecondaryInstance = shouldAllowSecondaryInstance(process.argv, process.env)
+const gotTheLock = allowSecondaryInstance || app.requestSingleInstanceLock()
+if (allowSecondaryInstance) {
+  console.log('[STARTUP] Allowing an isolated secondary instance for live proof')
+}
 if (!gotTheLock) {
   app.quit()
 } else {

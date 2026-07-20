@@ -101,6 +101,7 @@ HELPER FUNCTIONS
 """
 
 import hashlib
+import importlib
 import logging
 import inspect
 import os
@@ -946,7 +947,10 @@ def _gen_stream() -> Any:
     # the /v1/responses + dev-build-UI VL+audio path. Idempotent + cheap.
     if _GENERATION_STREAM is not None:
         try:
-            import mlx_vlm.generate as _mvg
+            # ``mlx_vlm`` exports a top-level ``generate`` function.  The
+            # dotted import form can therefore bind that function rather than
+            # the submodule, leaving the real module-global stream unchanged.
+            _mvg = importlib.import_module("mlx_vlm.generate")
             if getattr(_mvg, "generation_stream", None) is not _GENERATION_STREAM:
                 _mvg.generation_stream = _GENERATION_STREAM
         except Exception:

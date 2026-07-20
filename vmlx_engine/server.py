@@ -14047,7 +14047,15 @@ async def create_chat_completion(
         )
     except Exception:
         _ns_family = None
-    _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
+    # The loaded runtime can expose a public/served model name that is not a
+    # readable bundle path.  In that case the registry intentionally fails
+    # closed to ``unknown``, but the configured native parser remains the
+    # authoritative runtime contract.  Do not suppress M3's bounded answer
+    # pass merely because this late non-stream lookup cannot reopen config.json.
+    _ns_is_m3 = (
+        _ns_family in ("minimax_m3", "minimax_m3_vl")
+        or _tool_call_parser == "minimax_m3"
+    )
     _ns_tools_available = _tools_available_for_generation(
         request, chat_kwargs.get("tools")
     )
@@ -16801,7 +16809,13 @@ async def create_response(
         )
     except Exception:
         _ns_family = None
-    _ns_is_m3 = _ns_family in ("minimax_m3", "minimax_m3_vl")
+    # Match the Chat Completions path: a served model alias may not resolve to
+    # a local bundle during this late lookup, while the configured native tool
+    # parser still proves which runtime contract is active.
+    _ns_is_m3 = (
+        _ns_family in ("minimax_m3", "minimax_m3_vl")
+        or _tool_call_parser == "minimax_m3"
+    )
     _ns_tools_available = _tools_available_for_generation(
         request, chat_kwargs.get("tools")
     )

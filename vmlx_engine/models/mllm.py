@@ -3318,7 +3318,20 @@ def _vlm_stream():
                 _VLM_STREAM = mx.default_stream(mx.default_device())
             except Exception:
                 _VLM_STREAM = False
-    return None if _VLM_STREAM is False else _VLM_STREAM
+    stream = None if _VLM_STREAM is False else _VLM_STREAM
+    if stream is not None:
+        # mlx-vlm also owns a module-global generation stream.  The module
+        # survives SimpleEngine teardown while its worker does not, so a later
+        # direct engine can otherwise synchronize a handle created on the old
+        # thread.  Rebind it whenever this worker establishes ownership.
+        try:
+            _mvg = importlib.import_module("mlx_vlm.generate")
+
+            if getattr(_mvg, "generation_stream", None) is not stream:
+                _mvg.generation_stream = stream
+        except Exception:
+            pass
+    return stream
 
 
 def reset_vlm_stream() -> None:
@@ -5541,20 +5554,24 @@ class MLXMultimodalLM:
             resize_shape=kwargs.get("resize_shape"),
         )
 
-        # Generate with cache
-        result = generate(
-            self.model,
-            self.processor,
-            formatted_prompt,
-            all_images if all_images else None,
-            audio=all_audio if all_audio else None,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            verbose=False,
-            prompt_cache=prompt_cache,
-            **kwargs,
-        )
+        # Generate with cache.  Non-stream ``mlx_vlm.generate`` synchronizes
+        # its module-global generation_stream in wired_limit(), just like the
+        # streaming path.  Entering the owned stream context first also
+        # rebinds that global after direct-engine teardown/model swaps.
+        with _MaybeVLMStream():
+            result = generate(
+                self.model,
+                self.processor,
+                formatted_prompt,
+                all_images if all_images else None,
+                audio=all_audio if all_audio else None,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                verbose=False,
+                prompt_cache=prompt_cache,
+                **kwargs,
+            )
 
         # Store cache for future reuse (only on miss).
         # Use `is not None` — MLLMPrefixCacheManager.__len__ exists but

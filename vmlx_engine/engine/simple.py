@@ -9,6 +9,7 @@ performance when serving a single user at a time.
 import asyncio
 import functools
 import logging
+import threading
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -34,6 +35,9 @@ class SimpleEngine(BaseEngine):
     This engine provides maximum throughput for single-user scenarios
     by calling mlx-lm/mlx-vlm directly without batching overhead.
     """
+
+    _shared_model_executor: ThreadPoolExecutor | None = None
+    _shared_model_executor_lock = threading.Lock()
 
     def __init__(
         self,
@@ -69,10 +73,19 @@ class SimpleEngine(BaseEngine):
     def _ensure_model_executor(self) -> ThreadPoolExecutor:
         executor = getattr(self, "_model_executor", None)
         if executor is None:
-            executor = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="simple-engine-model",
-            )
+            # MLX stream ownership is thread-local and is not safely restored
+            # when a terminated worker's OS thread id is immediately reused.
+            # Keep one serialized direct-model worker for the process lifetime
+            # so load, generation, teardown, and later model swaps all retain
+            # the same MLX thread registry.
+            with type(self)._shared_model_executor_lock:
+                executor = type(self)._shared_model_executor
+                if executor is None:
+                    executor = ThreadPoolExecutor(
+                        max_workers=1,
+                        thread_name_prefix="simple-engine-model",
+                    )
+                    type(self)._shared_model_executor = executor
             self._model_executor = executor
         return executor
 
@@ -398,13 +411,21 @@ class SimpleEngine(BaseEngine):
 
         def _construct_and_load():
             if self._is_mllm:
-                from ..models.mllm import MLXMultimodalLM
+                from ..models.mllm import MLXMultimodalLM, _MaybeVLMStream
 
                 model = MLXMultimodalLM(
                     self._model_name,
                     trust_remote_code=self._trust_remote_code,
                     enable_cache=self._enable_cache,
                 )
+                # Model loaders construct lazy MLX graphs.  After a direct
+                # engine teardown, a replacement executor may reuse an OS
+                # thread id without inheriting that thread's default MLX
+                # stream registry.  Establish the owned VLM stream before
+                # loading so weights/caches cannot capture stale Stream(gpu,0)
+                # references that fail on the first generation.
+                with _MaybeVLMStream():
+                    model.load()
             else:
                 from ..models.llm import MLXLanguageModel
 
@@ -412,7 +433,7 @@ class SimpleEngine(BaseEngine):
                     self._model_name,
                     trust_remote_code=self._trust_remote_code,
                 )
-            model.load()
+                model.load()
             return model
 
         self._model = await self._run_model_call(_construct_and_load)
@@ -445,10 +466,10 @@ class SimpleEngine(BaseEngine):
             reset_vlm_stream()
         except Exception as e:
             logger.debug("Direct VLM stream reset skipped during SimpleEngine stop: %s", e)
-        executor = getattr(self, "_model_executor", None)
+        # The process-wide direct-model executor intentionally survives model
+        # teardown.  A later SimpleEngine reuses the same MLX-owning worker;
+        # shutting it down here recreates the Stream(gpu,0) reload crash.
         self._model_executor = None
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
         logger.info("SimpleEngine stopped")
 
     def _prompt_token_count(self, prompt: str) -> int:

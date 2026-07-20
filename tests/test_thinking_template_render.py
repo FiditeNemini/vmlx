@@ -347,7 +347,14 @@ def _live_generate(
 
 
 def _output_contains_thinking(output: str) -> bool:
-    return "<think>" in output and "</think>" in output
+    # Families expose different native reasoning rails.  Gemma 4 uses channel
+    # markers rather than Qwen-style <think> tags; both are valid raw-output
+    # evidence and both must remain absent when thinking is disabled.
+    return (
+        ("<think>" in output and "</think>" in output)
+        or "<|channel>thought" in output
+        or "<channel|>thought" in output
+    )
 
 
 @pytest.mark.live
@@ -389,7 +396,7 @@ def test_live_at_risk_thinking_present_when_enabled(
 
     output = _live_generate(model, enable_thinking=True, max_tokens=256)
 
-    assert "<think>" in output, (
-        f"{model.arch_name}: enable_thinking=True did not produce any "
-        f"<think> tag.\n--- output ---\n{output}\n--- end ---"
+    assert _output_contains_thinking(output), (
+        f"{model.arch_name}: enable_thinking=True did not produce any native "
+        f"reasoning rail.\n--- output ---\n{output}\n--- end ---"
     )

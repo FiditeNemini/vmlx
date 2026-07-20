@@ -343,3 +343,32 @@ class TestSimpleEngineConcurrency:
         worker_ids = {ident for _event, ident, _name in thread_events}
         assert len(worker_ids) == 1
         assert all("simple-engine-model" in name for _event, _ident, name in thread_events)
+
+    @pytest.mark.asyncio
+    async def test_simple_engine_model_swaps_reuse_process_model_worker(self):
+        """Sequential direct engines must not churn MLX thread ownership."""
+        from types import SimpleNamespace
+
+        from vmlx_engine.engine.simple import SimpleEngine
+
+        thread_ids: list[int] = []
+
+        class _Model:
+            tokenizer = SimpleNamespace(encode=lambda text: text.split())
+
+            def load(self):
+                thread_ids.append(threading.get_ident())
+
+        with (
+            patch("vmlx_engine.engine.simple.is_mllm_model", return_value=False),
+            patch("vmlx_engine.models.llm.MLXLanguageModel", side_effect=lambda *_a, **_k: _Model()),
+        ):
+            first = SimpleEngine("first")
+            await first.start()
+            await first.stop()
+            second = SimpleEngine("second")
+            await second.start()
+            await second.stop()
+
+        assert len(thread_ids) == 2
+        assert len(set(thread_ids)) == 1

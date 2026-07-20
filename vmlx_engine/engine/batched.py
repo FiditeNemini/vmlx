@@ -14,6 +14,7 @@ This is necessary because BatchGenerator only supports token IDs, not pixel_valu
 
 import asyncio
 import hashlib
+import importlib
 import logging
 import os
 import tempfile
@@ -348,7 +349,7 @@ class BatchedEngine(BaseEngine):
             # Executor is single-threaded (max_workers=1), so bind once.
             try:
                 import mlx.core as _mx
-                import mlx_vlm.generate as _mvg
+                _mvg = importlib.import_module("mlx_vlm.generate")
                 if not getattr(_SIMPLE_MLLM_STREAM_TLS, "bound", False):
                     _mvg.generation_stream = _mx.new_stream(_mx.default_device())
                     _SIMPLE_MLLM_STREAM_TLS.bound = True

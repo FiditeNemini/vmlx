@@ -40,6 +40,45 @@ def test_reset_generation_streams_clears_direct_vlm_handle():
         mllm._VLM_STREAM = old_stream
 
 
+def test_direct_vlm_stream_rebinds_mlx_vlm_global_and_wraps_nonstream_generate():
+    """Direct non-stream reloads must not synchronize an old worker's stream."""
+    import vmlx_engine.models.mllm as mllm
+
+    vlm_stream_source = inspect.getsource(mllm._vlm_stream)
+    generate_source = inspect.getsource(mllm.MLXMultimodalLM.generate)
+
+    assert 'importlib.import_module("mlx_vlm.generate")' in vlm_stream_source
+    assert "_mvg.generation_stream = stream" in vlm_stream_source
+    assert "with _MaybeVLMStream():" in generate_source
+    assert generate_source.index("with _MaybeVLMStream():") < generate_source.index(
+        "result = generate("
+    )
+
+
+def test_all_mllm_stream_rebinds_target_the_generate_submodule():
+    """Package-level ``generate`` is a function and must never receive the stream."""
+    import vmlx_engine.engine.batched as batched
+    import vmlx_engine.mllm_batch_generator as batch_generator
+
+    batch_source = inspect.getsource(batch_generator._gen_stream)
+    fallback_source = inspect.getsource(batched.BatchedEngine._simple_mllm_chat_output)
+
+    for source in (batch_source, fallback_source):
+        assert 'importlib.import_module("mlx_vlm.generate")' in source
+        assert "import mlx_vlm.generate as" not in source
+
+
+def test_simple_engine_establishes_owned_vlm_stream_before_model_load():
+    """Lazy MLLM load graphs must not capture a replacement worker's Stream 0."""
+    import vmlx_engine.engine.simple as simple
+
+    start_source = inspect.getsource(simple.SimpleEngine.start)
+    assert "with _MaybeVLMStream():" in start_source
+    assert start_source.index("with _MaybeVLMStream():") < start_source.index(
+        "model.load()"
+    )
+
+
 def test_server_resets_mllm_streams_when_replacing_or_unloading_engine():
     """Model switch and deep sleep both tear down MLLM stream ownership."""
     import vmlx_engine.server as srv

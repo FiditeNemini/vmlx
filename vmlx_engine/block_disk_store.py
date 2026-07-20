@@ -586,6 +586,18 @@ class BlockDiskStore:
             logger.debug("Skipping TQ-native block write because persisted TQ is disabled")
             return False
 
+        if not self._allow_tq_native:
+            # The content hash intentionally identifies the token prefix, not the
+            # storage codec.  A previous Auto/q4 run can therefore own the same
+            # row that an explicit None run is about to persist as plain KV.  The
+            # background writer normally de-duplicates an existing hash, so only
+            # rejecting the old TQ record during lookup leaves an untouched TQ
+            # suffix behind after the first miss.  Inspect/evict an incompatible
+            # record for *every* plain-KV write before queuing the replacement.
+            # Standard records remain untouched and are still de-duplicated by
+            # _write_block().
+            self.has_block(block_hash)
+
         hash_hex = block_hash.hex()
 
         # Pre-serialize on the calling (main) thread.

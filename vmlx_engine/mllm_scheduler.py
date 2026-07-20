@@ -2538,8 +2538,14 @@ class MLLMScheduler:
         return True
 
     def has_requests(self) -> bool:
-        """Check if there are any pending or running requests."""
-        return bool(self.waiting or self.running)
+        """Check for generation work or queued hybrid SSM idle rederive."""
+        generator = getattr(self, "batch_generator", None)
+        rederive_pending = bool(
+            getattr(self, "_is_hybrid", False)
+            and generator is not None
+            and getattr(generator, "_ssm_rederive_queue", None)
+        )
+        return bool(self.waiting or self.running or rederive_pending)
 
     def get_num_waiting(self) -> int:
         """Get number of waiting requests."""

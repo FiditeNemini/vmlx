@@ -3446,7 +3446,18 @@ class Scheduler:
         return list(prompt_tokens[cached_tokens:])
 
     def _release_unusable_paged_hit(self, request: Request) -> None:
-        """Drop refs for a fetched paged-cache hit that will not be inserted."""
+        """Drop refs and optimistic credit for a paged hit not actually used."""
+        if self.block_aware_cache is not None:
+            adjust = getattr(self.block_aware_cache, "adjust_cache_hit_credit", None)
+            if callable(adjust):
+                try:
+                    adjust(request.request_id, accepted_tokens=0)
+                except Exception as exc:
+                    logger.debug(
+                        "Request %s: failed to roll back unused cache-hit credit: %s",
+                        request.request_id,
+                        exc,
+                    )
         block_table = getattr(request, "block_table", None)
         if block_table is not None and self.block_aware_cache is not None:
             try:
@@ -3465,6 +3476,64 @@ class Scheduler:
                 )
         request.block_table = None
         request.shared_prefix_blocks = 0
+
+    def _accept_paged_hit_credit(self, request: Request, accepted_tokens: int) -> None:
+        """Reconcile a fetched block hit to the prefix generation really used."""
+        if self.block_aware_cache is None:
+            return
+        adjust = getattr(self.block_aware_cache, "adjust_cache_hit_credit", None)
+        if callable(adjust):
+            try:
+                adjust(request.request_id, accepted_tokens=accepted_tokens)
+            except Exception as exc:
+                logger.debug(
+                    "Request %s: failed to reconcile cache-hit credit: %s",
+                    request.request_id,
+                    exc,
+                )
+
+    def _retarget_ssm_rederive_to_paged_boundary(
+        self,
+        request_id: str,
+        store_tokens: List[int],
+        block_table: Any,
+    ) -> None:
+        """Align a queued clean SSM snapshot with the KV prefix actually stored.
+
+        A small block pool can persist only a prefix of a longer prompt.  The
+        companion queue was previously keyed to the full N-1 prompt, which can
+        never pair with the shorter KV chain.  Replace that request's pending
+        task with the real block-table boundary so the next exact/longer prompt
+        can consume every durable KV page instead of remaining pinned to an old
+        shorter SSM checkpoint.
+        """
+        if not getattr(self, "_is_hybrid", False):
+            return
+        queue = getattr(self, "_ssm_rederive_queue", None)
+        if not queue:
+            return
+        try:
+            boundary = int(getattr(block_table, "num_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if boundary <= 0 or boundary >= len(store_tokens):
+            return
+        retained = [
+            item
+            for item in queue
+            if not (len(item) >= 3 and item[2] == request_id)
+        ]
+        if len(retained) == len(queue):
+            return
+        retained.append((list(store_tokens[:boundary]), boundary, request_id))
+        self._ssm_rederive_queue = retained
+        logger.info(
+            "SSM companion: retargeted deferred re-derive for %s from %d "
+            "to stored paged boundary %d tokens",
+            request_id,
+            len(store_tokens),
+            boundary,
+        )
 
     def _cache_reuse_contract(self) -> str:
         """Name the active prompt-cache state contract for telemetry/policy."""
@@ -3852,6 +3921,11 @@ class Scheduler:
         self._cache_hit_tokens_by_detail[detail] = (
             self._cache_hit_tokens_by_detail.get(detail, 0) + cached_tokens
         )
+        finalize = getattr(
+            self.block_aware_cache, "finalize_cache_hit_credit", None
+        ) if self.block_aware_cache is not None else None
+        if callable(finalize):
+            finalize(request.request_id)
 
     def _shrink_hybrid_ssm_paged_cache_for_memory(
         self,
@@ -5605,8 +5679,18 @@ class Scheduler:
             logger.debug(f"Processed deferred abort for {request_id}")
 
     def has_requests(self) -> bool:
-        """Check if there are any pending or running requests."""
-        return bool(self.waiting or self.running)
+        """Check for generation work or a queued hybrid SSM idle task.
+
+        The async engine loop only calls ``step()`` while this returns true.
+        Excluding the rederive queue left clean prompt-only SSM snapshots
+        permanently queued after terminal cleanup, so later requests could
+        restore KV pages but repeatedly fall back to a much shorter companion.
+        """
+        rederive_pending = bool(
+            getattr(self, "_is_hybrid", False)
+            and getattr(self, "_ssm_rederive_queue", None)
+        )
+        return bool(self.waiting or self.running or rederive_pending)
 
     def get_num_waiting(self) -> int:
         """Get number of waiting requests."""
@@ -5740,6 +5824,7 @@ class Scheduler:
                             request,
                             trimmed.num_tokens,
                         )
+                        self._accept_paged_hit_credit(request, trimmed.num_tokens)
                         logger.info(
                             f"Request {request.request_id}: vmlx#91 RESUME — "
                             f"trimmed KV to {trimmed.num_tokens} tokens "
@@ -5845,10 +5930,7 @@ class Scheduler:
                 f"{fetch_num} KV tokens cached but no usable SSM companion, "
                 "full prefill (blocks kept cached for future sessions)"
             )
-            try:
-                self.block_aware_cache.detach_request(request.request_id)
-            except Exception:
-                pass
+            self._release_unusable_paged_hit(request)
             request.prompt_cache = None
             request.cached_tokens = 0
             request.remaining_tokens = request.prompt_token_ids
@@ -5864,10 +5946,7 @@ class Scheduler:
             logger.warning(
                 f"Request {request.request_id}: hybrid cache expansion failed"
             )
-            try:
-                self.block_aware_cache.release_cache(request.request_id)
-            except Exception:
-                pass
+            self._release_unusable_paged_hit(request)
             request.prompt_cache = None
             request.cached_tokens = 0
             request.remaining_tokens = request.prompt_token_ids
@@ -5966,6 +6045,7 @@ class Scheduler:
                     "recreation; falling back to full prefill",
                     request.request_id,
                 )
+                self._release_unusable_paged_hit(request)
                 request.prompt_cache = None
                 request.block_table = None
                 request.cached_tokens = 0
@@ -6087,15 +6167,9 @@ class Scheduler:
                         f"Request {request.request_id}: worker-side paged cache "
                         "reconstruction failed, treating as cache miss"
                     )
-                    # mlxstudio#73: release fetched block refs before full-prefill fallback.
-                    try:
-                        if self.block_aware_cache is not None:
-                            self.block_aware_cache.release_cache(request.request_id)
-                    except Exception as _rel_err:
-                        logger.debug(
-                            f"release_cache after worker reconstruct failure "
-                            f"threw ({type(_rel_err).__name__}): {_rel_err}"
-                        )
+                    # The lookup was optimistic; reconstruction did not save any
+                    # prefill work. Release refs and roll back hit telemetry.
+                    self._release_unusable_paged_hit(request)
                     request.prompt_cache = None
                     request.cached_tokens = 0
                     request.remaining_tokens = request.prompt_token_ids
@@ -6460,6 +6534,7 @@ class Scheduler:
                             f"Request {request.request_id}: cache insertion failed "
                             f"({type(e).__name__}: {e}), retrying without cache"
                         )
+                        self._release_unusable_paged_hit(request)
                         cache_to_use = None
                         request.prompt_cache = None
                         request.cached_tokens = 0
@@ -8148,11 +8223,16 @@ class Scheduler:
                                 and not self._mixed_attention_cache_model
                             ):
                                 _paged_store_kwargs["store_cumulative_state"] = False
-                            self.block_aware_cache.store_cache(
+                            _stored_block_table = self.block_aware_cache.store_cache(
                                 request_id,
                                 store_tokens,
                                 cache_data,
                                 **_paged_store_kwargs,
+                            )
+                            self._retarget_ssm_rederive_to_paged_boundary(
+                                request_id,
+                                store_tokens,
+                                _stored_block_table,
                             )
                             self._dsv4_trace_timing(
                                 "store_cache",

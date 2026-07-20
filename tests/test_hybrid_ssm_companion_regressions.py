@@ -27,6 +27,7 @@ from vmlx_engine.mllm_batch_generator import (  # noqa: E402
 from vmlx_engine.mllm_scheduler import MLLMScheduler  # noqa: E402
 from vmlx_engine.prefix_cache import BlockAwarePrefixCache  # noqa: E402
 from vmlx_engine.request import RequestOutput  # noqa: E402
+from vmlx_engine.scheduler import Scheduler  # noqa: E402
 
 
 class TurboQuantKVCache:
@@ -150,6 +151,97 @@ def test_shorter_ssm_checkpoint_keeps_only_consumed_token_credit():
     cache.finalize_cache_hit_credit("request-1")
     assert cache._hit_credits == {}
     assert cache.get_stats()["tokens_saved"] == 64
+
+
+def test_text_scheduler_rejected_block_hit_rolls_back_accounting_and_refs():
+    cache = _accounting_cache()
+    released = []
+    detached = []
+    cache.paged_cache = SimpleNamespace(
+        release_request_refs=released.append,
+        get_memory_usage=lambda: {},
+    )
+    cache.detach_request = detached.append
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.block_aware_cache = cache
+    table = SimpleNamespace(block_ids=[1, 2], num_tokens=128)
+    request = SimpleNamespace(
+        request_id="request-1",
+        block_table=table,
+        shared_prefix_blocks=2,
+    )
+
+    scheduler._release_unusable_paged_hit(request)
+
+    assert cache.get_stats()["hits"] == 0
+    assert cache.get_stats()["misses"] == 1
+    assert cache.get_stats()["tokens_saved"] == 0
+    assert released == [table]
+    assert detached == ["request-1"]
+    assert request.block_table is None
+    assert request.shared_prefix_blocks == 0
+
+
+def test_text_scheduler_partial_block_hit_keeps_only_accepted_credit():
+    cache = _accounting_cache()
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.block_aware_cache = cache
+    request = SimpleNamespace(request_id="request-1")
+
+    scheduler._accept_paged_hit_credit(request, 64)
+
+    assert cache.get_stats()["hits"] == 1
+    assert cache.get_stats()["misses"] == 0
+    assert cache.get_stats()["tokens_saved"] == 64
+    assert cache._hit_credits == {"request-1": 64}
+
+
+def test_text_scheduler_keeps_engine_awake_for_idle_ssm_rederive():
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.waiting = []
+    scheduler.running = {}
+    scheduler._is_hybrid = True
+    scheduler._ssm_rederive_queue = [([1, 2, 3], 3, "request-1")]
+
+    assert scheduler.has_requests() is True
+
+    scheduler._ssm_rederive_queue.clear()
+    assert scheduler.has_requests() is False
+
+
+def test_text_scheduler_retargets_ssm_rederive_to_truncated_kv_boundary():
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._is_hybrid = True
+    scheduler._ssm_rederive_queue = [
+        (list(range(706)), 706, "request-1"),
+        ([9, 8], 2, "other"),
+    ]
+
+    scheduler._retarget_ssm_rederive_to_paged_boundary(
+        "request-1",
+        list(range(706)),
+        SimpleNamespace(num_tokens=576),
+    )
+
+    assert scheduler._ssm_rederive_queue == [
+        ([9, 8], 2, "other"),
+        (list(range(576)), 576, "request-1"),
+    ]
+
+
+def test_mllm_scheduler_keeps_loop_awake_for_idle_ssm_rederive():
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler.waiting = []
+    scheduler.running = {}
+    scheduler._is_hybrid = True
+    scheduler.batch_generator = SimpleNamespace(
+        _ssm_rederive_queue=[([1, 2, 3], 3, "request-1")]
+    )
+
+    assert scheduler.has_requests() is True
+
+    scheduler.batch_generator._ssm_rederive_queue.clear()
+    assert scheduler.has_requests() is False
 
 
 def test_nonstream_generate_stamps_request_cache_metadata_on_final_output():

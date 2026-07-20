@@ -565,6 +565,59 @@ def test_tq_paged_disk_none_mode_skips_existing_native_blocks(tmp_path):
         restored.shutdown()
 
 
+def test_tq_paged_disk_none_mode_replaces_entire_native_chain_on_write(tmp_path):
+    """Off must replace every q4 page, even when lookup stopped at page one."""
+    from vmlx_engine.block_disk_store import BlockDiskStore
+    from vmlx_engine.tq_disk_store import encode_tq_block
+
+    cache_dir = str(tmp_path / "shared-chain")
+    hashes = [bytes.fromhex(f"{value:02x}" * 32) for value in (31, 32, 33)]
+    state = _tq_state(tokens=8, seed=179)
+    tq_entry = encode_tq_block(
+        state["state"][0],
+        state["state"][1],
+        state["tq_config"],
+    )
+
+    writer = BlockDiskStore(cache_dir, max_size_gb=0.1, allow_tq_native=True)
+    try:
+        for block_hash in hashes:
+            assert writer.write_block_async(block_hash, [tq_entry], token_count=8)
+        for _ in range(50):
+            if writer.get_stats()["blocks_on_disk"] == len(hashes):
+                break
+            time.sleep(0.1)
+        assert writer.get_stats()["blocks_on_disk"] == len(hashes)
+    finally:
+        writer.shutdown()
+
+    plain_keys = mx.random.normal(shape=(1, 2, 8, 64)).astype(mx.float16)
+    plain_values = mx.random.normal(shape=(1, 2, 8, 64)).astype(mx.float16)
+    disabled = BlockDiskStore(cache_dir, max_size_gb=0.1, allow_tq_native=False)
+    try:
+        # Do not pre-read every block. This reproduces a prefix walk that stops
+        # after the first incompatible page but then stores the complete raw run.
+        assert disabled.has_block(hashes[0]) is False
+        for block_hash in hashes:
+            assert disabled.write_block_async(
+                block_hash,
+                [("kv", plain_keys, plain_values)],
+                token_count=8,
+            )
+        ready = disabled.wait_for_blocks(hashes, timeout=5.0)
+        assert ready == set(hashes)
+        for block_hash in hashes:
+            restored = disabled.read_block(block_hash)
+            assert restored is not None
+            assert restored[0][0] == "kv"
+        stats = disabled.get_stats()
+        assert stats["blocks_on_disk"] == len(hashes)
+        assert stats["tq_native_hits"] == 0
+        assert stats["tq_native_enabled"] is False
+    finally:
+        disabled.shutdown()
+
+
 def test_block_disk_store_derives_native_tq_disable_from_cli_environment(
     tmp_path, monkeypatch
 ):

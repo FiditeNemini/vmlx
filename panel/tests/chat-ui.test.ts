@@ -19,6 +19,7 @@
  */
 import { readFileSync } from 'node:fs'
 import { describe, it, expect, vi } from 'vitest'
+import { orderComposerContentParts } from '../src/shared/composerContentOrder'
 
 // ─── Re-implement pure functions from chat-utils.ts for testing ──────────────
 
@@ -1244,6 +1245,38 @@ describe('Audit Fix: InlineToolCall empty statuses guard', () => {
 })
 
 describe('Media attachment product path', () => {
+  it('orders Gemma 4 visual media before text and audio after text', () => {
+    const parts = orderComposerContentParts(
+      'read the screenshot',
+      [
+        { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } },
+        { type: 'text', text: '[Attached file: notes.txt]\ncontext' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,BBBB' } },
+        { type: 'video_url', video_url: { url: 'data:video/mp4;base64,CCCC' } },
+      ],
+      'gemma4',
+    )
+
+    expect(parts.map((part) => part.type)).toEqual([
+      'image_url',
+      'video_url',
+      'text',
+      'text',
+      'input_audio',
+    ])
+    expect(parts[2]).toEqual({ type: 'text', text: 'read the screenshot' })
+  })
+
+  it('preserves the existing text-first composer order for non-Gemma families', () => {
+    const parts = orderComposerContentParts(
+      'describe this',
+      [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }],
+      'qwen3.6',
+    )
+
+    expect(parts.map((part) => part.type)).toEqual(['text', 'image_url'])
+  })
+
   it('chat input accepts audio files in addition to image and video', () => {
     const source = readFileSync('src/renderer/src/components/chat/InputBox.tsx', 'utf8')
     expect(source).toContain("export type AttachmentKind = 'image' | 'video' | 'audio' | 'text'")

@@ -47,6 +47,7 @@ import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import { selectFinalDecodeTps } from "../../shared/chatMetrics";
 import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
 import { replayPersistedAssistantHistory } from "../../shared/toolHistoryReplay";
+import { orderComposerContentParts } from "../../shared/composerContentOrder";
 import {
   ChatStreamServerEventError,
   chatStreamServerEventErrorDetail,
@@ -1326,30 +1327,33 @@ export function registerChatHandlers(
       const audioDataFromDataUrl = (dataUrl: string): string =>
         dataUrl.includes(",") ? dataUrl.split(",", 2)[1] : dataUrl;
       const userContentForDb = hasAttachments
-        ? JSON.stringify([
-            ...(content.trim() ? [{ type: "text", text: content }] : []),
-            ...attachments.map((a) => {
-              const kind = inferKind(a);
-              if (kind === "audio") {
-                return {
-                  type: "input_audio",
-                  input_audio: {
-                    data: audioDataFromDataUrl(a.dataUrl),
-                    format: audioFormatFromDataUrl(a.dataUrl),
-                  },
-                };
-              }
-              if (kind === "text") {
-                return {
-                  type: "text",
-                  text: `[Attached file: ${a.name}]\n${a.text || ""}`.trim(),
-                };
-              }
-              return kind === "video"
-                ? { type: "video_url", video_url: { url: a.dataUrl } }
-                : { type: "image_url", image_url: { url: a.dataUrl } };
-            }),
-          ])
+        ? JSON.stringify(
+            orderComposerContentParts(
+              content,
+              attachments.map((a) => {
+                const kind = inferKind(a);
+                if (kind === "audio") {
+                  return {
+                    type: "input_audio",
+                    input_audio: {
+                      data: audioDataFromDataUrl(a.dataUrl),
+                      format: audioFormatFromDataUrl(a.dataUrl),
+                    },
+                  };
+                }
+                if (kind === "text") {
+                  return {
+                    type: "text",
+                    text: `[Attached file: ${a.name}]\n${a.text || ""}`.trim(),
+                  };
+                }
+                return kind === "video"
+                  ? { type: "video_url", video_url: { url: a.dataUrl } }
+                  : { type: "image_url", image_url: { url: a.dataUrl } };
+              }),
+              chatDetectedFamily,
+            ),
+          )
         : content;
       const userMessage: Message = {
         id: uuidv4(),

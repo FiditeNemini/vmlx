@@ -2660,6 +2660,98 @@ class TestOpenAILogprobsFormatting:
         assert done_text == "Answer  done"
 
     @pytest.mark.asyncio
+    async def test_streaming_responses_separates_late_gemma4_thought_after_content(
+        self, monkeypatch
+    ):
+        """A post-tool Gemma answer must not stream its late thought rail as text."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.gemma4_parser import Gemma4ReasoningParser
+
+        raw = (
+            "The reported human-readable size is 5.2 KB.\n"
+            "REL1612-SEQ-T2C-DONE\n"
+            "thought\n"
+            "The human-readable size is 5.2 KB.\n"
+            "REL1612-SEQ-T2C-DONE"
+        )
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = ""
+                for idx, delta in enumerate(raw, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        raw_text=text,
+                        new_text=delta,
+                        tokens=[],
+                        prompt_tokens=7,
+                        completion_tokens=idx,
+                        finished=idx == len(raw),
+                        finish_reason="stop" if idx == len(raw) else None,
+                    )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "gemma4-post-tool-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", Gemma4ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", "gemma4")
+
+        request = ResponsesRequest(
+            model="gemma4-post-tool-test",
+            input="report the tool result",
+            stream=True,
+            enable_thinking=True,
+        )
+
+        events = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": "report the tool result"}],
+            request,
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        visible = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        )
+        reasoning = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.reasoning_summary_text.delta"
+        )
+        done_text = "".join(
+            event.get("text", "")
+            for event in events
+            if event.get("type") == "response.output_text.done"
+        )
+
+        expected_visible = (
+            "The reported human-readable size is 5.2 KB.\n"
+            "REL1612-SEQ-T2C-DONE"
+        )
+        assert visible == expected_visible
+        assert done_text == expected_visible
+        assert reasoning == (
+            "The human-readable size is 5.2 KB.\n"
+            "REL1612-SEQ-T2C-DONE"
+        )
+        assert "thought" not in visible
+        assert any(event.get("type") == "response.completed" for event in events)
+
+    @pytest.mark.asyncio
     async def test_streaming_responses_abort_is_incomplete_not_completed(
         self, monkeypatch
     ):

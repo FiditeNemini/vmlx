@@ -30,6 +30,15 @@ _THOUGHT_START = f"{_SOC}{_THOUGHT}\n"
 # End of thinking = start of content
 _THOUGHT_END = _EOC
 
+# Gemma 4 normally opens the thought channel at the start of a generation.
+# During a tool-result continuation, however, the model can finish a visible
+# answer and then open another channel.  The detokenizer may also consume the
+# ``<|channel>`` token, leaving only a line-delimited ``thought\n`` sentinel.
+# Keep this family-scoped: ordinary models can legitimately use the word
+# "thought" in prose, while Gemma's native channel grammar reserves this
+# standalone line.
+_DEGRADED_THOUGHT_START_RE = re.compile(r"(?:^|\n)thought\n")
+
 _PLAIN_THINKING_RE = re.compile(
     r"^\s*(?:\*\*)?Thinking Process:?(?:\*\*)?\s*",
     re.IGNORECASE,
@@ -83,6 +92,74 @@ class Gemma4ReasoningParser(ReasoningParser):
         self._saw_thought = False
         self._saw_eoc = False
 
+    @staticmethod
+    def _find_thought_start(text: str) -> tuple[int, int] | None:
+        """Return ``(index, marker_length)`` for a native thought channel.
+
+        Unlike the original start-only check, this intentionally recognizes a
+        channel after visible content.  That shape is produced by real Gemma 4
+        tool-result continuations and must not be streamed into ``content``.
+        """
+        full_idx = text.find(_SOC + _THOUGHT)
+        degraded = _DEGRADED_THOUGHT_START_RE.search(text)
+        degraded_idx = -1
+        degraded_len = 0
+        if degraded is not None:
+            degraded_idx = degraded.start()
+            # Preserve the separating newline as part of the visible prefix;
+            # the actual marker begins after it.
+            if text[degraded_idx:degraded.end()].startswith("\n"):
+                degraded_idx += 1
+            degraded_len = len(_THOUGHT) + 1
+
+        if full_idx >= 0 and (degraded_idx < 0 or full_idx <= degraded_idx):
+            marker_len = len(_SOC + _THOUGHT)
+            if text[full_idx + marker_len:].startswith("\n"):
+                marker_len += 1
+            return full_idx, marker_len
+        if degraded_idx >= 0:
+            return degraded_idx, degraded_len
+        return None
+
+    @staticmethod
+    def _join_visible_content(prefix: str, suffix: str) -> str | None:
+        """Join visible rails around a thought channel without duplication."""
+        prefix = prefix.strip()
+        suffix = suffix.strip()
+        if prefix and suffix:
+            if suffix == prefix or suffix.startswith(prefix + "\n"):
+                return suffix
+            if prefix.startswith(suffix + "\n"):
+                return prefix
+            return f"{prefix}\n{suffix}"
+        return prefix or suffix or None
+
+    @staticmethod
+    def _plain_content_before_possible_thought(text: str) -> str:
+        """Return the delta-safe visible prefix before a partial channel marker.
+
+        Streaming can split ``thought\n`` one character at a time.  If the
+        parser emits ``thought`` as content before the terminating newline
+        arrives, SSE cannot retract it.  Hold only the smallest suffix that can
+        still become Gemma's native full marker or its line-delimited degraded
+        marker.
+        """
+        text = text.replace(_EOT, "")
+        safe_end = len(text)
+
+        full_marker = _SOC + _THOUGHT + "\n"
+        for length in range(1, len(full_marker)):
+            if text.endswith(full_marker[:length]):
+                safe_end = min(safe_end, len(text) - length)
+
+        line_start = text.rfind("\n") + 1
+        line_tail = text[line_start:]
+        degraded_marker = _THOUGHT + "\n"
+        if line_tail and degraded_marker.startswith(line_tail):
+            safe_end = min(safe_end, line_start)
+
+        return text[:safe_end].strip()
+
     def extract_reasoning(
         self,
         model_output: str,
@@ -103,62 +180,39 @@ class Gemma4ReasoningParser(ReasoningParser):
         while text.endswith(_EOT):
             text = text[:-len(_EOT)]
 
-        # Detect thought channel. Accept both the full marker AND the
-        # degraded form where the SOC token was eaten by the detokenizer
-        # (the `thought\n` prefix + an `<channel|>` endmarker downstream).
-        soc_thought_idx = text.find(_SOC + _THOUGHT)
-        if soc_thought_idx < 0 and text.lstrip().startswith(_THOUGHT + "\n") and _EOC in text:
-            # Degraded form: `thought\n...<channel|>...`
-            stripped = text.lstrip()
-            lead = len(text) - len(stripped)
-            after_soc = stripped[len(_THOUGHT) + 1:]  # skip "thought\n"
+        # Detect the channel anywhere in the generation.  Tool continuations
+        # can emit a complete visible answer and then start a second thought
+        # rail; the prefix remains visible while the late rail stays private.
+        thought_start = self._find_thought_start(text)
+        if thought_start is not None:
+            thought_idx, marker_len = thought_start
+            visible_prefix = text[:thought_idx].strip()
+            after_soc = text[thought_idx + marker_len:]
             eoc_idx = after_soc.find(_EOC)
             if eoc_idx >= 0:
                 reasoning = after_soc[:eoc_idx].strip()
-                content = after_soc[eoc_idx + len(_EOC):].strip()
-                while content.endswith(_EOT):
-                    content = content[:-len(_EOT)].strip()
-                return reasoning or None, content or None
+                visible_suffix = after_soc[eoc_idx + len(_EOC):].strip()
+                while visible_suffix.endswith(_EOT):
+                    visible_suffix = visible_suffix[:-len(_EOT)].strip()
+                return (
+                    reasoning or None,
+                    self._join_visible_content(visible_prefix, visible_suffix),
+                )
 
-        # Also handle the degraded form when there's NO <channel|> yet
-        # (truncated mid-thought). Pull everything after `thought\n`
-        # into reasoning so it doesn't spill into content.
-        if soc_thought_idx < 0 and text.lstrip().startswith(_THOUGHT + "\n") and _EOC not in text:
-            stripped = text.lstrip()
-            after_soc = stripped[len(_THOUGHT) + 1:]
-            return after_soc.strip() or None, None
+            # No close marker: generation ended (or is currently streaming)
+            # inside the late thought rail.  Preserve any answer emitted before
+            # it instead of returning a reasoning-only result.
+            return after_soc.strip() or None, visible_prefix or None
 
         # Defensive orphan-close handling: if a bundle/template placed the
         # empty thought block in the prompt and only the channel close marker
         # leaks into generated text, strip it instead of showing it to users.
-        if soc_thought_idx < 0 and text.lstrip().startswith(_EOC):
+        if text.lstrip().startswith(_EOC):
             stripped = text.lstrip()
             content = stripped[len(_EOC):].strip()
             while content.endswith(_EOT):
                 content = content[:-len(_EOT)].strip()
             return None, content or None
-
-        # Check for thought channel (full marker form)
-        if soc_thought_idx >= 0:
-            idx = soc_thought_idx
-            # Extract after the channel marker + "thought" + optional newline
-            after_soc = text[idx + len(_SOC + _THOUGHT):]
-            if after_soc.startswith("\n"):
-                after_soc = after_soc[1:]
-
-            # Find the end-of-channel marker
-            eoc_idx = after_soc.find(_EOC)
-            if eoc_idx >= 0:
-                reasoning = after_soc[:eoc_idx].strip()
-                content = after_soc[eoc_idx + len(_EOC):].strip()
-                # Strip any trailing <turn|> from content
-                while content.endswith(_EOT):
-                    content = content[:-len(_EOT)].strip()
-                return reasoning or None, content or None
-            else:
-                # No end marker — all remaining is reasoning (truncated)
-                reasoning = after_soc.strip()
-                return reasoning or None, None
 
         plain_reasoning, plain_content = self._extract_plain_thinking_process(text)
         if plain_reasoning is not None:
@@ -189,8 +243,7 @@ class Gemma4ReasoningParser(ReasoningParser):
         # the detokenizer stripped `<|channel>` but left `thought\n`.
         plain_thinking_in_current = _PLAIN_THINKING_RE.match(current_text or "") is not None
         thought_in_current = (
-            _SOC + _THOUGHT in current_text
-            or current_text.lstrip().startswith(_THOUGHT + "\n")
+            self._find_thought_start(current_text) is not None
             or plain_thinking_in_current
         )
         eoc_in_current = _EOC in current_text
@@ -226,7 +279,9 @@ class Gemma4ReasoningParser(ReasoningParser):
                 # Hold until we resolve which side of the marker we're on
                 return None
             # Not a thought channel — emit ALL accumulated text as content.
-            content_so_far = current_text.replace(_EOT, "").strip()
+            content_so_far = self._plain_content_before_possible_thought(
+                current_text
+            )
             if content_so_far and len(content_so_far) > self._emitted_content:
                 new = content_so_far[self._emitted_content:]
                 self._emitted_content = len(content_so_far)
@@ -271,16 +326,13 @@ class Gemma4ReasoningParser(ReasoningParser):
         while text.endswith(_EOT):
             text = text[:-len(_EOT)]
 
-        # Full marker form
-        if _SOC + _THOUGHT in text:
-            idx = text.find(_SOC + _THOUGHT)
-            after_soc = text[idx + len(_SOC + _THOUGHT):]
-            if after_soc.startswith("\n"):
-                after_soc = after_soc[1:]
-        # Degraded form — only `thought\n` prefix (detokenizer ate <|channel>)
-        elif text.lstrip().startswith(_THOUGHT + "\n"):
-            stripped = text.lstrip()
-            after_soc = stripped[len(_THOUGHT) + 1:]
+        # Native or degraded marker, including a tool-continuation channel
+        # that begins after already-visible content.
+        thought_start = self._find_thought_start(text)
+        if thought_start is not None:
+            thought_idx, marker_len = thought_start
+            visible_prefix = text[:thought_idx].strip()
+            after_soc = text[thought_idx + marker_len:]
         # Orphan channel close: treat the post-marker tail as content. This
         # matches complete extraction and prevents streamed `<channel|>` leaks.
         elif text.lstrip().startswith(_EOC):
@@ -299,17 +351,19 @@ class Gemma4ReasoningParser(ReasoningParser):
         eoc_idx = after_soc.find(_EOC)
         if eoc_idx >= 0:
             reasoning = after_soc[:eoc_idx].strip()
-            content = after_soc[eoc_idx + len(_EOC):]
+            visible_suffix = after_soc[eoc_idx + len(_EOC):]
             # Strip <turn|> from content
-            while content.endswith(_EOT):
-                content = content[:-len(_EOT)]
-            content = content.strip()
-            return reasoning or None, content or None
+            while visible_suffix.endswith(_EOT):
+                visible_suffix = visible_suffix[:-len(_EOT)]
+            return (
+                reasoning or None,
+                self._join_visible_content(visible_prefix, visible_suffix),
+            )
         else:
             # Still in thought channel — partial reasoning, no content yet
             # Don't strip trailing partial marker
             reasoning = self._strip_partial_eoc(after_soc).rstrip()
-            return reasoning or None, None
+            return reasoning or None, visible_prefix or None
 
     @staticmethod
     def _strip_partial_eoc(text: str) -> str:

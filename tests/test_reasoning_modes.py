@@ -1502,6 +1502,58 @@ def test_gemma4_reasoning_parser_orphan_channel_close_is_not_visible():
     assert "<turn|>" not in content
 
 
+def test_gemma4_reasoning_parser_late_degraded_thought_keeps_visible_prefix_private():
+    """A post-tool answer followed by a new thought rail must not leak or duplicate."""
+    from vmlx_engine.reasoning.gemma4_parser import Gemma4ReasoningParser
+
+    parser = Gemma4ReasoningParser()
+    text = (
+        "The reported human-readable size is 5.2 KB.\n"
+        "REL1612-SEQ-T2C-DONE\n"
+        "thought\n"
+        "The human-readable size is 5.2 KB.\n"
+        "REL1612-SEQ-T2C-DONE"
+    )
+
+    reasoning, content = parser.extract_reasoning(text)
+
+    assert content == (
+        "The reported human-readable size is 5.2 KB.\n"
+        "REL1612-SEQ-T2C-DONE"
+    )
+    assert reasoning == (
+        "The human-readable size is 5.2 KB.\n"
+        "REL1612-SEQ-T2C-DONE"
+    )
+    assert "thought" not in content
+
+
+def test_gemma4_reasoning_streaming_late_thought_emits_separate_rails():
+    """Streaming may change from content to a late private channel after a tool."""
+    from vmlx_engine.reasoning.gemma4_parser import Gemma4ReasoningParser
+
+    parser = Gemma4ReasoningParser()
+    parser.reset_state()
+    text = "Answer: 5.2 KB.\nDONE\nthought\nDouble-check 5.2 KB."
+    accumulated = ""
+    reasoning_parts = []
+    content_parts = []
+
+    for char in text:
+        previous = accumulated
+        accumulated += char
+        delta = parser.extract_reasoning_streaming(previous, accumulated, char)
+        if delta is not None:
+            if delta.reasoning:
+                reasoning_parts.append(delta.reasoning)
+            if delta.content:
+                content_parts.append(delta.content)
+
+    assert "".join(content_parts) == "Answer: 5.2 KB.\nDONE"
+    assert "".join(reasoning_parts) == "Double-check 5.2 KB."
+    assert "thought" not in "".join(content_parts)
+
+
 def test_gemma4_reasoning_parser_splits_plain_media_thinking_process():
     """Gemma 4 media fallback can emit plain Thinking Process text."""
     from vmlx_engine.reasoning.gemma4_parser import Gemma4ReasoningParser

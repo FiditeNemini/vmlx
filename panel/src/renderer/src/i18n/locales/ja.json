@@ -33,7 +33,12 @@
     "open": "開く",
     "dismiss": "閉じる",
     "language": "言語",
-    "or": "または"
+    "or": "または",
+    "theme": {
+      "dark": "ダークテーマ",
+      "light": "ライトテーマ",
+      "system": "システムテーマ"
+    }
   },
   "status": {
     "running": "実行中",

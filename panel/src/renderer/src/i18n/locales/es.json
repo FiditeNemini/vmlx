@@ -33,7 +33,12 @@
     "open": "Abrir",
     "dismiss": "Descartar",
     "language": "Idioma",
-    "or": "o"
+    "or": "o",
+    "theme": {
+      "dark": "Tema oscuro",
+      "light": "Tema claro",
+      "system": "Tema del sistema"
+    }
   },
   "status": {
     "running": "En ejecución",

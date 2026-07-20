@@ -56,6 +56,7 @@ function useAudioSettings() {
  * STT model resolution: explicit prop > settings('sttModel') > 'whisper-large-v3'
  */
 export function VoiceChat({ onTranscription, endpoint, sessionId, sttModel, disabled }: VoiceChatProps) {
+  const { t } = useTranslation()
   const [state, setState] = useState<RecordingState>('idle')
   const [error, setError] = useState<string | null>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -126,9 +127,9 @@ export function VoiceChat({ onTranscription, endpoint, sessionId, sttModel, disa
           }
         } catch (err: any) {
           console.error('Transcription failed:', err)
-          const msg = err.message || 'Transcription failed'
+          const msg = err.message || t('chat.voice.transcribeFailed')
           if (msg.includes('mlx-audio') || msg.includes('mlx_audio')) {
-            setError('STT not available — mlx-audio not installed on server')
+            setError(t('chat.voice.sttMissing'))
           } else {
             setError(msg.length > 80 ? msg.slice(0, 80) + '…' : msg)
           }
@@ -142,12 +143,12 @@ export function VoiceChat({ onTranscription, endpoint, sessionId, sttModel, disa
     } catch (err: any) {
       console.error('Failed to start recording:', err)
       if (err.name === 'NotAllowedError') {
-        setError('Microphone access denied')
+        setError(t('chat.voice.micDenied'))
       } else {
-        setError(err.message || 'Failed to start recording')
+        setError(err.message || t('chat.voice.startFailed'))
       }
     }
-  }, [endpoint, effectiveSttModel, onTranscription])
+  }, [endpoint, effectiveSttModel, onTranscription, sessionId, t])
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
@@ -163,6 +164,12 @@ export function VoiceChat({ onTranscription, endpoint, sessionId, sttModel, disa
     }
   }
 
+  const buttonLabel = state === 'recording'
+    ? t('chat.voice.stopRecordingTitle')
+    : state === 'transcribing'
+      ? t('chat.voice.transcribingTitle')
+      : t('chat.voice.startRecordingTitle')
+
   return (
     <div className="relative">
       <button
@@ -175,11 +182,8 @@ export function VoiceChat({ onTranscription, endpoint, sessionId, sttModel, disa
               ? 'bg-primary/10 border-primary/30 text-primary'
               : 'bg-background border-input text-muted-foreground hover:text-foreground hover:bg-accent'
         } disabled:opacity-50 disabled:cursor-not-allowed`}
-        title={
-          state === 'recording' ? 'Click to stop recording'
-            : state === 'transcribing' ? 'Transcribing...'
-            : 'Click to start voice input'
-        }
+        title={buttonLabel}
+        aria-label={buttonLabel}
       >
         {state === 'transcribing' ? (
           // Loading spinner

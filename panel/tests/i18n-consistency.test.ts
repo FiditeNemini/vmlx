@@ -259,7 +259,18 @@ describe('i18n locale consistency', () => {
     ]) {
       expect(messageBubbleSrc).toContain(`t('${key}')`)
     }
-    for (const key of ['chat.tts.stopTitle', 'chat.tts.readAloudTitle', 'chat.tts.speak']) {
+    for (const key of [
+      'chat.voice.stopRecordingTitle',
+      'chat.voice.transcribingTitle',
+      'chat.voice.startRecordingTitle',
+      'chat.voice.sttMissing',
+      'chat.voice.micDenied',
+      'chat.voice.startFailed',
+      'chat.voice.transcribeFailed',
+      'chat.tts.stopTitle',
+      'chat.tts.readAloudTitle',
+      'chat.tts.speak',
+    ]) {
       expect(voiceChatSrc).toContain(`t('${key}')`)
     }
     for (const key of [
@@ -275,6 +286,23 @@ describe('i18n locale consistency', () => {
     ]) {
       expect(appSrc).toContain(`t('${key}'`)
     }
+  })
+
+  it('theme and voice icon controls expose localized accessible names', () => {
+    const themeToggleSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'ui', 'theme-toggle.tsx'),
+      'utf-8',
+    )
+    const voiceChatSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'chat', 'VoiceChat.tsx'),
+      'utf-8',
+    )
+
+    expect(themeToggleSrc).toContain('title={t(`common.theme.${theme}`)}')
+    expect(themeToggleSrc).toContain('aria-label={t(`common.theme.${theme}`)}')
+    expect(themeToggleSrc).not.toContain('title={`Theme: ${theme}`}')
+    expect(voiceChatSrc).toContain('title={buttonLabel}')
+    expect(voiceChatSrc).toContain('aria-label={buttonLabel}')
   })
 
   it('chat settings agentic controls and accessibility labels use the locale catalog', () => {

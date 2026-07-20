@@ -14,8 +14,9 @@ Design:
     expensive (~10 min on CPU, ~10s on MPS) so reuse the session across
     requests. The session also carries the persistent KV+SSM cache for
     multi-turn coherence on the same conversation.
-  - Per-request reset: when a NEW conversation arrives (detected by message
-    history not matching the running history-prefix), reset the session.
+  - Per-request reset: when a NEW conversation arrives (detected by the text
+    and media identity of its message history not matching the running
+    history-prefix), reset the session.
   - Extracts base64-encoded media into ``$TMPDIR/vmlx-omni-XXXX.{jpg,wav,mp4}``
     files because OmniChat's encoders expect file paths or PIL images.
   - Returns plain text for non-streaming requests and forwards real decode-time
@@ -427,7 +428,10 @@ def _extract_omni_video_frames(video_path: Path, scratch_dir: Path) -> List[Path
 
 
 def _extract_parts(
-    messages: List[Dict[str, Any]], scratch_dir: Path
+    messages: List[Dict[str, Any]],
+    scratch_dir: Path,
+    *,
+    rehydrate_history_media: bool = False,
 ) -> Tuple[str, List[Path], Optional[Path], Optional[Path]]:
     """Walk all messages, collect text + write media to temp files.
 
@@ -441,6 +445,9 @@ def _extract_parts(
     cur_images: List[Path] = []
     cur_audio: Optional[Path] = None
     cur_video: Optional[Path] = None
+    latest_media_turn: Optional[
+        Tuple[List[Path], Optional[Path], Optional[Path]]
+    ] = None
 
     for msg in messages or []:
         role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", "")
@@ -502,6 +509,21 @@ def _extract_parts(
                                 cur_video = video_path
                 elif ptype == "text":
                     last_user_text += (part.get("text") if isinstance(part, dict) else getattr(part, "text", "")) or ""
+        if cur_images or cur_audio is not None or cur_video is not None:
+            latest_media_turn = (list(cur_images), cur_audio, cur_video)
+
+    if (
+        rehydrate_history_media
+        and not cur_images
+        and cur_audio is None
+        and cur_video is None
+        and latest_media_turn is not None
+    ):
+        cur_images, cur_audio, cur_video = latest_media_turn
+        logger.info(
+            "OmniMultimodalDispatcher: rehydrating latest prior-turn media "
+            "after conversation cache reset"
+        )
     return last_user_text, cur_images, cur_audio, cur_video
 
 
@@ -560,10 +582,68 @@ def _build_omni_turn_prompt_with_thinking(
     return prev_then_now[idx + len(marker):]
 
 
-def _user_texts_in_order(messages: List[Dict[str, Any]]) -> List[str]:
-    """Return text from each user turn, in order. Used to compute a
-    cumulative hash that detects 'same conversation continuing' vs
-    'fresh conversation' robustly across single- and multi-turn requests.
+def _media_part_identity(part: Dict[str, Any]) -> Optional[str]:
+    """Return a stable, non-secret identity for one media content part.
+
+    Omni's persistent session cache must never treat identical text paired
+    with different media as the same conversation prefix.  Hash the wire
+    representation instead of retaining base64 payloads in process metadata.
+    Conservative false misses (for example, the same file via two paths) are
+    safe; a false hit would reuse stale KV/SSM state from different media.
+    """
+    if not isinstance(part, dict):
+        return None
+    ptype = str(part.get("type") or "")
+    if ptype in _IMAGE_TYPES:
+        kind = "image"
+        src = part.get("image_url") or part.get("image") or {}
+    elif ptype in _AUDIO_TYPES:
+        kind = "audio"
+        src = part.get("input_audio") or part.get("audio") or {}
+    elif ptype in _VIDEO_TYPES:
+        kind = "video"
+        src = part.get("video_url") or part.get("video") or {}
+    else:
+        return None
+
+    if isinstance(src, dict):
+        data = src.get("data")
+        if isinstance(data, str) and data:
+            digest = hashlib.sha256(data.encode("utf-8")).hexdigest()
+            fmt = str(src.get("format") or "")
+            return f"{kind}:data:{fmt}:{digest}"
+        source = src.get("url") or src.get("path")
+    else:
+        source = src
+
+    if not isinstance(source, str) or not source:
+        return f"{kind}:missing"
+    if source.startswith("data:"):
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        return f"{kind}:data-url:{digest}"
+
+    path = Path(source).expanduser()
+    try:
+        if path.is_file():
+            stat = path.stat()
+            identity = (
+                f"{path.resolve()}:{stat.st_size}:"
+                f"{getattr(stat, 'st_mtime_ns', int(stat.st_mtime * 1e9))}"
+            )
+            digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            return f"{kind}:file:{digest}"
+    except OSError:
+        pass
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    return f"{kind}:source:{digest}"
+
+
+def _user_turn_signatures(messages: List[Dict[str, Any]]) -> List[str]:
+    """Return text+media signatures from each user turn, in order.
+
+    These signatures detect 'same conversation continuing' vs 'fresh
+    conversation'. Media identity is mandatory: text-only signatures allowed
+    a blue-audio history to reuse an orange-audio KV/SSM session.
     """
     out: List[str] = []
     for m in messages or []:
@@ -571,17 +651,29 @@ def _user_texts_in_order(messages: List[Dict[str, Any]]) -> List[str]:
         if role != "user":
             continue
         content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+        media: List[str] = []
         if isinstance(content, str):
-            out.append(content)
+            text = content
         elif isinstance(content, list):
             parts: List[str] = []
             for p in content:
                 ptype = p.get("type") if isinstance(p, dict) else getattr(p, "type", None)
                 if ptype == "text":
                     parts.append((p.get("text") if isinstance(p, dict) else getattr(p, "text", "")) or "")
-            out.append(" ".join(parts))
+                if isinstance(p, dict):
+                    identity = _media_part_identity(p)
+                    if identity:
+                        media.append(identity)
+            text = " ".join(parts)
         else:
-            out.append("")
+            text = ""
+        out.append(
+            json.dumps(
+                {"text": text, "media": media},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
     return out
 
 
@@ -786,9 +878,9 @@ class OmniMultimodalDispatcher:
             # current (last) one. If it matches the hash we stored after the
             # previous turn (= hash of all user texts including the one we
             # just answered), this is the next turn of the same conversation.
-            user_texts = _user_texts_in_order(messages)
-            prefix_hash = _hash_user_texts(user_texts[:-1])
-            current_hash = _hash_user_texts(user_texts)
+            user_turns = _user_turn_signatures(messages)
+            prefix_hash = _hash_user_texts(user_turns[:-1])
+            current_hash = _hash_user_texts(user_turns)
 
             should_reset = force_reset or prefix_hash != self._last_signature
             if should_reset:
@@ -803,7 +895,11 @@ class OmniMultimodalDispatcher:
                 )
             self._last_signature = current_hash
 
-            text, images, audio, video = _extract_parts(messages, self._scratch_dir)
+            text, images, audio, video = _extract_parts(
+                messages,
+                self._scratch_dir,
+                rehydrate_history_media=should_reset,
+            )
             logger.info(
                 "OmniMultimodalDispatcher: turn — text=%dch, images=%d, audio=%s, video=%s",
                 len(text or ""), len(images),

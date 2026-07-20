@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
 import type { ClientRequest } from "node:http";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db, Chat, Message, Folder } from "../database";
 import { sessionManager, resolveUrl, connectHost } from "../sessions";
@@ -258,6 +258,20 @@ function stripHistoricalMediaPartsForReplay(parts: any[]): any[] {
     out.push({ type: "text", text: summarizeHistoricalMediaPart(part) });
   }
   return out.length ? out : [{ type: "text", text: "[Prior media attachment omitted from replay.]" }];
+}
+
+function shouldPreserveHistoricalMediaForOmni(
+  detectedFamily?: string,
+  modelPath?: string,
+): boolean {
+  if (!modelPath) return false;
+  const family = String(detectedFamily || "").toLowerCase().replace(/_/g, "-");
+  if (family !== "nemotron-h") return false;
+  try {
+    return existsSync(join(modelPath, "config_omni.json"));
+  } catch {
+    return false;
+  }
 }
 
 function redactContentForLog(content: any): any {
@@ -1134,6 +1148,16 @@ export function registerChatHandlers(
           } catch (_) {}
         }
       }
+      // Nemotron Omni's media route owns a persistent KV+SSM conversation
+      // session. Its prefix identity includes historical media bytes; replacing
+      // those bytes with a text placeholder makes a post-audio/image turn look
+      // text-only and silently routes it through the ordinary scheduler. Keep
+      // the real media envelope for this one stateful dispatcher family.
+      const preserveHistoricalMediaForOmni = shouldPreserveHistoricalMediaForOmni(
+        chatDetectedFamily,
+        chat.modelPath,
+      );
+      if (preserveHistoricalMediaForOmni) chatIsMultimodal = true;
       const fetchTimeout = setTimeout(() => {
         timedOut = true;
         abortController.abort();
@@ -1552,7 +1576,10 @@ export function registerChatHandlers(
             const parsed = JSON.parse(msgContent);
             if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].type) {
               if (chatIsMultimodal || isRemote) {
-                // Keep only the current turn's media bytes in the API replay.
+                // Keep only the current turn's media bytes in the API replay,
+                // except for Nemotron Omni. Its stateful dispatcher needs the
+                // prior media identity to validate/reuse (or safely rehydrate)
+                // its persistent KV+SSM conversation cache.
                 // Re-sending historical image/audio/video parts on every later
                 // text/tool turn keeps local engines on the media route, which
                 // breaks native tool prompting for families like MiniMax-M3 and
@@ -1560,7 +1587,9 @@ export function registerChatHandlers(
                 // remains in history, and the media user turn is represented by
                 // a text placeholder for continuity.
                 msgContent =
-                  !isRemote && m.id !== userMessage.id
+                  !isRemote &&
+                  m.id !== userMessage.id &&
+                  !preserveHistoricalMediaForOmni
                     ? stripHistoricalMediaPartsForReplay(parsed)
                     : parsed;
               } else {
@@ -2072,6 +2101,7 @@ export function registerChatHandlers(
               isRemote,
               baseUrl,
               chatIsMultimodal,
+              preserveHistoricalMediaForOmni,
               detectedFamily: chatDetectedFamily,
               sessionHasReasoningParser,
               body: summarizeRequestForLog(requestBody, useResponsesApi),

@@ -11,6 +11,8 @@ from vmlx_engine.omni_multimodal import (
     _build_omni_turn_prompt_with_thinking,
     dispatch_omni_chat_completion,
     _extract_parts,
+    _hash_user_texts,
+    _user_turn_signatures,
     is_omni_multimodal_bundle,
     omni_multimodal_component_status,
     request_has_multimodal,
@@ -381,6 +383,83 @@ def test_omni_extracts_input_audio_shape_emitted_by_panel(tmp_path):
     assert audio is not None
     assert audio.suffix == ".wav"
     assert audio.read_bytes() == b"RIFF"
+
+
+def test_omni_conversation_signature_salts_audio_bytes():
+    def messages(audio_data):
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Remember the marker."},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": audio_data, "format": "wav"},
+                    },
+                ],
+            }
+        ]
+
+    orange = _user_turn_signatures(messages("T1JBTkdF"))
+    orange_again = _user_turn_signatures(messages("T1JBTkdF"))
+    blue = _user_turn_signatures(messages("QkxVRQ=="))
+
+    assert orange == orange_again
+    assert _hash_user_texts(orange) == _hash_user_texts(orange_again)
+    assert orange != blue
+    assert _hash_user_texts(orange) != _hash_user_texts(blue)
+
+
+def test_omni_dispatcher_resets_when_replayed_prefix_media_changes(tmp_path):
+    class _Session:
+        def __init__(self):
+            self.reset_count = 0
+            self.turns = []
+            self._last_prompt_tokens = 1
+            self._last_completion_tokens = 1
+            self._last_finish_reason = "stop"
+
+        def reset(self):
+            self.reset_count += 1
+
+        def turn(self, **kwargs):
+            self.turns.append(kwargs)
+            return "READY"
+
+    dispatcher = OmniMultimodalDispatcher.__new__(OmniMultimodalDispatcher)
+    dispatcher.bundle_path = str(tmp_path)
+    dispatcher._session = _Session()
+    dispatcher._lock = threading.Lock()
+    dispatcher._last_signature = None
+    dispatcher._scratch_dir = tmp_path
+    dispatcher._backend = "stage1"
+
+    def first_turn(audio_data):
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Remember the marker."},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": audio_data, "format": "wav"},
+                    },
+                ],
+            }
+        ]
+
+    dispatcher.chat(first_turn("T1JBTkdF"))
+    assert dispatcher._session.reset_count == 1
+
+    changed_media_history = first_turn("QkxVRQ==") + [
+        {"role": "assistant", "content": "READY"},
+        {"role": "user", "content": "Repeat the marker."},
+    ]
+    dispatcher.chat(changed_media_history)
+
+    assert dispatcher._session.reset_count == 2
+    assert dispatcher._session.turns[-1]["audio"] is not None
+    assert dispatcher._session.turns[-1]["audio"].read_bytes() == b"BLUE"
 
 
 def test_request_modalities_detects_image_audio_video():

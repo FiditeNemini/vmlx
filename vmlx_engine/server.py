@@ -2608,6 +2608,18 @@ def _loaded_omni_modalities() -> list[str] | None:
     return None
 
 
+def _loaded_block_disk_cache_enabled() -> bool:
+    """Return the effective loaded-engine L2 toggle for sidecar media caches."""
+    engine = _engine
+    config = getattr(engine, "_scheduler_config", None) if engine is not None else None
+    if config is None and engine is not None:
+        scheduler = getattr(engine, "scheduler", None) or getattr(
+            engine, "_scheduler", None
+        )
+        config = getattr(scheduler, "config", None)
+    return bool(getattr(config, "enable_block_disk_cache", False))
+
+
 def _bundle_declares_native_video(bundle_path: str | None) -> bool:
     """Return True when the loaded non-Omni VLM bundle declares video support.
 
@@ -9240,6 +9252,10 @@ async def health():
                     "parakeet": bool(_omni_status.get("has_parakeet_weights")),
                     "media_projector": bool(_omni_status.get("has_media_projector")),
                 },
+                "session_l2": OmniMultimodalDispatcher.session_l2_status_for(
+                    _omni_path,
+                    enabled=_loaded_block_disk_cache_enabled(),
+                ),
             }
     except Exception:
         pass
@@ -10519,7 +10535,11 @@ async def create_anthropic_message(
             # shape, which the Anthropic adapter's `to_anthropic_response`
             # path can then re-wrap into Anthropic's content_block format.
             from .api.anthropic_adapter import to_anthropic_response
-            cc = await dispatch_omni_chat_completion(chat_req, _omni_path)
+            cc = await dispatch_omni_chat_completion(
+                chat_req,
+                _omni_path,
+                disk_cache_enabled=_loaded_block_disk_cache_enabled(),
+            )
             # `dispatch_omni_chat_completion` returns either a JSONResponse
             # (non-streaming) or a StreamingResponse. Anthropic streaming
             # has its own SSE shape, so OpenAI chat-completion chunks must
@@ -13378,7 +13398,11 @@ async def create_chat_completion(
                  for m in (request.messages or [])]
             )
         ):
-            return await dispatch_omni_chat_completion(request, _omni_path)
+            return await dispatch_omni_chat_completion(
+                request,
+                _omni_path,
+                disk_cache_enabled=_loaded_block_disk_cache_enabled(),
+            )
     except HTTPException:
         raise
     except Exception as _omni_route_err:  # pragma: no cover
@@ -16525,7 +16549,11 @@ async def create_response(
                 enable_thinking=request.enable_thinking,
                 reasoning_effort=request.reasoning_effort,
             )
-            cc = await _omni_dispatch_resp(_cc_req, _omni_path_dispatch)
+            cc = await _omni_dispatch_resp(
+                _cc_req,
+                _omni_path_dispatch,
+                disk_cache_enabled=_loaded_block_disk_cache_enabled(),
+            )
             if isinstance(cc, StreamingResponse) and request.stream:
                 return StreamingResponse(
                     _adapt_omni_chat_stream_to_responses(

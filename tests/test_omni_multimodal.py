@@ -260,6 +260,8 @@ async def test_omni_stream_emits_generation_time_reasoning_content_and_usage(
     bundle = _write_omni_bundle(tmp_path / "omni")
 
     class _Dispatcher:
+        persist_calls = 0
+
         def chat(self, *, token_callback, **kwargs):
             for token_id, delta in enumerate(
                 ("<think>", "private", "</think>", "visible", " answer"),
@@ -279,6 +281,10 @@ async def test_omni_stream_emits_generation_time_reasoning_content_and_usage(
         def reset(self):
             pass
 
+        def schedule_session_l2_persist(self):
+            self.persist_calls += 1
+            return None
+
         def submit(self, fn, /, *args, **kwargs):
             future = Future()
             try:
@@ -291,7 +297,7 @@ async def test_omni_stream_emits_generation_time_reasoning_content_and_usage(
     monkeypatch.setattr(
         OmniMultimodalDispatcher,
         "get",
-        classmethod(lambda cls, path: dispatcher),
+        classmethod(lambda cls, path, **kwargs: dispatcher),
     )
 
     class _Request:
@@ -341,6 +347,7 @@ async def test_omni_stream_emits_generation_time_reasoning_content_and_usage(
         "completion_tokens": 5,
         "total_tokens": 28,
     }
+    assert dispatcher.persist_calls == 1
 
 
 def test_omni_dispatcher_uses_one_persistent_native_runtime_owner_thread():
@@ -357,6 +364,132 @@ def test_omni_dispatcher_uses_one_persistent_native_runtime_owner_thread():
 
     assert first == second
     assert first != threading.get_ident()
+
+
+def test_omni_session_l2_roundtrips_q4_attention_and_native_ssm(tmp_path):
+    import mlx.core as mx
+    from mlx_lm.models.cache import (
+        ArraysCache,
+        KVCache,
+        QuantizedKVCache,
+        load_prompt_cache,
+    )
+    from types import SimpleNamespace
+
+    attention = KVCache()
+    attention.update_and_fetch(
+        mx.ones((1, 2, 3, 64)),
+        mx.ones((1, 2, 3, 64)) * 2,
+    )
+    ssm = ArraysCache(2)
+    ssm[0] = mx.ones((1, 4, 8))
+    ssm[1] = mx.ones((1, 3, 5))
+    backbone = SimpleNamespace(
+        layers=[SimpleNamespace(block_type="*"), SimpleNamespace(block_type="M")]
+    )
+
+    dispatcher = OmniMultimodalDispatcher.__new__(OmniMultimodalDispatcher)
+    dispatcher._disk_cache_enabled = True
+    dispatcher._backend = "stage1"
+    dispatcher._last_signature = "media-prefix-a"
+    dispatcher._session_l2_fingerprint = "bundle-a"
+    dispatcher._session_l2_path = tmp_path / "latest.safetensors"
+    dispatcher._session_l2_stats = {
+        "stores": 0,
+        "hits": 0,
+        "misses": 0,
+        "last_store_seconds": None,
+        "last_restore_seconds": None,
+        "last_error": None,
+    }
+    dispatcher._session = SimpleNamespace(
+        mlx_model=SimpleNamespace(backbone=backbone),
+        _cache=[attention, ssm],
+        _history_text=[{"role": "user", "content": "remember blue"}],
+    )
+
+    assert dispatcher._persist_session_snapshot() is True
+    stored, metadata = load_prompt_cache(
+        str(dispatcher._session_l2_path), return_metadata=True
+    )
+    assert isinstance(stored[0], QuantizedKVCache)
+    assert stored[0].bits == 4
+    assert isinstance(stored[1], ArraysCache)
+    assert metadata["signature"] == "media-prefix-a"
+
+    restored = OmniMultimodalDispatcher.__new__(OmniMultimodalDispatcher)
+    restored._disk_cache_enabled = True
+    restored._backend = "stage1"
+    restored._last_signature = None
+    restored._session_l2_fingerprint = "bundle-a"
+    restored._session_l2_path = dispatcher._session_l2_path
+    restored._session_l2_stats = {
+        "stores": 0,
+        "hits": 0,
+        "misses": 0,
+        "last_store_seconds": None,
+        "last_restore_seconds": None,
+        "last_error": None,
+    }
+    restored._session = SimpleNamespace(
+        mlx_model=SimpleNamespace(backbone=backbone),
+        _cache=None,
+        _history_text=[],
+    )
+
+    assert restored._try_restore_session_snapshot("media-prefix-a") is True
+    assert isinstance(restored._session._cache[0], QuantizedKVCache)
+    assert restored._session._cache[0].bits == 4
+    assert isinstance(restored._session._cache[1], ArraysCache)
+    assert restored._session._history_text == [
+        {"role": "user", "content": "remember blue"}
+    ]
+    assert restored._session_l2_stats["hits"] == 1
+
+
+def test_omni_session_l2_rejects_a_different_media_prefix(tmp_path):
+    import mlx.core as mx
+    from mlx_lm.models.cache import ArraysCache, save_prompt_cache
+    from types import SimpleNamespace
+
+    ssm = ArraysCache(1)
+    ssm[0] = mx.ones((1, 2, 3))
+
+    dispatcher = OmniMultimodalDispatcher.__new__(OmniMultimodalDispatcher)
+    dispatcher._disk_cache_enabled = True
+    dispatcher._backend = "stage1"
+    dispatcher._last_signature = None
+    dispatcher._session_l2_fingerprint = "bundle-a"
+    dispatcher._session_l2_path = tmp_path / "latest.safetensors"
+    dispatcher._session_l2_stats = {
+        "stores": 0,
+        "hits": 0,
+        "misses": 0,
+        "last_store_seconds": None,
+        "last_restore_seconds": None,
+        "last_error": None,
+    }
+    dispatcher._session = SimpleNamespace(
+        mlx_model=SimpleNamespace(
+            backbone=SimpleNamespace(layers=[SimpleNamespace(block_type="M")])
+        ),
+        _cache=None,
+        _history_text=[],
+    )
+    save_prompt_cache(
+        str(dispatcher._session_l2_path),
+        [ssm],
+        {
+            "schema": "nemotron_omni_session_v1",
+            "bundle_fingerprint": "bundle-a",
+            "signature": "orange-media-prefix",
+            "history_json": "[]",
+        },
+    )
+
+    assert dispatcher._try_restore_session_snapshot("blue-media-prefix") is False
+    assert dispatcher._session_l2_stats["hits"] == 0
+    assert dispatcher._session_l2_stats["misses"] == 1
 
 
 def test_omni_extracts_input_audio_shape_emitted_by_panel(tmp_path):

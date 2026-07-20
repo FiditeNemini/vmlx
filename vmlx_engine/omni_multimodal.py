@@ -34,13 +34,16 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib
 import json
 import logging
 import os
 import shutil
 import tempfile
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -52,6 +55,7 @@ _AUDIO_TYPES = {"input_audio", "audio"}
 _VIDEO_TYPES = {"video_url", "video"}
 _CRADIO_CACHE_REPO = "C_hyphen_RADIOv2_hyphen_H"
 _CRADIO_CACHE_REVISION = "0d8f4c18c877166eda07ddae1386bcad256b7a6a"
+_OMNI_SESSION_L2_SCHEMA = "nemotron_omni_session_v1"
 
 
 def _ensure_vendored_cradio_dynamic_module(
@@ -125,7 +129,7 @@ def _patch_omni_encoder_view_for_vendored_cradio() -> bool:
     module files and points the nested auto-map at those local files.
     """
     try:
-        import jang_tools.nemotron_omni_chat as omni_chat
+        omni_chat = importlib.import_module("jang_tools.nemotron_omni_chat")
     except Exception:
         return False
     if getattr(omni_chat, "_vmlx_cradio_view_patch", False):
@@ -698,7 +702,12 @@ class OmniMultimodalDispatcher:
     _last_signature: Optional[str] = None
 
     @classmethod
-    def get(cls, bundle_path: str | Path) -> "OmniMultimodalDispatcher":
+    def get(
+        cls,
+        bundle_path: str | Path,
+        *,
+        disk_cache_enabled: Optional[bool] = None,
+    ) -> "OmniMultimodalDispatcher":
         bundle_path = str(Path(bundle_path).resolve())
         with cls._instance_lock:
             if cls._instance is None or cls._instance.bundle_path != bundle_path:
@@ -707,10 +716,15 @@ class OmniMultimodalDispatcher:
                         "OmniMultimodalDispatcher: rebinding from %s to %s",
                         cls._instance.bundle_path, bundle_path,
                     )
-                cls._instance = cls(bundle_path)
+                cls._instance = cls(
+                    bundle_path,
+                    disk_cache_enabled=bool(disk_cache_enabled),
+                )
+            elif disk_cache_enabled is not None:
+                cls._instance._disk_cache_enabled = bool(disk_cache_enabled)
             return cls._instance
 
-    def __init__(self, bundle_path: str):
+    def __init__(self, bundle_path: str, *, disk_cache_enabled: bool = False):
         self.bundle_path = bundle_path
         self._session = None
         self._lock = threading.Lock()
@@ -725,6 +739,24 @@ class OmniMultimodalDispatcher:
             thread_name_prefix="vmlx-omni-model",
         )
         self._last_signature: Optional[str] = None
+        self._disk_cache_enabled = bool(disk_cache_enabled)
+        self._session_l2_fingerprint = self._bundle_fingerprint(bundle_path)
+        self._session_l2_path = self._default_session_l2_path(
+            self._session_l2_fingerprint
+        )
+        self._session_l2_stats: Dict[str, Any] = {
+            "schema": _OMNI_SESSION_L2_SCHEMA,
+            "enabled": self._disk_cache_enabled,
+            "path": str(self._session_l2_path),
+            "attention_codec": "mlx-quantized-kv-q4",
+            "ssm_codec": "native-arrays",
+            "stores": 0,
+            "hits": 0,
+            "misses": 0,
+            "last_store_seconds": None,
+            "last_restore_seconds": None,
+            "last_error": None,
+        }
         self._scratch_dir = Path(tempfile.gettempdir()) / "vmlx-omni-media"
         self._scratch_dir.mkdir(exist_ok=True)
         self._backend = self._pick_backend()
@@ -733,6 +765,211 @@ class OmniMultimodalDispatcher:
             "OmniMultimodalDispatcher: bundle=%s, backend=%s, device=%s, scratch=%s",
             bundle_path, self._backend, self._device, self._scratch_dir,
         )
+
+    @staticmethod
+    @lru_cache(maxsize=8)
+    def _bundle_fingerprint(bundle_path: str | Path) -> str:
+        """Bind a persisted Omni session to the exact model-side configuration."""
+        root = Path(bundle_path).resolve()
+        digest = hashlib.sha256(str(root).encode("utf-8"))
+        for name in (
+            "config.json",
+            "config_omni.json",
+            "jang_config.json",
+            "model.safetensors.index.json",
+        ):
+            path = root / name
+            digest.update(name.encode("utf-8"))
+            if path.is_file():
+                with path.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        digest.update(chunk)
+        return digest.hexdigest()[:16]
+
+    @staticmethod
+    def _default_session_l2_path(fingerprint: str) -> Path:
+        override = os.environ.get("VMLINUX_OMNI_SESSION_CACHE_DIR", "").strip()
+        root = (
+            Path(override).expanduser()
+            if override
+            else Path.home() / ".cache" / "vmlx-engine" / "omni-session"
+        )
+        return root / fingerprint / "latest.safetensors"
+
+    @classmethod
+    def session_l2_status_for(
+        cls,
+        bundle_path: str | Path,
+        *,
+        enabled: bool,
+    ) -> Dict[str, Any]:
+        resolved = str(Path(bundle_path).resolve())
+        with cls._instance_lock:
+            instance = cls._instance
+            if instance is not None and instance.bundle_path == resolved:
+                instance._disk_cache_enabled = bool(enabled)
+                return instance.session_l2_status()
+        fingerprint = cls._bundle_fingerprint(resolved)
+        path = cls._default_session_l2_path(fingerprint)
+        return {
+            "schema": _OMNI_SESSION_L2_SCHEMA,
+            "enabled": bool(enabled),
+            "path": str(path),
+            "exists": path.is_file(),
+            "bytes": path.stat().st_size if path.is_file() else 0,
+            "attention_codec": "mlx-quantized-kv-q4",
+            "ssm_codec": "native-arrays",
+            "stores": 0,
+            "hits": 0,
+            "misses": 0,
+            "last_store_seconds": None,
+            "last_restore_seconds": None,
+            "last_error": None,
+        }
+
+    def session_l2_status(self) -> Dict[str, Any]:
+        path = self._session_l2_path
+        status = dict(self._session_l2_stats)
+        status["enabled"] = bool(self._disk_cache_enabled)
+        status["exists"] = path.is_file()
+        status["bytes"] = path.stat().st_size if path.is_file() else 0
+        status["pending"] = self._executor._work_queue.qsize()
+        return status
+
+    def _cache_block_types(self) -> List[str]:
+        backbone = self._session.mlx_model.backbone
+        return [
+            layer.block_type
+            for layer in backbone.layers
+            if layer.block_type in ("M", "*")
+        ]
+
+    def _cache_for_persistence(self) -> List[Any]:
+        cache = list(self._session._cache or [])
+        block_types = self._cache_block_types()
+        if len(cache) != len(block_types):
+            raise ValueError(
+                "Omni cache layer count does not match the model cache topology: "
+                f"cache={len(cache)} topology={len(block_types)}"
+            )
+        persisted: List[Any] = []
+        for block_type, entry in zip(block_types, cache):
+            if block_type == "*" and hasattr(entry, "to_quantized"):
+                entry = entry.to_quantized(group_size=64, bits=4)
+            persisted.append(entry)
+        return persisted
+
+    def _persist_session_snapshot(self) -> bool:
+        if (
+            not getattr(self, "_disk_cache_enabled", False)
+            or self._backend != "stage1"
+            or self._session is None
+            or not self._last_signature
+            or not getattr(self._session, "_cache", None)
+        ):
+            return False
+        started = time.monotonic()
+        path = self._session_l2_path
+        tmp_path = path.with_suffix(f".tmp-{os.getpid()}.safetensors")
+        try:
+            from mlx_lm.models.cache import save_prompt_cache
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            metadata = {
+                "schema": _OMNI_SESSION_L2_SCHEMA,
+                "bundle_fingerprint": self._session_l2_fingerprint,
+                "signature": self._last_signature,
+                "history_json": json.dumps(
+                    getattr(self._session, "_history_text", []),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            }
+            save_prompt_cache(
+                str(tmp_path),
+                self._cache_for_persistence(),
+                metadata,
+            )
+            os.replace(tmp_path, path)
+            elapsed = time.monotonic() - started
+            self._session_l2_stats["stores"] += 1
+            self._session_l2_stats["last_store_seconds"] = round(elapsed, 6)
+            self._session_l2_stats["last_error"] = None
+            logger.info(
+                "OmniMultimodalDispatcher: persisted q4-KV/native-SSM session "
+                "signature=%s bytes=%d in %.3fs",
+                self._last_signature,
+                path.stat().st_size,
+                elapsed,
+            )
+            return True
+        except Exception as exc:
+            tmp_path.unlink(missing_ok=True)
+            self._session_l2_stats["last_error"] = str(exc)
+            logger.warning("Omni session L2 persist failed: %s", exc)
+            return False
+
+    def schedule_session_l2_persist(self) -> Optional[Future]:
+        """Queue persistence behind decode so HTTP terminal dispatch is not blocked."""
+        if (
+            not getattr(self, "_disk_cache_enabled", False)
+            or self._backend != "stage1"
+        ):
+            return None
+        return self.submit(self._persist_session_snapshot)
+
+    def _try_restore_session_snapshot(self, prefix_signature: str) -> bool:
+        if (
+            not getattr(self, "_disk_cache_enabled", False)
+            or self._backend != "stage1"
+            or self._session is None
+            or not prefix_signature
+            or not self._session_l2_path.is_file()
+        ):
+            return False
+        started = time.monotonic()
+        try:
+            from mlx_lm.models.cache import load_prompt_cache
+
+            cache, metadata = load_prompt_cache(
+                str(self._session_l2_path),
+                return_metadata=True,
+            )
+            if metadata.get("schema") != _OMNI_SESSION_L2_SCHEMA:
+                raise ValueError("Omni session L2 schema mismatch")
+            if metadata.get("bundle_fingerprint") != self._session_l2_fingerprint:
+                raise ValueError("Omni session L2 bundle fingerprint mismatch")
+            if metadata.get("signature") != prefix_signature:
+                self._session_l2_stats["misses"] += 1
+                return False
+            block_types = self._cache_block_types()
+            if len(cache) != len(block_types):
+                raise ValueError(
+                    "Omni session L2 layer count mismatch: "
+                    f"cache={len(cache)} topology={len(block_types)}"
+                )
+            history = json.loads(metadata.get("history_json") or "[]")
+            if not isinstance(history, list):
+                raise ValueError("Omni session L2 history is not a list")
+            self._session._cache = cache
+            self._session._history_text = history
+            self._last_signature = prefix_signature
+            elapsed = time.monotonic() - started
+            self._session_l2_stats["hits"] += 1
+            self._session_l2_stats["last_restore_seconds"] = round(elapsed, 6)
+            self._session_l2_stats["last_error"] = None
+            logger.info(
+                "OmniMultimodalDispatcher: restored q4-KV/native-SSM session "
+                "signature=%s bytes=%d in %.3fs",
+                prefix_signature,
+                self._session_l2_path.stat().st_size,
+                elapsed,
+            )
+            return True
+        except Exception as exc:
+            self._session_l2_stats["last_error"] = str(exc)
+            logger.warning("Omni session L2 restore rejected: %s", exc)
+            return False
 
     def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Future:
         """Submit work to the persistent Omni native-runtime owner thread."""
@@ -882,6 +1119,8 @@ class OmniMultimodalDispatcher:
             prefix_hash = _hash_user_texts(user_turns[:-1])
             current_hash = _hash_user_texts(user_turns)
 
+            if self._last_signature is None and not force_reset:
+                self._try_restore_session_snapshot(prefix_hash)
             should_reset = force_reset or prefix_hash != self._last_signature
             if should_reset:
                 logger.info(
@@ -1063,7 +1302,12 @@ class _OmniIncrementalRailSplitter:
         return events
 
 
-async def dispatch_omni_chat_completion(request, bundle_path: str):
+async def dispatch_omni_chat_completion(
+    request,
+    bundle_path: str,
+    *,
+    disk_cache_enabled: bool = False,
+):
     """Run a Nemotron Omni multimodal chat turn and return an OpenAI
     chat-completion response or SSE stream.
 
@@ -1104,7 +1348,10 @@ async def dispatch_omni_chat_completion(request, bundle_path: str):
             ),
         )
 
-    dispatcher = OmniMultimodalDispatcher.get(bundle_path)
+    dispatcher = OmniMultimodalDispatcher.get(
+        bundle_path,
+        disk_cache_enabled=disk_cache_enabled,
+    )
 
     _max_tokens = (
         getattr(request, "max_tokens", None)
@@ -1154,6 +1401,7 @@ async def dispatch_omni_chat_completion(request, bundle_path: str):
                 status_code=500, detail=f"Omni multimodal generation failed: {e}"
             )
 
+        dispatcher.schedule_session_l2_persist()
         elapsed = _time.time() - t_start
         reasoning_content, content = _split_omni_reply(
             result.get("content") or "",
@@ -1211,6 +1459,7 @@ async def dispatch_omni_chat_completion(request, bundle_path: str):
     def _on_done(future: Future) -> None:
         try:
             _enqueue(("done", future.result()))
+            dispatcher.schedule_session_l2_persist()
         except _OmniStreamCancelled as exc:
             dispatcher.reset()
             _enqueue(("cancelled", exc))

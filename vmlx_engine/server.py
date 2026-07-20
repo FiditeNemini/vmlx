@@ -17583,6 +17583,46 @@ async def stream_chat_completion(
     """Stream chat completion with auto-detection of closed connections."""
     response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
+    # Some adapters (notably Anthropic stream=false) consume this streaming
+    # generator inside a non-streaming HTTP handler so they can reuse its
+    # reasoning and tool parsing. Starlette does not own a StreamingResponse in
+    # that shape, and lazy is_disconnected() polling can miss http.disconnect
+    # after the request body has already been consumed. Actively drain receive
+    # only for that non-streaming-consumer shape; real StreamingResponse routes
+    # retain Starlette's single receive owner.
+    _nonstream_disconnect_event = asyncio.Event()
+    _nonstream_disconnect_drain: asyncio.Task | None = None
+    if (
+        fastapi_request is not None
+        and request.stream is False
+        and hasattr(fastapi_request, "receive")
+    ):
+        async def _drain_nonstream_disconnect() -> None:
+            try:
+                while not _nonstream_disconnect_event.is_set():
+                    message = await fastapi_request.receive()
+                    if (
+                        isinstance(message, dict)
+                        and message.get("type") == "http.disconnect"
+                    ):
+                        _nonstream_disconnect_event.set()
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _nonstream_disconnect_event.set()
+
+        _nonstream_disconnect_drain = asyncio.create_task(
+            _drain_nonstream_disconnect()
+        )
+
+    def _stop_nonstream_disconnect_drain() -> None:
+        if (
+            _nonstream_disconnect_drain is not None
+            and not _nonstream_disconnect_drain.done()
+        ):
+            _nonstream_disconnect_drain.cancel()
+
     # Pass response_id as request_id to engine for unified tracking
     kwargs["request_id"] = response_id
 
@@ -17968,19 +18008,36 @@ async def stream_chat_completion(
         # Stream content (with SSE keep-alive during long prefills)
         async for output in _stream_with_keepalive(
             engine.stream_chat(messages=messages, **kwargs),
+            interval=(
+                0.25
+                if _nonstream_disconnect_drain is not None
+                else _SSE_KEEPALIVE_INTERVAL
+            ),
             total_timeout=_stream_timeout,
         ):
             # Keep-alive sentinel — emit SSE comment to prevent connection timeout
             if output is None:
+                if _nonstream_disconnect_event.is_set():
+                    logger.info(
+                        "Client disconnected from non-stream adapter, aborting %s",
+                        response_id,
+                    )
+                    if hasattr(engine, "abort_request"):
+                        await engine.abort_request(response_id)
+                    return
                 yield ": keep-alive\n\n"
                 continue
 
             # Check if client disconnected
-            if fastapi_request and await fastapi_request.is_disconnected():
+            if _nonstream_disconnect_event.is_set() or (
+                fastapi_request
+                and _nonstream_disconnect_drain is None
+                and await fastapi_request.is_disconnected()
+            ):
                 logger.info(f"Client disconnected, aborting request {response_id}")
                 if hasattr(engine, "abort_request"):
                     await engine.abort_request(response_id)
-                break
+                return
 
             delta_text = output.new_text
             last_output = output
@@ -18575,6 +18632,8 @@ async def stream_chat_completion(
             yield f"data: {_dump_chat_chunk(err_usage_chunk, terminal_usage=True)}\n\n"
         yield "data: [DONE]\n\n"
         return
+    finally:
+        _stop_nonstream_disconnect_drain()
 
     # ─── Post-stream: tool call extraction ───────────────────────────────
     # If we buffered text because of tool call markers, parse it now

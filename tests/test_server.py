@@ -2064,6 +2064,62 @@ class TestOpenAILogprobsFormatting:
         }
 
     @pytest.mark.asyncio
+    async def test_nonstream_adapter_chat_stream_actively_aborts_on_disconnect(
+        self, monkeypatch
+    ):
+        import asyncio
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+
+        aborted: list[str] = []
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                await asyncio.Event().wait()
+                if False:
+                    yield None
+
+            async def abort_request(self, request_id):
+                aborted.append(request_id)
+
+        class _DisconnectedRequest:
+            async def receive(self):
+                return {"type": "http.disconnect"}
+
+            async def is_disconnected(self):
+                raise AssertionError("active receive drain owns disconnect detection")
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "anthropic-adapter-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+
+        request = ChatCompletionRequest(
+            model="anthropic-adapter-test",
+            messages=[Message(role="user", content="keep generating")],
+            stream=False,
+        )
+        stream = server.stream_chat_completion(
+            _Engine(),
+            [m.model_dump(exclude_none=True) for m in request.messages],
+            request,
+            fastapi_request=_DisconnectedRequest(),
+        )
+
+        first = await anext(stream)
+        assert '"role":"assistant"' in first.replace(" ", "")
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(stream), timeout=1.0)
+
+        assert len(aborted) == 1
+        assert aborted[0].startswith("chatcmpl-")
+
+    @pytest.mark.asyncio
     async def test_streaming_chat_strict_xml_validates_final_text(
         self, monkeypatch
     ):

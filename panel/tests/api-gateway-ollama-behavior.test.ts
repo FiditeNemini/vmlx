@@ -250,6 +250,43 @@ async function startSlowStreamingChatBackend(): Promise<
   return { server, port: await listen(server), bodies, paths, responseClosed };
 }
 
+async function startSlowNonStreamingChatBackend(): Promise<
+  BackendHandle & { requestReceived: Promise<void>; responseClosed: Promise<void> }
+> {
+  const bodies: any[] = [];
+  const paths: string[] = [];
+  let resolveReceived!: () => void;
+  let resolveClosed!: () => void;
+  const requestReceived = new Promise<void>((resolve) => {
+    resolveReceived = resolve;
+  });
+  const responseClosed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => {
+      paths.push(req.url || "");
+      const raw = Buffer.concat(chunks).toString("utf8");
+      bodies.push(raw ? JSON.parse(raw) : {});
+      res.on("close", resolveClosed);
+      resolveReceived();
+      // Deliberately do not send response headers. This models non-streaming
+      // inference, where the backend response callback does not run until the
+      // entire generation has completed.
+    });
+  });
+  return {
+    server,
+    port: await listen(server),
+    bodies,
+    paths,
+    requestReceived,
+    responseClosed,
+  };
+}
+
 async function startGateway(sessionPort: number): Promise<{ gateway: any; port: number }> {
   const sessions = [
     {
@@ -947,6 +984,38 @@ describe("Ollama gateway request translation behavior", () => {
       backend.responseClosed,
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error("backend stream stayed open")), 250),
+      ),
+    ]);
+  });
+
+  it("aborts a generic non-stream backend before response headers when the client disconnects", async () => {
+    backend = await startSlowNonStreamingChatBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    const controller = new AbortController();
+    const responsePromise = fetch(
+      `http://127.0.0.1:${started.port}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "hy3-model",
+          stream: false,
+          messages: [{ role: "user", content: "keep generating" }],
+        }),
+        signal: controller.signal,
+      },
+    );
+
+    await backend.requestReceived;
+    controller.abort();
+    await expect(responsePromise).rejects.toMatchObject({ name: "AbortError" });
+
+    await Promise.race([
+      backend.responseClosed,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("backend request stayed open")), 250),
       ),
     ]);
   });

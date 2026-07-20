@@ -436,6 +436,19 @@ export class ApiGateway extends EventEmitter {
     });
   }
 
+  private abortProxyRequestOnClientClose(
+    res: ServerResponse,
+    proxyReq: ClientRequest,
+  ): void {
+    // Install this before backend response headers exist. Non-streaming model
+    // routes do not produce a proxyRes until generation has finished, so only
+    // watching proxyRes (or the already-consumed client request body) strands
+    // backend inference when the downstream client disconnects mid-generation.
+    res.once("close", () => {
+      if (!res.writableEnded && !proxyReq.destroyed) proxyReq.destroy();
+    });
+  }
+
   async stop(): Promise<void> {
     if (!this.server) return;
     return new Promise((resolve) => {
@@ -995,6 +1008,8 @@ export class ApiGateway extends EventEmitter {
       });
     });
 
+    this.abortProxyRequestOnClientClose(clientRes, proxyReq);
+
     proxyReq.on("error", (err) => {
       if (this.isClientDisconnectError(err)) {
         if (!this.responseWritable(clientRes)) return;
@@ -1032,11 +1047,6 @@ export class ApiGateway extends EventEmitter {
 
     if (body.length > 0 && !this.writeProxyBody(proxyReq, body)) return;
     if (!this.endProxyRequest(proxyReq)) return;
-
-    // Abort backend inference when client disconnects mid-stream
-    clientReq.on("close", () => {
-      if (!proxyReq.destroyed) proxyReq.destroy();
-    });
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -1678,6 +1688,8 @@ export class ApiGateway extends EventEmitter {
       }
     });
 
+    this.abortProxyRequestOnClientClose(res, proxyReq);
+
     proxyReq.on("error", (err) => {
       if (this.isClientDisconnectError(err)) {
         if (!this.responseWritable(res)) return;
@@ -1699,9 +1711,6 @@ export class ApiGateway extends EventEmitter {
     });
     if (!this.writeProxyBody(proxyReq, JSON.stringify(openaiBody))) return;
     if (!this.endProxyRequest(proxyReq)) return;
-    req.on("close", () => {
-      if (!proxyReq.destroyed) proxyReq.destroy();
-    });
   }
 
   // ── /api/generate ──
@@ -1953,6 +1962,8 @@ export class ApiGateway extends EventEmitter {
       }
     });
 
+    this.abortProxyRequestOnClientClose(res, proxyReq);
+
     proxyReq.on("error", (err) => {
       if (this.isClientDisconnectError(err)) {
         if (!this.responseWritable(res)) return;
@@ -1973,9 +1984,6 @@ export class ApiGateway extends EventEmitter {
     });
     if (!this.writeProxyBody(proxyReq, JSON.stringify(openaiBody))) return;
     if (!this.endProxyRequest(proxyReq)) return;
-    req.on("close", () => {
-      if (!proxyReq.destroyed) proxyReq.destroy();
-    });
   }
 
   // ── /api/show ──
@@ -2122,6 +2130,8 @@ export class ApiGateway extends EventEmitter {
       });
     });
 
+    this.abortProxyRequestOnClientClose(res, proxyReq);
+
     proxyReq.on("error", (err) => {
       if (this.isClientDisconnectError(err)) {
         if (!this.responseWritable(res)) return;
@@ -2140,9 +2150,6 @@ export class ApiGateway extends EventEmitter {
     });
     if (!this.writeProxyBody(proxyReq, openaiBody)) return;
     if (!this.endProxyRequest(proxyReq)) return;
-    req.on("close", () => {
-      if (!proxyReq.destroyed) proxyReq.destroy();
-    });
   }
 
   // ═══════════════════════════════════════════════════════════════

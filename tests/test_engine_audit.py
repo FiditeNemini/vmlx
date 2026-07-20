@@ -15575,9 +15575,12 @@ class TestStreamUsagePropagatesCacheDetail:
                 # instead of the old non-streaming _await_chat_with_disconnect_abort.
                 if kwargs.get("enable_thinking") is False:
                     assert "tools" not in kwargs
-                    assert messages[-1]["role"] == "assistant"
-                    assert messages[-1]["content"] == ""
-                    assert "internal-only plan" in messages[-1]["reasoning_content"]
+                    # Gemma 4 cannot faithfully render a trailing
+                    # reasoning-only assistant turn. Its visible-answer retry
+                    # must therefore re-run the original user conversation on
+                    # the thinking-off rail instead of replaying hidden
+                    # reasoning as chat history.
+                    assert messages == [{"role": "user", "content": "hi"}]
                     yield GenerationOutput(
                         text="VISIBLE_GEMMA_ANSWER",
                         new_text="VISIBLE_GEMMA_ANSWER",

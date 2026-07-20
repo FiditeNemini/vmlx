@@ -217,7 +217,7 @@ function cacheTypeSupportsBlockDiskOnly(cacheType?: string): boolean {
 }
 
 function cacheSubtypeSupportsBlockDiskOnly(cacheSubtype?: string): boolean {
-    return cacheSubtype === 'mixed_swa_kv'
+    return cacheSubtype === 'mixed_swa_kv' || cacheSubtype === 'step3p7_full_sliding_kv'
 }
 
 const DSV4_PAGED_CACHE_BLOCK_SIZE = 256
@@ -2189,7 +2189,7 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
     })
 
-    it('Step3.7 full/sliding KV cache subtype forces paged cache over stale saved false', () => {
+    it('Step3.7 full/sliding KV cache subtype honors typed SSD-only mode with Block L2', () => {
         const out = preview(
             {
                 enablePrefixCache: true,
@@ -2213,12 +2213,14 @@ describe('No Hardcoded Values', () => {
         )
 
         expect(hasFlag(out, '--is-mllm')).toBe(true)
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-disk-cache')).toBe(false)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
         expect(getFlagValue(out, '--kv-cache-quantization')).toBe('q4')
         expect(getFlagValue(out, '--tool-call-parser')).toBe('step3p5')
         expect(getFlagValue(out, '--reasoning-parser')).toBe('qwen3')
+        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
     })
 
     it('deepseek-v4 respects explicit prefix cache disable and suppresses dependent caches', () => {
@@ -3097,7 +3099,7 @@ describe('JIT Toggle', () => {
         expect(shared).toContain('kIOGPUCommandBufferCallbackErrorOutOfMemory')
     })
 
-    it('settings form and launch code treat Step3.7 full/sliding KV subtype as architecture-paged cache', () => {
+    it('settings form and launch code treat Step3.7 full/sliding KV subtype as typed paged-or-SSD cache', () => {
         const fs = require('fs')
         const form = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
@@ -3120,6 +3122,7 @@ describe('JIT Toggle', () => {
 
         expect(form).toContain('detectedCacheSubtype')
         expect(form).toContain("detectedCacheSubtype === 'step3p7_full_sliding_kv'")
+        expect(form).toContain('Under tight Metal headroom, long cold-prompt stores can be skipped')
         expect(settings).toContain('detectedCacheSubtype={detectedConfig?.cacheSubtype}')
         expect(settings).toContain('cacheSubtypeRequiresPaged')
         expect(sessions).toContain('cacheSubtypeRequiresPaged')

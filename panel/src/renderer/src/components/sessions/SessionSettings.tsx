@@ -51,7 +51,7 @@ function cacheTypeSupportsBlockDiskOnly(cacheType?: string): boolean {
 }
 
 function cacheSubtypeSupportsBlockDiskOnly(cacheSubtype?: string): boolean {
-  return cacheSubtype === 'mixed_swa_kv'
+  return cacheSubtype === 'mixed_swa_kv' || cacheSubtype === 'step3p7_full_sliding_kv'
 }
 
 const DSV4_PAGED_CACHE_BLOCK_SIZE = 256

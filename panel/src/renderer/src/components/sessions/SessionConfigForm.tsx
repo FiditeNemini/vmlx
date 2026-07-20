@@ -370,7 +370,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     detectedCacheType === 'rotating_kv'
   const mixedSwaBlockDiskOnlySupported =
     detectedCacheType === 'rotating_kv' ||
-    detectedCacheSubtype === 'mixed_swa_kv'
+    detectedCacheSubtype === 'mixed_swa_kv' ||
+    detectedCacheSubtype === 'step3p7_full_sliding_kv'
+  const stepMixedSwaBlockDiskOnly = detectedCacheSubtype === 'step3p7_full_sliding_kv'
   const architectureBlockDiskOnlySupported =
     (detectedCacheType === 'mamba' ||
       detectedCacheType === 'hybrid' ||
@@ -1026,7 +1028,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {zayaTypedCacheRequiresPaged && <InfoNote text="ZAYA typed CCA cache requires paged cache while prefix cache is enabled. Turn off Prefix Cache to disable this cache stack for ZAYA." />}
         {nativeCacheRequiresPaged && !zayaTypedCacheRequiresPaged && !dsv4CompositeRequiresPaged && <InfoNote text="This native cache route requires paged cache while prefix cache is enabled so KV blocks and path-dependent state stay in the same cache contract." />}
         {architectureBlockDiskOnlySupported && cachePolicy.blockDiskCacheChecked && <InfoNote text={mixedSwaBlockDiskOnlySupported
-          ? "Native sliding/mixed-SWA SSD-only mode is available: turn Paged KV Cache Off to keep typed KV blocks and rotating-window metadata in Block Disk L2 without retaining RAM payloads."
+          ? stepMixedSwaBlockDiskOnly
+            ? "Step full/sliding-KV SSD-only mode is available: typed KV blocks and rotating metadata stay in Block Disk L2 without RAM payloads. Under tight Metal headroom, long cold-prompt stores can be skipped to avoid an unsafe second clean prefill; existing SSD blocks remain reusable."
+            : "Native sliding/mixed-SWA SSD-only mode is available: turn Paged KV Cache Off to keep typed KV blocks and rotating-window metadata in Block Disk L2 without retaining RAM payloads."
           : "Hybrid/Mamba SSD-only mode is available: turn Paged KV Cache Off to keep attention KV blocks in Block Disk L2 while restoring full-precision SSM/GDN companion state from its typed SSD store or clean-prefill rederive."} />}
         {dsv4CompositeRequiresPaged && <InfoNote text="DSV4 uses native SWA+CSA/HCA composite cache snapshots, so paged cache stays on and block size is fixed to 256 tokens for diagnostic decode-cache testing." />}
         {m3Active && <InfoNote text="MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets. Block Disk Cache provides its persistent L2; generic KV q4/q8 remains disabled." />}

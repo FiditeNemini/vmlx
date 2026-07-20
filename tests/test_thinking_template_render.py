@@ -263,19 +263,22 @@ def test_thinking_off_sentinel_does_not_touch_other_families_or_tools():
     )
 
 
-def test_lfm2_thinking_off_sentinel_applies_even_with_tools():
-    """LFM2 loops in `<think>` on tool turns unless the prompt closes it."""
+def test_lfm2_thinking_off_does_not_fabricate_a_sentinel():
+    """LFM2's native template owns reasoning and forbids synthetic prefill."""
     prompt = "<|im_start|>assistant\n"
 
-    fixed = ensure_thinking_off_sentinel(
+    assert ensure_thinking_off_sentinel(
         prompt,
         family_name="lfm2",
-        model_name="LFM2.5-8B-A1B-JANG_2L",
+        model_name="LFM2.5-8B-A1B-MXFP4-CRACK",
         tools_present=True,
-    )
-
-    assert fixed.endswith("<think>\n</think>\n\n")
-    assert _has_empty_think_pair(fixed)
+    ) == prompt
+    assert ensure_thinking_off_sentinel(
+        prompt,
+        family_name="lfm2",
+        model_name="LFM2.5-8B-A1B-MXFP4-CRACK",
+        tools_present=False,
+    ) == prompt
 
 
 def test_step37_thinking_off_sentinel_preserves_native_forced_think():

@@ -912,6 +912,50 @@ def test_step37_rejects_instruct_mode_but_keeps_native_reasoning_controls(monkey
         )
 
 
+def test_lfm2_rejects_synthetic_instruct_mode(monkeypatch):
+    """The native LFM2 template has no truthful enable_thinking=false rail."""
+    from fastapi import HTTPException
+
+    import vmlx_engine.model_config_registry as mcr
+    from vmlx_engine import server
+
+    cfg = SimpleNamespace(
+        family_name="lfm2",
+        reasoning_parser="qwen3",
+        think_in_template=False,
+        supports_thinking=True,
+        supports_instruct_mode=False,
+    )
+
+    class _Registry:
+        def lookup(self, _model_key):
+            return cfg
+
+    monkeypatch.setattr(mcr, "get_model_config_registry", lambda: _Registry())
+    monkeypatch.setattr(server, "_default_enable_thinking", None)
+
+    assert server._resolve_enable_thinking(
+        request_value=None,
+        ct_kwargs={},
+        tools_present=False,
+        model_key="lfm2",
+        auto_detect=True,
+    ) is True
+    assert server._resolve_enable_thinking(
+        request_value=True,
+        ct_kwargs={},
+        tools_present=True,
+        model_key="lfm2",
+    ) is True
+    with pytest.raises(HTTPException, match="does not expose a native thinking-off/instruct mode"):
+        server._resolve_enable_thinking(
+            request_value=False,
+            ct_kwargs={},
+            tools_present=False,
+            model_key="lfm2",
+        )
+
+
 @pytest.mark.asyncio
 async def test_step37_capabilities_advertise_reasoning_only_and_native_efforts(monkeypatch):
     import vmlx_engine.model_config_registry as mcr

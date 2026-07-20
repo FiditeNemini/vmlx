@@ -1168,6 +1168,13 @@ def register_all(registry=None):
             cache_subtype="lfm2_moe_hybrid_ssm",
             tool_parser="lfm2",
             reasoning_parser="qwen3",
+            supports_thinking=True,
+            # Liquid's native LFM2/LFM2.5 template has no enable_thinking
+            # branch and the converted bundle explicitly forbids a synthetic
+            # <think> assistant prefill. Auto/On use the model-owned reasoning
+            # rail; Off must be rejected instead of leaking or suppressing an
+            # incomplete reasoning pass as visible content.
+            supports_instruct_mode=False,
             architecture_hints={
                 "attention_arch": "hybrid_ssm_attention",
                 "cache_schema": "hybrid_ssm_v1",

@@ -1021,6 +1021,8 @@ class TestModelConfigs:
         assert config.cache_subtype == "lfm2_moe_hybrid_ssm"
         assert config.tool_parser == "lfm2"
         assert config.reasoning_parser == "qwen3"
+        assert config.supports_thinking is True
+        assert config.supports_instruct_mode is False
         assert config.architecture_hints["attention_arch"] == "hybrid_ssm_attention"
         assert config.architecture_hints["cache_schema"] == "hybrid_ssm_v1"
         assert config.architecture_hints["ssm_companion_cache"] is True
@@ -1037,6 +1039,8 @@ class TestModelConfigs:
         assert config.cache_type == "hybrid"
         assert config.cache_subtype == "lfm2_moe_hybrid_ssm"
         assert config.tool_parser == "lfm2"
+        assert config.supports_thinking is True
+        assert config.supports_instruct_mode is False
         assert config.architecture_hints["cache_schema"] == "hybrid_ssm_v1"
         assert config.architecture_hints["ssm_companion_cache"] is True
 

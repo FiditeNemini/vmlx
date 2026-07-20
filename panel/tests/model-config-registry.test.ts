@@ -1472,6 +1472,8 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
       if (row.reasoningParser !== undefined) expect(detected.reasoningParser).toBe(row.reasoningParser)
       if (row.isMultimodal !== undefined) expect(detected.isMultimodal).toBe(row.isMultimodal)
       if (row.modelType === 'lfm2_moe') {
+        expect(detected.supportsThinking).toBe(true)
+        expect(detected.supportsInstructMode).toBe(false)
         expect(detected.architectureHints).toMatchObject({
           attentionArch: 'hybrid_ssm_attention',
           cacheSchema: 'hybrid_ssm_v1',

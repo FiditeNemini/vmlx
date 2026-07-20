@@ -4661,9 +4661,21 @@ class TestOpenAILogprobsFormatting:
             for event_type, payload in payloads
             if event_type == "error"
         ]
+        terminal_events = [
+            (event_type, payload.get("response", {}))
+            for event_type, payload in payloads
+            if event_type.startswith("response.")
+            and event_type
+            in {"response.completed", "response.incomplete", "response.failed"}
+        ]
 
         assert function_items == []
         assert "tool_calls_required" in error_codes
+        assert [event_type for event_type, _ in terminal_events] == [
+            "response.failed"
+        ]
+        assert terminal_events[0][1]["status"] == "failed"
+        assert terminal_events[0][1]["error"]["code"] == "tool_calls_required"
 
     @pytest.mark.asyncio
     async def test_streaming_responses_reasoning_tool_call_keeps_arguments(

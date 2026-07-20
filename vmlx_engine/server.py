@@ -21145,9 +21145,26 @@ async def stream_responses_api(
                         f"Stream {response_id}: JSON validation failed: {_err}"
                     )
 
-    # Enforce tool_choice="required" in Responses API streaming
+    # Enforce tool_choice="required" in Responses API streaming.  An error
+    # event followed by response.completed is contradictory: strict clients
+    # dispatch terminal handling from the response.* event and can therefore
+    # mistake an unmet required-tool contract for success.  Keep the error
+    # event for incremental consumers, then terminate with response.failed.
     _resp_stream_tc = getattr(request, "tool_choice", None)
-    if _is_required_tool_choice(_resp_stream_tc) and not tool_calls:
+    _required_tool_contract_failed = bool(
+        _is_required_tool_choice(_resp_stream_tc) and not tool_calls
+    )
+    _required_tool_error = None
+    if _required_tool_contract_failed:
+        _required_tool_error = {
+            "type": "invalid_request_error",
+            "message": (
+                "tool_choice='required' was set but the model did not produce "
+                "any tool calls. Try rephrasing your prompt or using a model "
+                "with better tool-calling support."
+            ),
+            "code": "tool_calls_required",
+        }
         logger.warning(
             f"Stream {response_id}: tool_choice='required' but no tool calls produced"
         )
@@ -21155,12 +21172,9 @@ async def stream_responses_api(
             "error",
             {
                 "type": "error",
-                "message": (
-                    "tool_choice='required' was set but the model did not produce "
-                    "any tool calls. Try rephrasing your prompt or using a model "
-                    "with better tool-calling support."
-                ),
-                "code": "tool_calls_required",
+                "error": _required_tool_error,
+                "message": _required_tool_error["message"],
+                "code": _required_tool_error["code"],
             },
         )
 
@@ -21170,9 +21184,13 @@ async def stream_responses_api(
     # dispatch terminal handling by event type.
     _resp_finish = getattr(last_output, "finish_reason", None) if last_output else None
     _resp_status = (
-        "incomplete"
-        if _resp_finish in {"length", "aborted"} or _response_was_cancelled
-        else "completed"
+        "failed"
+        if _required_tool_contract_failed
+        else (
+            "incomplete"
+            if _resp_finish in {"length", "aborted"} or _response_was_cancelled
+            else "completed"
+        )
     )
     _resp_extra: dict = {}
     if _resp_status == "incomplete":
@@ -21218,6 +21236,7 @@ async def stream_responses_api(
         "output_text": display_text,
         "output": all_output_items,
         **_resp_extra,
+        **({"error": _required_tool_error} if _required_tool_error else {}),
         **({"warnings": _stream_warnings} if _stream_warnings else {}),
         "usage": {
             "input_tokens": prompt_tokens,
@@ -21236,16 +21255,17 @@ async def stream_responses_api(
             ),
         },
     }
-    if not _response_was_cancelled:
+    if not _response_was_cancelled and not _required_tool_contract_failed:
         _responses_store_history(
             response_id,
             (history_messages if history_messages is not None else messages)
             + _responses_output_to_assistant_messages(all_output_items),
             reasoning_only=_stream_reasoning_only,
         )
-    _terminal_response_event = (
-        "response.incomplete" if _resp_status == "incomplete" else "response.completed"
-    )
+    _terminal_response_event = {
+        "incomplete": "response.incomplete",
+        "failed": "response.failed",
+    }.get(_resp_status, "response.completed")
     yield _sse(
         _terminal_response_event,
         {

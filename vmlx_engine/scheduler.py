@@ -2039,7 +2039,7 @@ class Scheduler:
             # owner worker immediately before dequantization.
             # Paged cache reconstructs blocks immediately on the owner worker
             # and its typed serializer expects MLX arrays, so retain MLX there.
-            if self.block_aware_cache is not None:
+            if getattr(self, "block_aware_cache", None) is not None:
                 return tuple(parts)
             return tuple(np.array(part) for part in parts)
         result = []

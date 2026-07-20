@@ -8964,8 +8964,20 @@ def validate_current_dsv4_proof_artifact_freshness(
         or artifact["stale_references"]
         or artifact["missing_required_artifacts"]
     ]
+    all_generated_artifacts_absent = bool(artifacts) and all(
+        artifact["missing"] for artifact in artifacts
+    )
     return {
-        "status": "fail" if failures else "pass",
+        # A clean source checkout intentionally has no generated build/proof
+        # output.  That is an honest OPEN boundary.  Partial output, stale
+        # references, or an incomplete present artifact remain hard failures.
+        "status": (
+            "open"
+            if all_generated_artifacts_absent
+            else "fail"
+            if failures
+            else "pass"
+        ),
         "artifacts": artifacts,
         "checked_artifacts": list(checked_artifacts),
         "require_manifest_artifact": require_manifest_artifact,

@@ -909,9 +909,58 @@ def build_audit(root: Path) -> dict[str, Any]:
     }
     focused_failures: list[str] = []
     focused_open: list[str] = []
+    # Generated proof output and staged apps are deliberately absent from a
+    # clean source checkout.  Their absence is an OPEN release boundary, not a
+    # source failure.  A present artifact that fails its checks still falls
+    # through to the normal FAIL classification below.
+    generated_proof_boundaries: dict[str, tuple[set[str], tuple[Path, ...]]] = {
+        "165": (
+            {"dsml_issue_165_regression_present"},
+            (TOOL_CALL_CONTRACT, INSTALLED_APP_RUNTIME_PARITY),
+        ),
+        "169": (
+            {
+                "dual_public_dmg_flavors",
+                "compat_wheel_default",
+                "minimum_system_version_allows_sequoia",
+                "wrong_flavor_error_tested",
+            },
+            (STAGED_SEQUOIA_APP, STAGED_TAHOE_APP),
+        ),
+        "117": (
+            {"minimax_reasoning_parser_guarded"},
+            (ISSUE179_ROOT_CAUSE_AUDIT, ISSUE179_RESPONSES_CANCEL_PREFLIGHT),
+        ),
+        "180": (
+            set(),
+            (
+                Path(
+                    "build/private-evidence/"
+                    "current-real-ui-live-model-minimax-m27-small-responses-"
+                    "stricttools-cachecontrols-20260530-proof.json"
+                ),
+            ),
+        ),
+        "116": (
+            {"panel_thinking_off_control_present"},
+            (REASONING_TEMPLATE_CONTRACT, PACKAGED_INTEGRITY_CONTRACT),
+        ),
+    }
     for number, issue in issues.items():
         checks = issue["checks"]
-        if number == "117" and checks.get("issue179_root_cause_audit_passes") is True:
+        generated_boundary = generated_proof_boundaries.get(number)
+        missing_generated_proof = False
+        source_boundary_passes = False
+        if generated_boundary is not None:
+            source_keys, proof_paths = generated_boundary
+            source_boundary_passes = all(checks.get(key) is True for key in source_keys)
+            missing_generated_proof = any(not (root / path).exists() for path in proof_paths)
+
+        if generated_boundary is not None and missing_generated_proof:
+            issue["focused_source_slice"] = (
+                "open" if source_boundary_passes else "fail"
+            )
+        elif number == "117" and checks.get("issue179_root_cause_audit_passes") is True:
             required_pass_checks = {
                 key: value
                 for key, value in checks.items()

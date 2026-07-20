@@ -442,7 +442,15 @@ def _patch_prompt_cache_rank3_trim() -> None:
         + needle,
         1,
     )
-    namespace = dict(generate_mod.__dict__)
+    # Compile into the real module namespace, not a copied globals dict.
+    # ``stream_generate`` reads mutable module globals such as
+    # ``generation_stream``.  A copied namespace freezes the stream object
+    # that happened to exist on the thread which first applied this patch;
+    # later model-worker rebinding then updates ``mlx_vlm.generate`` but not
+    # the patched function's private globals.  Full-suite ordering exposed
+    # that as ``There is no Stream(gpu,N) in current thread`` when the compat
+    # patch ran on MainThread before SimpleEngine loaded a VLM on its worker.
+    namespace = generate_mod.__dict__
     namespace["_vmlx_trim_prompt_cache"] = _vmlx_trim_prompt_cache
     namespace["_vmlx_prime_qwen_mrope_for_full_prompt"] = (
         _vmlx_prime_qwen_mrope_for_full_prompt

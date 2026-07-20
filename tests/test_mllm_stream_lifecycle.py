@@ -78,6 +78,28 @@ def test_all_mllm_stream_rebinds_target_the_generate_submodule():
     assert "_GENERATION_STREAM_OWNER != owner" in batch_source
 
 
+def test_mlx_vlm_compat_stream_patch_keeps_live_module_globals():
+    """A main-thread compat patch must not freeze mlx-vlm's stream global."""
+    import importlib
+
+    from vmlx_engine.utils import mlx_vlm_compat
+
+    generate_mod = importlib.import_module("mlx_vlm.generate")
+    mlx_vlm_compat.apply()
+
+    patched = generate_mod.stream_generate
+    assert getattr(patched, "_vmlx_rank3_cache_trim_patched", False)
+    assert patched.__globals__ is generate_mod.__dict__
+
+    old_stream = generate_mod.generation_stream
+    replacement = object()
+    try:
+        generate_mod.generation_stream = replacement
+        assert patched.__globals__["generation_stream"] is replacement
+    finally:
+        generate_mod.generation_stream = old_stream
+
+
 def test_simple_engine_establishes_owned_vlm_stream_before_model_load():
     """Lazy MLLM load graphs must not capture a replacement worker's Stream 0."""
     import vmlx_engine.engine.simple as simple

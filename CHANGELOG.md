@@ -2,6 +2,45 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.12] - 2026-07-19
+
+### Changed
+- Block-disk L2 can now restore reusable full and partial prefix blocks even
+  when paged RAM is explicitly disabled. When both tiers are enabled, memory
+  remains first choice and disk refaults only missing reusable blocks.
+- Eligible hybrid and full-KV attention components retain q4 TurboQuant cache
+  storage while native/typed architectures keep their own codecs and rederive
+  rules. TurboQuant remains a KV-cache codec, distinct from JANG affine,
+  JANGTQ/MXTQ Hadamard-codebook, and base MLX MXFP model weights.
+- Model-derived Electron settings more accurately surface quant format,
+  parser/reasoning/cache policy, eager Start materialization, single-model
+  switching, sleep/wake lifecycle, and port/LAN rollback.
+
+### Fixed
+- Abandoned non-stream Chat, Anthropic, and Ollama gateway requests now cancel
+  upstream inference before response headers; immediate recovery requests no
+  longer inherit a stuck scheduler slot.
+- Progressive reasoning/content/tool output and terminal usage ordering were
+  hardened across the current Qwen, HY3, Step, MiniMax, Anthropic, Ollama, and
+  Responses routes, including explicit no-tool turns and malformed native tool
+  prefixes.
+- q4 memory-prefix serialization no longer falls back to unquantized storage
+  when a minimal or early scheduler boundary has not initialized paged-cache
+  state.
+- Immediate session stop preserves completed first-turn L2 state, and media
+  decoding retains its persistent scheduler owner for cancellation/recovery.
+
+### Verified checkpoint boundary
+- Current-source live Electron and API evidence covers the named cache,
+  streaming, tool, media, lifecycle, and gateway rows recorded under
+  `docs/internal/release-gates/`; those scoped results are not generalized to
+  untested artifacts or parser families.
+- Historical generated `build/` proof output is no longer tracked as source
+  truth. Clean checkouts classify absent generated/staged evidence as OPEN,
+  while partial, stale, or mismatched present artifacts remain FAIL.
+- Broader long/stochastic model-family, media, parser, and signed-app soak rows
+  remain explicitly deferred after this release checkpoint.
+
 ## [1.6.11] - 2026-07-15
 
 ### Changed

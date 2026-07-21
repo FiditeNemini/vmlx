@@ -60,6 +60,24 @@ def _uses_gemma4_audio_tower(audio_config) -> bool:
     return str(getattr(audio_config, "model_type", "") or "").lower() == "gemma4_audio"
 
 
+def _language_model_mask(mask: Optional[mx.array]) -> Optional[mx.array]:
+    """Keep processor padding masks out of Gemma's causal attention path.
+
+    ``mlx_vlm.generate_step`` passes the processor's 2-D ``attention_mask``
+    only to ``get_input_embeddings`` and then invokes the language model
+    without it.  The wrapper path used by continuous batching previously
+    forwarded that same all-ones padding mask as the language model's
+    additive/causal mask.  On real Gemma 4 Unified audio this changed the
+    first-step logits and collapsed decode into repeated ``thought`` tokens.
+
+    Preserve explicit higher-rank attention masks for callers that really
+    constructed one, while matching mlx-vlm for ordinary processor masks.
+    """
+    if mask is not None and getattr(mask, "ndim", 0) <= 2:
+        return None
+    return mask
+
+
 class VisionEmbedder(nn.Module):
     """Encoder-free Gemma 4 unified vision embedder."""
 
@@ -353,7 +371,7 @@ class Model(nn.Module):
             None,
             cache=cache,
             inputs_embeds=input_embeddings_features.inputs_embeds,
-            mask=mask,
+            mask=_language_model_mask(mask),
             per_layer_inputs=input_embeddings_features.per_layer_inputs,
             **lm_kwargs,
         )

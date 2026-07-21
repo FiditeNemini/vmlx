@@ -579,6 +579,26 @@ def test_mllm_gemma_input_features_forward_as_raw_audio_features():
     assert request.vision_encoded is True
 
 
+def test_gemma4_wrapper_does_not_forward_processor_padding_mask_to_language_model():
+    """Continuous batching must match mlx-vlm's Gemma media mask contract."""
+    import mlx.core as mx
+
+    from vmlx_engine.models.gemma4_unified_register import (
+        register_gemma4_unified_runtime,
+    )
+
+    register_gemma4_unified_runtime()
+    from mlx_vlm.models.gemma4_unified.gemma4_unified import (
+        _language_model_mask,
+    )
+
+    processor_padding_mask = mx.ones((1, 165), dtype=mx.bool_)
+    assert _language_model_mask(processor_padding_mask) is None
+
+    explicit_attention_mask = mx.zeros((1, 1, 4, 4))
+    assert _language_model_mask(explicit_attention_mask) is explicit_attention_mask
+
+
 def test_mllm_processor_direct_omits_invalid_audios_alias_for_mimo_v2_processor():
     """MiMo-V2 processors warn and ignore unknown `audios`; use `audio` only."""
     from vmlx_engine.mllm_batch_generator import _call_processor_direct

@@ -2993,21 +2993,25 @@ def _bundle_declares_native_audio(bundle_path: str | None) -> bool:
     if model_type == "gemma4_unified" and cfg.get("audio_config") is not None:
         if _bundle_weight_map_has_prefix(bundle_path, "audio_tower."):
             return True
+        direct_audio_declared = bool(
+            isinstance(cap_modalities, dict)
+            and cap_modalities.get("audio") is True
+            and _bundle_weight_map_has_prefix(bundle_path, "embed_audio.")
+        )
         audio_proven = bool(
             (cfg.get("capabilities") or {}).get("audio_runtime_proven")
             or (jang or {}).get("audio_runtime_proven")
             or ((jang or {}).get("capabilities") or {}).get("audio_runtime_proven")
         )
-        if audio_proven or (
+        if direct_audio_declared or audio_proven or (
             os.environ.get("VMLINUX_ALLOW_EXPERIMENTAL_GEMMA4_DIRECT_AUDIO") == "1"
             or os.environ.get("VMLX_ALLOW_EXPERIMENTAL_GEMMA4_DIRECT_AUDIO") == "1"
         ):
             return True
-        # Gemma4 Unified direct-audio bundles can contain an audio token and
-        # embed_audio projection without a real audio_tower. The 12B JANG_4M
-        # artifact reaches the audio projection but installed UI/Chat/Responses
-        # live proof still answers as if no audio was attached. Keep
-        # capabilities honest until a bundle is explicitly stamped/proven.
+        # Encoder-free Gemma4 Unified uses a direct raw-waveform projection,
+        # but a leftover audio_config alone is not enough to advertise it.
+        # Require both the artifact-owned audio capability and real projection
+        # weights (or an explicit runtime-proven/experimental override).
         return False
     if cfg.get("audio_config") is not None:
         return True

@@ -53,6 +53,64 @@ describe('detectModelConfigFromDir quantization label', () => {
 })
 
 describe('detectModelConfigFromDir JANG multimodal detection', () => {
+  it('detects Nemotron Omni media from its sidecar and matching component tensors', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'nemotron_h',
+        weight_format: 'mxtq',
+        _jang_modality: 'text',
+      },
+      {
+        weight_format: 'mxtq',
+        modality: 'omni',
+        capabilities: {
+          family: 'nemotron_h',
+          modality: 'omni',
+          cache_type: 'hybrid',
+        },
+      },
+    )
+    writeFileSync(join(dir, 'config_omni.json'), JSON.stringify({
+      model_type: 'NemotronH_Nano_Omni_Reasoning_V3',
+      sound_config: { model_type: 'parakeet', sampling_rate: 16000 },
+      vision_config: { model_type: 'radio' },
+    }))
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: {
+        'sound_encoder.layers.0.weight': 'model.safetensors',
+        'sound_projection.0.weight': 'model.safetensors',
+        'vision_model.encoder.weight': 'model.safetensors',
+        'mlp1.0.weight': 'model.safetensors',
+      },
+    }))
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('nemotron-h')
+    expect(detected.isTurboQuant).toBe(true)
+    expect(detected.isMultimodal).toBe(true)
+  })
+
+  it('does not trust a Nemotron Omni metadata stamp without matching media tensors', () => {
+    const dir = makeModelDir(
+      { model_type: 'nemotron_h', weight_format: 'mxtq', _jang_modality: 'text' },
+      {
+        weight_format: 'mxtq',
+        modality: 'omni',
+        capabilities: { family: 'nemotron_h', modality: 'omni', cache_type: 'hybrid' },
+      },
+    )
+    writeFileSync(join(dir, 'config_omni.json'), JSON.stringify({
+      sound_config: { model_type: 'parakeet', sampling_rate: 16000 },
+      vision_config: { model_type: 'radio' },
+    }))
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: { 'model.layers.0.mixer.weight': 'model.safetensors' },
+    }))
+
+    expect(detectModelConfigFromDir(dir).isMultimodal).toBe(false)
+  })
+
   it('marks Qwen3.6 VL JANG bundles with indexed MTP tensors as native MTP capable', () => {
     const dir = makeModelDir(
       {

@@ -1722,6 +1722,14 @@ export class SessionManager extends EventEmitter {
     }
 
     const config: ServerConfig = JSON.parse(session.config)
+    // Detection may materialize an effective multimodal value for this launch,
+    // but it must not turn an absent (Auto) setting into a persisted Force On
+    // or Force Off override.  Capture user intent before applying defaults or
+    // inspecting the current artifact.
+    const hadExplicitMultimodalOverride = Object.prototype.hasOwnProperty.call(
+      config,
+      'isMultimodal',
+    )
     config.modelPath = session.modelPath
     config.host = session.host
     config.port = session.port
@@ -1908,8 +1916,14 @@ export class SessionManager extends EventEmitter {
           if (oldReasoningParser && oldReasoningParser !== 'auto' && isZayaCcaFamily(freshFamily) && oldReasoningParser !== config.reasoningParser) {
             this.pushLog(sessionId, `[INFO] ZAYA reasoning parser reset from stale ${oldReasoningParser} to auto (no reasoning parser)`)
           }
-          // Update DB with refreshed config
-          db.updateSession(sessionId, { config: JSON.stringify(config) })
+          // Persist refreshed defaults without converting the tri-state Auto
+          // selection into an explicit override.  The in-memory config keeps
+          // the detected effective value for buildArgs below.
+          const persistedConfig = { ...config }
+          if (!hadExplicitMultimodalOverride) {
+            delete persistedConfig.isMultimodal
+          }
+          db.updateSession(sessionId, { config: JSON.stringify(persistedConfig) })
         }
       } catch (e) {
         this.pushLog(sessionId, `[WARN] Could not re-detect model config: ${(e as Error).message}`)
@@ -3390,7 +3404,6 @@ export class SessionManager extends EventEmitter {
     const dsv4Active = detectedFamily === 'deepseek-v4'
     const m3Active = detectedFamily === 'minimax_m3'
     const dsv4PrefixCacheOptIn = dsv4Active && config.dsv4PrefixCache !== false
-    const omniBackendActive = detectedFamily === 'nemotron-h' && detected.isMultimodal === true
 
     // Concurrent processing
     // When value is 0 ("No limit" in UI), omit the flag so backend uses its default.
@@ -3429,18 +3442,25 @@ export class SessionManager extends EventEmitter {
     const effectiveSmelt = !!(config as any).smelt && !dsv4Active
     // User explicitly toggled multimodal OFF (Force Off) — must beat detected VL.
     const userForceTextOnly = config.isMultimodal === false
+    // Nemotron Omni advertises attachments through isMultimodal, but its
+    // Parakeet/RADIO inputs are injected by the engine's Omni dispatcher into
+    // the text decoder.  It is not a generic mlx_vlm --is-mllm route.
+    const omniBackendActive = detectedFamily === 'nemotron-h' &&
+      detected.isMultimodal === true &&
+      !userForceTextOnly &&
+      !detected.forceTextOnly
     // MiniMax-M3 VL route: vision is handled in-engine via SingleBatchGenerator behind
     // VMLX_M3_VL=1, so M3 must emit NEITHER --is-mllm NOR --text-only. Forcing isVLM=false
     // suppresses --is-mllm (the unpublished mlx_vlm.minimax_m3_vl path that crashes), and
     // excluding m3VlRoute from the --text-only branch keeps images flowing to the engine.
     const m3VlRoute = !!detected.m3VlRoute
-    const isVLM = dsv4Active || effectiveSmelt || detected.forceTextOnly || userForceTextOnly || m3VlRoute ? false
+    const isVLM = dsv4Active || effectiveSmelt || detected.forceTextOnly || userForceTextOnly || m3VlRoute || omniBackendActive ? false
       : detected.isMultimodal ? true
         : config.isMultimodal === true ? true
           : false
     if (isVLM) {
       args.push('--is-mllm')
-    } else if (!dsv4Active && !effectiveSmelt && !m3VlRoute && detected.isMultimodal && (userForceTextOnly || detected.forceTextOnly)) {
+    } else if (!dsv4Active && !effectiveSmelt && !m3VlRoute && !omniBackendActive && detected.isMultimodal && (userForceTextOnly || detected.forceTextOnly)) {
       // Model autodetects as VL but must run TEXT-ONLY (user Force-Off, or a family
       // whose VL runtime path isn't wired). Omitting --is-mllm is NOT enough — the
       // engine re-autodetects VL from config.json. --text-only forces is_mllm_model->False.

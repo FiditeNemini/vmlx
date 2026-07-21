@@ -615,6 +615,48 @@ function modelIndexHasVisionWeights(modelPath: string): boolean {
   }
 }
 
+/**
+ * Nemotron Omni keeps its media contract outside the text decoder's
+ * config.json.  Treat it as media-capable only when the sidecar declaration
+ * and the matching encoder/projector tensors are both present.  This mirrors
+ * the engine's artifact-first Omni dispatch without trusting a folder name or
+ * a JANG modality stamp by itself.
+ */
+function nemotronOmniArtifactHasMedia(
+  parsedConfig: any,
+  jangCfg: any,
+  modelPath: string,
+): boolean {
+  const modelTypes = [
+    parsedConfig?.model_type,
+    parsedConfig?.text_config?.model_type,
+    jangCfg?.capabilities?.family,
+  ].map(value => String(value || '').toLowerCase())
+  if (!modelTypes.some(value => value === 'nemotron_h' || value === 'nemotron-h')) {
+    return false
+  }
+
+  try {
+    const omni = JSON.parse(readFileSync(join(modelPath, 'config_omni.json'), 'utf-8'))
+    const index = JSON.parse(readFileSync(join(modelPath, 'model.safetensors.index.json'), 'utf-8'))
+    const weightMap = index?.weight_map
+    if (!omni || typeof omni !== 'object' || !weightMap || typeof weightMap !== 'object') {
+      return false
+    }
+    const keys = Object.keys(weightMap)
+    const hasPrefix = (prefix: string): boolean => keys.some(key => key.startsWith(prefix))
+    const audioReady = omni.sound_config != null &&
+      hasPrefix('sound_encoder.') &&
+      hasPrefix('sound_projection.')
+    const visionReady = omni.vision_config != null &&
+      hasPrefix('vision_model.') &&
+      hasPrefix('mlp1.')
+    return audioReady || visionReady
+  } catch {
+    return false
+  }
+}
+
 function affineJangArtifactHasVision(jangCfg: any, modelPath: string): boolean {
   if (affineJangRuntimeHasVerifiedVision(jangCfg)) return true
   if (
@@ -895,9 +937,6 @@ function applyConfigMetadataOverrides(
       vlRuntimeAvailable: false,
     }
   }
-  if (next.family === 'nemotron-h' && !configDeclaresMedia(parsedConfig)) {
-    next.isMultimodal = false
-  }
   if (
     next.family === 'nemotron-h' &&
     typeof parsedConfig?.hybrid_override_pattern === 'string' &&
@@ -1124,6 +1163,10 @@ function resolveJangMultimodal(jangCfg: any, parsedConfig: any, modelPath: strin
     jangCfg?.modality ??
     parsedConfig?._jang_modality
 
+  if (modality === 'omni') {
+    return nemotronOmniArtifactHasMedia(parsedConfig, jangCfg, modelPath)
+  }
+
   if (parsedConfig?.model_type === 'zaya1_vl' && hasMediaConfig) {
     return true
   }
@@ -1141,7 +1184,6 @@ function resolveJangMultimodal(jangCfg: any, parsedConfig: any, modelPath: strin
     return jangCfg.architecture.has_vision
   }
   if (typeof modality === 'string') {
-    if (modality === 'omni') return hasMediaConfig
     return modality !== 'text' && modality !== 'embedding' && modality !== 'rerank'
   }
   return hasMediaConfig

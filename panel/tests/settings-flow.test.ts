@@ -333,13 +333,16 @@ function buildCommandPreview(
     const dsv4Active = detectedFamily === 'deepseek-v4'
     const m3Active = detectedFamily === 'minimax_m3'
     const dsv4PrefixCacheOptIn = dsv4Active && config.dsv4PrefixCache !== false
-    const omniBackendActive = detectedFamily === 'nemotron-h' && detected?.isMultimodal === true
     const effectiveSmelt = !!config.smelt && !dsv4Active
     // Mirror buildArgs (sessions.ts): user Force-Off (isMultimodal===false) beats
     // detected VL; m3Active stands in for m3VlRoute (registry sets it for every
     // minimax_m3 bundle) so M3 emits NEITHER --is-mllm NOR --text-only.
     const userForceTextOnly = config.isMultimodal === false
-    const isVLM = dsv4Active || effectiveSmelt || detected?.forceTextOnly || userForceTextOnly || m3Active ? false
+    const omniBackendActive = detectedFamily === 'nemotron-h' &&
+        detected?.isMultimodal === true &&
+        !userForceTextOnly &&
+        !detected?.forceTextOnly
+    const isVLM = dsv4Active || effectiveSmelt || detected?.forceTextOnly || userForceTextOnly || m3Active || omniBackendActive ? false
         : detected?.isMultimodal ? true
             : config.isMultimodal === true ? true
                 : false
@@ -371,7 +374,7 @@ function buildCommandPreview(
     if (!dsv4Active && completionBatchSize != null) parts.push('--completion-batch-size', completionBatchSize.toString())
 
     if (isVLM) parts.push('--is-mllm')
-    else if (!dsv4Active && !effectiveSmelt && !m3Active && detected?.isMultimodal && (userForceTextOnly || detected?.forceTextOnly)) {
+    else if (!dsv4Active && !effectiveSmelt && !m3Active && !omniBackendActive && detected?.isMultimodal && (userForceTextOnly || detected?.forceTextOnly)) {
         parts.push('--text-only')
     }
     const cacheStackActive = dsv4Active ? true : config.continuousBatching !== false
@@ -2760,6 +2763,21 @@ describe('Default IP and New Settings', () => {
         expect(updateBlock).toContain('Object.prototype.hasOwnProperty.call(currentConfig, k)')
     })
 
+    it('does not materialize a detected multimodal value into a persisted Auto override at Start', () => {
+        const fs = require('fs')
+        const sessions = fs.readFileSync('src/main/sessions.ts', 'utf-8')
+        const start = sessions.slice(
+            sessions.indexOf('private async _startSessionInner'),
+            sessions.indexOf('// Memory estimation:', sessions.indexOf('private async _startSessionInner')),
+        )
+
+        expect(start).toContain('const hadExplicitMultimodalOverride = Object.prototype.hasOwnProperty.call(')
+        expect(start).toContain('const persistedConfig = { ...config }')
+        expect(start).toContain('if (!hadExplicitMultimodalOverride)')
+        expect(start).toContain('delete persistedConfig.isMultimodal')
+        expect(start).toContain('db.updateSession(sessionId, { config: JSON.stringify(persistedConfig) })')
+    })
+
     it('adopted paged sessions default to block L2 without legacy L2', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const start = source.indexOf('async detectAndAdoptAll()')
@@ -3080,10 +3098,19 @@ describe('JIT Toggle', () => {
         const nonOmni = preview({ omniBackend: 'stage2' }, { family: 'qwen3.5', isMultimodal: true })
         const textNemotron = preview({ omniBackend: 'stage2' }, { family: 'nemotron-h', isMultimodal: false })
         const omni = preview({ omniBackend: 'stage2' }, { family: 'nemotron-h', isMultimodal: true })
+        const omniForceOff = preview(
+            { omniBackend: 'stage2', isMultimodal: false },
+            { family: 'nemotron-h', isMultimodal: true },
+        )
 
         expect(hasFlag(nonOmni, '--omni-backend')).toBe(false)
         expect(hasFlag(textNemotron, '--omni-backend')).toBe(false)
         expect(getFlagValue(omni, '--omni-backend')).toBe('stage2')
+        expect(hasFlag(omni, '--is-mllm')).toBe(false)
+        expect(hasFlag(omni, '--text-only')).toBe(false)
+        expect(hasFlag(omniForceOff, '--omni-backend')).toBe(false)
+        expect(hasFlag(omniForceOff, '--is-mllm')).toBe(false)
+        expect(hasFlag(omniForceOff, '--text-only')).toBe(true)
     })
 
     it('settings form and launch code surface ZAYA typed CCA paged-cache requirement', () => {

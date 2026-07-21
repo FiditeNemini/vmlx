@@ -2748,6 +2748,18 @@ describe('Default IP and New Settings', () => {
         expect(updateBlock).toContain('normalizeCacheStackMutualExclusion(merged as Partial<ServerConfig>)')
     })
 
+    it('persists tri-state Auto by deleting the stored override and requiring restart', () => {
+        const source = readFileSync('src/main/sessions.ts', 'utf8')
+        const updateStart = source.indexOf('async updateSessionConfig')
+        const updateEnd = source.indexOf('repointSessionModelPath(', updateStart)
+        const updateBlock = source.slice(updateStart, updateEnd)
+
+        expect(updateBlock).toContain('const explicitlyClearedKeys = new Set<string>()')
+        expect(updateBlock).toContain('explicitlyClearedKeys.add(k)')
+        expect(updateBlock).toContain('for (const key of explicitlyClearedKeys) delete migratedBaseline[key]')
+        expect(updateBlock).toContain('Object.prototype.hasOwnProperty.call(currentConfig, k)')
+    })
+
     it('adopted paged sessions default to block L2 without legacy L2', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const start = source.indexOf('async detectAndAdoptAll()')

@@ -221,8 +221,10 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('qwen3.5')
     expect(detected.cacheType).toBe('hybrid')
-    expect(detected.isMultimodal).toBe(false)
-    expect(detected.forceTextOnly).toBe(true)
+    // Missing indexed MTP disables speculation only. The independently
+    // indexed vision tower remains a runnable multimodal artifact.
+    expect(detected.isMultimodal).toBe(true)
+    expect(detected.forceTextOnly).toBeUndefined()
     expect(detected.nativeMtp).toBeUndefined()
   })
 
@@ -998,7 +1000,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     ['qwen3_5', 'qwen3_5_text'],
     ['qwen3_vl', 'qwen3_vl'],
     ['qwen3_vl_moe', 'qwen3_vl_moe'],
-  ])('routes affine-JANG %s text-only until the mlx-vlm M-RoPE path is fixed', (modelType, textModelType) => {
+  ])('routes affine-JANG %s metadata-only artifacts text-only without indexed vision tensors', (modelType, textModelType) => {
     const dir = makeModelDir(
       {
         model_type: modelType,
@@ -1016,6 +1018,43 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     const detected = detectModelConfigFromDir(dir)
     expect(detected.isMultimodal).toBe(false)
     expect(detected.forceTextOnly).toBe(true)
+  })
+
+  it('keeps converted affine-JANG Qwen bundles multimodal when the index contains a real vision tower', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'qwen3_5',
+        architectures: ['Qwen3_5ForConditionalGeneration'],
+        text_config: {
+          model_type: 'qwen3_5_text',
+          layer_types: ['linear_attention', 'full_attention'],
+        },
+        vision_config: { hidden_size: 1152 },
+        image_token_id: 248056,
+        video_token_id: 248057,
+      },
+      {
+        format: 'jang',
+        architecture: { has_vision: true, has_ssm: true },
+        capabilities: {
+          family: 'qwen3_5',
+          modality: 'vision',
+          has_vision: true,
+        },
+      },
+    )
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: {
+        'language_model.model.embed_tokens.weight': 'model-00001-of-00002.safetensors',
+        'vision_tower.patch_embed.proj.weight': 'model-00002-of-00002.safetensors',
+      },
+    }))
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('qwen3.5')
+    expect(detected.isMultimodal).toBe(true)
+    expect(detected.forceTextOnly).toBeUndefined()
   })
 
   it('keeps runtime-verified affine-JANG Qwen image/video bundles multimodal', () => {

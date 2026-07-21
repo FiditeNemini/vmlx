@@ -794,8 +794,8 @@ class ModelConfigRegistry:
             elif _is_affine_jang_qwen_hybrid_vlm(local_model_config, jcfg):
                 # Affine-JANG Qwen VL routes multimodal when the vMLX-owned
                 # qwen3_5_family runtime is available (gate-quant + 1D
-                # text-RoPE fixes for the original M-RoPE corruption per
-                # docs/AUDIT-QWEN-AFFINE-JANG-VLM.md); text-only otherwise.
+                # text-RoPE fixes for the original M-RoPE corruption); use the
+                # text runtime only when that owned runtime is unavailable.
                 # VMLX_QWEN_VL=1/0 is an explicit override in both directions;
                 # indexed native-MTP VL artifacts keep their dedicated route.
                 _qwen_env = _qwen_vl_env_override()

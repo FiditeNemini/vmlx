@@ -3636,8 +3636,8 @@ def _load_jang_v2_vlm(
         # GAP-A fix: the vMLX-owned qwen3_5_family runtime (router gates stay
         # nn.Linear) plus the mlx_vlm_mtp patch suite (1D text-RoPE via
         # _patch_attention_text_rope) resolve both original justifications for
-        # the affine text-only fallback (docs/AUDIT-QWEN-AFFINE-JANG-VLM.md:
-        # M-RoPE text-logit corruption + gate quant_predicate decode crash).
+        # the affine text-only fallback (M-RoPE text-logit corruption plus the
+        # gate quant_predicate decode crash originally isolated at 80a62555f).
         try:
             from ..models.qwen3_5_family import register_qwen3_5_family_runtime
             _vendored_qwen_vl_ready = bool(register_qwen3_5_family_runtime())
@@ -3656,8 +3656,7 @@ def _load_jang_v2_vlm(
     ):
         logger.warning(
             "  Qwen3.5/3.6 affine-JANG VLM is routed text-only: %s. "
-            "MXTQ/JANGTQ Qwen VLM remains on the native VLM loader. See "
-            "docs/AUDIT-QWEN-AFFINE-JANG-VLM.md.",
+            "MXTQ/JANGTQ Qwen VLM remains on the native VLM loader.",
             "VMLX_QWEN_VL=0 override active"
             if _qwen_vl_block
             else "vendored qwen3_5_family VLM runtime is unavailable",

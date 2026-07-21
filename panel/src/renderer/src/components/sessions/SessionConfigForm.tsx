@@ -1491,7 +1491,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         </Field>
         <SelectField
           label="Multimodal Support (VLM)"
-          tooltip="Vision-Language Model mode for models like Qwen2-VL, Qwen3-VL, Pixtral, InternVL, or LLaVA. Auto-detected VLMs launch with the MLLM scheduler even if an older saved session says off. Smelt and documented unsafe runtimes use text-only loading."
+          tooltip="Vision-Language Model mode for models like Qwen2-VL, Qwen3-VL, Pixtral, InternVL, or LLaVA. Auto uses the detected model/runtime policy. Force Off remains an explicit user override. Smelt and documented unsafe runtimes use text-only loading."
           value={dsv4Active || smeltActive || detectedForceTextOnly ? 'off' : config.isMultimodal === true ? 'on' : config.isMultimodal === false ? 'off' : 'auto'}
           onChange={v => onChange('isMultimodal', v === 'on' ? true : v === 'off' ? false : undefined)}
           options={[

@@ -262,7 +262,7 @@ def _vendored_qwen35_vlm_runtime_available() -> bool:
 def _is_affine_jang_qwen_hybrid_vlm_path(local_path: str) -> bool:
     """True when an affine-JANG Qwen hybrid VL bundle must stay text-only.
 
-    Original exclusion (docs/AUDIT-QWEN-AFFINE-JANG-VLM.md, commit 80a62555f):
+    Original exclusion (commit 80a62555f):
     upstream mlx_vlm qwen3_5's ``Qwen3_5RotaryEmbedding`` M-RoPE path corrupts
     text logits, and its ``quant_predicate`` force-quantizes float router gates
     ("weight matrix should be uint32" decode crash on JANG affine bundles).

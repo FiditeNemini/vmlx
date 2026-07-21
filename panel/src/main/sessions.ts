@@ -1840,8 +1840,10 @@ export class SessionManager extends EventEmitter {
           }
           // Refresh multimodal detection from disk. A detected VLM must win
           // over stale saved `isMultimodal=false` from older sessions, while a
-          // forceTextOnly policy must clear stale true rows. The latter is used
-          // for affine-JANG Qwen hybrid until its mlx_vlm M-RoPE path is fixed.
+          // forceTextOnly policy must clear stale true rows. Affine-JANG Qwen
+          // hybrids now remain multimodal when the artifact has indexed vision
+          // tensors and the vMLX-owned runtime is available; metadata-only or
+          // explicitly text-only artifacts still land in forceTextOnly.
           // Smelt is handled later at launch time because its partial expert
           // support uses text-only loading.
           if (freshConfig.forceTextOnly === true) {
@@ -1986,12 +1988,12 @@ export class SessionManager extends EventEmitter {
     if (freshDetectedFamily === 'minimax_m3') {
       spawnEnv.VMLX_M3_VL = '1'
     }
-    // Qwen3.5/3.6 hybrid affine-JANG VLM (e.g. Ornith-1.0): the engine routes
-    // these text-only by default because the legacy mlx_vlm qwen3_5 M-RoPE path
-    // corrupts logits. The engine's qwen35_vl patch suite (_patch_attention_text_rope
-    // + GatedDelta) fixes it but is gated behind VMLX_QWEN_VL=1. Scope to the
-    // qwen3.5 hybrid families; for non-VL bundles (no media in config) the
-    // engine's _has_media check makes the override a no-op.
+    // Qwen3.5/3.6 hybrid affine-JANG VLM (for example Ornith): select the
+    // vMLX-owned qwen3_5_family runtime, whose router-gate and 1D text-RoPE
+    // patches replace the unsafe legacy mlx-vlm path. Scope the override to
+    // these families; for a non-VL artifact the engine's media check makes it
+    // a no-op. An explicit UI Force Off still emits --text-only and wins at
+    // model classification.
     if (freshDetectedFamily === 'qwen3_5' || freshDetectedFamily === 'qwen3_5_moe') {
       spawnEnv.VMLX_QWEN_VL = '1'
     }
@@ -2422,11 +2424,19 @@ export class SessionManager extends EventEmitter {
     } catch {
       // Corrupted config in DB — start fresh
     }
-    // Strip undefined values before merging — prevents config spread from
-    // overwriting existing DB values with undefined (which JSON.stringify would then drop)
+    // IPC preserves own properties whose value is undefined. In the settings
+    // UI that value means "Auto" for tri-state controls, so it must DELETE a
+    // persisted override rather than be silently ignored. Omitted properties
+    // remain untouched because Object.entries only visits properties present
+    // on the submitted object.
     const cleanConfig: Record<string, unknown> = {}
+    const explicitlyClearedKeys = new Set<string>()
     for (const [k, v] of Object.entries(config as Record<string, unknown>)) {
-      if (v !== undefined) cleanConfig[k] = v
+      if (v === undefined) {
+        explicitlyClearedKeys.add(k)
+      } else {
+        cleanConfig[k] = v
+      }
     }
     // Migrate the STORED baseline to the current cache-stack defaults version
     // FIRST, then layer the user's explicit edits on top so user intent wins.
@@ -2442,6 +2452,7 @@ export class SessionManager extends EventEmitter {
     const migratedBaseline: Record<string, unknown> = { ...currentConfig }
     applyCacheStackStartupDefaultMigration(migratedBaseline as Partial<ServerConfig>, (migratedBaseline.modelPath as string) || undefined)
     markCacheStackStartupDefaultsCurrent(migratedBaseline as Partial<ServerConfig>)
+    for (const key of explicitlyClearedKeys) delete migratedBaseline[key]
     const merged = { ...migratedBaseline, ...cleanConfig }
     normalizeCacheStackMutualExclusion(merged as Partial<ServerConfig>)
     markCacheStackStartupDefaultsCurrent(merged as Partial<ServerConfig>)
@@ -2464,10 +2475,16 @@ export class SessionManager extends EventEmitter {
 
     // H6: Determine if changed keys require a restart
     const isRunning = session.status === 'running' || session.status === 'loading'
-    const changedKeys = Object.keys(cleanConfig).filter(k =>
-      SessionManager.RESTART_REQUIRED_KEYS.has(k) &&
-      (cleanConfig as Record<string, unknown>)[k] !== currentConfig[k]
-    )
+    const changedKeys = [
+      ...Object.keys(cleanConfig).filter(k =>
+        SessionManager.RESTART_REQUIRED_KEYS.has(k) &&
+        (cleanConfig as Record<string, unknown>)[k] !== currentConfig[k]
+      ),
+      ...Array.from(explicitlyClearedKeys).filter(k =>
+        SessionManager.RESTART_REQUIRED_KEYS.has(k) &&
+        Object.prototype.hasOwnProperty.call(currentConfig, k)
+      ),
+    ]
     return {
       restartRequired: isRunning && changedKeys.length > 0,
       changedKeys,

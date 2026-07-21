@@ -601,6 +601,37 @@ function affineJangRuntimeHasVerifiedVision(jangCfg: any): boolean {
     capabilities.supports_vision === true
 }
 
+function modelIndexHasVisionWeights(modelPath: string): boolean {
+  try {
+    const raw = readFileSync(join(modelPath, 'model.safetensors.index.json'), 'utf-8')
+    const index = JSON.parse(raw)
+    const weightMap = index?.weight_map
+    if (!weightMap || typeof weightMap !== 'object') return false
+    return Object.keys(weightMap).some(key =>
+      /(^|\.)(vision_tower|vision_model|visual|patch_embed|multi_modal_projector|mm_projector|image_newline)(\.|$)/.test(key),
+    )
+  } catch {
+    return false
+  }
+}
+
+function affineJangArtifactHasVision(jangCfg: any, modelPath: string): boolean {
+  if (affineJangRuntimeHasVerifiedVision(jangCfg)) return true
+  if (
+    jangCfg?.has_vision === false ||
+    jangCfg?.architecture?.has_vision === false ||
+    jangCfg?.capabilities?.has_vision === false
+  ) {
+    return false
+  }
+  // Current affine JANG conversion preserves the real Qwen vision tower but
+  // does not stamp the historical runtime_verified fields. The engine owns
+  // runtime availability and already auto-routes through qwen3_5_family; the
+  // panel only needs to establish that this artifact actually carries vision
+  // tensors. Metadata-only/text extracts still stay forceTextOnly.
+  return modelIndexHasVisionWeights(modelPath)
+}
+
 function qwenNativeMtpVlArtifactReady(
   parsedConfig: any,
   jangCfg: any,
@@ -1075,7 +1106,7 @@ function applyJangCapabilities(
   return next
 }
 
-function resolveJangMultimodal(jangCfg: any, parsedConfig: any): boolean {
+function resolveJangMultimodal(jangCfg: any, parsedConfig: any, modelPath: string): boolean {
   const hasMediaConfig = configDeclaresMedia(parsedConfig)
   const capsModalities = Array.isArray(jangCfg?.capabilities?.modalities)
     ? jangCfg.capabilities.modalities.map((item: any) => String(item || '').toLowerCase()).filter(Boolean)
@@ -1098,7 +1129,7 @@ function resolveJangMultimodal(jangCfg: any, parsedConfig: any): boolean {
   }
 
   if (isAffineJangQwenHybridVlm(parsedConfig, jangCfg)) {
-    return affineJangRuntimeHasVerifiedVision(jangCfg)
+    return affineJangArtifactHasVision(jangCfg, modelPath)
   }
 
   // Explicit converter stamps are authoritative. A JANG bundle may keep a
@@ -1209,7 +1240,7 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
               if (
                 isAffineJangQwenHybridVlm(parsed, jangCfg) &&
                 !nativeMtpVlReady &&
-                !affineJangRuntimeHasVerifiedVision(jangCfg)
+                !affineJangArtifactHasVision(jangCfg, modelPath)
               ) {
                 detected.forceTextOnly = true
               }
@@ -1225,7 +1256,7 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
                   slidingWindow: 512,
                 }
               }
-              detected.isMultimodal = resolveJangMultimodal(jangCfg, parsed)
+              detected.isMultimodal = resolveJangMultimodal(jangCfg, parsed, modelPath)
             } catch {
               if ('vision_config' in parsed) {
                 detected.isMultimodal = true

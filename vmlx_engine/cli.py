@@ -746,6 +746,13 @@ def serve_command(args):
     elif _m3_forced_no_kvq:
         args.kv_cache_quantization = "none"
         args.kv_cache_quantization_explicit = False
+        # MiniMax-M3's native sparse cache carries idx_keys and absolute block
+        # offsets in addition to dense KV.  The loader already rejects the
+        # generic TurboQuant make_cache patch, but the disk stores use this
+        # process-level gate to decide whether native TQ records are admissible.
+        # Keep the live-cache and persisted-cache contracts aligned so health
+        # does not advertise tq_native_enabled for an MSA tuple it cannot use.
+        os.environ["VMLX_DISABLE_TQ_KV"] = "1"
         os.environ.pop("VMLX_FORCE_TQ_AUTO", None)
         logger.info(
             "KV cache auto mode: MiniMax-M3 native MSA cache detected; "

@@ -188,6 +188,32 @@ def test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore(tm
     assert os.environ.get("VMLX_DISABLE_SSM_DISK_RESTORE") is None
 
 
+def test_minimax_m3_native_msa_disables_tq_for_live_and_persisted_cache(
+    tmp_path, monkeypatch
+):
+    """M3 idx_keys tuples must never advertise or admit generic TQ blocks."""
+
+    (tmp_path / "config.json").write_text(json.dumps({
+        "model_type": "minimax_m3_vl",
+        "text_config": {
+            "model_type": "minimax_m3",
+            "num_hidden_layers": 60,
+            "sparse_attention_config": {"use_sparse_attention": True},
+        },
+    }))
+    monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
+    monkeypatch.setenv("VMLX_FORCE_TQ_AUTO", "1")
+
+    args = _serve_args(str(tmp_path), kv_cache_quantization=None)
+
+    _run_serve_until_uvicorn(monkeypatch, args)
+
+    assert args.kv_cache_quantization == "none"
+    assert args.kv_cache_quantization_explicit is False
+    assert os.environ.get("VMLX_DISABLE_TQ_KV") == "1"
+    assert os.environ.get("VMLX_FORCE_TQ_AUTO") is None
+
+
 def test_mimo_v2_auto_mode_keeps_prefix_cache_lossless_by_default(tmp_path, monkeypatch):
     """MiMo mixed-SWA cache must not use lossy stored q4 in auto mode."""
 

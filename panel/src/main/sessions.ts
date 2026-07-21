@@ -3345,7 +3345,10 @@ export class SessionManager extends EventEmitter {
       args.push('--prefill-batch-size', prefillBatchSize.toString())
     }
     const prefillStepSize = finitePositiveInteger(config.prefillStepSize)
-    if (!dsv4Active && prefillStepSize != null) {
+    // DSV4BatchGenerator is single-batch, so its batch-size controls remain
+    // fixed at one. Its prefill *step* is a real bounded-memory control,
+    // however, and must reach the CLI exactly as shown in the UI.
+    if (prefillStepSize != null) {
       args.push('--prefill-step-size', prefillStepSize.toString())
     }
     const completionBatchSize = finitePositiveInteger(config.completionBatchSize)

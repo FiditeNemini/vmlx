@@ -440,7 +440,7 @@ function buildCommandPreview(
   const prefillBatchSize = finitePositiveInteger(config.prefillBatchSize)
   if (!dsv4Active && prefillBatchSize != null) parts.push('--prefill-batch-size', prefillBatchSize.toString())
   const prefillStepSize = finitePositiveInteger(config.prefillStepSize)
-  if (!dsv4Active && prefillStepSize != null) parts.push('--prefill-step-size', prefillStepSize.toString())
+  if (prefillStepSize != null) parts.push('--prefill-step-size', prefillStepSize.toString())
   const completionBatchSize = finitePositiveInteger(config.completionBatchSize)
   if (!dsv4Active && completionBatchSize != null) parts.push('--completion-batch-size', completionBatchSize.toString())
 

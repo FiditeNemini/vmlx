@@ -366,7 +366,7 @@ function buildCommandPreview(
     const prefillBatchSize = finitePositiveInteger(config.prefillBatchSize)
     if (!dsv4Active && prefillBatchSize != null) parts.push('--prefill-batch-size', prefillBatchSize.toString())
     const prefillStepSize = finitePositiveInteger(config.prefillStepSize)
-    if (!dsv4Active && prefillStepSize != null) parts.push('--prefill-step-size', prefillStepSize.toString())
+    if (prefillStepSize != null) parts.push('--prefill-step-size', prefillStepSize.toString())
     const completionBatchSize = finitePositiveInteger(config.completionBatchSize)
     if (!dsv4Active && completionBatchSize != null) parts.push('--completion-batch-size', completionBatchSize.toString())
 
@@ -2171,12 +2171,23 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(out, '--continuous-batching')).toBe(true)
         expect(hasFlag(out, '--disable-prefix-cache')).toBe(false)
         expect(hasFlag(out, '--prefill-batch-size')).toBe(false)
-        expect(hasFlag(out, '--prefill-step-size')).toBe(false)
+        expect(getFlagValue(out, '--prefill-step-size')).toBe('2048')
         expect(hasFlag(out, '--completion-batch-size')).toBe(false)
         expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
         expect(hasFlag(out, '--speculative-model')).toBe(false)
         expect(hasFlag(out, '--is-mllm')).toBe(false)
         expect(hasFlag(out, '--native-mtp-depth')).toBe(false)
+    })
+
+    it('deepseek-v4 passes the visible prefill step through to its native generator', () => {
+        const out = preview(
+            { prefillStepSize: 512 },
+            { family: 'deepseek-v4', usePagedCache: false },
+        )
+
+        expect(getFlagValue(out, '--prefill-step-size')).toBe('512')
+        expect(hasFlag(out, '--prefill-batch-size')).toBe(false)
+        expect(hasFlag(out, '--completion-batch-size')).toBe(false)
     })
 
     it('deepseek-v4 native cache path uses DS4 page-sized blocks', () => {

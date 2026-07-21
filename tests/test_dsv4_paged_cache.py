@@ -359,8 +359,8 @@ def test_panel_names_dsv4_cache_as_native_composite_not_generic_paged_kv():
     assert "not generic paged KV" in form
 
 
-def test_panel_suppresses_generic_batch_and_chunk_controls_for_dsv4():
-    """DSV4 app launches must not pass misleading generic batch/chunk flags."""
+def test_panel_suppresses_dsv4_batch_sizes_but_passes_real_prefill_step():
+    """DSV4 batch sizes stay fixed at one; its memory step remains effective."""
     from pathlib import Path
 
     form = Path("panel/src/renderer/src/components/sessions/SessionConfigForm.tsx").read_text()
@@ -373,13 +373,15 @@ def test_panel_suppresses_generic_batch_and_chunk_controls_for_dsv4():
     assert "const prefillBatchSize = finitePositiveInteger(config.prefillBatchSize)" in sessions
     assert "if (!dsv4Active && prefillBatchSize != null)" in sessions
     assert "const prefillStepSize = finitePositiveInteger(config.prefillStepSize)" in sessions
-    assert "if (!dsv4Active && prefillStepSize != null)" in sessions
+    assert "if (prefillStepSize != null)" in sessions
+    assert "if (!dsv4Active && prefillStepSize != null)" not in sessions
     assert "const completionBatchSize = finitePositiveInteger(config.completionBatchSize)" in sessions
     assert "if (!dsv4Active && completionBatchSize != null)" in sessions
     assert "const prefillBatchSize = finitePositiveInteger(config.prefillBatchSize)" in settings
     assert "if (!dsv4Active && prefillBatchSize != null)" in settings
     assert "const prefillStepSize = finitePositiveInteger(config.prefillStepSize)" in settings
-    assert "if (!dsv4Active && prefillStepSize != null)" in settings
+    assert "if (prefillStepSize != null)" in settings
+    assert "if (!dsv4Active && prefillStepSize != null)" not in settings
     assert "const completionBatchSize = finitePositiveInteger(config.completionBatchSize)" in settings
     assert "if (!dsv4Active && completionBatchSize != null)" in settings
 
@@ -1674,6 +1676,114 @@ def test_dsv4_generator_captures_prompt_snapshot_when_cache_store_enabled(monkey
 
     assert calls == ["snapshot"]
     assert prompt_responses[0].prompt_cache_snapshot == ["snapshot"]
+
+
+def test_dsv4_generator_rejects_oversize_nested_snapshot_before_copy(monkeypatch):
+    """Nested composite state must be counted before the destructive copy."""
+    import mlx.core as mx
+
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    monkeypatch.setenv("DSV4_PROMPT_SNAPSHOT_MIN_TOKENS", "0")
+
+    class _CompositeCache:
+        state = (
+            (mx.zeros((8,), dtype=mx.float32), None),
+            (mx.zeros((16,), dtype=mx.float32),),
+            (mx.zeros((32,), dtype=mx.float32),),
+        )
+
+    class _Model:
+        def make_cache(self):
+            return [_CompositeCache()]
+
+        def __call__(self, ids, cache=None):
+            return mx.array([[[0.0, 1.0, 0.0]]], dtype=mx.float32)
+
+    calls = []
+
+    def _snapshot(_cache):
+        calls.append("snapshot")
+        return ["snapshot"]
+
+    monkeypatch.setattr(
+        DSV4BatchGenerator,
+        "_snapshot_dsv4_cache",
+        staticmethod(_snapshot),
+    )
+    gen = DSV4BatchGenerator(
+        _Model(),
+        capture_prompt_snapshot=True,
+        prompt_snapshot_max_bytes=1,
+    )
+    gen._warmed_up = True
+    gen.insert([[42, 43]], max_tokens=[2])
+
+    prompt_responses, _ = gen.next()
+
+    assert calls == []
+    assert prompt_responses[0].prompt_cache_snapshot is None
+    assert gen.prompt_snapshot_last_estimated_bytes == (8 + 16 + 32) * 4
+    assert gen.prompt_snapshot_oversize_skips == 1
+
+
+def test_dsv4_generator_rejects_snapshot_that_exceeds_metal_headroom(monkeypatch):
+    import mlx.core as mx
+
+    from vmlx_engine.utils import memory_limits
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    monkeypatch.setenv("DSV4_PROMPT_SNAPSHOT_MIN_TOKENS", "0")
+    monkeypatch.setattr(
+        memory_limits,
+        "get_effective_metal_working_set_bytes",
+        lambda _mx: (990, 1000),
+    )
+    monkeypatch.setattr(memory_limits, "get_metal_ws_guard_threshold", lambda: 100.0)
+
+    class _CompositeCache:
+        state = ((mx.zeros((8,), dtype=mx.float32),), None, None)
+
+    class _Model:
+        def make_cache(self):
+            return [_CompositeCache()]
+
+        def __call__(self, ids, cache=None):
+            return mx.array([[[0.0, 1.0, 0.0]]], dtype=mx.float32)
+
+    gen = DSV4BatchGenerator(
+        _Model(), capture_prompt_snapshot=True, prompt_snapshot_max_bytes=None
+    )
+    gen._warmed_up = True
+    gen.insert([[42, 43]], max_tokens=[2])
+
+    prompt_responses, _ = gen.next()
+
+    assert prompt_responses[0].prompt_cache_snapshot is None
+    assert gen.prompt_snapshot_last_estimated_bytes == 32
+    assert gen.prompt_snapshot_last_headroom_bytes == 10
+    assert gen.prompt_snapshot_headroom_skips == 1
+    assert gen.prompt_snapshot_oversize_skips == 1
+
+
+def test_scheduler_passes_snapshot_budget_to_dsv4_and_surfaces_telemetry():
+    import inspect
+
+    from vmlx_engine import scheduler
+
+    create_src = inspect.getsource(scheduler.Scheduler._create_batch_generator)
+    dsv4_block = create_src[
+        create_src.index("return DSV4BatchGenerator("):
+        create_src.index("except Exception as _dsv4_err:")
+    ]
+    assert "prompt_snapshot_max_bytes=_prompt_snapshot_max_bytes" in dsv4_block
+
+    stats_src = inspect.getsource(scheduler.Scheduler.get_stats)
+    cache_stats_src = inspect.getsource(scheduler.Scheduler.get_cache_stats)
+    for source in (stats_src, cache_stats_src):
+        assert '"DSV4BatchGenerator"' in source
+        assert '"prompt_snapshot_last_estimated_bytes"' in source
+        assert '"prompt_snapshot_headroom_skips"' in source
 
 
 def test_dsv4_cache_hit_extends_clean_snapshot_from_uncached_tail(monkeypatch):

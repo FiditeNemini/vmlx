@@ -135,6 +135,7 @@ class DSV4BatchGenerator:
         max_kv_size: Optional[int] = None,
         stream=None,
         capture_prompt_snapshot: bool = True,
+        prompt_snapshot_max_bytes: Optional[int] = None,
     ):
         self.model = model
         self.max_tokens = max_tokens
@@ -203,6 +204,15 @@ class DSV4BatchGenerator:
         self.completion_batch_size = 1
         self.max_kv_size = max_kv_size
         self.capture_prompt_snapshot = bool(capture_prompt_snapshot)
+        self.prompt_snapshot_max_bytes = (
+            None
+            if prompt_snapshot_max_bytes is None
+            else max(0, int(prompt_snapshot_max_bytes))
+        )
+        self.prompt_snapshot_oversize_skips = 0
+        self.prompt_snapshot_headroom_skips = 0
+        self.prompt_snapshot_last_estimated_bytes = 0
+        self.prompt_snapshot_last_headroom_bytes = 0
         self.prompt_snapshot_min_tokens = dsv4_prompt_snapshot_min_tokens()
         self._uid_count = 0
         self._requests: List[_Request] = []
@@ -422,6 +432,87 @@ class DSV4BatchGenerator:
             )
             return None
         return snapshots
+
+    @staticmethod
+    def _estimate_dsv4_cache_nbytes(cache_list: List[Any]) -> int:
+        """Count the nested DSV4 prompt state without realizing or copying it.
+
+        ``DeepseekV4Cache.state`` is a tuple of local-KV, compressor-pool, and
+        sparse-indexer tuples.  The generic cache estimator intentionally only
+        walks one state level and therefore reports this composite as zero.
+        Snapshot admission must count every nested MLX leaf or the guard can
+        still attempt the exact multi-gigabyte copy it is meant to prevent.
+        """
+
+        seen: set[int] = set()
+
+        def _walk(value: Any) -> int:
+            if value is None:
+                return 0
+            value_id = id(value)
+            if value_id in seen:
+                return 0
+            seen.add(value_id)
+            if isinstance(value, dict):
+                return sum(_walk(item) for item in value.values())
+            if isinstance(value, (tuple, list)):
+                return sum(_walk(item) for item in value)
+            nbytes = getattr(value, "nbytes", None)
+            if isinstance(nbytes, (int, float)):
+                return max(0, int(nbytes))
+            try:
+                state = getattr(value, "state")
+            except Exception:
+                return 0
+            return 0 if state is value else _walk(state)
+
+        return _walk(cache_list)
+
+    def _snapshot_admissible_dsv4_cache(
+        self, cache_list: List[Any]
+    ) -> Optional[List[Any]]:
+        """Copy a prompt boundary only when cache budget and Metal permit it."""
+
+        estimated = self._estimate_dsv4_cache_nbytes(cache_list)
+        self.prompt_snapshot_last_estimated_bytes = estimated
+
+        backend_limit = self.prompt_snapshot_max_bytes
+        if backend_limit is not None and estimated > backend_limit:
+            self.prompt_snapshot_oversize_skips += 1
+            logger.warning(
+                "DSV4Gen: skipping prompt snapshot before copy: estimated %.1fMB "
+                "exceeds every enabled cache backend limit (%.1fMB)",
+                estimated / (1024 * 1024),
+                backend_limit / (1024 * 1024),
+            )
+            return None
+
+        try:
+            from .memory_limits import (
+                get_effective_metal_working_set_bytes,
+                get_metal_ws_guard_threshold,
+            )
+
+            active_bytes, max_ws_bytes = get_effective_metal_working_set_bytes(mx)
+            threshold = get_metal_ws_guard_threshold() / 100.0
+            headroom = max(0, int(max_ws_bytes * threshold) - int(active_bytes))
+        except Exception as exc:
+            logger.debug("DSV4 prompt snapshot Metal headroom lookup failed: %s", exc)
+            headroom = 0
+            max_ws_bytes = 0
+        self.prompt_snapshot_last_headroom_bytes = headroom
+        if max_ws_bytes > 0 and estimated > headroom:
+            self.prompt_snapshot_oversize_skips += 1
+            self.prompt_snapshot_headroom_skips += 1
+            logger.warning(
+                "DSV4Gen: skipping prompt snapshot before copy: estimated %.1fMB "
+                "exceeds safe Metal headroom (%.1fMB)",
+                estimated / (1024 * 1024),
+                headroom / (1024 * 1024),
+            )
+            return None
+
+        return self._snapshot_dsv4_cache(cache_list)
 
     def _should_capture_logprobs(self, uid: int) -> bool:
         try:
@@ -701,7 +792,9 @@ class DSV4BatchGenerator:
                         )
                         try:
                             _t_snapshot = time.perf_counter()
-                            r.prompt_snapshot = self._snapshot_dsv4_cache(r.cache)
+                            r.prompt_snapshot = self._snapshot_admissible_dsv4_cache(
+                                r.cache
+                            )
                             self._trace_timing(
                                 "prompt_snapshot",
                                 _t_snapshot,
@@ -828,7 +921,9 @@ class DSV4BatchGenerator:
                             )
                         try:
                             _t_snapshot = time.perf_counter()
-                            r.prompt_snapshot = self._snapshot_dsv4_cache(r.cache)
+                            r.prompt_snapshot = self._snapshot_admissible_dsv4_cache(
+                                r.cache
+                            )
                             self._trace_timing(
                                 "cache_hit_extension_snapshot",
                                 _t_snapshot,

@@ -14,6 +14,7 @@ const sessionManagerMock = vi.hoisted(() => ({
   startSession: vi.fn(),
   wakeSession: vi.fn(),
   touchSession: vi.fn(),
+  preflightSessionStart: vi.fn(),
 }));
 
 const gatewayBodyMock = vi.hoisted(() => ({
@@ -435,6 +436,95 @@ describe("ApiGateway single-model mode behavior", () => {
     await expect((gateway as any).enforceSingleModelMode("target")).resolves.toBe(
       false,
     );
+  });
+
+  it("rejects an invalid target before unloading the healthy single model", async () => {
+    dbMock.getSetting.mockImplementation((key: string) =>
+      key === "gateway_single_model_mode" ? "true" : undefined,
+    );
+    const previous = {
+      id: "previous",
+      modelPath: "/models/Previous-JANG",
+      modelName: "previous-model",
+      host: "127.0.0.1",
+      port: 9001,
+      status: "running",
+      type: "local",
+      config: "{}",
+    };
+    const target = {
+      id: "target",
+      modelPath: "/models/Missing-JANG",
+      modelName: "target-model",
+      host: "127.0.0.1",
+      port: 9002,
+      status: "stopped",
+      type: "local",
+      config: "{}",
+    };
+    dbMock.getSessions.mockReturnValue([previous, target]);
+    dbMock.getSession.mockImplementation((id: string) =>
+      id === previous.id ? previous : id === target.id ? target : undefined,
+    );
+    sessionManagerMock.preflightSessionStart.mockImplementationOnce(() => {
+      throw new Error("Model not found");
+    });
+
+    const { ApiGateway } = await import("../src/main/api-gateway");
+    const gateway = new ApiGateway();
+    const result = await (gateway as any).prepareSessionForRouting(target);
+
+    expect(result.status).toBe("load_failed");
+    expect(result.code).toBe("model_preflight_failed");
+    expect(result.message).toContain("Model not found");
+    expect(sessionManagerMock.stopSession).not.toHaveBeenCalled();
+    expect(sessionManagerMock.startSession).not.toHaveBeenCalled();
+  });
+
+  it("restores the displaced healthy model when a preflighted target later fails", async () => {
+    dbMock.getSetting.mockImplementation((key: string) =>
+      key === "gateway_single_model_mode" ? "true" : undefined,
+    );
+    const previous = {
+      id: "previous",
+      modelPath: "/models/Previous-JANG",
+      modelName: "previous-model",
+      host: "127.0.0.1",
+      port: 9001,
+      status: "running",
+      type: "local",
+      config: "{}",
+    };
+    const target = {
+      id: "target",
+      modelPath: "/models/Target-JANG",
+      modelName: "target-model",
+      host: "127.0.0.1",
+      port: 9002,
+      status: "stopped",
+      type: "local",
+      config: "{}",
+    };
+    dbMock.getSessions.mockReturnValue([previous, target]);
+    dbMock.getSession.mockImplementation((id: string) =>
+      id === previous.id ? previous : id === target.id ? target : undefined,
+    );
+    sessionManagerMock.preflightSessionStart.mockReturnValueOnce(undefined);
+    sessionManagerMock.startSession
+      .mockRejectedValueOnce(new Error("target load failed"))
+      .mockResolvedValueOnce(undefined);
+
+    const { ApiGateway } = await import("../src/main/api-gateway");
+    const gateway = new ApiGateway();
+    const result = await (gateway as any).prepareSessionForRouting(target);
+
+    expect(result.status).toBe("load_failed");
+    expect(result.code).toBe("model_load_timeout");
+    expect(sessionManagerMock.stopSession).toHaveBeenCalledWith(previous.id);
+    expect(sessionManagerMock.startSession.mock.calls.map((call) => call[0])).toEqual([
+      target.id,
+      previous.id,
+    ]);
   });
 
   it("writes each streamed gateway response chunk once and treats EPIPE as disconnect", async () => {

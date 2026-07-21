@@ -47,7 +47,12 @@ interface ResolvedSession {
 type PreparedSession =
   | { status: "ready"; session: ResolvedSession }
   | { status: "unload_failed"; session: ResolvedSession }
-  | { status: "load_failed"; session: ResolvedSession };
+  | {
+      status: "load_failed";
+      session: ResolvedSession;
+      code: "model_preflight_failed" | "model_load_timeout";
+      message: string;
+    };
 
 type ProxyStreamProtocol = "openai" | "responses" | "anthropic" | "ollama";
 
@@ -845,9 +850,9 @@ export class ApiGateway extends EventEmitter {
     if (prepared.status === "load_failed") {
       return this.sendJson(res, 503, {
         error: {
-          message: `Model '${session.modelName}' failed to load within ${JIT_TIMEOUT_MS / 1000}s`,
+          message: prepared.message,
           type: "server_error",
-          code: "model_load_timeout",
+          code: prepared.code,
         },
         retry_after: 30,
       });
@@ -1043,11 +1048,70 @@ export class ApiGateway extends EventEmitter {
     }
   }
 
+  private getSingleModelRollbackCandidate(
+    targetSessionId: string,
+  ): ResolvedSession | undefined {
+    if (!this.singleModelMode) return undefined;
+    const candidates = db
+      .getSessions()
+      .filter(
+        (candidate: any) =>
+          candidate.id !== targetSessionId &&
+          candidate.type !== "remote" &&
+          ["running", "standby"].includes(candidate.status),
+      )
+      .map((candidate: any) => this.getResolvedSessionById(candidate.id))
+      .filter((candidate): candidate is ResolvedSession => Boolean(candidate));
+    return (
+      candidates.find((candidate) => candidate.status === "running") ||
+      candidates.find((candidate) => candidate.status === "standby")
+    );
+  }
+
+  private async restoreDisplacedSingleModel(
+    candidate: ResolvedSession | undefined,
+    failedTargetId: string,
+  ): Promise<void> {
+    if (!candidate) return;
+    try {
+      console.warn(
+        `[gateway] target ${failedTargetId} failed to load; restoring displaced session ${candidate.id}`,
+      );
+      await sessionManager.startSession(candidate.id);
+      console.log(
+        `[gateway] restored displaced session ${candidate.id} after target ${failedTargetId} failed`,
+      );
+    } catch (error) {
+      console.error(
+        `[gateway] failed to restore displaced session ${candidate.id} after target ${failedTargetId}: ${error}`,
+      );
+    }
+  }
+
   private async prepareSessionForRouting(
     session: ResolvedSession,
   ): Promise<PreparedSession> {
     return this.withSingleModelTransition(async () => {
       const target = this.getResolvedSessionById(session.id) || session;
+      try {
+        // A stale/malformed target must fail before Single Model mode unloads
+        // the currently healthy engine. The session manager repeats this same
+        // shared validation at spawn time to cover filesystem races.
+        sessionManager.preflightSessionStart(target.id);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error(
+          `[gateway] target session ${target.id} failed preflight: ${error}`,
+        );
+        return {
+          status: "load_failed",
+          session: target,
+          code: "model_preflight_failed",
+          message: `Model '${target.modelName}' cannot be loaded: ${detail}`,
+        };
+      }
+
+      const rollbackCandidate = this.getSingleModelRollbackCandidate(target.id);
       const singleModelReady = await this.enforceSingleModelMode(target.id);
       if (!singleModelReady) return { status: "unload_failed", session: target };
 
@@ -1057,7 +1121,15 @@ export class ApiGateway extends EventEmitter {
       }
 
       const ok = await this.jitLoad(latest.id);
-      if (!ok) return { status: "load_failed", session: latest };
+      if (!ok) {
+        await this.restoreDisplacedSingleModel(rollbackCandidate, latest.id);
+        return {
+          status: "load_failed",
+          session: latest,
+          code: "model_load_timeout",
+          message: `Model '${latest.modelName}' failed to load within ${JIT_TIMEOUT_MS / 1000}s`,
+        };
+      }
 
       return {
         status: "ready",
@@ -1640,7 +1712,10 @@ export class ApiGateway extends EventEmitter {
       });
     }
     if (prepared.status === "load_failed") {
-      return this.sendJson(res, 503, { error: "Model failed to load" });
+      return this.sendJson(res, 503, {
+        error: prepared.message,
+        code: prepared.code,
+      });
     }
     const routedSession = prepared.session;
 
@@ -1955,7 +2030,10 @@ export class ApiGateway extends EventEmitter {
       });
     }
     if (prepared.status === "load_failed") {
-      return this.sendJson(res, 503, { error: "Model failed to load" });
+      return this.sendJson(res, 503, {
+        error: prepared.message,
+        code: prepared.code,
+      });
     }
     const routedSession = prepared.session;
 
@@ -2288,7 +2366,10 @@ export class ApiGateway extends EventEmitter {
       });
     }
     if (prepared.status === "load_failed") {
-      return this.sendJson(res, 503, { error: "Model failed to load" });
+      return this.sendJson(res, 503, {
+        error: prepared.message,
+        code: prepared.code,
+      });
     }
     const routedSession = prepared.session;
 

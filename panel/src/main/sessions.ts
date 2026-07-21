@@ -1539,6 +1539,120 @@ export class SessionManager extends EventEmitter {
     return session
   }
 
+  /**
+   * Validate a local target before single-model replacement unloads the
+   * currently healthy engine. This intentionally performs no process mutation.
+   * `_startSessionInner` repeats the same shared validation immediately before
+   * spawn so filesystem changes between preflight and launch still fail closed.
+   */
+  preflightSessionStart(sessionId: string): void {
+    const session = db.getSession(sessionId)
+    if (!session) throw new Error(`Session ${sessionId} not found`)
+    if (session.type === 'remote') return
+
+    const config: ServerConfig = JSON.parse(session.config)
+    config.modelPath = session.modelPath
+    config.host = session.host
+    config.port = session.port
+    if (!this.findEnginePath()) {
+      throw new Error('vmlx-engine not found. Please install it first.')
+    }
+    this.validateLocalSessionTarget(sessionId, session, config)
+  }
+
+  private validateLocalSessionTarget(
+    sessionId: string,
+    session: Session,
+    config: ServerConfig
+  ): boolean {
+    // Image models may use mflux named models (e.g., "schnell") that are NOT
+    // filesystem paths. Let the image server validate those names at launch.
+    const isImageSession = config.modelType === 'image'
+
+    if (!isImageSession) {
+      if (!existsSync(config.modelPath)) {
+        // LE10: the saved path may be a stale symlink/alias (e.g. a
+        // ~/.mlxstudio/models/X target that moved) while the SAME model is
+        // present at a different real path (e.g. an external drive). Re-resolve
+        // by model IDENTITY (basename) against other known sessions whose path
+        // still exists — a real comparison, and only when exactly one distinct
+        // valid path matches, never a guess. This lets Start succeed instead of
+        // failing on a dead symlink when the model is plainly available.
+        // When NO unambiguous twin exists, fail with the explicit repoint hint
+        // (the session list surfaces the Repoint/Remove recovery actions).
+        const resolved = Array.from(new Set(
+          db.getSessions()
+            .filter(s =>
+              s.id !== sessionId &&
+              sessionMatchesModelPath(s.modelPath, config.modelPath) &&
+              existsSync(s.modelPath))
+            .map(s => s.modelPath.replace(/\/+$/, ''))
+        ))
+        if (resolved.length === 1) {
+          console.log(`[SESSION] modelPath missing (${config.modelPath}) — re-resolved by identity to ${resolved[0]}`)
+          config.modelPath = resolved[0]
+          // Persist so the UI + future starts use the valid path — but ONLY when
+          // no other session already owns that path. sessions.model_path is
+          // UNIQUE, and the valid path is typically owned by the very session we
+          // re-resolved against, so a blind update would throw a UNIQUE
+          // constraint error. In that collision case persistence is both
+          // impossible and unnecessary: the identity re-resolution re-fires
+          // cheaply on every start and the launch already uses the valid path.
+          const pathOwnedElsewhere = db.getSessions().some(
+            s => s.id !== session.id && s.modelPath?.replace(/\/+$/, '') === resolved[0],
+          )
+          if (!pathOwnedElsewhere) {
+            try {
+              db.updateSession(session.id, { modelPath: resolved[0] })
+            } catch (e) {
+              console.warn(`[SESSION] Failed to persist re-resolved modelPath for ${session.id}: ${e}`)
+            }
+          }
+        } else {
+          throw new Error(
+            `Model not found at: ${config.modelPath}. Repoint the session to a valid model bundle before starting it.`,
+          )
+        }
+      }
+
+      // Block starting a session with an actively downloading model.
+      const downloadMarker = join(config.modelPath, '.vmlx-downloading')
+      if (existsSync(downloadMarker)) {
+        throw new Error('This model is still downloading. Please wait for the download to complete before starting a session.')
+      }
+
+      // Validate model format: vmlx-engine only supports MLX (safetensors) models.
+      try {
+        const files = readdirSync(config.modelPath)
+        const hasGGUF = files.some(f => f.endsWith('.gguf') || f.endsWith('.gguf.part'))
+        const hasSafetensors = files.some(f => f.endsWith('.safetensors'))
+        const hasConfig = files.includes('config.json')
+
+        if (hasGGUF && !hasSafetensors) {
+          throw new Error(
+            'This model is in GGUF format, which is not supported by vmlx-engine. ' +
+            'Please download an MLX-format version (safetensors) from HuggingFace Hub.'
+          )
+        }
+        // Diffusers image models have model_index.json instead of config.json — that's valid.
+        const hasModelIndex = files.includes('model_index.json')
+        const hasTransformerDir = files.includes('transformer')
+        if (!hasConfig && !hasModelIndex && !hasTransformerDir) {
+          throw new Error(
+            'Model directory is missing config.json (text) or model_index.json (image). ' +
+            'vmlx-engine requires MLX-format models with config.json and .safetensors files, ' +
+            'or diffusers-format image models with model_index.json.'
+          )
+        }
+      } catch (e) {
+        if ((e as Error).message.includes('GGUF format') || (e as Error).message.includes('missing config.json') || (e as Error).message.includes('model_index.json')) throw e
+        // Ignore other filesystem errors — let the server handle them.
+      }
+    }
+
+    return isImageSession
+  }
+
   async startSession(sessionId: string): Promise<void> {
     // Remote sessions connect instead of starting a local process
     const session = db.getSession(sessionId)
@@ -1553,6 +1667,9 @@ export class SessionManager extends EventEmitter {
 
     const startLocalSession = async () => {
       if (db.getSetting('gateway_single_model_mode') === 'true') {
+        // Validate before unloading the current model. Without this ordering a
+        // stale/malformed target can strand the user with zero loaded models.
+        this.preflightSessionStart(sessionId)
         const otherLocalSessions = db.getSessions().filter(other =>
           other.id !== sessionId &&
           other.type !== 'remote' &&
@@ -1635,91 +1752,7 @@ export class SessionManager extends EventEmitter {
 
     const engineResult = this.findEnginePath()
     if (!engineResult) throw new Error('vmlx-engine not found. Please install it first.')
-
-    // Image models may use mflux named models (e.g., "schnell") that are NOT filesystem paths
-    // — skip path/format validation for image sessions, let the Python server handle it
-    const isImageSession = config.modelType === 'image'
-
-    if (!isImageSession) {
-      if (!existsSync(config.modelPath)) {
-        // LE10: the saved path may be a stale symlink/alias (e.g. a
-        // ~/.mlxstudio/models/X target that moved) while the SAME model is
-        // present at a different real path (e.g. an external drive). Re-resolve
-        // by model IDENTITY (basename) against other known sessions whose path
-        // still exists — a real comparison, and only when exactly one distinct
-        // valid path matches, never a guess. This lets Start succeed instead of
-        // failing on a dead symlink when the model is plainly available.
-        // When NO unambiguous twin exists, fail with the explicit repoint hint
-        // (the session list surfaces the Repoint/Remove recovery actions).
-        const resolved = Array.from(new Set(
-          db.getSessions()
-            .filter(s =>
-              s.id !== sessionId &&
-              sessionMatchesModelPath(s.modelPath, config.modelPath) &&
-              existsSync(s.modelPath))
-            .map(s => s.modelPath.replace(/\/+$/, ''))
-        ))
-        if (resolved.length === 1) {
-          console.log(`[SESSION] modelPath missing (${config.modelPath}) — re-resolved by identity to ${resolved[0]}`)
-          config.modelPath = resolved[0]
-          // Persist so the UI + future starts use the valid path — but ONLY when
-          // no other session already owns that path. sessions.model_path is
-          // UNIQUE, and the valid path is typically owned by the very session we
-          // re-resolved against, so a blind update would throw a UNIQUE
-          // constraint error. In that collision case persistence is both
-          // impossible and unnecessary: the identity re-resolution re-fires
-          // cheaply on every start and the launch already uses the valid path.
-          const pathOwnedElsewhere = db.getSessions().some(
-            s => s.id !== session.id && s.modelPath?.replace(/\/+$/, '') === resolved[0],
-          )
-          if (!pathOwnedElsewhere) {
-            try {
-              db.updateSession(session.id, { modelPath: resolved[0] })
-            } catch (e) {
-              console.warn(`[SESSION] Failed to persist re-resolved modelPath for ${session.id}: ${e}`)
-            }
-          }
-        } else {
-          throw new Error(
-            `Model not found at: ${config.modelPath}. Repoint the session to a valid model bundle before starting it.`,
-          )
-        }
-      }
-
-      // Block starting a session with an actively downloading model
-      const downloadMarker = join(config.modelPath, '.vmlx-downloading')
-      if (existsSync(downloadMarker)) {
-        throw new Error('This model is still downloading. Please wait for the download to complete before starting a session.')
-      }
-
-      // Validate model format: vmlx-engine only supports MLX (safetensors) models
-      try {
-        const files = readdirSync(config.modelPath)
-        const hasGGUF = files.some(f => f.endsWith('.gguf') || f.endsWith('.gguf.part'))
-        const hasSafetensors = files.some(f => f.endsWith('.safetensors'))
-        const hasConfig = files.includes('config.json')
-
-        if (hasGGUF && !hasSafetensors) {
-          throw new Error(
-            'This model is in GGUF format, which is not supported by vmlx-engine. ' +
-            'Please download an MLX-format version (safetensors) from HuggingFace Hub.'
-          )
-        }
-        // Diffusers image models have model_index.json instead of config.json — that's valid
-        const hasModelIndex = files.includes('model_index.json')
-        const hasTransformerDir = files.includes('transformer')
-        if (!hasConfig && !hasModelIndex && !hasTransformerDir) {
-          throw new Error(
-            'Model directory is missing config.json (text) or model_index.json (image). ' +
-            'vmlx-engine requires MLX-format models with config.json and .safetensors files, ' +
-            'or diffusers-format image models with model_index.json.'
-          )
-        }
-      } catch (e) {
-        if ((e as Error).message.includes('GGUF format') || (e as Error).message.includes('missing config.json') || (e as Error).message.includes('model_index.json')) throw e
-        // Ignore filesystem errors — let the server handle them
-      }
-    } // end if (!isImageSession)
+    const isImageSession = this.validateLocalSessionTarget(sessionId, session, config)
 
     // Re-detect model config from disk — handles case where model files were
     // replaced with a different model (same folder name, different model_type).

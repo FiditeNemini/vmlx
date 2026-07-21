@@ -47,7 +47,7 @@ import { app as electronApp } from 'electron'
 /** Result of findEnginePath: either bundled Python or a system binary */
 type EnginePath =
   | { type: 'bundled'; pythonPath: string }
-  | { type: 'system'; binaryPath: string }
+  | { type: 'system'; binaryPath: string; sourceRoot?: string }
 
 interface ManagedProcess {
   process: ChildProcess | null
@@ -2090,8 +2090,20 @@ export class SessionManager extends EventEmitter {
       const fullCmd = `${engineResult.binaryPath} ${args.join(' ')}`
       this.pushLog(sessionId, `$ ${fullCmd}`)
       this.emit('session:log', { sessionId, data: `$ ${fullCmd}\n` })
+      const systemEnv = { ...spawnEnv }
+      if (engineResult.sourceRoot) {
+        // A development checkout may intentionally reuse dependencies from a
+        // sibling venv. Pin the imported vmlx_engine package to this checkout;
+        // otherwise the console script's editable install silently executes the
+        // sibling repository and invalidates every current-source UI proof.
+        systemEnv.PYTHONPATH = engineResult.sourceRoot
+        this.pushLog(
+          sessionId,
+          `[SESSIONS] Development engine source: ${engineResult.sourceRoot}`,
+        )
+      }
       proc = spawn(engineResult.binaryPath, args, {
-        env: spawnEnv,
+        env: systemEnv,
         cwd: dirname(engineResult.binaryPath),
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,
@@ -3795,9 +3807,19 @@ export class SessionManager extends EventEmitter {
   }
 
   findEnginePath(): EnginePath | null {
+    const sourceDir = join(__dirname, '..', '..', '..')
+    const developmentSourceRoot = (
+      !electronApp.isPackaged
+      && existsSync(join(sourceDir, 'vmlx_engine', '__init__.py'))
+    ) ? sourceDir : undefined
+    const systemEnginePath = (binaryPath: string): EnginePath => ({
+      type: 'system',
+      binaryPath,
+      ...(developmentSourceRoot ? { sourceRoot: developmentSourceRoot } : {}),
+    })
+
     const findProjectVenvEngine = (): EnginePath | null => {
       try {
-        const sourceDir = join(__dirname, '..', '..', '..')
         const venvPython = join(sourceDir, '.venv', 'bin', 'python3')
         if (!existsSync(venvPython)) return null
 
@@ -3886,7 +3908,7 @@ export class SessionManager extends EventEmitter {
     } catch (_) { }
 
     for (const loc of locations) {
-      if (existsSync(loc)) return { type: 'system', binaryPath: loc }
+      if (existsSync(loc)) return systemEnginePath(loc)
     }
 
     // Fallback: check PATH via login shell (picks up pyenv, nvm, etc.)
@@ -3896,14 +3918,14 @@ export class SessionManager extends EventEmitter {
           `${shell} -lc "which vmlx-engine"`,
           { encoding: 'utf-8', timeout: 5000 }
         ).trim()
-        if (result && existsSync(result)) return { type: 'system', binaryPath: result }
+        if (result && existsSync(result)) return systemEnginePath(result)
       } catch (_) { }
     }
 
     // Last resort: plain which
     try {
       const result = execSync('which vmlx-engine', { encoding: 'utf-8', timeout: 3000 }).trim()
-      if (result && existsSync(result)) return { type: 'system', binaryPath: result }
+      if (result && existsSync(result)) return systemEnginePath(result)
     } catch (_) { }
 
     return null

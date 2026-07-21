@@ -19,6 +19,7 @@ import vmlx_engine.server as server_mod
 from vmlx_engine.server import (
     _ANS_MARKER_HOLDBACK,
     _ANSWER_PASS_LEAK_GUARD_FAMILIES,
+    _answer_pass_reconcile_delta,
     _answer_pass_stream_holdback,
     _answer_pass_visible_delta,
     _main_pass_finish_reason,
@@ -196,11 +197,11 @@ def test_enable_thinking_false_splits_on_close_think():
 def test_both_stream_sites_use_the_delta_helper():
     # Neither streaming answer pass may regress to the old single-chunk emit.
     chat_src = inspect.getsource(server_mod.stream_chat_completion)
-    assert "_answer_pass_visible_delta" in chat_src
+    assert "_answer_pass_reconcile_delta" in chat_src
     assert "engine.stream_chat(messages=answer_messages" in chat_src
     # Responses API streaming answer pass lives in stream_responses_api.
     resp_src = inspect.getsource(server_mod.stream_responses_api)
-    assert "_answer_pass_visible_delta" in resp_src
+    assert "_answer_pass_reconcile_delta" in resp_src
     assert "engine.stream_chat(messages=answer_messages" in resp_src
 
 
@@ -210,6 +211,17 @@ def test_internal_reasoning_pass_terminal_is_held_until_visible_answer_finishes(
         "length",
         finished=True,
         content_was_emitted=False,
+        accumulated_reasoning="private planning",
+        answer_pass_pending=True,
+    ) is None
+
+    # A partition can cross into content just before its token share expires.
+    # The internal length terminal must still be held while the direct pass
+    # reconciles and continues that prefix.
+    assert _main_pass_finish_reason(
+        "length",
+        finished=True,
+        content_was_emitted=True,
         accumulated_reasoning="private planning",
         answer_pass_pending=True,
     ) is None
@@ -224,12 +236,12 @@ def test_internal_reasoning_pass_terminal_is_held_until_visible_answer_finishes(
 
 def test_genuine_main_pass_terminal_reasons_are_preserved():
     assert _main_pass_finish_reason(
-        "length",
+        "stop",
         finished=True,
         content_was_emitted=True,
         accumulated_reasoning="private planning",
         answer_pass_pending=True,
-    ) == "length"
+    ) == "stop"
     assert _main_pass_finish_reason(
         "length",
         finished=True,
@@ -244,6 +256,44 @@ def test_genuine_main_pass_terminal_reasons_are_preserved():
         accumulated_reasoning="",
         answer_pass_pending=False,
     ) is None
+
+
+def test_partial_visible_prefix_reconciliation_emits_only_new_suffix():
+    existing = "BANANA8426\nQ35-PARTIAL-"
+    raw = ""
+    sent = ""
+    reconciled = False
+    deltas = []
+    chunks = ("BANANA8426\n", "Q35-PARTIAL-", "DONE")
+    for index, piece in enumerate(chunks):
+        raw += piece
+        delta, sent, now_reconciled = _answer_pass_reconcile_delta(
+            raw,
+            existing,
+            sent,
+            _req(),
+            index == len(chunks) - 1,
+        )
+        reconciled = reconciled or now_reconciled
+        if delta:
+            deltas.append(delta)
+
+    assert reconciled is True
+    assert deltas == ["DONE"]
+    assert sent == existing + "DONE"
+
+
+def test_partial_visible_prefix_reconciliation_fails_closed_on_divergence():
+    delta, sent, reconciled = _answer_pass_reconcile_delta(
+        "A different regenerated answer",
+        "BANANA8426\nQ35-PARTIAL-",
+        "",
+        _req(),
+        True,
+    )
+    assert delta == ""
+    assert sent == ""
+    assert reconciled is False
 
 
 def test_chat_legacy_reasoning_fallback_cannot_precede_answer_pass():

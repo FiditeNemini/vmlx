@@ -56,6 +56,35 @@ def test_ollama_chat_omits_disabled_top_k_sentinels():
         assert "top_k" not in req
 
 
+def test_ollama_chat_translates_video_and_audio_extensions():
+    from vmlx_engine.api.ollama_adapter import ollama_chat_to_openai
+
+    req = ollama_chat_to_openai(
+        {
+            "model": "omni",
+            "messages": [{
+                "role": "user",
+                "content": "Inspect both.",
+                "videos": ["AAAAIGZ0eXA="],
+                "audio": "SUQz",
+            }],
+        }
+    )
+
+    assert req["messages"] == [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Inspect both."},
+            {"type": "video_url", "video_url": {
+                "url": "data:video/mp4;base64,AAAAIGZ0eXA=",
+            }},
+            {"type": "audio_url", "audio_url": {
+                "url": "data:audio/wav;base64,SUQz",
+            }},
+        ],
+    }]
+
+
 def test_ollama_generate_omits_disabled_top_k_sentinels():
     from vmlx_engine.api.ollama_adapter import (
         ollama_generate_to_openai,

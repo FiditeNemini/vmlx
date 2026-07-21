@@ -23,6 +23,13 @@ describe("Ollama gateway parity contracts", () => {
     expect(source).toContain("messages: this.translateOllamaMessages");
   });
 
+  it("translates vMLX Ollama video and audio message extensions", () => {
+    expect(source).toContain('data:video/mp4;base64,${video}');
+    expect(source).toContain('type: "video_url"');
+    expect(source).toContain('data:audio/wav;base64,${audioItem}');
+    expect(source).toContain('type: "audio_url"');
+  });
+
   it("maps Ollama json and schema formats to OpenAI response_format", () => {
     expect(source).toContain("private ollamaResponseFormat");
     expect(source).toContain('format === "json"');

@@ -126,9 +126,9 @@ def ollama_chat_to_openai(body: dict) -> dict:
 
     # Ollama convention for VL models: each message may have an
     # `images: [<base64>, ...]` field alongside `content: <string>`.
-    # The OpenAI multimodal schema instead embeds images as inline
-    # content parts. Translate so VL models (Qwen VL, Gemma 4 VL, etc.)
-    # see the image through the normal /v1/chat/completions path.
+    # vMLX also accepts symmetric `videos` and `audio`/`audios` extension
+    # arrays for local runtimes that advertise those modalities. The OpenAI
+    # multimodal schema embeds all media as inline content parts.
     #
     # Without this translation `prompt_eval_count` shows only the text
     # tokens, the model reports "I cannot see the image", and the
@@ -138,14 +138,24 @@ def ollama_chat_to_openai(body: dict) -> dict:
     translated_messages = []
     for msg in src_messages:
         images = msg.get("images") if isinstance(msg, dict) else None
-        if not images:
+        videos = msg.get("videos") if isinstance(msg, dict) else None
+        audio = (
+            msg.get("audio", msg.get("audios")) if isinstance(msg, dict) else None
+        )
+        if isinstance(images, str):
+            images = [images]
+        if isinstance(videos, str):
+            videos = [videos]
+        if isinstance(audio, str):
+            audio = [audio]
+        if not images and not videos and not audio:
             translated_messages.append(msg)
             continue
         text = msg.get("content", "") or ""
         parts: list[dict] = []
         if text:
             parts.append({"type": "text", "text": text})
-        for img in images:
+        for img in images or []:
             if not isinstance(img, str):
                 continue
             # Ollama accepts either raw base64 or a data URL — normalize
@@ -153,7 +163,25 @@ def ollama_chat_to_openai(body: dict) -> dict:
             # inspects the dataUrl mime prefix) can decode.
             url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
             parts.append({"type": "image_url", "image_url": {"url": url}})
-        new_msg = {k: v for k, v in msg.items() if k != "images" and k != "content"}
+        for video in videos or []:
+            if not isinstance(video, str):
+                continue
+            url = video if video.startswith("data:") else f"data:video/mp4;base64,{video}"
+            parts.append({"type": "video_url", "video_url": {"url": url}})
+        for audio_item in audio or []:
+            if not isinstance(audio_item, str):
+                continue
+            url = (
+                audio_item
+                if audio_item.startswith("data:")
+                else f"data:audio/wav;base64,{audio_item}"
+            )
+            parts.append({"type": "audio_url", "audio_url": {"url": url}})
+        new_msg = {
+            k: v
+            for k, v in msg.items()
+            if k not in {"images", "videos", "audio", "audios", "content"}
+        }
         new_msg["role"] = msg.get("role", "user")
         new_msg["content"] = parts
         translated_messages.append(new_msg)

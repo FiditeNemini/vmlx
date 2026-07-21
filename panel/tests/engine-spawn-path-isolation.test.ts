@@ -15,4 +15,11 @@ describe('engine child path isolation', () => {
   it('also gives a system engine binary a stable executable-owned cwd', () => {
     expect(source).toContain('cwd: dirname(engineResult.binaryPath)')
   })
+
+  it('pins a reused system venv to the current development checkout source', () => {
+    expect(source).toContain("existsSync(join(sourceDir, 'vmlx_engine', '__init__.py'))")
+    expect(source).toContain('sourceRoot: developmentSourceRoot')
+    expect(source).toContain('systemEnv.PYTHONPATH = engineResult.sourceRoot')
+    expect(source).toContain('[SESSIONS] Development engine source:')
+  })
 })

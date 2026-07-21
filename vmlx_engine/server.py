@@ -1079,6 +1079,63 @@ def _answer_pass_visible_delta(
     return target[len(already_sent):], target
 
 
+def _answer_pass_reconcile_delta(
+    raw_text: str,
+    existing_visible_prefix: str,
+    regenerated_sent: str,
+    request: Any,
+    finished: bool,
+    *,
+    holdback: int | None = None,
+    think_in_prompt: bool = False,
+) -> tuple[str, str, bool]:
+    """Continue a length-truncated visible prefix without duplicating it.
+
+    A partitioned reasoning pass can cross into visible content just before its
+    token share expires.  The direct pass regenerates the answer from the start;
+    withhold it until its cleaned output covers the already-emitted prefix, then
+    emit only the suffix.  If the regenerated text diverges, emit nothing because
+    streamed bytes cannot be retracted.
+    """
+    if not existing_visible_prefix:
+        delta, cursor = _answer_pass_visible_delta(
+            raw_text,
+            regenerated_sent,
+            request,
+            finished,
+            holdback=holdback,
+            think_in_prompt=think_in_prompt,
+        )
+        return delta, cursor, bool(cursor)
+
+    if regenerated_sent:
+        delta, cursor = _answer_pass_visible_delta(
+            raw_text,
+            regenerated_sent,
+            request,
+            finished,
+            holdback=holdback,
+            think_in_prompt=think_in_prompt,
+        )
+        return delta, cursor, True
+
+    _, current = _answer_pass_visible_delta(
+        raw_text,
+        "",
+        request,
+        finished,
+        holdback=holdback,
+        think_in_prompt=think_in_prompt,
+    )
+    if not current:
+        return "", "", False
+    if existing_visible_prefix.startswith(current) and not finished:
+        return "", "", False
+    if current.startswith(existing_visible_prefix):
+        return current[len(existing_visible_prefix):], current, True
+    return "", "", False
+
+
 def _main_pass_finish_reason(
     finish_reason: str | None,
     *,
@@ -1093,10 +1150,11 @@ def _main_pass_finish_reason(
     and then continue through the bounded direct-answer pass.  Emitting that
     first-pass reason tells OpenAI clients the *whole* response is terminal;
     many coding harnesses correctly stop reading there and never receive the
-    visible answer.  Hold the internal terminal only while a content-empty,
-    reasoning-bearing request has a real answer-pass path pending.  The answer
-    pass emits its own final ``stop``; if it cannot produce safe content, the
-    existing post-stream warning path emits an honest final ``length``.
+    visible answer.  Hold the internal terminal while a reasoning-bearing request
+    has a real answer-pass path pending, including when the first pass crossed
+    into visible content just before its partition expired.  The answer pass
+    emits its own final ``stop`` after prefix reconciliation; if reconciliation
+    fails, the post-stream path emits an honest final ``length``.
 
     This is state-based and applies to every reasoning family using the shared
     answer-pass contract, including tool-enabled fallbacks.  Genuine terminal
@@ -1107,8 +1165,8 @@ def _main_pass_finish_reason(
         return None
     if (
         answer_pass_pending
-        and not content_was_emitted
         and bool((accumulated_reasoning or "").strip())
+        and (not content_was_emitted or finish_reason == "length")
     ):
         return None
     return finish_reason
@@ -14171,6 +14229,8 @@ async def create_chat_completion(
         if reasoning_text:
             reasoning_text = clean_output_text(reasoning_text)
 
+    _ns_visible_answer_finish_reason: str | None = None
+
     # Reasoning-runaway backstop (non-streaming chat completions): mirror the
     # streaming bounded thinking-off answer pass. Degraded reasoners
     # (qwen3.5/3.6 MXFP4-CRACK, gemma4, MiniMax-M3) can fill the thinking
@@ -14361,6 +14421,9 @@ async def create_chat_completion(
                 _ns_answer_complete = not _ns_reasoning_leak
                 if _ns_text and _ns_answer_complete:
                     content_for_parsing = _ns_text
+                    _ns_visible_answer_finish_reason = getattr(
+                        _ns_out, "finish_reason", None
+                    )
                     try:
                         output.completion_tokens += int(getattr(_ns_out, "completion_tokens", 0) or 0)
                     except Exception:
@@ -14494,7 +14557,11 @@ async def create_chat_completion(
         )
 
     # Determine finish reason
-    finish_reason = "tool_calls" if tool_calls else output.finish_reason
+    finish_reason = (
+        "tool_calls"
+        if tool_calls
+        else (_ns_visible_answer_finish_reason or output.finish_reason)
+    )
     response_content = clean_output_text(cleaned_text) if cleaned_text else None
     if response_content:
         response_content = _finalize_visible_text_for_request(response_content, request)
@@ -19052,8 +19119,15 @@ async def stream_chat_completion(
         )
         yield f"data: {_dump_chat_chunk(fallback_chunk)}\n\n"
 
+    _partial_visible_answer_repair = bool(
+        content_was_emitted
+        and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
+        and accumulated_reasoning.strip()
+        and streamed_content
+        and getattr(last_output, "finish_reason", None) == "length"
+    )
     if (
-        not content_was_emitted
+        (not content_was_emitted or _partial_visible_answer_repair)
         and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
         and accumulated_reasoning.strip()
         and not tool_calls_emitted
@@ -19088,10 +19162,15 @@ async def stream_chat_completion(
             else reasoning_only_answer_budget
         )
         logger.info(
-            "%s Chat Completions stream produced no visible content; "
+            "%s Chat Completions stream %s; "
             "running bounded %s answer pass "
             "(reasoning_chars=%d, answer_budget=%s)",
             _answer_family,
+            (
+                "ended with a length-truncated visible prefix"
+                if _partial_visible_answer_repair
+                else "produced no visible content"
+            ),
             (
                 "native tools-free"
                 if _family_name in _NATIVE_REASONING_TOOL_RECOVERY_FAMILIES
@@ -19158,6 +19237,10 @@ async def stream_chat_completion(
             _ans_budget_cap = int(answer_kwargs.get("max_tokens") or 0)
             _ans_raw = ""
             _ans_sent = ""
+            _ans_existing_prefix = (
+                streamed_content if _partial_visible_answer_repair else ""
+            )
+            _ans_reconciled = False
             _ans_ct = 0
             _ans_any = False
             _ans_last_out = None
@@ -19185,8 +19268,9 @@ async def stream_chat_completion(
                 if _buffer_answer_pass:
                     # Accumulate only; emit after we confirm clean completion.
                     continue
-                _delta, _ans_sent = _answer_pass_visible_delta(
+                _delta, _ans_sent, _reconciled_now = _answer_pass_reconcile_delta(
                     _ans_raw,
+                    _ans_existing_prefix,
                     _ans_sent,
                     request,
                     bool(getattr(answer_output, "finished", False)),
@@ -19196,6 +19280,7 @@ async def stream_chat_completion(
                     ),
                     think_in_prompt=_native_reasoning_retry,
                 )
+                _ans_reconciled = _ans_reconciled or _reconciled_now
                 if not _delta:
                     continue
                 _ans_any = True
@@ -19221,8 +19306,9 @@ async def stream_chat_completion(
                     getattr(_ans_last_out, "finish_reason", None) == "length"
                     or (_ans_budget_cap and _ans_ct >= _ans_budget_cap)
                 )
-                _full_delta, _ans_sent = _answer_pass_visible_delta(
+                _full_delta, _ans_sent, _ans_reconciled = _answer_pass_reconcile_delta(
                     _ans_raw,
+                    _ans_existing_prefix,
                     "",
                     request,
                     True,
@@ -19280,9 +19366,15 @@ async def stream_chat_completion(
                         "content (ct=%d/%d) — client should raise max_tokens",
                         _answer_family, _ans_ct, _ans_budget_cap,
                     )
-            if _ans_any:
+            _answer_pass_succeeded = _ans_any or (
+                _partial_visible_answer_repair and _ans_reconciled
+            )
+            if _answer_pass_succeeded:
                 content_was_emitted = True
-                streamed_content += _ans_sent
+                if _partial_visible_answer_repair:
+                    streamed_content = _ans_sent
+                else:
+                    streamed_content += _ans_sent
                 completion_tokens += int(_ans_ct or 0)
                 # Terminal finish for the answer-pass stream (mirrors the original
                 # single chunk's finish_reason="stop"): satisfies the OpenAI
@@ -19299,6 +19391,24 @@ async def stream_chat_completion(
                     ],
                 )
                 yield f"data: {_dump_chat_chunk(answer_finish_chunk)}\n\n"
+            elif _partial_visible_answer_repair:
+                logger.warning(
+                    "%s direct answer diverged from the already-streamed prefix; "
+                    "preserving the honest length-truncated prefix",
+                    _answer_family,
+                )
+                repair_finish_chunk = ChatCompletionChunk(
+                    id=response_id,
+                    created=_created_ts,
+                    model=request.model,
+                    choices=[
+                        ChatCompletionChunkChoice(
+                            delta=ChatCompletionChunkDelta(),
+                            finish_reason="length",
+                        )
+                    ],
+                )
+                yield f"data: {_dump_chat_chunk(repair_finish_chunk)}\n\n"
         except Exception as e:
             logger.error(
                 "%s Chat Completions visible answer pass failed for %s: %s",
@@ -20890,9 +21000,16 @@ async def stream_responses_api(
             # here was the bug that pollutes history.
             if not reasoning_was_streamed and not _buffered_reasoning_only:
                 display_text = clean_output_text(full_text) if full_text else ""
+        _partial_visible_answer_repair = bool(
+            display_text
+            and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
+            and accumulated_reasoning.strip()
+            and streamed_text
+            and getattr(last_output, "finish_reason", None) == "length"
+        )
         if (
             not _response_was_cancelled
-            and not display_text
+            and (not display_text or _partial_visible_answer_repair)
             and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
             and accumulated_reasoning.strip()
             and not tool_calls
@@ -20922,10 +21039,15 @@ async def stream_responses_api(
                 else reasoning_only_answer_budget
             )
             logger.info(
-                "%s reasoning produced no visible content; "
+                "%s reasoning %s; "
                 "running bounded %s answer pass "
                 "(reasoning_chars=%d, answer_budget=%s)",
                 _answer_family,
+                (
+                    "ended with a length-truncated visible prefix"
+                    if _partial_visible_answer_repair
+                    else "produced no visible content"
+                ),
                 (
                     "native tools-free"
                     if _family_name in _NATIVE_REASONING_TOOL_RECOVERY_FAMILIES
@@ -20987,6 +21109,10 @@ async def stream_responses_api(
                 _ans_budget_cap = int(answer_kwargs.get("max_tokens") or 0)
                 _ans_raw = ""
                 _ans_sent = ""
+                _ans_existing_prefix = (
+                    streamed_text if _partial_visible_answer_repair else ""
+                )
+                _ans_reconciled = False
                 _ans_ct = 0
                 _ans_last_out = None
                 async for answer_output in _stream_with_keepalive(
@@ -21007,8 +21133,9 @@ async def stream_responses_api(
                     _ans_raw += getattr(answer_output, "new_text", "") or ""
                     if _buffer_answer_pass:
                         continue
-                    _delta, _ans_sent = _answer_pass_visible_delta(
+                    _delta, _ans_sent, _reconciled_now = _answer_pass_reconcile_delta(
                         _ans_raw,
+                        _ans_existing_prefix,
                         _ans_sent,
                         request,
                         bool(getattr(answer_output, "finished", False)),
@@ -21018,6 +21145,7 @@ async def stream_responses_api(
                         ),
                         think_in_prompt=_native_reasoning_retry,
                     )
+                    _ans_reconciled = _ans_reconciled or _reconciled_now
                     if not _delta:
                         continue
                     yield _sse(
@@ -21035,8 +21163,9 @@ async def stream_responses_api(
                         getattr(_ans_last_out, "finish_reason", None) == "length"
                         or (_ans_budget_cap and _ans_ct >= _ans_budget_cap)
                     )
-                    _full_delta, _ans_sent = _answer_pass_visible_delta(
+                    _full_delta, _ans_sent, _ans_reconciled = _answer_pass_reconcile_delta(
                         _ans_raw,
+                        _ans_existing_prefix,
                         "",
                         request,
                         True,
@@ -21085,9 +21214,15 @@ async def stream_responses_api(
                                 "no visible content (ct=%d/%d) — raise max_tokens",
                                 _answer_family, _ans_ct, _ans_budget_cap,
                             )
-                if _ans_sent:
+                _answer_pass_succeeded = bool(_ans_sent) or (
+                    _partial_visible_answer_repair and _ans_reconciled
+                )
+                if _answer_pass_succeeded:
                     display_text = _ans_sent
-                    streamed_text += _ans_sent
+                    if _partial_visible_answer_repair:
+                        streamed_text = _ans_sent
+                    else:
+                        streamed_text += _ans_sent
                     completion_tokens += int(_ans_ct or 0)
                     # The visible-answer pass now owns the terminal status. The
                     # first reasoning pass commonly ended with finish=length by
@@ -21095,6 +21230,12 @@ async def stream_responses_api(
                     # response.incomplete even when this pass stopped cleanly.
                     if _ans_last_out is not None:
                         last_output = _ans_last_out
+                elif _partial_visible_answer_repair:
+                    logger.warning(
+                        "%s direct answer diverged from the already-streamed "
+                        "Responses prefix; preserving the honest incomplete terminal",
+                        _answer_family,
+                    )
             except Exception as e:
                 logger.error(
                     "%s visible answer pass failed for %s: %s",

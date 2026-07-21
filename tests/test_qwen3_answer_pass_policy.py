@@ -91,6 +91,84 @@ class _Qwen35AutoBudgetOverrunEngine:
         )
 
 
+class _Qwen35PartialVisiblePartitionEngine:
+    """First pass crosses into content before its Auto reasoning share expires."""
+
+    tokenizer = SimpleNamespace(has_thinking=False)
+    is_mllm = False
+    preserve_native_tool_format = False
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def stream_chat(self, *, messages, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("enable_thinking") is False:
+            text = ""
+            for index, delta in enumerate(
+                ("BANANA8426\n", "Q35-PARTIAL-", "DONE"), start=1
+            ):
+                text += delta
+                yield GenerationOutput(
+                    text=text,
+                    new_text=delta,
+                    tokens=[],
+                    prompt_tokens=11,
+                    completion_tokens=index,
+                    finished=index == 3,
+                    finish_reason="stop" if index == 3 else None,
+                )
+            return
+
+        reasoning = "<think>private planning</think>"
+        visible = "BANANA8426\nQ35-PARTIAL-"
+        yield GenerationOutput(
+            text=reasoning,
+            new_text=reasoning,
+            tokens=[],
+            prompt_tokens=17,
+            completion_tokens=max(1, int(kwargs["max_tokens"]) - 1),
+            finished=False,
+            finish_reason=None,
+        )
+        yield GenerationOutput(
+            text=reasoning + visible,
+            new_text=visible,
+            tokens=[],
+            prompt_tokens=17,
+            completion_tokens=int(kwargs["max_tokens"]),
+            finished=True,
+            finish_reason="length",
+        )
+
+    async def chat(self, *, messages, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("enable_thinking") is False:
+            visible = "BANANA8426\nQ35-PARTIAL-DONE"
+            return GenerationOutput(
+                text=visible,
+                raw_text=visible,
+                tokens=[],
+                prompt_tokens=11,
+                completion_tokens=3,
+                finished=True,
+                finish_reason="stop",
+            )
+
+        reasoning = "<think>private planning</think>"
+        visible = "BANANA8426\nQ35-PARTIAL-"
+        raw = reasoning + visible
+        return GenerationOutput(
+            text=raw,
+            raw_text=raw,
+            tokens=[],
+            prompt_tokens=17,
+            completion_tokens=int(kwargs["max_tokens"]),
+            finished=True,
+            finish_reason="length",
+        )
+
+
 class _Qwen35SuppressedRepeatToolEngine:
     """Post-tool reasoning emits a forbidden second native call, then direct answer."""
 
@@ -704,6 +782,121 @@ async def test_qwen35_responses_auto_blank_budget_still_runs_floor_answer_pass(
         event["response"] for event in events if event.get("type") == "response.completed"
     )
     assert completed["output"][0]["content"][0]["text"] == "Q35-VISIBLE-DONE"
+
+
+@pytest.mark.asyncio
+async def test_qwen35_chat_auto_continues_partial_visible_prefix_without_duplication(
+    monkeypatch,
+):
+    _install_qwen_policy(monkeypatch, "qwen3_5")
+    engine = _Qwen35PartialVisiblePartitionEngine()
+    messages = [Message(role="user", content="read the marker")]
+    request = ChatCompletionRequest(
+        model="dealignai/Qwen3.6-27B-MXFP4-CRACK-MTP",
+        messages=messages,
+        stream=True,
+        enable_thinking=True,
+        max_tokens=512,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    chunks = []
+    async for chunk in server.stream_chat_completion(
+        engine,
+        messages,
+        request,
+        fastapi_request=None,
+        max_tokens=512,
+    ):
+        chunks.append(chunk)
+
+    assert engine.calls[0]["max_tokens"] == server._auto_thinking_pass_budget(512)
+    assert engine.calls[1]["enable_thinking"] is False
+    assert engine.calls[1]["max_tokens"] == 256
+    events = _data_events(chunks)
+    content_deltas = [
+        choice["delta"].get("content", "")
+        for event in events
+        for choice in event.get("choices", [])
+        if choice.get("delta", {}).get("content")
+    ]
+    assert "".join(content_deltas) == "BANANA8426\nQ35-PARTIAL-DONE"
+    assert content_deltas.count("BANANA8426\nQ35-PARTIAL-") == 1
+    finish_reasons = [
+        choice.get("finish_reason")
+        for event in events
+        for choice in event.get("choices", [])
+        if choice.get("finish_reason")
+    ]
+    assert finish_reasons == ["stop"]
+
+
+@pytest.mark.asyncio
+async def test_qwen35_nonstream_chat_uses_completed_answer_pass_terminal(
+    monkeypatch,
+):
+    """A completed direct-answer pass owns non-stream Chat/Ollama status too."""
+    _install_qwen_policy(monkeypatch, "qwen3_5")
+    engine = _Qwen35PartialVisiblePartitionEngine()
+    monkeypatch.setattr(server, "_engine", engine)
+    monkeypatch.setattr(
+        server, "_served_model_name", "dealignai/Qwen3.6-27B-MXFP4-CRACK-MTP"
+    )
+    request = ChatCompletionRequest(
+        model="dealignai/Qwen3.6-27B-MXFP4-CRACK-MTP",
+        messages=[Message(role="user", content="read the marker")],
+        stream=False,
+        enable_thinking=True,
+        max_tokens=512,
+    )
+
+    response = await server.create_chat_completion(request, fastapi_request=None)
+
+    assert engine.calls[0]["max_tokens"] == server._auto_thinking_pass_budget(512)
+    assert engine.calls[1]["enable_thinking"] is False
+    assert engine.calls[1]["max_tokens"] == 256
+    assert response.choices[0].message.content == "BANANA8426\nQ35-PARTIAL-DONE"
+    assert response.choices[0].finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_qwen35_responses_auto_continues_partial_visible_prefix_without_duplication(
+    monkeypatch,
+):
+    _install_qwen_policy(monkeypatch, "qwen3_5")
+    engine = _Qwen35PartialVisiblePartitionEngine()
+    request = ResponsesRequest(
+        model="dealignai/Qwen3.6-27B-MXFP4-CRACK-MTP",
+        input="read the marker",
+        stream=True,
+        enable_thinking=True,
+        max_output_tokens=512,
+    )
+
+    chunks = []
+    async for chunk in server.stream_responses_api(
+        engine,
+        [{"role": "user", "content": "read the marker"}],
+        request,
+        fastapi_request=None,
+        max_tokens=512,
+    ):
+        chunks.append(chunk)
+
+    assert engine.calls[0]["max_tokens"] == server._auto_thinking_pass_budget(512)
+    assert engine.calls[1]["enable_thinking"] is False
+    assert engine.calls[1]["max_tokens"] == 256
+    events = _data_events(chunks)
+    content_deltas = [
+        event["delta"]
+        for event in events
+        if event.get("type") == "response.output_text.delta"
+    ]
+    assert "".join(content_deltas) == "BANANA8426\nQ35-PARTIAL-DONE"
+    completed = next(
+        event["response"] for event in events if event.get("type") == "response.completed"
+    )
+    assert completed["output_text"] == "BANANA8426\nQ35-PARTIAL-DONE"
 
 
 @pytest.mark.asyncio

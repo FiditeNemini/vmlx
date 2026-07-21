@@ -459,6 +459,37 @@ describe("Ollama gateway request translation behavior", () => {
     ]);
   });
 
+  it("forwards Ollama video and audio extensions as typed media content parts", async () => {
+    backend = await startCaptureBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    await postJson(`http://127.0.0.1:${started.port}/api/chat`, {
+      model: "hy3-model",
+      stream: false,
+      messages: [{
+        role: "user",
+        content: "Inspect both.",
+        videos: ["AAAAIGZ0eXA="],
+        audio: "SUQz",
+      }],
+    });
+
+    expect(backend.paths).toEqual(["/v1/chat/completions"]);
+    expect(backend.bodies[0].messages).toEqual([{
+      role: "user",
+      content: [
+        { type: "text", text: "Inspect both." },
+        { type: "video_url", video_url: {
+          url: "data:video/mp4;base64,AAAAIGZ0eXA=",
+        } },
+        { type: "audio_url", audio_url: {
+          url: "data:audio/wav;base64,SUQz",
+        } },
+      ],
+    }]);
+  });
+
   it("omits malformed Ollama num_predict values instead of poisoning max_tokens", async () => {
     backend = await startCaptureBackend();
     const started = await startGateway(backend.port);

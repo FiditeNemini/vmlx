@@ -327,7 +327,7 @@ def _convert_user_message(msg: dict) -> Message | list[Message]:
         # Anthropic puts tool results in user messages; OpenAI uses role="tool"
         result_messages: list[Message] = []
         content_parts: list[dict] = []
-        has_images = False
+        has_media = False
 
         for block in content:
             if not isinstance(block, dict):
@@ -360,27 +360,71 @@ def _convert_user_message(msg: dict) -> Message | list[Message]:
                         "type": "image_url",
                         "image_url": {"url": f"data:{media_type};base64,{data}"},
                     })
-                    has_images = True
+                    has_media = True
                 elif source.get("type") == "url":
                     content_parts.append({
                         "type": "image_url",
                         "image_url": {"url": source.get("url", "")},
                     })
-                    has_images = True
+                    has_media = True
+            elif block_type in {"video", "video_url"}:
+                # vMLX extension: Anthropic has no native video block today,
+                # but local multimodal clients use the same source envelope as
+                # image blocks. Preserve it for the shared Chat media path.
+                source = block.get("source", {})
+                if source.get("type") == "base64":
+                    media_type = source.get("media_type", "video/mp4")
+                    data = source.get("data", "")
+                    content_parts.append({
+                        "type": "video_url",
+                        "video_url": {"url": f"data:{media_type};base64,{data}"},
+                    })
+                    has_media = True
+                elif source.get("type") == "url":
+                    content_parts.append({
+                        "type": "video_url",
+                        "video_url": {"url": source.get("url", "")},
+                    })
+                    has_media = True
+            elif block_type in {"audio", "input_audio"}:
+                # vMLX extension matching the image/video source envelope.
+                # Base64 audio uses the OpenAI input_audio shape so native
+                # audio towers receive data plus the declared format.
+                source = block.get("source", {})
+                if source.get("type") == "base64":
+                    media_type = str(source.get("media_type", "audio/wav"))
+                    audio_format = media_type.split("/", 1)[-1].lower()
+                    audio_format = {"mpeg": "mp3", "x-wav": "wav"}.get(
+                        audio_format, audio_format
+                    )
+                    content_parts.append({
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": source.get("data", ""),
+                            "format": audio_format,
+                        },
+                    })
+                    has_media = True
+                elif source.get("type") == "url":
+                    content_parts.append({
+                        "type": "audio_url",
+                        "audio_url": {"url": source.get("url", "")},
+                    })
+                    has_media = True
 
         if result_messages:
             # Return all tool result messages as a list
             # Caller (to_chat_completion) flattens these into the messages array
             if content_parts:
-                # Text/images + tool results: prepend content as user message
-                user_content: Any = content_parts if has_images else "\n".join(
+                # Text/media + tool results: prepend content as user message
+                user_content: Any = content_parts if has_media else "\n".join(
                     p["text"] for p in content_parts if p["type"] == "text"
                 )
                 return [Message(role="user", content=user_content)] + result_messages
             return result_messages if len(result_messages) > 1 else result_messages[0]
 
         # No tool results — return as user message
-        if has_images:
+        if has_media:
             return Message(role="user", content=content_parts)
         text = "\n".join(p["text"] for p in content_parts if p["type"] == "text")
         return Message(role="user", content=text if text else "")

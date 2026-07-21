@@ -317,6 +317,48 @@ class TestMultimodalConversion:
         content = chat_req.messages[0].content
         assert isinstance(content, list)
 
+    def test_base64_video_extension(self):
+        req = AnthropicRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": [
+                {"type": "video", "source": {
+                    "type": "base64",
+                    "media_type": "video/mp4",
+                    "data": "AAAAIGZ0eXA=",
+                }},
+                {"type": "text", "text": "Read the marker."},
+            ]}],
+        )
+        chat_req = to_chat_completion(req)
+        content = chat_req.messages[0].content
+        assert isinstance(content, list)
+        video = content[0] if isinstance(content[0], dict) else content[0].model_dump(exclude_none=True)
+        assert video == {
+            "type": "video_url",
+            "video_url": {"url": "data:video/mp4;base64,AAAAIGZ0eXA="},
+        }
+
+    def test_base64_audio_extension(self):
+        req = AnthropicRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": [
+                {"type": "audio", "source": {
+                    "type": "base64",
+                    "media_type": "audio/mpeg",
+                    "data": "SUQz",
+                }},
+                {"type": "text", "text": "Transcribe it."},
+            ]}],
+        )
+        chat_req = to_chat_completion(req)
+        content = chat_req.messages[0].content
+        assert isinstance(content, list)
+        audio = content[0] if isinstance(content[0], dict) else content[0].model_dump(exclude_none=True)
+        assert audio == {
+            "type": "input_audio",
+            "input_audio": {"data": "SUQz", "format": "mp3"},
+        }
+
 
 # ─── Response Conversion Tests ───────────────────────────────────────
 

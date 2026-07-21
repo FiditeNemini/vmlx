@@ -1258,20 +1258,57 @@ export class ApiGateway extends EventEmitter {
   private translateOllamaMessages(messages: any): any[] {
     if (!Array.isArray(messages)) return [];
     return messages.map((msg: any) => {
-      if (!msg || !Array.isArray(msg.images) || msg.images.length === 0) {
+      const images = Array.isArray(msg?.images)
+        ? msg.images
+        : typeof msg?.images === "string"
+          ? [msg.images]
+          : [];
+      const videos = Array.isArray(msg?.videos)
+        ? msg.videos
+        : typeof msg?.videos === "string"
+          ? [msg.videos]
+          : [];
+      const rawAudio = msg?.audio ?? msg?.audios;
+      const audio = Array.isArray(rawAudio)
+        ? rawAudio
+        : typeof rawAudio === "string"
+          ? [rawAudio]
+          : [];
+      if (!msg || (images.length === 0 && videos.length === 0 && audio.length === 0)) {
         return msg;
       }
       const parts: any[] = [];
       const text = msg.content || "";
       if (text) parts.push({ type: "text", text });
-      for (const img of msg.images) {
+      for (const img of images) {
         if (typeof img !== "string") continue;
         const url = img.startsWith("data:")
           ? img
           : `data:image/png;base64,${img}`;
         parts.push({ type: "image_url", image_url: { url } });
       }
-      const { images: _images, content: _content, ...rest } = msg;
+      for (const video of videos) {
+        if (typeof video !== "string") continue;
+        const url = video.startsWith("data:")
+          ? video
+          : `data:video/mp4;base64,${video}`;
+        parts.push({ type: "video_url", video_url: { url } });
+      }
+      for (const audioItem of audio) {
+        if (typeof audioItem !== "string") continue;
+        const url = audioItem.startsWith("data:")
+          ? audioItem
+          : `data:audio/wav;base64,${audioItem}`;
+        parts.push({ type: "audio_url", audio_url: { url } });
+      }
+      const {
+        images: _images,
+        videos: _videos,
+        audio: _audio,
+        audios: _audios,
+        content: _content,
+        ...rest
+      } = msg;
       return {
         ...rest,
         role: msg.role || "user",

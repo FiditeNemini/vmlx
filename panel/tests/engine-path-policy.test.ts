@@ -52,4 +52,29 @@ describe('engine path policy', () => {
     expect(moduleVersion).toBeGreaterThan(moduleImport)
     expect(metadataFallback).toBeGreaterThan(moduleVersion)
   })
+
+  it('probes the same source root that development session launches pin on PYTHONPATH', () => {
+    const source = readFileSync('src/main/engine-manager.ts', 'utf8')
+    const checkInstallation = source.slice(
+      source.indexOf('export async function checkEngineInstallation'),
+      source.indexOf('function detectInstallMethod'),
+    )
+    const bundledSource = source.slice(
+      source.indexOf('function getBundledSourcePath'),
+      source.indexOf('function buildInstallCommand'),
+    )
+
+    expect(source).toContain('function getDevelopmentSourceRoot(): string | null')
+    expect(source).toContain('if (app.isPackaged) return null')
+    expect(checkInstallation).toContain(
+      'const developmentSourceRoot = getDevelopmentSourceRoot()',
+    )
+    expect(checkInstallation).toContain(
+      'getVersionFromBinary(path, developmentSourceRoot)',
+    )
+    expect(checkInstallation).toContain(
+      "PYTHONPATH: developmentSourceRoot || ''",
+    )
+    expect(bundledSource).toContain('return getDevelopmentSourceRoot()')
+  })
 })

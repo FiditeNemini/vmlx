@@ -88,6 +88,23 @@ export function getBundledPythonPath(): string | null {
 }
 
 /**
+ * Return the source tree a development session will actually place on
+ * PYTHONPATH. Packaged builds intentionally return null: their signed bundled
+ * Python is authoritative and must never be shadowed by source files.
+ */
+function getDevelopmentSourceRoot(): string | null {
+  if (app.isPackaged) return null
+  const sourceRoot = join(app.getAppPath(), '..')
+  if (
+    existsSync(join(sourceRoot, 'pyproject.toml'))
+    && existsSync(join(sourceRoot, 'vmlx_engine', '__init__.py'))
+  ) {
+    return sourceRoot
+  }
+  return null
+}
+
+/**
  * Read the installed vmlx-engine version from filesystem metadata without
  * spawning Python (which can take >10s on cold boot and time out, falsely
  * reporting the engine as missing). Looks up the first `vmlx*.dist-info` or
@@ -164,11 +181,16 @@ export async function checkEngineInstallation(): Promise<EngineInstallation> {
     console.log('[Engine Manager] Bundled Python present but vmlx_engine dist-info missing; trying system')
   }
 
+  // Match development session launch semantics. sessions.ts pins this source
+  // root when it reuses dependencies from a sibling/system engine shim; the
+  // displayed version must describe the code that shim will actually import.
+  const developmentSourceRoot = getDevelopmentSourceRoot()
+
   // 1. Check common paths
   for (const path of SEARCH_PATHS) {
     if (existsSync(path)) {
       console.log(`[Engine Manager] Found at: ${path}`)
-      const version = await getVersionFromBinary(path)
+      const version = await getVersionFromBinary(path, developmentSourceRoot)
       const method = detectInstallMethod(path)
       return { installed: true, path, version, method }
     }
@@ -187,7 +209,7 @@ export async function checkEngineInstallation(): Promise<EngineInstallation> {
       const path = result.stdout.trim()
       if (path && existsSync(path)) {
         console.log(`[Engine Manager] Found in PATH: ${path}`)
-        const version = await getVersionFromBinary(path)
+        const version = await getVersionFromBinary(path, developmentSourceRoot)
         const method = detectInstallMethod(path)
         return { installed: true, path, version, method }
       }
@@ -198,7 +220,7 @@ export async function checkEngineInstallation(): Promise<EngineInstallation> {
       const path = result.stdout.trim()
       if (path && existsSync(path)) {
         console.log(`[Engine Manager] Found in login-shell PATH: ${path}`)
-        const version = await getVersionFromBinary(path)
+        const version = await getVersionFromBinary(path, developmentSourceRoot)
         const method = detectInstallMethod(path)
         return { installed: true, path, version, method }
       }
@@ -229,7 +251,7 @@ export async function checkEngineInstallation(): Promise<EngineInstallation> {
 
     if (path) {
       console.log(`[Engine Manager] Found in PATH: ${path}`)
-      const version = await getVersionFromBinary(path)
+      const version = await getVersionFromBinary(path, developmentSourceRoot)
       const method = detectInstallMethod(path)
       return { installed: true, path, version, method }
     }
@@ -245,7 +267,10 @@ export async function checkEngineInstallation(): Promise<EngineInstallation> {
 /**
  * Get version from vmlx-engine binary
  */
-async function getVersionFromBinary(path: string): Promise<string> {
+async function getVersionFromBinary(
+  path: string,
+  developmentSourceRoot: string | null = null,
+): Promise<string> {
   // Prefer the imported module's version over distribution metadata. Editable
   // source checkouts can legitimately have stale dist-info after a version bump
   // while the console-script shim already imports the current source tree. Using
@@ -271,7 +296,7 @@ async function getVersionFromBinary(path: string): Promise<string> {
             ...process.env,
             PYTHONDONTWRITEBYTECODE: '1',
             PYTHONNOUSERSITE: '1',
-            PYTHONPATH: '',
+            PYTHONPATH: developmentSourceRoot || '',
           },
         },
       )
@@ -396,13 +421,7 @@ function getBundledSourcePath(): string | null {
     }
   }
 
-  // Dev mode: monorepo root is one level up from panel/
-  const devPath = join(app.getAppPath(), '..')
-  if (existsSync(join(devPath, 'pyproject.toml')) && existsSync(join(devPath, 'vmlx_engine'))) {
-    return devPath
-  }
-
-  return null
+  return getDevelopmentSourceRoot()
 }
 
 /**

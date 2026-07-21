@@ -1730,6 +1730,8 @@ export class SessionManager extends EventEmitter {
       config,
       'isMultimodal',
     )
+    const toolParserWasAuto = config.toolCallParser == null || config.toolCallParser === 'auto'
+    const reasoningParserWasAuto = config.reasoningParser == null || config.reasoningParser === 'auto'
     config.modelPath = session.modelPath
     config.host = session.host
     config.port = session.port
@@ -1922,6 +1924,12 @@ export class SessionManager extends EventEmitter {
           const persistedConfig = { ...config }
           if (!hadExplicitMultimodalOverride) {
             delete persistedConfig.isMultimodal
+          }
+          if (toolParserWasAuto) {
+            persistedConfig.toolCallParser = 'auto'
+          }
+          if (reasoningParserWasAuto) {
+            persistedConfig.reasoningParser = 'auto'
           }
           db.updateSession(sessionId, { config: JSON.stringify(persistedConfig) })
         }

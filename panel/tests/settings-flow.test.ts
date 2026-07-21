@@ -2763,7 +2763,7 @@ describe('Default IP and New Settings', () => {
         expect(updateBlock).toContain('Object.prototype.hasOwnProperty.call(currentConfig, k)')
     })
 
-    it('does not materialize a detected multimodal value into a persisted Auto override at Start', () => {
+    it('does not materialize detected multimodal or parser values into persisted Auto overrides at Start', () => {
         const fs = require('fs')
         const sessions = fs.readFileSync('src/main/sessions.ts', 'utf-8')
         const start = sessions.slice(
@@ -2775,6 +2775,10 @@ describe('Default IP and New Settings', () => {
         expect(start).toContain('const persistedConfig = { ...config }')
         expect(start).toContain('if (!hadExplicitMultimodalOverride)')
         expect(start).toContain('delete persistedConfig.isMultimodal')
+        expect(start).toContain("const toolParserWasAuto = config.toolCallParser == null || config.toolCallParser === 'auto'")
+        expect(start).toContain("const reasoningParserWasAuto = config.reasoningParser == null || config.reasoningParser === 'auto'")
+        expect(start).toContain("persistedConfig.toolCallParser = 'auto'")
+        expect(start).toContain("persistedConfig.reasoningParser = 'auto'")
         expect(start).toContain('db.updateSession(sessionId, { config: JSON.stringify(persistedConfig) })')
     })
 

@@ -3054,6 +3054,11 @@ def _bundle_declares_native_audio(bundle_path: str | None) -> bool:
         return True
     if model_type == "gemma4_unified":
         return True
+    if model_type == "gemma4":
+        # Vision-only Gemma 4 bundles may retain a tokenizer-level
+        # ``audio_token_id`` even when they contain no audio configuration or
+        # audio weights. A reserved token is not a runnable audio tower.
+        return False
     for obj in (cfg, cfg.get("text_config")):
         if not isinstance(obj, dict):
             continue

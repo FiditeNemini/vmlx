@@ -5035,6 +5035,29 @@ class TestMediaDiagnostics:
 
         assert server._loaded_runtime_modalities() == ["text", "vision"]
 
+    def test_gemma4_runtime_modalities_do_not_infer_audio_from_token_only_config(
+        self, monkeypatch, tmp_path
+    ):
+        import vmlx_engine.server as server
+
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "gemma4",
+                    "vision_config": {"model_type": "gemma4_vision"},
+                    "audio_config": None,
+                    "audio_token_id": 258881,
+                }
+            )
+        )
+
+        monkeypatch.setattr(server, "_engine", SimpleNamespace(is_mllm=True))
+        monkeypatch.setattr(server, "_model_path", str(tmp_path))
+        monkeypatch.setattr(server, "_model_name", "gemma4-audio-token-only-test")
+        monkeypatch.setattr(server, "_loaded_omni_modalities", lambda: None)
+
+        assert server._loaded_runtime_modalities() == ["text", "vision"]
+
     def test_gemma4_runtime_modalities_respect_audio_false_capability(
         self, monkeypatch, tmp_path
     ):

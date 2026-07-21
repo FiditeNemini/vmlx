@@ -721,15 +721,6 @@ _FALLBACK_TOP_P = 1.0
 _FAMILY_FALLBACK_DEFAULTS: dict[str, tuple[float | None, float | None, float | None]] = {
 }
 
-# Ling/Bailing bundles on this host omit top_k metadata, but live multilingual
-# audit shows unconstrained stochastic sampling can leak CJK into non-CJK
-# prompts. Keep the bounded fallback at request resolution so it is logged in
-# resolved kwargs and remains overrideable by request/CLI/bundle metadata.
-_FAMILY_TOP_K_DEFAULTS: dict[str, int] = {
-    "ling": 20,
-}
-
-
 def _family_fallback_for(model_name: str = "") -> tuple[float | None, float | None, float | None]:
     """Look up family-specific fallback (temp, top_p, rep_pen). All-None tuple
     when the family has no override. Resolves via model_config_registry — uses
@@ -1620,7 +1611,7 @@ def _resolve_top_p(request_value: float | None, model_name: str = "") -> float:
 
 
 def _resolve_top_k(request_value: int | None, model_name: str = "") -> int:
-    """Resolve top_k: request > explicit CLI/session > bundle > family > disabled."""
+    """Resolve top_k: request > explicit CLI/session > bundle > disabled."""
     if request_value is not None:
         return max(0, int(request_value))
     if _default_top_k is not None:
@@ -1636,9 +1627,9 @@ def _resolve_top_k(request_value: int | None, model_name: str = "") -> int:
         return max(0, int(v))
     if _generation_config_declares_greedy_sampling(model_name):
         return 0
-    family = _model_family_for_defaults(model_name)
-    if family in _FAMILY_TOP_K_DEFAULTS:
-        return max(0, int(_FAMILY_TOP_K_DEFAULTS[family]))
+    # Do not invent family-only sampler values. The Electron controls cannot
+    # truthfully display an engine-only fallback, and official bundle defaults
+    # must remain authoritative.
     return 0
 
 

@@ -198,13 +198,10 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   }
 
   const handleReset = async () => {
-    // Re-read model's generation_config.json for recommended inference defaults
-    // Use atomic upsert (INSERT OR REPLACE) instead of clear-then-set
-    let genDefaults: Awaited<ReturnType<typeof window.api.models.getGenerationDefaults>> | null = null
-    try {
-      genDefaults = await window.api.models.getGenerationDefaults(session.modelPath)
-    } catch (_) {}
-    const defaults: ChatOverrides = buildChatSettingsResetOverrides(overrides, genDefaults) as ChatOverrides
+    // Reset sampling fields to inheritance, not a sticky copy of today's bundle
+    // values. The visible controls continue to render modelDefaults, while the
+    // request omits the fields so the engine applies the live bundle contract.
+    const defaults: ChatOverrides = buildChatSettingsResetOverrides(overrides) as ChatOverrides
     await window.api.chat.setOverrides(chatId, defaults)
     setOverrides(defaults)
     setDirty(false)
@@ -638,7 +635,10 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
             <SliderField
               label={t('chat.settings.topK')}
               value={Math.max(0, overrides.topK ?? modelDefaults.topK ?? 0)}
-              onChange={v => update('topK', v === 0 ? undefined : v)}
+              // Zero is an explicit and useful override. Clearing it here made
+              // a bundle top-k default immediately snap back on screen and in
+              // the next request, so users could not actually disable top-k.
+              onChange={v => update('topK', v)}
               min={0} max={200} step={1}
               help={t('chat.settings.topKHelp')}
               format={formatTopK}
@@ -655,7 +655,9 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
             <SliderField
               label={t('chat.settings.repetitionPenalty')}
               value={overrides.repeatPenalty ?? modelDefaults.repeatPenalty ?? 1.0}
-              onChange={v => update('repeatPenalty', v === 1.0 ? undefined : v)}
+              // 1.0 is an explicit neutral override, distinct from inheriting a
+              // bundle-declared repetition penalty. Reset clears inheritance.
+              onChange={v => update('repeatPenalty', v)}
               min={1.0} max={2.0} step={0.05}
               help={t('chat.settings.repetitionPenaltyHelp')}
             />

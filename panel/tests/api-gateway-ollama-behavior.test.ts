@@ -399,7 +399,7 @@ describe("Ollama gateway request translation behavior", () => {
     ]);
   });
 
-  it("omits unset and disabled sampling sentinels without dropping explicit overrides", async () => {
+  it("omits unset and negative sentinels while forwarding explicit neutral sampling overrides", async () => {
     backend = await startCaptureBackend();
     const started = await startGateway(backend.port);
     gateway = started.gateway;
@@ -444,7 +444,7 @@ describe("Ollama gateway request translation behavior", () => {
     expect(backend.bodies[1]).not.toHaveProperty("max_tokens");
     expect(backend.bodies[1]).not.toHaveProperty("top_k");
     expect(backend.bodies[2]).not.toHaveProperty("max_tokens");
-    expect(backend.bodies[2]).not.toHaveProperty("top_k");
+    expect(backend.bodies[2].top_k).toBe(0);
     expect(backend.bodies[3].max_tokens).toBe(12);
     expect(backend.bodies[3].temperature).toBe(0.4);
     expect(backend.bodies[3].top_p).toBe(0.82);

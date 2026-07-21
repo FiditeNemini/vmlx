@@ -100,7 +100,7 @@ function buildRequestBody(
         if (outputBudget) obj.max_output_tokens = outputBudget
         if (stopSequences) obj.stop = stopSequences
         const effectiveTopK = overrides?.topK
-        if (effectiveTopK != null && effectiveTopK > 0) obj.top_k = effectiveTopK
+        if (effectiveTopK != null) obj.top_k = effectiveTopK
         if (overrides?.minP != null) obj.min_p = overrides.minP
         if (overrides?.repeatPenalty != null) obj.repetition_penalty = overrides.repeatPenalty
         if (tools) {
@@ -132,7 +132,7 @@ function buildRequestBody(
         if (outputBudget) obj.max_tokens = outputBudget
         if (stopSequences) obj.stop = stopSequences
         const effectiveTopK = overrides?.topK
-        if (effectiveTopK != null && effectiveTopK > 0) obj.top_k = effectiveTopK
+        if (effectiveTopK != null) obj.top_k = effectiveTopK
         if (overrides?.minP != null) obj.min_p = overrides.minP
         if (overrides?.repeatPenalty != null) obj.repetition_penalty = overrides.repeatPenalty
         if (tools) {
@@ -197,14 +197,14 @@ describe('buildRequestBody — Chat Completions API', () => {
         expect(body.top_p).toBe(0.5)
     })
 
-    it('includes top_k when > 0', () => {
+    it('includes a positive top_k override', () => {
         const body = buildRequestBody('completions', 'gpt-4', messages, { topK: 40 }, false, false)
         expect(body.top_k).toBe(40)
     })
 
-    it('omits top_k when explicitly 0', () => {
-        const body = buildRequestBody('completions', 'gpt-4', messages, { topK: 0 }, false, false)
-        expect(body.top_k).toBeUndefined()
+    it.each(['completions', 'responses'] as const)('forwards explicit top_k=0 for %s so bundle defaults are disabled', wireApi => {
+        const body = buildRequestBody(wireApi, 'gpt-4', messages, { topK: 0 }, false, false)
+        expect(body.top_k).toBe(0)
     })
 
     it('omits top_k when unset so the engine uses bundle metadata or disabled fallback', () => {

@@ -1704,8 +1704,16 @@ describe('Generation Defaults', () => {
     it('chat settings default to neutral repeat penalty when bundle has no value', () => {
         const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
         expect(source).toContain('value={overrides.repeatPenalty ?? modelDefaults.repeatPenalty ?? 1.0}')
-        expect(source).toContain("onChange={v => update('repeatPenalty', v === 1.0 ? undefined : v)}")
+        expect(source).toContain("onChange={v => update('repeatPenalty', v)}")
         expect(source).not.toContain('value={overrides.repeatPenalty ?? 1.1}')
+    })
+
+    it('preserves explicit neutral top-k and repetition overrides instead of snapping to bundle defaults', () => {
+        const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
+        expect(source).toContain("onChange={v => update('topK', v)}")
+        expect(source).toContain("onChange={v => update('repeatPenalty', v)}")
+        expect(source).not.toContain("update('topK', v === 0 ? undefined : v)")
+        expect(source).not.toContain("update('repeatPenalty', v === 1.0 ? undefined : v)")
     })
 
     it('chat settings expose per-chat max tokens without hidden DSV4 floors', () => {

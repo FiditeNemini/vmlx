@@ -55,7 +55,7 @@ export const CHAT_SETTINGS_RESET_PRESERVE_KEYS = [
 
 export function buildChatSettingsResetOverrides<T extends ChatSettingsResetOverrides>(
   overrides: T,
-  genDefaults?: ChatSettingsGenerationDefaults | null,
+  _genDefaults?: ChatSettingsGenerationDefaults | null,
 ): Partial<T> {
   const reset: Partial<T> = {}
 
@@ -66,11 +66,11 @@ export function buildChatSettingsResetOverrides<T extends ChatSettingsResetOverr
     }
   }
 
-  if (genDefaults?.temperature != null) reset.temperature = genDefaults.temperature as T['temperature']
-  if (genDefaults?.topP != null) reset.topP = genDefaults.topP as T['topP']
-  if (genDefaults?.topK != null) reset.topK = genDefaults.topK as T['topK']
-  if (genDefaults?.minP != null) reset.minP = genDefaults.minP as T['minP']
-  if (genDefaults?.repeatPenalty != null) reset.repeatPenalty = genDefaults.repeatPenalty as T['repeatPenalty']
+  // Model sampling defaults are display/runtime inheritance, not per-chat
+  // overrides. Persisting a copy here makes Reset look correct only until the
+  // bundle changes, then silently sends stale values ahead of the new config.
+  // Leave all sampler fields absent; ChatSettings renders the current bundle
+  // defaults and the engine resolves the same live metadata for the request.
   // Keep max_new_tokens model-owned. Saving it as a per-chat maxTokens
   // override makes the UI enforce a sticky output cap even though the server
   // can resolve the same bundle default when the request omits max_tokens.

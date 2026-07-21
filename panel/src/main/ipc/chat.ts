@@ -1935,8 +1935,9 @@ export function registerChatHandlers(
             };
             if (stopSequences) obj.stop = stopSequences;
             const effectiveTopK = overrides?.topK;
-            if (effectiveTopK != null && effectiveTopK > 0)
-              obj.top_k = effectiveTopK;
+            // Zero is an explicit disable override. Omitting it would make the
+            // engine re-inherit a non-zero bundle/default top_k.
+            if (effectiveTopK != null) obj.top_k = effectiveTopK;
             // Explicit zero disables a non-zero bundle min_p default. Only an
             // absent override means inherit the model/server default.
             if (overrides?.minP != null)
@@ -2018,8 +2019,9 @@ export function registerChatHandlers(
             };
             if (stopSequences) obj.stop = stopSequences;
             const effectiveTopK = overrides?.topK;
-            if (effectiveTopK != null && effectiveTopK > 0)
-              obj.top_k = effectiveTopK;
+            // Preserve explicit Off across both wire APIs; only undefined means
+            // inherit the current model/server default.
+            if (effectiveTopK != null) obj.top_k = effectiveTopK;
             if (overrides?.minP != null)
               obj.min_p = overrides.minP;
             // Always send when explicitly set; 1.0 can be an intentional

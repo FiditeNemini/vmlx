@@ -6,7 +6,7 @@ import {
 } from '../src/shared/chatSettingsResetPolicy'
 
 describe('chat settings reset policy', () => {
-  it('keeps tool and coding controls but clears sticky prompt, api, reasoning, stop, and stale sampler fields', () => {
+  it('keeps tool and coding controls but returns all inference fields to model inheritance', () => {
     const result = buildChatSettingsResetOverrides(
       {
         temperature: 1,
@@ -45,10 +45,6 @@ describe('chat settings reset policy', () => {
     )
 
     expect(result).toMatchObject({
-      temperature: 0.42,
-      topP: 0.77,
-      topK: 33,
-      repeatPenalty: 1.07,
       workingDirectory: '/tmp/vmlx-tools',
       builtinToolsEnabled: true,
       webSearchEnabled: true,
@@ -68,7 +64,11 @@ describe('chat settings reset policy', () => {
     expect(result.stopSequences).toBeUndefined()
     expect(result.enableThinking).toBeUndefined()
     expect(result.reasoningEffort).toBeUndefined()
+    expect(result.temperature).toBeUndefined()
+    expect(result.topP).toBeUndefined()
+    expect(result.topK).toBeUndefined()
     expect(result.minP).toBeUndefined()
+    expect(result.repeatPenalty).toBeUndefined()
     expect(result.maxTokens).toBeUndefined()
     expect(result.maxThinkingTokens).toBeUndefined()
   })

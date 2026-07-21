@@ -2799,17 +2799,16 @@ class TestServerSamplingResolution:
         assert resolved == server._FALLBACK_MAX_OUTPUT_TOKENS_REASONING
         assert resolved < 32768  # still bounded — no historical 32K loop drift
 
-    def test_ling_bailing_omitted_top_k_uses_audited_family_cap(
+    def test_ling_bailing_omitted_top_k_stays_neutral_without_bundle_metadata(
         self,
         tmp_path,
         monkeypatch,
     ):
-        """Ling/Bailing needs a bounded stochastic sampler when metadata is absent.
+        """An undeclared family must not get an engine-only sampler default.
 
-        The live multilingual audit reproduces CJK leakage with temperature/top_p
-        sampling when the bundle omits top_k. Keep the policy at request
-        resolution, with request/CLI/bundle values still taking precedence, so
-        it is visible in resolved kwargs instead of hidden inside the sampler.
+        A non-zero top_k must come from the request, startup/session CLI, or the
+        bundle so the Electron controls and every API route expose the same
+        effective setting.
         """
         import vmlx_engine.server as server
 
@@ -2820,7 +2819,7 @@ class TestServerSamplingResolution:
         server._jang_sampling_defaults_cache.clear()
         server._generation_defaults_cache.clear()
 
-        assert server._resolve_top_k(None, str(tmp_path)) == 20
+        assert server._resolve_top_k(None, str(tmp_path)) == 0
         assert server._resolve_top_k(0, str(tmp_path)) == 0
         assert server._resolve_top_k(7, str(tmp_path)) == 7
 

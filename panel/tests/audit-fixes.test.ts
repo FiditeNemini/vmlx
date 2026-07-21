@@ -550,7 +550,7 @@ describe('chat overrides reset behavior', () => {
       { temperature: 0.7 }
     )
     expect(result.systemPrompt).toBeUndefined()
-    expect(result.temperature).toBe(0.7)
+    expect(result.temperature).toBeUndefined()
   })
 
   it('preserves working directory on reset', () => {
@@ -559,6 +559,7 @@ describe('chat overrides reset behavior', () => {
       { temperature: 0.5 }
     )
     expect(result.workingDirectory).toBe('/home/user/project')
+    expect(result.temperature).toBeUndefined()
   })
 
   it('preserves tool toggles on reset', () => {
@@ -570,13 +571,13 @@ describe('chat overrides reset behavior', () => {
     expect(result.webSearchEnabled).toBe(false)
   })
 
-  it('clears inference params and applies model defaults', () => {
+  it('clears inference params so current model defaults remain inherited', () => {
     const result = simulateReset(
       { temperature: 1.5, topP: 0.5, topK: 100, minP: 0.1, repeatPenalty: 2.0 },
       { temperature: 0.7, topP: 0.9 }
     )
-    expect(result.temperature).toBe(0.7)
-    expect(result.topP).toBe(0.9)
+    expect(result.temperature).toBe(undefined)
+    expect(result.topP).toBe(undefined)
     expect(result.topK).toBe(undefined)
     expect(result.minP).toBe(undefined)
     expect(result.repeatPenalty).toBe(undefined)

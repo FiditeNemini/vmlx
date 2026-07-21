@@ -173,6 +173,7 @@ declare global {
           folderId?: string,
           modelPath?: string,
         ) => Promise<any>;
+        ensureForModel: (title: string, modelPath: string) => Promise<any>;
         getAll: (folderId?: string) => Promise<any[]>;
         getByModel: (modelPath: string) => Promise<any[]>;
         get: (id: string) => Promise<any>;

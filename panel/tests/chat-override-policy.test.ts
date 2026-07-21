@@ -432,8 +432,8 @@ describe('new-chat override inheritance policy', () => {
       'utf8',
     )
     const createHandler = chatIpcSource.slice(
-      chatIpcSource.indexOf('"chat:create"'),
-      chatIpcSource.indexOf('ipcMain.handle("chat:getByModel"'),
+      chatIpcSource.indexOf('const createChatRecord'),
+      chatIpcSource.indexOf('ipcMain.handle(\n    "chat:create"'),
     )
     const defaultProfileBranch = createHandler.slice(
       createHandler.indexOf('if (defaultProfile)'),
@@ -453,8 +453,8 @@ describe('new-chat override inheritance policy', () => {
       'utf8',
     )
     const createHandler = chatIpcSource.slice(
-      chatIpcSource.indexOf('"chat:create"'),
-      chatIpcSource.indexOf('ipcMain.handle("chat:getByModel"'),
+      chatIpcSource.indexOf('const createChatRecord'),
+      chatIpcSource.indexOf('ipcMain.handle(\n    "chat:create"'),
     )
 
     expect(createHandler).toContain('.getRecentChats(100)')
@@ -462,5 +462,24 @@ describe('new-chat override inheritance policy', () => {
     expect(createHandler).toContain('db.getChatOverrides(candidate.id)')
     expect(createHandler).toContain('candidate.overrides !== undefined')
     expect(createHandler).not.toContain('db.getChatsByModelPath(modelPath)')
+  })
+
+  it('uses a single main-process ensure operation for the initial session chat', () => {
+    const chatIpcSource = fs.readFileSync(
+      path.resolve(__dirname, '../src/main/ipc/chat.ts'),
+      'utf8',
+    )
+    const sessionViewSource = fs.readFileSync(
+      path.resolve(__dirname, '../src/renderer/src/components/sessions/SessionView.tsx'),
+      'utf8',
+    )
+    const ensureHandler = chatIpcSource.slice(
+      chatIpcSource.indexOf('"chat:ensureForModel"'),
+      chatIpcSource.indexOf('ipcMain.handle("chat:getByModel"'),
+    )
+
+    expect(sessionViewSource).toContain('window.api.chat.ensureForModel(')
+    expect(ensureHandler).toContain('db.getChatsByModelPath(modelPath)[0]')
+    expect(ensureHandler).toContain('existing ?? createChatRecord(')
   })
 })

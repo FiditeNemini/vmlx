@@ -808,25 +808,22 @@ export function registerChatHandlers(
   });
 
   // Chats
-  ipcMain.handle(
-    "chat:create",
-    async (
-      _,
-      title: string,
-      modelId: string,
-      folderId?: string,
-      modelPath?: string,
-    ) => {
-      const chat: Chat = {
-        id: uuidv4(),
-        title,
-        folderId,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        modelId,
-        modelPath,
-      };
-      db.createChat(chat);
+  const createChatRecord = (
+    title: string,
+    modelId: string,
+    folderId?: string,
+    modelPath?: string,
+  ): Chat => {
+    const chat: Chat = {
+      id: uuidv4(),
+      title,
+      folderId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      modelId,
+      modelPath,
+    };
+    db.createChat(chat);
 
       // Do not seed new chats from per-model settings or sibling chats. A
       // clean chat starts with no overrides; the engine resolves bundle
@@ -881,7 +878,28 @@ export function registerChatHandlers(
         console.error("[CHAT] Failed to apply default profile:", e);
       }
 
-      return chat;
+    return chat;
+  };
+
+  ipcMain.handle(
+    "chat:create",
+    async (
+      _,
+      title: string,
+      modelId: string,
+      folderId?: string,
+      modelPath?: string,
+    ) => createChatRecord(title, modelId, folderId, modelPath),
+  );
+
+  // SessionView effects can be replayed in development. Keep the initial
+  // chat lookup and insert in one main-process turn so replay cannot create
+  // two empty chats for the same newly launched model.
+  ipcMain.handle(
+    "chat:ensureForModel",
+    async (_, title: string, modelPath: string) => {
+      const existing = db.getChatsByModelPath(modelPath)[0];
+      return existing ?? createChatRecord(title, "default", undefined, modelPath);
     },
   );
 

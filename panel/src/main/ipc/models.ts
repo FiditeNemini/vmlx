@@ -376,6 +376,59 @@ interface ModelInfo {
   size?: string;
   format?: "mlx" | "gguf" | "unknown";
   quantization?: string;
+  /** True when the local bundle contains an actual usable chat template. */
+  hasChatTemplate?: boolean;
+}
+
+async function chatTemplateValueHasContent(
+  value: unknown,
+  modelPath: string,
+): Promise<boolean> {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    const includePattern = /{%\s*include\s+["']([^"']+)["']\s*%}/g;
+    const includes = [...trimmed.matchAll(includePattern)];
+    if (includes.length === 0 || trimmed.replace(includePattern, "").trim()) {
+      return true;
+    }
+    for (const match of includes) {
+      if ((await readOptionalText(join(modelPath, match[1]))).trim()) return true;
+    }
+    return false;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (await chatTemplateValueHasContent(item, modelPath)) return true;
+    }
+    return false;
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      if (await chatTemplateValueHasContent(item, modelPath)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The March 2026 JANG notice is about bundles that genuinely lack a template.
+ * Quantization alone cannot identify those bundles: current JANG/JANGTQ models
+ * already ship either a standalone template or tokenizer_config chat_template.
+ */
+export async function hasUsableChatTemplate(modelPath: string): Promise<boolean> {
+  for (const name of ["chat_template.jinja", "chat_template.txt"]) {
+    if ((await readOptionalText(join(modelPath, name))).trim()) return true;
+  }
+
+  try {
+    const tokenizer = JSON.parse(
+      await readFile(join(modelPath, "tokenizer_config.json"), "utf-8"),
+    );
+    return chatTemplateValueHasContent(tokenizer?.chat_template, modelPath);
+  } catch {
+    return false;
+  }
 }
 
 /** Check if a model directory contains MLX-format files or diffusers format.
@@ -856,6 +909,10 @@ async function scanModelsInPath(
             if (nameMatch) quantization = nameMatch[1];
           }
 
+          const hasChatTemplate = quantization?.startsWith("JANG")
+            ? await hasUsableChatTemplate(currentPath)
+            : undefined;
+
           models.push({
             id,
             name: id,
@@ -863,6 +920,7 @@ async function scanModelsInPath(
             size: formatSize(size),
             format,
             quantization,
+            hasChatTemplate,
           });
         }
 

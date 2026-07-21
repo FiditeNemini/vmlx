@@ -54,6 +54,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
   const [overridesVersion, setOverridesVersion] = useState(0)
   const [effectiveReasoningParser, setEffectiveReasoningParser] = useState<string | undefined>(undefined)
   const [jangLabel, setJangLabel] = useState<string | undefined>(undefined)
+  const [jangNeedsTemplateUpdate, setJangNeedsTemplateUpdate] = useState(false)
   const [jangNoticeDismissed, setJangNoticeDismissed] = useState(true) // hidden by default until checked
 
   // Check JANG redownload notice dismiss state
@@ -75,6 +76,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
       try {
         const s = await window.api.sessions.get(sessionId)
         setSession(s)
+        setJangLabel(undefined)
+        setJangNeedsTemplateUpdate(false)
         // Auto-open logs panel if session is in error state
         if (s?.status === 'error') setShowLogs(true)
 
@@ -82,17 +85,13 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
           // Skip chat loading for image model sessions — they don't use chat
           const cfg = s.config ? (() => { try { return JSON.parse(s.config) } catch { return {} } })() : {}
           if (cfg.modelType !== 'image') {
-            // Load chats for this model, auto-create first chat if none exist
-            const chats = await window.api.chat.getByModel(s.modelPath)
-            if (chats.length > 0) {
-              setCurrentChatId(chats[0].id)
-            } else {
-              try {
-                const title = `Chat ${new Date().toLocaleString()}`
-                const chat = await window.api.chat.create(title, 'default', undefined, s.modelPath)
-                setCurrentChatId(chat.id)
-              } catch (_) { /* will show empty state */ }
-            }
+            // One main-process operation prevents development effect replay
+            // from racing a separate get/create pair into duplicate chats.
+            try {
+              const title = `Chat ${new Date().toLocaleString()}`
+              const chat = await window.api.chat.ensureForModel(title, s.modelPath)
+              setCurrentChatId(chat.id)
+            } catch (_) { /* will show empty state */ }
           }
           // Detect effective reasoning parser for chat settings UI
           // Skip filesystem detection for remote sessions (remote:// paths don't exist on disk)
@@ -119,6 +118,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
               const match = models.find((m: any) => m.path === s.modelPath)
               if (match?.quantization && match.quantization.startsWith('JANG')) {
                 setJangLabel(match.quantization)
+                setJangNeedsTemplateUpdate(match.hasChatTemplate === false)
               }
             } catch (_) { /* ignore scan errors */ }
           }
@@ -433,7 +433,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
       {session.status === 'loading' && <SessionViewLoadBar sessionId={session.id} />}
 
       {/* JANG Redownload Notice */}
-      {jangLabel && !jangNoticeDismissed && (
+      {jangLabel && jangNeedsTemplateUpdate && !jangNoticeDismissed && (
         <div className="flex items-start gap-2 px-4 py-2 bg-amber-500/10 border-b border-amber-500/20 flex-shrink-0">
           <AlertTriangle className="h-3.5 w-3.5 text-amber-400 flex-shrink-0 mt-0.5" />
           <p className="text-xs text-amber-300/90 flex-1">

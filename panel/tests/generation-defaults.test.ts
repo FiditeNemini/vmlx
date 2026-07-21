@@ -16,7 +16,7 @@ vi.mock('../src/main/database', () => ({
   },
 }))
 
-import { readGenerationDefaults } from '../src/main/ipc/models'
+import { hasUsableChatTemplate, readGenerationDefaults } from '../src/main/ipc/models'
 
 const createdDirs: string[] = []
 
@@ -37,6 +37,43 @@ afterEach(() => {
     const dir = createdDirs.pop()
     if (dir) rmSync(dir, { recursive: true, force: true })
   }
+})
+
+describe('hasUsableChatTemplate', () => {
+  it('accepts a current embedded tokenizer chat template', async () => {
+    const dir = makeModelDir({
+      'tokenizer_config.json': {
+        chat_template: '{% for message in messages %}{{ message.content }}{% endfor %}',
+      },
+    }, 'vmlx-chat-template-embedded-')
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(true)
+  })
+
+  it('accepts a standalone chat_template.jinja', async () => {
+    const dir = makeModelDir({}, 'vmlx-chat-template-standalone-')
+    writeFileSync(join(dir, 'chat_template.jinja'), '{{ messages }}')
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(true)
+  })
+
+  it('rejects a bundle with no non-empty chat template', async () => {
+    const dir = makeModelDir({
+      'tokenizer_config.json': { chat_template: '   ' },
+    }, 'vmlx-chat-template-missing-')
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(false)
+  })
+
+  it('rejects an include-only tokenizer stub when its referenced file is absent', async () => {
+    const dir = makeModelDir({
+      'tokenizer_config.json': {
+        chat_template: "{% include 'chat_template.jinja' %}",
+      },
+    }, 'vmlx-chat-template-missing-include-')
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(false)
+  })
 })
 
 describe('readGenerationDefaults generation_config defaults', () => {

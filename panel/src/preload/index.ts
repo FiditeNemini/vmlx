@@ -87,6 +87,8 @@ const api = {
     // Chats
     create: (title: string, modelId: string, folderId?: string, modelPath?: string) =>
       ipcRenderer.invoke('chat:create', title, modelId, folderId, modelPath),
+    ensureForModel: (title: string, modelPath: string) =>
+      ipcRenderer.invoke('chat:ensureForModel', title, modelPath),
     getRecent: (limit: number = 100) => ipcRenderer.invoke('chat:getRecent', limit),
     getByModel: (modelPath: string) => ipcRenderer.invoke('chat:getByModel', modelPath),
     getAll: (folderId?: string) => ipcRenderer.invoke('chat:getAll', folderId),

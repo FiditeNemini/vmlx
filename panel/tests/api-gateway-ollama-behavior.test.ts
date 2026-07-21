@@ -14,6 +14,7 @@ const sessionManagerMock = vi.hoisted(() => ({
   startSession: vi.fn(),
   stopSession: vi.fn(),
   wakeSession: vi.fn(),
+  preflightSessionStart: vi.fn(),
 }));
 
 vi.mock("../src/main/database", () => ({ db: dbMock }));
@@ -337,6 +338,32 @@ async function startPrematureStreamingBackend(): Promise<BackendHandle> {
         );
       }
       setTimeout(() => res.socket?.destroy(), 10);
+    });
+  });
+  return { server, port: await listen(server), bodies, paths };
+}
+
+async function startPrematureNonStreamingBackend(): Promise<BackendHandle> {
+  const bodies: any[] = [];
+  const paths: string[] = [];
+  const attempts = new Map<string, number>();
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => {
+      const path = req.url || "";
+      paths.push(path);
+      const raw = Buffer.concat(chunks).toString("utf8");
+      bodies.push(raw ? JSON.parse(raw) : {});
+      const attempt = (attempts.get(path) || 0) + 1;
+      attempts.set(path, attempt);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (attempt === 1) {
+        res.write('{"partial":');
+        setTimeout(() => res.socket?.destroy(), 10);
+        return;
+      }
+      res.end(JSON.stringify({ object: "gateway.recovery", path, ok: true }));
     });
   });
   return { server, port: await listen(server), bodies, paths };
@@ -1220,6 +1247,67 @@ describe("Ollama gateway request translation behavior", () => {
       "/v1/messages",
       "/v1/chat/completions",
     ]);
+  });
+
+  it("keeps non-stream JSON atomic across premature backend loss and immediate recovery", async () => {
+    backend = await startPrematureNonStreamingBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    const requests = [
+      {
+        path: "/v1/chat/completions",
+        body: {
+          model: "hy3-model",
+          stream: false,
+          messages: [{ role: "user", content: "chat" }],
+        },
+      },
+      {
+        path: "/v1/responses",
+        body: { model: "hy3-model", stream: false, input: "responses" },
+      },
+      {
+        path: "/v1/messages",
+        body: {
+          model: "hy3-model",
+          stream: false,
+          max_tokens: 32,
+          messages: [{ role: "user", content: "anthropic" }],
+        },
+      },
+    ];
+
+    for (const request of requests) {
+      const failed = await fetch(`http://127.0.0.1:${started.port}${request.path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request.body),
+      });
+      expect(failed.status).toBe(502);
+      expect(await failed.json()).toEqual({
+        error: {
+          message: "Backend connection closed before response completed",
+          type: "server_error",
+          code: "backend_connection_closed",
+        },
+      });
+
+      const recovered = await fetch(
+        `http://127.0.0.1:${started.port}${request.path}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request.body),
+        },
+      );
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toEqual({
+        object: "gateway.recovery",
+        path: request.path,
+        ok: true,
+      });
+    }
   });
 
   it("refuses single-model Ollama routes when previous local model cannot unload", async () => {

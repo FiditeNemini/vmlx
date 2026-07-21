@@ -1238,7 +1238,40 @@ export class ApiGateway extends EventEmitter {
     };
 
     const proxyReq = httpRequest(options, (proxyRes) => {
-      // Forward status + headers verbatim (preserves SSE Content-Type)
+      const streaming = this.proxyRequestStreams(body);
+      this.abortProxyResponseOnClientClose(clientRes, proxyRes);
+      this.guardProxyResponseLifecycle(clientRes, proxyRes, {
+        context: `Proxy response ${session.host}:${session.port}${clientReq.url}`,
+        streaming,
+        protocol: this.proxyStreamProtocol(clientReq.url),
+      });
+
+      if (!streaming) {
+        // Non-stream responses are one JSON document. Do not commit the
+        // backend's status/headers or leak body fragments until the upstream
+        // message completes; otherwise a reset after `{"partial":` leaves
+        // clients with HTTP 200 and truncated JSON. The lifecycle guard can
+        // now return one atomic 502 while headers are still uncommitted.
+        const chunks: Buffer[] = [];
+        proxyRes.on("data", (chunk: Buffer) => {
+          chunks.push(Buffer.from(chunk));
+        });
+        proxyRes.on("end", () => {
+          if (
+            !this.writeHeadResponse(
+              clientRes,
+              proxyRes.statusCode || 502,
+              proxyRes.headers,
+            )
+          )
+            return;
+          this.endResponse(clientRes, Buffer.concat(chunks));
+        });
+        return;
+      }
+
+      // Streaming routes retain byte-for-byte forwarding and native SSE
+      // failure terminals.
       if (
         !this.writeHeadResponse(
           clientRes,
@@ -1249,12 +1282,6 @@ export class ApiGateway extends EventEmitter {
         proxyRes.destroy();
         return;
       }
-      this.abortProxyResponseOnClientClose(clientRes, proxyRes);
-      this.guardProxyResponseLifecycle(clientRes, proxyRes, {
-        context: `Proxy response ${session.host}:${session.port}${clientReq.url}`,
-        streaming: this.proxyRequestStreams(body),
-        protocol: this.proxyStreamProtocol(clientReq.url),
-      });
       // Forward bytes manually so client disconnects go through the guarded writer.
       // This preserves SSE Content-Type while avoiding noisy write EPIPE crashes.
       proxyRes.on("data", (chunk: Buffer) => {

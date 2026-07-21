@@ -2611,6 +2611,43 @@ def _loaded_block_disk_cache_enabled() -> bool:
     return bool(getattr(config, "enable_block_disk_cache", False))
 
 
+def _bundle_explicit_modality_flag(
+    bundle_path: str | None,
+    modality: str,
+) -> bool | None:
+    """Return an artifact-owned modality flag when one is explicitly stamped.
+
+    Quantized bundles may repeat capability truth at the top level and in
+    ``capabilities.modalities`` in both config sidecars. Treat an explicit
+    ``False`` as the conservative native-capability verdict when those copies
+    disagree; runtime-owned compatibility bridges are reported separately.
+    """
+    cfg = _read_bundle_json(bundle_path, "config.json")
+    jang = _read_bundle_json(bundle_path, "jang_config.json")
+    key = str(modality or "").strip().lower()
+    if not key:
+        return None
+    flags: list[bool] = []
+    for obj in (cfg, jang):
+        if not isinstance(obj, dict):
+            continue
+        caps = obj.get("capabilities")
+        for source in (caps, obj):
+            if not isinstance(source, dict):
+                continue
+            modalities = source.get("modalities")
+            if isinstance(modalities, dict) and isinstance(modalities.get(key), bool):
+                flags.append(bool(modalities[key]))
+            has_key = f"has_{key}"
+            if isinstance(source.get(has_key), bool):
+                flags.append(bool(source[has_key]))
+    if False in flags:
+        return False
+    if True in flags:
+        return True
+    return None
+
+
 def _bundle_declares_native_video(bundle_path: str | None) -> bool:
     """Return True when the loaded non-Omni VLM bundle declares video support.
 
@@ -2621,6 +2658,8 @@ def _bundle_declares_native_video(bundle_path: str | None) -> bool:
     """
     cfg = _read_bundle_json(bundle_path, "config.json")
     if not cfg:
+        return False
+    if _bundle_explicit_modality_flag(bundle_path, "video") is False:
         return False
     if cfg.get("video_config") is not None:
         return True
@@ -2653,12 +2692,19 @@ def _bundle_supports_video_frame_fallback(bundle_path: str | None) -> bool:
     if not cfg:
         return False
     model_type = str(cfg.get("model_type") or "").lower()
-    if model_type != "step3p7":
-        return False
-    return bool(
-        cfg.get("image_token_id") is not None
-        and isinstance(cfg.get("vision_config"), dict)
-    )
+    if model_type == "step3p7":
+        return bool(
+            cfg.get("image_token_id") is not None
+            and isinstance(cfg.get("vision_config"), dict)
+        )
+    if model_type in {"gemma4", "gemma4_unified"}:
+        proc = _read_bundle_json(bundle_path, "processor_config.json")
+        return bool(
+            cfg.get("video_token_id") is not None
+            and isinstance(cfg.get("vision_config"), dict)
+            and isinstance(proc.get("video_processor") if proc else None, dict)
+        )
+    return False
 
 
 def _mimo_v2_runtime_module() -> Any | None:
@@ -3073,6 +3119,12 @@ def _artifact_media_modalities(bundle_path: str | None) -> dict[str, list[str]]:
     cap_modalities = caps.get("modalities") if isinstance(caps, dict) else None
     if isinstance(cap_modalities, list):
         declared.update(str(item).lower() for item in cap_modalities if item)
+    elif isinstance(cap_modalities, dict):
+        declared.update(
+            str(item).lower()
+            for item, enabled in cap_modalities.items()
+            if enabled is True
+        )
     cap_modality = caps.get("modality") if isinstance(caps, dict) else None
     if cap_modality:
         declared.add(str(cap_modality).lower())
@@ -3086,11 +3138,17 @@ def _artifact_media_modalities(bundle_path: str | None) -> dict[str, list[str]]:
             target.update(str(item).lower() for item in values if item)
 
     model_type = str((cfg or {}).get("model_type") or "").lower()
-    if isinstance(cfg.get("vision_config"), dict):
+    if (
+        isinstance(cfg.get("vision_config"), dict)
+        and _bundle_explicit_modality_flag(bundle_path, "vision") is not False
+    ):
         declared.add("vision")
-    if isinstance(cfg.get("audio_config"), dict):
+    if (
+        isinstance(cfg.get("audio_config"), dict)
+        and _bundle_explicit_modality_flag(bundle_path, "audio") is not False
+    ):
         declared.add("audio")
-    if _bundle_declares_native_video(bundle_path) or _bundle_supports_video_frame_fallback(bundle_path):
+    if _bundle_declares_native_video(bundle_path):
         declared.add("video")
 
     if model_type == "mimo_v2":

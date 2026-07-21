@@ -872,6 +872,54 @@ class TestServerSamplingResolution:
 
         assert server._bundle_declares_native_video("/tmp/gemma4") is True
 
+    def test_gemma4_video_capability_separates_native_false_from_frame_fallback(
+        self, monkeypatch, tmp_path
+    ):
+        import vmlx_engine.server as server
+
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "gemma4_unified",
+                    "video_token_id": 258884,
+                    "vision_config": {"model_type": "gemma4_unified_vision"},
+                    "capabilities": {
+                        "modalities": {
+                            "text": True,
+                            "vision": True,
+                            "audio": False,
+                            "video": False,
+                        },
+                        "has_video": False,
+                    },
+                }
+            )
+        )
+        (tmp_path / "processor_config.json").write_text(
+            json.dumps(
+                {
+                    "video_processor": {
+                        "video_processor_type": "Gemma4UnifiedVideoProcessor"
+                    }
+                }
+            )
+        )
+
+        monkeypatch.setattr(server, "_engine", SimpleNamespace(is_mllm=True))
+        monkeypatch.setattr(server, "_model_path", str(tmp_path))
+        monkeypatch.setattr(server, "_model_name", "gemma4-video-fallback-test")
+        monkeypatch.setattr(server, "_loaded_omni_modalities", lambda: None)
+
+        assert server._bundle_explicit_modality_flag(str(tmp_path), "video") is False
+        assert server._bundle_declares_native_video(str(tmp_path)) is False
+        assert server._bundle_supports_video_frame_fallback(str(tmp_path)) is True
+        assert server._loaded_runtime_modalities() == ["text", "vision", "video"]
+
+        artifact = server._artifact_media_modalities(str(tmp_path))
+        assert "video" not in artifact["declared_modalities"]
+        media = server._loaded_media_capability_status(["text", "vision", "video"])
+        assert media["status_by_modality"]["video"] == "runtime_supported"
+
     def test_step37_video_capability_uses_frame_fallback(self, monkeypatch, tmp_path):
         import vmlx_engine.server as server
 

@@ -38,6 +38,14 @@ declare global {
           forceTextOnly?: boolean;
           isTurboQuant?: boolean;
           quantizationLabel?: string;
+          nativeMtp?: {
+            supported: boolean;
+            depth: number;
+            depthSource?: string;
+            runtimeScope: 'text' | 'text+vl';
+            nativeCacheType: string;
+            requiresDeterministicSampling: boolean;
+          };
           description: string;
           maxContextLength?: number;
         }>;

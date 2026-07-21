@@ -518,7 +518,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
               pid: session.pid,
               type: session.type,
               remoteUrl: session.remoteUrl,
-              modelType: (() => { try { const c = JSON.parse(session.config || '{}'); return c.modelType } catch { return undefined } })()
+              modelType: (() => { try { const c = JSON.parse(session.config || '{}'); return c.modelType } catch { return undefined } })(),
+              config: session.config,
             }}
             reasoningParser={effectiveReasoningParser}
             onClose={() => setShowSettings(false)}

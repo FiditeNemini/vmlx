@@ -4,6 +4,7 @@ import { useToast } from '../Toast'
 import { useTranslation } from '../../i18n'
 import { buildChatSettingsCompatibilityWarnings } from './chatSettingsCompatibility'
 import { buildChatSettingsResetOverrides } from '../../../../shared/chatSettingsResetPolicy'
+import { applyEffectiveSessionGenerationDefaults } from '../../../../shared/effectiveGenerationDefaults'
 
 interface ChatProfile {
   id: string
@@ -149,6 +150,11 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
           setDetectedSupportsInstructMode(detected?.supportsInstructMode)
           setDetectedReasoningEfforts(detected?.supportedReasoningEfforts)
           setSupportsThinkingBudget(detected?.supportsThinkingBudget)
+          detectedModelDefaults = applyEffectiveSessionGenerationDefaults(
+            detectedModelDefaults,
+            session.config,
+            detected?.nativeMtp,
+          )
         } catch (_) {
           setDetectedFamily(undefined)
           setDetectedToolParser(undefined)
@@ -169,7 +175,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
       setDirty(false)
     })()
     loadProfiles()
-  }, [chatId, session.modelPath, loadProfiles])
+  }, [chatId, session.modelPath, session.config, loadProfiles])
 
   const update = <K extends keyof ChatOverrides>(key: K, value: ChatOverrides[K]) => {
     setOverrides(prev => ({ ...prev, [key]: value }))

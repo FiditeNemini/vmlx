@@ -452,6 +452,7 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
               type: displaySession.type,
               remoteUrl: displaySession.remoteUrl,
               modelType: (() => { try { return JSON.parse(displaySession.config || '{}').modelType } catch { return undefined } })(),
+              config: displaySession.config,
             }}
             reasoningParser={effectiveReasoningParser}
             onClose={() => setShowChatSettings(false)}

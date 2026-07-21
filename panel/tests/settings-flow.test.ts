@@ -3887,6 +3887,17 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         expect(source).toContain('format={formatTopK}')
     })
 
+    it('chat settings applies the effective native-MTP startup policy and receives session config', () => {
+        const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
+        const toolbar = readFileSync('src/renderer/src/components/layout/ChatModeToolbar.tsx', 'utf8')
+        const sessionView = readFileSync('src/renderer/src/components/sessions/SessionView.tsx', 'utf8')
+        expect(source).toContain('applyEffectiveSessionGenerationDefaults(')
+        expect(source).toContain('detected?.nativeMtp')
+        expect(source).toContain('session.config')
+        expect(toolbar).toContain('config: displaySession.config')
+        expect(sessionView).toContain('config: session.config')
+    })
+
     it('chat settings shows max-thinking tokens only for engine-honoring or template-budget families', () => {
         const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
         expect(source).toContain('setThinkingBudgetSupported(gen.thinkingBudgetSupported)')

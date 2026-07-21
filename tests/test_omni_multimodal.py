@@ -258,11 +258,13 @@ async def test_omni_stream_emits_generation_time_reasoning_content_and_usage(
     tmp_path, monkeypatch
 ):
     bundle = _write_omni_bundle(tmp_path / "omni")
+    captured = {}
 
     class _Dispatcher:
         persist_calls = 0
 
         def chat(self, *, token_callback, **kwargs):
+            captured.update(kwargs)
             for token_id, delta in enumerate(
                 ("<think>", "private", "</think>", "visible", " answer"),
                 start=1,
@@ -320,7 +322,13 @@ async def test_omni_stream_emits_generation_time_reasoning_content_and_usage(
         chat_template_kwargs = {}
         enable_thinking = True
 
-    response = await dispatch_omni_chat_completion(_Request(), str(bundle))
+    response = await dispatch_omni_chat_completion(
+        _Request(),
+        str(bundle),
+        effective_max_tokens=16_384,
+        effective_temperature=0.6,
+        effective_top_p=0.95,
+    )
     payloads = []
     async for raw in response.body_iterator:
         for line in str(raw).splitlines():
@@ -348,6 +356,9 @@ async def test_omni_stream_emits_generation_time_reasoning_content_and_usage(
         "total_tokens": 28,
     }
     assert dispatcher.persist_calls == 1
+    assert captured["max_tokens"] == 16_384
+    assert captured["temperature"] == 0.6
+    assert captured["top_p"] == 0.95
 
 
 def test_omni_dispatcher_uses_one_persistent_native_runtime_owner_thread():

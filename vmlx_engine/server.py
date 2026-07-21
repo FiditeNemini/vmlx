@@ -10592,6 +10592,13 @@ async def create_anthropic_message(
                 chat_req,
                 _omni_path,
                 disk_cache_enabled=_loaded_block_disk_cache_enabled(),
+                effective_max_tokens=_resolve_max_tokens(
+                    chat_req.max_tokens, chat_req.model
+                ),
+                effective_temperature=_resolve_temperature(
+                    chat_req.temperature, chat_req.model
+                ),
+                effective_top_p=_resolve_top_p(chat_req.top_p, chat_req.model),
             )
             # `dispatch_omni_chat_completion` returns either a JSONResponse
             # (non-streaming) or a StreamingResponse. Anthropic streaming
@@ -13455,6 +13462,13 @@ async def create_chat_completion(
                 request,
                 _omni_path,
                 disk_cache_enabled=_loaded_block_disk_cache_enabled(),
+                effective_max_tokens=_resolve_max_tokens(
+                    request.max_tokens, request.model
+                ),
+                effective_temperature=_resolve_temperature(
+                    request.temperature, request.model
+                ),
+                effective_top_p=_resolve_top_p(request.top_p, request.model),
             )
     except HTTPException:
         raise
@@ -16595,9 +16609,9 @@ async def create_response(
             _cc_req = _CCR(
                 model=resolved_name,
                 messages=messages,  # already preserved-multimodal above
-                temperature=request.temperature,
-                top_p=request.top_p,
-                max_tokens=request.max_output_tokens,
+                temperature=chat_kwargs["temperature"],
+                top_p=chat_kwargs["top_p"],
+                max_tokens=chat_kwargs["max_tokens"],
                 stream=bool(request.stream),
                 enable_thinking=request.enable_thinking,
                 reasoning_effort=request.reasoning_effort,
@@ -16606,6 +16620,9 @@ async def create_response(
                 _cc_req,
                 _omni_path_dispatch,
                 disk_cache_enabled=_loaded_block_disk_cache_enabled(),
+                effective_max_tokens=chat_kwargs["max_tokens"],
+                effective_temperature=chat_kwargs["temperature"],
+                effective_top_p=chat_kwargs["top_p"],
             )
             if isinstance(cc, StreamingResponse) and request.stream:
                 return StreamingResponse(

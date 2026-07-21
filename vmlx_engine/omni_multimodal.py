@@ -1307,6 +1307,9 @@ async def dispatch_omni_chat_completion(
     bundle_path: str,
     *,
     disk_cache_enabled: bool = False,
+    effective_max_tokens: Optional[int] = None,
+    effective_temperature: Optional[float] = None,
+    effective_top_p: Optional[float] = None,
 ):
     """Run a Nemotron Omni multimodal chat turn and return an OpenAI
     chat-completion response or SSE stream.
@@ -1353,17 +1356,30 @@ async def dispatch_omni_chat_completion(
         disk_cache_enabled=disk_cache_enabled,
     )
 
+    # Protocol handlers resolve request/session/bundle defaults before this
+    # bridge.  Do not replace an omitted request cap with the bridge's old
+    # 256-token convenience default: that discarded bundle max_new_tokens and
+    # could finalize Auto turns as reasoning-only.
+    _request_max_tokens = getattr(request, "max_tokens", None)
+    if _request_max_tokens is None:
+        _request_max_tokens = getattr(request, "max_completion_tokens", None)
     _max_tokens = (
-        getattr(request, "max_tokens", None)
-        or getattr(request, "max_completion_tokens", None)
-        or 256
+        effective_max_tokens
+        if effective_max_tokens is not None
+        else (_request_max_tokens if _request_max_tokens is not None else 256)
     )
-    _temperature = getattr(request, "temperature", None)
-    if _temperature is None:
-        _temperature = 0.6
-    _top_p = getattr(request, "top_p", None)
-    if _top_p is None:
-        _top_p = 0.95
+    _request_temperature = getattr(request, "temperature", None)
+    _temperature = (
+        effective_temperature
+        if effective_temperature is not None
+        else (_request_temperature if _request_temperature is not None else 0.6)
+    )
+    _request_top_p = getattr(request, "top_p", None)
+    _top_p = (
+        effective_top_p
+        if effective_top_p is not None
+        else (_request_top_p if _request_top_p is not None else 0.95)
+    )
     _ct_kwargs = getattr(request, "chat_template_kwargs", None) or {}
     _request_enable_thinking = getattr(request, "enable_thinking", None)
     if _request_enable_thinking is not None:

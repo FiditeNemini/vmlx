@@ -6885,6 +6885,10 @@ class TestAnthropicOmniStreamingAdapter:
         assert "and not request.stream" not in block
         assert "stream=bool(request.stream)" in block
         assert "_adapt_omni_chat_stream_to_responses(" in block
+        assert 'max_tokens=chat_kwargs["max_tokens"]' in block
+        assert 'effective_max_tokens=chat_kwargs["max_tokens"]' in block
+        assert 'effective_temperature=chat_kwargs["temperature"]' in block
+        assert 'effective_top_p=chat_kwargs["top_p"]' in block
 
     @pytest.mark.asyncio
     async def test_omni_chat_stream_translates_to_incremental_responses_events(

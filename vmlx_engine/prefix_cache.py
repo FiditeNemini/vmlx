@@ -972,7 +972,13 @@ def _numpy_block_slice(
     existing_tokens=0,
     store_cumulative_state=True,
 ):
-    """Create per-block cache_data using numpy slicing (no MLX/Metal ops).
+    """Create per-block cache_data using NumPy slicing.
+
+    Positional slicing stays on the CPU. The final per-block arrays are moved
+    back to MLX only when their original dtype must be restored (notably bf16,
+    which NumPy snapshots represent as float32). The disk writer would perform
+    the same NumPy-to-MLX conversion later; restoring here prevents an L2 record
+    from silently changing attention math and decode speed.
 
     Args:
         cache_data: Full layer-state dicts from _extract_cache_states.
@@ -1074,11 +1080,16 @@ def _numpy_block_slice(
             if start_idx >= actual_end:
                 block_slices.append(("skip",))
                 continue
-            ks = np_k[:, :, start_idx:actual_end, :]
-            vs = np_v[:, :, start_idx:actual_end, :]
-            idxs = (
-                np_idx[:, :, start_idx:actual_end, :] if np_idx is not None else None
-            )
+            ks = mx.array(np_k[:, :, start_idx:actual_end, :])
+            vs = mx.array(np_v[:, :, start_idx:actual_end, :])
+            idxs = None
+            if np_idx is not None:
+                idxs = mx.array(np_idx[:, :, start_idx:actual_end, :])
+            if orig_dtype is not None and ks.dtype != orig_dtype:
+                ks = ks.astype(orig_dtype)
+                vs = vs.astype(orig_dtype)
+                if idxs is not None:
+                    idxs = idxs.astype(orig_dtype)
             block_slices.append(("minimax_m3", ks, vs, idxs))
             continue
 
@@ -1088,7 +1099,8 @@ def _numpy_block_slice(
             continue
 
         if idx in np_sources:
-            np_k, np_v, *_ = np_sources[idx]
+            np_k, np_v, *source_meta = np_sources[idx]
+            orig_dtype = source_meta[0] if source_meta else None
             ndim = np_k.ndim
             if ndim == 4:
                 seq_len = np_k.shape[2]
@@ -1128,16 +1140,29 @@ def _numpy_block_slice(
                         keep = 0
                         offset = None
                         idx_state = None
+                ks = mx.array(ks)
+                vs = mx.array(vs)
+                if orig_dtype is not None and ks.dtype != orig_dtype:
+                    ks = ks.astype(orig_dtype)
+                    vs = vs.astype(orig_dtype)
                 block_slices.append((
                     "rotating_kv",
-                    mx.array(ks),
-                    mx.array(vs),
+                    ks,
+                    vs,
                     max_size,
                     keep,
                     offset,
                     idx_state,
                 ))
             else:
+                # NumPy has no native bfloat16 dtype. Preserve the model-owned
+                # attention dtype rather than persisting the fp32 bridge arrays.
+                if orig_dtype is not None:
+                    ks = mx.array(ks)
+                    vs = mx.array(vs)
+                    if ks.dtype != orig_dtype:
+                        ks = ks.astype(orig_dtype)
+                        vs = vs.astype(orig_dtype)
                 block_slices.append(("kv", ks, vs))
         else:
             # Cumulative / non-positional layer
@@ -2076,7 +2101,8 @@ class BlockAwarePrefixCache:
                             v_dq = mx.dequantize(
                                 v_w, v_s, v_b, group_size=g_size, bits=q_bits,
                             )
-                            if 'bfloat16' in str(k_dq.dtype):
+                            original_dtype = k_dq.dtype
+                            if 'bfloat16' in str(original_dtype):
                                 # Use float32 (not float16) for the numpy round-trip.
                                 # fp16 has only 5 exponent bits vs bf16's 8 — casting
                                 # down silently clips/loses precision for many
@@ -2087,7 +2113,11 @@ class BlockAwarePrefixCache:
                                 k_dq = k_dq.astype(mx.float32)
                                 v_dq = v_dq.astype(mx.float32)
                             mx.eval(k_dq, v_dq)
-                            np_sources[idx] = (np.array(k_dq), np.array(v_dq), k_dq.dtype)
+                            np_sources[idx] = (
+                                np.array(k_dq),
+                                np.array(v_dq),
+                                original_dtype,
+                            )
                             continue
                         if hasattr(keys, 'shape'):
                             k_np, v_np = keys, values

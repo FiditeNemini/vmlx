@@ -377,6 +377,72 @@ class TestBlockSlicingHybrid:
         assert slices[0] == ("skip",)
         assert slices[1][0] == "kv"
 
+    def test_numpy_disk_writer_restores_bfloat16_positional_dtypes(self):
+        """NumPy's fp32 bf16 bridge must not leak into paged/L2 cache records."""
+        import numpy as np
+
+        from vmlx_engine.prefix_cache import _numpy_block_slice
+
+        cache_data = [
+            {
+                "state": (
+                    mx.zeros((1, 8, 8, 16), dtype=mx.bfloat16),
+                    mx.ones((1, 8, 8, 16), dtype=mx.bfloat16),
+                ),
+                "meta_state": ("0",),
+                "class_name": "KVCache",
+            },
+            {
+                "state": (
+                    mx.zeros((1, 8, 8, 16), dtype=mx.bfloat16),
+                    mx.ones((1, 8, 8, 16), dtype=mx.bfloat16),
+                ),
+                "meta_state": ("0", "512", "8", "8"),
+                "class_name": "RotatingKVCache",
+            },
+            {
+                "state": (
+                    mx.zeros((1, 8, 8, 16), dtype=mx.bfloat16),
+                    mx.ones((1, 8, 8, 16), dtype=mx.bfloat16),
+                    mx.ones((1, 8, 8, 16), dtype=mx.bfloat16),
+                ),
+                "meta_state": (),
+                "class_name": "MiniMaxM3Cache",
+            },
+        ]
+        np_sources = {
+            index: (
+                np.zeros((1, 8, 8, 16), dtype=np.float32),
+                np.ones((1, 8, 8, 16), dtype=np.float32),
+                mx.bfloat16,
+            )
+            for index in range(2)
+        }
+        np_sources[2] = {
+            "type": "minimax_m3",
+            "kv": (
+                np.zeros((1, 8, 8, 16), dtype=np.float32),
+                np.ones((1, 8, 8, 16), dtype=np.float32),
+                np.ones((1, 8, 8, 16), dtype=np.float32),
+                mx.bfloat16,
+            ),
+        }
+
+        slices = _numpy_block_slice(cache_data, np_sources, 0, 8, True)
+
+        assert slices is not None
+        assert slices[0][0] == "kv"
+        assert slices[0][1].dtype == mx.bfloat16
+        assert slices[0][2].dtype == mx.bfloat16
+        assert slices[1][0] == "rotating_kv"
+        assert slices[1][1].dtype == mx.bfloat16
+        assert slices[1][2].dtype == mx.bfloat16
+        assert slices[1][3:] == (512, 0, 8, 8)
+        assert slices[2][0] == "minimax_m3"
+        assert slices[2][1].dtype == mx.bfloat16
+        assert slices[2][2].dtype == mx.bfloat16
+        assert slices[2][3].dtype == mx.bfloat16
+
     def test_ssm_none_state_always_skip(self):
         """SSM layers with None state should always be 'skip', even in last block."""
         cache = self._make_cache(block_size=64)

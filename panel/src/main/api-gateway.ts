@@ -50,9 +50,17 @@ type PreparedSession =
   | {
       status: "load_failed";
       session: ResolvedSession;
-      code: "model_preflight_failed" | "model_load_timeout";
+      code:
+        | "model_preflight_failed"
+        | "model_load_failed"
+        | "model_load_timeout";
       message: string;
     };
+
+type JitLoadResult =
+  | { status: "ready" }
+  | { status: "load_failed"; detail: string }
+  | { status: "timeout" };
 
 type ProxyStreamProtocol = "openai" | "responses" | "anthropic" | "ollama";
 
@@ -75,7 +83,7 @@ export class ApiGateway extends EventEmitter {
   private host: string = "127.0.0.1";
   private _running = false;
   /** Track in-flight JIT loads to prevent duplicate starts */
-  private jitPending = new Map<string, Promise<boolean>>();
+  private jitPending = new Map<string, Promise<JitLoadResult>>();
   /** Serialize cross-model transitions when single-model mode is enabled. */
   private singleModelTransitionPending: Promise<void> = Promise.resolve();
   /** Responses for model/API requests that have not reached finish/close yet. */
@@ -1120,14 +1128,17 @@ export class ApiGateway extends EventEmitter {
         return { status: "ready", session: latest };
       }
 
-      const ok = await this.jitLoad(latest.id);
-      if (!ok) {
+      const loadResult = await this.jitLoad(latest.id);
+      if (loadResult.status !== "ready") {
         await this.restoreDisplacedSingleModel(rollbackCandidate, latest.id);
+        const timedOut = loadResult.status === "timeout";
         return {
           status: "load_failed",
           session: latest,
-          code: "model_load_timeout",
-          message: `Model '${latest.modelName}' failed to load within ${JIT_TIMEOUT_MS / 1000}s`,
+          code: timedOut ? "model_load_timeout" : "model_load_failed",
+          message: timedOut
+            ? `Model '${latest.modelName}' failed to load within ${JIT_TIMEOUT_MS / 1000}s`
+            : `Model '${latest.modelName}' failed to load: ${loadResult.detail}`,
         };
       }
 
@@ -1142,7 +1153,7 @@ export class ApiGateway extends EventEmitter {
   // JIT Auto-Load
   // ═══════════════════════════════════════════════════════════════
 
-  private async jitLoad(sessionId: string): Promise<boolean> {
+  private async jitLoad(sessionId: string): Promise<JitLoadResult> {
     // Deduplicate concurrent JIT loads for the same session
     const existing = this.jitPending.get(sessionId);
     if (existing) return existing;
@@ -1156,7 +1167,7 @@ export class ApiGateway extends EventEmitter {
     }
   }
 
-  private async _doJitLoad(sessionId: string): Promise<boolean> {
+  private async _doJitLoad(sessionId: string): Promise<JitLoadResult> {
     const session = db.getSession(sessionId);
     const isStandby = session?.status === "standby";
     console.log(
@@ -1174,21 +1185,27 @@ export class ApiGateway extends EventEmitter {
         await sessionManager.startSession(sessionId);
       }
     } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
       console.error(
         `[gateway] Failed to ${isStandby ? "wake" : "start"} session ${sessionId}: ${err}`,
       );
-      return false;
+      return { status: "load_failed", detail };
     }
 
     const deadline = Date.now() + JIT_TIMEOUT_MS;
     while (Date.now() < deadline) {
       const s = db.getSession(sessionId);
-      if (s?.status === "running") return true;
-      if (s?.status === "error") return false;
+      if (s?.status === "running") return { status: "ready" };
+      if (s?.status === "error") {
+        return {
+          status: "load_failed",
+          detail: "engine process entered error state before becoming ready",
+        };
+      }
       await new Promise((r) => setTimeout(r, HEALTH_POLL_MS));
     }
     console.error(`[gateway] JIT load timeout for session ${sessionId}`);
-    return false;
+    return { status: "timeout" };
   }
 
   // ═══════════════════════════════════════════════════════════════

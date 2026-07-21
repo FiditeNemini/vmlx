@@ -519,12 +519,54 @@ describe("ApiGateway single-model mode behavior", () => {
     const result = await (gateway as any).prepareSessionForRouting(target);
 
     expect(result.status).toBe("load_failed");
-    expect(result.code).toBe("model_load_timeout");
+    expect(result.code).toBe("model_load_failed");
+    expect(result.message).toContain("target load failed");
     expect(sessionManagerMock.stopSession).toHaveBeenCalledWith(previous.id);
     expect(sessionManagerMock.startSession.mock.calls.map((call) => call[0])).toEqual([
       target.id,
       previous.id,
     ]);
+  });
+
+  it("uses the timeout code only when the JIT deadline is actually exhausted", async () => {
+    dbMock.getSetting.mockImplementation((key: string) =>
+      key === "gateway_single_model_mode" ? "true" : undefined,
+    );
+    const previous = {
+      id: "previous",
+      modelPath: "/models/Previous-JANG",
+      modelName: "previous-model",
+      host: "127.0.0.1",
+      port: 9001,
+      status: "running",
+      type: "local",
+      config: "{}",
+    };
+    const target = {
+      id: "target",
+      modelPath: "/models/Target-JANG",
+      modelName: "target-model",
+      host: "127.0.0.1",
+      port: 9002,
+      status: "stopped",
+      type: "local",
+      config: "{}",
+    };
+    dbMock.getSessions.mockReturnValue([previous, target]);
+    dbMock.getSession.mockImplementation((id: string) =>
+      id === previous.id ? previous : id === target.id ? target : undefined,
+    );
+
+    const { ApiGateway } = await import("../src/main/api-gateway");
+    const gateway = new ApiGateway();
+    (gateway as any).jitLoad = vi.fn().mockResolvedValue({ status: "timeout" });
+    const result = await (gateway as any).prepareSessionForRouting(target);
+
+    expect(result.status).toBe("load_failed");
+    expect(result.code).toBe("model_load_timeout");
+    expect(result.message).toContain("failed to load within 120s");
+    expect(sessionManagerMock.stopSession).toHaveBeenCalledWith(previous.id);
+    expect(sessionManagerMock.startSession).toHaveBeenCalledWith(previous.id);
   });
 
   it("writes each streamed gateway response chunk once and treats EPIPE as disconnect", async () => {

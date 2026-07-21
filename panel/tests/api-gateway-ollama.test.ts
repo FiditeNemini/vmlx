@@ -560,7 +560,9 @@ describe("Gateway passthrough contracts for non-Ollama APIs", () => {
     expect(source).toContain("private endProxyRequest");
     expect(source).toContain("private writeJsonLine");
     expect(source).toContain("if (!this.writeJsonLine(res, ollamaMsg))");
-    expect(source).toContain("if (this.isClientDisconnectError(err)) return;");
+    expect(source).toContain("private guardProxyResponseLifecycle");
+    expect(source).toContain('proxyRes.once("aborted"');
+    expect(source).toContain('proxyRes.once("close"');
     expect(source).toContain("closed?: boolean");
     expect(source).toContain("!anyRes.closed");
     expect(source).toContain("!anyReq.closed");
@@ -586,13 +588,13 @@ describe("Gateway passthrough contracts for non-Ollama APIs", () => {
     expect(guardedJsonLineWrites.length).toBe(rawJsonLineWrites.length);
   });
 
-  it("guards every Ollama backend response stream error as a disconnect boundary", () => {
+  it("guards every Ollama backend response with the shared lifecycle boundary", () => {
     const ollamaProxyHandlers =
       source.match(
         /const proxyReq = httpRequest\(proxyOpts, \(proxyRes\) => \{[\s\S]*?proxyReq\.on\("error"/g,
       ) || [];
     const guardedOllamaProxyHandlers = ollamaProxyHandlers.filter((handler) =>
-      handler.includes('proxyRes.on("error"'),
+      handler.includes("this.guardProxyResponseLifecycle"),
     );
 
     expect(ollamaProxyHandlers.length).toBeGreaterThanOrEqual(3);

@@ -308,6 +308,40 @@ async function startSlowNonStreamingChatBackend(): Promise<
   };
 }
 
+async function startPrematureStreamingBackend(): Promise<BackendHandle> {
+  const bodies: any[] = [];
+  const paths: string[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => {
+      const path = req.url || "";
+      paths.push(path);
+      const raw = Buffer.concat(chunks).toString("utf8");
+      bodies.push(raw ? JSON.parse(raw) : {});
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+      });
+      if (path === "/v1/responses") {
+        res.write(
+          'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+        );
+      } else if (path === "/v1/messages") {
+        res.write(
+          'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}\n\n',
+        );
+      } else {
+        res.write(
+          'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
+        );
+      }
+      setTimeout(() => res.socket?.destroy(), 10);
+    });
+  });
+  return { server, port: await listen(server), bodies, paths };
+}
+
 async function startGateway(sessionPort: number): Promise<{ gateway: any; port: number }> {
   const sessions = [
     {
@@ -1101,6 +1135,90 @@ describe("Ollama gateway request translation behavior", () => {
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error("backend request stayed open")), 250),
       ),
+    ]);
+  });
+
+  it("terminates premature backend streams with protocol-native failures and no false success", async () => {
+    backend = await startPrematureStreamingBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    const requests = [
+      {
+        path: "/v1/chat/completions",
+        body: {
+          model: "hy3-model",
+          stream: true,
+          messages: [{ role: "user", content: "chat" }],
+        },
+      },
+      {
+        path: "/v1/responses",
+        body: { model: "hy3-model", stream: true, input: "responses" },
+      },
+      {
+        path: "/v1/messages",
+        body: {
+          model: "hy3-model",
+          stream: true,
+          max_tokens: 32,
+          messages: [{ role: "user", content: "anthropic" }],
+        },
+      },
+      {
+        path: "/api/chat",
+        body: {
+          model: "hy3-model",
+          stream: true,
+          messages: [{ role: "user", content: "ollama" }],
+        },
+      },
+    ];
+
+    const outputs: string[] = [];
+    for (const request of requests) {
+      const response = await fetch(`http://127.0.0.1:${started.port}${request.path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request.body),
+      });
+      expect(response.status).toBe(200);
+      outputs.push(await response.text());
+    }
+
+    expect(outputs[0]).toContain("partial");
+    expect(outputs[0]).toContain('"code":"backend_connection_closed"');
+    expect(outputs[0]).not.toContain("[DONE]");
+
+    expect(outputs[1]).toContain("event: response.output_text.delta");
+    expect(outputs[1]).toContain("event: response.failed");
+    expect(outputs[1]).toContain('"status":"failed"');
+    expect(outputs[1]).not.toContain("event: response.completed");
+
+    expect(outputs[2]).toContain("event: content_block_delta");
+    expect(outputs[2]).toContain("event: error");
+    expect(outputs[2]).toContain('"type":"api_error"');
+    expect(outputs[2]).not.toContain("event: message_stop");
+
+    const ollamaLines = outputs[3]
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    expect(ollamaLines[0]).toMatchObject({
+      message: { content: "partial" },
+      done: false,
+    });
+    expect(ollamaLines.at(-1)).toEqual({
+      error: "Backend connection closed before response completed",
+    });
+    expect(ollamaLines.some((line) => line.done === true)).toBe(false);
+
+    expect(backend.paths).toEqual([
+      "/v1/chat/completions",
+      "/v1/responses",
+      "/v1/messages",
+      "/v1/chat/completions",
     ]);
   });
 

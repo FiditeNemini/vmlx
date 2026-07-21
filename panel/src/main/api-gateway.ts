@@ -49,6 +49,8 @@ type PreparedSession =
   | { status: "unload_failed"; session: ResolvedSession }
   | { status: "load_failed"; session: ResolvedSession };
 
+type ProxyStreamProtocol = "openai" | "responses" | "anthropic" | "ollama";
+
 function parsePositiveTimeoutSeconds(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim()) {
@@ -447,6 +449,141 @@ export class ApiGateway extends EventEmitter {
     res.once("close", () => {
       if (!res.writableEnded && !proxyReq.destroyed) proxyReq.destroy();
     });
+  }
+
+  private proxyStreamProtocol(path: string | undefined): ProxyStreamProtocol {
+    if (path?.startsWith("/v1/responses")) return "responses";
+    if (path?.startsWith("/v1/messages")) return "anthropic";
+    return "openai";
+  }
+
+  private proxyRequestStreams(body: Buffer): boolean {
+    try {
+      return JSON.parse(body.toString("utf8") || "{}").stream === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  private emitProxyStreamFailure(
+    res: ServerResponse,
+    protocol: ProxyStreamProtocol,
+    message: string,
+  ): void {
+    if (!this.responseWritable(res)) return;
+    if (protocol === "ollama") {
+      if (!this.writeJsonLine(res, { error: message })) return;
+      this.endResponse(res);
+      return;
+    }
+    if (protocol === "responses") {
+      const error = {
+        type: "server_error",
+        message,
+        code: "backend_connection_closed",
+      };
+      if (
+        !this.writeResponse(
+          res,
+          `event: error\ndata: ${JSON.stringify({ type: "error", error })}\n\n`,
+        )
+      )
+        return;
+      if (
+        !this.writeResponse(
+          res,
+          `event: response.failed\ndata: ${JSON.stringify({
+            type: "response.failed",
+            response: {
+              id: "resp_gateway_backend_closed",
+              object: "response",
+              status: "failed",
+              error,
+            },
+          })}\n\n`,
+        )
+      )
+        return;
+      this.endResponse(res);
+      return;
+    }
+    if (protocol === "anthropic") {
+      if (
+        !this.writeResponse(
+          res,
+          `event: error\ndata: ${JSON.stringify({
+            type: "error",
+            error: { type: "api_error", message },
+          })}\n\n`,
+        )
+      )
+        return;
+      this.endResponse(res);
+      return;
+    }
+    if (
+      !this.writeResponse(
+        res,
+        `data: ${JSON.stringify({
+          error: {
+            message,
+            type: "server_error",
+            code: "backend_connection_closed",
+          },
+        })}\n\n`,
+      )
+    )
+      return;
+    this.endResponse(res);
+  }
+
+  private guardProxyResponseLifecycle(
+    res: ServerResponse,
+    proxyRes: IncomingMessage,
+    options: {
+      context: string;
+      streaming: boolean;
+      protocol: ProxyStreamProtocol;
+    },
+  ): void {
+    let settled = false;
+    const fail = (cause?: Error): void => {
+      if (settled || proxyRes.complete) return;
+      settled = true;
+      // A downstream disconnect deliberately destroys proxyRes. There is no
+      // client left to notify, so do not log or manufacture a backend failure.
+      if (!this.responseWritable(res)) return;
+      const message = "Backend connection closed before response completed";
+      console.error(
+        `[gateway] ${options.context} ended prematurely: ${cause?.message || message}`,
+      );
+      if (options.streaming) {
+        this.emitProxyStreamFailure(res, options.protocol, message);
+      } else if (!res.headersSent) {
+        this.sendJson(res, 502, {
+          error:
+            options.protocol === "ollama"
+              ? message
+              : {
+                  message,
+                  type: "server_error",
+                  code: "backend_connection_closed",
+                },
+        });
+      } else {
+        // Headers or a partial JSON body already escaped. A second response
+        // would be invalid; terminate the HTTP message so clients get a prompt
+        // truncated-response error instead of waiting forever.
+        res.destroy(new Error(message));
+      }
+    };
+
+    proxyRes.once("end", () => {
+      settled = true;
+    });
+    proxyRes.once("aborted", () => fail(new Error("backend response aborted")));
+    proxyRes.once("error", (error) => fail(error));
+    proxyRes.once("close", () => fail(new Error("backend response closed")));
   }
 
   async stop(): Promise<void> {
@@ -989,13 +1126,12 @@ export class ApiGateway extends EventEmitter {
         proxyRes.destroy();
         return;
       }
-      proxyRes.on("error", (err) => {
-        if (this.isClientDisconnectError(err)) return;
-        console.error(
-          `[gateway] Proxy response error → ${session.host}:${session.port}${clientReq.url}: ${err.message}`,
-        );
-      });
       this.abortProxyResponseOnClientClose(clientRes, proxyRes);
+      this.guardProxyResponseLifecycle(clientRes, proxyRes, {
+        context: `Proxy response ${session.host}:${session.port}${clientReq.url}`,
+        streaming: this.proxyRequestStreams(body),
+        protocol: this.proxyStreamProtocol(clientReq.url),
+      });
       // Forward bytes manually so client disconnects go through the guarded writer.
       // This preserves SSE Content-Type while avoiding noisy write EPIPE crashes.
       proxyRes.on("data", (chunk: Buffer) => {
@@ -1526,11 +1662,10 @@ export class ApiGateway extends EventEmitter {
 
     const proxyReq = httpRequest(proxyOpts, (proxyRes) => {
       this.abortProxyResponseOnClientClose(res, proxyRes);
-      proxyRes.on("error", (err) => {
-        if (this.isClientDisconnectError(err)) return;
-        console.error(
-          `[gateway] Ollama chat proxy response error → ${routedSession.host}:${routedSession.port}: ${err.message}`,
-        );
+      this.guardProxyResponseLifecycle(res, proxyRes, {
+        context: `Ollama chat proxy response ${routedSession.host}:${routedSession.port}`,
+        streaming: isStreaming,
+        protocol: "ollama",
       });
       if (!isStreaming) {
         // Non-streaming: buffer, translate, send
@@ -1852,11 +1987,10 @@ export class ApiGateway extends EventEmitter {
 
     const proxyReq = httpRequest(proxyOpts, (proxyRes) => {
       this.abortProxyResponseOnClientClose(res, proxyRes);
-      proxyRes.on("error", (err) => {
-        if (this.isClientDisconnectError(err)) return;
-        console.error(
-          `[gateway] Ollama generate proxy response error → ${routedSession.host}:${routedSession.port}: ${err.message}`,
-        );
+      this.guardProxyResponseLifecycle(res, proxyRes, {
+        context: `Ollama generate proxy response ${routedSession.host}:${routedSession.port}`,
+        streaming: isStreaming,
+        protocol: "ollama",
       });
       if (!isStreaming) {
         // Non-streaming: buffer, translate, send
@@ -2142,11 +2276,10 @@ export class ApiGateway extends EventEmitter {
 
     const proxyReq = httpRequest(proxyOpts, (proxyRes) => {
       this.abortProxyResponseOnClientClose(res, proxyRes);
-      proxyRes.on("error", (err) => {
-        if (this.isClientDisconnectError(err)) return;
-        console.error(
-          `[gateway] Ollama embeddings proxy response error → ${routedSession.host}:${routedSession.port}: ${err.message}`,
-        );
+      this.guardProxyResponseLifecycle(res, proxyRes, {
+        context: `Ollama embeddings proxy response ${routedSession.host}:${routedSession.port}`,
+        streaming: false,
+        protocol: "ollama",
       });
       let data = "";
       proxyRes.on("data", (chunk: Buffer) => {

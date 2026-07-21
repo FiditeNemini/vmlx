@@ -153,12 +153,28 @@ describe("Ollama gateway parity contracts", () => {
       "utf8",
     );
     expect(mainSource).toContain("function gatewayStatusPayload()");
+    expect(mainSource).toContain("activeRequests: apiGateway.activeRequestCount");
     expect(mainSource).toContain(
       "return gatewayStatusPayload()",
     );
     expect(mainSource).not.toContain(
       "return { running: true, port, host: apiGateway.activeHost }",
     );
+  });
+
+  it("persists gateway host and port only after the replacement listener binds", () => {
+    const mainSource = readFileSync(
+      resolve(process.cwd(), "src/main/index.ts"),
+      "utf8",
+    );
+    const restartHandler = mainSource.slice(
+      mainSource.indexOf("ipcMain.handle('gateway:restart'"),
+      mainSource.indexOf("ipcMain.handle('gateway:setSingleModelMode'"),
+    );
+
+    expect(restartHandler).toContain("await apiGateway.restart(port, host)");
+    expect(restartHandler).not.toContain("db.setSetting('gateway_port'");
+    expect(restartHandler).not.toContain("db.setSetting('gateway_host'");
   });
 
   it("does not turn client disconnect EPIPE into the unexpected-error crash dialog", () => {

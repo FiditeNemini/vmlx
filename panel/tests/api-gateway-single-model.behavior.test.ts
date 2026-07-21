@@ -331,6 +331,92 @@ describe("ApiGateway single-model mode behavior", () => {
     );
   });
 
+  it("keeps the listener live and rejects reconfiguration while a model response is active", async () => {
+    const responseStarted = deferred<void>();
+    let finishBackendResponse: (() => void) | undefined;
+    const backendServer = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+        });
+        res.write(
+          'data: {"choices":[{"delta":{"content":"hel"},"finish_reason":null}]}\n\n',
+        );
+        finishBackendResponse = () => {
+          res.write(
+            'data: {"choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}\n\n',
+          );
+          res.write("data: [DONE]\n\n");
+          res.end();
+        };
+        responseStarted.resolve();
+      });
+    });
+    backend = {
+      server: backendServer,
+      port: await listen(backendServer),
+      bodies: [],
+      paths: [],
+    };
+    const session = {
+      id: "target",
+      modelPath: "/models/Target-JANG",
+      modelName: "target-model",
+      host: "127.0.0.1",
+      port: backend.port,
+      status: "running",
+      type: "local",
+      config: JSON.stringify({ servedModelName: "target-alias" }),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    dbMock.getSetting.mockReturnValue(undefined);
+    dbMock.getSessions.mockReturnValue([session]);
+    dbMock.getSession.mockReturnValue(session);
+
+    const { ApiGateway } = await import("../src/main/api-gateway");
+    gateway = new ApiGateway();
+    const originalPort = await freePort();
+    const requestedPort = await freePort();
+    await gateway.start(originalPort, "127.0.0.1");
+
+    const responsePromise = fetch(
+      `http://127.0.0.1:${originalPort}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "target-alias",
+          stream: true,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      },
+    );
+    await responseStarted.promise;
+    const response = await responsePromise;
+
+    expect(gateway.activeRequestCount).toBe(1);
+    await expect(
+      gateway.restart(requestedPort, "0.0.0.0"),
+    ).rejects.toThrow("while 1 model request is active");
+    expect(gateway.running).toBe(true);
+    expect(gateway.activePort).toBe(originalPort);
+    expect(gateway.activeHost).toBe("127.0.0.1");
+    expect((await fetch(`http://127.0.0.1:${originalPort}/health`)).status).toBe(
+      200,
+    );
+
+    finishBackendResponse?.();
+    expect(await response.text()).toContain("data: [DONE]");
+    expect(gateway.activeRequestCount).toBe(0);
+    await expect(
+      gateway.restart(requestedPort, "127.0.0.1"),
+    ).resolves.toBeUndefined();
+    expect(gateway.activePort).toBe(requestedPort);
+  });
+
   it("reports failure when another active local session cannot be unloaded", async () => {
     dbMock.getSetting.mockImplementation((key: string) =>
       key === "gateway_single_model_mode" ? "true" : undefined,

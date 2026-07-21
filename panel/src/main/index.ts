@@ -59,6 +59,7 @@ function gatewayStatusPayload() {
     port: apiGateway.activePort,
     host,
     lanHost,
+    activeRequests: apiGateway.activeRequestCount,
     displayHost: lanHost || (host === '0.0.0.0' ? 'localhost' : host),
     singleModelMode: apiGateway.singleModelMode,
   }
@@ -286,8 +287,6 @@ function createWindow(): void {
       return { running: false }
     })
     ipcMain.handle('gateway:restart', async (_e, port: number, host?: string) => {
-      db.setSetting('gateway_port', String(port))
-      if (host) db.setSetting('gateway_host', host)
       await apiGateway.restart(port, host)
       return gatewayStatusPayload()
     })

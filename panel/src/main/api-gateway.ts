@@ -73,6 +73,8 @@ export class ApiGateway extends EventEmitter {
   private jitPending = new Map<string, Promise<boolean>>();
   /** Serialize cross-model transitions when single-model mode is enabled. */
   private singleModelTransitionPending: Promise<void> = Promise.resolve();
+  /** Responses for model/API requests that have not reached finish/close yet. */
+  private inFlightResponses = new Set<ServerResponse>();
 
   get running(): boolean {
     return this._running;
@@ -82,6 +84,9 @@ export class ApiGateway extends EventEmitter {
   }
   get activeHost(): string {
     return this.host;
+  }
+  get activeRequestCount(): number {
+    return this.inFlightResponses.size;
   }
   get singleModelMode(): boolean {
     return db.getSetting(SINGLE_MODEL_MODE_KEY) === "true";
@@ -267,6 +272,7 @@ export class ApiGateway extends EventEmitter {
     return new Promise((resolve, reject) => {
       this.server = createServer((req, res) => {
         this.attachResponseErrorGuard(res);
+        this.trackInFlightRequest(req, res);
         this.handleRequest(req, res).catch((err) => {
           this.handleRequestError(err, res);
         });
@@ -319,6 +325,26 @@ export class ApiGateway extends EventEmitter {
       }
       console.error("[gateway] Response stream error:", err);
     });
+  }
+
+  private trackInFlightRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): void {
+    const path = (req.url || "/").split("?", 1)[0];
+    // Liveness probes must remain available while a model request is active,
+    // and should not themselves block an otherwise-idle listener change.
+    if (req.method === "GET" && (path === "/" || path === "/health")) return;
+
+    this.inFlightResponses.add(res);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.inFlightResponses.delete(res);
+    };
+    res.once("finish", release);
+    res.once("close", release);
   }
 
   private handleRequestError(err: unknown, res: ServerResponse): boolean {
@@ -601,6 +627,14 @@ export class ApiGateway extends EventEmitter {
   }
 
   async restart(port: number, host?: string): Promise<void> {
+    const activeRequests = this.inFlightResponses.size;
+    if (activeRequests > 0) {
+      throw new Error(
+        `Gateway cannot change host or port while ${activeRequests} model ` +
+          `request${activeRequests === 1 ? " is" : "s are"} active. ` +
+          "Wait for the request to finish or cancel it first.",
+      );
+    }
     const wasRunning = this._running;
     const previousPort = this.port;
     const previousHost = this.host;
@@ -1257,6 +1291,7 @@ export class ApiGateway extends EventEmitter {
     this.sendJson(res, 200, {
       status: "ok",
       gateway_port: this.port,
+      active_requests: this.inFlightResponses.size,
       single_model_mode: this.singleModelMode,
       backends: sessions.map((s) => {
         let config: any = {};

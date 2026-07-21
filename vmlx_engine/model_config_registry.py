@@ -176,6 +176,33 @@ def _is_explicit_affine_jang_config(jang_config: Any) -> bool:
     )
 
 
+def _jang_stamp_default_enable_thinking(jang_config: Any) -> tuple[bool | None, str | None]:
+    """Read a concrete bundle's authoritative Auto-thinking default.
+
+    Family registry defaults are compatibility fallbacks for unstamped/base
+    artifacts.  A JANG bundle may carry a newer, artifact-specific template
+    contract, so prefer its explicit template kwarg and then its reasoning
+    default.  Missing metadata remains ``None``; callers must not infer a value
+    from the presence of a parser alone.
+    """
+    if not isinstance(jang_config, dict):
+        return None, None
+    chat = jang_config.get("chat")
+    if not isinstance(chat, dict):
+        return None, None
+    template_defaults = chat.get("template_kwargs_defaults")
+    if isinstance(template_defaults, dict):
+        value = template_defaults.get("enable_thinking")
+        if isinstance(value, bool):
+            return value, "jang_config.chat.template_kwargs_defaults.enable_thinking"
+    reasoning = chat.get("reasoning")
+    if isinstance(reasoning, dict):
+        value = reasoning.get("default_enabled")
+        if isinstance(value, bool):
+            return value, "jang_config.chat.reasoning.default_enabled"
+    return None, None
+
+
 def _is_affine_jang_qwen_hybrid_vlm(
     model_config: dict[str, Any],
     jang_config: Any,
@@ -625,6 +652,9 @@ class ModelConfigRegistry:
                 except Exception:
                     gemma4_unified_runtime_ready = False
             preserve_template_metadata_when_no_thinking = False
+            stamped_default_thinking, stamped_default_thinking_source = (
+                _jang_stamp_default_enable_thinking(jcfg)
+            )
 
             if is_zaya_family:
                 # Text ZAYA is reasoning-capable, and reasoning is now the
@@ -821,6 +851,39 @@ class ModelConfigRegistry:
                     updates["is_mllm"] = True
                 else:
                     updates["is_mllm"] = False
+            # Bundle-scoped Auto truth wins over a coarse family fallback. This
+            # is intentionally applied only outside the runtime-policy families
+            # above, whose live-proven compatibility guards reject stale stamps.
+            # Example: Laguna XS.2 defaults thinking OFF, while the newer
+            # Laguna-S-2.1 JANG bundles explicitly default it ON. A single
+            # family-wide bool cannot represent both artifacts truthfully.
+            stamped_policy_locked = (
+                is_zaya_family
+                or is_zaya1_vl_family
+                or is_ling_family
+                or is_hy3_family
+                or is_mimo_v2_family
+            )
+            effective_supports_thinking = updates.get(
+                "supports_thinking", base_supports_thinking
+            )
+            if (
+                isinstance(stamped_default_thinking, bool)
+                and not stamped_policy_locked
+                and effective_supports_thinking is not False
+            ):
+                hints = dict(
+                    updates.get(
+                        "architecture_hints",
+                        getattr(base, "architecture_hints", None),
+                    )
+                    or {}
+                )
+                hints["default_enable_thinking"] = stamped_default_thinking
+                hints["default_enable_thinking_source"] = (
+                    stamped_default_thinking_source
+                )
+                updates["architecture_hints"] = hints
             if updates:
                 base = replace(base, **updates)
             base = _with_hybrid_override_pattern_hint(base, local_model_config)

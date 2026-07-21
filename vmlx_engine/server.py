@@ -8225,13 +8225,24 @@ def _turboquant_kv_cache_status(engine=None, scheduler=None) -> dict:
         auto_policy = None
         configured_key_bits = 0
         configured_value_bits = 0
-        if engine is not None:
+        if engine is not None or scheduler is not None:
             _seen = set()
             _stack = []
-            for _attr in ("_model", "model"):
-                _value = _diagnostic_attr(engine, _attr)
-                if _value is not None:
-                    _stack.append(_value)
+            if engine is not None:
+                for _attr in ("_model", "model"):
+                    _value = _diagnostic_attr(engine, _attr)
+                    if _value is not None:
+                        _stack.append(_value)
+            # The health endpoint receives BatchedEngine plus its Scheduler.
+            # Some loader wrappers keep the patched language model only on
+            # scheduler.model, so probing the engine chain alone reports active
+            # TQ objects but loses their bits/policy and falsely labels storage
+            # native. The scheduler's own model is also the object generation
+            # calls make_cache() on, making it the authoritative fallback.
+            if scheduler is not None:
+                _scheduler_model = _diagnostic_attr(scheduler, "model")
+                if _scheduler_model is not None:
+                    _stack.append(_scheduler_model)
             while _stack and not template_layers:
                 _value = _stack.pop()
                 if id(_value) in _seen:
@@ -8793,13 +8804,33 @@ def _native_cache_status(
                 )
             except (TypeError, ValueError):
                 stored_kv_bits = 0
+        native_tq_storage = bool(
+            turboquant_status is not None
+            and turboquant_status.get("storage_encode_enabled")
+        )
         storage_quantized = bool(
             stored_kv_bits > 0
-            or (
-                turboquant_status is not None
-                and turboquant_status.get("storage_encode_enabled")
-            )
+            or native_tq_storage
         )
+        storage_quantization = {
+            "enabled": storage_quantized,
+            "mode": "storage_boundary",
+            "bits": stored_kv_bits if storage_quantized else None,
+            "group_size": stored_kv_group if storage_quantized else None,
+            "applies_to": (
+                "full_attention_kv_only"
+                if native_tq_storage
+                else "full_and_sliding_attention_kv"
+            ),
+            "metadata_policy": "preserve_rotating_window_metadata",
+        }
+        if native_tq_storage:
+            storage_quantization["sliding_window_policy"] = (
+                "native_rotating_kv_state"
+            )
+            storage_quantization["restore_policy"] = (
+                "decode_full_attention_tq_and_restore_rotating_state"
+            )
         return {
             "family": family_name or scheduler_family or "mixed_attention",
             "schema": "mixed_swa_kv_v1",
@@ -8818,14 +8849,7 @@ def _native_cache_status(
                     else "storage_only" if storage_quantized else "not_active"
                 ),
             },
-            "storage_quantization": {
-                "enabled": storage_quantized,
-                "mode": "storage_boundary",
-                "bits": stored_kv_bits if storage_quantized else None,
-                "group_size": stored_kv_group if storage_quantized else None,
-                "applies_to": "full_and_sliding_attention_kv",
-                "metadata_policy": "preserve_rotating_window_metadata",
-            },
+            "storage_quantization": storage_quantization,
             "prefix": bool(block_aware_cache is not None),
             "paged": paged_backend_active,
             "block_disk_only": block_disk_only,

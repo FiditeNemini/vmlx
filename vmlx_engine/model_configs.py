@@ -213,7 +213,7 @@ def register_all(registry=None):
     # follow-up turns. Use the strings that ARE in the vocab.
     #
     # Reasoning parser: Laguna's chat template gates `<think>` blocks
-    # behind `enable_thinking=true` (default false). The qwen3 parser
+    # behind `enable_thinking=true`. The qwen3 parser
     # extracts `<think>...</think>` if present and otherwise routes
     # all output to `content`, so leaving it auto-applied is safe.
     _register(
@@ -239,8 +239,11 @@ def register_all(registry=None):
             # False (otherwise the Auto path mis-seeds the qwen3 parser
             # reasoning-first even when reasoning is off).
             #
-            # Auto must follow the bundle's native default (false), not force the
-            # optional `<think>` rail on. A live Electron run with Auto forced ON
+            # This family fallback keeps legacy/unstamped XS.2 Auto off. Concrete
+            # JANG stamps can override it through
+            # chat.template_kwargs_defaults.enable_thinking or
+            # chat.reasoning.default_enabled; Laguna-S-2.1 explicitly defaults
+            # Auto on. A prior XS.2 Electron run with Auto forced ON
             # produced 1,978 reasoning tokens and a deterministic-looking
             # `tenant` repetition before manual abort, while the same artifact's
             # native/default direct rail and explicit bounded reasoning rail both

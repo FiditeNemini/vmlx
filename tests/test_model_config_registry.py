@@ -442,6 +442,66 @@ class TestModelConfigRegistry:
         assert result.think_in_template is False
         assert result.tool_parser == "deepseek"
 
+    @pytest.mark.parametrize("stamped_default", [True, False])
+    def test_laguna_jang_stamp_overrides_family_auto_thinking_fallback(
+        self, empty_registry, tmp_path, stamped_default
+    ):
+        """Laguna Auto follows each concrete bundle, not one family-wide bool."""
+        empty_registry.register(
+            ModelConfig(
+                family_name="laguna",
+                model_types=["laguna"],
+                cache_type="kv",
+                tool_parser="glm47",
+                reasoning_parser="qwen3",
+                think_in_template=False,
+                supports_thinking=True,
+                architecture_hints={"default_enable_thinking": False},
+                priority=10,
+            )
+        )
+        (tmp_path / "config.json").write_text(
+            json.dumps({"model_type": "laguna"})
+        )
+        (tmp_path / "jang_config.json").write_text(
+            json.dumps(
+                {
+                    "capabilities": {
+                        "family": "laguna",
+                        "cache_type": "kv",
+                        "tool_parser": "glm47",
+                        "reasoning_parser": "deepseek_r1",
+                        "think_in_template": True,
+                        "supports_thinking": True,
+                        "modality": "text",
+                    },
+                    "chat": {
+                        "reasoning": {
+                            "supported": True,
+                            "default_enabled": stamped_default,
+                        },
+                        "template_kwargs_defaults": {
+                            "enable_thinking": stamped_default,
+                        },
+                    },
+                }
+            )
+        )
+
+        result = empty_registry.lookup(str(tmp_path))
+
+        assert result.family_name == "laguna"
+        assert result.supports_thinking is True
+        assert result.reasoning_parser == "deepseek_r1"
+        assert result.think_in_template is True
+        assert (
+            result.architecture_hints["default_enable_thinking"]
+            is stamped_default
+        )
+        assert result.architecture_hints["default_enable_thinking_source"] == (
+            "jang_config.chat.template_kwargs_defaults.enable_thinking"
+        )
+
     def test_zaya_is_reasoning_capable_but_does_not_auto_open_in_no_think_prompt(
         self, empty_registry, tmp_path
     ):

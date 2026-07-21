@@ -772,6 +772,49 @@ def test_ling_suppresses_reasoning_parser_and_stale_think_in_template(
     assert resolved is False
 
 
+def test_laguna_auto_uses_bundle_stamped_reasoning_default(tmp_path, monkeypatch):
+    """Auto must resolve from the concrete Laguna artifact's JANG stamp."""
+    import json
+    from vmlx_engine import server
+    import vmlx_engine.model_config_registry as mcr
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "laguna"}))
+    (tmp_path / "jang_config.json").write_text(json.dumps({
+        "capabilities": {
+            "family": "laguna",
+            "cache_type": "kv",
+            "tool_parser": "glm47",
+            "reasoning_parser": "deepseek_r1",
+            "think_in_template": True,
+            "supports_thinking": True,
+            "modality": "text",
+        },
+        "chat": {
+            "reasoning": {"supported": True, "default_enabled": True},
+            "template_kwargs_defaults": {"enable_thinking": True},
+        },
+    }))
+
+    mcr.ModelConfigRegistry._instance = None
+    mcr._configs_loaded = False
+    registry = mcr.get_model_config_registry()
+    registry.clear_cache()
+    monkeypatch.setattr(server, "_default_enable_thinking", None)
+
+    config = registry.lookup(str(tmp_path))
+    resolved = server._resolve_enable_thinking(
+        request_value=None,
+        ct_kwargs={},
+        tools_present=False,
+        model_key=str(tmp_path),
+        engine=None,
+        auto_detect=True,
+    )
+
+    assert config.architecture_hints["default_enable_thinking"] is True
+    assert resolved is True
+
+
 def test_panel_ling_registry_does_not_advertise_reasoning_parser():
     """Panel auto-detect must match engine Ling no-reasoning contract."""
     from pathlib import Path

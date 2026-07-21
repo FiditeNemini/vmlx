@@ -11423,6 +11423,53 @@ class TestTurboQuantKVTelemetry:
         assert "single_sequence_reason" not in status
         assert status["effective_max_num_seqs"] == 5
 
+    def test_reads_storage_codec_from_scheduler_model_when_engine_wrapper_hides_it(self):
+        """Health must inspect the same make_cache object used by generation."""
+        from types import SimpleNamespace
+        from vmlx_engine.server import _turboquant_kv_cache_status
+
+        class TurboQuantKVCache:
+            compress_after = 0
+            key_bits = 4
+            value_bits = 4
+
+        def _tq_make_cache():
+            return [TurboQuantKVCache()]
+
+        _tq_make_cache._vmlx_tq_compress_after = 0
+        _tq_make_cache._vmlx_tq_default_key_bits = 4
+        _tq_make_cache._vmlx_tq_default_value_bits = 4
+        _tq_make_cache._vmlx_tq_auto_policy = (
+            "mixed_swa_full_attention_kv_storage_tq4"
+        )
+        scheduler = SimpleNamespace(
+            model=SimpleNamespace(make_cache=_tq_make_cache),
+            _tq_active=True,
+            _tq_batch_api=True,
+            _kv_cache_bits=0,
+            block_aware_cache=object(),
+            memory_aware_cache=None,
+            prefix_cache=None,
+            config=SimpleNamespace(
+                max_num_seqs=1,
+                prefill_batch_size=512,
+                completion_batch_size=512,
+            ),
+        )
+
+        status = _turboquant_kv_cache_status(
+            engine=SimpleNamespace(_model=SimpleNamespace()),
+            scheduler=scheduler,
+        )
+
+        assert status["storage_encode_enabled"] is True
+        assert status["storage_key_bits"] == 4
+        assert status["storage_value_bits"] == 4
+        assert status["stored_prefix_quantization"] == "turboquant-q4"
+        assert status["auto_policy"] == (
+            "mixed_swa_full_attention_kv_storage_tq4"
+        )
+
     def test_mllm_scheduler_aggregates_cached_tokens_for_stats(self):
         import threading
         from types import SimpleNamespace
@@ -13669,8 +13716,10 @@ class TestTurboQuantKVTelemetry:
             "mode": "storage_boundary",
             "bits": 4,
             "group_size": 64,
-            "applies_to": "full_and_sliding_attention_kv",
+            "applies_to": "full_attention_kv_only",
             "metadata_policy": "preserve_rotating_window_metadata",
+            "sliding_window_policy": "native_rotating_kv_state",
+            "restore_policy": "decode_full_attention_tq_and_restore_rotating_state",
         }
 
     def test_native_cache_status_reports_step37_full_sliding_kv_from_registry_subtype(self):

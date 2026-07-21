@@ -2,11 +2,10 @@
 """
 Laguna (poolside) loader — thin wrapper over `jang_tools.laguna.runtime`.
 
-Laguna is poolside.ai's 33B/3B agentic-coding MoE: 40 layers, hybrid
-SWA + full attention with PER-LAYER head count (48 full / 64 SWA, dual
-RoPE — full uses YaRN, SWA uses default), 256 routed experts top-8 + 1
-shared, sigmoid routing with per-head gating (`g_proj`), q_norm/k_norm
-in attention, dense layer 0 + sparse layers 1..39. Text-only.
+Laguna is poolside.ai's agentic-coding MoE family. Bundle config is
+authoritative for layer count, per-layer full/sliding attention heads,
+dual-RoPE parameters, expert count/top-k, and dense/sparse layout. Do not
+hardcode the older XS.2 topology here; newer S-2.1 artifacts differ.
 
 `model_type = "laguna"`. Bundle layout (see the `jang_tools.laguna`
 runtime README):
@@ -38,6 +37,22 @@ from pathlib import Path
 from typing import Any, Tuple
 
 logger = logging.getLogger("vmlx_engine.loaders.laguna")
+
+
+def _load_laguna_tokenizer(path: Path) -> Any:
+    """Load the shipped Laguna tokenizer without a one-sided regex rewrite.
+
+    Poolside's reference serving stack consumes the bundle's ``tokenizer.json``
+    as written.  Transformers may suggest ``fix_mistral_regex=True``, but using
+    that flag only in vMLX would make prompt tokenization diverge from the
+    reference stack.  Keep the warning visible and preserve bundle truth.
+    """
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(
+        str(path),
+        trust_remote_code=True,
+    )
 
 
 def load_laguna_model(model_path: str | Path) -> Tuple[Any, Any]:
@@ -148,10 +163,7 @@ def load_laguna_model(model_path: str | Path) -> Tuple[Any, Any]:
     # (the symptom users see as "looping"). Read the full eos id list
     # from generation_config.json and attach it to the tokenizer so
     # mlx_lm honors both.
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        str(path), trust_remote_code=True
-    )
+    tokenizer = _load_laguna_tokenizer(path)
     # mlx_lm.generate.stream_generate wraps the tokenizer with
     # `TokenizerWrapper(tokenizer)` — no `eos_token_ids` arg passed —
     # which falls back to `{tokenizer.eos_token_id}` (singleton). For

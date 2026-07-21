@@ -416,7 +416,12 @@ declare global {
         }) => Promise<{ success: boolean; error?: string }>;
         cancelOp: () => Promise<{ success: boolean; error?: string }>;
         isRunning: () => Promise<{ running: boolean }>;
-        getBufferedLogs: () => Promise<{ lines: string[]; running: boolean }>;
+        getBufferedLogs: () => Promise<{
+          lines: string[];
+          running: boolean;
+          result: { success: boolean; cancelled?: boolean; error?: string } | null;
+          operation: { command: string; args: string[] } | null;
+        }>;
         browseOutputDir: () => Promise<string | null>;
         onLog: (callback: (data: { data: string }) => void) => () => void;
         onComplete: (

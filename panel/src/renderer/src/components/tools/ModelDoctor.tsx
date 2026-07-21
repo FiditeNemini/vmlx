@@ -102,7 +102,17 @@ export function ModelDoctor({ initialModelPath, onBack, models = [] }: ModelDoct
     setChecks(parseOutput(lines))
   }, [])
 
-  const { running, logLines, wasCancelled, start, cancel } = useStreamingOperation(onLogUpdate)
+  const { running, logLines, wasCancelled, completion, operation, start, cancel } = useStreamingOperation(onLogUpdate)
+
+  useEffect(() => {
+    if (operation?.command !== 'doctor') return
+    setModelPath(operation.args[0] || '')
+    setNoInference(operation.args.includes('--no-inference'))
+  }, [operation])
+
+  useEffect(() => {
+    if (completion) setDone(true)
+  }, [completion])
 
   useEffect(() => {
     if (initialModelPath) setModelPath(initialModelPath)

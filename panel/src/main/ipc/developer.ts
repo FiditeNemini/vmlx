@@ -2,10 +2,14 @@ import { ipcMain, BrowserWindow, dialog } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import { sessionManager } from '../sessions'
 import { db } from '../database'
+import {
+  StreamingOperationLifecycle,
+  type StreamingOperationResult,
+} from './streaming-operation-lifecycle'
 
-let activeProcess: ChildProcess | null = null
-let cancelled = false
+const operationLifecycle = new StreamingOperationLifecycle<ChildProcess>()
 let bufferedLogLines: string[] = []  // Persists across component mounts for reconnection
+let bufferedOperationDescriptor: { command: string; args: string[] } | null = null
 
 function isExpectedChildProcessStreamDisconnectError(err: unknown): boolean {
   const code = (err as NodeJS.ErrnoException)?.code
@@ -86,7 +90,7 @@ function emitLog(getWin: () => BrowserWindow | null, data: string) {
   }
 }
 
-function emitComplete(getWin: () => BrowserWindow | null, result: { success: boolean; cancelled?: boolean; error?: string }) {
+function emitComplete(getWin: () => BrowserWindow | null, result: StreamingOperationResult) {
   const win = getWin()
   if (win && !win.isDestroyed()) {
     win.webContents.send('developer:complete', result)
@@ -149,20 +153,29 @@ async function runStreamingCommand(
   cliArgs: string[],
   failureMessage: string,
 ): Promise<{ success: boolean; cancelled?: boolean; error?: string }> {
-  if (activeProcess) {
+  if (operationLifecycle.isRunning) {
     return { success: false, error: 'Another operation is already running' }
   }
 
   const spawn_info = resolveCliSpawn(cliArgs)
-  cancelled = false
   bufferedLogLines = []  // Clear previous buffer
+  bufferedOperationDescriptor = {
+    command: cliArgs[0] || '',
+    args: cliArgs.slice(1),
+  }
 
   return new Promise((resolve) => {
     const proc = spawn(spawn_info.cmd, spawn_info.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: spawn_info.env,
     })
-    activeProcess = proc
+    const operation = operationLifecycle.start(proc)
+    const settle = (result: StreamingOperationResult) => {
+      const terminal = operationLifecycle.finish(operation, result)
+      if (!terminal) return
+      emitComplete(getWin, terminal)
+      resolve(terminal)
+    }
 
     const bufferAndEmit = (raw: string) => {
       const lines = raw.split('\n').filter((l: string) => l.length > 0)
@@ -181,20 +194,11 @@ async function runStreamingCommand(
     })
 
     proc.on('close', (code) => {
-      activeProcess = null
-      if (cancelled) {
-        emitComplete(getWin, { success: false, cancelled: true })
-        resolve({ success: false, cancelled: true, error: 'Cancelled' })
-      } else {
-        const success = code === 0
-        emitComplete(getWin, { success })
-        resolve({ success, cancelled: false, error: success ? undefined : failureMessage })
-      }
+      const success = code === 0
+      settle({ success, cancelled: false, error: success ? undefined : failureMessage })
     })
     proc.on('error', (err) => {
-      activeProcess = null
-      emitComplete(getWin, { success: false, error: err.message })
-      resolve({ success: false, error: err.message })
+      settle({ success: false, error: err.message })
     })
   })
 }
@@ -256,26 +260,23 @@ export function registerDeveloperHandlers(getWin: () => BrowserWindow | null) {
   })
 
   ipcMain.handle('developer:cancelOp', async () => {
-    if (activeProcess) {
-      cancelled = true
-      activeProcess.kill('SIGTERM')
-      const proc = activeProcess
-      setTimeout(() => {
-        try { proc.kill('SIGKILL') } catch { /* already dead */ }
-      }, 3000)
-      return { success: true }
-    }
+    if (operationLifecycle.cancel()) return { success: true }
     return { success: false, error: 'No active operation' }
   })
 
   // Query whether a conversion/operation is currently running (for reconnection after navigation)
   ipcMain.handle('developer:isRunning', async () => {
-    return { running: activeProcess !== null }
+    return { running: operationLifecycle.isRunning }
   })
 
   // Get buffered log lines from the current/last operation (for reconnection after navigation)
   ipcMain.handle('developer:getBufferedLogs', async () => {
-    return { lines: bufferedLogLines, running: activeProcess !== null }
+    return {
+      lines: bufferedLogLines,
+      running: operationLifecycle.isRunning,
+      result: operationLifecycle.lastResult,
+      operation: bufferedOperationDescriptor,
+    }
   })
 
   ipcMain.handle('developer:browseOutputDir', async () => {
@@ -289,13 +290,5 @@ export function registerDeveloperHandlers(getWin: () => BrowserWindow | null) {
 }
 
 export function killActiveOperation() {
-  if (activeProcess) {
-    const proc = activeProcess
-    activeProcess = null
-    cancelled = true
-    proc.kill('SIGTERM')
-    setTimeout(() => {
-      try { proc.kill('SIGKILL') } catch { /* already dead */ }
-    }, 3000)
-  }
+  operationLifecycle.cancel()
 }

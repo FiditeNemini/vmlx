@@ -88,7 +88,62 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
     return getJangCompatWarning(detectedModelType, profile)
   })()
 
-  const { running, logLines, wasCancelled, start, cancel } = useStreamingOperation()
+  const { running, logLines, wasCancelled, completion, operation, start, cancel } = useStreamingOperation()
+
+  useEffect(() => {
+    if (operation?.command !== 'convert') return
+    const args = operation.args
+    const option = (name: string) => {
+      const index = args.indexOf(name)
+      return index >= 0 ? args[index + 1] : undefined
+    }
+    setModelPath(args[0] || '')
+    setOutputDir(option('--output') || '')
+    setForce(args.includes('--force'))
+    setSkipVerify(args.includes('--skip-verify'))
+    setTrustRemoteCode(args.includes('--trust-remote-code'))
+
+    const profile = option('--jang-profile')
+    if (profile) {
+      setQuantMode('jang')
+      const presetEntry = Object.entries(JANG_PRESETS).find(([, value]) => value.profile === profile)
+      if (presetEntry) {
+        setPreset(presetEntry[0])
+      } else if (profile.startsWith('CUSTOM_')) {
+        const custom = profile.split('_').slice(1).map(Number)
+        if (custom.length === 3 && custom.every(Number.isFinite)) {
+          setCustomCritical(custom[0])
+          setCustomImportant(custom[1])
+          setCustomCompress(custom[2])
+          setPreset('jang_custom')
+        }
+      }
+      setJangMethod(option('--jang-method') || 'mse')
+      return
+    }
+
+    setQuantMode('mlx')
+    const restoredBits = Number(option('--bits') || 4)
+    const restoredGroupSize = Number(option('--group-size') || 64)
+    setBits(restoredBits)
+    setGroupSize(restoredGroupSize)
+    setMode(option('--mode') || 'default')
+    setDtype(option('--dtype') || '')
+    const matchingPreset = Object.entries(MLX_PRESETS).find(([, value]) => (
+      value.bits === restoredBits && value.groupSize === restoredGroupSize
+    ))
+    setPreset(matchingPreset?.[0] || 'custom')
+  }, [operation])
+
+  useEffect(() => {
+    if (!completion) return
+    setSuccess(completion.success)
+    if (!completion.success) return
+    const pathLine = logLines.find((l: string) => l.match(/^\s*Output(?:\s+path)?:\s/))
+    if (pathLine) {
+      setOutputPath(pathLine.replace(/^\s*Output(?:\s+path)?:\s*/, '').trim())
+    }
+  }, [completion, logLines])
 
   // Derive progress status from log lines for the progress indicator
   const progressStatus = (() => {

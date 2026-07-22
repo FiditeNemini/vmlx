@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import {
   requestedExactFinalToolNames,
   requestsDirectAnswerAfterSingleTool,
+  requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
@@ -127,11 +128,35 @@ describe('tool auto-continue policy', () => {
     ).toBe(false)
   })
 
+  it('treats strict exact-answer prompts without a tool directive as text-only turns', () => {
+    expect(
+      requestsExactTextOnlyWithoutToolUse(
+        '[LAG-UI-GLOBAL1] Think privately if useful, then reply exactly LAG-UI-GLOBAL1-DONE.',
+      ),
+    ).toBe(true)
+    expect(
+      requestsExactTextOnlyWithoutToolUse(
+        'Call the built-in file_info tool exactly once with path panel/package.json. After the tool result, reply exactly DONE.',
+      ),
+    ).toBe(false)
+    expect(
+      requestsExactTextOnlyWithoutToolUse(
+        'You must use the tool. After its function result, reply exactly DONE.',
+      ),
+    ).toBe(false)
+    expect(
+      requestsExactTextOnlyWithoutToolUse('Use tools as needed, then reply exactly DONE.'),
+    ).toBe(false)
+  })
+
   it('omits unusable tool schemas and suppresses the generic tool prompt when requested', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
 
     expect(source).toContain('requestsNoToolCalls(latestUserText)')
-    expect(source.match(/builtinToolsEnabled && !userForbidsToolCalls/g) || []).toHaveLength(2)
+    expect(source).toContain('requestsExactTextOnlyWithoutToolUse(latestUserText)')
+    expect(source).toContain('const attachBuiltinToolsForCurrentTurn =')
+    expect(source).toContain('!exactTextOnlyNoToolTurn')
+    expect(source.match(/if \(attachBuiltinToolsForCurrentTurn\)/g) || []).toHaveLength(2)
     expect(source).not.toContain('obj.tool_choice = "none"')
   })
 

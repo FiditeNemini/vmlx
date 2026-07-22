@@ -56,6 +56,29 @@ export function requestsDirectAnswerAfterSingleTool(text: string): boolean {
   return requestedExactFinalToolNames(text).length === 1
 }
 
+export function requestsExactTextOnlyWithoutToolUse(text: string): boolean {
+  if (!/\breply exactly\b/i.test(text)) return false
+  if (requestedExactFinalToolNames(text).length > 0) return false
+
+  // A previous chat/profile may leave builtin tools enabled. For strict
+  // exact-answer probes that do not ask for tool use, sending the whole tool
+  // catalog changes the prompt and lets small/native models answer from schema
+  // text instead of the current user turn. Keep this directive-shaped so normal
+  // agentic coding chats still receive tools.
+  const explicitToolRequest =
+    /\b(?:call|use|invoke|run)\s+(?:the\s+)?(?:built[- ]in\s+)?[a-z][\w-]*(?:\s+tool|\s+function)?\b/i
+  const toolResultContract =
+    /\bafter\b[^.!?\n]{0,120}\b(?:tool|function)\s+results?\b/i
+  const mustUseTool =
+    /\bmust\s+(?:call|use|invoke|run)\s+(?:the\s+)?(?:built[- ]in\s+)?(?:[a-z][\w-]*\s+)?(?:tool|function)\b/i
+
+  return !(
+    explicitToolRequest.test(text) ||
+    toolResultContract.test(text) ||
+    mustUseTool.test(text)
+  )
+}
+
 export function requestsNoToolCalls(text: string): boolean {
   // Keep these directive-shaped so quoted discussion of tool policy does not
   // silently disable the catalog. The UI omits tool schemas entirely when

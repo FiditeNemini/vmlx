@@ -32,6 +32,7 @@ import {
 import {
   requestedExactFinalToolNames,
   requestsDirectAnswerAfterSingleTool,
+  requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
@@ -1467,6 +1468,13 @@ export function registerChatHandlers(
       const userForbidsToolCalls =
         overrides?.builtinToolsEnabled === true &&
         requestsNoToolCalls(latestUserText);
+      const exactTextOnlyNoToolTurn =
+        overrides?.builtinToolsEnabled === true &&
+        requestsExactTextOnlyWithoutToolUse(latestUserText);
+      const attachBuiltinToolsForCurrentTurn =
+        overrides?.builtinToolsEnabled === true &&
+        !userForbidsToolCalls &&
+        !exactTextOnlyNoToolTurn;
       const directAnswerAfterSingleTool =
         overrides?.builtinToolsEnabled === true &&
         requestsDirectAnswerAfterSingleTool(latestUserText);
@@ -1482,7 +1490,7 @@ export function registerChatHandlers(
           chat.modelPath || chat.modelId,
         );
       const directMediaAttachmentRule =
-        hasMediaAttachments && overrides?.builtinToolsEnabled
+        hasMediaAttachments && attachBuiltinToolsForCurrentTurn
           ? DIRECT_MEDIA_ATTACHMENT_TOOL_RULE
           : "";
       if (hasSystemPrompt && overrides?.builtinToolsEnabled) {
@@ -1505,7 +1513,7 @@ export function registerChatHandlers(
           content: overrides!.systemPrompt!,
         });
       } else if (
-        overrides?.builtinToolsEnabled &&
+        attachBuiltinToolsForCurrentTurn &&
         !userForbidsToolCalls &&
         !suppressAgenticToolPromptForExactOutput &&
         !suppressGenericAgenticToolPromptForNativeTools
@@ -1978,7 +1986,7 @@ export function registerChatHandlers(
             // unusable catalog, and keeps the rendered prefix stable across
             // Responses history replay (some native templates otherwise add a
             // fallback schema block only on the follow-up turn).
-            if (overrides?.builtinToolsEnabled && !userForbidsToolCalls) {
+            if (attachBuiltinToolsForCurrentTurn) {
               obj.tools = availableToolDefinitions().map((t) => ({
                 type: "function",
                 name: t.function.name,
@@ -2054,7 +2062,7 @@ export function registerChatHandlers(
             // per-chat override of a bundle repetition penalty.
             if (overrides?.repeatPenalty != null)
               obj.repetition_penalty = overrides.repeatPenalty;
-            if (overrides?.builtinToolsEnabled && !userForbidsToolCalls) {
+            if (attachBuiltinToolsForCurrentTurn) {
               // Chat Completions API: tools must be in OpenAI format with "function" wrapper
               // e.g. {"type": "function", "function": {"name": ..., "parameters": ...}}
               obj.tools = availableToolDefinitions();

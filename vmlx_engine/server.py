@@ -18478,10 +18478,7 @@ async def stream_chat_completion(
         and _exact_once_requested
         and not _has_post_user_tool_result
     )
-    _stream_speculative_tool_start_allowed = bool(
-        _exact_once_tool_contract
-        or _is_required_tool_choice(getattr(request, "tool_choice", None))
-    )
+    _stream_speculative_tool_start_allowed = False
     if tool_call_active and _exact_once_requested:
         logger.info(
             "Chat exact-once tool gate: initial_selection=%s "
@@ -18912,12 +18909,13 @@ async def stream_chat_completion(
                             )
                             yield f"data: {_dump_chat_chunk(reasoning_chunk)}\n\n"
                     # Buffering is speculative until the final parser returns a
-                    # schema-valid function call. Initial exact-once/required
-                    # tool-selection turns may advertise a START delta so
-                    # strict clients know a call is in progress. Optional and
-                    # post-tool continuations must not, because native marker
-                    # residue can false-trigger buffering and strict coding
-                    # harnesses will treat the empty delta as a real call.
+                    # schema-valid function call. Do not advertise an OpenAI
+                    # tool_calls START delta here: malformed required-tool
+                    # output and optional/post-tool native marker residue can
+                    # false-trigger buffering, and strict coding harnesses will
+                    # treat the empty delta as a real call. Valid calls still
+                    # receive a START delta immediately before the final
+                    # schema-valid call deltas are emitted below.
                     if (
                         not tool_call_buffering_notified
                         and _stream_speculative_tool_start_allowed
@@ -19119,10 +19117,9 @@ async def stream_chat_completion(
                     )
 
                 if tool_call_buffering:
-                    # Same contract as the reasoning-parser branch: initial
-                    # exact-once/required tool-selection turns may emit a START
-                    # delta; optional/post-tool buffering emits only neutral
-                    # heartbeats until a schema-valid tool call exists.
+                    # Same contract as the reasoning-parser branch: buffering
+                    # emits only neutral heartbeats until a schema-valid tool
+                    # call exists. Valid calls still get a START delta below.
                     if (
                         not tool_call_buffering_notified
                         and _stream_speculative_tool_start_allowed

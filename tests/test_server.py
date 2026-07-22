@@ -3833,7 +3833,9 @@ class TestOpenAILogprobsFormatting:
                     role="user",
                     content=(
                         "Call the built-in file_info tool exactly once with path "
-                        "panel/package.json."
+                        "panel/package.json. You must use the tool. After the "
+                        "tool result, reply exactly "
+                        "LAG-S21-POST-TOOL-FINAL-DONE and nothing else."
                     ),
                 )
             ],

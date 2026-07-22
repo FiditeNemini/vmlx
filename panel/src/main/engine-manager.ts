@@ -62,8 +62,8 @@ function attachChildProcessStreamErrorGuard(
 // `vmlx-engine` and falsely reported "engine not installed" for users who
 // installed via `uv tool install vmlx` (which on some uv versions only
 // drops `vmlx` into ~/.local/bin) or who use `vmlx serve …` interactively.
-const ENTRY_POINT_NAMES = ['vmlx-engine', 'vmlx-serve', 'vmlx']
-const SEARCH_DIRS = [
+export const ENGINE_ENTRY_POINT_NAMES = ['vmlx-engine', 'vmlx-serve', 'vmlx'] as const
+export const ENGINE_SEARCH_DIRS = [
   join(homedir(), '.local', 'bin'),                    // uv tool / pip --user / pipx
   '/opt/homebrew/bin',                                  // Homebrew (Apple Silicon)
   '/usr/local/bin',                                     // Homebrew (Intel)
@@ -73,7 +73,7 @@ const SEARCH_DIRS = [
   join(homedir(), 'miniconda3', 'bin'),                 // Miniconda
   join(homedir(), '.pyenv', 'shims'),                   // pyenv shims
 ]
-const SEARCH_PATHS = SEARCH_DIRS.flatMap(d => ENTRY_POINT_NAMES.map(n => join(d, n)))
+const SEARCH_PATHS = ENGINE_SEARCH_DIRS.flatMap(d => ENGINE_ENTRY_POINT_NAMES.map(n => join(d, n)))
 const PYPI_PACKAGE_NAME = 'vmlx'
 
 /**
@@ -261,7 +261,7 @@ export async function checkEngineInstallation(): Promise<EngineInstallation> {
   const { execFile: execFileWhich2 } = await import('child_process')
   const { promisify: promisifyWhich2 } = await import('util')
   const execFileWhichAsync2 = promisifyWhich2(execFileWhich2)
-  for (const name of ENTRY_POINT_NAMES) {
+  for (const name of ENGINE_ENTRY_POINT_NAMES) {
     try {
       const result = await execFileWhichAsync2('which', [name])
       const path = result.stdout.trim()

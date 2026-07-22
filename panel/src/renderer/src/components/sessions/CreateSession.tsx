@@ -4,46 +4,7 @@ import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG } from './SessionConfi
 import { DownloadTab } from './DownloadTab'
 import { DirectoryManager } from './DirectoryManager'
 import { useTranslation } from '../../i18n'
-
-function hasDeclaredSamplingDefaults(gen: any): boolean {
-  return !!gen && (
-    gen.doSample === false ||
-    gen.temperature != null ||
-    gen.topP != null ||
-    gen.topK != null ||
-    gen.minP != null ||
-    gen.repeatPenalty != null
-  )
-}
-
-function applyGenerationDefaultsToConfig<T extends SessionConfig>(base: T, gen: any): T {
-  const next = { ...base }
-  if (gen?.temperature != null) next.defaultTemperature = Math.round(gen.temperature * 100)
-  else next.defaultTemperature = 0
-  if (gen?.topP != null) next.defaultTopP = Math.round(gen.topP * 100)
-  else next.defaultTopP = 0
-  next.defaultTopK = gen?.topK != null ? Math.max(0, Math.round(gen.topK)) : 0
-  if (gen?.minP != null) next.defaultMinP = Math.max(0, Math.round(gen.minP * 100))
-  else next.defaultMinP = 0
-  if (gen?.repeatPenalty != null) next.defaultRepetitionPenalty = Math.round(gen.repeatPenalty * 100)
-  else next.defaultRepetitionPenalty = 0
-  next.defaultMaxNewTokens = gen?.maxNewTokens != null ? Math.round(gen.maxNewTokens) : 0
-  next.defaultDoSample = typeof gen?.doSample === 'boolean' ? gen.doSample : undefined
-  next.defaultSamplingDefaultsDeclared = hasDeclaredSamplingDefaults(gen)
-  return next
-}
-
-function applyGenerationDefaultsToStoredConfig(stored: any, gen: any): any {
-  stored.defaultTemperature = gen?.temperature != null ? Math.round(gen.temperature * 100) : 0
-  stored.defaultTopP = gen?.topP != null ? Math.round(gen.topP * 100) : 0
-  stored.defaultTopK = gen?.topK != null ? Math.max(0, Math.round(gen.topK)) : 0
-  stored.defaultMinP = gen?.minP != null ? Math.round(gen.minP * 100) : 0
-  stored.defaultRepetitionPenalty = gen?.repeatPenalty != null ? Math.round(gen.repeatPenalty * 100) : 0
-  stored.defaultMaxNewTokens = gen?.maxNewTokens != null ? Math.round(gen.maxNewTokens) : 0
-  stored.defaultDoSample = typeof gen?.doSample === 'boolean' ? gen.doSample : undefined
-  stored.defaultSamplingDefaultsDeclared = hasDeclaredSamplingDefaults(gen)
-  return stored
-}
+import { applyBundleGenerationDefaultsToSessionConfig } from '../../../../shared/sessionGenerationDefaults'
 
 interface ModelInfo {
   path: string
@@ -73,6 +34,9 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
   const [detectedUsePagedCache, setDetectedUsePagedCache] = useState<boolean | undefined>(undefined)
   const [detectedCacheSubtype, setDetectedCacheSubtype] = useState<string | undefined>()
   const [detectedFamily, setDetectedFamily] = useState<string | undefined>()
+  const [detectedToolParser, setDetectedToolParser] = useState<string | undefined>()
+  const [detectedReasoningParser, setDetectedReasoningParser] = useState<string | undefined>()
+  const [detectedEnableAutoToolChoice, setDetectedEnableAutoToolChoice] = useState<boolean | undefined>()
   const [detectedIsTurboQuant, setDetectedIsTurboQuant] = useState<boolean>(false)
   const [detectedIsMultimodal, setDetectedIsMultimodal] = useState<boolean>(false)
   const [detectedForceTextOnly, setDetectedForceTextOnly] = useState<boolean>(false)
@@ -90,6 +54,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
   const launchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const launchSessionIdRef = useRef<string | null>(null)
   const mountedRef = useRef(true)
+  const modelDefaultsRequestRef = useRef(0)
 
   // Remote session fields
   const [remoteUrl, setRemoteUrl] = useState('')
@@ -99,12 +64,19 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
   const [remoteConnecting, setRemoteConnecting] = useState(false)
 
   const applyModelDefaults = async (modelPath: string) => {
-    const detected = await window.api.models.detectConfig(modelPath) as any
-    const gen = await window.api.models.getGenerationDefaults(modelPath).catch(() => null) as any
+    const requestId = ++modelDefaultsRequestRef.current
+    const [detected, gen] = await Promise.all([
+      window.api.models.detectConfig(modelPath).catch(() => null),
+      window.api.models.getGenerationDefaults(modelPath).catch(() => null),
+    ]) as [any, any]
+    if (!mountedRef.current || modelDefaultsRequestRef.current !== requestId) return
     setConfig(prev => {
       const next: SessionConfig = {
         ...prev,
-        enableAutoToolChoice: detected?.enableAutoToolChoice,
+        // Auto remains undefined; detection is displayed separately and launch
+        // resolves the effective value. Materializing detection here made a
+        // model-derived default indistinguishable from an explicit user choice.
+        enableAutoToolChoice: undefined,
         toolCallParser: 'auto',
         reasoningParser: 'auto',
         dsv4PrefixCache: detected?.family === 'deepseek-v4' ? true : prev.dsv4PrefixCache,
@@ -116,7 +88,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         kvCacheQuantization: detected?.family === 'openpangu_v2' ? 'none' : prev.kvCacheQuantization,
         pagedCacheBlockSize: detected?.family === 'deepseek-v4' ? 256 : prev.pagedCacheBlockSize,
       }
-      return applyGenerationDefaultsToConfig(next, gen)
+      return applyBundleGenerationDefaultsToSessionConfig(next, gen)
     })
     if (detected?.cacheType) setDetectedCacheType(detected.cacheType)
     else setDetectedCacheType('kv')
@@ -124,6 +96,9 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
     setDetectedCacheSubtype(detected?.cacheSubtype)
     if (detected?.family && detected.family !== 'unknown') setDetectedFamily(detected.family)
     else setDetectedFamily(undefined)
+    setDetectedToolParser(detected?.toolParser)
+    setDetectedReasoningParser(detected?.reasoningParser)
+    setDetectedEnableAutoToolChoice(detected?.enableAutoToolChoice)
     setDetectedIsTurboQuant(!!detected?.isTurboQuant)
     setDetectedIsMultimodal(!!detected?.isMultimodal)
     setDetectedForceTextOnly(!!detected?.forceTextOnly)
@@ -210,14 +185,18 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
   }
 
   const handleReset = async () => {
+    const requestId = ++modelDefaultsRequestRef.current
     const base = { ...DEFAULT_CONFIG, port: config.port }
     // Re-run model detection to get proper defaults for this model
     if (selectedModel) {
       try {
-        const detected = await window.api.models.detectConfig(selectedModel) as any
-        const gen = await window.api.models.getGenerationDefaults(selectedModel).catch(() => null) as any
+        const [detected, gen] = await Promise.all([
+          window.api.models.detectConfig(selectedModel).catch(() => null),
+          window.api.models.getGenerationDefaults(selectedModel).catch(() => null),
+        ]) as [any, any]
+        if (!mountedRef.current || modelDefaultsRequestRef.current !== requestId) return
         if (detected && detected.family !== 'unknown') {
-          base.enableAutoToolChoice = detected.enableAutoToolChoice
+          base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
             base.timeout = 900
             base.dsv4PrefixCache = true
@@ -239,6 +218,9 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             base.enableBlockDiskCache = true
           }
           setDetectedFamily(detected.family)
+          setDetectedToolParser(detected.toolParser)
+          setDetectedReasoningParser(detected.reasoningParser)
+          setDetectedEnableAutoToolChoice(detected.enableAutoToolChoice)
           setDetectedCacheSubtype(detected.cacheSubtype)
           setDetectedIsTurboQuant(!!detected.isTurboQuant)
           setDetectedIsMultimodal(!!detected.isMultimodal)
@@ -246,15 +228,22 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           setDetectedNativeMtp(detected.nativeMtp)
         } else {
           setDetectedFamily(undefined)
+          setDetectedToolParser(undefined)
+          setDetectedReasoningParser(undefined)
+          setDetectedEnableAutoToolChoice(undefined)
           setDetectedCacheSubtype(undefined)
           setDetectedIsTurboQuant(false)
           setDetectedIsMultimodal(false)
           setDetectedForceTextOnly(false)
           setDetectedNativeMtp(undefined)
         }
-        Object.assign(base, applyGenerationDefaultsToConfig(base, gen))
+        Object.assign(base, applyBundleGenerationDefaultsToSessionConfig(base, gen))
       } catch (_) {
+        if (!mountedRef.current || modelDefaultsRequestRef.current !== requestId) return
         setDetectedFamily(undefined)
+        setDetectedToolParser(undefined)
+        setDetectedReasoningParser(undefined)
+        setDetectedEnableAutoToolChoice(undefined)
         setDetectedCacheSubtype(undefined)
         setDetectedIsTurboQuant(false)
         setDetectedIsMultimodal(false)
@@ -608,10 +597,16 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                     <div key={model.path} className="group relative">
                     <button
                       onClick={async () => {
+                        const selectionRequestId = ++modelDefaultsRequestRef.current
+                        const selectionStillCurrent = () => (
+                          mountedRef.current &&
+                          modelDefaultsRequestRef.current === selectionRequestId
+                        )
                         setSelectedModel(model.path)
                         // Pre-populate from existing session config if this model was launched before
                         try {
                           const sessions = await window.api.sessions.list()
+                          if (!selectionStillCurrent()) return
                           const normalized = model.path.replace(/\/+$/, '')
                           const existing = sessions.find((s: any) =>
                             (s.modelPath || '').replace(/\/+$/, '') === normalized
@@ -619,30 +614,40 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                           if (existing?.config) {
                             try {
                               const stored = JSON.parse(existing.config)
-	                              // Migrate old default: enableAutoToolChoice: false was the broken default
-	                              // that blocked auto-detection. Convert to undefined (auto-detect).
-                              if (stored.enableAutoToolChoice === false) delete stored.enableAutoToolChoice
+                              // Preserve explicit tri-state tool policy. Legacy
+                              // migration belongs in the versioned DB/session
+                              // migration, never in this renderer reload path.
                               try {
                                 const gen = await window.api.models.getGenerationDefaults(model.path) as any
-                                applyGenerationDefaultsToStoredConfig(stored, gen)
+                                if (!selectionStillCurrent()) return
+                                Object.assign(
+                                  stored,
+                                  applyBundleGenerationDefaultsToSessionConfig(stored, gen),
+                                )
                               } catch (_) { }
 	                              setConfig(prev => ({ ...prev, ...stored, port: prev.port }))
                               // Still detect cache type for UI gating (Mamba vs KV, VLM)
                               try {
                                 const det = await window.api.models.detectConfig(model.path) as any
+                                if (!selectionStillCurrent()) return
                                 if (det?.cacheType) setDetectedCacheType(det.cacheType)
                                 setDetectedUsePagedCache(det?.usePagedCache)
                                 setDetectedCacheSubtype(det?.cacheSubtype)
                                 if (det?.family && det.family !== 'unknown') setDetectedFamily(det.family)
                                 else setDetectedFamily(undefined)
+                                setDetectedToolParser(det?.toolParser)
+                                setDetectedReasoningParser(det?.reasoningParser)
+                                setDetectedEnableAutoToolChoice(det?.enableAutoToolChoice)
                                 setDetectedIsTurboQuant(!!det?.isTurboQuant)
                                 setDetectedIsMultimodal(!!det?.isMultimodal)
                                 setDetectedForceTextOnly(!!det?.forceTextOnly)
+                                setDetectedNativeMtp(det?.nativeMtp)
                                 if (det?.maxContextLength) setDetectedMaxContext(det.maxContextLength)
                               } catch (_) { }
                               // Auto-detect image model
                               try {
                                 const types = await window.api.models.detectTypes([model.path])
+                                if (!selectionStillCurrent()) return
                                 if (types?.[model.path] === 'image') setAutoDetectedType('image')
                                 else setAutoDetectedType('text')
                               } catch (_) { setAutoDetectedType(undefined) }
@@ -869,7 +874,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             </p>
           </div>
         ) : (
-          <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelIdentity={selectedModel} />
+          <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedToolParser={detectedToolParser} detectedReasoningParser={detectedReasoningParser} detectedEnableAutoToolChoice={detectedEnableAutoToolChoice} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelIdentity={selectedModel} />
         )}
 
         {/* Launch */}

@@ -11,7 +11,7 @@ describe('engine path policy', () => {
 
     const projectVenvIndex = findEnginePath.indexOf('Development builds must exercise the source tree')
     const systemSearchIndex = findEnginePath.indexOf('// System binary search')
-    const staleSystemIndex = findEnginePath.indexOf("join(home, '.local', 'bin', 'vmlx-engine')")
+    const staleSystemIndex = findEnginePath.indexOf('ENGINE_SEARCH_DIRS.flatMap')
 
     expect(projectVenvIndex).toBeGreaterThanOrEqual(0)
     expect(systemSearchIndex).toBeGreaterThanOrEqual(0)
@@ -51,10 +51,14 @@ describe('engine path policy', () => {
 
   it('uses the published vmlx package name for PyPI installs while preserving vmlx-engine entrypoint detection', () => {
     const engineManager = readFileSync('src/main/engine-manager.ts', 'utf8')
+    const sessions = readFileSync('src/main/sessions.ts', 'utf8')
     const createSession = readFileSync('src/renderer/src/components/sessions/CreateSession.tsx', 'utf8')
 
     expect(engineManager).toContain("const PYPI_PACKAGE_NAME = 'vmlx'")
-    expect(engineManager).toContain("const ENTRY_POINT_NAMES = ['vmlx-engine', 'vmlx-serve', 'vmlx']")
+    expect(engineManager).toContain("export const ENGINE_ENTRY_POINT_NAMES = ['vmlx-engine', 'vmlx-serve', 'vmlx']")
+    expect(sessions).toContain('ENGINE_ENTRY_POINT_NAMES,')
+    expect(sessions).toContain('ENGINE_SEARCH_DIRS,')
+    expect(sessions).toContain('ENGINE_ENTRY_POINT_NAMES.map')
     expect(engineManager).toContain("const pkg = bundledSource || PYPI_PACKAGE_NAME")
     expect(engineManager).toContain("['tool', 'upgrade', PYPI_PACKAGE_NAME]")
     expect(engineManager).not.toContain("const pkg = bundledSource || 'vmlx-engine'")

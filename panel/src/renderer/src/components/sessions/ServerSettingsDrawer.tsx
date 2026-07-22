@@ -3,6 +3,7 @@ import { X } from 'lucide-react'
 import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG, SliderField, DSV4_PAGED_CACHE_BLOCK_SIZE, commitActiveSettingsInput } from './SessionConfigForm'
 import { useInferenceMode } from '../layout/InferenceMode'
 import { useTranslation } from '../../i18n'
+import { applyBundleGenerationDefaultsToSessionConfig } from '../../../../shared/sessionGenerationDefaults'
 
 interface Session {
   id: string
@@ -34,6 +35,9 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
   const [detectedUsePagedCache, setDetectedUsePagedCache] = useState<boolean | undefined>(undefined)
   const [detectedCacheSubtype, setDetectedCacheSubtype] = useState<string | undefined>()
   const [detectedFamily, setDetectedFamily] = useState<string | undefined>()
+  const [detectedToolParser, setDetectedToolParser] = useState<string | undefined>()
+  const [detectedReasoningParser, setDetectedReasoningParser] = useState<string | undefined>()
+  const [detectedEnableAutoToolChoice, setDetectedEnableAutoToolChoice] = useState<boolean | undefined>()
   const [detectedIsTurboQuant, setDetectedIsTurboQuant] = useState<boolean>(false)
   const [detectedIsMultimodal, setDetectedIsMultimodal] = useState<boolean>(false)
   const [detectedForceTextOnly, setDetectedForceTextOnly] = useState<boolean>(false)
@@ -41,36 +45,69 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
   const [detectedNativeMtp, setDetectedNativeMtp] = useState<any>(undefined)
   const [singleModelMode, setSingleModelMode] = useState(false)
   const restartingRef = useRef(false)
+  const sessionIdRef = useRef(session.id)
+  const resetRequestRef = useRef(0)
   restartingRef.current = restarting
+  sessionIdRef.current = session.id
 
   useEffect(() => {
-    try {
-      const stored = JSON.parse(session.config)
-      // Always use DB columns as canonical source for host/port to prevent mismatch
-      setConfig({ ...DEFAULT_CONFIG, ...stored, host: session.host, port: session.port })
-    } catch {
-      setConfig({ ...DEFAULT_CONFIG, host: session.host, port: session.port })
+    let active = true
+    resetRequestRef.current += 1
+    const load = async () => {
+      let base: SessionConfig
+      try {
+        const stored = JSON.parse(session.config)
+        // Always use DB columns as canonical source for host/port to prevent mismatch
+        base = { ...DEFAULT_CONFIG, ...stored, host: session.host, port: session.port }
+      } catch {
+        base = { ...DEFAULT_CONFIG, host: session.host, port: session.port }
+      }
+
+      // Install the persisted session synchronously before the bundle lookup.
+      // The later lookup only owns default* metadata, so merging it into the
+      // latest state cannot erase a user edit made while the request is in
+      // flight.
+      setConfig(base)
+      setDirty(false)
+      setMessage(null)
+      const generationDefaults = session.modelPath
+        ? await window.api.models.getGenerationDefaults(session.modelPath).catch(() => null)
+        : null
+      if (!active) return
+      setConfig(current => applyBundleGenerationDefaultsToSessionConfig(current, generationDefaults))
+
+      // Detect model cache type for feature gating.
+      if (!session.modelPath) return
+      try {
+        const det: any = await window.api.models.detectConfig(session.modelPath)
+        if (!active) return
+        if (det?.cacheType) setDetectedCacheType(det.cacheType)
+        setDetectedUsePagedCache(det?.usePagedCache)
+        setDetectedCacheSubtype(det?.cacheSubtype)
+        if (det?.family && det.family !== 'unknown') setDetectedFamily(det.family)
+        else setDetectedFamily(undefined)
+        setDetectedToolParser(det?.toolParser)
+        setDetectedReasoningParser(det?.reasoningParser)
+        setDetectedEnableAutoToolChoice(det?.enableAutoToolChoice)
+        setDetectedIsTurboQuant(!!det?.isTurboQuant)
+        setDetectedIsMultimodal(!!det?.isMultimodal)
+        setDetectedForceTextOnly(!!det?.forceTextOnly)
+        setDetectedNativeMtp(det?.nativeMtp)
+        if (det?.maxContextLength) setDetectedMaxContext(det.maxContextLength)
+      } catch (err) {
+        if (active) {
+          console.error('Failed to detect model config:', err)
+          setDetectedFamily(undefined)
+          setDetectedToolParser(undefined)
+          setDetectedReasoningParser(undefined)
+          setDetectedEnableAutoToolChoice(undefined)
+          setDetectedCacheSubtype(undefined)
+        }
+      }
     }
-    setDirty(false)
-    setMessage(null)
-    // Detect model cache type for feature gating
-    if (session.modelPath) {
-      window.api.models.detectConfig(session.modelPath)
-        .then((det: any) => {
-          if (det?.cacheType) setDetectedCacheType(det.cacheType)
-          setDetectedUsePagedCache(det?.usePagedCache)
-          setDetectedCacheSubtype(det?.cacheSubtype)
-          if (det?.family && det.family !== 'unknown') setDetectedFamily(det.family)
-          else setDetectedFamily(undefined)
-          setDetectedIsTurboQuant(!!det?.isTurboQuant)
-          setDetectedIsMultimodal(!!det?.isMultimodal)
-          setDetectedForceTextOnly(!!det?.forceTextOnly)
-          setDetectedNativeMtp(det?.nativeMtp)
-          if (det?.maxContextLength) setDetectedMaxContext(det.maxContextLength)
-        })
-        .catch((err) => console.error('Failed to detect model config:', err))
-    }
-  }, [session.id, session.config, session.host, session.port])
+    load()
+    return () => { active = false }
+  }, [session.id, session.config, session.host, session.port, session.modelPath])
 
   useEffect(() => {
     window.api.gateway?.getStatus?.()
@@ -177,13 +214,20 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
   }
 
   const handleReset = async () => {
+    const resetSessionId = session.id
+    const resetRequest = ++resetRequestRef.current
+    const resetStillCurrent = () => (
+      sessionIdRef.current === resetSessionId
+      && resetRequestRef.current === resetRequest
+    )
     const base = { ...DEFAULT_CONFIG, host: config.host, port: config.port }
     // Re-run model detection to get proper defaults for this model
     if (session.modelPath) {
       try {
         const detected = await window.api.models.detectConfig(session.modelPath)
+        if (!resetStillCurrent()) return
         if (detected && detected.family !== 'unknown') {
-          base.enableAutoToolChoice = detected.enableAutoToolChoice
+          base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
             base.dsv4PrefixCache = true
             base.dsv4PoolQuant = true
@@ -204,25 +248,41 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             base.enableBlockDiskCache = true
           }
           setDetectedFamily(detected.family)
+          setDetectedToolParser(detected.toolParser)
+          setDetectedReasoningParser(detected.reasoningParser)
+          setDetectedEnableAutoToolChoice(detected.enableAutoToolChoice)
           setDetectedCacheSubtype(detected.cacheSubtype)
           setDetectedIsTurboQuant(!!detected.isTurboQuant)
           setDetectedIsMultimodal(!!detected.isMultimodal)
           setDetectedForceTextOnly(!!detected.forceTextOnly)
         } else {
           setDetectedFamily(undefined)
+          setDetectedToolParser(undefined)
+          setDetectedReasoningParser(undefined)
+          setDetectedEnableAutoToolChoice(undefined)
           setDetectedCacheSubtype(undefined)
           setDetectedIsTurboQuant(false)
           setDetectedIsMultimodal(false)
           setDetectedForceTextOnly(false)
         }
       } catch (_) {
+        if (!resetStillCurrent()) return
         setDetectedFamily(undefined)
+        setDetectedToolParser(undefined)
+        setDetectedReasoningParser(undefined)
+        setDetectedEnableAutoToolChoice(undefined)
         setDetectedCacheSubtype(undefined)
         setDetectedIsTurboQuant(false)
         setDetectedIsMultimodal(false)
         setDetectedForceTextOnly(false)
       }
+      // Bundle generation defaults are independent of family/cache detection.
+      // Keep hydrating them even if detectConfig cannot classify the model.
+      const generationDefaults = await window.api.models.getGenerationDefaults(session.modelPath).catch(() => null)
+      if (!resetStillCurrent()) return
+      Object.assign(base, applyBundleGenerationDefaultsToSessionConfig(base, generationDefaults))
     }
+    if (!resetStillCurrent()) return
     setConfig(base)
     setDirty(true)
     setMessage(null)
@@ -232,7 +292,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
     const next = !singleModelMode
     setSingleModelMode(next)
     try {
-      const status = await window.api.gateway?.setSingleModelMode?.(next)
+      const status = await window.api.gateway?.setSingleModelMode?.(next, session.id)
       if (typeof status?.singleModelMode === 'boolean') {
         setSingleModelMode(status.singleModelMode)
       }
@@ -311,7 +371,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             />
           </div>
         ) : (
-          <SessionConfigForm config={config} onChange={handleChange} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} imageMode={(() => { try { return JSON.parse(session.config || '{}').imageMode } catch { return undefined } })()} sessionId={session.id} modelIdentity={`${session.modelName || ''} ${session.modelPath}`} />
+          <SessionConfigForm config={config} onChange={handleChange} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedToolParser={detectedToolParser} detectedReasoningParser={detectedReasoningParser} detectedEnableAutoToolChoice={detectedEnableAutoToolChoice} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} imageMode={(() => { try { return JSON.parse(session.config || '{}').imageMode } catch { return undefined } })()} sessionId={session.id} modelIdentity={`${session.modelName || ''} ${session.modelPath}`} />
         )}
       </div>
 

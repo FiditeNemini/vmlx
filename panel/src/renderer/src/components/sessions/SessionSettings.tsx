@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { ArrowLeft, ChevronRight } from 'lucide-react'
 import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG, commitActiveSettingsInput } from './SessionConfigForm'
 import { useTranslation } from '../../i18n'
@@ -6,6 +6,8 @@ import { resolveCacheLaunchPolicy } from '../../../../shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../../../../shared/mcpPolicy'
 import { canonicalizeReasoningParserForCli } from '../../../../shared/reasoningParserAliases'
 import { canonicalizeToolParserId } from '../../../../shared/toolParserAliases'
+import { buildToolLaunchArgs } from '../../../../shared/toolLaunchArgs'
+import { applyBundleGenerationDefaultsToSessionConfig } from '../../../../shared/sessionGenerationDefaults'
 
 interface Session {
   id: string
@@ -346,42 +348,6 @@ function filterAdditionalArgs(raw: string | undefined, blockedFlags: Set<string>
   return filtered
 }
 
-function hasDeclaredSamplingDefaults(gen: any): boolean {
-  return !!gen && (
-    gen.doSample === false ||
-    gen.temperature != null ||
-    gen.topP != null ||
-    gen.topK != null ||
-    gen.minP != null ||
-    gen.repeatPenalty != null
-  )
-}
-
-async function applyBundleGenerationDefaults(config: SessionConfig, modelPath: string): Promise<SessionConfig> {
-  const next: SessionConfig = { ...config }
-  try {
-    const gen = await window.api.models.getGenerationDefaults(modelPath) as any
-    next.defaultTemperature = gen?.temperature != null ? Math.round(gen.temperature * 100) : 0
-    next.defaultTopP = gen?.topP != null ? Math.round(gen.topP * 100) : 0
-    next.defaultTopK = gen?.topK != null ? Math.max(0, Math.round(gen.topK)) : 0
-    next.defaultMinP = gen?.minP != null ? Math.round(gen.minP * 100) : 0
-    next.defaultRepetitionPenalty = gen?.repeatPenalty != null ? Math.round(gen.repeatPenalty * 100) : 0
-    next.defaultMaxNewTokens = gen?.maxNewTokens != null ? Math.round(gen.maxNewTokens) : 0
-    next.defaultDoSample = typeof gen?.doSample === 'boolean' ? gen.doSample : undefined
-    next.defaultSamplingDefaultsDeclared = hasDeclaredSamplingDefaults(gen)
-  } catch (_) {
-    next.defaultTemperature = 0
-    next.defaultTopP = 0
-    next.defaultTopK = 0
-    next.defaultMinP = 0
-    next.defaultRepetitionPenalty = 0
-    next.defaultMaxNewTokens = 0
-    next.defaultDoSample = undefined
-    next.defaultSamplingDefaultsDeclared = false
-  }
-  return next
-}
-
 /**
  * Build a preview of the CLI command from config.
  * This MUST mirror the logic in sessions.ts buildArgs() exactly.
@@ -463,7 +429,7 @@ function buildCommandPreview(
     parts.push('--no-continuous-batching')
   }
 
-  // Parser resolution: User explicit choice -> Detected config -> Fallback
+    // Parser resolution: User explicit choice -> Detected config -> Fallback
   // (mirrors buildArgs: user choice wins over detection)
   // "" = user chose "None" → engine needs the literal "none" flag to opt out
   // (absence auto-configures from the registry). Mirrors buildArgs in sessions.ts.
@@ -588,17 +554,10 @@ function buildCommandPreview(
     parts.push('--max-prompt-tokens', maxContextLength.toString())
   }
   // Tool integration — mirrors buildArgs in sessions.ts
-  if (effectiveToolParser === 'none') {
-    // Hard opt-out: literal flag, no auto-tool-choice.
-    parts.push('--tool-call-parser', 'none')
-  } else if (effectiveToolParser) {
-    parts.push('--tool-call-parser', effectiveToolParser)
-    if (effectiveAutoTool || config.enableAutoToolChoice === undefined) {
-      parts.push('--enable-auto-tool-choice')
-    }
-  } else if (effectiveAutoTool) {
-    parts.push('--enable-auto-tool-choice')
-  }
+  parts.push(...buildToolLaunchArgs({
+    toolParser: effectiveToolParser,
+    enableAutoToolChoice: effectiveAutoTool,
+  }))
   if (effectiveReasoningParser) parts.push('--reasoning-parser', effectiveReasoningParser)
   if (dsv4PrefixCacheOptIn) parts.push('--dsv4-enable-prefix-cache')
 
@@ -716,30 +675,49 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [showPreview, setShowPreview] = useState(false)
   const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; maxContextLength?: number; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string } } | null>(null)
+  const sessionIdRef = useRef(sessionId)
+  const resetRequestRef = useRef(0)
+  sessionIdRef.current = sessionId
 
   useEffect(() => {
+    let active = true
+    resetRequestRef.current += 1
+    setDetectedConfig(null)
     const load = async () => {
       const s = await window.api.sessions.get(sessionId)
-      if (s) {
-        setSession(s)
+      if (s && active) {
         // Parse stored config JSON, merge with defaults
         try {
           const stored = JSON.parse(s.config)
-          const hydrated = await applyBundleGenerationDefaults({ ...DEFAULT_CONFIG, ...stored }, s.modelPath)
-          setConfig(hydrated)
+          const base = { ...DEFAULT_CONFIG, ...stored }
+          // Do not expose DEFAULT_CONFIG while the bundle lookup is pending,
+          // and merge only bundle-owned default* metadata into any edit made
+          // after the persisted config becomes visible.
+          setConfig(base)
+          setDirty(false)
+          setSession(s)
+          const generationDefaults = await window.api.models.getGenerationDefaults(s.modelPath).catch(() => null)
+          if (active) {
+            setConfig(current => applyBundleGenerationDefaultsToSessionConfig(current, generationDefaults))
+          }
         } catch {
-          setConfig(DEFAULT_CONFIG)
-          setMessage({ type: 'error', text: 'Stored configuration was corrupted and has been reset to defaults. Save to persist.' })
-          setDirty(true)
+          if (active) {
+            setConfig(DEFAULT_CONFIG)
+            setMessage({ type: 'error', text: 'Stored configuration was corrupted and has been reset to defaults. Save to persist.' })
+            setDirty(true)
+          }
         }
         // Load auto-detected config for preview resolution
         try {
           const det = await window.api.models.detectConfig(s.modelPath)
-          if (det && det.family !== 'unknown') setDetectedConfig(det)
-        } catch (_) { }
+          if (active) setDetectedConfig(det && det.family !== 'unknown' ? det : null)
+        } catch (_) {
+          if (active) setDetectedConfig(null)
+        }
       }
     }
     load()
+    return () => { active = false }
   }, [sessionId])
 
   // Listen for session status changes
@@ -849,13 +827,21 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
   }
 
   const handleReset = async () => {
+    const resetSessionId = sessionId
+    const resetRequest = ++resetRequestRef.current
+    const resetStillCurrent = () => (
+      sessionIdRef.current === resetSessionId
+      && resetRequestRef.current === resetRequest
+    )
     const base = { ...DEFAULT_CONFIG, host: config.host, port: config.port }
     // Re-run model detection to get proper defaults for this model
     if (session?.modelPath) {
       try {
         const detected = await window.api.models.detectConfig(session.modelPath)
+        if (!resetStillCurrent()) return
         if (detected && detected.family !== 'unknown') {
-          base.enableAutoToolChoice = detected.enableAutoToolChoice
+          // Reset restores model-derived Auto, not a sticky explicit On/Off.
+          base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
             base.dsv4PrefixCache = true
             base.dsv4PoolQuant = true
@@ -888,9 +874,16 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             ? false
             : detected.isMultimodal === true
         }
-        Object.assign(base, await applyBundleGenerationDefaults(base, session.modelPath))
-      } catch (_) { }
+      } catch (_) {
+        if (!resetStillCurrent()) return
+      }
+      // Bundle generation defaults are independent of family/cache detection.
+      // Keep hydrating them even if detectConfig cannot classify the model.
+      const generationDefaults = await window.api.models.getGenerationDefaults(session.modelPath).catch(() => null)
+      if (!resetStillCurrent()) return
+      Object.assign(base, applyBundleGenerationDefaultsToSessionConfig(base, generationDefaults))
     }
+    if (!resetStillCurrent()) return
     setConfig(base)
     setDirty(true)
     setMessage(null)
@@ -954,7 +947,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
         )}
 
         {/* Config Form */}
-        <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedConfig?.cacheType} detectedUsePagedCache={detectedConfig?.usePagedCache} detectedCacheSubtype={detectedConfig?.cacheSubtype} detectedFamily={detectedConfig?.family} detectedToolParser={detectedConfig?.toolParser} detectedReasoningParser={detectedConfig?.reasoningParser} detectedIsTurboQuant={detectedConfig?.isTurboQuant} detectedIsMultimodal={detectedConfig?.isMultimodal} detectedForceTextOnly={detectedConfig?.forceTextOnly} detectedMaxContext={detectedConfig?.maxContextLength} detectedNativeMtp={(detectedConfig as any)?.nativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} sessionId={sessionId} modelIdentity={`${session.modelName || ''} ${session.modelPath}`} />
+        <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedConfig?.cacheType} detectedUsePagedCache={detectedConfig?.usePagedCache} detectedCacheSubtype={detectedConfig?.cacheSubtype} detectedFamily={detectedConfig?.family} detectedToolParser={detectedConfig?.toolParser} detectedReasoningParser={detectedConfig?.reasoningParser} detectedEnableAutoToolChoice={detectedConfig?.enableAutoToolChoice} detectedIsTurboQuant={detectedConfig?.isTurboQuant} detectedIsMultimodal={detectedConfig?.isMultimodal} detectedForceTextOnly={detectedConfig?.forceTextOnly} detectedMaxContext={detectedConfig?.maxContextLength} detectedNativeMtp={(detectedConfig as any)?.nativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} sessionId={sessionId} modelIdentity={`${session.modelName || ''} ${session.modelPath}`} />
 
         {/* Command Preview */}
         <div className="mt-4">

@@ -286,6 +286,7 @@ interface SessionConfigFormProps {
   detectedFamily?: string
   detectedToolParser?: string
   detectedReasoningParser?: string
+  detectedEnableAutoToolChoice?: boolean
   /** True for JANGTQ/MXTQ models whose live TurboQuant KV cache cannot be mx.compile traced */
   detectedIsTurboQuant?: boolean
   /** True for VLM/MLLM models detected from config/capabilities */
@@ -313,7 +314,7 @@ interface SessionConfigFormProps {
   modelIdentity?: string
 }
 
-export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedUsePagedCache, detectedCacheSubtype, detectedFamily, detectedToolParser, detectedReasoningParser, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId, modelIdentity }: SessionConfigFormProps) {
+export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedUsePagedCache, detectedCacheSubtype, detectedFamily, detectedToolParser, detectedReasoningParser, detectedEnableAutoToolChoice, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId, modelIdentity }: SessionConfigFormProps) {
   const { t } = useTranslation()
   const isImage = modelType === 'image'
   const isImageEdit = isImage && (imageMode === 'edit' || config.imageMode === 'edit')
@@ -1449,9 +1450,25 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             )}
           </div>
         )}
-        <CheckField label="Enable Auto Tool Choice" tooltip="When enabled, the model automatically decides when to call tools based on the conversation context. Requires a model that supports tool calling (Qwen, Llama 3+, Mistral, Gemma 3, Phi-4, Hermes, DeepSeek, GLM, Granite, Kimi, xLAM, Functionary, MiniMax, StepFun). The model will format tool calls according to the selected parser. Leave unchecked for auto-detection (recommended)." checked={config.enableAutoToolChoice ?? false} onChange={v => onChange('enableAutoToolChoice', v || undefined)} />
+        <SelectField
+          label="Automatic Tool Choice"
+          tooltip="Auto follows the detected model/tool-parser contract. On explicitly enables automatic tool selection. Off explicitly disables it."
+          value={config.enableAutoToolChoice === undefined ? 'auto' : config.enableAutoToolChoice ? 'on' : 'off'}
+          onChange={value => onChange(
+            'enableAutoToolChoice',
+            value === 'auto' ? undefined : value === 'on',
+          )}
+          options={[
+            {
+              value: 'auto',
+              label: `Auto (detected: ${detectedEnableAutoToolChoice ? 'On' : 'Off'})`,
+            },
+            { value: 'on', label: 'On' },
+            { value: 'off', label: 'Off' },
+          ]}
+        />
         {config.enableAutoToolChoice === undefined && (
-          <InfoNote text="Auto-detect: most models enable this automatically when a tool parser is detected." />
+          <InfoNote text={`Auto-detect is currently ${detectedEnableAutoToolChoice ? 'On' : 'Off'} for this model.`} />
         )}
         <ParserField
           label="Tool Call Parser"

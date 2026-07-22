@@ -14,6 +14,7 @@ import { resolveCacheLaunchPolicy } from '../src/shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../src/shared/mcpPolicy'
 import { canonicalizeToolParserId } from '../src/shared/toolParserAliases'
 import { canonicalizeReasoningParserForCli } from '../src/shared/reasoningParserAliases'
+import { buildToolLaunchArgs } from '../src/shared/toolLaunchArgs'
 
 // ─── SessionConfig replica (from SessionConfigForm.tsx) ──────────────────────
 
@@ -485,16 +486,10 @@ function buildCommandPreview(
         parts.push('--max-tokens', maxTokens.toString())
     }
     // Pass resolved parsers directly (mirrors buildArgs lines 1139-1150)
-    if (effectiveToolParser === 'none') {
-        parts.push('--tool-call-parser', 'none')
-    } else if (effectiveToolParser) {
-        parts.push('--tool-call-parser', effectiveToolParser)
-        if (effectiveAutoTool || config.enableAutoToolChoice === undefined) {
-            parts.push('--enable-auto-tool-choice')
-        }
-    } else if (effectiveAutoTool) {
-        parts.push('--enable-auto-tool-choice')
-    }
+    parts.push(...buildToolLaunchArgs({
+        toolParser: effectiveToolParser,
+        enableAutoToolChoice: effectiveAutoTool,
+    }))
     if (effectiveReasoningParser) parts.push('--reasoning-parser', effectiveReasoningParser)
     if (dsv4PrefixCacheOptIn) parts.push('--dsv4-enable-prefix-cache')
 
@@ -1502,6 +1497,12 @@ describe('Tool Integration', () => {
         expect(getFlagValue(out, '--tool-call-parser')).toBe('qwen')
     })
 
+    it('Auto follows a detected-Off tool contract even when a parser is present', () => {
+        const out = preview({}, { toolParser: 'qwen', enableAutoToolChoice: false })
+        expect(getFlagValue(out, '--tool-call-parser')).toBe('qwen')
+        expect(hasFlag(out, '--enable-auto-tool-choice')).toBe(false)
+    })
+
     it('default config without detected parser does not enable auto-tool-choice', () => {
         // Unknown model, no detection → no auto-tool-choice
         const out = preview({})
@@ -1644,7 +1645,7 @@ describe('Generation Defaults', () => {
         const engineManager = readFileSync('src/main/engine-manager.ts', 'utf8')
         const createSource = readFileSync('src/renderer/src/components/sessions/CreateSession.tsx', 'utf8')
 
-        expect(engineManager).toContain("const ENTRY_POINT_NAMES = ['vmlx-engine', 'vmlx-serve', 'vmlx']")
+        expect(engineManager).toContain("export const ENGINE_ENTRY_POINT_NAMES = ['vmlx-engine', 'vmlx-serve', 'vmlx']")
         expect(engineManager).toContain("const PYPI_PACKAGE_NAME = 'vmlx'")
         expect(engineManager).toContain('const pkg = bundledSource || PYPI_PACKAGE_NAME')
         expect(engineManager).toContain("['tool', 'upgrade', PYPI_PACKAGE_NAME]")
@@ -1677,12 +1678,15 @@ describe('Generation Defaults', () => {
         const createSource = readFileSync('src/renderer/src/components/sessions/CreateSession.tsx', 'utf8')
         const sessionSettingsSource = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf8')
         const formSource = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
+        const sharedDefaultsSource = readFileSync('src/shared/sessionGenerationDefaults.ts', 'utf8')
 
         expect(sessionsSource).toContain('max_new_tokens is also bundle-owned')
         expect(sessionsSource).toContain('defaultMaxNewTokens')
-        expect(createSource).toContain('next.defaultMaxNewTokens')
-        expect(createSource).toContain('stored.defaultMaxNewTokens')
-        expect(sessionSettingsSource).toContain('next.defaultMaxNewTokens')
+        expect(createSource).toContain('applyBundleGenerationDefaultsToSessionConfig')
+        expect(createSource).not.toContain('next.defaultMaxNewTokens')
+        expect(createSource).not.toContain('stored.defaultMaxNewTokens')
+        expect(sessionSettingsSource).toContain('applyBundleGenerationDefaultsToSessionConfig')
+        expect(sharedDefaultsSource).toContain('defaultMaxNewTokens:')
         expect(sessionsSource).not.toContain('config.maxTokens = defs.maxTokens')
         expect(createSource).not.toContain('next.maxTokens = gen.maxNewTokens')
         expect(createSource).not.toContain('stored.maxTokens = gen.maxNewTokens')
@@ -1695,11 +1699,14 @@ describe('Generation Defaults', () => {
         const formSource = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
         const createSource = readFileSync('src/renderer/src/components/sessions/CreateSession.tsx', 'utf8')
         const settingsSource = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf8')
+        const sharedDefaultsSource = readFileSync('src/shared/sessionGenerationDefaults.ts', 'utf8')
 
         expect(formSource).toContain('hasDeclaredSamplingDefaults')
         expect(formSource).toContain('config.defaultSamplingDefaultsDeclared === true')
-        expect(createSource).toContain('next.defaultSamplingDefaultsDeclared = hasDeclaredSamplingDefaults(gen)')
-        expect(settingsSource).toContain('next.defaultSamplingDefaultsDeclared = hasDeclaredSamplingDefaults(gen)')
+        expect(createSource).toContain('applyBundleGenerationDefaultsToSessionConfig')
+        expect(createSource).not.toContain('function hasDeclaredSamplingDefaults')
+        expect(settingsSource).toContain('applyBundleGenerationDefaultsToSessionConfig')
+        expect(sharedDefaultsSource).toContain('defaultSamplingDefaultsDeclared: hasDeclaredBundleSamplingDefaults(defaults)')
         expect(formSource).toContain("hasDeclaredSamplingDefaults ? `temperature ${(config.defaultTemperature / 100).toFixed(2)}` : null")
         expect(formSource).toContain("hasDeclaredSamplingDefaults ? ((config.defaultTopK ?? 0) > 0 ? `top-k ${Math.floor(config.defaultTopK ?? 0)}` : 'top-k off') : null")
     })
@@ -3975,9 +3982,47 @@ describe('Settings → CLI Round-Trip Completeness', () => {
 
     it('chat settings shows max-thinking tokens only for engine-honoring or template-budget families', () => {
         const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
-        expect(source).toContain('setThinkingBudgetSupported(gen.thinkingBudgetSupported)')
-        expect(source).toContain('setSupportsThinkingBudget(detected?.supportsThinkingBudget)')
+        expect(source).toContain('nextThinkingBudgetSupported = gen.thinkingBudgetSupported')
+        expect(source).toContain('setThinkingBudgetSupported(nextThinkingBudgetSupported)')
+        expect(source).toContain('nextSupportsThinkingBudget = detected?.supportsThinkingBudget')
+        expect(source).toContain('setSupportsThinkingBudget(nextSupportsThinkingBudget)')
         expect(source).toContain('{(supportsThinkingBudget === true || thinkingBudgetSupported === true) && displayedEnableThinking !== false && (')
+    })
+
+    it('renders automatic tool choice as a real Auto/On/Off control on every settings surface', () => {
+        const form = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
+        const create = readFileSync('src/renderer/src/components/sessions/CreateSession.tsx', 'utf8')
+        const drawer = readFileSync('src/renderer/src/components/sessions/ServerSettingsDrawer.tsx', 'utf8')
+        const full = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf8')
+        expect(form).toContain('label="Automatic Tool Choice"')
+        expect(form).toContain("value === 'auto' ? undefined : value === 'on'")
+        expect(form).toContain("{ value: 'off', label: 'Off' }")
+        expect(create).not.toContain('delete stored.enableAutoToolChoice')
+        expect(create).toContain('detectedEnableAutoToolChoice={detectedEnableAutoToolChoice}')
+        expect(drawer).toContain('detectedEnableAutoToolChoice={detectedEnableAutoToolChoice}')
+        expect(full).toContain('detectedEnableAutoToolChoice={detectedConfig?.enableAutoToolChoice}')
+        expect(full).toContain('base.enableAutoToolChoice = undefined')
+    })
+
+    it('guards async Chat and Create settings hydration against stale model/session responses', () => {
+        const chat = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
+        const create = readFileSync('src/renderer/src/components/sessions/CreateSession.tsx', 'utf8')
+        const full = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf8')
+        expect(chat).toContain('const loadRequestRef = useRef(0)')
+        expect(chat).toContain('const stillCurrent = () => active && loadRequestRef.current === requestId')
+        expect(chat).toContain('if (!stillCurrent()) return')
+        expect(create).toContain('const modelDefaultsRequestRef = useRef(0)')
+        expect(create).toContain('const selectionStillCurrent = () => (')
+        expect(full).toContain('setDetectedConfig(null)')
+    })
+
+    it('refuses unowned port conflicts instead of killing arbitrary listener PIDs', () => {
+        const sessions = readFileSync('src/main/sessions.ts', 'utf8')
+        expect(sessions).toContain('ensureOwnedSessionPortAvailable(session)')
+        expect(sessions).toContain('terminateDetectedEngineForSession(session)')
+        expect(sessions).toContain('vMLX did not terminate the unowned process')
+        expect(sessions).not.toContain('lsof -ti tcp:')
+        expect(sessions).not.toContain('killByPort(')
     })
 
     it('JANGTQ acceleration toggle is not exposed as a user setting', () => {

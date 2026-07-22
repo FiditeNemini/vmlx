@@ -92,6 +92,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const [supportsThinkingBudget, setSupportsThinkingBudget] = useState<boolean | undefined>(undefined)
   const [savedChatModelPath, setSavedChatModelPath] = useState<string | undefined>(undefined)
   const [messageCount, setMessageCount] = useState(0)
+  const loadRequestRef = useRef(0)
   const isRemote = session.type === 'remote'
   const effectiveWireApi = overrides.wireApi ?? (isRemote ? 'completions' : 'responses')
   const effectiveReasoningParser = detectedSupportsThinking === false ? undefined : (detectedReasoningParser ?? reasoningParser)
@@ -115,25 +116,40 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   }, [])
 
   useEffect(() => {
-    (async () => {
+    const requestId = ++loadRequestRef.current
+    let active = true
+    const stillCurrent = () => active && loadRequestRef.current === requestId
+    void (async () => {
       const saved = await window.api.chat.getOverrides(chatId) as ChatOverrides | null
+      if (!stillCurrent()) return
+      let nextSavedChatModelPath: string | undefined
+      let nextMessageCount = 0
       try {
         const [chat, messages] = await Promise.all([
           window.api.chat.get(chatId),
           window.api.chat.getMessages(chatId),
         ])
-        setSavedChatModelPath(chat?.modelPath)
-        setMessageCount(Array.isArray(messages) ? messages.length : 0)
+        if (!stillCurrent()) return
+        nextSavedChatModelPath = chat?.modelPath
+        nextMessageCount = Array.isArray(messages) ? messages.length : 0
       } catch (_) {
-        setSavedChatModelPath(undefined)
-        setMessageCount(0)
+        if (!stillCurrent()) return
       }
       // Pull recommended defaults from model metadata. If the bundle does not
       // declare a value, leave it unset so the engine resolves its own fallback.
       let detectedModelDefaults: Partial<ChatOverrides> = {}
+      let nextThinkingBudgetSupported: boolean | undefined
+      let nextDetectedFamily: string | undefined
+      let nextDetectedToolParser: string | undefined
+      let nextDetectedReasoningParser: string | undefined
+      let nextDetectedSupportsThinking: boolean | undefined
+      let nextDetectedSupportsInstructMode: boolean | undefined
+      let nextDetectedReasoningEfforts: Array<'low' | 'medium' | 'high' | 'max'> | undefined
+      let nextSupportsThinkingBudget: boolean | undefined
       if (session.modelPath) {
         try {
           const gen = await window.api.models.getGenerationDefaults(session.modelPath)
+          if (!stillCurrent()) return
           if (gen) {
             if (gen.temperature != null) detectedModelDefaults.temperature = gen.temperature
             if (gen.topP != null) detectedModelDefaults.topP = gen.topP
@@ -142,47 +158,48 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
             if (gen.repeatPenalty != null) detectedModelDefaults.repeatPenalty = gen.repeatPenalty
             if (gen.maxNewTokens != null) detectedModelDefaults.maxTokens = gen.maxNewTokens
             if (gen.maxThinkingTokens != null) detectedModelDefaults.maxThinkingTokens = gen.maxThinkingTokens
-            setThinkingBudgetSupported(gen.thinkingBudgetSupported)
-          } else {
-            setThinkingBudgetSupported(undefined)
+            nextThinkingBudgetSupported = gen.thinkingBudgetSupported
           }
-        } catch (_) {
-          setThinkingBudgetSupported(undefined)
-        }
+        } catch (_) {}
         try {
           const detected = await window.api.models.detectConfig(session.modelPath)
-          setDetectedFamily(detected?.family)
-          setDetectedToolParser(detected?.toolParser)
-          setDetectedReasoningParser(detected?.reasoningParser)
-          setDetectedSupportsThinking(detected?.supportsThinking)
-          setDetectedSupportsInstructMode(detected?.supportsInstructMode)
-          setDetectedReasoningEfforts(detected?.supportedReasoningEfforts)
-          setSupportsThinkingBudget(detected?.supportsThinkingBudget)
+          if (!stillCurrent()) return
+          nextDetectedFamily = detected?.family
+          nextDetectedToolParser = detected?.toolParser
+          nextDetectedReasoningParser = detected?.reasoningParser
+          nextDetectedSupportsThinking = detected?.supportsThinking
+          nextDetectedSupportsInstructMode = detected?.supportsInstructMode
+          nextDetectedReasoningEfforts = detected?.supportedReasoningEfforts
+          nextSupportsThinkingBudget = detected?.supportsThinkingBudget
           detectedModelDefaults = applyEffectiveSessionGenerationDefaults(
             detectedModelDefaults,
             session.config,
             detected?.nativeMtp,
           )
-        } catch (_) {
-          setDetectedFamily(undefined)
-          setDetectedToolParser(undefined)
-          setDetectedReasoningParser(undefined)
-          setDetectedSupportsThinking(undefined)
-          setDetectedSupportsInstructMode(undefined)
-          setDetectedReasoningEfforts(undefined)
-          setSupportsThinkingBudget(undefined)
-        }
+        } catch (_) {}
       }
       // Saved non-null overrides win over model defaults. SQL NULL means the
       // field is unset, not an explicit request to mask the model/app default.
       const savedExplicit = Object.fromEntries(
         Object.entries(saved || {}).filter(([, v]) => v !== null && v !== undefined),
       ) as ChatOverrides
+      if (!stillCurrent()) return
+      setSavedChatModelPath(nextSavedChatModelPath)
+      setMessageCount(nextMessageCount)
+      setThinkingBudgetSupported(nextThinkingBudgetSupported)
+      setDetectedFamily(nextDetectedFamily)
+      setDetectedToolParser(nextDetectedToolParser)
+      setDetectedReasoningParser(nextDetectedReasoningParser)
+      setDetectedSupportsThinking(nextDetectedSupportsThinking)
+      setDetectedSupportsInstructMode(nextDetectedSupportsInstructMode)
+      setDetectedReasoningEfforts(nextDetectedReasoningEfforts)
+      setSupportsThinkingBudget(nextSupportsThinkingBudget)
       setModelDefaults(detectedModelDefaults)
       setOverrides(savedExplicit)
       setDirty(false)
     })()
     loadProfiles()
+    return () => { active = false }
   }, [chatId, session.modelPath, session.config, loadProfiles])
 
   const update = <K extends keyof ChatOverrides>(key: K, value: ChatOverrides[K]) => {

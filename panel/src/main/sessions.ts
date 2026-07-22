@@ -13,6 +13,7 @@ import { dsv4EnvFromConfig } from '../shared/dsv4Env'
 import { resolveCacheLaunchPolicy } from '../shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../shared/mcpPolicy'
 import { canonicalizeToolParserId } from '../shared/toolParserAliases'
+import { buildToolLaunchArgs } from '../shared/toolLaunchArgs'
 import { canonicalizeReasoningParserForCli } from '../shared/reasoningParserAliases'
 import {
   GENERATION_STARTUP_DEFAULTS_VERSION,
@@ -42,6 +43,8 @@ export type { ServerConfig, DetectedProcess } from './server'
 import type { ServerConfig, DetectedProcess } from './server'
 import { detectModelConfigFromDir } from './model-config-registry'
 import {
+  ENGINE_ENTRY_POINT_NAMES,
+  ENGINE_SEARCH_DIRS,
   getBundledPythonPath,
   getDevelopmentProjectVenv,
   getDevelopmentSourceRoot,
@@ -2088,8 +2091,9 @@ export class SessionManager extends EventEmitter {
       }
     }
 
-    // Kill anything on this port first
-    await this.killByPort(session.port)
+    // Never kill arbitrary processes by port. Terminate only a detected vMLX
+    // engine for this exact model/session; otherwise fail closed.
+    await this.ensureOwnedSessionPortAvailable(session)
 
     db.updateSession(sessionId, {
       status: 'loading',
@@ -2495,8 +2499,9 @@ export class SessionManager extends EventEmitter {
         await new Promise(r => setTimeout(r, 1500))
         try { process.kill(session.pid, 0); this.killPid(session.pid, 'SIGKILL') } catch (_) { }
       } else {
-        // Last resort: kill by port
-        await this.killByPort(session.port)
+        // Ownership-scoped fallback. Never kill an unrelated app merely
+        // because it happens to use this session's saved port.
+        await this.terminateDetectedEngineForSession(session)
       }
 
       db.updateSession(sessionId, {
@@ -2544,9 +2549,10 @@ export class SessionManager extends EventEmitter {
     'toolCallParser', 'reasoningParser',
     'dsv4PrefixCache', 'dsv4PoolQuant',
     'maxNumSeqs', 'prefillBatchSize', 'prefillStepSize', 'completionBatchSize',
-    'streamInterval', 'apiKey', 'rateLimit',
-    // NOTE: 'timeout' intentionally omitted — client sends per-request timeout
-    // to server in the request body (chat.ts:818), so changes take effect immediately.
+    'streamInterval', 'apiKey', 'rateLimit', 'timeout',
+    // Timeout is both a per-request client/proxy deadline and a server launch
+    // argument. Restart so Electron, gateway, argv, and backend agree after a
+    // saved setting changes instead of leaving the old server timeout active.
     'maxTokens', 'maxContextLength', 'mcpConfig',
     'mcpEnabledServers', 'mcpDisabledServers', 'mcpEnabledTools', 'mcpDisabledTools',
     'servedModelName',
@@ -2590,6 +2596,12 @@ export class SessionManager extends EventEmitter {
       const gwPort = parseInt(db.getSetting('gateway_port') || '8080', 10)
       if (config.port === gwPort) {
         throw new Error(`Port ${config.port} is in use by the API Gateway. Choose a different port.`)
+      }
+      if (config.port !== session.port && !(await this.isPortFree(config.port))) {
+        throw new Error(
+          `Port ${config.port} is already in use by another application. ` +
+          'vMLX will not stop or replace an unowned process.',
+        )
       }
     }
 
@@ -3484,8 +3496,8 @@ export class SessionManager extends EventEmitter {
             }
           }, 3000)
         } else if (session.port) {
-          // Fallback: kill by port
-          this.killByPort(session.port).catch(() => { })
+          // Ownership-scoped fallback; unrelated listeners are left alone.
+          this.terminateDetectedEngineForSession(session).catch(() => { })
         }
         this.processes.delete(sessionId)
       }
@@ -3724,21 +3736,13 @@ export class SessionManager extends EventEmitter {
     }
 
     // Pass resolved parsers directly to the CLI so backend doesn't guess.
-    // When a tool parser is set, --enable-auto-tool-choice is required by the engine
-    // (cli.py gates on both flags). Enable it unless user explicitly disabled auto-tool-choice.
-    if (effectiveToolParser === 'none') {
-      // Hard opt-out: emit the literal flag so the engine disables tool parsing;
-      // do NOT enable auto-tool-choice (the engine gates it on parser != "none").
-      args.push('--tool-call-parser', 'none')
-    } else if (effectiveToolParser) {
-      args.push('--tool-call-parser', effectiveToolParser)
-      // Ensure --enable-auto-tool-choice is set when a parser is present
-      if (effectiveAutoTool || config.enableAutoToolChoice === undefined) {
-        args.push('--enable-auto-tool-choice')
-      }
-    } else if (effectiveAutoTool) {
-      args.push('--enable-auto-tool-choice')
-    }
+    // Auto tool choice is a separate tri-state: its already-resolved effective
+    // boolean must be true. Auto with a detected-Off contract must not be turned
+    // On merely because a parser exists.
+    args.push(...buildToolLaunchArgs({
+      toolParser: effectiveToolParser,
+      enableAutoToolChoice: effectiveAutoTool,
+    }))
     if (effectiveReasoningParser) {
       args.push('--reasoning-parser', effectiveReasoningParser)
     }
@@ -4162,22 +4166,18 @@ export class SessionManager extends EventEmitter {
 
     // System binary search
     const home = homedir()
-    const locations = [
-      join(home, '.local', 'bin', 'vmlx-engine'),     // uv tool / pip --user
-      '/opt/homebrew/bin/vmlx-engine',                  // Homebrew (Apple Silicon)
-      '/usr/local/bin/vmlx-engine',                     // Homebrew (Intel) / system pip
-      '/usr/bin/vmlx-engine',                           // System pip
-      join(home, 'miniforge3', 'bin', 'vmlx-engine'),  // Miniforge
-      join(home, 'anaconda3', 'bin', 'vmlx-engine'),   // Anaconda
-      join(home, 'miniconda3', 'bin', 'vmlx-engine'),  // Miniconda
-    ]
+    const locations = ENGINE_SEARCH_DIRS.flatMap((dir) =>
+      ENGINE_ENTRY_POINT_NAMES.map((name) => join(dir, name)),
+    )
 
     // Scan pyenv versions (common on macOS)
     const pyenvRoot = join(home, '.pyenv', 'versions')
     try {
       if (existsSync(pyenvRoot)) {
         for (const ver of readdirSync(pyenvRoot)) {
-          locations.push(join(pyenvRoot, ver, 'bin', 'vmlx-engine'))
+          for (const name of ENGINE_ENTRY_POINT_NAMES) {
+            locations.push(join(pyenvRoot, ver, 'bin', name))
+          }
         }
       }
     } catch (_) { }
@@ -4188,20 +4188,25 @@ export class SessionManager extends EventEmitter {
 
     // Fallback: check PATH via login shell (picks up pyenv, nvm, etc.)
     for (const shell of ['/bin/zsh', '/bin/bash']) {
-      try {
-        const result = execSync(
-          `${shell} -lc "which vmlx-engine"`,
-          { encoding: 'utf-8', timeout: 5000 }
-        ).trim()
-        if (result && existsSync(result)) return systemEnginePath(result)
-      } catch (_) { }
+      for (const name of ENGINE_ENTRY_POINT_NAMES) {
+        try {
+          const result = execFileSync(
+            shell,
+            ['-lc', `which ${name}`],
+            { encoding: 'utf-8', timeout: 5000 },
+          ).trim()
+          if (result && existsSync(result)) return systemEnginePath(result)
+        } catch (_) { }
+      }
     }
 
     // Last resort: plain which
-    try {
-      const result = execSync('which vmlx-engine', { encoding: 'utf-8', timeout: 3000 }).trim()
-      if (result && existsSync(result)) return systemEnginePath(result)
-    } catch (_) { }
+    for (const name of ENGINE_ENTRY_POINT_NAMES) {
+      try {
+        const result = execFileSync('which', [name], { encoding: 'utf-8', timeout: 3000 }).trim()
+        if (result && existsSync(result)) return systemEnginePath(result)
+      } catch (_) { }
+    }
 
     return null
   }
@@ -4282,23 +4287,26 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  private async killByPort(port: number): Promise<void> {
-    try {
-      const output = execSync(`lsof -ti tcp:${port}`, { encoding: 'utf-8', timeout: 5000 }).trim()
-      if (output) {
-        const pids = output.split('\n').map(s => parseInt(s)).filter(n => !isNaN(n))
-        for (const pid of pids) this.killPid(pid)
-        await new Promise(r => setTimeout(r, 1500))
-        // Escalate to SIGKILL if processes still hold the port
-        try {
-          const check = execSync(`lsof -ti tcp:${port}`, { encoding: 'utf-8', timeout: 3000 }).trim()
-          if (check) {
-            for (const pidStr of check.split('\n')) this.killPid(parseInt(pidStr), 'SIGKILL')
-            await new Promise(r => setTimeout(r, 500))
-          }
-        } catch (_) { /* port freed */ }
-      }
-    } catch (_) { }
+  private async terminateDetectedEngineForSession(session: Session): Promise<boolean> {
+    const targetPath = normalizePath(session.modelPath)
+    const detected = await this.detect()
+    const proc = detected.find(candidate =>
+      candidate.port === session.port &&
+      normalizePath(candidate.modelPath) === targetPath
+    )
+    if (!proc) return false
+    await this.terminateDetectedLocalEngine(proc)
+    return true
+  }
+
+  private async ensureOwnedSessionPortAvailable(session: Session): Promise<void> {
+    if (await this.isPortFree(session.port)) return
+    const terminated = await this.terminateDetectedEngineForSession(session)
+    if (terminated && await this.isPortFree(session.port)) return
+    throw new Error(
+      `Port ${session.port} is already in use by another application. ` +
+      'vMLX did not terminate the unowned process; choose another port.',
+    )
   }
 
   private async killChildProcess(proc: ChildProcess): Promise<void> {

@@ -299,7 +299,8 @@ def validate_cache_record(
         cache_data: The list of per-layer entries returned by
             ``_deserialize_block`` or ``_extract_block_tensor_slice``. Each entry
             is a tuple whose first element is a tag string (``"kv"``,
-            ``"quantized_kv"``, ``"turboquant_kv"``, ``"rotating_kv"``, ``"cumulative"``,
+            ``"quantized_kv"``, ``"turboquant_kv"``, ``"rotating_kv"``,
+            ``"rotating_kv_pending"``, ``"cumulative"``,
             ``"deepseek_v4"``, ``"deepseek_v4_pending"``, ``"cache_list"``,
             ``"zaya_cca"``, ``"minimax_m3"``, ``"no_state"``, ``"skip"``).
         expected_num_layers: If not None, ``len(cache_data)`` must match.
@@ -334,7 +335,12 @@ def validate_cache_record(
 
         tag = entry[0]
 
-        if tag in ("skip", "deepseek_v4_pending", "no_state"):
+        if tag in (
+            "skip",
+            "deepseek_v4_pending",
+            "rotating_kv_pending",
+            "no_state",
+        ):
             continue
 
         if tag == "kv":

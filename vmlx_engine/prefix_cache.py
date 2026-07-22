@@ -74,7 +74,16 @@ logger = logging.getLogger(__name__)
 # prefix and emit malformed native tool markup (live reproduction: a truncated
 # ``<_command>`` span instead of the required second function call).  Release
 # upgrades must miss those blocks cleanly; users must not need a manual clear.
-PAGED_CACHE_SCHEMA_VERSION = "paged_n1_keys_v10_qwen_tool_continuation"
+# 2026-07-22 v11 bump: mixed-SWA RotatingKVCache is now stored as one exact,
+# bounded terminal temporal-window checkpoint. Older records distributed slices
+# from different logical snapshots across reusable blocks, allowing a long
+# Laguna chain to combine offset=381 metadata with only 191/277 physical tokens
+# at a 3712/3798-token boundary. Those states are causally incomplete and can
+# crash the next decode with "Negative dimensions not allowed". Force old L2
+# records to miss; do not pad or reinterpret them.
+PAGED_CACHE_SCHEMA_VERSION = (
+    "paged_n1_keys_v11_qwen_tool_continuation_rotating_terminal_window"
+)
 
 
 def runtime_cache_fingerprint() -> str:
@@ -836,6 +845,7 @@ def _block_payload_needs_native_residency(cache_data) -> bool:
         "deepseek_v4_pending",
         "zaya_cca",
         "rotating_kv",
+        "rotating_kv_pending",
     }
 
     def _has_native(value) -> bool:
@@ -924,6 +934,165 @@ def _cache_data_has_rotating_kv(cache_data) -> bool:
     except Exception:
         return False
     return False
+
+
+def _rotating_kv_layer_count(cache_data) -> int:
+    """Count live rotating-window layers in an extracted cache snapshot."""
+    try:
+        return sum(
+            1
+            for layer_state in cache_data or []
+            if isinstance(layer_state, dict)
+            and "Rotating" in str(layer_state.get("class_name", ""))
+        )
+    except Exception:
+        return 0
+
+
+def _rotating_terminal_window(
+    keys,
+    values,
+    meta_state,
+    *,
+    expected_offset: Optional[int] = None,
+    concatenate=None,
+):
+    """Return the exact bounded state needed to resume a rotating KV cache.
+
+    ``RotatingKVCache`` is not an append-only positional cache.  Its physical
+    tensors are a path-dependent ring/window snapshot, and a multi-token
+    prefill may temporarily retain ``max_size + chunk_size - 1`` tokens.  A
+    terminal paged-cache checkpoint must therefore store one complete temporal
+    window, not token slices spread across independently reusable blocks.
+
+    The returned tuple is ``(keys, values, max_size, keep, offset, idx)``.  The
+    tensors are in temporal order and bounded to ``min(offset, max_size)``;
+    ``idx`` is the exact state mlx-lm would have after trimming the prefill
+    buffer immediately before the next single-token decode.
+    """
+    if not isinstance(meta_state, (tuple, list)) or len(meta_state) < 4:
+        raise ValueError("RotatingKVCache terminal snapshot is missing meta_state")
+    try:
+        keep, max_size, offset, idx_state = map(int, meta_state[:4])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("RotatingKVCache terminal metadata is not integral") from exc
+    if max_size <= 0 or keep < 0 or keep > max_size:
+        raise ValueError(
+            f"invalid RotatingKVCache window metadata keep={keep} max_size={max_size}"
+        )
+    if offset < 0:
+        raise ValueError(f"invalid RotatingKVCache offset={offset}")
+    if expected_offset is not None and offset != int(expected_offset):
+        raise ValueError(
+            "RotatingKVCache snapshot boundary mismatch: "
+            f"offset={offset} expected={int(expected_offset)}"
+        )
+
+    ndim = len(keys.shape)
+    if ndim == 4:
+        seq_axis = 2
+    elif ndim == 3:
+        seq_axis = 1
+    else:
+        raise ValueError(f"unsupported RotatingKVCache rank={ndim}")
+    if len(values.shape) != ndim:
+        raise ValueError("RotatingKVCache key/value rank mismatch")
+    seq_len = int(keys.shape[seq_axis])
+    if int(values.shape[seq_axis]) != seq_len:
+        raise ValueError("RotatingKVCache key/value sequence mismatch")
+    if idx_state < 0 or idx_state > seq_len:
+        raise ValueError(
+            f"invalid RotatingKVCache idx={idx_state} physical_len={seq_len}"
+        )
+    if concatenate is None:
+        concatenate = mx.concatenate
+
+    def _slice(value, start=None, stop=None):
+        index = [slice(None)] * ndim
+        index[seq_axis] = slice(start, stop)
+        return value[tuple(index)]
+
+    def _cat(parts):
+        return concatenate(parts, axis=seq_axis)
+
+    # Match mlx-lm RotatingKVCache._temporal_order exactly, generalized to the
+    # 3-D compatibility shape also accepted by the block-cache layer.
+    if idx_state == seq_len:
+        temporal_keys, temporal_values = keys, values
+    elif idx_state < offset:
+        temporal_keys = _cat(
+            [_slice(keys, 0, keep), _slice(keys, idx_state, None), _slice(keys, keep, idx_state)]
+        )
+        temporal_values = _cat(
+            [_slice(values, 0, keep), _slice(values, idx_state, None), _slice(values, keep, idx_state)]
+        )
+    else:
+        temporal_keys = _slice(keys, 0, idx_state)
+        temporal_values = _slice(values, 0, idx_state)
+
+    temporal_len = int(temporal_keys.shape[seq_axis])
+    required_len = min(offset, max_size)
+    if temporal_len < required_len:
+        raise ValueError(
+            "incomplete RotatingKVCache terminal window: "
+            f"physical={temporal_len} required={required_len} offset={offset}"
+        )
+    if temporal_len > required_len:
+        if required_len == 0:
+            temporal_keys = _slice(temporal_keys, 0, 0)
+            temporal_values = _slice(temporal_values, 0, 0)
+        elif keep:
+            recent = required_len - keep
+            if recent < 0:
+                raise ValueError(
+                    f"RotatingKVCache keep={keep} exceeds retained length={required_len}"
+                )
+            temporal_keys = _cat(
+                [_slice(temporal_keys, 0, keep), _slice(temporal_keys, -recent, None)]
+            ) if recent else _slice(temporal_keys, 0, keep)
+            temporal_values = _cat(
+                [_slice(temporal_values, 0, keep), _slice(temporal_values, -recent, None)]
+            ) if recent else _slice(temporal_values, 0, keep)
+        else:
+            temporal_keys = _slice(temporal_keys, -required_len, None)
+            temporal_values = _slice(temporal_values, -required_len, None)
+
+    physical_len = int(temporal_keys.shape[seq_axis])
+    if physical_len != required_len:
+        raise ValueError(
+            "RotatingKVCache terminal normalization failed: "
+            f"physical={physical_len} required={required_len}"
+        )
+    return temporal_keys, temporal_values, max_size, keep, offset, physical_len
+
+
+def _block_has_complete_rotating_terminal(
+    cache_data,
+    *,
+    target_tokens: int,
+    expected_layers: int,
+) -> bool:
+    """Whether a block already carries every exact rotating terminal layer."""
+    if not cache_data or expected_layers <= 0:
+        return False
+    complete = 0
+    for entry in cache_data:
+        if not isinstance(entry, (tuple, list)) or not entry or entry[0] != "rotating_kv":
+            continue
+        if len(entry) < 7:
+            continue
+        try:
+            max_size = int(entry[3])
+            offset = int(entry[5])
+            keys = entry[1]
+            ndim = len(keys.shape)
+            seq_axis = 2 if ndim == 4 else 1 if ndim == 3 else -1
+            physical_len = int(keys.shape[seq_axis]) if seq_axis >= 0 else -1
+        except (TypeError, ValueError, IndexError, AttributeError):
+            continue
+        if offset == int(target_tokens) and physical_len == min(offset, max_size):
+            complete += 1
+    return complete == int(expected_layers)
 
 
 def _dsv4_cache_meta(layer_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -1122,6 +1291,44 @@ def _numpy_block_slice(
             else:
                 block_slices.append(("skip",))
                 continue
+            if "Rotating" in cls:
+                # A rotating-window state is one terminal checkpoint, not a
+                # collection of immutable token pages.  Reusing slices written
+                # from snapshots with different logical offsets produced the
+                # live Laguna mosaic (old offset metadata + an incomplete new
+                # physical window).  Keep non-terminal blocks shareable and put
+                # the exact bounded temporal window on the terminal block only.
+                if not is_last_block:
+                    block_slices.append(("rotating_kv_pending", cls))
+                    continue
+                try:
+                    terminal = _rotating_terminal_window(
+                        np_k,
+                        np_v,
+                        layer_state.get("meta_state", ()),
+                        expected_offset=end_idx,
+                        concatenate=np.concatenate,
+                    )
+                except ValueError as exc:
+                    logger.warning("Layer %s (%s): %s", idx, cls, exc)
+                    block_slices.append(("skip",))
+                    continue
+                tk, tv, max_size, keep, offset, idx_state = terminal
+                tk = mx.array(tk)
+                tv = mx.array(tv)
+                if orig_dtype is not None and tk.dtype != orig_dtype:
+                    tk = tk.astype(orig_dtype)
+                    tv = tv.astype(orig_dtype)
+                block_slices.append((
+                    "rotating_kv",
+                    tk,
+                    tv,
+                    max_size,
+                    keep,
+                    offset,
+                    idx_state,
+                ))
+                continue
             slice_start, actual_end = _positional_layer_slice_bounds(
                 layer_state, cls, start_idx, end_idx, seq_len, existing_tokens,
             )
@@ -1134,49 +1341,15 @@ def _numpy_block_slice(
             else:
                 ks = np_k[:, slice_start:actual_end, :]
                 vs = np_v[:, slice_start:actual_end, :]
-            if "Rotating" in cls:
-                meta = layer_state.get("meta_state", ())
-                max_size = seq_len
-                keep = 0
-                offset = None
-                idx_state = None
-                if meta and len(meta) >= 2:
-                    try:
-                        keep = int(meta[0])
-                        max_size = int(meta[1])
-                        if len(meta) >= 3:
-                            offset = int(meta[2])
-                        if len(meta) >= 4:
-                            idx_state = int(meta[3])
-                    except (ValueError, TypeError):
-                        max_size = seq_len
-                        keep = 0
-                        offset = None
-                        idx_state = None
+            # NumPy has no native bfloat16 dtype. Preserve the model-owned
+            # attention dtype rather than persisting the fp32 bridge arrays.
+            if orig_dtype is not None:
                 ks = mx.array(ks)
                 vs = mx.array(vs)
-                if orig_dtype is not None and ks.dtype != orig_dtype:
+                if ks.dtype != orig_dtype:
                     ks = ks.astype(orig_dtype)
                     vs = vs.astype(orig_dtype)
-                block_slices.append((
-                    "rotating_kv",
-                    ks,
-                    vs,
-                    max_size,
-                    keep,
-                    offset,
-                    idx_state,
-                ))
-            else:
-                # NumPy has no native bfloat16 dtype. Preserve the model-owned
-                # attention dtype rather than persisting the fp32 bridge arrays.
-                if orig_dtype is not None:
-                    ks = mx.array(ks)
-                    vs = mx.array(vs)
-                    if ks.dtype != orig_dtype:
-                        ks = ks.astype(orig_dtype)
-                        vs = vs.astype(orig_dtype)
-                block_slices.append(("kv", ks, vs))
+            block_slices.append(("kv", ks, vs))
         else:
             # Cumulative / non-positional layer
             state = layer_state.get("state")
@@ -1910,6 +2083,9 @@ class BlockAwarePrefixCache:
         has_rotating_kv_cache_data = (
             _cache_data_has_rotating_kv(cache_data) if is_tensor_data else False
         )
+        rotating_kv_layer_count = (
+            _rotating_kv_layer_count(cache_data) if has_rotating_kv_cache_data else 0
+        )
 
         # Get or create block table
         block_table = self.paged_cache.get_block_table(request_id)
@@ -1948,6 +2124,47 @@ class BlockAwarePrefixCache:
             block_table.num_tokens = aligned_tokens
             existing_tokens = aligned_tokens
         new_tokens = tokens[existing_tokens:]
+
+        if (
+            not new_tokens
+            and has_rotating_kv_cache_data
+            and block_table.block_ids
+        ):
+            terminal_block_id = block_table.block_ids[-1]
+            terminal_block = self.paged_cache.allocated_blocks.get(terminal_block_id)
+            if not _block_has_complete_rotating_terminal(
+                getattr(terminal_block, "cache_data", None),
+                target_tokens=existing_tokens,
+                expected_layers=rotating_kv_layer_count,
+            ):
+                # This exact token block may have first been created as an
+                # interior block of a longer prefix.  Its ordinary KV payload
+                # is reusable, but it has no rotating state for this causal
+                # boundary. Rebuild only the terminal block under the same
+                # chain hash, mirroring the cumulative-state promotion path.
+                terminal_count = int(
+                    getattr(terminal_block, "token_count", 0) or 0
+                )
+                if terminal_count <= 0 or terminal_count > existing_tokens:
+                    logger.warning(
+                        "Cannot promote rotating terminal block for %s: "
+                        "invalid token_count=%s existing_tokens=%s",
+                        request_id,
+                        terminal_count,
+                        existing_tokens,
+                    )
+                    return block_table
+                self.paged_cache.decrement_ref(terminal_block_id)
+                block_table.block_ids.pop()
+                existing_tokens -= terminal_count
+                block_table.num_tokens = existing_tokens
+                new_tokens = tokens[existing_tokens:]
+                logger.info(
+                    "Promoting interior rotating block to terminal checkpoint "
+                    "for %s at %s tokens",
+                    request_id,
+                    len(tokens),
+                )
 
         if not new_tokens:
             # All tokens already cached
@@ -2200,6 +2417,14 @@ class BlockAwarePrefixCache:
                             or (
                                 (has_dsv4_cache_data or has_zaya_cca_cache_data)
                                 and existing_block.cache_data is None
+                            )
+                            or (
+                                has_rotating_kv_cache_data
+                                and not _block_has_complete_rotating_terminal(
+                                    existing_block.cache_data,
+                                    target_tokens=global_end,
+                                    expected_layers=rotating_kv_layer_count,
+                                )
                             )
                         )
                     ):
@@ -2956,6 +3181,55 @@ class BlockAwarePrefixCache:
                         block_slices.append(("skip",))
                         continue
 
+                    if "Rotating" in class_name:
+                        if not is_last_block:
+                            block_slices.append(("rotating_kv_pending", class_name))
+                            continue
+                        try:
+                            if np_sources is not None and layer_idx in np_sources:
+                                import numpy as np
+
+                                np_k, np_v, orig_dtype = np_sources[layer_idx]
+                                terminal = _rotating_terminal_window(
+                                    np_k,
+                                    np_v,
+                                    layer_state.get("meta_state", ()),
+                                    expected_offset=end_idx,
+                                    concatenate=np.concatenate,
+                                )
+                                tk, tv, max_size, keep, offset, idx_state = terminal
+                                tk = mx.array(tk)
+                                tv = mx.array(tv)
+                                if tk.dtype != orig_dtype:
+                                    tk = tk.astype(orig_dtype)
+                                    tv = tv.astype(orig_dtype)
+                            else:
+                                terminal = _rotating_terminal_window(
+                                    keys,
+                                    values,
+                                    layer_state.get("meta_state", ()),
+                                    expected_offset=end_idx,
+                                    concatenate=mx.concatenate,
+                                )
+                                tk, tv, max_size, keep, offset, idx_state = terminal
+                                tk = _copy_mlx_tree(tk)
+                                tv = _copy_mlx_tree(tv)
+                            block_slices.append((
+                                "rotating_kv",
+                                tk,
+                                tv,
+                                max_size,
+                                keep,
+                                offset,
+                                idx_state,
+                            ))
+                        except ValueError as exc:
+                            logger.warning(
+                                "Layer %s (%s): %s", layer_idx, class_name, exc
+                            )
+                            block_slices.append(("skip",))
+                        continue
+
                     seq_len = keys.shape[seq_dim]
                     slice_start, actual_end = _positional_layer_slice_bounds(
                         layer_state,
@@ -3003,39 +3277,6 @@ class BlockAwarePrefixCache:
                         block_slices.append(
                             encode_tq_block(ks, vs, layer_state["tq_config"])
                         )
-                    # Use rotating_kv tag for RotatingKVCache to preserve params
-                    elif "Rotating" in class_name:
-                        # Extract max_size/keep from meta_state tuple
-                        # RotatingKVCache.meta_state returns
-                        # (keep, max_size, offset, _idx).
-                        meta = layer_state.get("meta_state", ())
-                        offset = None
-                        idx_state = None
-                        if meta and len(meta) >= 2:
-                            try:
-                                keep = int(meta[0])
-                                max_size = int(meta[1])
-                                if len(meta) >= 3:
-                                    offset = int(meta[2])
-                                if len(meta) >= 4:
-                                    idx_state = int(meta[3])
-                            except (ValueError, TypeError):
-                                max_size = seq_len
-                                keep = 0
-                                offset = None
-                                idx_state = None
-                        else:
-                            max_size = layer_state.get("max_size", seq_len)
-                            keep = layer_state.get("keep", 0)
-                        block_slices.append((
-                            "rotating_kv",
-                            ks,
-                            vs,
-                            max_size,
-                            keep,
-                            offset,
-                            idx_state,
-                        ))
                     else:
                         block_slices.append(("kv", ks, vs))
                 except Exception as e:
@@ -3555,9 +3796,8 @@ class BlockAwarePrefixCache:
                 best_dsv4 = None
                 kv_slices_keys = []
                 kv_slices_values = []
-                rotating_kv_slices_keys = []
-                rotating_kv_slices_values = []
-                rotating_params = None  # (max_size, keep, offset, _idx)
+                rotating_entries = []
+                rotating_terminal = None
                 quantized_kv_slices_keys = []  # list of tuples of (data, scales, zeros)
                 quantized_kv_slices_values = []
                 quantized_meta = None
@@ -3586,15 +3826,20 @@ class BlockAwarePrefixCache:
                         tq_block_entries.append(tuple(entry))
                         tq_native_entry_count += 1
                     elif tag == "rotating_kv":
-                        rotating_kv_slices_keys.append(entry[1])
-                        rotating_kv_slices_values.append(entry[2])
-                        if len(entry) > 3 and rotating_params is None:
-                            rotating_params = (
-                                entry[3],
-                                entry[4] if len(entry) > 4 else 0,
-                                entry[5] if len(entry) > 5 else None,
-                                entry[6] if len(entry) > 6 else None,
-                            )
+                        rotating_entries.append(entry)
+                        # v11 rotating records are exact terminal windows.  A
+                        # reused earlier terminal can legitimately appear in
+                        # the middle of a longer block chain; only the record
+                        # whose logical offset equals this table boundary is
+                        # valid for reconstruction.
+                        if len(entry) >= 7:
+                            try:
+                                if int(entry[5]) == int(block_table.num_tokens):
+                                    rotating_terminal = entry
+                            except (TypeError, ValueError):
+                                pass
+                    elif tag == "rotating_kv_pending":
+                        pass
                     elif tag == "cumulative":
                         best_cumulative = entry  # Last cumulative entry wins
                     elif tag == "deepseek_v4":
@@ -3958,81 +4203,84 @@ class BlockAwarePrefixCache:
                     reconstructed_indices.add(layer_idx)
                     kv_count += 1
 
-                elif rotating_kv_slices_keys:
-                    # RotatingKVCache: concatenate + restore window params
-                    ndim = len(rotating_kv_slices_keys[0].shape)
-                    seq_axis = 1 if ndim == 3 else 2
-                    concat_keys = mx.concatenate(rotating_kv_slices_keys, axis=seq_axis)
-                    concat_values = mx.concatenate(rotating_kv_slices_values, axis=seq_axis)
-                    mx.eval(concat_keys, concat_values)
-
-                    if has_rotating and rotating_params:
-                        max_size, keep, original_offset, original_idx = rotating_params
-                        cache = RotatingKVCache(max_size=max_size, keep=keep)
-                    else:
-                        # Fallback to standard KVCache
-                        cache = KVCache()
-                    cache.keys = concat_keys
-                    cache.values = concat_values
-                    restored_len = concat_keys.shape[seq_axis]
-                    target_tokens = int(getattr(block_table, "num_tokens", 0) or 0)
-                    if has_rotating and rotating_params:
-                        max_size_int = int(max_size or 0)
-                        restored_len_int = int(restored_len or 0)
-                        original_offset_int = (
-                            int(original_offset)
-                            if original_offset is not None
-                            else None
+                elif rotating_terminal is not None:
+                    (
+                        _,
+                        terminal_keys,
+                        terminal_values,
+                        max_size,
+                        keep,
+                        original_offset,
+                        original_idx,
+                    ) = rotating_terminal[:7]
+                    ndim = len(terminal_keys.shape)
+                    seq_axis = 1 if ndim == 3 else 2 if ndim == 4 else -1
+                    if seq_axis < 0:
+                        logger.warning(
+                            "Cannot reconstruct RotatingKVCache layer %s: rank=%s",
+                            layer_idx,
+                            ndim,
                         )
-                        # mlx-lm RotatingKVCache permits a logical offset
-                        # larger than the SWA window only after the physical
-                        # ring buffer has grown to max_size. A partial paged/L2
-                        # prefix hit can legitimately hold fewer recent tokens
-                        # than max_size (for example, a 4032-token hit against
-                        # a later 4094-token snapshot). Restoring offset=4032
-                        # with a 64-token physical buffer makes
-                        # RotatingKVCache._update_in_place() compute
-                        # max_size - offset < 0 and crash with
-                        # "[full] Negative dimensions not allowed." That state
-                        # is also semantically incomplete: the next token would
-                        # lack part of its sliding-window history. Downgrade
-                        # the hit to a miss instead of padding fake zeros or
-                        # leaking a synthetic engine error into
-                        # reasoning_content.
-                        if (
-                            max_size_int > 0
-                            and target_tokens > max_size_int
-                            and restored_len_int < max_size_int
-                        ):
-                            logger.warning(
-                                "Cannot reconstruct RotatingKVCache layer %s: "
-                                "physical window %s < max_size %s while "
-                                "target_tokens=%s original_offset=%s; "
-                                "treating paged/L2 prefix hit as a miss",
-                                layer_idx,
-                                restored_len_int,
-                                max_size_int,
-                                target_tokens,
-                                original_offset_int,
-                            )
-                            return None
-                        if (
-                            original_offset_int is not None
-                            and original_offset_int == target_tokens
-                        ):
-                            cache.offset = original_offset_int
-                            if original_idx is not None:
-                                cache._idx = int(original_idx)
-                            else:
-                                cache._idx = restored_len
-                        else:
-                            cache.offset = max(restored_len, target_tokens)
-                            cache._idx = restored_len
+                        return None
+                    target_tokens = int(getattr(block_table, "num_tokens", 0) or 0)
+                    max_size_int = int(max_size or 0)
+                    keep_int = int(keep or 0)
+                    original_offset_int = int(original_offset)
+                    original_idx_int = int(original_idx)
+                    restored_len_int = int(terminal_keys.shape[seq_axis])
+                    required_len = min(target_tokens, max_size_int)
+                    if (
+                        max_size_int <= 0
+                        or keep_int < 0
+                        or keep_int > max_size_int
+                        or original_offset_int != target_tokens
+                        or restored_len_int != required_len
+                        or original_idx_int != restored_len_int
+                    ):
+                        logger.warning(
+                            "Cannot reconstruct RotatingKVCache layer %s: invalid "
+                            "terminal window physical=%s required=%s max_size=%s "
+                            "keep=%s target_tokens=%s original_offset=%s idx=%s",
+                            layer_idx,
+                            restored_len_int,
+                            required_len,
+                            max_size_int,
+                            keep_int,
+                            target_tokens,
+                            original_offset_int,
+                            original_idx_int,
+                        )
+                        return None
+                    mx.eval(terminal_keys, terminal_values)
+                    if has_rotating:
+                        cache = RotatingKVCache(max_size=max_size_int, keep=keep_int)
                     else:
-                        cache.offset = restored_len
+                        # A runtime without RotatingKVCache cannot preserve the
+                        # typed SWA contract.  Treating it as plain KV would be a
+                        # silent semantic change, so reject the hit.
+                        logger.warning(
+                            "Cannot reconstruct RotatingKVCache layer %s: typed "
+                            "runtime class is unavailable",
+                            layer_idx,
+                        )
+                        return None
+                    cache.keys = terminal_keys
+                    cache.values = terminal_values
+                    cache.offset = original_offset_int
+                    cache._idx = original_idx_int
                     reconstructed_caches.append(cache)
                     reconstructed_indices.add(layer_idx)
                     kv_count += 1
+
+                elif rotating_entries:
+                    logger.warning(
+                        "Cannot reconstruct RotatingKVCache layer %s: no exact "
+                        "terminal window for target_tokens=%s (candidate_offsets=%s)",
+                        layer_idx,
+                        int(getattr(block_table, "num_tokens", 0) or 0),
+                        [entry[5] if len(entry) > 5 else None for entry in rotating_entries],
+                    )
+                    return None
 
                 elif best_dsv4 is not None:
                     _, state, meta, class_name, cache_meta = best_dsv4

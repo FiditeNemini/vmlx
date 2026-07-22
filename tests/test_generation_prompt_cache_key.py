@@ -106,8 +106,9 @@ def test_mllm_media_cache_side_key_merge_preserves_generation_prompt_axis():
     }
 
 
-def test_paged_cache_schema_version_invalidates_pre_sidekey_l2_blocks():
+def test_paged_cache_schema_version_tracks_tool_and_rotating_contracts():
     from vmlx_engine.prefix_cache import PAGED_CACHE_SCHEMA_VERSION
 
-    assert "v10" in PAGED_CACHE_SCHEMA_VERSION
+    assert "v11" in PAGED_CACHE_SCHEMA_VERSION
     assert "qwen_tool_continuation" in PAGED_CACHE_SCHEMA_VERSION
+    assert "rotating_terminal_window" in PAGED_CACHE_SCHEMA_VERSION

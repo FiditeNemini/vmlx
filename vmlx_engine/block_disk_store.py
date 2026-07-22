@@ -26,7 +26,8 @@ Supported cache_data tuple types (from prefix_cache.py):
 - ("quantized_kv", keys_tuple, values_tuple, meta) — QuantizedKVCache
 - ("turboquant_kv", encoded_keys, encoded_values, config) — native
   TurboQuant codebook payload with the exact per-layer seed and codec bits
-- ("rotating_kv", keys_slice, values_slice, max_size, keep[, offset, idx])
+- ("rotating_kv", terminal_keys, terminal_values, max_size, keep, offset, idx)
+- ("rotating_kv_pending", class_name) for non-terminal rotating chain blocks
   — RotatingKVCache
 - ("cumulative", state_list, meta, class_name) — MambaCache/ArraysCache
 - ("deepseek_v4", state_tree, meta, class_name, cache_meta) — DSV4
@@ -1125,6 +1126,11 @@ def _serialize_block(
             if hasattr(keys, "dtype"):
                 meta.setdefault("__orig_dtypes__", {})[str(i)] = str(keys.dtype)
 
+        elif tag == "rotating_kv_pending":
+            _, class_name = layer_data
+            tensors[f"layer_{i}_rotating_pending"] = mx.array([1], dtype=mx.int32)
+            meta[str(i)] = {"class_name": str(class_name)}
+
         elif tag == "cache_list":
             # CacheList (MoE models): each sub-cache is serialized independently
             _, sub_slices = layer_data
@@ -1441,6 +1447,13 @@ def _deserialize_block(
             else:
                 cache_data.append(("skip",))
 
+        elif layer_type == "rotating_kv_pending":
+            layer_meta_dict = meta.get(str(i), {})
+            cache_data.append((
+                "rotating_kv_pending",
+                layer_meta_dict.get("class_name", "RotatingKVCache"),
+            ))
+
         elif layer_type == "cache_list":
             # CacheList (MoE models): reconstruct sub-caches
             layer_meta_dict = meta.get(str(i), {})
@@ -1597,6 +1610,7 @@ def _infer_layer_type(data: Dict[str, Any], layer_idx: int, fallback_dtype: str)
     has_dsv4 = f"{prefix}dsv4_state_0" in data
     has_dsv4_pending = f"{prefix}dsv4_pending" in data
     has_max_size = f"{prefix}max_size" in data
+    has_rotating_pending = f"{prefix}rotating_pending" in data
     has_keys = f"{prefix}keys" in data
     has_sub = (
         f"{prefix}sub_0_keys" in data
@@ -1616,6 +1630,8 @@ def _infer_layer_type(data: Dict[str, Any], layer_idx: int, fallback_dtype: str)
         return "deepseek_v4"
     if has_dsv4_pending:
         return "deepseek_v4_pending"
+    if has_rotating_pending:
+        return "rotating_kv_pending"
     if has_max_size and has_keys:
         return "rotating_kv"
     if has_keys:

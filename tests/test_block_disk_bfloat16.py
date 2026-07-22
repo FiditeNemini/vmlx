@@ -108,6 +108,18 @@ class TestSerializeBlock:
         assert restored[0][0] == "rotating_kv"
         assert restored[0][3:] == (4096, 0, 20, 8)
 
+    def test_rotating_pending_block_round_trips_for_disk_chain(self):
+        from vmlx_engine.block_disk_store import _deserialize_block, _serialize_block
+
+        cache_data = [("rotating_kv_pending", "RotatingKVCache")]
+        tensors, dtype, num_layers = _serialize_block(cache_data)
+
+        assert num_layers == 1
+        assert dtype == "rotating_kv_pending"
+        assert "layer_0_rotating_pending" in tensors
+        restored = _deserialize_block(dict(tensors), dtype)
+        assert restored == [("rotating_kv_pending", "RotatingKVCache")]
+
 
 class TestEndToEndRoundTrip:
     """Test full write -> read round-trips through the disk store."""
@@ -194,6 +206,18 @@ class TestWriteBlockAsync:
         assert stats["blocks_on_disk"] == 1
         assert stats["total_tokens_on_disk"] == 8
         assert stats["disk_writes"] == 1
+
+    def test_rotating_pending_block_survives_l2_write_read(self, disk_store):
+        """Pure rotating models still need durable non-terminal chain nodes."""
+        import time
+
+        block_hash = b"\x04" * 16
+        cache_data = [("rotating_kv_pending", "RotatingKVCache")]
+        assert disk_store.write_block_async(block_hash, cache_data, 8)
+        time.sleep(1.0)
+
+        restored = disk_store.read_block(block_hash)
+        assert restored == [("rotating_kv_pending", "RotatingKVCache")]
 
     def test_stats_include_persistent_token_count(self, disk_store):
         """Block L2 stats must report tokens persisted on disk, not only blocks."""

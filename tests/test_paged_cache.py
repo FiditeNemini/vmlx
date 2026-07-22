@@ -873,6 +873,81 @@ class TestBlockAwarePrefixCache:
         finally:
             restarted_store.shutdown()
 
+    def test_disk_only_rotating_terminal_restores_across_restart(self, tmp_path):
+        """SSD-only L2 preserves pending chain nodes plus the exact SWA window."""
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.block_disk_store import BlockDiskStore
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        cache_dir = tmp_path / "disk-only-rotating-blocks"
+        tokens = list(range(12))
+        positions = mx.arange(4, 12, dtype=mx.float32).reshape(1, 1, 8, 1)
+        state = [{
+            "class_name": "RotatingKVCache",
+            "state": (positions, positions + 100),
+            "meta_state": (0, 8, 12, 8),
+        }]
+
+        store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.01,
+            expected_num_layers=1,
+        )
+        manager = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        table = cache.store_cache("writer", tokens, state)
+        assert table is not None
+        assert table.num_tokens == 12
+        store.shutdown()
+
+        restarted_store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.01,
+            expected_num_layers=1,
+        )
+        restarted_manager = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=restarted_store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        restarted = BlockAwarePrefixCache(
+            model=None,
+            paged_cache_manager=restarted_manager,
+        )
+        try:
+            hit, remaining = restarted.fetch_cache("reader", tokens + [99])
+            assert hit is not None
+            assert hit.num_tokens == 12
+            assert remaining == [99]
+            rebuilt = restarted.reconstruct_cache(hit)
+            assert rebuilt is not None
+            assert rebuilt[0].offset == 12
+            assert rebuilt[0]._idx == 8
+            assert mx.array_equal(
+                rebuilt[0].keys.reshape(-1),
+                mx.arange(4, 12, dtype=mx.float32),
+            ).item()
+            next_key = mx.array([[[[12.0]]]], dtype=mx.float32)
+            next_value = mx.array([[[[112.0]]]], dtype=mx.float32)
+            fetched_keys, fetched_values = rebuilt[0].update_and_fetch(
+                next_key, next_value
+            )
+            mx.eval(fetched_keys, fetched_values)
+            assert rebuilt[0].offset == 13
+            assert restarted_manager.stats.disk_hits >= 3
+        finally:
+            restarted_store.shutdown()
+
     def test_rotating_cache_partial_window_hit_downgrades_to_miss(self):
         """Unsafe mixed-SWA partial hits must not restore impossible ring state.
 
@@ -906,6 +981,145 @@ class TestBlockAwarePrefixCache:
         assert table is not None
         assert table.num_tokens == 256
         assert cache.reconstruct_cache(table) is None
+
+    def test_rotating_cache_stores_exact_terminal_window(self):
+        """Long mixed-SWA stores one complete terminal ring checkpoint."""
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        tokens = list(range(256))
+        # A clean chunked prefill may retain more than max_size physical tokens.
+        # The terminal record must normalize it to the exact last 128 positions.
+        positions = mx.arange(64, 256, dtype=mx.float32).reshape(1, 1, 192, 1)
+        state = [{
+            "class_name": "RotatingKVCache",
+            "state": (positions, positions + 1000),
+            "meta_state": (0, 128, 256, 192),
+        }]
+
+        manager = PagedCacheManager(block_size=64, max_blocks=16)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        table = cache.store_cache("writer", tokens, state)
+
+        assert table is not None
+        assert table.num_tokens == 256
+        entries = [
+            manager.allocated_blocks[block_id].cache_data[0]
+            for block_id in table.block_ids
+        ]
+        assert [entry[0] for entry in entries[:-1]] == [
+            "rotating_kv_pending",
+            "rotating_kv_pending",
+            "rotating_kv_pending",
+        ]
+        assert entries[-1][0] == "rotating_kv"
+        assert entries[-1][3:] == (128, 0, 256, 128)
+        assert entries[-1][1].shape[2] == 128
+
+        rebuilt = cache.reconstruct_cache(table)
+        assert rebuilt is not None
+        assert len(rebuilt) == 1
+        assert rebuilt[0].offset == 256
+        assert rebuilt[0]._idx == 128
+        assert rebuilt[0].keys.shape[2] == 128
+        assert mx.array_equal(
+            rebuilt[0].keys.reshape(-1),
+            mx.arange(128, 256, dtype=mx.float32),
+        ).item()
+        next_key = mx.array([[[[256.0]]]], dtype=mx.float32)
+        next_value = mx.array([[[[1256.0]]]], dtype=mx.float32)
+        fetched_keys, fetched_values = rebuilt[0].update_and_fetch(
+            next_key, next_value
+        )
+        mx.eval(fetched_keys, fetched_values)
+        assert rebuilt[0].offset == 257
+        assert fetched_keys.shape[2] == 128
+        assert float(fetched_keys[0, 0, rebuilt[0]._idx - 1, 0].item()) == 256.0
+
+    def test_rotating_cache_extension_uses_new_terminal_not_old_snapshot(self):
+        """A longer chain must not combine rotating state from two snapshots."""
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        def snapshot(offset):
+            start = max(0, offset - 128)
+            positions = mx.arange(start, offset, dtype=mx.float32).reshape(
+                1, 1, offset - start, 1
+            )
+            return [{
+                "class_name": "RotatingKVCache",
+                "state": (positions, positions + 1000),
+                "meta_state": (0, 128, offset, offset - start),
+            }]
+
+        manager = PagedCacheManager(block_size=64, max_blocks=24)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        short_tokens = list(range(192))
+        long_tokens = list(range(384))
+        cache.store_cache("short", short_tokens, snapshot(192))
+
+        hit, remaining = cache.fetch_cache("long", long_tokens)
+        assert hit is not None
+        assert hit.num_tokens == 192
+        assert remaining == long_tokens[192:]
+
+        table = cache.store_cache("long", long_tokens, snapshot(384))
+        assert table is not None
+        rebuilt = cache.reconstruct_cache(table)
+        assert rebuilt is not None
+        assert rebuilt[0].offset == 384
+        assert rebuilt[0]._idx == 128
+        assert mx.array_equal(
+            rebuilt[0].keys.reshape(-1),
+            mx.arange(256, 384, dtype=mx.float32),
+        ).item()
+
+    def test_rotating_cache_promotes_interior_block_to_terminal_checkpoint(self):
+        """An exact hit ending on an interior block gains its own SWA state."""
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        def snapshot(offset):
+            start = max(0, offset - 128)
+            positions = mx.arange(start, offset, dtype=mx.float32).reshape(
+                1, 1, offset - start, 1
+            )
+            return [{
+                "class_name": "RotatingKVCache",
+                "state": (positions, positions + 1000),
+                "meta_state": (0, 128, offset, offset - start),
+            }]
+
+        manager = PagedCacheManager(block_size=64, max_blocks=24)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        long_tokens = list(range(384))
+        short_tokens = long_tokens[:192]
+        cache.store_cache("long", long_tokens, snapshot(384))
+
+        hit, remaining = cache.fetch_cache("short", short_tokens)
+        assert hit is not None
+        assert hit.num_tokens == 192
+        assert remaining == []
+        # The matched third block was interior in the 384-token store, so it has
+        # no terminal window until the exact shorter prompt completes a clean prefill.
+        assert cache.reconstruct_cache(hit) is None
+
+        table = cache.store_cache("short", short_tokens, snapshot(192))
+        assert table is not None
+        rebuilt = cache.reconstruct_cache(table)
+        assert rebuilt is not None
+        assert rebuilt[0].offset == 192
+        assert rebuilt[0]._idx == 128
+        assert mx.array_equal(
+            rebuilt[0].keys.reshape(-1),
+            mx.arange(64, 192, dtype=mx.float32),
+        ).item()
 
     def test_extending_partial_prefix_realigns_durable_block_chain(self):
         """An extended partial tail must be replaced at block boundaries."""

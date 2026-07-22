@@ -17,7 +17,8 @@ describe('engine child path isolation', () => {
   })
 
   it('pins a reused system venv to the current development checkout source', () => {
-    expect(source).toContain("existsSync(join(sourceDir, 'vmlx_engine', '__init__.py'))")
+    expect(source).toContain('getDevelopmentSourceRoot,')
+    expect(source).toContain('const developmentSourceRoot = getDevelopmentSourceRoot() || undefined')
     expect(source).toContain('sourceRoot: developmentSourceRoot')
     expect(source).toContain('systemEnv.PYTHONPATH = engineResult.sourceRoot')
     expect(source).toContain('[SESSIONS] Development engine source:')

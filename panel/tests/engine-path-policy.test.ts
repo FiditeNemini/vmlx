@@ -20,6 +20,35 @@ describe('engine path policy', () => {
     expect(projectVenvIndex).toBeLessThan(staleSystemIndex)
   })
 
+  it('uses one project-venv probe for setup detection and development session startup', () => {
+    const engineManager = readFileSync('src/main/engine-manager.ts', 'utf8')
+    const sessions = readFileSync('src/main/sessions.ts', 'utf8')
+    const checkInstallation = engineManager.slice(
+      engineManager.indexOf('export async function checkEngineInstallation'),
+      engineManager.indexOf('async function getVersionFromBinary'),
+    )
+    const findEnginePath = sessions.slice(
+      sessions.indexOf('findEnginePath(): EnginePath | null'),
+      sessions.indexOf('  private async findAvailablePort'),
+    )
+
+    expect(engineManager).toContain('export function getDevelopmentProjectVenv(')
+    expect(engineManager).toContain("join(sourceRoot, '.venv', 'bin', 'python3')")
+    expect(engineManager).toContain("PYTHONPATH: ''")
+    expect(checkInstallation).toContain(
+      'const projectVenv = getDevelopmentProjectVenv(developmentSourceRoot)',
+    )
+    expect(checkInstallation.indexOf('getDevelopmentProjectVenv')).toBeLessThan(
+      checkInstallation.indexOf('// 1. Check common paths'),
+    )
+    expect(sessions).toContain('getDevelopmentProjectVenv,')
+    expect(sessions).toContain('getDevelopmentSourceRoot,')
+    expect(findEnginePath).toContain(
+      'const projectVenv = getDevelopmentProjectVenv(developmentSourceRoot || null)',
+    )
+    expect(findEnginePath).not.toContain("join(sourceDir, '.venv', 'bin', 'python3')")
+  })
+
   it('uses the published vmlx package name for PyPI installs while preserving vmlx-engine entrypoint detection', () => {
     const engineManager = readFileSync('src/main/engine-manager.ts', 'utf8')
     const createSession = readFileSync('src/renderer/src/components/sessions/CreateSession.tsx', 'utf8')

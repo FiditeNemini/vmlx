@@ -92,7 +92,7 @@ export function getBundledPythonPath(): string | null {
  * PYTHONPATH. Packaged builds intentionally return null: their signed bundled
  * Python is authoritative and must never be shadowed by source files.
  */
-function getDevelopmentSourceRoot(): string | null {
+export function getDevelopmentSourceRoot(): string | null {
   if (app.isPackaged) return null
   const sourceRoot = join(app.getAppPath(), '..')
   if (
@@ -102,6 +102,47 @@ function getDevelopmentSourceRoot(): string | null {
     return sourceRoot
   }
   return null
+}
+
+export interface DevelopmentProjectVenv {
+  pythonPath: string
+  version: string
+}
+
+/**
+ * Resolve the project virtualenv used by development sessions.  Setup and
+ * session startup must share this probe: otherwise the renderer can strand a
+ * usable source checkout on the Welcome / Install Engine screen even though
+ * SessionManager would launch that checkout successfully.
+ */
+export function getDevelopmentProjectVenv(
+  sourceRoot: string | null = getDevelopmentSourceRoot(),
+): DevelopmentProjectVenv | null {
+  if (!sourceRoot) return null
+
+  const pythonPath = join(sourceRoot, '.venv', 'bin', 'python3')
+  if (!existsSync(pythonPath)) return null
+
+  try {
+    const version = execFileSync(
+      pythonPath,
+      ['-B', '-s', '-c', 'import vmlx_engine; print(vmlx_engine.__version__)'],
+      {
+        encoding: 'utf-8',
+        timeout: 10000,
+        env: {
+          ...process.env,
+          PYTHONDONTWRITEBYTECODE: '1',
+          PYTHONNOUSERSITE: '1',
+          PYTHONPATH: '',
+        },
+      },
+    ).trim()
+    if (!/^\d+\.\d+\.\d+/.test(version)) return null
+    return { pythonPath, version }
+  } catch (_) {
+    return null
+  }
 }
 
 /**
@@ -185,6 +226,23 @@ export async function checkEngineInstallation(): Promise<EngineInstallation> {
   // root when it reuses dependencies from a sibling/system engine shim; the
   // displayed version must describe the code that shim will actually import.
   const developmentSourceRoot = getDevelopmentSourceRoot()
+
+  // Development sessions prefer the checkout's own virtualenv before stale
+  // user/system entrypoints.  Installation detection must make the same
+  // decision or App.tsx will show setup even though Start can launch a model.
+  const projectVenv = getDevelopmentProjectVenv(developmentSourceRoot)
+  if (projectVenv) {
+    console.log(
+      `[Engine Manager] Found development project venv: ${projectVenv.pythonPath} ` +
+      `(vmlx_engine ${projectVenv.version})`,
+    )
+    return {
+      installed: true,
+      path: projectVenv.pythonPath,
+      version: projectVenv.version,
+      method: 'manual',
+    }
+  }
 
   // 1. Check common paths
   for (const path of SEARCH_PATHS) {

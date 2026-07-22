@@ -41,7 +41,12 @@ import {
 export type { ServerConfig, DetectedProcess } from './server'
 import type { ServerConfig, DetectedProcess } from './server'
 import { detectModelConfigFromDir } from './model-config-registry'
-import { getBundledPythonPath, verifyBundledEngineOnFilesystem } from './engine-manager'
+import {
+  getBundledPythonPath,
+  getDevelopmentProjectVenv,
+  getDevelopmentSourceRoot,
+  verifyBundledEngineOnFilesystem,
+} from './engine-manager'
 import { app as electronApp } from 'electron'
 
 /** Result of findEnginePath: either bundled Python or a system binary */
@@ -4093,11 +4098,7 @@ export class SessionManager extends EventEmitter {
   }
 
   findEnginePath(): EnginePath | null {
-    const sourceDir = join(__dirname, '..', '..', '..')
-    const developmentSourceRoot = (
-      !electronApp.isPackaged
-      && existsSync(join(sourceDir, 'vmlx_engine', '__init__.py'))
-    ) ? sourceDir : undefined
+    const developmentSourceRoot = getDevelopmentSourceRoot() || undefined
     const systemEnginePath = (binaryPath: string): EnginePath => ({
       type: 'system',
       binaryPath,
@@ -4105,25 +4106,13 @@ export class SessionManager extends EventEmitter {
     })
 
     const findProjectVenvEngine = (): EnginePath | null => {
-      try {
-        const venvPython = join(sourceDir, '.venv', 'bin', 'python3')
-        if (!existsSync(venvPython)) return null
-
-        execFileSync(venvPython, ['-B', '-s', '-c', 'import vmlx_engine'], {
-          encoding: 'utf-8',
-          timeout: 10000,
-          env: {
-            ...process.env,
-            PYTHONDONTWRITEBYTECODE: '1',
-            PYTHONNOUSERSITE: '1',
-            PYTHONPATH: '',
-          },
-        })
-        console.log(`[SESSIONS] Using project venv: ${venvPython}`)
-        return { type: 'bundled', pythonPath: venvPython }
-      } catch (_) {
-        return null
-      }
+      const projectVenv = getDevelopmentProjectVenv(developmentSourceRoot || null)
+      if (!projectVenv) return null
+      console.log(
+        `[SESSIONS] Using project venv: ${projectVenv.pythonPath} ` +
+        `(vmlx_engine ${projectVenv.version})`,
+      )
+      return { type: 'bundled', pythonPath: projectVenv.pythonPath }
     }
 
     // Bundled Python: use python3 -m vmlx_engine.cli instead of vmlx-engine binary.

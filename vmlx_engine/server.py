@@ -19423,7 +19423,11 @@ async def stream_chat_completion(
             # (not just accumulated — content in the same delta as a tool marker
             # may be accumulated but never yielded due to buffering).
             unemitted_content = None
-            if cleaned_text and cleaned_text.strip():
+            if (
+                not _exact_once_tool_contract
+                and cleaned_text
+                and cleaned_text.strip()
+            ):
                 already_sent = streamed_content.strip()
                 candidate = cleaned_text.strip()
                 if not already_sent:
@@ -19576,7 +19580,15 @@ async def stream_chat_completion(
                 remainder = full[len(already_sent) :].strip()
             else:
                 remainder = full if not content_was_emitted else ""
-            if remainder:
+            if _exact_once_tool_contract:
+                # An explicit exact-one selection turn has no legitimate visible
+                # prose before its required function call.  If the final parser
+                # rejects the buffered candidate, keep all native/orphan control
+                # fragments hidden and let the required-tool terminal below report
+                # the failure truthfully.  Flushing here leaked Qwen-style
+                # ``<parameter=path>...`` residue through Anthropic/Chat clients.
+                remainder = ""
+            elif remainder:
                 remainder = _strip_tool_markup_residue_for_display(remainder)
             if remainder:
                 # Use the engine's actual finish_reason (e.g., "length" if max_tokens

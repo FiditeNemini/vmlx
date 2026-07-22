@@ -773,13 +773,14 @@ class TestRequestValidationEdgeCases:
             ]}],
         )
         chat_req = to_chat_completion(req)
-        # Should produce a user message (text) + tool message (result)
+        # The result must stay adjacent to the preceding assistant tool call;
+        # the text is the next user instruction and therefore follows it.
         assert len(chat_req.messages) == 2
-        assert chat_req.messages[0].role == "user"
-        assert "Here are the results:" in chat_req.messages[0].content
-        assert chat_req.messages[1].role == "tool"
-        assert chat_req.messages[1].content == "Result data"
-        assert chat_req.messages[1].tool_call_id == "call_1"
+        assert chat_req.messages[0].role == "tool"
+        assert chat_req.messages[0].content == "Result data"
+        assert chat_req.messages[0].tool_call_id == "call_1"
+        assert chat_req.messages[1].role == "user"
+        assert "Here are the results:" in chat_req.messages[1].content
 
     def test_assistant_with_only_thinking_blocks(self):
         """Assistant message with only thinking blocks and no text."""

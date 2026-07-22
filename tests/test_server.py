@@ -2680,6 +2680,112 @@ class TestOpenAILogprobsFormatting:
         assert done_seen is True
 
     @pytest.mark.asyncio
+    async def test_streaming_chat_exact_once_hides_pretool_prose_and_orphan_markup(
+        self, monkeypatch
+    ):
+        """Exact-one turns never expose meta prose or rejected native fragments."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            def __init__(self, deltas):
+                self.deltas = deltas
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = ""
+                for index, delta in enumerate(self.deltas, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=delta,
+                        tokens=[index],
+                        prompt_tokens=8,
+                        completion_tokens=index,
+                        finished=index == len(self.deltas),
+                        finish_reason="stop" if index == len(self.deltas) else None,
+                    )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "qwen-jangtq-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+
+        def request():
+            return ChatCompletionRequest(
+                model="qwen-jangtq-test",
+                messages=[Message(
+                    role="user",
+                    content=(
+                        "Call file_info exactly once with path panel/package.json."
+                    ),
+                )],
+                stream=True,
+                tools=[{
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }],
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": "file_info"},
+                },
+            )
+
+        async def collect(deltas):
+            req = request()
+            chunks = []
+            async for line in server.stream_chat_completion(
+                _Engine(deltas),
+                [m.model_dump(exclude_none=True) for m in req.messages],
+                req,
+                fastapi_request=None,
+            ):
+                if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                    chunks.append(json.loads(line.removeprefix("data: ")))
+            visible = "".join(
+                choice.get("delta", {}).get("content") or ""
+                for chunk in chunks
+                for choice in chunk.get("choices", [])
+            )
+            calls = [
+                call
+                for chunk in chunks
+                for choice in chunk.get("choices", [])
+                for call in choice.get("delta", {}).get("tool_calls", [])
+            ]
+            return visible, calls, chunks
+
+        visible, calls, _ = await collect([
+            "I should call the requested tool. ",
+            "<tool_call><function=file_info>",
+            "<parameter=path>panel/package.json</parameter>",
+            "</function></tool_call>",
+        ])
+        assert visible == ""
+        assert calls[-1]["function"]["name"] == "file_info"
+
+        visible, calls, chunks = await collect([
+            "<parameter=path>\npanel/package.json\n</parameter>\n</",
+        ])
+        assert visible == ""
+        assert calls == []
+        assert any(chunk.get("error", {}).get("code") == "tool_calls_required" for chunk in chunks)
+
+    @pytest.mark.asyncio
     async def test_streaming_chat_hides_zaya_visual_grounding_markup(self, monkeypatch):
         """ZAYA-VL point spans are control markup, not visible assistant text."""
         import json

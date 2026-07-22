@@ -418,14 +418,20 @@ def _convert_user_message(msg: dict) -> Message | list[Message]:
                     has_media = True
 
         if result_messages:
-            # Return all tool result messages as a list
-            # Caller (to_chat_completion) flattens these into the messages array
+            # OpenAI-compatible history requires every tool result to remain
+            # adjacent to the assistant tool call it answers.  Anthropic permits
+            # a tool_result and follow-up text in the same user content array;
+            # flatten that shape as tool result(s) FIRST, then the new user
+            # instruction.  Reversing those messages breaks tool-call adjacency
+            # and also makes exact/required selection gates mistake the previous
+            # result for one belonging to the new instruction.
             if content_parts:
-                # Text/media + tool results: prepend content as user message
+                # Text/media + tool results: append the new user instruction
+                # after every result from the prior assistant tool call.
                 user_content: Any = content_parts if has_media else "\n".join(
                     p["text"] for p in content_parts if p["type"] == "text"
                 )
-                return [Message(role="user", content=user_content)] + result_messages
+                return result_messages + [Message(role="user", content=user_content)]
             return result_messages if len(result_messages) > 1 else result_messages[0]
 
         # No tool results — return as user message

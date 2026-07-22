@@ -136,6 +136,16 @@ describe('tool auto-continue policy', () => {
     ).toBe(true)
     expect(
       requestsExactTextOnlyWithoutToolUse(
+        '[LAG-S21-UI-RAIL] Think privately in one short sentence. Visible answer exactly LAG-S21-UI-RAIL-DONE.',
+      ),
+    ).toBe(true)
+    expect(
+      requestsExactTextOnlyWithoutToolUse(
+        'Privately solve it. Your only visible answer must be SECOND-PASS-DONE.',
+      ),
+    ).toBe(true)
+    expect(
+      requestsExactTextOnlyWithoutToolUse(
         'Call the built-in file_info tool exactly once with path panel/package.json. After the tool result, reply exactly DONE.',
       ),
     ).toBe(false)

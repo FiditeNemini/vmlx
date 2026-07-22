@@ -57,7 +57,13 @@ export function requestsDirectAnswerAfterSingleTool(text: string): boolean {
 }
 
 export function requestsExactTextOnlyWithoutToolUse(text: string): boolean {
-  if (!/\breply exactly\b/i.test(text)) return false
+  const strictTextAnswer =
+    /\breply exactly\b/i.test(text) ||
+    /\banswer exactly\b/i.test(text) ||
+    /\bvisible answer\s+(?:must\s+be\s+|is\s+|exactly\s+)/i.test(text) ||
+    /\bonly visible answer\s+(?:must\s+be\s+|is\s+|exactly\s+)/i.test(text) ||
+    /\byour only visible answer\s+(?:must\s+be\s+|is\s+|exactly\s+)/i.test(text)
+  if (!strictTextAnswer) return false
   if (requestedExactFinalToolNames(text).length > 0) return false
 
   // A previous chat/profile may leave builtin tools enabled. For strict

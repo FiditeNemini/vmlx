@@ -299,7 +299,8 @@ def test_paged_cache_capacity_is_visible_and_not_memory_mb_driven() -> None:
     assert "tokens/block x" in panel
     # Truthful post-#98 messaging: --cache-memory-mb/percent set the paged L1 RAM
     # byte ceiling (they are NOT ignored); Max Cache Blocks sizes token capacity.
-    assert "set the L1 RAM byte ceiling that evicts free blocks" in panel
+    assert "set the L1 RAM byte ceiling for the block KV mirror" in panel
+    assert "evicts free blocks" in panel
     assert "Max Cache Blocks" in panel
     assert "capacity={capacity} tokens" in cli
     assert "set the L1 RAM byte " in cli

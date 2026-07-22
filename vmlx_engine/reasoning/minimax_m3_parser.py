@@ -12,6 +12,7 @@ Created by Jinho Jang (eric@jangq.ai).
 """
 
 from .base import DeltaMessage
+from .think_parser import delta_safe_reasoning_marker_view
 from .think_xml_parser import ThinkXmlReasoningParser
 
 
@@ -59,6 +60,14 @@ class MiniMaxM3ReasoningParser(ThinkXmlReasoningParser):
         delta_text: str,
     ) -> DeltaMessage | None:
         """Stream M3 reasoning for both documented and fallback tags."""
+        markers = tuple(marker for pair in self._ALIASES for marker in pair)
+        previous_text, current_text, delta_text = delta_safe_reasoning_marker_view(
+            previous_text,
+            current_text,
+            markers,
+        )
+        if not delta_text:
+            return None
         for start, end in self._ALIASES:
             if start in current_text or end in current_text:
                 if start == self.start_token and end == self.end_token:

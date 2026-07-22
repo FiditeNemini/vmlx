@@ -17,6 +17,49 @@ from abc import abstractmethod
 from .base import DeltaMessage, ReasoningParser
 
 
+def delta_safe_reasoning_marker_view(
+    previous_text: str,
+    current_text: str,
+    markers: tuple[str, ...],
+) -> tuple[str, str, str]:
+    """Return accumulated views that cannot expose a split control marker.
+
+    SSE deltas are irreversible.  When a tokenizer/engine splits ``<think>``
+    or ``</think>`` across chunks, the old parser could emit ``<thi`` as
+    visible content (or reasoning) before the final ``nk>`` arrived.  Hold the
+    smallest trailing suffix that is still a proper prefix of any marker.  If
+    later characters prove it was ordinary prose, the next safe delta releases
+    the held suffix verbatim; if it completes a marker, the parser consumes the
+    whole marker without ever exposing it.
+
+    The calculation is derived only from the accumulated text, so it remains
+    request-local and safe even when parser instances are reused.
+    """
+
+    usable_markers = tuple(marker for marker in markers if marker)
+
+    def _safe_prefix(text: str) -> str:
+        held = 0
+        for marker in usable_markers:
+            max_prefix = min(len(text), len(marker) - 1)
+            for length in range(max_prefix, 0, -1):
+                if text.endswith(marker[:length]):
+                    held = max(held, length)
+                    break
+        return text[:-held] if held else text
+
+    safe_previous = _safe_prefix(previous_text)
+    safe_current = _safe_prefix(current_text)
+    if safe_current.startswith(safe_previous):
+        safe_delta = safe_current[len(safe_previous) :]
+    else:
+        # Accumulated generation text is required to be append-only.  On an
+        # unexpected rewrite, emit nothing rather than replaying already-sent
+        # text; downstream terminal reconciliation remains truthful.
+        safe_delta = ""
+    return safe_previous, safe_current, safe_delta
+
+
 class BaseThinkingReasoningParser(ReasoningParser):
     """
     Base parser for models using <think>...</think> style tags.
@@ -182,6 +225,14 @@ class BaseThinkingReasoningParser(ReasoningParser):
         Returns:
             DeltaMessage with reasoning/content, or None to skip.
         """
+        previous_text, current_text, delta_text = delta_safe_reasoning_marker_view(
+            previous_text,
+            current_text,
+            (self.start_token, self.end_token),
+        )
+        if not delta_text:
+            return None
+
         # Skip if delta is just the special tokens themselves
         stripped_delta = delta_text.strip()
         if stripped_delta == self.start_token:

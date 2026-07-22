@@ -7,7 +7,10 @@ the parser id separate so capabilities and CLI auto-configuration cannot drift
 back to qwen3 while still sharing the common XML tag extraction behavior.
 """
 
-from .think_parser import BaseThinkingReasoningParser
+from .think_parser import (
+    BaseThinkingReasoningParser,
+    delta_safe_reasoning_marker_view,
+)
 
 
 class ThinkXmlReasoningParser(BaseThinkingReasoningParser):
@@ -45,9 +48,20 @@ class ThinkXmlReasoningParser(BaseThinkingReasoningParser):
         delta_text: str,
     ):
         """Stream generic XML reasoning without classifying no-tag deltas hidden."""
-        if self.start_token not in current_text and self.end_token not in current_text:
-            return self._content_delta(delta_text)
-        return super().extract_reasoning_streaming(previous_text, current_text, delta_text)
+        safe_previous, safe_current, safe_delta = delta_safe_reasoning_marker_view(
+            previous_text,
+            current_text,
+            (self.start_token, self.end_token),
+        )
+        if not safe_delta:
+            return None
+        if self.start_token not in safe_current and self.end_token not in safe_current:
+            return self._content_delta(safe_delta)
+        return super().extract_reasoning_streaming(
+            safe_previous,
+            safe_current,
+            safe_delta,
+        )
 
     @staticmethod
     def _content_delta(delta_text: str):

@@ -11856,6 +11856,26 @@ async def ollama_chat(fastapi_request: Request):
         chat_kwargs["reasoning_effort"] = chat_req.reasoning_effort
         _ollama_ct_kwargs.setdefault("reasoning_effort", chat_req.reasoning_effort)
 
+    # Auto-map the public thinking bool onto Mistral 4's template vocabulary.
+    # Non-streaming Ollama delegates through create_chat_completion(), which
+    # already performs this normalization; the streaming route owns its kwargs
+    # locally and must mirror that contract before rendering the prompt.
+    if (
+        _reasoning_parser
+        and type(_reasoning_parser).__name__ == "MistralReasoningParser"
+    ):
+        if (
+            chat_req.enable_thinking is True
+            and "reasoning_effort" not in _ollama_ct_kwargs
+        ):
+            _ollama_ct_kwargs["reasoning_effort"] = "high"
+            chat_kwargs["reasoning_effort"] = "high"
+        elif (
+            chat_req.enable_thinking is False
+            and "reasoning_effort" not in _ollama_ct_kwargs
+        ):
+            _ollama_ct_kwargs["reasoning_effort"] = "none"
+
     # Hy3's template ignores enable_thinking and opens its reasoning rail only
     # for reasoning_effort=low|high.  The other three chat-shaped routes apply
     # this family normalizer before generation; Ollama streaming builds kwargs
@@ -11927,6 +11947,21 @@ async def ollama_chat(fastapi_request: Request):
             _ollama_ct_kwargs["reasoning_effort"] = _stable_effort_o
         else:
             _ollama_ct_kwargs.pop("reasoning_effort", None)
+
+    # MiniMax-M3 and openPangu use family-native template switches rather than
+    # the public enable_thinking kwarg. Keep streaming /api/chat identical to
+    # non-streaming Ollama (which delegates through create_chat_completion()).
+    _normalize_minimax_m3_thinking_mode(
+        _ollama_ct_kwargs,
+        chat_req,
+        _model_path or _model_name or chat_req.model,
+    )
+    _normalize_openpangu_thinking(
+        _ollama_ct_kwargs,
+        chat_req,
+        _model_path or _model_name or chat_req.model,
+    )
+
     # Forward resolved template kwargs for every family, not only DSV4. This
     # covers Mistral/GPT-OSS reasoning_effort, Qwen thinking_budget, and any
     # model-specific kwargs accepted by the tokenizer template.
@@ -11959,6 +11994,15 @@ async def ollama_chat(fastapi_request: Request):
         from .api.utils import extract_multimodal_content
 
         messages, _, _ = extract_multimodal_content(chat_req.messages)
+
+    # Ollama translates historical message.thinking into reasoning_content.
+    # Explicit Off must remove that private rail before prompt rendering, just
+    # like Chat Completions, Responses, Anthropic, and non-streaming Ollama.
+    _explicit_thinking_off = chat_req.enable_thinking is False or (
+        _ollama_ct_kwargs.get("enable_thinking") is False
+    )
+    if _explicit_thinking_off and messages:
+        messages = _strip_prior_reasoning_for_thinking_off(messages)
 
     # mlxstudio#72: stateful Ollama NDJSON translation. vMLX's
     # stream_chat_completion emits tool calls across two SSE chunks:

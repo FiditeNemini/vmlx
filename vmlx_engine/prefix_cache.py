@@ -61,7 +61,13 @@ logger = logging.getLogger(__name__)
 # rotating SWA layers. Older VLM extraction sliced all layers to the primary
 # count before storage, so old L2 blocks can restore invalid 4-head rotating
 # caches. Miss them cleanly.
-PAGED_CACHE_SCHEMA_VERSION = "paged_n1_keys_v8_external_companion"
+# 2026-07-22 v9 bump: generation prompt side-keys and mixed-SWA clean
+# prompt-boundary re-prefill changed the causal boundary for thinking/tool
+# turns. Older v8 L2 blocks can partially restore a stale first block and poison
+# Laguna/other mixed-SWA tool selection with gibberish before the new clean
+# prompt-boundary block is written. Put current builds in a fresh block-disk
+# namespace instead of asking users to manually delete old caches.
+PAGED_CACHE_SCHEMA_VERSION = "paged_n1_keys_v9_generation_prompt_sidekey"
 
 
 def runtime_cache_fingerprint() -> str:

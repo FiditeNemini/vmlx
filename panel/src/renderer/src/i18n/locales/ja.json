@@ -567,7 +567,7 @@
       "cachingHelpMambaTitle": "Mamba とハイブリッドの互換性",
       "cachingHelpKvQuantTitle": "KV キャッシュ量子化",
       "cachingHelpVLTitle": "視覚言語 (VL) モデル",
-      "pagedKVCache": "ページ KV キャッシュ",
+      "pagedKVCache": "メモリ内ページキャッシュ (RAM)",
       "blockCachePlaceholder": "~/.cache/vmlx-engine/block-cache",
       "kvCacheQuantization": "KV キャッシュ量子化",
       "kvQuantNone": "なし（保存量子化 + ライブ TQ-KV を無効化）",

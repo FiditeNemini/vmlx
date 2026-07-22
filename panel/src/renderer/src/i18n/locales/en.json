@@ -567,7 +567,7 @@
       "cachingHelpMambaTitle": "Mamba & Hybrid Compatibility",
       "cachingHelpKvQuantTitle": "KV Cache Quantization",
       "cachingHelpVLTitle": "Vision-Language (VL) Models",
-      "pagedKVCache": "Paged KV Cache",
+      "pagedKVCache": "In-Memory Paged Cache (RAM)",
       "blockCachePlaceholder": "~/.cache/vmlx-engine/block-cache",
       "kvCacheQuantization": "KV Cache Quantization",
       "kvQuantNone": "None (disable stored quant + live TQ-KV)",

@@ -567,7 +567,7 @@
       "cachingHelpMambaTitle": "Mamba 与混合架构兼容性",
       "cachingHelpKvQuantTitle": "KV 缓存量化",
       "cachingHelpVLTitle": "视觉语言 (VL) 模型",
-      "pagedKVCache": "分页 KV 缓存",
+      "pagedKVCache": "内存分页缓存 (RAM)",
       "blockCachePlaceholder": "~/.cache/vmlx-engine/block-cache",
       "kvCacheQuantization": "KV 缓存量化",
       "kvQuantNone": "无（禁用存储量化 + 实时 TQ-KV）",

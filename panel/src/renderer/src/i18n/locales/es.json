@@ -567,7 +567,7 @@
       "cachingHelpMambaTitle": "Compatibilidad con Mamba e híbridos",
       "cachingHelpKvQuantTitle": "Cuantización de KV caché",
       "cachingHelpVLTitle": "Modelos de visión-lenguaje (VL)",
-      "pagedKVCache": "KV caché paginada",
+      "pagedKVCache": "Caché paginada en memoria (RAM)",
       "blockCachePlaceholder": "~/.cache/vmlx-engine/block-cache",
       "kvCacheQuantization": "Cuantización de KV caché",
       "kvQuantNone": "Ninguna (desactiva quant almacenada + TQ-KV en vivo)",

@@ -567,7 +567,7 @@
       "cachingHelpMambaTitle": "Mamba 및 하이브리드 호환성",
       "cachingHelpKvQuantTitle": "KV 캐시 양자화",
       "cachingHelpVLTitle": "비전-언어 (VL) 모델",
-      "pagedKVCache": "페이지드 KV 캐시",
+      "pagedKVCache": "메모리 내 페이지 캐시 (RAM)",
       "blockCachePlaceholder": "~/.cache/vmlx-engine/block-cache",
       "kvCacheQuantization": "KV 캐시 양자화",
       "kvQuantNone": "없음(저장 양자화 + 실시간 TQ-KV 비활성화)",

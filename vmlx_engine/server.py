@@ -19403,6 +19403,32 @@ async def stream_chat_completion(
             # Official SDK accumulation appends string deltas; repeating the
             # same full id corrupts it. Subsequent calls did not receive an
             # early START, so they still introduce their parser id/type here.
+            if _stream_tool_call_start_id is None:
+                _stream_tool_call_start_id = generate_tool_id()
+                start_chunk = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": _created_ts,
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": _stream_tool_call_start_id,
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""},
+                                    }
+                                ],
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                yield f"data: {_dump_chat_chunk(start_chunk)}\n\n"
             tc_deltas = []
             for i, tc in enumerate(tool_calls):
                 tc_delta = {

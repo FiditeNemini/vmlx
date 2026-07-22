@@ -3307,6 +3307,160 @@ class TestOpenAILogprobsFormatting:
         assert len(_Engine.aborted) == 1
 
     @pytest.mark.asyncio
+    async def test_streaming_chat_structured_engine_error_does_not_enter_reasoning(
+        self, monkeypatch
+    ):
+        """Structured engine errors must not become reasoning/content deltas."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning import get_parser
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+            aborted = []
+
+            async def stream_chat(self, *, messages, **kwargs):
+                yield GenerationOutput(
+                    text="",
+                    new_text="",
+                    prompt_tokens=5,
+                    completion_tokens=0,
+                    finished=True,
+                    finish_reason="error",
+                    error=(
+                        "Engine loop error: [full] Negative dimensions not allowed."
+                    ),
+                    error_code="engine_loop_error",
+                )
+
+            async def abort_request(self, request_id):
+                self.aborted.append(request_id)
+                return True
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "laguna-error-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", get_parser("deepseek_r1")())
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+
+        request = ChatCompletionRequest(
+            model="laguna-error-test",
+            messages=[{"role": "user", "content": "trigger engine error"}],
+            stream=True,
+            stream_options={"include_usage": True},
+            enable_thinking=True,
+        )
+
+        raw_chunks = []
+        async for chunk in server.stream_chat_completion(
+            _Engine(),
+            request.messages,
+            request,
+            fastapi_request=None,
+        ):
+            raw_chunks.append(chunk)
+
+        data = [
+            line.removeprefix("data: ")
+            for chunk in raw_chunks
+            for line in chunk.splitlines()
+            if line.startswith("data: ")
+        ]
+        parsed = [json.loads(item) for item in data if item != "[DONE]"]
+        deltas = [
+            choice.get("delta", {})
+            for chunk in parsed
+            for choice in chunk.get("choices", [])
+        ]
+        assert not any(delta.get("reasoning_content") for delta in deltas)
+        assert not any(delta.get("content") for delta in deltas)
+        errors = [chunk["error"] for chunk in parsed if chunk.get("error")]
+        assert len(errors) == 1
+        assert errors[0]["code"] == "internal_error"
+        assert "Negative dimensions not allowed" in errors[0]["message"]
+        assert all("[Engine error:" not in json.dumps(chunk) for chunk in parsed)
+        assert data[-1] == "[DONE]"
+
+    @pytest.mark.asyncio
+    async def test_streaming_responses_structured_engine_error_failed_not_reasoning(
+        self, monkeypatch
+    ):
+        """Responses converts structured engine errors to response.failed."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning import get_parser
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+            aborted = []
+
+            async def stream_chat(self, *, messages, **kwargs):
+                yield GenerationOutput(
+                    text="",
+                    new_text="",
+                    prompt_tokens=7,
+                    completion_tokens=0,
+                    finished=True,
+                    finish_reason="error",
+                    error=(
+                        "Engine loop error: [full] Negative dimensions not allowed."
+                    ),
+                    error_code="engine_loop_error",
+                )
+
+            async def abort_request(self, request_id):
+                self.aborted.append(request_id)
+                return True
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "laguna-error-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", get_parser("deepseek_r1")())
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+
+        request = ResponsesRequest(
+            model="laguna-error-test",
+            input="trigger engine error",
+            stream=True,
+            enable_thinking=True,
+        )
+
+        events = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": "trigger engine error"}],
+            request,
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        assert not any(
+            event.get("type") == "response.reasoning_summary_text.delta"
+            for event in events
+        )
+        assert not any(
+            event.get("type") == "response.output_text.delta" for event in events
+        )
+        errors = [event for event in events if event.get("type") == "error"]
+        failed = [event for event in events if event.get("type") == "response.failed"]
+        assert len(errors) == 1
+        assert len(failed) == 1
+        assert "Negative dimensions not allowed" in errors[0]["error"]["message"]
+        assert failed[0]["response"]["status"] == "failed"
+        assert not any(event.get("type") == "response.completed" for event in events)
+        assert all("[Engine error:" not in json.dumps(event) for event in events)
+
+    @pytest.mark.asyncio
     async def test_streaming_responses_tool_call_arguments_survive_buffering(
         self, monkeypatch
     ):

@@ -3970,8 +3970,50 @@ class BlockAwarePrefixCache:
                     restored_len = concat_keys.shape[seq_axis]
                     target_tokens = int(getattr(block_table, "num_tokens", 0) or 0)
                     if has_rotating and rotating_params:
-                        if original_offset is not None and int(original_offset) == target_tokens:
-                            cache.offset = int(original_offset)
+                        max_size_int = int(max_size or 0)
+                        restored_len_int = int(restored_len or 0)
+                        original_offset_int = (
+                            int(original_offset)
+                            if original_offset is not None
+                            else None
+                        )
+                        # mlx-lm RotatingKVCache permits a logical offset
+                        # larger than the SWA window only after the physical
+                        # ring buffer has grown to max_size. A partial paged/L2
+                        # prefix hit can legitimately hold fewer recent tokens
+                        # than max_size (for example, a 4032-token hit against
+                        # a later 4094-token snapshot). Restoring offset=4032
+                        # with a 64-token physical buffer makes
+                        # RotatingKVCache._update_in_place() compute
+                        # max_size - offset < 0 and crash with
+                        # "[full] Negative dimensions not allowed." That state
+                        # is also semantically incomplete: the next token would
+                        # lack part of its sliding-window history. Downgrade
+                        # the hit to a miss instead of padding fake zeros or
+                        # leaking a synthetic engine error into
+                        # reasoning_content.
+                        if (
+                            max_size_int > 0
+                            and target_tokens > max_size_int
+                            and restored_len_int < max_size_int
+                        ):
+                            logger.warning(
+                                "Cannot reconstruct RotatingKVCache layer %s: "
+                                "physical window %s < max_size %s while "
+                                "target_tokens=%s original_offset=%s; "
+                                "treating paged/L2 prefix hit as a miss",
+                                layer_idx,
+                                restored_len_int,
+                                max_size_int,
+                                target_tokens,
+                                original_offset_int,
+                            )
+                            return None
+                        if (
+                            original_offset_int is not None
+                            and original_offset_int == target_tokens
+                        ):
+                            cache.offset = original_offset_int
                             if original_idx is not None:
                                 cache._idx = int(original_idx)
                             else:

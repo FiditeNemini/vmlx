@@ -5,6 +5,7 @@ import {
   requestsDirectAnswerAfterSingleTool,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
+  requestsPrivateReasoningWithoutToolUse,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
 } from '../src/shared/toolAutoContinue'
@@ -159,13 +160,43 @@ describe('tool auto-continue policy', () => {
     ).toBe(false)
   })
 
+  it('treats private reasoning calculation probes as text-only even when tools are enabled', () => {
+    expect(
+      requestsPrivateReasoningWithoutToolUse(
+        '[LAG-S21] Privately calculate 143 times 27 and double-check it. Then answer one concise sentence ending with PASS.',
+      ),
+    ).toBe(true)
+    expect(
+      requestsPrivateReasoningWithoutToolUse(
+        'Do not expose reasoning. Compute the modulo and answer with only the marker.',
+      ),
+    ).toBe(true)
+    expect(
+      requestsPrivateReasoningWithoutToolUse(
+        'After the private calculation, answer exactly THREE-LINE-PASS.',
+      ),
+    ).toBe(true)
+    expect(
+      requestsPrivateReasoningWithoutToolUse(
+        'Call the built-in file_info tool exactly once with path panel/package.json. You must use the tool.',
+      ),
+    ).toBe(false)
+    expect(
+      requestsPrivateReasoningWithoutToolUse(
+        'Inspect the repo and fix the failing test.',
+      ),
+    ).toBe(false)
+  })
+
   it('omits unusable tool schemas and suppresses the generic tool prompt when requested', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
 
     expect(source).toContain('requestsNoToolCalls(latestUserText)')
     expect(source).toContain('requestsExactTextOnlyWithoutToolUse(latestUserText)')
+    expect(source).toContain('requestsPrivateReasoningWithoutToolUse(latestUserText)')
     expect(source).toContain('const attachBuiltinToolsForCurrentTurn =')
     expect(source).toContain('!exactTextOnlyNoToolTurn')
+    expect(source).toContain('!privateReasoningNoToolTurn')
     expect(source.match(/if \(attachBuiltinToolsForCurrentTurn\)/g) || []).toHaveLength(2)
     expect(source).not.toContain('obj.tool_choice = "none"')
   })

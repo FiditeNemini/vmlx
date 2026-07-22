@@ -86,4 +86,52 @@ describe('manual session single-model enforcement', () => {
     expect(block).toContain("this.emit('session:ready'")
     expect(block).toContain('return true')
   })
+
+  it('re-adopts a healthy replacement process before marking a stale pid down', () => {
+    const source = readFileSync('src/main/sessions.ts', 'utf8')
+    const adoptStart = source.indexOf('private async adoptHealthyReplacementForSession')
+    const adoptEnd = source.indexOf('private async incrementFailAndCheck', adoptStart)
+    const adoptBlock = source.slice(adoptStart, adoptEnd)
+    const failStart = source.indexOf('private async incrementFailAndCheck')
+    const failEnd = source.indexOf('private handleSessionDown', failStart)
+    const failBlock = source.slice(failStart, failEnd)
+
+    expect(adoptStart).toBeGreaterThanOrEqual(0)
+    expect(adoptBlock).toContain('const detected = await this.detect()')
+    expect(adoptBlock).toContain('p.healthy')
+    expect(adoptBlock).toContain('p.port === session.port')
+    expect(adoptBlock).toContain('sessionMatchesModelPath(p.modelPath, targetPath)')
+    expect(adoptBlock).toContain("this.processes.set(session.id, { process: null, adoptedPid: proc.pid })")
+    expect(adoptBlock).toContain("this.emit('session:ready'")
+    expect(failBlock).toContain('if (await this.adoptHealthyReplacementForSession(session)) return')
+    expect(failBlock.indexOf('adoptHealthyReplacementForSession')).toBeLessThan(
+      failBlock.indexOf('this.handleSessionDown(sessionId)'),
+    )
+  })
+
+  it('does not let stale managed child state override a fresh db pid or adopted pid', () => {
+    const source = readFileSync('src/main/sessions.ts', 'utf8')
+    const aliveStart = source.indexOf('private isProcessAlive')
+    const aliveEnd = source.indexOf('private getSessionByPort', aliveStart)
+    const aliveBlock = source.slice(aliveStart, aliveEnd)
+    const exitStart = source.indexOf("proc.on('exit'")
+    const exitEnd = source.indexOf("proc.on('error'", exitStart)
+    const exitBlock = source.slice(exitStart, exitEnd)
+
+    expect(aliveStart).toBeGreaterThanOrEqual(0)
+    expect(aliveBlock).toContain('const candidates = [')
+    expect(aliveBlock).toContain('dbPid,')
+    expect(aliveBlock).toContain('managed?.adoptedPid')
+    expect(aliveBlock).toContain('managed?.process?.pid')
+    expect(aliveBlock).toContain('for (const pid of [...new Set(candidates)])')
+
+    expect(exitStart).toBeGreaterThanOrEqual(0)
+    expect(exitBlock).toContain('currentSession?.pid && currentSession.pid !== proc.pid')
+    expect(exitBlock).toContain('db now owns pid=${currentSession.pid}')
+    expect(exitBlock).toContain('if (managed && managed.process !== proc)')
+    expect(exitBlock).toContain('Ignoring stale child exit')
+    expect(exitBlock.indexOf('currentSession?.pid && currentSession.pid !== proc.pid')).toBeLessThan(
+      exitBlock.indexOf('db.updateSession(sessionId, {'),
+    )
+  })
 })

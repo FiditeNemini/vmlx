@@ -155,6 +155,19 @@ class RequestOutputCollector:
             completion_tokens=new.completion_tokens,
             cached_tokens=new.cached_tokens,
             cache_detail=getattr(new, 'cache_detail', ''),
+            error=getattr(new, "error", None) or getattr(existing, "error", None),
+            error_code=getattr(new, "error_code", None) or getattr(existing, "error_code", None),
+            error_prompt_tokens=(
+                getattr(new, "error_prompt_tokens", None)
+                if getattr(new, "error_prompt_tokens", None) is not None
+                else getattr(existing, "error_prompt_tokens", None)
+            ),
+            error_max_prompt_tokens=(
+                getattr(new, "error_max_prompt_tokens", None)
+                if getattr(new, "error_max_prompt_tokens", None) is not None
+                else getattr(existing, "error_max_prompt_tokens", None)
+            ),
+            error_source=getattr(new, "error_source", None) or getattr(existing, "error_source", None),
         )
 
     def clear(self) -> None:

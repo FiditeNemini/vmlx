@@ -15,6 +15,40 @@ from vmlx_engine.request import RequestOutput
 from vmlx_engine.scheduler import Scheduler, SchedulerOutput
 
 
+def test_engine_loop_failure_uses_structured_error_not_assistant_text() -> None:
+    engine = EngineCore.__new__(EngineCore)
+    seen: list[RequestOutput] = []
+
+    class _Collector:
+        def put(self, output: RequestOutput) -> None:
+            seen.append(output)
+
+    class _Scheduler:
+        running = {"req": object()}
+        waiting = []
+
+        def abort_request(self, request_id: str) -> None:
+            assert request_id == "req"
+
+    done = asyncio.Event()
+    engine.scheduler = _Scheduler()
+    engine._output_collectors = {"req": _Collector()}
+    engine._finished_events = {"req": done}
+
+    engine._fail_active_requests("[full] Negative dimensions not allowed.")
+
+    assert done.is_set()
+    assert len(seen) == 1
+    output = seen[0]
+    assert output.finished is True
+    assert output.finish_reason == "error"
+    assert output.error == "Engine loop error: [full] Negative dimensions not allowed."
+    assert output.error_code == "engine_loop_error"
+    assert output.error_source == "engine_loop"
+    assert output.new_text == ""
+    assert "[Engine error:" not in output.output_text
+
+
 @pytest.mark.asyncio
 async def test_llm_engine_dispatches_terminal_before_deferred_cleanup() -> None:
     order: list[str] = []

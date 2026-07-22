@@ -1637,6 +1637,39 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
     expect(detected.defaultEnableThinking).toBe(true)
   })
 
+  it('uses Laguna top-level JANG chat metadata even when capabilities are absent', () => {
+    const dir = makeModelDir(
+      { model_type: 'laguna' },
+      {
+        chat: {
+          reasoning: {
+            supported: true,
+            parser: 'deepseek_r1',
+            default_enabled: true,
+            default_mode: 'think',
+          },
+          template_kwargs_defaults: {
+            enable_thinking: true,
+          },
+          tool_calling: {
+            supported: true,
+            parser: 'glm47',
+          },
+        },
+      },
+    )
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('laguna')
+    expect(detected.toolParser).toBe('glm47')
+    expect(detected.enableAutoToolChoice).toBe(true)
+    expect(detected.reasoningParser).toBe('deepseek_r1')
+    expect(detected.supportsThinking).toBe(true)
+    expect(detected.thinkInTemplate).toBe(true)
+    expect(detected.defaultEnableThinking).toBe(true)
+  })
+
   it('lets Laguna JANG template defaults override reasoning.default_enabled when present', () => {
     const dir = makeModelDir(
       { model_type: 'laguna' },

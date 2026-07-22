@@ -331,7 +331,7 @@ class EngineCore:
         """Signal all active requests as failed so waiting consumers unblock.
 
         Called when the engine loop catches an unexpected exception. Creates
-        a synthetic error output for each tracked request so stream_outputs()
+        a structured error output for each tracked request so stream_outputs()
         and generate() callers receive an error instead of hanging forever.
 
         Also proactively aborts all requests in the scheduler to prevent
@@ -344,8 +344,12 @@ class EngineCore:
                 error_output = RequestOutput(
                     request_id=rid,
                     finished=True,
-                    finish_reason="stop",
-                    new_text=f"\n\n[Engine error: {error_msg}]",
+                    finish_reason="error",
+                    new_text="",
+                    output_text="",
+                    error=f"Engine loop error: {error_msg}",
+                    error_code="engine_loop_error",
+                    error_source="engine_loop",
                 )
                 collector.put(error_output)
             except Exception:

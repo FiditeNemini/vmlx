@@ -2324,6 +2324,21 @@ export class SessionManager extends EventEmitter {
     proc.on('exit', (code, signal) => {
       this.stopLoadResidentMonitor(sessionId)
       const managed = this.processes.get(sessionId)
+      const currentSession = db.getSession(sessionId)
+      if (currentSession?.pid && currentSession.pid !== proc.pid) {
+        console.log(
+          `[SESSIONS] Ignoring stale child exit for session ${sessionId}; ` +
+          `db now owns pid=${currentSession.pid}, exited pid=${proc.pid ?? 'unknown'}`,
+        )
+        return
+      }
+      if (managed && managed.process !== proc) {
+        console.log(
+          `[SESSIONS] Ignoring stale child exit for session ${sessionId}; ` +
+          `current owner is pid=${managed.adoptedPid ?? managed.process?.pid ?? 'none'}`,
+        )
+        return
+      }
       const lastStderr = managed?.lastStderr
       const intentional = managed?.intentionalStop === true
       this.processes.delete(sessionId)
@@ -2970,7 +2985,7 @@ export class SessionManager extends EventEmitter {
                 latencyMs
               })
             } else {
-              this.incrementFailAndCheck(session.id)
+              await this.incrementFailAndCheck(session.id)
             }
           } catch (_) {
             // Remote server unresponsive — likely busy with inference.
@@ -2985,7 +3000,7 @@ export class SessionManager extends EventEmitter {
             })
             const count = this.failCounts.get(session.id) || 0
             if (count % 3 === 0) {
-              this.incrementFailAndCheck(session.id)
+                await this.incrementFailAndCheck(session.id)
             } else {
               this.failCounts.set(session.id, count + 1)
             }
@@ -3067,7 +3082,7 @@ export class SessionManager extends EventEmitter {
               memory: data.memory  // { active_mb, peak_mb, cache_mb } from /health
             })
           } else {
-            this.incrementFailAndCheck(session.id)
+            await this.incrementFailAndCheck(session.id)
           }
         } catch (_) {
           // Health check timed out or failed — check if process is still alive
@@ -3086,13 +3101,13 @@ export class SessionManager extends EventEmitter {
             // Only count every 3rd failure to avoid false positives
             const count = this.failCounts.get(session.id) || 0
             if (count % 3 === 0) {
-              this.incrementFailAndCheck(session.id)
+              await this.incrementFailAndCheck(session.id)
             } else {
               this.failCounts.set(session.id, count + 1)
             }
           } else {
             // Process is truly dead — fast-track to marking down
-            this.incrementFailAndCheck(session.id)
+            await this.incrementFailAndCheck(session.id)
           }
         }
       }
@@ -3347,7 +3362,46 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  private incrementFailAndCheck(sessionId: string): void {
+  private async adoptHealthyReplacementForSession(session: Session): Promise<boolean> {
+    if (session.type === 'remote') return false
+
+    const targetPath = normalizePath(session.modelPath)
+    const detected = await this.detect()
+    const proc = detected.find(p =>
+      p.healthy &&
+      p.port === session.port &&
+      (
+        normalizePath(p.modelPath) === targetPath ||
+        sessionMatchesModelPath(p.modelPath, targetPath)
+      )
+    )
+    if (!proc) return false
+
+    const status = proc.standbyDepth ? 'standby' : 'running'
+    console.log(
+      `[SESSIONS] Re-adopting healthy replacement pid=${proc.pid} ` +
+      `for session ${session.id} on port=${proc.port} after stale pid=${session.pid}`,
+    )
+    db.updateSession(session.id, {
+      status,
+      pid: proc.pid,
+      port: proc.port,
+      modelPath: targetPath,
+      modelName: proc.modelName || session.modelName,
+      lastStartedAt: Date.now(),
+      standbyDepth: proc.standbyDepth || null,
+    })
+    this.processes.set(session.id, { process: null, adoptedPid: proc.pid })
+    this.failCounts.delete(session.id)
+    if (status === 'standby') {
+      this.emit('session:standby', { sessionId: session.id, depth: proc.standbyDepth })
+    } else {
+      this.emit('session:ready', { sessionId: session.id, port: proc.port, pid: proc.pid })
+    }
+    return true
+  }
+
+  private async incrementFailAndCheck(sessionId: string): Promise<void> {
     const count = (this.failCounts.get(sessionId) || 0) + 1
     this.failCounts.set(sessionId, count)
 
@@ -3357,6 +3411,7 @@ export class SessionManager extends EventEmitter {
     // For remote sessions: skip this check — they have no PID, so isProcessAlive
     // always returns false. Use the normal fail-count threshold instead.
     if (session?.type !== 'remote' && session && !this.isProcessAlive(sessionId, session.pid)) {
+      if (await this.adoptHealthyReplacementForSession(session)) return
       console.log(`[SESSIONS] Process dead for session ${sessionId} (fail #${count}), marking down`)
       this.failCounts.delete(sessionId)
       this.handleSessionDown(sessionId)
@@ -4192,25 +4247,33 @@ export class SessionManager extends EventEmitter {
 
   /** Check if a session's process is still alive (not zombie) via PID probe. */
   private isProcessAlive(sessionId: string, dbPid?: number): boolean {
-    // Check managed process first (spawned or adopted)
     const managed = this.processes.get(sessionId)
-    const pid = managed?.adoptedPid ?? managed?.process?.pid ?? dbPid
-    if (!pid) return false
-    try {
-      process.kill(pid, 0) // Signal 0: doesn't kill, just checks existence
-    } catch (_) {
-      return false
+    // DB pid is the freshest durable truth after a restart/adoption, while
+    // this.processes can still briefly hold the previous ChildProcess until its
+    // exit callback drains. Treat any current candidate as alive instead of
+    // letting one stale managed pid mark a healthy replacement down.
+    const candidates = [
+      dbPid,
+      managed?.adoptedPid,
+      managed?.process?.pid,
+    ].filter((pid): pid is number => typeof pid === 'number' && pid > 0)
+
+    for (const pid of [...new Set(candidates)]) {
+      try {
+        process.kill(pid, 0) // Signal 0: doesn't kill, just checks existence
+      } catch (_) {
+        continue
+      }
+      // M7: kill(pid, 0) succeeds for zombies. Check process state to filter them out.
+      try {
+        const state = execFileSync('ps', ['-o', 'state=', '-p', String(pid)],
+          { timeout: 1000 }).toString().trim()
+        if (!state.startsWith('Z')) return true
+      } catch (_) {
+        // ps failed — process may have exited between checks
+      }
     }
-    // M7: kill(pid, 0) succeeds for zombies. Check process state to filter them out.
-    try {
-      const state = execFileSync('ps', ['-o', 'state=', '-p', String(pid)],
-        { timeout: 1000 }).toString().trim()
-      if (state.startsWith('Z')) return false // Zombie process
-    } catch (_) {
-      // ps failed — process may have exited between checks
-      return false
-    }
-    return true
+    return false
   }
 
   private killPid(pid: number, signal: NodeJS.Signals = 'SIGTERM'): void {

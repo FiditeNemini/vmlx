@@ -107,6 +107,56 @@ class TestEnginePromptReasoningSeed:
             is False
         )
 
+    def test_batched_engine_renders_wrapped_inner_template_for_laguna(self):
+        """Prompt rendering must unwrap the same tokenizer shape as seed probes.
+
+        It is not enough for the server to seed the reasoning parser from the
+        inner template. BatchedEngine must render the actual generation prompt
+        through that same inner ``apply_chat_template``; otherwise a wrapped
+        Laguna tokenizer falls through to generic ``user: ... assistant:`` text
+        and thinking-on requests stream private reasoning as visible content.
+        """
+        from vmlx_engine.engine.batched import BatchedEngine
+
+        class _InnerLagunaTokenizer:
+            chat_template = "<user>{{ messages[-1]['content'] }}</user>"
+
+            def __init__(self):
+                self.calls = []
+
+            def apply_chat_template(self, messages, **kwargs):
+                self.calls.append(dict(kwargs))
+                user = messages[-1]["content"]
+                if kwargs.get("enable_thinking"):
+                    return f"<user>{user}</user>\n<assistant><think>"
+                return f"<user>{user}</user>\n<assistant></think>"
+
+        class _TokenizerWrapper:
+            def __init__(self):
+                self._tokenizer = _InnerLagunaTokenizer()
+
+        wrapper = _TokenizerWrapper()
+        engine = BatchedEngine.__new__(BatchedEngine)
+        engine._tokenizer = wrapper
+        engine._processor = None
+        engine._model = None
+        engine._model_name = "Laguna-S-2.1-JANG_2L"
+        engine._is_mllm = False
+
+        thinking_prompt = engine._apply_chat_template(
+            [{"role": "user", "content": "check"}],
+            enable_thinking=True,
+        )
+        off_prompt = engine._apply_chat_template(
+            [{"role": "user", "content": "check"}],
+            enable_thinking=False,
+        )
+
+        assert thinking_prompt.endswith("<assistant><think>")
+        assert off_prompt.endswith("<assistant></think>")
+        assert wrapper._tokenizer.calls[0]["enable_thinking"] is True
+        assert wrapper._tokenizer.calls[1]["enable_thinking"] is False
+
 
 class TestThinkInPromptStreaming:
     """Tests for BaseThinkingReasoningParser with think_in_prompt=True.
@@ -209,6 +259,30 @@ class TestThinkInPromptStreaming:
         assert result is not None
         assert result.reasoning == " more"
         assert result.content == "content here"
+
+    def test_deepseek_prompt_open_can_close_empty_reasoning_then_emit_content(self):
+        """An immediate close sentinel is not inline reasoning leakage.
+
+        Laguna/Poolside prompts open ``<think>`` in the assistant prefix when
+        Auto resolves to thinking-on. If the model immediately emits
+        ``</think>``, that is an empty reasoning rail; following tokens are
+        valid visible content and must not be hidden or moved into
+        reasoning_content.
+        """
+        from vmlx_engine.reasoning import get_parser
+
+        parser = get_parser("deepseek_r1")()
+        parser.reset_state(think_in_prompt=True)
+
+        first = parser.extract_reasoning_streaming("", "</think>", "</think>")
+        second = parser.extract_reasoning_streaming(
+            "</think>", "</think>LAGUNA-DONE", "LAGUNA-DONE"
+        )
+
+        assert first is None
+        assert second is not None
+        assert second.reasoning is None
+        assert second.content == "LAGUNA-DONE"
 
     def test_reset_state_clears_think_in_prompt(self, parser):
         """reset_state should clear think_in_prompt between requests."""
@@ -380,6 +454,111 @@ class TestEnableThinkingTriState:
         assert request.enable_thinking is True
         assert reasoning == "hidden check"
         assert content == "VISIBLE-DONE"
+
+    @pytest.mark.asyncio
+    async def test_stream_responses_stamped_think_template_seeds_without_renderer(
+        self, monkeypatch
+    ):
+        """Stamped template-owned reasoning must not leak if seed probing cannot render.
+
+        Live Laguna S-2.1 Responses traffic uses the local engine's wrapper
+        tokenizer path. If the probe cannot inspect the renderer but the concrete
+        bundle registry says ``think_in_template`` and the request resolved
+        thinking ON, implicit text before ``</think>`` still belongs on the
+        reasoning rail, not ``output_text.delta``.
+        """
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server_mod
+        import vmlx_engine.model_config_registry as registry_mod
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning import get_parser
+
+        class _WrapperTokenizerWithoutRenderer:
+            pass
+
+        class _Engine:
+            tokenizer = _WrapperTokenizerWithoutRenderer()
+            seen_kwargs = None
+
+            async def stream_chat(self, *, messages, **kwargs):
+                self.seen_kwargs = dict(kwargs)
+                chunks = [
+                    ("private prefix", False, None),
+                    ("</think>", False, None),
+                    ("VISIBLE-STAMPED-DONE", True, "stop"),
+                ]
+                text = ""
+                for idx, (delta, finished, reason) in enumerate(chunks, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        raw_text=text,
+                        new_text=delta,
+                        prompt_tokens=8,
+                        completion_tokens=idx,
+                        finished=finished,
+                        finish_reason=reason,
+                    )
+
+        cfg = SimpleNamespace(
+            family_name="laguna",
+            model_type="laguna",
+            supports_thinking=True,
+            supports_instruct_mode=True,
+            reasoning_parser="deepseek_r1",
+            tool_parser="glm47",
+            think_in_template=True,
+            architecture_hints={"default_enable_thinking": True},
+        )
+        monkeypatch.setattr(server_mod, "_model_path", "/models/Laguna-S-2.1-JANG_2L")
+        monkeypatch.setattr(server_mod, "_model_name", "jangq-ai/Laguna-S-2.1-JANG_2L")
+        monkeypatch.setattr(server_mod, "_reasoning_parser", get_parser("deepseek_r1")())
+        monkeypatch.setattr(server_mod, "_default_enable_thinking", None)
+        monkeypatch.setattr(
+            registry_mod,
+            "get_model_config_registry",
+            lambda: SimpleNamespace(lookup=lambda key: cfg),
+        )
+
+        request = ResponsesRequest(
+            model="default",
+            input="reason privately then answer",
+            stream=True,
+            max_output_tokens=32,
+            enable_thinking=True,
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        engine = _Engine()
+        events = []
+        async for chunk in server_mod.stream_responses_api(
+            engine,
+            [{"role": "user", "content": "reason privately then answer"}],
+            request,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    data = line.removeprefix("data: ")
+                    if data != "[DONE]":
+                        events.append(json.loads(data))
+
+        reasoning = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.reasoning_summary_text.delta"
+        )
+        content = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        )
+
+        assert engine.seen_kwargs["enable_thinking"] is True
+        assert request.enable_thinking is True
+        assert reasoning == "private prefix"
+        assert content == "VISIBLE-STAMPED-DONE"
 
     def test_effective_think_in_template_cleared_when_thinking_false(self):
         """When enable_thinking=False and template respects it, think_in_template is cleared."""

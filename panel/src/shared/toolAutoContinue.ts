@@ -56,6 +56,22 @@ export function requestsDirectAnswerAfterSingleTool(text: string): boolean {
   return requestedExactFinalToolNames(text).length === 1
 }
 
+function containsExplicitToolRequest(text: string): boolean {
+  const explicitToolRequest =
+    /\b(?:call|use|invoke|run)\s+(?:the\s+)?(?:built[- ]in\s+)?[a-z][\w-]*(?:\s+tool|\s+function)?\b/i
+  const toolResultContract =
+    /\bafter\b[^.!?\n]{0,120}\b(?:tool|function)\s+results?\b/i
+  const mustUseTool =
+    /\bmust\s+(?:call|use|invoke|run)\s+(?:the\s+)?(?:built[- ]in\s+)?(?:[a-z][\w-]*\s+)?(?:tool|function)\b/i
+
+  return (
+    explicitToolRequest.test(text) ||
+    toolResultContract.test(text) ||
+    mustUseTool.test(text) ||
+    requestedExactFinalToolNames(text).length > 0
+  )
+}
+
 export function requestsExactTextOnlyWithoutToolUse(text: string): boolean {
   const strictTextAnswer =
     /\breply exactly\b/i.test(text) ||
@@ -71,18 +87,19 @@ export function requestsExactTextOnlyWithoutToolUse(text: string): boolean {
   // catalog changes the prompt and lets small/native models answer from schema
   // text instead of the current user turn. Keep this directive-shaped so normal
   // agentic coding chats still receive tools.
-  const explicitToolRequest =
-    /\b(?:call|use|invoke|run)\s+(?:the\s+)?(?:built[- ]in\s+)?[a-z][\w-]*(?:\s+tool|\s+function)?\b/i
-  const toolResultContract =
-    /\bafter\b[^.!?\n]{0,120}\b(?:tool|function)\s+results?\b/i
-  const mustUseTool =
-    /\bmust\s+(?:call|use|invoke|run)\s+(?:the\s+)?(?:built[- ]in\s+)?(?:[a-z][\w-]*\s+)?(?:tool|function)\b/i
+  return !containsExplicitToolRequest(text)
+}
 
-  return !(
-    explicitToolRequest.test(text) ||
-    toolResultContract.test(text) ||
-    mustUseTool.test(text)
-  )
+export function requestsPrivateReasoningWithoutToolUse(text: string): boolean {
+  if (containsExplicitToolRequest(text)) return false
+
+  const privateReasoningDirective =
+    /\b(?:privately|private(?:ly)?\s+reason|private\s+(?:calculation|check|solution)|in\s+private|do\s+not\s+expose\s+(?:the\s+)?reasoning|without\s+showing\s+(?:the\s+)?reasoning|silent(?:ly)?\s+(?:reason|think)|think\s+privately)\b/i
+  if (!privateReasoningDirective.test(text)) return false
+
+  const textOnlyReasoningTask =
+    /\b(?:calculate|calculation|compute|solve|solution|double[- ]?check|check\s+(?:whether|if)|verify|reason\s+through|derive|evaluate)\b/i
+  return textOnlyReasoningTask.test(text)
 }
 
 export function requestsNoToolCalls(text: string): boolean {

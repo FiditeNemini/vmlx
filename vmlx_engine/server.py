@@ -4376,6 +4376,31 @@ def _engine_prompt_starts_in_reasoning(
     return _rendered_prompt_starts_in_reasoning(str(rendered))
 
 
+def _stamped_think_template_requires_reasoning_seed(
+    model_config: Any,
+    effective_thinking: Any,
+    *,
+    template_completed_thinking: bool,
+) -> bool:
+    """Return True when the artifact contract itself owns the open think rail.
+
+    Wrapper tokenizers can hide the renderer used by the engine prompt probe.
+    When the concrete model config already says the template opens the reasoning
+    rail and this request resolved thinking ON, the streaming parser must seed as
+    prompt-in-reasoning. Otherwise implicit reasoning before ``</think>`` can be
+    emitted as visible Responses/Chat text even though the model is on its
+    native think rail. Do not override known S5-style templates that complete the
+    thought block inside the prompt before generation.
+    """
+    if effective_thinking is not True:
+        return False
+    if template_completed_thinking:
+        return False
+    if not getattr(model_config, "think_in_template", False):
+        return False
+    return bool(getattr(model_config, "reasoning_parser", None))
+
+
 # Cache: does a model's template complete thinking in the generation prompt?
 # Some templates (e.g., Nemotron CRACK) use an "S5 seed" approach:
 # generation prompt = <think>\nOK.\n</think>\n — the model output is plain text.
@@ -18298,8 +18323,10 @@ async def stream_chat_completion(
     # thinking block in the generation prompt (<think>\nOK.\n</think>\n).
     # The model output is plain text — think_in_template must be False so
     # the parser doesn't misclassify all output as reasoning.
+    _template_completed_thinking = False
     if think_in_template:
         if _template_completes_thinking(engine.tokenizer, _model_name or request.model):
+            _template_completed_thinking = True
             think_in_template = False
 
     # When user explicitly disables thinking, check if template actually respects it.
@@ -18330,6 +18357,13 @@ async def stream_chat_completion(
             think_in_template = True
         else:
             think_in_template = False
+
+    if _stamped_think_template_requires_reasoning_seed(
+        _model_config,
+        _effective_thinking,
+        template_completed_thinking=_template_completed_thinking,
+    ):
+        think_in_template = True
 
     if _hy3_prompt_starts_in_reasoning(
         model_key=_model_path or _model_name or request.model,
@@ -18666,6 +18700,8 @@ async def stream_chat_completion(
             _detail = getattr(output, "cache_detail", "") or None
             if _detail is not None:
                 cache_detail = _detail
+            if getattr(output, "error", None):
+                raise RuntimeError(str(getattr(output, "error")))
             chunk_logprobs = None
             if request.logprobs:
                 raw_logprobs = getattr(output, "logprobs", None) or []
@@ -18754,7 +18790,6 @@ async def stream_chat_completion(
                 delta_msg = request_parser.extract_reasoning_streaming(
                     previous_text, accumulated_text, delta_text
                 )
-
                 if delta_msg is None:
                     # Skip this chunk (e.g., <think> token itself)
                     if suppress_reasoning:
@@ -20391,8 +20426,10 @@ async def stream_responses_api(
     )
 
     # S5 seed detection (mirrors Chat Completions path)
+    _template_completed_thinking = False
     if think_in_template:
         if _template_completes_thinking(engine.tokenizer, _model_name or request.model):
+            _template_completed_thinking = True
             think_in_template = False
 
     # When user explicitly disables thinking, check if template actually respects it.
@@ -20421,6 +20458,13 @@ async def stream_responses_api(
             think_in_template = True
         else:
             think_in_template = False
+
+    if _stamped_think_template_requires_reasoning_seed(
+        _model_config,
+        _effective_thinking,
+        template_completed_thinking=_template_completed_thinking,
+    ):
+        think_in_template = True
 
     if _hy3_prompt_starts_in_reasoning(
         model_key=_model_path or _model_name or request.model,
@@ -20654,6 +20698,8 @@ async def stream_responses_api(
             _detail_chunk = getattr(output, "cache_detail", "") or None
             if _detail_chunk is not None:
                 _cache_detail = _detail_chunk
+            if getattr(output, "error", None):
+                raise RuntimeError(str(getattr(output, "error")))
 
             if delta_text:
                 full_text += delta_text

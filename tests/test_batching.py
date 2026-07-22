@@ -586,6 +586,68 @@ class TestSchedulerBasic:
         with pytest.raises(RuntimeError, match="VLM image prefill rejected"):
             _raise_prompt_too_long_from_output(output)
 
+    def test_engine_loop_failure_is_structured_error_not_generated_text(self):
+        """Engine-loop exceptions must not be injected as assistant text."""
+        from types import SimpleNamespace
+
+        from vmlx_engine.engine_core import EngineCore
+        from vmlx_engine.output_collector import RequestOutputCollector
+
+        aborted = []
+        engine = EngineCore.__new__(EngineCore)
+        engine._output_collectors = {"req-engine-error": RequestOutputCollector()}
+        engine._finished_events = {}
+        engine._stream_states = {}
+        engine.scheduler = SimpleNamespace(
+            running={},
+            waiting=[],
+            abort_request=lambda rid: aborted.append(rid),
+        )
+
+        engine._fail_active_requests("[full] Negative dimensions not allowed.")
+
+        output = engine._output_collectors["req-engine-error"].get_nowait()
+        assert output is not None
+        assert output.finished is True
+        assert output.finish_reason == "error"
+        assert output.new_text == ""
+        assert output.output_text == ""
+        assert "[Engine error:" not in output.new_text
+        assert output.error_code == "engine_loop_error"
+        assert "Negative dimensions not allowed" in (output.error or "")
+
+    def test_output_collector_preserves_structured_error_when_merging(self):
+        """Buffered content must not erase a following structured error marker."""
+        from vmlx_engine.output_collector import RequestOutputCollector
+        from vmlx_engine.request import RequestOutput
+
+        collector = RequestOutputCollector()
+        collector.put(
+            RequestOutput(
+                request_id="merge-error",
+                new_text="partial",
+                output_text="partial",
+                prompt_tokens=3,
+                completion_tokens=1,
+            )
+        )
+        collector.put(
+            RequestOutput(
+                request_id="merge-error",
+                finished=True,
+                finish_reason="error",
+                error="Engine loop error: boom",
+                error_code="engine_loop_error",
+            )
+        )
+
+        merged = collector.get_nowait()
+        assert merged is not None
+        assert merged.new_text == "partial"
+        assert merged.finish_reason == "error"
+        assert merged.error == "Engine loop error: boom"
+        assert merged.error_code == "engine_loop_error"
+
     def test_mllm_vlm_image_prefill_budget_error_round_trips_as_typed_error(self):
         """Expected image-budget rejections must not look like generic 500s."""
         from vmlx_engine.engine.batched import _raise_prompt_too_long_from_output

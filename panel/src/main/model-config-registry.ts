@@ -586,6 +586,69 @@ function readJangDefaultEnableThinking(jangCfg: any): boolean | undefined {
   return undefined
 }
 
+function readJangChatMetadata(
+  detected: DetectedConfig,
+  jangCfg: any,
+): DetectedConfig {
+  if (!jangCfg || typeof jangCfg !== 'object') return detected
+  const chat = jangCfg.chat
+  if (!chat || typeof chat !== 'object') return detected
+
+  const next = { ...detected }
+  const reasoning = chat.reasoning
+  const toolCalling = chat.tool_calling
+
+  if (reasoning && typeof reasoning === 'object') {
+    if (reasoning.supported === false) {
+      next.reasoningParser = undefined
+      next.supportsThinking = false
+      next.thinkInTemplate = false
+      next.defaultEnableThinking = false
+    } else if (reasoning.supported === true) {
+      next.supportsThinking = true
+      if (typeof reasoning.parser === 'string') {
+        next.reasoningParser = reasoning.parser === 'none' ? undefined : reasoning.parser
+      }
+      if (typeof reasoning.think_in_template === 'boolean') {
+        next.thinkInTemplate = reasoning.think_in_template
+      } else if (
+        next.family === 'laguna' &&
+        (
+          reasoning.default_mode === 'think' ||
+          (Array.isArray(reasoning.modes) && reasoning.modes.includes('think'))
+        )
+      ) {
+        // Laguna/Poolside templates own the <think> rail. Real S-2.1 JANG_2L
+        // sidecars carry this fact in the top-level chat block, not in the
+        // older capabilities stamp. Preserve Auto reasoning in the UI by
+        // deriving the same template ownership before the capabilities guard.
+        next.thinkInTemplate = true
+      }
+    }
+  }
+
+  const stampedDefaultEnableThinking = readJangDefaultEnableThinking(jangCfg)
+  if (typeof stampedDefaultEnableThinking === 'boolean' && next.supportsThinking !== false) {
+    next.defaultEnableThinking = stampedDefaultEnableThinking
+  }
+
+  if (toolCalling && typeof toolCalling === 'object') {
+    if (toolCalling.supported === false) {
+      next.toolParser = undefined
+      next.enableAutoToolChoice = false
+    } else if (toolCalling.supported === true) {
+      if (typeof toolCalling.parser === 'string') {
+        next.toolParser = toolCalling.parser === 'none' ? undefined : toolCalling.parser
+      }
+      if (next.toolParser) {
+        next.enableAutoToolChoice = true
+      }
+    }
+  }
+
+  return next
+}
+
 function isAffineJangQwenHybridVlm(parsedConfig: any, jangCfg: any): boolean {
   if (!parsedConfig || typeof parsedConfig !== 'object') return false
   if (!jangCfg || typeof jangCfg !== 'object') return false
@@ -1031,7 +1094,7 @@ function applyJangCapabilities(
   jangCfg: any,
 ): DetectedConfig {
   const caps = jangCfg?.capabilities
-  const next = { ...detected }
+  const next = readJangChatMetadata(detected, jangCfg)
   const zayaTypedCca = next.family === 'zaya' || next.family === 'zaya1-vl'
   const quantizationLabel = formatJangQuantizationLabel(jangCfg ?? {})
   if (quantizationLabel) {

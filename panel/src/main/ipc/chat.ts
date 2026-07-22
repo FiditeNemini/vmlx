@@ -34,6 +34,7 @@ import {
   requestsDirectAnswerAfterSingleTool,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
+  requestsPrivateReasoningWithoutToolUse,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
 } from "../../shared/toolAutoContinue";
@@ -1478,10 +1479,14 @@ export function registerChatHandlers(
       const exactTextOnlyNoToolTurn =
         overrides?.builtinToolsEnabled === true &&
         requestsExactTextOnlyWithoutToolUse(latestUserText);
+      const privateReasoningNoToolTurn =
+        overrides?.builtinToolsEnabled === true &&
+        requestsPrivateReasoningWithoutToolUse(latestUserText);
       const attachBuiltinToolsForCurrentTurn =
         overrides?.builtinToolsEnabled === true &&
         !userForbidsToolCalls &&
-        !exactTextOnlyNoToolTurn;
+        !exactTextOnlyNoToolTurn &&
+        !privateReasoningNoToolTurn;
       const directAnswerAfterSingleTool =
         overrides?.builtinToolsEnabled === true &&
         requestsDirectAnswerAfterSingleTool(latestUserText);

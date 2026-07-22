@@ -1517,6 +1517,33 @@ class BatchedEngine(BaseEngine):
         """Apply chat template to messages."""
         tokenizer = self.tokenizer
 
+        def _chat_template_renderer():
+            """Return the object that owns the real HF chat template.
+
+            Some loaders wrap the tokenizer to preserve runtime semantics that
+            the raw HF tokenizer cannot represent on its own. Laguna is the
+            current important case: the wrapper preserves the bundle's multi-EOS
+            contract, but the shipped ``apply_chat_template`` method lives on
+            the inner tokenizer. Prompt rendering must use that inner renderer
+            while generation/tokenization can keep using the wrapper.
+            """
+
+            seen: set[int] = set()
+            for candidate in (
+                tokenizer,
+                getattr(tokenizer, "_tokenizer", None),
+                getattr(tokenizer, "tokenizer", None),
+            ):
+                if candidate is None:
+                    continue
+                ident = id(candidate)
+                if ident in seen:
+                    continue
+                seen.add(ident)
+                if hasattr(candidate, "apply_chat_template"):
+                    return candidate
+            return None
+
         # Normalize native tool-history turns before any template renderer sees
         # them. OpenAI permits assistant tool-call turns with content=null, but
         # strict HF templates (Mistral 4/Pixtral-style) often accept the
@@ -1719,7 +1746,8 @@ class BatchedEngine(BaseEngine):
                 logger.warning(f"Failed to apply MLLM chat template: {e}")
                 # Fall through to standard template
 
-        if hasattr(tokenizer, "apply_chat_template"):
+        renderer = _chat_template_renderer()
+        if renderer is not None:
             # Ensure tool_calls arguments are dicts, not JSON strings.
             # Chat templates (Qwen3, Llama, etc.) call .items() on arguments.
             for msg in messages:
@@ -1745,10 +1773,10 @@ class BatchedEngine(BaseEngine):
             prompt = None
             try:
                 if _chat_template_is_unresolved_include(
-                    getattr(tokenizer, "chat_template", None)
+                    getattr(renderer, "chat_template", None)
                 ):
                     _injected_include = _inject_chat_template_if_missing(
-                        tokenizer, self._model_name
+                        renderer, self._model_name
                     )
                     if _injected_include:
                         logger.info(
@@ -1763,7 +1791,7 @@ class BatchedEngine(BaseEngine):
                     include_err,
                 )
             try:
-                prompt = tokenizer.apply_chat_template(messages, **template_kwargs)
+                prompt = renderer.apply_chat_template(messages, **template_kwargs)
             except Exception as template_err:
                 # GH#66 part 2 — mlx-community quants (e.g. mlx-community/
                 # gemma-4-31b-8bit) often DON'T bake `chat_template` into
@@ -1776,10 +1804,10 @@ class BatchedEngine(BaseEngine):
                 # just to get a working prompt.
                 _err_msg = str(template_err)
                 if "chat_template is not set" in _err_msg or "no template argument" in _err_msg:
-                    _injected = self._inject_fallback_chat_template(tokenizer)
+                    _injected = self._inject_fallback_chat_template(renderer)
                     if _injected:
                         try:
-                            prompt = tokenizer.apply_chat_template(messages, **template_kwargs)
+                            prompt = renderer.apply_chat_template(messages, **template_kwargs)
                             logger.info(
                                 f"Chat template injected from {_injected} for {self._model_name}"
                             )
@@ -1799,7 +1827,7 @@ class BatchedEngine(BaseEngine):
                     for key in reversed(strip_order):
                         del template_kwargs[key]
                         try:
-                            prompt = tokenizer.apply_chat_template(messages, **template_kwargs)
+                            prompt = renderer.apply_chat_template(messages, **template_kwargs)
                             stripped = [k for k in strip_order if k not in template_kwargs]
                             logger.warning(
                                 f"Chat template succeeded after stripping: {stripped} "
@@ -1810,13 +1838,13 @@ class BatchedEngine(BaseEngine):
                             continue
                 if prompt is None:
                     # All kwargs stripped and still failing — last resort (will raise)
-                    prompt = tokenizer.apply_chat_template(messages, **template_kwargs)
+                    prompt = renderer.apply_chat_template(messages, **template_kwargs)
 
             prompt = check_and_inject_fallback_tools(
                 prompt,
                 messages,
                 tools,
-                tokenizer,
+                renderer,
                 template_kwargs,
                 tool_parser_id=self._model_tool_parser_name(),
             )
@@ -1981,6 +2009,7 @@ class BatchedEngine(BaseEngine):
 
         raw = output.output_text
         text = clean_output_text(raw)
+        _raise_prompt_too_long_from_output(output)
 
         return GenerationOutput(
             text=text,
@@ -2133,6 +2162,7 @@ class BatchedEngine(BaseEngine):
         )
 
         async for output in self._engine.stream_outputs(request_id):
+            _raise_prompt_too_long_from_output(output)
             text = clean_output_text(output.output_text)
 
             yield GenerationOutput(

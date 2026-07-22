@@ -873,6 +873,40 @@ class TestBlockAwarePrefixCache:
         finally:
             restarted_store.shutdown()
 
+    def test_rotating_cache_partial_window_hit_downgrades_to_miss(self):
+        """Unsafe mixed-SWA partial hits must not restore impossible ring state.
+
+        A long prompt can have a RotatingKVCache logical offset far beyond the
+        sliding-window max_size while only the most recent physical window is
+        materialized. If a later request matches only part of that tail, the
+        block chain may contain fewer physical tokens than max_size but still
+        carry offset=target_tokens. Restoring that state makes mlx-lm allocate
+        ``max_size - offset`` elements on the next decode token, which is the
+        live Electron Laguna failure:
+        ``[full] Negative dimensions not allowed``.
+        """
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        tokens = list(range(256))
+        keys = mx.arange(128, dtype=mx.float32).reshape(1, 1, 64, 2)
+        values = (keys + 1000).astype(mx.float32)
+        state = [{
+            "class_name": "RotatingKVCache",
+            "state": (keys, values),
+            "meta_state": (0, 128, 256, 64),
+        }]
+
+        manager = PagedCacheManager(block_size=64, max_blocks=16)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        table = cache.store_cache("writer", tokens, state)
+
+        assert table is not None
+        assert table.num_tokens == 256
+        assert cache.reconstruct_cache(table) is None
+
     def test_extending_partial_prefix_realigns_durable_block_chain(self):
         """An extended partial tail must be replaced at block boundaries."""
         from vmlx_engine.paged_cache import PagedCacheManager

@@ -36,6 +36,10 @@ class GenerationOutput:
     # markers; consumers that want display-ready text use `text`. Empty
     # string when the engine didn't track raw separately.
     raw_text: str = ""
+    # Structured engine/runtime error. This must never be serialized as
+    # assistant text; API adapters map it to their native error surface.
+    error: str | None = None
+    error_code: str | None = None
 
 
 class BaseEngine(ABC):

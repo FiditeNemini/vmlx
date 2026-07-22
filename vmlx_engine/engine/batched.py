@@ -35,6 +35,10 @@ from ..utils.chat_template_kwargs import (
     ensure_thinking_off_sentinel,
 )
 from ..utils.multi_eos import collect_multi_eos_ids
+from ..utils.tokenizer import (
+    _chat_template_is_unresolved_include,
+    _inject_chat_template_if_missing,
+)
 from .base import BaseEngine, GenerationOutput
 import threading as _threading
 
@@ -47,6 +51,76 @@ import threading as _threading
 _SIMPLE_MLLM_STREAM_TLS = _threading.local()
 
 logger = logging.getLogger(__name__)
+
+
+def _generation_prompt_cache_extra_key(
+    *,
+    prompt_with_generation: str,
+    prompt_without_generation: str,
+    gen_prompt_len: int,
+    tokens_with_generation: list[int] | None = None,
+    tokens_without_generation: list[int] | None = None,
+) -> dict[str, str] | None:
+    """Return a stable cache discriminator for stripped generation prompts.
+
+    Prefix cache lookup/store strips the final assistant generation prompt from
+    token keys so thinking-capable chats can reuse the same conversation prefix
+    across turns. That suffix is not semantically neutral: ``<think>``,
+    ``</think>``, effort tags, Harmony analysis prefixes, and family-specific
+    markers change the causal state at the decode boundary. Mix a compact hash
+    of the stripped suffix into paged/block cache keys so ON/OFF/effort rails
+    can reuse within the same rail but never cross-restore each other's KV.
+    """
+    gen_prompt_len = int(gen_prompt_len or 0)
+    if gen_prompt_len <= 0:
+        return None
+
+    suffix_text = ""
+    if prompt_with_generation.startswith(prompt_without_generation):
+        suffix_text = prompt_with_generation[len(prompt_without_generation):]
+    elif prompt_with_generation:
+        suffix_text = prompt_with_generation[-512:]
+
+    suffix_tokens: list[int] = []
+    if tokens_with_generation is not None:
+        try:
+            suffix_tokens = list(tokens_with_generation[-gen_prompt_len:])
+        except Exception:
+            suffix_tokens = []
+    if (
+        not suffix_tokens
+        and tokens_with_generation is not None
+        and tokens_without_generation is not None
+    ):
+        try:
+            suffix_tokens = list(tokens_with_generation[len(tokens_without_generation):])
+        except Exception:
+            suffix_tokens = []
+
+    hasher = hashlib.sha256()
+    hasher.update(b"vmlx-generation-prompt-cache-v1")
+    hasher.update(str(gen_prompt_len).encode("utf-8"))
+    hasher.update(bytes(str(tuple(int(t) for t in suffix_tokens)), "utf-8"))
+    hasher.update(suffix_text.encode("utf-8", "surrogatepass"))
+    return {
+        "generation_prompt": f"v1:{gen_prompt_len}:{hasher.hexdigest()[:16]}",
+    }
+
+
+def _merge_cache_extra_keys(
+    base: Any,
+    addition: dict[str, str] | None,
+) -> Any:
+    if not addition:
+        return base
+    if base is None:
+        return dict(addition)
+    if isinstance(base, dict):
+        merged = dict(base)
+    else:
+        merged = {"base": repr(base)}
+    merged.update(addition)
+    return merged
 
 
 def _bound_video_fallback_frames(
@@ -1242,7 +1316,7 @@ class BatchedEngine(BaseEngine):
 
         return None
 
-    def _compute_gen_prompt_len(
+    def _compute_gen_prompt_cache_context(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict] | None,
@@ -1252,8 +1326,8 @@ class BatchedEngine(BaseEngine):
         prompt_with_gen: str,
         num_videos: int = 0,
         num_audio: int = 0,
-    ) -> int:
-        """Compute the number of tokens added by add_generation_prompt=True.
+    ) -> tuple[int, dict[str, str] | None]:
+        """Compute stripped generation-prompt length and cache discriminator.
 
         This is used by the prefix cache to strip generation prompt tokens
         from the cache key, preventing 100% cache misses in multi-turn
@@ -1269,7 +1343,7 @@ class BatchedEngine(BaseEngine):
             prompt_with_gen: The already-rendered prompt WITH generation prompt
 
         Returns:
-            Number of tokens in the generation prompt suffix
+            Tuple of (generation prompt token count, cache extra keys)
         """
         try:
             prompt_without_gen = self._apply_chat_template(
@@ -1284,7 +1358,7 @@ class BatchedEngine(BaseEngine):
             )
             tokenizer = self._tokenizer or self._processor
             if tokenizer is None:
-                return 0
+                return 0, None
 
             # Use the tokenizer's encode method
             if hasattr(tokenizer, "encode"):
@@ -1292,17 +1366,47 @@ class BatchedEngine(BaseEngine):
             elif hasattr(tokenizer, "tokenizer") and hasattr(tokenizer.tokenizer, "encode"):
                 enc = tokenizer.tokenizer.encode
             else:
-                return 0
+                return 0, None
 
             tokens_with = self._encode_rendered_prompt(enc, prompt_with_gen)
             tokens_without = self._encode_rendered_prompt(enc, prompt_without_gen)
             gen_len = len(tokens_with) - len(tokens_without)
             if gen_len > 0:
                 logger.debug(f"Gen prompt len: {gen_len} tokens")
-            return max(gen_len, 0)
+            gen_len = max(gen_len, 0)
+            return gen_len, _generation_prompt_cache_extra_key(
+                prompt_with_generation=prompt_with_gen,
+                prompt_without_generation=prompt_without_gen,
+                gen_prompt_len=gen_len,
+                tokens_with_generation=tokens_with,
+                tokens_without_generation=tokens_without,
+            )
         except Exception as e:
             logger.debug(f"Failed to compute gen_prompt_len: {e}")
-            return 0
+            return 0, None
+
+    def _compute_gen_prompt_len(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None,
+        num_images: int,
+        enable_thinking: bool,
+        extra_template_kwargs: dict | None,
+        prompt_with_gen: str,
+        num_videos: int = 0,
+        num_audio: int = 0,
+    ) -> int:
+        gen_len, _ = self._compute_gen_prompt_cache_context(
+            messages,
+            tools,
+            num_images,
+            enable_thinking,
+            extra_template_kwargs,
+            prompt_with_gen,
+            num_videos=num_videos,
+            num_audio=num_audio,
+        )
+        return gen_len
 
     @staticmethod
     def _encode_rendered_prompt(enc, prompt: str) -> list[int]:
@@ -1640,6 +1744,25 @@ class BatchedEngine(BaseEngine):
 
             prompt = None
             try:
+                if _chat_template_is_unresolved_include(
+                    getattr(tokenizer, "chat_template", None)
+                ):
+                    _injected_include = _inject_chat_template_if_missing(
+                        tokenizer, self._model_name
+                    )
+                    if _injected_include:
+                        logger.info(
+                            "Chat template include resolved from %s for %s",
+                            _injected_include,
+                            self._model_name,
+                        )
+            except Exception as include_err:
+                logger.debug(
+                    "chat_template include resolution skipped for %s: %s",
+                    self._model_name,
+                    include_err,
+                )
+            try:
                 prompt = tokenizer.apply_chat_template(messages, **template_kwargs)
             except Exception as template_err:
                 # GH#66 part 2 — mlx-community quants (e.g. mlx-community/
@@ -1753,6 +1876,7 @@ class BatchedEngine(BaseEngine):
         bypass_prefix_cache = bool(kwargs.pop("_bypass_prefix_cache", False))
         request_id = kwargs.pop("request_id", None)
         max_prompt_tokens = int(kwargs.pop("max_prompt_tokens", 0) or 0)
+        cache_extra_keys = kwargs.pop("_cache_extra_keys", None)
 
         if self._is_mllm and self._mllm_scheduler:
             # Use MLLM scheduler for all requests (text-only and multimodal)
@@ -1777,6 +1901,7 @@ class BatchedEngine(BaseEngine):
                 gen_prompt_len=kwargs.get("gen_prompt_len", 0),
                 enable_thinking=kwargs.get("enable_thinking"),
                 bypass_prefix_cache=bypass_prefix_cache,
+                cache_extra_keys=cache_extra_keys,
                 request_id=request_id,
                 max_prompt_tokens=max_prompt_tokens,
                 _vmlx_tools_present=bool(kwargs.get("_vmlx_tools_present")),
@@ -1848,6 +1973,7 @@ class BatchedEngine(BaseEngine):
             num_messages=kwargs.get("num_messages", 1),
             segment_boundaries=segment_boundaries,
             bypass_prefix_cache=bypass_prefix_cache,
+            cache_extra_keys=cache_extra_keys,
             encode_add_special_tokens=encode_add_special_tokens,
             max_prompt_tokens=max_prompt_tokens,
             **_m3vl_extra,
@@ -1907,6 +2033,7 @@ class BatchedEngine(BaseEngine):
         # collide with downstream positional arguments.
         bypass_prefix_cache = bool(kwargs.pop("_bypass_prefix_cache", False))
         max_prompt_tokens = int(kwargs.pop("max_prompt_tokens", 0) or 0)
+        cache_extra_keys = kwargs.pop("_cache_extra_keys", None)
 
         if self._is_mllm and self._mllm_scheduler:
             # Use MLLM scheduler for all requests (text-only and multimodal)
@@ -1932,6 +2059,7 @@ class BatchedEngine(BaseEngine):
                 gen_prompt_len=kwargs.get("gen_prompt_len", 0),
                 enable_thinking=kwargs.get("enable_thinking"),
                 bypass_prefix_cache=bypass_prefix_cache,
+                cache_extra_keys=cache_extra_keys,
                 max_prompt_tokens=max_prompt_tokens,
                 _vmlx_tools_present=bool(kwargs.get("_vmlx_tools_present")),
                 _vmlx_template_tools=kwargs.get("_vmlx_template_tools"),
@@ -1998,6 +2126,7 @@ class BatchedEngine(BaseEngine):
             num_messages=kwargs.get("num_messages", 1),
             segment_boundaries=segment_boundaries,
             bypass_prefix_cache=bypass_prefix_cache,
+            cache_extra_keys=cache_extra_keys,
             encode_add_special_tokens=encode_add_special_tokens,
             max_prompt_tokens=max_prompt_tokens,
             **_m3vl_extra,
@@ -2120,13 +2249,20 @@ class BatchedEngine(BaseEngine):
         # stripping generation prompt tokens (e.g., <|im_start|>assistant\n<think>\n)
         # from the cache key. Works for both LLM and MLLM paths.
         gen_prompt_len = 0
+        cache_extra_keys = kwargs.get("_cache_extra_keys")
         if not skip_gen_prompt:
-            gen_prompt_len = self._compute_gen_prompt_len(
+            gen_prompt_len, gen_prompt_cache_keys = self._compute_gen_prompt_cache_context(
                 messages, template_tools, len(all_images),
                 thinking_enabled, extra_tpl, prompt,
                 num_videos=len(all_videos),
                 num_audio=len(all_audio),
             )
+            cache_extra_keys = _merge_cache_extra_keys(
+                cache_extra_keys,
+                gen_prompt_cache_keys,
+            )
+            if cache_extra_keys is not None:
+                kwargs["_cache_extra_keys"] = cache_extra_keys
 
         # Phase 5 audit fix (F11, 2026-04-08): compute per-segment boundaries
         # so the LLM scheduler can store cache entries with the correct
@@ -2294,13 +2430,20 @@ class BatchedEngine(BaseEngine):
         # stripping generation prompt tokens (e.g., <|im_start|>assistant\n<think>\n)
         # from the cache key. Works for both LLM and MLLM paths.
         gen_prompt_len = 0
+        cache_extra_keys = kwargs.get("_cache_extra_keys")
         if not skip_gen_prompt:
-            gen_prompt_len = self._compute_gen_prompt_len(
+            gen_prompt_len, gen_prompt_cache_keys = self._compute_gen_prompt_cache_context(
                 messages, template_tools, len(all_images),
                 thinking_enabled, extra_tpl, prompt,
                 num_videos=len(all_videos),
                 num_audio=len(all_audio),
             )
+            cache_extra_keys = _merge_cache_extra_keys(
+                cache_extra_keys,
+                gen_prompt_cache_keys,
+            )
+            if cache_extra_keys is not None:
+                kwargs["_cache_extra_keys"] = cache_extra_keys
 
         # F11 (audit 2026-04-08): per-segment boundaries for cache_type LRU.
         # Mirrors the non-streaming chat() path so the priority eviction

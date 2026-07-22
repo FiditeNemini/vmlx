@@ -388,6 +388,7 @@ class EngineCore:
         pixel_values_videos: Optional[Any] = None,
         video_grid_thw: Optional[Any] = None,
         prompt_token_ids: Optional[List[int]] = None,
+        cache_extra_keys: Optional[Any] = None,
     ) -> str:
         """
         Add a request for processing.
@@ -442,9 +443,22 @@ class EngineCore:
         # different media cannot cross-reuse vision-conditioned MSA state.
         # Scheduler admission below permits only the salted paged/block path;
         # unsalted legacy/memory/prompt-L2 paths remain disabled for media.
+        if cache_extra_keys is not None:
+            request._cache_extra_keys = dict(cache_extra_keys) if isinstance(
+                cache_extra_keys, dict
+            ) else {"request": repr(cache_extra_keys)}
         if pixel_values is not None or pixel_values_videos is not None:
-            request._cache_extra_keys = _mllm_media_cache_extra_keys(request)
-            request._m3_vl_media_cache_context = bool(request._cache_extra_keys)
+            media_extra = _mllm_media_cache_extra_keys(request)
+            if media_extra:
+                if getattr(request, "_cache_extra_keys", None):
+                    merged = dict(request._cache_extra_keys)
+                    merged.update(media_extra)
+                    request._cache_extra_keys = merged
+                else:
+                    request._cache_extra_keys = media_extra
+            request._m3_vl_media_cache_context = bool(
+                getattr(request, "_cache_extra_keys", None)
+            )
 
         # Attach gen_prompt_len for prefix cache key stripping.
         # The scheduler reads this via getattr(request, '_gen_prompt_len', 0)

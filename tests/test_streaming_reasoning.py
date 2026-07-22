@@ -233,8 +233,11 @@ class TestEnableThinkingTriState:
         """Parser reset_state should receive effective_think_in_template, not raw."""
         import vmlx_engine.server as server_mod
         source = inspect.getsource(server_mod.stream_chat_completion)
+        helper_source = inspect.getsource(server_mod._new_request_reasoning_parser)
 
-        assert "think_in_prompt=effective_think_in_template" in source
+        assert "_new_request_reasoning_parser(" in source
+        assert "effective_think_in_template=effective_think_in_template" in source
+        assert "think_in_prompt=effective_think_in_template" in helper_source
 
     def test_minimax_m3_streaming_enabled_mode_seeds_prompt_reasoning(self):
         """M3 thinking_mode=enabled prompt-opens <mm:think> in streaming too."""
@@ -1606,17 +1609,23 @@ class TestPerRequestParserInstances:
         """Server must create new parser instance per request."""
         import vmlx_engine.server as server_mod
         source = inspect.getsource(server_mod.stream_chat_completion)
+        helper_source = inspect.getsource(server_mod._new_request_reasoning_parser)
 
-        # Should create a new instance, not reuse the global
-        assert "_reasoning_parser.__class__()" in source
+        # Stream path should delegate to a helper that creates a new instance,
+        # not reuse the mutable global parser object directly.
+        assert "_new_request_reasoning_parser(" in source
+        assert "configured_parser.__class__()" in helper_source
 
     def test_parser_reset_with_effective_think(self):
         """Parser reset_state should use effective_think_in_template."""
         import vmlx_engine.server as server_mod
         source = inspect.getsource(server_mod.stream_chat_completion)
+        helper_source = inspect.getsource(server_mod._new_request_reasoning_parser)
 
-        assert "request_parser.reset_state" in source
-        assert "think_in_prompt=effective_think_in_template" in source
+        assert "_new_request_reasoning_parser(" in source
+        assert "effective_think_in_template=effective_think_in_template" in source
+        assert "parser.reset_state" in helper_source
+        assert "think_in_prompt=effective_think_in_template" in helper_source
 
     def test_parser_concurrent_isolation(self):
         """Two parser instances should not share state."""

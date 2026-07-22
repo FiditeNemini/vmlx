@@ -2410,6 +2410,13 @@ class MLLMScheduler:
         }
         if "enable_thinking" in kwargs:
             request.enable_thinking = kwargs.get("enable_thinking")
+        cache_extra_keys = kwargs.get("cache_extra_keys")
+        if cache_extra_keys is not None:
+            request._cache_extra_keys = (
+                dict(cache_extra_keys)
+                if isinstance(cache_extra_keys, dict)
+                else {"request": repr(cache_extra_keys)}
+            )
         _max_prompt_tokens = int(kwargs.get("max_prompt_tokens", 0) or 0)
         if _max_prompt_tokens > 0:
             request._max_prompt_tokens = _max_prompt_tokens
@@ -2619,6 +2626,8 @@ class MLLMScheduler:
                 batch_req._gen_prompt_len = _gpl
             if getattr(request, '_bypass_prefix_cache', False):
                 batch_req._bypass_prefix_cache = True
+            if getattr(request, "_cache_extra_keys", None):
+                batch_req._cache_extra_keys = dict(request._cache_extra_keys)
             if request.sampling_params.stop:
                 batch_req._stop_strings = list(request.sampling_params.stop)
             batch_requests.append(batch_req)
@@ -3451,14 +3460,10 @@ class MLLMScheduler:
                                         cache_states = self._extract_cache_states(cache_blocks)
                                         if cache_states:
                                             _paged_store_kwargs = {
-                                                "cache_extra_keys": (
-                                                    getattr(
-                                                        request,
-                                                        "_cache_extra_keys",
-                                                        None,
-                                                    )
-                                                    if media_cache_allowed
-                                                    else None
+                                                "cache_extra_keys": getattr(
+                                                    request,
+                                                    "_cache_extra_keys",
+                                                    None,
                                                 ),
                                             }
                                             if (
@@ -3479,7 +3484,7 @@ class MLLMScheduler:
                                                 f"VLM Scheduler stored paged Prefix Cache for "
                                                 f"{request_id}: {len(cache_states)} layers, "
                                                 f"truncated to {len(truncated_tokens)} tokens"
-                                                f"{' with media side-key' if media_cache_allowed else ''}"
+                                                f"{' with cache side-key' if getattr(request, '_cache_extra_keys', None) else ''}"
                                             )
                                         else:
                                             logger.info(

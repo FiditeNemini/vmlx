@@ -23,6 +23,30 @@ logger = logging.getLogger(__name__)
 _NEMOTRON_QUANT_ROOT_KEYS = frozenset({"group_size", "bits", "mode"})
 
 
+def _chat_template_is_unresolved_include(template) -> bool:
+    """True when a tokenizer template is only a sidecar include directive.
+
+    Transformers does not resolve Jinja ``include`` against the model directory
+    in the chat-template string itself. Several JANG bundles, including Laguna,
+    intentionally ship ``tokenizer_config.json`` as ``{% include
+    'chat_template.jinja' %}`` plus the real sidecar template. Treating that
+    one-line include as a valid baked template makes the engine render the wrong
+    prompt and mis-seed reasoning parsers.
+    """
+
+    if not isinstance(template, str):
+        return False
+    text = template.strip()
+    if not text:
+        return False
+    return (
+        text.startswith("{%")
+        and text.endswith("%}")
+        and "include" in text
+        and "chat_template" in text
+    )
+
+
 def _register_mimo_v2_runtime_for_mlx_lm() -> bool:
     """Register MiMo-V2.5's JANG runtime before generic mlx-lm resolution.
 
@@ -565,9 +589,11 @@ def _patch_mlx_lm_tokenizer_load() -> None:
         inner = getattr(wrapper, "_tokenizer", wrapper)
         try:
             existing = getattr(inner, "chat_template", None)
-            already_set = (isinstance(existing, str) and existing.strip()) or (
-                isinstance(existing, list) and existing
-            )
+            already_set = (
+                isinstance(existing, str)
+                and existing.strip()
+                and not _chat_template_is_unresolved_include(existing)
+            ) or (isinstance(existing, list) and existing)
             if already_set:
                 return wrapper
         except Exception:
@@ -782,15 +808,23 @@ def _inject_chat_template_if_missing(tokenizer, model_path) -> str | None:
     if not targets:
         return None
 
-    # If ANY target already has a non-empty template, propagate it to all
-    # the others and bail (no injection needed).
+    # If ANY target already has a non-empty resolved template, propagate it to
+    # all the others and bail (no injection needed). A one-line Jinja include is
+    # not resolved by transformers, so do not treat it as a usable template.
     for t in targets:
         existing = getattr(t, "chat_template", None)
-        if isinstance(existing, str) and existing.strip():
+        if (
+            isinstance(existing, str)
+            and existing.strip()
+            and not _chat_template_is_unresolved_include(existing)
+        ):
             for o in targets:
                 if o is not t and not (
                     isinstance(getattr(o, "chat_template", None), str)
                     and getattr(o, "chat_template").strip()
+                    and not _chat_template_is_unresolved_include(
+                        getattr(o, "chat_template")
+                    )
                 ):
                     try:
                         o.chat_template = existing
@@ -818,7 +852,11 @@ def _inject_chat_template_if_missing(tokenizer, model_path) -> str | None:
             try:
                 tcfg = json.loads(tcfg_path.read_text(encoding="utf-8"))
                 tpl = tcfg.get("chat_template") if isinstance(tcfg, dict) else None
-                if isinstance(tpl, str) and tpl.strip():
+                if (
+                    isinstance(tpl, str)
+                    and tpl.strip()
+                    and not _chat_template_is_unresolved_include(tpl)
+                ):
                     for t in targets:
                         try:
                             t.chat_template = tpl

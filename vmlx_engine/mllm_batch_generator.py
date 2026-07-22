@@ -279,6 +279,24 @@ def _mllm_media_cache_extra_keys(request: Any) -> Optional[Dict[str, str]]:
     return {"mllm_media": hasher.hexdigest()}
 
 
+def _merge_mllm_cache_extra_keys(
+    base: Optional[Any],
+    addition: Optional[Dict[str, str]],
+) -> Optional[Dict[str, str]]:
+    """Merge cache side-key dictionaries without dropping request-owned axes."""
+    if not base and not addition:
+        return None
+    merged: Dict[str, str] = {}
+    if base:
+        if isinstance(base, dict):
+            merged.update({str(k): str(v) for k, v in base.items()})
+        else:
+            merged["request"] = repr(base)
+    if addition:
+        merged.update({str(k): str(v) for k, v in addition.items()})
+    return merged or None
+
+
 @dataclass(frozen=True)
 class VLMImagePrefillBudgetDecision:
     should_reject: bool
@@ -5895,7 +5913,10 @@ class MLLMBatchGenerator:
                     )
                 )
                 continue
-            req._cache_extra_keys = _mllm_media_cache_extra_keys(req)
+            req._cache_extra_keys = _merge_mllm_cache_extra_keys(
+                getattr(req, "_cache_extra_keys", None),
+                _mllm_media_cache_extra_keys(req),
+            )
             # Save full token list BEFORE cache fetch can mutate req.input_ids.
             # Used later for SSM state cache keying (must be consistent with fetch key).
             _all_tokens = (

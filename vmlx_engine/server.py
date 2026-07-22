@@ -18222,6 +18222,19 @@ async def stream_chat_completion(
         auto_detect=True,
         reasoning_effort=request.reasoning_effort,
     )
+    logger.info(
+        "Responses stream effective thinking: request=%r ct=%r default=%r "
+        "model_key=%s registry_key=%s result=%r",
+        request.enable_thinking,
+        _ct_kwargs.get("enable_thinking") if isinstance(_ct_kwargs, dict) else None,
+        _default_enable_thinking,
+        _model_path or _model_name or request.model,
+        _registry_model_key(request.model),
+        _effective_thinking,
+    )
+    if _effective_thinking is not None:
+        kwargs["enable_thinking"] = _effective_thinking
+        request.enable_thinking = _effective_thinking
 
     # Check if model's chat template injects <think> in the assistant prefix
     # Use _model_name (actual model path) not request.model (which may be "default")
@@ -18267,7 +18280,12 @@ async def stream_chat_completion(
         if not _template_always_thinks(engine.tokenizer, _model_name or request.model):
             think_in_template = False
 
-    if _reasoning_parser:
+    _reasoning_seed_probe_needed = bool(
+        _reasoning_parser
+        or getattr(_model_config, "reasoning_parser", None)
+        or getattr(_model_config, "think_in_template", False)
+    )
+    if _reasoning_seed_probe_needed:
         _prompt_enable = True if _effective_thinking is None else bool(_effective_thinking)
         _tools_present_for_prompt = _tools_available_for_generation(
             request, kwargs.get("tools")
@@ -20311,6 +20329,9 @@ async def stream_responses_api(
         auto_detect=True,
         reasoning_effort=request.reasoning_effort,
     )
+    if _effective_thinking is not None:
+        kwargs["enable_thinking"] = _effective_thinking
+        request.enable_thinking = _effective_thinking
 
     # Reasoning parser setup (mirrors stream_chat_completion)
     from .model_config_registry import get_model_config_registry
@@ -20350,7 +20371,12 @@ async def stream_responses_api(
         if not _template_always_thinks(engine.tokenizer, _model_name or request.model):
             think_in_template = False
 
-    if _reasoning_parser:
+    _reasoning_seed_probe_needed = bool(
+        _reasoning_parser
+        or getattr(_model_config, "reasoning_parser", None)
+        or getattr(_model_config, "think_in_template", False)
+    )
+    if _reasoning_seed_probe_needed:
         _prompt_enable = True if _effective_thinking is None else bool(_effective_thinking)
         _tools_present_for_prompt = _tools_available_for_generation(
             request, kwargs.get("tools")

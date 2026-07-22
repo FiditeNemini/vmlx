@@ -219,6 +219,22 @@ class TestEnableThinkingTriState:
         # suppress_reasoning is set when thinking is explicitly False
         assert "suppress_reasoning = _effective_thinking is False" in source
 
+    def test_stream_chat_forwards_effective_thinking_to_engine_kwargs(self):
+        """Streaming Chat must render with the same Auto value its parser uses."""
+        import vmlx_engine.server as server_mod
+        source = inspect.getsource(server_mod.stream_chat_completion)
+
+        assert 'kwargs["enable_thinking"] = _effective_thinking' in source
+        assert "request.enable_thinking = _effective_thinking" in source
+
+    def test_stream_responses_forwards_effective_thinking_to_engine_kwargs(self):
+        """Streaming Responses must not resolve Auto only for parser seeding."""
+        import vmlx_engine.server as server_mod
+        source = inspect.getsource(server_mod.stream_responses_api)
+
+        assert 'kwargs["enable_thinking"] = _effective_thinking' in source
+        assert "request.enable_thinking = _effective_thinking" in source
+
     def test_effective_think_in_template_cleared_when_thinking_false(self):
         """When enable_thinking=False and template respects it, think_in_template is cleared."""
         import vmlx_engine.server as server_mod
@@ -238,6 +254,19 @@ class TestEnableThinkingTriState:
         assert "_new_request_reasoning_parser(" in source
         assert "effective_think_in_template=effective_think_in_template" in source
         assert "think_in_prompt=effective_think_in_template" in helper_source
+
+    def test_streaming_seed_probe_uses_registry_contract_without_global_parser(self):
+        """Registry parser/template contracts must seed streams even if the global parser is absent."""
+        import vmlx_engine.server as server_mod
+
+        chat_source = inspect.getsource(server_mod.stream_chat_completion)
+        responses_source = inspect.getsource(server_mod.stream_responses_api)
+
+        for source in (chat_source, responses_source):
+            assert "_reasoning_seed_probe_needed = bool(" in source
+            assert 'getattr(_model_config, "reasoning_parser", None)' in source
+            assert 'getattr(_model_config, "think_in_template", False)' in source
+            assert "_engine_prompt_starts_in_reasoning(" in source
 
     def test_minimax_m3_streaming_enabled_mode_seeds_prompt_reasoning(self):
         """M3 thinking_mode=enabled prompt-opens <mm:think> in streaming too."""

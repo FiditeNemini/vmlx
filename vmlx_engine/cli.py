@@ -472,11 +472,12 @@ def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
     if not getattr(args, "use_paged_cache", False):
         return [
             (
-                "Block disk-only prefix cache: "
+                "Block Disk Cache (SSD / L2), disk-only mode: "
                 f"block_size={args.paged_cache_block_size}, "
                 f"max_index_blocks={args.max_cache_blocks}, "
                 f"max={args.block_disk_cache_max_gb}GB "
-                "(paged RAM disabled; KV payloads restore from SSD transiently)"
+                "(In-Memory Paged Cache is disabled; KV payloads restore "
+                "from SSD transiently)"
             )
         ]
 
@@ -500,7 +501,7 @@ def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
     capacity = int(args.paged_cache_block_size) * int(args.max_cache_blocks)
     lines = [
         (
-            "Paged cache: "
+            "In-memory paged cache (RAM): "
             f"block_size={args.paged_cache_block_size}, "
             f"max_blocks={args.max_cache_blocks}, "
             f"capacity={capacity} tokens "
@@ -510,7 +511,9 @@ def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
         )
     ]
     if getattr(args, "enable_block_disk_cache", False):
-        lines.append(f"Block disk cache: max={args.block_disk_cache_max_gb}GB")
+        lines.append(
+            f"Block Disk Cache (SSD / L2): max={args.block_disk_cache_max_gb}GB"
+        )
     return lines
 
 
@@ -2678,7 +2681,7 @@ Examples:
         action="store_true",
         default=True,
         help="Process multiple requests simultaneously using continuous batching. "
-             "Enables prefix caching, paged cache, KV/storage cache codecs, and concurrent users. "
+             "Enables Prefix Cache, In-Memory Paged Cache (RAM), stored-cache codecs, and concurrent users. "
              "Default is enabled with max-num-seqs=1 for local chat.",
     )
     serve_parser.add_argument(
@@ -2692,7 +2695,8 @@ Examples:
     serve_parser.add_argument(
         "--use-paged-cache",
         action="store_true",
-        help="Use block-based (paged) KV cache management. Splits cached prompts into "
+        help="Keep block-based (paged) prompt and KV cache entries in Apple unified memory. "
+             "Splits cached prompts into "
              "fixed-size blocks that can be shared across requests with common prefixes. "
              "Reduces memory fragmentation and improves cache utilization for multi-user "
              "workloads. Requires --continuous-batching.",
@@ -2701,18 +2705,17 @@ Examples:
         "--no-paged-cache",
         dest="disable_paged_cache",
         action="store_true",
-        help="Opt out of the generic default-on paged cache. Paged cache is ON by "
-             "default for autodetected TEXT models at startup EXCEPT arch-incompatible "
-             "families (M3, openPangu-v2, gemma4 mixed-SWA) and MLLM/VL loads (pending "
-             "the #98 byte-ceiling). This flag disables that generic default; families "
-             "whose native cache REQUIRES paged (DSV4 composite, Zaya CCA, hybrid SSM) "
-             "still enable it via their own policy.",
+        help="Disable the generic in-memory paged-cache tier. Block Disk Cache may "
+             "remain enabled as an SSD-only tier on supported architectures. "
+             "Architecture-owned native caches may still use internal block transport; "
+             "inspect startup output and /health for the effective policy.",
     )
     serve_parser.add_argument(
         "--paged-cache-block-size",
         type=int,
         default=64,
-        help="Number of tokens per cache block when using paged cache. Smaller blocks = "
+        help="Number of tokens per content-addressed cache block in the in-memory paged "
+             "tier or Block Disk Cache. Smaller blocks = "
              "more granular sharing but higher overhead. Larger blocks = less overhead but "
              "waste space on short prompts. (default: 64)",
     )
@@ -2720,9 +2723,10 @@ Examples:
         "--max-cache-blocks",
         type=int,
         default=1000,
-        help="Maximum number of cache blocks to keep in memory. Each block holds KV states "
-             "for --paged-cache-block-size tokens. Total cache capacity = blocks × block_size. "
-             "(default: 1000, i.e. 64,000 tokens with default block size)",
+        help="Maximum number of indexed cache blocks. With In-Memory Paged Cache on, "
+             "this caps the RAM block pool; in SSD-only mode, it caps the in-memory "
+             "block index. SSD capacity is controlled separately by "
+             "--block-disk-cache-max-gb. (default: 1000)",
     )
     # KV cache quantization
     # mlxstudio#138: default=None lets us distinguish "user didn't pass it"
@@ -2782,15 +2786,15 @@ Examples:
         "--enable-block-disk-cache",
         dest="enable_block_disk_cache",
         action="store_true",
-        help="Persist individual paged cache blocks to SSD. When a block is evicted from "
-             "memory, it's saved to disk and reloaded on the next hit instead of recomputing. "
-             "Requires --use-paged-cache. Great for large multi-user workloads.",
+        help="Persist content-addressed cache blocks to SSD. With the in-memory paged "
+             "tier on, SSD is L2 behind RAM; with it off, SSD is the authoritative block "
+             "tier on supported architectures. Requires continuous batching and Prefix Cache.",
     )
     serve_block_disk_group.add_argument(
         "--disable-block-disk-cache",
         dest="enable_block_disk_cache",
         action="store_false",
-        help="Explicitly disable the default SSD L2 when paged cache is active.",
+        help="Disable Block Disk Cache (SSD / L2), including the disk-only block tier.",
     )
     serve_parser.set_defaults(enable_block_disk_cache=None)
     serve_parser.add_argument(
@@ -3323,7 +3327,7 @@ Examples:
     bench_parser.add_argument(
         "--use-paged-cache",
         action="store_true",
-        help="Use paged KV cache for memory efficiency (experimental). NOTE: bench "
+        help="Use paged KV cache in Apple unified memory (experimental). NOTE: bench "
              "does not apply the serve-path generic paged default-on; pass this "
              "explicitly to benchmark the paged backend.",
     )
@@ -3345,7 +3349,7 @@ Examples:
         type=str,
         default=None,
         choices=["none", "q4", "q8"],
-        help="Quantize KV cache to reduce GPU memory (~2-4x). q8=8-bit, q4=4-bit. "
+        help="Quantize KV cache to reduce Apple unified-memory use (~2-4x). q8=8-bit, q4=4-bit. "
              "Passing this flag explicitly disables JANG-calibrated TurboQuant KV. "
              "Omitting it uses auto q4 stored-prefix fallback.",
     )
@@ -3378,13 +3382,14 @@ Examples:
         "--enable-block-disk-cache",
         dest="enable_block_disk_cache",
         action="store_true",
-        help="Enable block-level disk persistence (requires --use-paged-cache)",
+        help="Persist content-addressed cache blocks to SSD. With the in-memory paged "
+             "tier off, supported architectures use SSD as the authoritative block tier.",
     )
     bench_block_disk_group.add_argument(
         "--disable-block-disk-cache",
         dest="enable_block_disk_cache",
         action="store_false",
-        help="Explicitly disable the default SSD L2 when paged cache is active.",
+        help="Disable Block Disk Cache (SSD / L2), including the disk-only block tier.",
     )
     bench_parser.set_defaults(enable_block_disk_cache=None)
     bench_parser.add_argument(

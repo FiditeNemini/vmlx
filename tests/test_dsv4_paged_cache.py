@@ -466,13 +466,13 @@ def test_dsv4_cache_ui_has_one_prefix_owner_and_no_stale_duplicate_labels():
 
     assert 'label="DSV4 Native Composite Prefix Cache"' in form
     assert 'label="DSV4 CSA/HCA Pool Codec"' in form
-    assert 'label={dsv4Active ? "DSV4 Block Disk Cache (L2)"' in form
+    assert 'label={dsv4Active ? "DSV4 Block Disk Cache (SSD / L2)"' in form
 
     # Generic prefix/paged/stored-KV controls must be hidden or disabled for
     # DSV4. The internal paged path is only the block index/L2 transport for
     # DeepseekV4Cache state; it is not a second DSV4 prefix toggle.
     assert '!dsv4Active && (\n          <CheckField label="Enable Prefix Cache"' in form
-    assert '<CheckField label="Use Paged KV Cache"' in form
+    assert '<CheckField label="In-Memory Paged Cache (RAM)"' in form
     assert 'disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}' in form
     assert "const effectiveStoredCacheQuantization = openPanguExactTypedCache" in form
     assert ": nativeTypedCacheOwnsStoredCodec ? 'auto' : config.kvCacheQuantization" in form

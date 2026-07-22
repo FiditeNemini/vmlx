@@ -774,7 +774,7 @@
       "ssmCompanion": "SSM コンパニオン",
       "scheduler": "スケジューラ",
       "diskCacheL2": "ディスクキャッシュ (L2)",
-      "blockDiskCache": "ブロックディスクキャッシュ (L2 ページ)",
+      "blockDiskCache": "ブロックディスクキャッシュ (SSD / L2)",
       "loading": "キャッシュ統計を読み込み中...",
       "warmPlaceholder": "キャッシュをウォームアップするシステムプロンプトを入力..."
     },
@@ -988,7 +988,7 @@
       "section2BodyB": "max_tokens を省略した場合、古い 32768 fallback ではなく bounded model/default budget に解決され、request logs に解決値が表示されます。",
       "section3Heading": "MTP, cache, JANG runtime hardening",
       "section3BodyA": "Qwen3.6 native MTP detection、JANG/JANGTQ group-size recognition、MX matmul dispatch checks、Hunyuan/ZAYA/Gemma/MiniMax routing の gate を強化しました。",
-      "section3BodyB": "Prefix cache、paged cache、L2 disk cache、TurboQuant KV は、cache reuse を推測ではなく確認できるように health counters を明確化しました。",
+      "section3BodyB": "Prefix cache、in-memory paged cache、L2 disk cache、TurboQuant KV は、cache reuse を推測ではなく確認できるように health counters を明確化しました。",
       "section4Heading": "Release integrity と updater safety",
       "section4BodyA": "Release 前に packaged app の Developer ID signing、notarization、bundled source hashes、critical imports、GUI launch、latest.json/update manifest compatibility を確認します。",
       "section4BodyB": "DeepSeek V4 Flash は native composite cache path をデフォルトで使い、generic KV q4/q8 は引き続き抑止します。exact long-code output は identifier gate が通るまで follow-up として残します。",

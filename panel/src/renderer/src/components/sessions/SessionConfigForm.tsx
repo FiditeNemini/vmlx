@@ -842,14 +842,14 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             <PerformanceHint text={`Streaming experts from SSD with ${config.flashMoeSlotBank}-slot LRU cache. Non-MoE models automatically pass through (no effect). JIT disabled (incompatible with on-demand loading).`} />
           </>
         )}
-        <CheckField label="Continuous Batching" tooltip="Keep ON for best performance. This is the master switch for prefix cache, paged KV cache, block disk L2, and stored-cache codecs. Turning it off uses the direct single-request engine and disables the cache features below." checked={effectiveContinuousBatching} onChange={v => onChange('continuousBatching', v)} disabled={dsv4Active} />
-        <PerformanceHint text="Keep ON for best overall behavior: it enables prefix reuse, paged cache, block disk L2, and architecture-specific cache restore while the default max sequence count stays at one for local chat." />
+        <CheckField label="Continuous Batching" tooltip="Keep ON for best performance. This is the master switch for Prefix Cache, In-Memory Paged Cache (RAM), Block Disk Cache (SSD / L2), and stored-cache codecs. Turning it off uses the direct single-request engine and disables the cache features below." checked={effectiveContinuousBatching} onChange={v => onChange('continuousBatching', v)} disabled={dsv4Active} />
+        <PerformanceHint text="Keep ON for best overall behavior: it enables prefix reuse, the in-memory RAM tier, persistent SSD L2, and architecture-specific cache restore while the default max sequence count stays at one for local chat." />
         {dsv4Active && <InfoNote text="DSV4 Flash uses the continuous-batching DSV4BatchGenerator path for native SWA+CSA/HCA cache correctness." />}
         {!effectiveContinuousBatching && effectivePrefixCacheEnabled && (
-          <InfoNote text="Cache flags will be omitted at launch while continuous batching is off. Turn it back on to use prefix cache, paged KV cache, block disk L2, and stored-cache codecs." />
+          <InfoNote text="Cache flags will be omitted at launch while continuous batching is off. Turn it back on to use Prefix Cache, In-Memory Paged Cache (RAM), Block Disk Cache (SSD / L2), and stored-cache codecs." />
         )}
         {!effectiveContinuousBatching && (
-          <InfoNote text="Turning this off disables: prefix caching, paged KV cache, KV cache quantization, and disk caching. Enable it to unlock these features." />
+          <InfoNote text="Turning this off disables Prefix Cache, In-Memory Paged Cache (RAM), KV cache quantization, and disk caching. Enable it to unlock these features." />
         )}
         <InfoNote text={metalWiredLimitHelpText} />
       </Section>
@@ -946,10 +946,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   maxInput={100}
                   disabled={pagedCacheUiState.memoryBudgetControlsDisabled}
                 />
-                {blockDiskOnly && <IncompatWarning text="Paged RAM is Off and Block Disk Cache is authoritative, so Cache Memory Limit, Cache Memory %, and Cache TTL do not apply. Block Size and Max Cache Blocks bound the in-memory hash/index capacity; Block Cache Max bounds SSD usage." />}
+                {blockDiskOnly && <IncompatWarning text="In-Memory Paged Cache (RAM) is Off and Block Disk Cache (SSD / L2) is authoritative, so Cache Memory Limit, Cache Memory %, and Cache TTL do not apply. Block Size and Max Cache Blocks bound the in-memory hash/index capacity; Block Cache Max bounds SSD usage." />}
                 <SliderField
                   label="Cache TTL (minutes)"
-                  tooltip="Time-to-live for memory-aware cache entries. Entries not accessed within this window are evicted to free memory. 'No expiration' means entries are only evicted by memory pressure. Note: this setting has no effect when Paged KV Cache is enabled (paged cache uses its own LRU eviction based on Max Cache Blocks)."
+                  tooltip="Time-to-live for memory-aware cache entries. Entries not accessed within this window are evicted to free memory. 'No expiration' means entries are only evicted by memory pressure. This setting has no effect while In-Memory Paged Cache (RAM) is on; that tier uses LRU eviction based on Max Cache Blocks."
                   value={config.cacheTtlMinutes}
                   onChange={v => onChange('cacheTtlMinutes', v)}
                   min={1}
@@ -971,7 +971,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   <div>
                     <h3 className="text-base font-semibold text-foreground mb-2">The Continuous Batching Engine</h3>
                     <p className="text-muted-foreground leading-relaxed">
-                      <strong>Continuous Batching</strong> is the heart of vMLX's server performance. Unlike simple mode (which processes exactly one request at a time), continuous batching allows multiple requests to be processed simultaneously. More importantly, <strong>it is required to enable all advanced caching features</strong> (Prefix Cache, Paged Cache, KV Quantization, and Disk Cache).
+                      <strong>Continuous Batching</strong> is the heart of vMLX's server performance. Unlike simple mode (which processes exactly one request at a time), continuous batching allows multiple requests to be processed simultaneously. More importantly, <strong>it is required to enable all advanced caching features</strong> (Prefix Cache, In-Memory Paged Cache, KV Quantization, and Disk Cache).
                     </p>
                   </div>
 
@@ -993,7 +993,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                     </p>
                     <ul className="list-disc pl-5 space-y-2 text-muted-foreground">
                       <li><strong>KV Quantization:</strong> vMLX securely isolates Mamba layers. If you turn on KV Quantization (e.g. q8), it will safely compress the Attention layers while leaving the internal Mamba/SSM memory at full precision, ensuring no corruption or quality loss.</li>
-                      <li><strong>Paged Cache Requirement:</strong> Since cumulative SSM states cannot be safely stored as continuous memory-aware blocks, the engine uses <code>--use-paged-cache</code> for these models when prefix caching is enabled.</li>
+                      <li><strong>In-Memory Paged Cache:</strong> Some models use this RAM tier when Prefix Cache is enabled so attention KV blocks and path-dependent state share one cache contract. Supported models can instead use Block Disk Cache as an SSD-only tier.</li>
                     </ul>
                   </div>
 
@@ -1019,34 +1019,34 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
       {/* In-memory paged cache (RAM) */}
       <Section title={pagedCacheSectionTitle} expanded={expandedSections.pagedCache} onToggle={() => toggleSection('pagedCache')} hidden={isImage}>
-        {!effectivelyNoBatching && !dsv4Active && <PerformanceHint text="Keeps reusable prefix blocks in Apple unified memory as small pages instead of one large allocation. This is the fast RAM tier; Block Disk Cache (L2) below is the persistent SSD tier." />}
+        {!effectivelyNoBatching && !dsv4Active && <PerformanceHint text="Keeps reusable prefix blocks in Apple unified memory as small pages instead of one large allocation. This is the fast RAM tier; Block Disk Cache (SSD / L2) below is the persistent tier." />}
         {dsv4Active && !dsv4CompositeCacheOptIn && <PerformanceHint text="DSV4 generic paged-KV controls are hidden because DeepSeek-V4 uses a fixed native SWA+CSA/HCA transport only when DSV4 Native Composite Prefix Cache is enabled above." />}
         {dsv4CompositeRequiresPaged && <PerformanceHint text="DSV4 Flash stores native SWA+CSA/HCA prompt-boundary snapshots for prefix reuse. This is not generic paged KV; the internal paged path is only the block index and L2 transport for DeepseekV4Cache state." />}
-        {batchingOff && <IncompatWarning text="In-Memory Paged Cache requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above to enable the RAM cache tier." />}
-        {!dsv4Active && !dsv4CompositeRequiresPaged && config.enableDiskCache && <IncompatWarning text="In-Memory Paged Cache and legacy Disk Cache cannot run simultaneously. Enabling the RAM tier will auto-disable legacy Disk Cache. For persistent SSD caching, use 'Block Disk Cache (L2)' below instead." />}
-        {!dsv4Active && !dsv4CompositeRequiresPaged && !batchingOff && prefixOff && !cachePolicy.architectureRequiresPagedCache && <InfoNote text="In-Memory Paged Cache is a prefix-cache backend. Turning it on will enable Prefix Cache." />}
-        {!batchingOff && prefixOff && cachePolicy.architectureRequiresPagedCache && <IncompatWarning text="This model uses native/paged cache when Prefix Cache is enabled. Enable Prefix Cache above to activate the architecture-specific cache stack." />}
-        {zayaTypedCacheRequiresPaged && <InfoNote text="ZAYA typed CCA cache requires paged cache while prefix cache is enabled. Turn off Prefix Cache to disable this cache stack for ZAYA." />}
-        {nativeCacheRequiresPaged && !zayaTypedCacheRequiresPaged && !dsv4CompositeRequiresPaged && <InfoNote text="This native cache route requires paged cache while prefix cache is enabled so KV blocks and path-dependent state stay in the same cache contract." />}
+        {batchingOff && <IncompatWarning text="In-Memory Paged Cache (RAM) requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above to enable the RAM cache tier." />}
+        {!dsv4Active && !dsv4CompositeRequiresPaged && config.enableDiskCache && <IncompatWarning text="In-Memory Paged Cache (RAM) and legacy Disk Cache cannot run simultaneously. Enabling the RAM tier will auto-disable legacy Disk Cache. For persistent SSD caching, use 'Block Disk Cache (SSD / L2)' below instead." />}
+        {!dsv4Active && !dsv4CompositeRequiresPaged && !batchingOff && prefixOff && !cachePolicy.architectureRequiresPagedCache && <InfoNote text="In-Memory Paged Cache (RAM) is a prefix-cache backend. Turning it on will enable Prefix Cache." />}
+        {!batchingOff && prefixOff && cachePolicy.architectureRequiresPagedCache && <IncompatWarning text="This model uses a native/in-memory paged cache when Prefix Cache is enabled. Enable Prefix Cache above to activate the architecture-specific cache stack." />}
+        {zayaTypedCacheRequiresPaged && <InfoNote text="ZAYA typed CCA cache requires the in-memory paged tier while Prefix Cache is enabled. Turn off Prefix Cache to disable this cache stack for ZAYA." />}
+        {nativeCacheRequiresPaged && !zayaTypedCacheRequiresPaged && !dsv4CompositeRequiresPaged && <InfoNote text="This native cache route requires the in-memory paged tier while Prefix Cache is enabled so KV blocks and path-dependent state stay in the same cache contract." />}
         {architectureBlockDiskOnlySupported && cachePolicy.blockDiskCacheChecked && <InfoNote text={mixedSwaBlockDiskOnlySupported
           ? stepMixedSwaBlockDiskOnly
             ? "Step full/sliding-KV SSD-only mode is available: typed KV blocks and rotating metadata stay in Block Disk L2 without RAM payloads. Under tight Metal headroom, long cold-prompt stores can be skipped to avoid an unsafe second clean prefill; existing SSD blocks remain reusable."
             : "Native sliding/mixed-SWA SSD-only mode is available: turn In-Memory Paged Cache Off to keep typed KV blocks and rotating-window metadata in Block Disk L2 without retaining RAM payloads."
           : "Hybrid/Mamba SSD-only mode is available: turn In-Memory Paged Cache Off to keep attention KV blocks in Block Disk L2 while restoring full-precision SSM/GDN companion state from its typed SSD store or clean-prefill rederive."} />}
-        {dsv4CompositeRequiresPaged && <InfoNote text="DSV4 uses native SWA+CSA/HCA composite cache snapshots, so paged cache stays on and block size is fixed to 256 tokens for diagnostic decode-cache testing." />}
+        {dsv4CompositeRequiresPaged && <InfoNote text="DSV4 uses native SWA+CSA/HCA composite cache snapshots, so its internal paged transport stays on and block size is fixed to 256 tokens for diagnostic decode-cache testing." />}
         {m3Active && <InfoNote text="MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets. Block Disk Cache provides its persistent L2; generic KV q4/q8 remains disabled." />}
         {openPanguExactTypedCache && <InfoNote text="openPangu does not use generic paged blocks: causal-convolution state is cumulative and cannot be reconstructed from an arbitrary block. Use Prefix Cache plus prompt-level Disk Cache (L2) instead." />}
         {!dsv4Active && (
-          <CheckField label="In-Memory Paged Cache (RAM)" tooltip="Keep reusable prefix and KV blocks in fast Apple unified memory using fixed-size pages. This reduces fragmentation and speeds warm reuse. It is the RAM tier, not persistent storage; Block Disk Cache (L2) below is the SSD tier and can remain enabled when this RAM tier is Off." checked={effectiveUsePagedCache} onChange={v => applyCacheControlUpdates(cacheControlUpdatesForPagedToggle(v, cacheControlState))} disabled={genericPagedCacheToggleDisabled} />
+          <CheckField label="In-Memory Paged Cache (RAM)" tooltip="Keeps reusable prompt-prefix and KV blocks in Apple unified memory (shared by CPU and GPU) for faster repeated prompts. This is the fast RAM tier and is not persistent. Block Disk Cache (SSD / L2) is the persistent tier and can remain enabled when this RAM tier is Off." checked={effectiveUsePagedCache} onChange={v => applyCacheControlUpdates(cacheControlUpdatesForPagedToggle(v, cacheControlState))} disabled={genericPagedCacheToggleDisabled} />
         )}
         {(effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked) && (
           <>
             <InfoNote text={blockDiskOnly
-              ? effectivePagedCapacityText.replace('Effective paged capacity', 'Effective SSD block-index capacity')
+              ? effectivePagedCapacityText.replace('Effective in-memory cache capacity', 'Effective SSD block-index capacity')
               : effectivePagedCapacityText} />
             <SliderField
               label="Block Size (tokens)"
-              tooltip="Number of tokens per paged KV cache block. Smaller blocks reduce memory waste per sequence but increase overhead from managing more blocks. Default 64 is optimal for most models. DSV4 uses 256-token blocks for its native composite cache."
+              tooltip="Number of tokens per content-addressed cache block in the in-memory paged tier or Block Disk Cache. Smaller blocks reduce waste per sequence but increase management overhead. Default 64 is optimal for most models. DSV4 uses 256-token blocks for its native composite cache."
               value={effectivePagedCacheBlockSize}
               onChange={v => onChange('pagedCacheBlockSize', v)}
               min={1}
@@ -1072,10 +1072,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         )}
         {!batchingOff && !effectiveUsePagedCache && <InfoNote text="Block Disk Cache can run as a pure SSD prefix tier while In-Memory Paged Cache remains Off. It keeps only the content-addressed block index in memory, restores KV payloads transiently from SSD, and still requires Prefix Cache." />}
         {(!dsv4Active || dsv4CompositeRequiresPaged) && <CheckField
-          label={dsv4Active ? "DSV4 Block Disk Cache (L2)" : "Block Disk Cache (L2)"}
+          label={dsv4Active ? "DSV4 Block Disk Cache (SSD / L2)" : "Block Disk Cache (SSD / L2)"}
           tooltip={dsv4Active
             ? "Persist DeepSeek-V4 native SWA+CSA/HCA composite cache records to SSD. This is storage for the DSV4 Native Composite Prefix Cache path and does not enable prefix reuse by itself."
-            : "Persist content-addressed prefix blocks to SSD. With In-Memory Paged Cache On, SSD is L2 behind the RAM tier. With In-Memory Paged Cache Off, SSD is the authoritative block tier and KV payloads are restored only transiently for reconstruction. Compatible runtimes preserve native TurboQuant or typed cache records."}
+            : "Persist content-addressed prefix blocks to SSD. With In-Memory Paged Cache (RAM) On, SSD is L2 behind the RAM tier. With the RAM tier Off, SSD is the authoritative block tier and KV payloads are restored only transiently for reconstruction. Compatible runtimes preserve native TurboQuant or typed cache records."}
           checked={cachePolicy.blockDiskCacheChecked}
           onChange={v => applyCacheControlUpdates(dsv4Active ? cacheControlUpdatesForDsv4BlockDiskToggle(v) : cacheControlUpdatesForBlockDiskToggle(v, cacheControlState))}
           disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || openPanguExactTypedCache}
@@ -1122,7 +1122,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {batchingOff && <IncompatWarning text="KV cache quantization requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above." />}
         {!batchingOff && prefixOff && <IncompatWarning text="KV cache quantization requires prefix cache. Enable 'Prefix Cache' above to use KV cache quantization." />}
         {!effectivelyNoBatching && !prefixOff && mixedSwaCacheActive && <PerformanceHint text="Mixed sliding/full attention cache detected — Auto applies TQ4 only to compatible full-attention KV slots and preserves native rotating-SWA metadata. Explicit None disables both live TQ-KV and stored quantization." />}
-        {!effectivelyNoBatching && !prefixOff && hy3Active && <PerformanceHint text="HY3 plain-KV cache detected — Auto uses TQ4 for paged/L2 stored prefixes while live decode stays on the native KV cache. Native MTP D1 copies this cache independently before batch split/verify." />}
+        {!effectivelyNoBatching && !prefixOff && hy3Active && <PerformanceHint text="HY3 plain-KV cache detected — Auto uses TQ4 for RAM/SSD L2 stored prefixes while live decode stays on the native KV cache. Native MTP D1 copies this cache independently before batch split/verify." />}
         {!effectivelyNoBatching && !prefixOff && qwenHybridTqActive && !mixedSwaCacheActive && <PerformanceHint text={bonsaiActive ? 'Bonsai hybrid cache detected — Auto applies TQ8 only to compatible attention KV and preserves native SSM/GLA companion state.' : 'Qwen hybrid cache detected — Auto applies TQ4 only to compatible attention KV and preserves native SSM/GLA companion state.'} />}
         {!effectivelyNoBatching && !prefixOff && qwenFullTqActive && <PerformanceHint text="Qwen full-KV cache detected — Auto stores bulk attention KV with TQ4 and protects the first/last six boundary layers with TQ8. Explicit None disables both live TQ-KV and stored quantization." />}
         {!effectivelyNoBatching && !prefixOff && isMambaCache && !qwenHybridTqActive && !mixedSwaCacheActive && !dsv4Active && !m3Active && !openPanguExactTypedCache && <PerformanceHint text="Hybrid stateful cache detected — the engine keeps SSM/GLA state native and only uses cache codecs proven for that architecture. Generic TurboQuant KV is disabled unless a tested override exists." />}
@@ -1184,19 +1184,19 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!effectivelyNoBatching && <PerformanceHint text="Saves cached prompts to your SSD so they survive server restarts. Next time you load the same model, previous conversations warm up instantly." />}
         {dsv4Active ? (
           <InfoNote text={dsv4CompositeCacheOptIn
-            ? "DSV4 Flash stores persistent prefix state through Block Disk Cache (L2) in the native cache section. Legacy disk cache is disabled because DSV4 restores typed SWA+CSA/HCA composite records, not generic KV entries."
-            : "DSV4 Flash native composite prefix and Block Disk Cache (L2) reuse are explicitly disabled for this session. Legacy disk cache is also unavailable for DSV4 typed cache records."} />
+            ? "DSV4 Flash stores persistent prefix state through Block Disk Cache (SSD / L2) in the native cache section. Legacy disk cache is disabled because DSV4 restores typed SWA+CSA/HCA composite records, not generic KV entries."
+            : "DSV4 Flash native composite prefix and Block Disk Cache (SSD / L2) reuse are explicitly disabled for this session. Legacy disk cache is also unavailable for DSV4 typed cache records."} />
         ) : (
-          <InfoNote text="Legacy prompt disk cache works with the memory-aware prefix backend. Block Disk Cache (L2) persists content-addressed blocks whether Paged RAM is on or explicitly off. Only one disk format can be active at a time." />
+          <InfoNote text="Legacy prompt disk cache works with the memory-aware prefix backend. Block Disk Cache (SSD / L2) persists content-addressed blocks whether In-Memory Paged Cache (RAM) is On or explicitly Off. Only one disk format can be active at a time." />
         )}
         {openPanguExactTypedCache && <InfoNote text="For openPangu this prompt-level disk cache stores the exact typed N-1 composite and restores it across process restarts. Block Disk Cache remains unavailable." />}
         {batchingOff && <IncompatWarning text="Disk cache requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above." />}
-        {!effectivelyNoBatching && cachePolicy.legacyDiskCacheUnavailableReason === 'paged-cache-active' && <IncompatWarning text="Legacy disk cache is not compatible with the in-memory paged backend. For persistent SSD storage, use 'Block Disk Cache (L2)' in the In-Memory Paged Cache section instead. To use legacy Disk Cache, disable the in-memory RAM tier first." />}
-        {!effectivelyNoBatching && cachePolicy.legacyDiskCacheUnavailableReason === 'architecture-requires-paged-cache' && <IncompatWarning text="This architecture requires native/in-memory paged cache when Prefix Cache is enabled. Use 'Block Disk Cache (L2)' in the In-Memory Paged Cache section for persistent SSD storage." />}
-        {!batchingOff && prefixOff && !cachePolicy.legacyDiskCacheDisabled && <InfoNote text="Disk cache is persistent L2 behind Prefix Cache. Turning it on will enable Prefix Cache and disable paged/block cache." />}
+        {!effectivelyNoBatching && cachePolicy.legacyDiskCacheUnavailableReason === 'paged-cache-active' && <IncompatWarning text="Legacy disk cache is not compatible with In-Memory Paged Cache (RAM). For persistent SSD storage, use 'Block Disk Cache (SSD / L2)' in that section instead. To use legacy Disk Cache, disable the RAM tier first." />}
+        {!effectivelyNoBatching && cachePolicy.legacyDiskCacheUnavailableReason === 'architecture-requires-paged-cache' && <IncompatWarning text="This architecture requires a native/in-memory paged cache while Prefix Cache is enabled. Use 'Block Disk Cache (SSD / L2)' in the In-Memory Paged Cache section for persistent SSD storage." />}
+        {!batchingOff && prefixOff && !cachePolicy.legacyDiskCacheDisabled && <InfoNote text="Disk cache is persistent L2 behind Prefix Cache. Turning it on will enable Prefix Cache and disable the in-memory and block-cache backends." />}
         <CheckField
           label="Enable Disk Cache"
-          tooltip="Persist prompt caches to disk for reuse across server restarts. Acts as L2 cache behind the in-memory prefix cache — when a prompt isn't found in memory, it's loaded from disk instead of recomputing. Dramatically speeds up repeated prompts (system prompts, common prefixes). Compatible runtimes store compressed cache data in their native format; path-dependent caches use typed restore records. Requires prefix cache to be enabled. Note: not compatible with paged cache (uses different storage format)."
+          tooltip="Persist whole-prompt caches to disk for reuse across server restarts. This legacy format acts as L2 behind the memory-aware prefix backend. It requires Prefix Cache and is not compatible with In-Memory Paged Cache (RAM); use Block Disk Cache (SSD / L2) for persistent content-addressed blocks instead."
           checked={cachePolicy.legacyDiskCacheChecked}
           onChange={v => applyCacheControlUpdates(cacheControlUpdatesForDiskToggle(v, cacheControlState))}
           disabled={cachePolicy.legacyDiskCacheDisabled}
@@ -1511,7 +1511,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           <IncompatWarning text="This bundle includes media metadata, but its detected vMLX runtime is currently text-only. Attachments stay disabled until that family's native media path is live-verified; changing quantization format alone does not make the media route available." />
         )}
         {!dsv4Active && !smeltActive && !detectedForceTextOnly && config.isMultimodal === true && (
-          <InfoNote text="VLM mode is active — the MLLM scheduler handles image/video processing with full prefix cache, paged KV cache, and KV quantization support." />
+          <InfoNote text="VLM mode is active — the MLLM scheduler handles image/video processing with Prefix Cache, In-Memory Paged Cache (RAM), and KV quantization support." />
         )}
         {!dsv4Active && !smeltActive && !detectedForceTextOnly && config.isMultimodal === false && (
           <InfoNote text="VLM mode is off only when the model is not auto-detected as multimodal. Detected VLM bundles launch with image/video support." />
@@ -1606,7 +1606,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={3}
           disabled={nativeMtpMode === 'off'}
         />
-        <InfoNote text={`Detected scope: ${detectedNativeMtp?.runtimeScope || 'text'}; native cache: ${detectedNativeMtp?.nativeCacheType || detectedCacheSubtype || detectedCacheType || 'unknown'}; depth source: ${detectedNativeMtp?.depthSource || 'default'}. Hybrid cache bundles use paged cache while prefix cache is enabled so KV blocks and SSM state stay in one cache contract.`} />
+        <InfoNote text={`Detected scope: ${detectedNativeMtp?.runtimeScope || 'text'}; native cache: ${detectedNativeMtp?.nativeCacheType || detectedCacheSubtype || detectedCacheType || 'unknown'}; depth source: ${detectedNativeMtp?.depthSource || 'default'}. Hybrid cache bundles use the in-memory paged tier while Prefix Cache is enabled so KV blocks and SSM state stay in one cache contract.`} />
       </Section>
 
       {/* Speculative Decoding */}
@@ -1798,13 +1798,15 @@ export function Tooltip({ text }: { text: string }) {
   }
 
   return (
-    <span className="relative inline-flex ml-1">
+    <span
+      ref={triggerRef}
+      className="relative inline-flex ml-1"
+      onClick={handleClick}
+      onMouseEnter={handleEnter}
+      onMouseLeave={handleLeave}
+    >
       <span
-        ref={triggerRef}
         className={`inline-flex items-center justify-center w-3.5 h-3.5 rounded-full text-[10px] font-bold cursor-help select-none ${pinned ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
-        onClick={handleClick}
-        onMouseEnter={handleEnter}
-        onMouseLeave={handleLeave}
       >
         ?
       </span>

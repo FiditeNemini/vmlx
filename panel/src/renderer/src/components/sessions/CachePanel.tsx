@@ -468,10 +468,10 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
         </div>
       )}
 
-      {/* Block Disk Cache (L2 paged blocks) */}
+      {/* Block Disk Cache (SSD / L2 content-addressed blocks) */}
       {stats?.block_disk_cache && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Block Disk Cache (L2 Paged)</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Block Disk Cache (SSD / L2)</h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
             <StatCard label="Blocks on Disk" value={String(stats.block_disk_cache.blocks_on_disk ?? 0)} />
             <StatCard label="Disk Size" value={`${(stats.block_disk_cache.disk_size_gb ?? 0).toFixed(2)} GB`} />

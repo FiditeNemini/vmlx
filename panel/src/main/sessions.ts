@@ -744,9 +744,9 @@ function pagedCacheCapacityLogLine(args: string[]): string | null {
   const usableBlocks = Math.max(0, maxBlocks - 1)
   const capacity = blockSize * usableBlocks
   if (!pagedActive) {
-    return `Block disk-only index capacity: ${blockSize} tokens/block x ${usableBlocks} usable blocks (${maxBlocks} configured; 1 reserved) = ${capacity} indexed tokens. Paged RAM is disabled; KV payloads persist on SSD and restore transiently.\n`
+    return `Block disk-only index capacity: ${blockSize} tokens/block x ${usableBlocks} usable blocks (${maxBlocks} configured; 1 reserved) = ${capacity} indexed tokens. In-Memory Paged Cache (RAM) is disabled; KV payloads persist on SSD and restore transiently.\n`
   }
-  return `Paged cache capacity: ${blockSize} tokens/block x ${usableBlocks} usable blocks (${maxBlocks} configured; 1 reserved) = ${capacity} tokens. Token capacity is sized by the usable Max Cache Blocks; --cache-memory-mb/--cache-memory-percent set the L1 RAM byte ceiling that evicts free blocks (they bound RAM, not token capacity).\n`
+  return `In-memory paged-cache capacity: ${blockSize} tokens/block x ${usableBlocks} usable blocks (${maxBlocks} configured; 1 reserved) = ${capacity} tokens. Token capacity is sized by the usable Max Cache Blocks; --cache-memory-mb/--cache-memory-percent set the Apple unified-memory ceiling that evicts free blocks (they bound RAM, not token capacity).\n`
 }
 
 function isZayaCacheStackMigrationTarget(modelPath?: string): boolean {
@@ -2009,7 +2009,7 @@ export class SessionManager extends EventEmitter {
             config.usePagedCache === false
           ) {
             config.usePagedCache = true
-            this.pushLog(sessionId, `[INFO] ${freshConfig.family} ${freshConfig.cacheSubtype || freshConfig.cacheType} cache requires paged cache; stale saved Use Paged Cache=false was reset to auto-safe true`)
+            this.pushLog(sessionId, `[INFO] ${freshConfig.family} ${freshConfig.cacheSubtype || freshConfig.cacheType} cache requires the in-memory paged tier; stale saved In-Memory Paged Cache (RAM)=Off was reset to auto-safe On`)
           }
           // Log if model type changed
           if (oldFamily && oldFamily !== 'auto' && freshConfig.toolParser && oldFamily !== freshConfig.toolParser) {

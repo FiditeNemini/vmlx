@@ -774,7 +774,7 @@
       "ssmCompanion": "SSM Companion",
       "scheduler": "Planificador",
       "diskCacheL2": "Caché en disco (L2)",
-      "blockDiskCache": "Caché de bloques en disco (L2 paginada)",
+      "blockDiskCache": "Caché de bloques en disco (SSD / L2)",
       "loading": "Cargando estadísticas de caché...",
       "warmPlaceholder": "Ingrese un prompt de sistema con el cual precalentar la caché..."
     },
@@ -988,7 +988,7 @@
       "section2BodyB": "Si se omite max_tokens, ahora se resuelve a un presupuesto acotado del modelo/default en vez del antiguo 32768, con logs de solicitud mostrando el valor resuelto.",
       "section3Heading": "MTP, caché y endurecimiento del runtime JANG",
       "section3BodyA": "La detección MTP nativa de Qwen3.6, el reconocimiento de group-size JANG/JANGTQ, las comprobaciones de MX matmul y el enrutamiento Hunyuan/ZAYA/Gemma/MiniMax tienen gates más estrictos.",
-      "section3BodyB": "Prefix cache, paged cache, L2 disk cache y TurboQuant KV muestran contadores de salud más claros para que la reutilización de caché sea visible y no supuesta.",
+      "section3BodyB": "Prefix cache, in-memory paged cache, L2 disk cache y TurboQuant KV muestran contadores de salud más claros para que la reutilización de caché sea visible y no supuesta.",
       "section4Heading": "Integridad de release y seguridad del actualizador",
       "section4BodyA": "La app empaquetada se comprueba para Developer ID, notarización, hashes de fuente incluidos, imports críticos, arranque GUI y compatibilidad con latest.json/update manifest antes del release.",
       "section4BodyB": "DeepSeek V4 Flash ahora inicia con su ruta native composite cache por defecto mientras q4/q8 KV genérico sigue desactivado; la salida exacta de código largo sigue como seguimiento hasta limpiar el gate de identificadores.",

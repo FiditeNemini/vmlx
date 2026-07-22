@@ -142,6 +142,30 @@ class TestServeCommandSocketBinding:
         assert "--uds" in output
         assert "Unix domain socket" in output
 
+    def test_serve_cache_help_distinguishes_ram_and_ssd_only(self, capsys):
+        with pytest.raises(SystemExit):
+            with patch("sys.argv", ["vmlx-engine", "serve", "--help"]):
+                from vmlx_engine.cli import main
+                main()
+
+        output = " ".join(capsys.readouterr().out.split())
+        assert "Apple unified memory" in output
+        assert "Block Disk Cache (SSD / L2)" in output
+        assert "SSD-only tier" in output
+        assert "Requires --use-paged-cache" not in output
+
+    def test_bench_cache_help_uses_unified_memory_and_ssd_only_truth(self, capsys):
+        with pytest.raises(SystemExit):
+            with patch("sys.argv", ["vmlx-engine", "bench", "--help"]):
+                from vmlx_engine.cli import main
+                main()
+
+        output = " ".join(capsys.readouterr().out.split())
+        assert "Apple unified memory" in output
+        assert "SSD as the authoritative block tier" in output
+        assert "GPU memory" not in output
+        assert "requires --use-paged-cache" not in output.lower()
+
     def test_uvicorn_bind_kwargs_use_tcp_when_uds_omitted(self):
         from argparse import Namespace
         from vmlx_engine.cli import _uvicorn_bind_kwargs

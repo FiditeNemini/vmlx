@@ -26,7 +26,7 @@ function formatInteger(value: number): string {
 }
 
 export const pagedCacheMemoryIgnoredText =
-  'Cache TTL is ignored while paged cache is active. Cache Memory Limit / Cache Memory % set the L1 RAM byte ceiling for the paged block pool (they bound RAM and evict free blocks); Max Cache Blocks and Block Size set token capacity.'
+  'Cache TTL does not apply while In-Memory Paged Cache is on. Cache Memory Limit / Cache Memory % caps its L1 use of Apple unified memory; Max Cache Blocks and Block Size cap token capacity.'
 
 export function resolvePagedCacheCapacity(input: PagedCacheCapacityInput): {
   blockSize: number
@@ -57,7 +57,7 @@ export function resolvePagedCacheCapacity(input: PagedCacheCapacityInput): {
 
 export function pagedCacheCapacityText(input: PagedCacheCapacityInput): string {
   const resolved = resolvePagedCacheCapacity(input)
-  return `Effective paged capacity: ${resolved.blockSize} tokens/block x ${resolved.usableBlocks} usable blocks (${resolved.maxBlocks} configured; 1 reserved) = ${formatInteger(resolved.capacityTokens)} tokens`
+  return `Effective in-memory cache capacity: ${resolved.blockSize} tokens/block x ${resolved.usableBlocks} usable blocks (${resolved.maxBlocks} configured; 1 reserved) = ${formatInteger(resolved.capacityTokens)} tokens`
 }
 
 export function pagedCacheControlsState(

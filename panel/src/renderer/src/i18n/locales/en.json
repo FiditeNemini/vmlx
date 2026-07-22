@@ -774,7 +774,7 @@
       "ssmCompanion": "SSM Companion",
       "scheduler": "Scheduler",
       "diskCacheL2": "Disk Cache (L2)",
-      "blockDiskCache": "Block Disk Cache (L2 Paged)",
+      "blockDiskCache": "Block Disk Cache (SSD / L2)",
       "loading": "Loading cache stats...",
       "warmPlaceholder": "Enter system prompt to warm cache with..."
     },
@@ -988,7 +988,7 @@
       "section2BodyB": "Omitted max_tokens now resolves to a bounded model/default budget instead of the old 32768 fallback, with request logs showing the resolved value.",
       "section3Heading": "MTP, cache, and JANG runtime hardening",
       "section3BodyA": "Qwen3.6 native MTP detection, JANG/JANGTQ group-size recognition, MX matmul dispatch checks, and Hunyuan/ZAYA/Gemma/MiniMax family routing have stricter gates.",
-      "section3BodyB": "Prefix cache, paged cache, L2 disk cache, and TurboQuant KV paths now expose clearer health counters so cache reuse is visible instead of guessed.",
+      "section3BodyB": "Prefix cache, in-memory paged cache, L2 disk cache, and TurboQuant KV paths now expose clearer health counters so cache reuse is visible instead of guessed.",
       "section4Heading": "Release integrity and updater safety",
       "section4BodyA": "The packaged app is checked for Developer ID signing, notarization, bundled source hashes, critical imports, GUI launch, and latest.json/update manifest compatibility before release.",
       "section4BodyB": "DeepSeek V4 Flash now launches with its native composite cache path by default while generic KV q4/q8 stays suppressed; exact long-code output remains listed as a follow-up until the identifier gate is cleared.",

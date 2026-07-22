@@ -466,7 +466,7 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
             {health.native_cache && (health.native_cache.paged != null || health.native_cache.block_disk_l2 != null) && (
               <InfoCard
                 label="Cache Stack"
-                value={`${health.native_cache.paged ? 'paged' : health.native_cache.prefix ? 'prefix' : 'no-prefix'}${health.native_cache.block_disk_l2 ? ' + block L2' : ''}`}
+                value={`${health.native_cache.paged ? 'RAM paged' : health.native_cache.prefix ? 'prefix' : 'no-prefix'}${health.native_cache.block_disk_l2 ? ' + SSD L2' : ''}`}
               />
             )}
             {health.native_cache?.components?.length ? (
@@ -709,7 +709,7 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
             )}
             {health.cache.block_disk_cache?.blocks_on_disk != null && (
               <InfoCard
-                label="Paged L2"
+                label="Block Disk L2 (SSD)"
                 value={`${health.cache.block_disk_cache.blocks_on_disk || 0} blocks / ${(health.cache.block_disk_cache.total_tokens_on_disk || 0).toLocaleString()} tokens`}
               />
             )}

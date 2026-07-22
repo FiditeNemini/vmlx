@@ -3140,7 +3140,7 @@ describe('JIT Toggle', () => {
         const sessions = fs.readFileSync('src/main/sessions.ts', 'utf-8')
 
         expect(form).toContain('zayaTypedCacheRequiresPaged')
-        expect(form).toContain('ZAYA typed CCA cache requires paged cache while prefix cache is enabled')
+        expect(form).toContain('ZAYA typed CCA cache requires the in-memory paged tier while Prefix Cache is enabled')
         expect(settings).toContain('zayaTypedCacheRequiresPaged')
         expect(sessions).toContain('resolveCacheLaunchPolicy')
         expect(sessions).toContain('architectureRequiresPagedCache')
@@ -3254,19 +3254,38 @@ describe('JIT Toggle', () => {
 
         expect(countOccurrences(form, 'label="DSV4 Native Composite Prefix Cache"')).toBe(1)
         expect(countOccurrences(form, 'label="DSV4 CSA/HCA Pool Codec"')).toBe(1)
-        expect(countOccurrences(form, 'label={dsv4Active ? "DSV4 Block Disk Cache (L2)" : "Block Disk Cache (L2)"}')).toBe(1)
+        expect(countOccurrences(form, 'label={dsv4Active ? "DSV4 Block Disk Cache (SSD / L2)" : "Block Disk Cache (SSD / L2)"}')).toBe(1)
         expect(countOccurrences(form, 'label="In-Memory Paged Cache (RAM)"')).toBe(1)
         expect(form).toContain('{!dsv4Active && (')
         expect(form).not.toContain('LOCKED OFF')
         expect(form).toContain('<CheckField label="In-Memory Paged Cache (RAM)"')
-        expect(form).toContain('It is the RAM tier, not persistent storage; Block Disk Cache (L2) below is the SSD tier')
+        expect(form).toContain('Apple unified memory (shared by CPU and GPU)')
+        expect(form).toContain('Block Disk Cache (SSD / L2) is the persistent tier')
         expect(form).not.toContain('limited GPU RAM')
         expect(form).toContain("e.preventDefault()")
+        expect(form).toContain('className="relative inline-flex ml-1"\n      onClick={handleClick}')
         expect(form).toContain('disabled={dsv4CompositeRequiresPaged}')
         expect(form).toContain('disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}')
         expect(form).not.toContain('DSV4 Native Cache')
         expect(form).not.toContain('DSV4 Composite Prefix Cache')
         expect(form).not.toContain('DSV4 Pool Quantization')
+    })
+
+    it('uses user-facing RAM and SSD cache names in cache status panels', () => {
+        const cachePanel = readFileSync(
+            'src/renderer/src/components/sessions/CachePanel.tsx',
+            'utf-8',
+        )
+        const performancePanel = readFileSync(
+            'src/renderer/src/components/sessions/PerformancePanel.tsx',
+            'utf-8',
+        )
+
+        expect(cachePanel).toContain('Block Disk Cache (SSD / L2)')
+        expect(performancePanel).toContain("health.native_cache.paged ? 'RAM paged'")
+        expect(performancePanel).toContain('Block Disk L2 (SSD)')
+        expect(cachePanel).not.toContain('L2 Paged')
+        expect(performancePanel).not.toContain('Paged L2')
     })
 
     it('settings form disables generic stored KV codec controls for MiniMax-M3 native MSA cache', () => {

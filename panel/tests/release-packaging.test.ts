@@ -53,4 +53,12 @@ describe('release packaging', () => {
     expect(source).toContain('removeBundledWindowsLaunchers')
     expect(source).toContain('removedWindowsLaunchers')
   })
+
+  it('refuses symlinked or cross-checkout release dependencies', () => {
+    const source = read('scripts/build-release-dmgs.sh')
+
+    expect(source).toContain('release node_modules must not be a symlink')
+    expect(source).toContain('NODE_MODULES_REAL=')
+    expect(source).toContain('release node_modules resolves outside this checkout')
+  })
 })

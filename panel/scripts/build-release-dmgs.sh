@@ -18,6 +18,27 @@ ROOT_DIR="$(dirname "$PANEL_DIR")"
 
 cd "$PANEL_DIR"
 
+# Release builds must never borrow dependencies from another checkout. A
+# symlinked node_modules can silently package stale Electron/native code and,
+# in particular, makes electron-builder rebuild better-sqlite3 in the wrong
+# tree. Require a checkout-local install so the signed artifact has one
+# auditable source/dependency root.
+if [[ -L "$PANEL_DIR/node_modules" ]]; then
+  echo "ERROR: release node_modules must not be a symlink: $PANEL_DIR/node_modules" >&2
+  echo "       Unlink it and run npm ci in this release checkout." >&2
+  exit 1
+fi
+if [[ ! -d "$PANEL_DIR/node_modules" ]]; then
+  echo "ERROR: release node_modules is missing: $PANEL_DIR/node_modules" >&2
+  echo "       Run npm ci in this release checkout before packaging." >&2
+  exit 1
+fi
+NODE_MODULES_REAL="$(cd "$PANEL_DIR/node_modules" && pwd -P)"
+if [[ "$NODE_MODULES_REAL" != "$PANEL_DIR/node_modules" ]]; then
+  echo "ERROR: release node_modules resolves outside this checkout: $NODE_MODULES_REAL" >&2
+  exit 1
+fi
+
 VERSION="$(node -p "require('./package.json').version")"
 DIST_DIR="${VMLINUX_RELEASE_OUTPUT_DIR:-release}"
 PYTHON_BIN="${PYTHON:-$ROOT_DIR/.venv/bin/python}"

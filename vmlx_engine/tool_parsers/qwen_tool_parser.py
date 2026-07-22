@@ -102,6 +102,10 @@ class QwenToolParser(ToolParser):
         r"(?m)^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*$"
         r"\s*^\s*([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.*?)\s*$"
     )
+    EMPTY_MARKDOWN_FENCE_PATTERN = re.compile(
+        r"^\s*```(?:text|xml)?\s*```\s*$",
+        re.DOTALL | re.IGNORECASE,
+    )
 
     # Residual tool-scaffolding strip. Some off-format / quant-degraded models
     # (observed live on Holo3-35B-A3B-mxfp4, 2026-07-08) emit ORPHAN scaffolding
@@ -176,6 +180,75 @@ class QwenToolParser(ToolParser):
             parsed = cls._schema_single_string_call_from_match(match, request)
             if parsed is not None:
                 return parsed
+        return None
+
+    @classmethod
+    def _orphan_function_wrapper_tool_call(
+        cls, text: str, request: dict[str, Any] | None
+    ) -> tuple[dict[str, Any], re.Match[str]] | None:
+        """Parse a closed Qwen tool block whose function opener was omitted.
+
+        Observed live in the Electron full-tool-catalog path on
+        Qwen3.6-35B-A3B-JANGTQ-CRACK::
+
+            <tool_call>
+            file_info
+            <parameter=path>panel/package.json</parameter>
+            </function>
+            </tool_call>
+
+        The call is accepted only when the bare first line names an advertised
+        tool and every emitted parameter belongs to that tool's request schema.
+        This keeps ordinary XML/prose from being promoted into executable work.
+        """
+        if not request:
+            return None
+        for match in cls.TOOL_BLOCK_PATTERN.finditer(text):
+            block = match.group(0)
+            if "<function" in block:
+                continue
+            inner = re.sub(r"^\s*<tool_call>\s*", "", block, count=1)
+            inner = re.sub(r"\s*</tool_call>\s*$", "", inner, count=1)
+            lines = [line.strip() for line in inner.splitlines() if line.strip()]
+            if not lines:
+                continue
+            tool_name = lines[0]
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", tool_name):
+                continue
+            schema = cls._function_schema_for_tool(request, tool_name)
+            if not isinstance(schema, dict):
+                continue
+            properties = schema.get("properties")
+            required = schema.get("required") or []
+            if not isinstance(properties, dict) or not isinstance(required, list):
+                continue
+            params = cls.PARAMETER_PATTERN.findall(block)
+            if not params:
+                continue
+            arguments: dict[str, Any] = {}
+            invalid = False
+            for param_name, raw_value in params:
+                name = param_name.strip()
+                if name not in properties or name in arguments:
+                    invalid = True
+                    break
+                arguments[name] = cls._coerce_arg_value(raw_value)
+            if invalid or any(
+                name not in arguments
+                or arguments[name] is None
+                or (isinstance(arguments[name], str) and not arguments[name].strip())
+                for name in required
+                if isinstance(name, str)
+            ):
+                continue
+            return (
+                {
+                    "id": generate_tool_id(),
+                    "name": tool_name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                },
+                match,
+            )
         return None
 
     @classmethod
@@ -337,6 +410,21 @@ class QwenToolParser(ToolParser):
                 tools_called=True,
                 tool_calls=tool_calls,
                 content=cleaned_text if cleaned_text else None,
+            )
+        orphan_wrapper_call = self._orphan_function_wrapper_tool_call(
+            cleaned_text, request
+        )
+        if orphan_wrapper_call is not None:
+            call, match = orphan_wrapper_call
+            remaining = (
+                cleaned_text[: match.start()] + cleaned_text[match.end() :]
+            ).strip()
+            if self.EMPTY_MARKDOWN_FENCE_PATTERN.fullmatch(remaining):
+                remaining = ""
+            return ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=[call],
+                content=remaining or None,
             )
         markdown_call = self._markdown_tool_call(cleaned_text, request)
         if markdown_call is not None:

@@ -434,6 +434,112 @@ class TestQwenToolParser:
             "path": "panel/package.json"
         }
 
+    def test_orphan_function_opener_inside_tool_wrapper_uses_request_schema(self, parser):
+        """A closed wrapper with a missing function opener remains executable.
+
+        This exact fenced shape was emitted by the live Qwen3.6 JANGTQ
+        Electron full-tool-catalog turn. The advertised tool name and parameter
+        schema make it unambiguous; the orphan closing tag and fence are not
+        visible assistant content.
+        """
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "additionalProperties": False,
+                    },
+                }
+            ]
+        }
+        text = (
+            "```text\n"
+            "<tool_call>\n"
+            "file_info\n"
+            "<parameter=path>\n"
+            "panel/package.json\n"
+            "</parameter>\n"
+            "</function>\n"
+            "</tool_call>\n"
+            "```"
+        )
+
+        result = parser.extract_tool_calls(text, request=request)
+
+        assert result.tools_called
+        assert result.content is None
+        assert result.tool_calls[0]["name"] == "file_info"
+        assert json.loads(result.tool_calls[0]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+
+    def test_orphan_function_opener_rejects_unadvertised_tool_or_parameter(self, parser):
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        unadvertised = (
+            "<tool_call>delete_file<parameter=path>x</parameter>"
+            "</function></tool_call>"
+        )
+        wrong_parameter = (
+            "<tool_call>file_info<parameter=command>x</parameter>"
+            "</function></tool_call>"
+        )
+
+        assert not parser.extract_tool_calls(unadvertised, request=request).tools_called
+        assert not parser.extract_tool_calls(wrong_parameter, request=request).tools_called
+
+    def test_orphan_function_opener_streaming_completes_only_when_schema_valid(self, parser):
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        current = (
+            "<tool_call>\nfile_info\n<parameter=path>panel/package.json</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+
+        result = parser.extract_tool_calls_streaming(
+            previous_text=current[:-12],
+            current_text=current,
+            delta_text="</tool_call>",
+            request=request,
+        )
+
+        assert result is not None
+        call = result["tool_calls"][0]
+        assert call["function"]["name"] == "file_info"
+        assert json.loads(call["function"]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+
     def test_labeled_line_call_stream_stop_truncates_after_argument(self, parser):
         parser._stream_stop_request = {
             "tools": [

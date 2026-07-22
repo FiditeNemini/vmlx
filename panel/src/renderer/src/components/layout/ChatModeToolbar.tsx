@@ -94,7 +94,20 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
   // Keep session status in sync via context
   const contextSession = sessions.find(s => s.id === activeSessionId)
   const displaySession = sessionDetail
-    ? { ...sessionDetail, status: contextSession?.status || sessionDetail.status, port: contextSession?.port || sessionDetail.port }
+    ? {
+        ...sessionDetail,
+        status: contextSession?.status ?? sessionDetail.status,
+        modelPath: contextSession?.modelPath ?? sessionDetail.modelPath,
+        modelName: contextSession?.modelName ?? sessionDetail.modelName,
+        host: contextSession?.host ?? sessionDetail.host,
+        port: contextSession?.port ?? sessionDetail.port,
+        // When a context row exists its PID is authoritative even when it is
+        // undefined: session:stopped deliberately clears the old process ID.
+        pid: contextSession ? contextSession.pid : sessionDetail.pid,
+        type: contextSession?.type ?? sessionDetail.type,
+        remoteUrl: contextSession?.remoteUrl ?? sessionDetail.remoteUrl,
+        config: contextSession?.config ?? sessionDetail.config,
+      }
     : null
 
   const isRemote = displaySession?.type === 'remote'

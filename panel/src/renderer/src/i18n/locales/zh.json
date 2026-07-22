@@ -696,6 +696,7 @@
       "cliPreview": "CLI 命令预览",
       "saving": "保存中...",
       "saveSettings": "保存设置",
+      "saveForNextRestart": "保存并在下次重启时应用",
       "restarting": "重启中...",
       "saveAndRestart": "保存并重启",
       "loading": "加载会话中...",

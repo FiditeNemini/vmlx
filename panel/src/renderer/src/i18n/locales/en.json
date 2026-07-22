@@ -696,6 +696,7 @@
       "cliPreview": "CLI Command Preview",
       "saving": "Saving...",
       "saveSettings": "Save Settings",
+      "saveForNextRestart": "Save for Next Restart",
       "restarting": "Restarting...",
       "saveAndRestart": "Save & Restart",
       "loading": "Loading session...",

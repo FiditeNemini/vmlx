@@ -158,17 +158,9 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         return
       }
 
-      // Wait for session:stopped event instead of fixed delay (avoids port race)
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(resolve, 15000) // hard cap at 15s
-        const unsub = window.api.sessions.onStopped((data: any) => {
-          if (data.sessionId === session.id) {
-            clearTimeout(timeout)
-            unsub()
-            resolve()
-          }
-        })
-      })
+      // sessions.stop resolves only after stopSession has killed the process,
+      // cleared its durable PID, and emitted session:stopped. Subscribing after
+      // that await misses the event and adds a guaranteed timeout delay.
       setMessage({ type: 'success', text: 'Starting with new settings...' })
       const startResult = await window.api.sessions.start(session.id)
       if (!startResult.success) {
@@ -331,7 +323,9 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           disabled={!dirty || saving || restarting}
           className="flex-1 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-40"
         >
-          {saving && !restarting ? t('common.saving') : t('common.save')}
+          {saving && !restarting
+            ? t('common.saving')
+            : t(isRunning ? 'sessions.settings.saveForNextRestart' : 'common.save')}
         </button>
         {isRunning && !isRemote && (
           <button

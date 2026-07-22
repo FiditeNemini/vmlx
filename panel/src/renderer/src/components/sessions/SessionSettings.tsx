@@ -827,10 +827,8 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
         return
       }
 
-      // Wait for port to free (backend uses up to 10s SIGKILL timeout)
-      await new Promise(r => setTimeout(r, 2500))
-
-      // Start with new config
+      // sessions.stop resolves only after stopSession has completed, so the
+      // new process can start immediately without an arbitrary renderer delay.
       setMessage({ type: 'success', text: 'Starting session with new settings...' })
       const startResult = await window.api.sessions.start(sessionId)
       if (!startResult.success) {
@@ -984,7 +982,9 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             disabled={!dirty || saving || restarting}
             className="px-6 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 font-medium disabled:opacity-40"
           >
-            {saving && !restarting ? t('common.saving') : t('sessions.settings.saveSettings')}
+            {saving && !restarting
+              ? t('common.saving')
+              : t(isRunning ? 'sessions.settings.saveForNextRestart' : 'sessions.settings.saveSettings')}
           </button>
           {isRunning && (
             <button

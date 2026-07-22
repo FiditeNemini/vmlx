@@ -696,6 +696,7 @@
       "cliPreview": "CLI 명령 미리보기",
       "saving": "저장 중...",
       "saveSettings": "설정 저장",
+      "saveForNextRestart": "다음 다시 시작을 위해 저장",
       "restarting": "다시 시작 중...",
       "saveAndRestart": "저장 및 다시 시작",
       "loading": "세션을 불러오는 중...",

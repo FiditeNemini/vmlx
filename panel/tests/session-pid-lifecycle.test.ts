@@ -25,4 +25,12 @@ describe('session PID lifecycle', () => {
     expect(source.match(/\.\.\.\(data\.pid \? \{ pid: data\.pid \} : \{\}\)/g)).toHaveLength(3)
     expect(source).toContain("status: 'stopped' as const, pid: undefined")
   })
+
+  it('uses the shared context PID as authoritative in chat settings', () => {
+    const source = read('src/renderer/src/components/layout/ChatModeToolbar.tsx')
+
+    expect(source).toContain('pid: contextSession ? contextSession.pid : sessionDetail.pid')
+    expect(source).toContain('config: contextSession?.config ?? sessionDetail.config')
+    expect(source).toContain('pid: displaySession.pid')
+  })
 })

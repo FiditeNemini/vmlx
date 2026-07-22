@@ -696,6 +696,7 @@
       "cliPreview": "Vista previa del comando CLI",
       "saving": "Guardando...",
       "saveSettings": "Guardar configuración",
+      "saveForNextRestart": "Guardar para el próximo reinicio",
       "restarting": "Reiniciando...",
       "saveAndRestart": "Guardar y reiniciar",
       "loading": "Cargando sesión...",

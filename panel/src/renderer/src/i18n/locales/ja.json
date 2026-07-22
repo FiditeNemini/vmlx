@@ -696,6 +696,7 @@
       "cliPreview": "CLI コマンドプレビュー",
       "saving": "保存中...",
       "saveSettings": "設定を保存",
+      "saveForNextRestart": "次回の再起動用に保存",
       "restarting": "再起動中...",
       "saveAndRestart": "保存して再起動",
       "loading": "セッションを読み込み中...",

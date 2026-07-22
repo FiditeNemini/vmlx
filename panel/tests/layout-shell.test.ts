@@ -76,9 +76,11 @@ interface SessionSummary {
   modelName?: string
   host: string
   port: number
+  pid?: number
   status: 'running' | 'stopped' | 'error' | 'loading'
   type?: 'local' | 'remote'
   remoteUrl?: string
+  config?: string
 }
 
 // ─── Date Grouping (from ChatHistory.tsx) ────────────────────────────────────
@@ -181,8 +183,15 @@ function mergeSessionStatus(
   if (!sessionDetail) return null
   return {
     ...sessionDetail,
-    status: contextSession?.status || sessionDetail.status,
-    port: contextSession?.port || sessionDetail.port,
+    status: contextSession?.status ?? sessionDetail.status,
+    modelPath: contextSession?.modelPath ?? sessionDetail.modelPath,
+    modelName: contextSession?.modelName ?? sessionDetail.modelName,
+    host: contextSession?.host ?? sessionDetail.host,
+    port: contextSession?.port ?? sessionDetail.port,
+    pid: contextSession ? contextSession.pid : sessionDetail.pid,
+    type: contextSession?.type ?? sessionDetail.type,
+    remoteUrl: contextSession?.remoteUrl ?? sessionDetail.remoteUrl,
+    config: contextSession?.config ?? sessionDetail.config,
   }
 }
 
@@ -816,6 +825,29 @@ describe('Session Status Merge', () => {
     expect(merged?.port).toBe(9001)
   })
 
+  it('uses the live context PID over a stale detail PID', () => {
+    const detail = makeSessionDetail({ pid: 111 })
+    const context = makeSession({ id: 'session-1', status: 'running', pid: 222 })
+    const merged = mergeSessionStatus(detail, context)
+    expect(merged?.pid).toBe(222)
+  })
+
+  it('clears a stale detail PID when the live context has stopped', () => {
+    const detail = makeSessionDetail({ pid: 111, status: 'running' })
+    const context = makeSession({ id: 'session-1', status: 'stopped', pid: undefined })
+    const merged = mergeSessionStatus(detail, context)
+    expect(merged?.status).toBe('stopped')
+    expect(merged?.pid).toBeUndefined()
+  })
+
+  it('uses current context host and config for downstream chat settings', () => {
+    const detail = makeSessionDetail({ host: '127.0.0.1', config: '{"logLevel":"DEBUG"}' })
+    const context = makeSession({ host: '0.0.0.0', config: '{"logLevel":"INFO"}' })
+    const merged = mergeSessionStatus(detail, context)
+    expect(merged?.host).toBe('0.0.0.0')
+    expect(merged?.config).toBe('{"logLevel":"INFO"}')
+  })
+
   it('falls back to detail when no context session', () => {
     const detail = makeSessionDetail({ status: 'stopped', port: 8000 })
     const merged = mergeSessionStatus(detail, undefined)
@@ -823,7 +855,7 @@ describe('Session Status Merge', () => {
     expect(merged?.port).toBe(8000)
   })
 
-  it('preserves all other detail fields', () => {
+  it('preserves detail fields that are absent from the current context row', () => {
     const detail = makeSessionDetail({
       modelPath: 'test/model',
       modelName: 'TestModel',
@@ -832,7 +864,12 @@ describe('Session Status Merge', () => {
       type: 'remote',
       remoteUrl: 'https://example.com',
     })
-    const context = makeSession({ id: 'session-1', status: 'running' })
+    const context = makeSession({
+      id: 'session-1',
+      status: 'running',
+      modelPath: 'test/model',
+      host: '0.0.0.0',
+    })
     const merged = mergeSessionStatus(detail, context)
     expect(merged?.modelPath).toBe('test/model')
     expect(merged?.modelName).toBe('TestModel')

@@ -2655,6 +2655,14 @@ export class SessionManager extends EventEmitter {
         Object.prototype.hasOwnProperty.call(currentConfig, k)
       ),
     ]
+    const updatedSession = db.getSession(sessionId)
+    if (updatedSession) {
+      this.emit('session:updated', {
+        sessionId,
+        session: updatedSession,
+        changedKeys,
+      })
+    }
     return {
       restartRequired: isRunning && changedKeys.length > 0,
       changedKeys,

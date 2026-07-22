@@ -18478,6 +18478,10 @@ async def stream_chat_completion(
         and _exact_once_requested
         and not _has_post_user_tool_result
     )
+    _stream_speculative_tool_start_allowed = bool(
+        _exact_once_tool_contract
+        or _is_required_tool_choice(getattr(request, "tool_choice", None))
+    )
     if tool_call_active and _exact_once_requested:
         logger.info(
             "Chat exact-once tool gate: initial_selection=%s "
@@ -18908,13 +18912,44 @@ async def stream_chat_completion(
                             )
                             yield f"data: {_dump_chat_chunk(reasoning_chunk)}\n\n"
                     # Buffering is speculative until the final parser returns a
-                    # schema-valid function call. Do not advertise an empty
-                    # OpenAI tool_calls delta here: optional/post-tool turns can
-                    # false-trigger on native marker residue and strict coding
+                    # schema-valid function call. Initial exact-once/required
+                    # tool-selection turns may advertise a START delta so
+                    # strict clients know a call is in progress. Optional and
+                    # post-tool continuations must not, because native marker
+                    # residue can false-trigger buffering and strict coding
                     # harnesses will treat the empty delta as a real call.
                     if (
                         not tool_call_buffering_notified
+                        and _stream_speculative_tool_start_allowed
                     ):
+                        tool_call_buffering_notified = True
+                        if _stream_tool_call_start_id is None:
+                            _stream_tool_call_start_id = generate_tool_id()
+                        start_chunk = {
+                            "id": response_id,
+                            "object": "chat.completion.chunk",
+                            "created": _created_ts,
+                            "model": request.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": _stream_tool_call_start_id,
+                                                "type": "function",
+                                                "function": {"name": "", "arguments": ""},
+                                            }
+                                        ],
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {_dump_chat_chunk(start_chunk)}\n\n"
+                    elif not tool_call_buffering_notified:
                         tool_call_buffering_notified = True
                     # Subsequent ticks: spec-clean empty delta.
                     # No `tool_call_generating` field and no non-terminal usage.
@@ -19084,12 +19119,42 @@ async def stream_chat_completion(
                     )
 
                 if tool_call_buffering:
-                    # Same contract as the reasoning-parser branch: buffering is
-                    # speculative until final parse, so emit only neutral
-                    # heartbeats before a schema-valid tool call exists.
+                    # Same contract as the reasoning-parser branch: initial
+                    # exact-once/required tool-selection turns may emit a START
+                    # delta; optional/post-tool buffering emits only neutral
+                    # heartbeats until a schema-valid tool call exists.
                     if (
                         not tool_call_buffering_notified
+                        and _stream_speculative_tool_start_allowed
                     ):
+                        tool_call_buffering_notified = True
+                        if _stream_tool_call_start_id is None:
+                            _stream_tool_call_start_id = generate_tool_id()
+                        start_chunk = {
+                            "id": response_id,
+                            "object": "chat.completion.chunk",
+                            "created": _created_ts,
+                            "model": request.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": _stream_tool_call_start_id,
+                                                "type": "function",
+                                                "function": {"name": "", "arguments": ""},
+                                            }
+                                        ],
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {_dump_chat_chunk(start_chunk)}\n\n"
+                    elif not tool_call_buffering_notified:
                         tool_call_buffering_notified = True
                     buf_chunk = ChatCompletionChunk(
                         id=response_id,

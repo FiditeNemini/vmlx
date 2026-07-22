@@ -1670,6 +1670,16 @@ export class SessionManager extends EventEmitter {
         // Validate before unloading the current model. Without this ordering a
         // stale/malformed target can strand the user with zero loaded models.
         this.preflightSessionStart(sessionId)
+        // Single-model mode is a RAM/process contract, not just a DB-state
+        // contract. A prior Electron crash, gateway restart, or stale session
+        // row can leave a healthy vmlx-engine alive while its DB row says
+        // stopped (or points at an old port). Stop those detected engines
+        // before launching the replacement, otherwise the UI can show one
+        // running model while two engines are resident.
+        await this.stopDetectedLocalEnginesForSingleModel(sessionId)
+        if (await this.adoptDetectedTargetProcessForStart(sessionId)) {
+          return
+        }
         const otherLocalSessions = db.getSessions().filter(other =>
           other.id !== sessionId &&
           other.type !== 'remote' &&
@@ -1707,6 +1717,96 @@ export class SessionManager extends EventEmitter {
     } finally {
       release()
     }
+  }
+
+  async enforceSingleModelLocalProcessContract(
+    targetSessionId: string,
+    options: { preserveActiveTarget?: boolean } = {},
+  ): Promise<boolean> {
+    if (db.getSetting('gateway_single_model_mode') !== 'true') return false
+    this.preflightSessionStart(targetSessionId)
+    await this.stopDetectedLocalEnginesForSingleModel(targetSessionId)
+    if (options.preserveActiveTarget) {
+      return this.adoptDetectedTargetProcessForStart(targetSessionId)
+    }
+    return false
+  }
+
+  private async stopDetectedLocalEnginesForSingleModel(targetSessionId: string): Promise<void> {
+    const target = db.getSession(targetSessionId)
+    if (!target || target.type === 'remote') return
+
+    const targetPath = normalizePath(target.modelPath)
+    const detected = await this.detect()
+    const allSessions = db.getSessions()
+
+    for (const proc of detected) {
+      const livePath = normalizePath(proc.modelPath)
+      const isHealthyTarget =
+        proc.healthy &&
+        livePath === targetPath &&
+        proc.port === target.port
+      if (isHealthyTarget) continue
+
+      console.log(
+        `[SESSIONS] single-model mode: stopping detected engine pid=${proc.pid} ` +
+        `port=${proc.port} model=${livePath} before starting ${targetSessionId}`,
+      )
+      await this.terminateDetectedLocalEngine(proc, allSessions)
+    }
+  }
+
+  private async terminateDetectedLocalEngine(proc: DetectedProcess, sessions = db.getSessions()): Promise<void> {
+    this.killPid(proc.pid)
+    await new Promise(r => setTimeout(r, 1500))
+    try {
+      process.kill(proc.pid, 0)
+      this.killPid(proc.pid, 'SIGKILL')
+    } catch (_) { }
+
+    const livePath = normalizePath(proc.modelPath)
+    const owner = sessions.find(s =>
+      s.type !== 'remote' &&
+      (normalizePath(s.modelPath) === livePath || s.port === proc.port || s.pid === proc.pid)
+    )
+    if (owner) {
+      this.processes.delete(owner.id)
+      db.updateSession(owner.id, {
+        status: 'stopped',
+        pid: undefined,
+        lastStoppedAt: Date.now(),
+        standbyDepth: null,
+      })
+      this.emit('session:stopped', { sessionId: owner.id })
+    }
+  }
+
+  private async adoptDetectedTargetProcessForStart(sessionId: string): Promise<boolean> {
+    const session = db.getSession(sessionId)
+    if (!session || session.type === 'remote') return false
+
+    const targetPath = normalizePath(session.modelPath)
+    const detected = await this.detect()
+    const proc = detected.find(p =>
+      p.healthy &&
+      normalizePath(p.modelPath) === targetPath &&
+      p.port === session.port
+    )
+    if (!proc) return false
+
+    const status = proc.standbyDepth ? 'standby' : 'running'
+    db.updateSession(session.id, {
+      status,
+      pid: proc.pid,
+      port: proc.port,
+      modelPath: targetPath,
+      modelName: proc.modelName || session.modelName,
+      lastStartedAt: Date.now(),
+      standbyDepth: proc.standbyDepth || null,
+    })
+    this.processes.set(session.id, { process: null, adoptedPid: proc.pid })
+    this.emit('session:ready', { sessionId: session.id, port: proc.port, pid: proc.pid })
+    return true
   }
 
   private async _startSessionInner(sessionId: string): Promise<void> {
@@ -2604,7 +2704,8 @@ export class SessionManager extends EventEmitter {
   // ─── Discovery & Adoption ─────────────────────────────────────────
 
   async detectAndAdoptAll(): Promise<Session[]> {
-    const processes = await this.detect()
+    let processes = await this.detect()
+    processes = await this.pruneDetectedProcessesForSingleModel(processes)
     const adopted: Session[] = []
 
     for (const proc of processes) {
@@ -2736,6 +2837,50 @@ export class SessionManager extends EventEmitter {
     }
 
     return adopted
+  }
+
+  private async pruneDetectedProcessesForSingleModel(processes: DetectedProcess[]): Promise<DetectedProcess[]> {
+    if (db.getSetting('gateway_single_model_mode') !== 'true') return processes
+    const healthy = processes.filter(proc => proc.healthy)
+    if (healthy.length <= 1) return processes
+
+    const sessions = db.getSessions()
+    const score = (proc: DetectedProcess): [number, number, number, number] => {
+      const livePath = normalizePath(proc.modelPath)
+      const owner = sessions.find(s =>
+        s.type !== 'remote' &&
+        (s.pid === proc.pid || s.port === proc.port || normalizePath(s.modelPath) === livePath)
+      )
+      const active = owner && ['running', 'loading', 'standby'].includes(owner.status) ? 1 : 0
+      const started = Number(owner?.lastStartedAt || 0)
+      const updated = Number(owner?.updatedAt || 0)
+      return [active, started, updated, proc.pid]
+    }
+    const better = (a: DetectedProcess, b: DetectedProcess) => {
+      const sa = score(a)
+      const sb = score(b)
+      for (let i = 0; i < sa.length; i += 1) {
+        if (sa[i] !== sb[i]) return sa[i] > sb[i]
+      }
+      return false
+    }
+
+    let keep = healthy[0]
+    for (const proc of healthy.slice(1)) {
+      if (better(proc, keep)) keep = proc
+    }
+
+    for (const proc of healthy) {
+      if (proc === keep) continue
+      console.log(
+        `[SESSIONS] single-model mode: pruning detected engine pid=${proc.pid} ` +
+        `port=${proc.port} model=${normalizePath(proc.modelPath)} during adoption; ` +
+        `keeping pid=${keep.pid} port=${keep.port}`,
+      )
+      await this.terminateDetectedLocalEngine(proc, sessions)
+    }
+
+    return processes.filter(proc => proc === keep || !healthy.includes(proc))
   }
 
   // ─── Global Health Monitor ─────────────────────────────────────────

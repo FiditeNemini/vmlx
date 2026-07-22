@@ -2557,6 +2557,129 @@ class TestOpenAILogprobsFormatting:
         assert done_seen is True
 
     @pytest.mark.asyncio
+    async def test_streaming_chat_exact_once_buffers_schema_labeled_qwen_call(
+        self, monkeypatch
+    ):
+        """Exact-one tool selection must not leak off-template Qwen call prose.
+
+        Live Qwen3.6 JANGTQ emitted:
+            [Q36-JT-UI-TOOL2]
+            file_info
+            path: panel/package.json
+
+        That is a schema-valid tool intent, but it contains no canonical XML
+        marker. Chat must buffer the selection turn from token one, then emit a
+        structured tool_call instead of first streaming the lines as content.
+        """
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+        from vmlx_engine.engine.base import GenerationOutput
+
+        chunks_out = (
+            "[Q36-JT-UI-TOOL2]\n",
+            "file_info\npath: panel/package.json\n[Q36-JT-UI-TOOL2-DONE SIZE=3",
+        )
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+            aborted = False
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = ""
+                for index, delta in enumerate(chunks_out, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=delta,
+                        tokens=list(range(index)),
+                        prompt_tokens=8,
+                        completion_tokens=index,
+                        finished=False,
+                        finish_reason=None,
+                    )
+                    if self.aborted:
+                        return
+
+            async def abort_request(self, request_id):
+                self.aborted = True
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "qwen-jangtq-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", "qwen")
+
+        request = ChatCompletionRequest(
+            model="qwen-jangtq-test",
+            messages=[
+                Message(
+                    role="user",
+                    content=(
+                        "Call the built-in file_info tool exactly once with path "
+                        "panel/package.json. You must use the tool."
+                    ),
+                )
+            ],
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ],
+        )
+
+        chunks = []
+        done_seen = False
+        async for line in server.stream_chat_completion(
+            _Engine(),
+            [m.model_dump(exclude_none=True) for m in request.messages],
+            request,
+            fastapi_request=None,
+        ):
+            if line.strip() == "data: [DONE]":
+                done_seen = True
+            elif line.startswith("data: "):
+                chunks.append(json.loads(line.removeprefix("data: ")))
+
+        visible = "".join(
+            choice.get("delta", {}).get("content") or ""
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+        )
+        tool_deltas = [
+            tool_call
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+            for tool_call in choice.get("delta", {}).get("tool_calls", [])
+        ]
+        finish_reasons = [
+            choice.get("finish_reason")
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+            if choice.get("finish_reason") is not None
+        ]
+
+        assert visible == ""
+        assert tool_deltas[0]["function"] == {"name": "", "arguments": ""}
+        assert tool_deltas[-1]["function"]["name"] == "file_info"
+        assert json.loads(tool_deltas[-1]["function"]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+        assert finish_reasons == ["tool_calls"]
+        assert done_seen is True
+
+    @pytest.mark.asyncio
     async def test_streaming_chat_hides_zaya_visual_grounding_markup(self, monkeypatch):
         """ZAYA-VL point spans are control markup, not visible assistant text."""
         import json

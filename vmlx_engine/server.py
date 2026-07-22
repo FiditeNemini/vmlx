@@ -18381,6 +18381,34 @@ async def stream_chat_completion(
         and not _suppress_tools
         and not _tool_call_parser_disabled_explicitly
     )
+    # An explicit single-call contract has no legitimate visible prose before
+    # the first function call. Responses already buffers that selection turn
+    # from token one; Chat must do the same or native/off-template call
+    # scaffolding can leak as content before final parsing converts it into
+    # structured tool_calls. After a real tool result is in history, stream the
+    # answer normally and only re-buffer if a new marker appears.
+    _exact_once_requested = _request_explicitly_requires_one_tool_once(request)
+    _has_post_user_tool_result = _responses_messages_have_tool_result_after_latest_user(
+        messages
+    )
+    _exact_once_tool_contract = bool(
+        tool_call_active
+        and _exact_once_requested
+        and not _has_post_user_tool_result
+    )
+    if tool_call_active and _exact_once_requested:
+        logger.info(
+            "Chat exact-once tool gate: initial_selection=%s "
+            "post_user_tool_result=%s message_shapes=%s",
+            _exact_once_tool_contract,
+            _has_post_user_tool_result,
+            [
+                (message.get("role"), message.get("type"))
+                for message in messages
+                if isinstance(message, dict)
+            ],
+        )
+    tool_call_buffering = _exact_once_tool_contract
     # Early-stop after a complete tool-call turn (opt-in per tool parser via
     # STREAM_STOPS_AFTER_COMPLETE_CALL). Live-proven need: degraded 2-bit
     # openPangu keeps narrating after <|tool_call_end|> instead of emitting
@@ -18760,6 +18788,42 @@ async def stream_chat_completion(
                             tool_call_buffering = True
 
                 if tool_call_buffering:
+                    if (
+                        _exact_once_tool_contract
+                        and not suppress_reasoning
+                        and delta_msg.reasoning
+                    ):
+                        # Exact-once selection turns buffer visible content from
+                        # token one, but genuine reasoning should still stream on
+                        # the reasoning rail. Stop the reasoning prefix at the
+                        # first native tool marker so the structured call itself
+                        # never leaks as reasoning text.
+                        _safe_reasoning = _visible_prefix_before_unparsed_tool_markup(
+                            accumulated_reasoning
+                        )
+                        if _safe_reasoning.startswith(streamed_reasoning_content):
+                            _reasoning_delta = _safe_reasoning[
+                                len(streamed_reasoning_content) :
+                            ]
+                        else:
+                            _reasoning_delta = ""
+                        if _reasoning_delta:
+                            reasoning_was_streamed = True
+                            streamed_reasoning_content += _reasoning_delta
+                            reasoning_chunk = ChatCompletionChunk(
+                                id=response_id,
+                                created=_created_ts,
+                                model=request.model,
+                                choices=[
+                                    ChatCompletionChunkChoice(
+                                        delta=ChatCompletionChunkDelta(
+                                            reasoning=_reasoning_delta
+                                        ),
+                                        finish_reason=None,
+                                    )
+                                ],
+                            )
+                            yield f"data: {_dump_chat_chunk(reasoning_chunk)}\n\n"
                     # #219: On the FIRST buffering tick emit a proper OpenAI
                     # streaming tool_calls START delta so strict clients
                     # (OpenCode, AI SDK) see tool-call activity immediately

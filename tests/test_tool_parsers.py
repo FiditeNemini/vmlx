@@ -269,6 +269,193 @@ class TestQwenToolParser:
         args = json.loads(result.tool_calls[0]["arguments"])
         assert args == {"command": 'echo "Tool test successful!"'}
 
+    def test_markdown_call_header_uses_single_required_schema(self, parser):
+        """Qwen3.6 JANGTQ may emit a markdown-looking call header.
+
+        Observed live on Qwen3.6-35B-A3B-JANGTQ-CRACK: the model wrote
+        "# Calling file_info" and "# path=panel/package.json", then continued
+        into a fake "# Tool result" block because the parser did not stop the
+        stream. Only the schema-valid header+argument pair is the call; the
+        fake result must not become content or arguments.
+        """
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        text = (
+            "# Calling file_info\n"
+            "# path=panel/package.json\n\n"
+            "# Tool result:\n"
+            '# {"path": "panel/package.json", "size": "2.4 KB"}'
+        )
+
+        result = parser.extract_tool_calls(text, request=request)
+
+        assert result.tools_called
+        assert result.content is None
+        assert result.tool_calls[0]["name"] == "file_info"
+        assert json.loads(result.tool_calls[0]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+
+    def test_markdown_call_requires_matching_schema(self, parser):
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+
+        result = parser.extract_tool_calls(
+            "# Calling file_info\n# command=panel/package.json",
+            request=request,
+        )
+        no_schema = parser.extract_tool_calls(
+            "# Calling file_info\n# path=panel/package.json"
+        )
+
+        assert not result.tools_called
+        assert not no_schema.tools_called
+
+    def test_markdown_call_streaming_uses_request_schema(self, parser):
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        current = "# Calling file_info\n# path=panel/package.json"
+
+        result = parser.extract_tool_calls_streaming(
+            previous_text="# Calling file_info\n",
+            current_text=current,
+            delta_text="# path=panel/package.json",
+            request=request,
+        )
+
+        assert result is not None
+        assert "tool_calls" in result
+        call = result["tool_calls"][0]
+        assert call["function"]["name"] == "file_info"
+        assert json.loads(call["function"]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+
+    def test_labeled_line_call_uses_schema_after_prompt_marker(self, parser):
+        """Qwen3.6 JANGTQ may prefix the tool block with the benchmark marker
+        and then write a plain tool-name/parameter pair. The parser may accept
+        only the schema-valid pair, not the marker or later answer text.
+        """
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        text = (
+            "[Q36-JT-UI-TOOL2]\n"
+            "file_info\n"
+            "path: panel/package.json\n"
+            "[Q36-JT-UI-TOOL2-DONE SIZE=3"
+        )
+
+        result = parser.extract_tool_calls(text, request=request)
+
+        assert result.tools_called
+        assert result.content is None
+        assert result.tool_calls[0]["name"] == "file_info"
+        assert json.loads(result.tool_calls[0]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+
+    def test_labeled_line_call_stream_stop_truncates_after_argument(self, parser):
+        parser._stream_stop_request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        buffered = (
+            "[Q36-JT-UI-TOOL2]\n"
+            "file_info\n"
+            "path: panel/package.json\n"
+            "[Q36-JT-UI-TOOL2-DONE SIZE=3"
+        )
+
+        assert parser.stream_tool_calls_complete(buffered) is True
+        assert parser.stream_tool_call_stop_truncate(buffered) == (
+            "[Q36-JT-UI-TOOL2]\nfile_info\npath: panel/package.json"
+        )
+
+    def test_exact_once_stream_stop_truncates_after_markdown_call(self, parser):
+        parser._stream_stop_request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        call = "# Calling file_info\n# path=panel/package.json"
+        buffered = call + "\n\n# Tool result:\n# fake\nQ36-JT-UI-TOOL1-DONE"
+
+        assert parser.stream_tool_calls_complete(buffered) is True
+        assert parser.stream_tool_call_stop_truncate(buffered) == call
+
     def test_bracket_format(self, parser):
         """Test parsing Qwen bracket format (Qwen3 style)."""
         text = '[Calling tool: add({"a": 5, "b": 3})]'

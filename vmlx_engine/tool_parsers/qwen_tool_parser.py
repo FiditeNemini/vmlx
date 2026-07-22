@@ -74,6 +74,34 @@ class QwenToolParser(ToolParser):
         r"<tool_call>\s*.*?\s*</tool_call>",
         re.DOTALL,
     )
+    # Off-template but observed live on Qwen3.6-35B-JANGTQ with a required
+    # file_info turn: the model wrote a markdown-looking call header, then
+    # continued into a fake result because the parser never stopped generation:
+    #
+    #   # Calling file_info
+    #   # path=panel/package.json
+    #
+    # Treat only a schema-valid header+single required string parameter as a
+    # tool call. Never parse or trust any following "# Tool result" block.
+    MARKDOWN_CALL_PATTERN = re.compile(
+        r"(?m)^\s*#\s*Calling\s+([A-Za-z_][A-Za-z0-9_-]*)\s*$"
+        r"\s*^\s*#\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$"
+    )
+    # Second off-template shape observed on the same live Qwen3.6 JANGTQ
+    # required-tool prompt after the markdown-call fix was loaded:
+    #
+    #   [Q36-JT-UI-TOOL2]
+    #   file_info
+    #   path: panel/package.json
+    #
+    # This is still the model choosing a tool and providing an argument, but
+    # with a leading prompt label. Scan for a schema-valid tool-name line
+    # followed by one required string parameter line. Gated to the active
+    # request schema; normal prose cannot invent unadvertised tools.
+    LABELED_LINE_CALL_PATTERN = re.compile(
+        r"(?m)^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*$"
+        r"\s*^\s*([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.*?)\s*$"
+    )
 
     # Residual tool-scaffolding strip. Some off-format / quant-degraded models
     # (observed live on Holo3-35B-A3B-mxfp4, 2026-07-08) emit ORPHAN scaffolding
@@ -130,6 +158,70 @@ class QwenToolParser(ToolParser):
             "name": tool_name,
             "arguments": json.dumps({param_name: value}, ensure_ascii=False),
         }
+
+    @classmethod
+    def _markdown_tool_call(
+        cls, text: str, request: dict[str, Any] | None
+    ) -> tuple[dict[str, Any], int] | None:
+        match = cls.MARKDOWN_CALL_PATTERN.search(text)
+        return cls._schema_single_string_call_from_match(match, request)
+
+    @classmethod
+    def _labeled_line_tool_call(
+        cls, text: str, request: dict[str, Any] | None
+    ) -> tuple[dict[str, Any], int] | None:
+        if not request:
+            return None
+        for match in cls.LABELED_LINE_CALL_PATTERN.finditer(text):
+            parsed = cls._schema_single_string_call_from_match(match, request)
+            if parsed is not None:
+                return parsed
+        return None
+
+    @classmethod
+    def _schema_single_string_call_from_match(
+        cls, match: re.Match[str] | None, request: dict[str, Any] | None
+    ) -> tuple[dict[str, Any], int] | None:
+        if not match:
+            return None
+        tool_name = match.group(1).strip()
+        param_name = match.group(2).strip()
+        value = match.group(3).strip()
+        if not value:
+            return None
+        if (
+            (value.startswith('"') and value.endswith('"'))
+            or (value.startswith("'") and value.endswith("'"))
+        ):
+            value = value[1:-1].strip()
+        if not value:
+            return None
+
+        schema = cls._function_schema_for_tool(request, tool_name)
+        if not isinstance(schema, dict):
+            return None
+        properties = schema.get("properties")
+        required = schema.get("required")
+        if not isinstance(properties, dict) or not isinstance(required, list):
+            return None
+        required_names = [name for name in required if isinstance(name, str)]
+        if required_names != [param_name]:
+            return None
+        param_schema = properties.get(param_name)
+        if not isinstance(param_schema, dict):
+            return None
+        param_type = param_schema.get("type")
+        if param_type not in (None, "string"):
+            return None
+
+        return (
+            {
+                "id": generate_tool_id(),
+                "name": tool_name,
+                "arguments": json.dumps({param_name: value}, ensure_ascii=False),
+            },
+            match.end(),
+        )
 
     @staticmethod
     def _coerce_arg_value(value: str) -> Any:
@@ -246,6 +338,22 @@ class QwenToolParser(ToolParser):
                 tool_calls=tool_calls,
                 content=cleaned_text if cleaned_text else None,
             )
+        markdown_call = self._markdown_tool_call(cleaned_text, request)
+        if markdown_call is not None:
+            call, _ = markdown_call
+            return ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=[call],
+                content=None,
+            )
+        labeled_call = self._labeled_line_tool_call(cleaned_text, request)
+        if labeled_call is not None:
+            call, _ = labeled_call
+            return ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=[call],
+                content=None,
+            )
         plain_call = self._plain_tool_line_call(cleaned_text, request)
         if plain_call is not None:
             return ExtractedToolCallInformation(
@@ -278,6 +386,8 @@ class QwenToolParser(ToolParser):
             or "<function=" in current_text  # issue #192 (canonical)
             or "<function name=" in current_text  # off-format attribute variant
             or "<function:" in current_text  # colon dialect (2026-07-08)
+            or re.search(r"(?m)^\s*#\s*Calling\s+", current_text) is not None
+            or self._labeled_line_tool_call(current_text, request) is not None
         )
 
         if not has_tool_marker:
@@ -289,9 +399,11 @@ class QwenToolParser(ToolParser):
             "</tool_call>" in delta_text
             or ")]" in delta_text
             or "</function>" in delta_text  # issue #192
+            or self.MARKDOWN_CALL_PATTERN.search(current_text) is not None
+            or self._labeled_line_tool_call(current_text, request) is not None
         ):
             # Tool call complete, parse the whole thing
-            result = self.extract_tool_calls(current_text)
+            result = self.extract_tool_calls(current_text, request=request)
             if result.tools_called:
                 return {
                     "tool_calls": [
@@ -357,6 +469,14 @@ class QwenToolParser(ToolParser):
             (match.end(), match.group(0))
             for match in self.BRACKET_PATTERN.finditer(buffered_text)
         )
+        candidates.extend(
+            (match.end(), match.group(0))
+            for match in self.MARKDOWN_CALL_PATTERN.finditer(buffered_text)
+        )
+        candidates.extend(
+            (match.end(), match.group(0))
+            for match in self.LABELED_LINE_CALL_PATTERN.finditer(buffered_text)
+        )
         for end, candidate in sorted(candidates, key=lambda item: item[0]):
             if self._stream_stop_candidate_valid(candidate):
                 return end
@@ -374,4 +494,4 @@ class QwenToolParser(ToolParser):
     def stream_tool_call_stop_truncate(self, buffered_text: str) -> str:
         """Drop Qwen's post-call reasoning after the first exact-once call."""
         end = self._first_complete_stream_call_end(buffered_text)
-        return buffered_text if end is None else buffered_text[:end]
+        return buffered_text if end is None else buffered_text[:end].rstrip()

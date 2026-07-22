@@ -9,6 +9,7 @@ import { ToolCallStatus } from './ToolCallStatus'
 import { InlineToolCall, InlineToolGroup } from './InlineToolCall'
 import { TTSPlayer } from './VoiceChat'
 import { formatTimestamp, parseContentArray, getMetricsItems, type MessageMetrics } from './chat-utils'
+import { prepareMarkdownWithMath } from './mathMarkdown'
 import { reasoningSegmentsForDisplay as getReasoningSegmentsForDisplay } from '../../../../shared/interleavedReasoning'
 import { useTranslation } from '../../i18n'
 
@@ -49,7 +50,7 @@ function parseMarkdown(markdown: string, defaultLanguage: string, copyLabel: str
   const headerHtml = `<div class="code-header"><span class="code-lang">${lang || defaultLanguage}</span><button class="code-copy-btn">${copyLabel}</button></div>`
   return `<div class="code-block-wrapper">${headerHtml}<pre><code class="hljs language-${lang || 'plaintext'}">${highlighted}</code></pre></div>`
   }
-  return marked.parse(markdown, { renderer, breaks: true, gfm: true }) as string
+  return marked.parse(prepareMarkdownWithMath(markdown), { renderer, breaks: true, gfm: true }) as string
 }
 
 /**
@@ -60,7 +61,9 @@ function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
     ADD_TAGS: ['pre', 'code'],
-    ADD_ATTR: ['class']
+    // KaTeX's HTML renderer uses inline layout styles and aria-hidden spans.
+    // DOMPurify still owns the allowlist; scripts/events remain forbidden.
+    ADD_ATTR: ['class', 'style', 'aria-hidden', 'aria-label', 'role']
   })
 }
 

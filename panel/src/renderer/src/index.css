@@ -1,3 +1,5 @@
+@import 'katex/dist/katex.min.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -255,6 +257,27 @@ button, input, select, textarea, a {
   padding: 0.15em 0.4em;
   border-radius: 4px;
   font-size: 0.875em;
+}
+
+/* KaTeX rendering for model Markdown. API and SQLite content stay byte-faithful;
+   this only controls presentation in the Electron assistant/reasoning surfaces. */
+.prose .math-inline {
+  white-space: nowrap;
+}
+
+.prose .math-block {
+  display: block;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgb(var(--border) / 0.45);
+  border-radius: 0.5rem;
+  background: rgb(var(--popover) / 0.45);
+  white-space: normal;
+}
+
+.prose .math-fallback {
+  color: rgb(var(--warning));
 }
 
 /* Custom scrollbar — dark */

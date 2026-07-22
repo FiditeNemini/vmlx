@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { ChevronRight, Maximize2, Minimize2 } from 'lucide-react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
+import { prepareMarkdownWithMath, prepareStreamingPlainTextMath } from './mathMarkdown'
 import { useTranslation } from '../../i18n'
 
 interface ReasoningBoxProps {
@@ -15,7 +16,7 @@ function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
     ADD_TAGS: ['pre', 'code'],
-    ADD_ATTR: ['class']
+    ADD_ATTR: ['class', 'style', 'aria-hidden', 'aria-label', 'role']
   })
 }
 
@@ -72,7 +73,7 @@ export function ReasoningBox({ content, isStreaming, isDone }: ReasoningBoxProps
   const renderedHtml = useMemo(() => {
     if (!content) return ''
     if (isStreaming && !isDone) return ''  // plain text path during streaming
-    return sanitizeHtml(marked.parse(content) as string)
+    return sanitizeHtml(marked.parse(prepareMarkdownWithMath(content)) as string)
   }, [content, isStreaming, isDone])
 
   // Handle copy button clicks inside code blocks (same as MessageBubble)
@@ -133,7 +134,7 @@ export function ReasoningBox({ content, isStreaming, isDone }: ReasoningBoxProps
           style={{ lineHeight: '1.6' }}
         >
           {isStreaming && !isDone ? (
-            <div className="whitespace-pre-wrap">{content}</div>
+            <div className="whitespace-pre-wrap">{prepareStreamingPlainTextMath(content)}</div>
           ) : (
             <div
               className="prose prose-invert prose-xs max-w-none break-words overflow-x-auto [&_pre]:overflow-x-auto [&_code]:break-all [&_pre]:text-[11px] [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5 [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs [&_pre]:my-1.5 [&_pre]:rounded [&_blockquote]:my-1"

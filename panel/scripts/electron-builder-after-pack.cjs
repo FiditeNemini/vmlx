@@ -1,6 +1,6 @@
 const { spawnSync } = require('node:child_process')
-const { existsSync, readdirSync } = require('node:fs')
-const { join } = require('node:path')
+const { existsSync, readdirSync, rmSync } = require('node:fs')
+const { basename, dirname, join } = require('node:path')
 
 function walk(dir, out = []) {
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
@@ -46,6 +46,20 @@ function signAdhoc(path) {
   }
 }
 
+function isBundledPipDistlibWindowsLauncher(path) {
+  if (!path.endsWith('.exe')) return false
+  const parent = dirname(path).split(/[\\/]+/).slice(-4).join('/')
+  return parent === 'site-packages/pip/_vendor/distlib'
+}
+
+function removeBundledWindowsLaunchers(files) {
+  const launchers = files.filter(isBundledPipDistlibWindowsLauncher)
+  for (const file of launchers) {
+    rmSync(file, { force: true })
+  }
+  return launchers
+}
+
 async function afterPack(context) {
   const appOutDir = context && context.appOutDir
   const appName = context && context.packager && context.packager.appInfo
@@ -68,15 +82,27 @@ async function afterPack(context) {
     return
   }
 
-  const nativeFiles = walk(bundledPython).filter(isMachO)
+  const allFiles = walk(bundledPython)
+  const removedWindowsLaunchers = removeBundledWindowsLaunchers(allFiles)
+  const nativeFiles = allFiles
+    .filter(file => !removedWindowsLaunchers.includes(file))
+    .filter(isMachO)
   for (const file of nativeFiles) {
     removeSignature(file)
     signAdhoc(file)
+  }
+  if (removedWindowsLaunchers.length > 0) {
+    console.log(
+      `[afterPack] removed ${removedWindowsLaunchers.length} bundled Python Windows launcher stubs: ` +
+        removedWindowsLaunchers.map(file => basename(file)).join(', '),
+    )
   }
   console.log(`[afterPack] normalized ad-hoc signatures for ${nativeFiles.length} bundled Python native files`)
 }
 
 module.exports = afterPack
+module.exports.removeBundledWindowsLaunchers = removeBundledWindowsLaunchers
+module.exports.isBundledPipDistlibWindowsLauncher = isBundledPipDistlibWindowsLauncher
 
 if (require.main === module) {
   afterPack({

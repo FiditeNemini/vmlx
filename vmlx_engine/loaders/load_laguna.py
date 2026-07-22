@@ -39,6 +39,44 @@ from typing import Any, Tuple
 logger = logging.getLogger("vmlx_engine.loaders.laguna")
 
 
+def _uses_mixed_affine_modules(config: dict[str, Any]) -> bool:
+    """Return whether Laguna needs per-module affine bit-width dispatch."""
+    if config.get("weight_format") in ("mxtq", "mxfp4"):
+        return False
+    quantization = config.get("quantization") or {}
+    if not isinstance(quantization, dict):
+        return False
+    default_bits = quantization.get("bits")
+    if not isinstance(default_bits, int):
+        return False
+    return any(
+        isinstance(spec, dict)
+        and isinstance(spec.get("bits"), int)
+        and spec["bits"] != default_bits
+        for spec in quantization.values()
+    )
+
+
+def _require_mixed_affine_runtime(
+    path: Path,
+    config: dict[str, Any],
+    runtime: Any,
+) -> None:
+    """Reject stale JANG wheels before mixed-bit Laguna model execution."""
+    if not _uses_mixed_affine_modules(config):
+        return
+    marker = getattr(runtime, "LAGUNA_MIXED_AFFINE_RUNTIME_VERSION", 0)
+    if isinstance(marker, int) and marker >= 1:
+        return
+    runtime_path = getattr(runtime, "__file__", "unknown")
+    raise RuntimeError(
+        "This Laguna bundle uses mixed affine bit widths, but the imported "
+        "JANG runtime predates the per-module loader contract. Upgrade with "
+        "`pip install -U 'jang>=2.5.33'` and restart vMLX. "
+        f"Imported runtime: {runtime_path}; model: {path}"
+    )
+
+
 def _load_laguna_tokenizer(path: Path) -> Any:
     """Load the shipped Laguna tokenizer without a one-sided regex rewrite.
 
@@ -73,16 +111,23 @@ def load_laguna_model(model_path: str | Path) -> Tuple[Any, Any]:
             laguna/" — same convention as the DSV4 loader.
     """
     try:
-        from jang_tools.laguna.runtime import load as _laguna_load
+        from jang_tools.laguna import runtime as _laguna_runtime
     except ImportError as e:
         raise ImportError(
             "Laguna bundle detected (model_type=laguna) but `jang_tools.laguna` "
-            "is missing. Install with `pip install -U jang-tools>=2.5.0` "
+            "is missing. Install with `pip install -U 'jang>=2.5.33'` "
             "(must include the laguna/ submodule). Original error: " + str(e)
         )
 
     path = Path(model_path)
     logger.info("Loading Laguna bundle: %s", path.name)
+
+    try:
+        cfg_check = json.loads((path / "config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        cfg_check = {}
+    _require_mixed_affine_runtime(path, cfg_check, _laguna_runtime)
+    _laguna_load = _laguna_runtime.load
 
     # 2026-05-02 follow-up: Laguna JANGTQ now wired through
     # `jang_tools.jangrt.jangtq_hydrate.hydrate_jangtq` (jang-tools 2.5.12+).
@@ -91,7 +136,6 @@ def load_laguna_model(model_path: str | Path) -> Tuple[Any, Any]:
     # without the helper raises `ImportError` → caught here as a clean
     # NotImplementedError pointing the user at the alternative bundles.
     try:
-        cfg_check = json.loads((path / "config.json").read_text())
         if cfg_check.get("weight_format") == "mxtq" or "mxtq_bits" in cfg_check:
             try:
                 # Surface a clear error if the helper isn't installed.

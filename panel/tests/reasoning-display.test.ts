@@ -287,6 +287,20 @@ describe('Client-side <think> tag extraction — streaming sequences', () => {
     })
 })
 
+describe('Electron reasoning persistence guard', () => {
+    it('does not persist a degenerate reasoning rail that equals visible content', () => {
+        const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+
+        expect(source).toContain('const rawFinalReasoningContent = currentReasoningContent()')
+        expect(source).toContain('const reasoningDuplicatesVisibleContent =')
+        expect(source).toContain('normalizeRailForPersistence(fullContent) ===')
+        expect(source).toContain('normalizeRailForPersistence(rawFinalReasoningContent)')
+        expect(source).toContain('Dropping content-identical reasoning rail before persistence')
+        expect(source).toContain('const finalReasoningContent = reasoningDuplicatesVisibleContent')
+        expect(source).toContain('const replayReasoningSegments = reasoningDuplicatesVisibleContent')
+    })
+})
+
 describe('Client-side <think> tag extraction — edge cases', () => {
     it('<think> tag only (no text after)', () => {
         const state = { clientSideThinkParsing: false }

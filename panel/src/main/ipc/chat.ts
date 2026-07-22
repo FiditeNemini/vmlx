@@ -4064,13 +4064,33 @@ export function registerChatHandlers(
         // Reasoning stays in reasoningContent for the reasoning box; content stays empty.
         // (Previously this did fullContent = reasoningContent which triggered the anti-dup
         // check in MessageBubble, hiding the reasoning box.)
-        const finalReasoningContent = currentReasoningContent();
-        const finalReasoningSegments = currentReasoningSegments();
+        const rawFinalReasoningContent = currentReasoningContent();
+        const rawFinalReasoningSegments = currentReasoningSegments();
+        const normalizeRailForPersistence = (value: string) =>
+          value.replace(/\r\n/g, "\n").trim();
+        const reasoningDuplicatesVisibleContent =
+          !!fullContent &&
+          !!rawFinalReasoningContent &&
+          normalizeRailForPersistence(fullContent) ===
+            normalizeRailForPersistence(rawFinalReasoningContent);
+        if (reasoningDuplicatesVisibleContent) {
+          console.warn(
+            "[CHAT] Dropping content-identical reasoning rail before persistence",
+          );
+        }
+        const finalReasoningContent = reasoningDuplicatesVisibleContent
+          ? ""
+          : rawFinalReasoningContent;
+        const finalReasoningSegments = reasoningDuplicatesVisibleContent
+          ? []
+          : rawFinalReasoningSegments;
         // Preserve empty tool-boundary slots in SQLite for exact model-history
         // replay. The renderer receives only visible segments, but an empty
         // slot records that a tool iteration produced no reasoning and prevents
         // later segments from being attached to the wrong assistant turn.
-        const replayReasoningSegments = [...reasoningSegments];
+        const replayReasoningSegments = reasoningDuplicatesVisibleContent
+          ? []
+          : [...reasoningSegments];
         if (!fullContent && finalReasoningContent) {
           console.log(
             `[CHAT] No main content — reasoning only (${finalReasoningContent.length} chars)`,

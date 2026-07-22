@@ -1734,20 +1734,30 @@ describe('Generation Defaults', () => {
     it('new chat creation inherits only tool/workspace ergonomics, not stale sampling or prompts', () => {
         const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
         const policy = readFileSync('src/main/chat-override-policy.ts', 'utf8')
+        const createRecord = source.slice(
+            source.indexOf('const createChatRecord ='),
+            source.indexOf('ipcMain.handle(\n    "chat:create"'),
+        )
         const createHandler = source.slice(
             source.indexOf('"chat:create"'),
-            source.indexOf('ipcMain.handle("chat:getByModel"'),
+            source.indexOf('ipcMain.handle(\n    "chat:ensureForModel"'),
         )
 
         expect(source).toContain('bundle generation defaults stay authoritative')
-        expect(createHandler).toContain('getDefaultChatProfile')
-        expect(createHandler).toContain('buildNewChatInheritedOverrides')
+        expect(createRecord).toContain('getDefaultChatProfile')
+        expect(createRecord).toContain('buildNewChatInheritedOverrides')
+        expect(createHandler).toContain('createChatRecord(title, modelId, folderId, modelPath)')
+        const ensureHandler = source.slice(
+            source.indexOf('"chat:ensureForModel"'),
+            source.indexOf('ipcMain.handle("chat:getByModel"'),
+        )
+        expect(ensureHandler).toContain('createChatRecord(title, "default", undefined, modelPath)')
         expect(policy).toContain('NEW_CHAT_TOOL_INHERIT_KEYS')
         expect(policy).not.toContain("'systemPrompt'")
         expect(policy).not.toContain("'temperature'")
         expect(policy).not.toContain("'enableThinking'")
         expect(source).not.toContain('enableThinkingFromReasoningMode')
-        expect(createHandler).not.toContain('readGenerationDefaults')
+        expect(createRecord).not.toContain('readGenerationDefaults')
         expect(source).not.toContain('Applied global model settings / generation defaults')
     })
 

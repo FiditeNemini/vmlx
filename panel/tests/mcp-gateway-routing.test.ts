@@ -11,6 +11,7 @@ const dbMock = vi.hoisted(() => ({
 
 const sessionManagerMock = vi.hoisted(() => ({
   touchSession: vi.fn(),
+  preflightSessionStart: vi.fn(),
   startSession: vi.fn(),
   stopSession: vi.fn(),
   wakeSession: vi.fn(),

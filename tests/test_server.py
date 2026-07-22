@@ -3777,6 +3777,138 @@ class TestOpenAILogprobsFormatting:
         assert tool_deltas == []
 
     @pytest.mark.asyncio
+    async def test_streaming_chat_post_tool_false_marker_does_not_emit_phantom_tool_delta(
+        self, monkeypatch
+    ):
+        """Optional post-tool continuations must not advertise rejected empty calls."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _ReasoningParser:
+            def reset_state(self, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(
+                self, previous_text, current_text, delta_text
+            ):
+                return SimpleNamespace(reasoning=None, content=delta_text)
+
+            def extract_reasoning(self, text):
+                return None, text
+
+        deltas = ["<tool_call>", "LAG-S21-POST-TOOL-FINAL-DONE"]
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = ""
+                for idx, delta in enumerate(deltas, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=delta,
+                        tokens=[idx],
+                        prompt_tokens=12,
+                        completion_tokens=idx,
+                        finished=(idx == len(deltas)),
+                        finish_reason="stop" if idx == len(deltas) else None,
+                    )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "laguna-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", _ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", "auto")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+
+        request = ChatCompletionRequest(
+            model="laguna-test",
+            messages=[
+                Message(
+                    role="user",
+                    content=(
+                        "Call the built-in file_info tool exactly once with path "
+                        "panel/package.json."
+                    ),
+                )
+            ],
+            stream=True,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ],
+            tool_choice="auto",
+        )
+        messages = [
+            {"role": "user", "content": request.messages[0].content},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_prior",
+                        "type": "function",
+                        "function": {
+                            "name": "file_info",
+                            "arguments": '{"path":"panel/package.json"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_prior",
+                "content": "Path: panel/package.json\nSize: 5.2 KB",
+            },
+        ]
+
+        chunks = []
+        async for line in server.stream_chat_completion(
+            _Engine(),
+            messages,
+            request,
+            fastapi_request=None,
+        ):
+            if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                chunks.append(json.loads(line.removeprefix("data: ")))
+
+        visible = "".join(
+            choice.get("delta", {}).get("content") or ""
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+        )
+        tool_deltas = [
+            choice["delta"]["tool_calls"]
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+            if choice.get("delta", {}).get("tool_calls")
+        ]
+        finish_reasons = [
+            choice.get("finish_reason")
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+            if choice.get("finish_reason") is not None
+        ]
+
+        assert visible == "LAG-S21-POST-TOOL-FINAL-DONE"
+        assert tool_deltas == []
+        assert finish_reasons == ["stop"]
+
+    @pytest.mark.asyncio
     async def test_streaming_responses_qwen_exact_once_stops_after_first_valid_call(
         self, monkeypatch
     ):

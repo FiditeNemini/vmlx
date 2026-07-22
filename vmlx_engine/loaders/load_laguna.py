@@ -127,6 +127,13 @@ def load_laguna_model(model_path: str | Path) -> Tuple[Any, Any]:
     except (OSError, json.JSONDecodeError):
         cfg_check = {}
     _require_mixed_affine_runtime(path, cfg_check, _laguna_runtime)
+    logger.info(
+        "Laguna JANG runtime: module=%s mixed_affine_version=%s "
+        "mixed_affine_bundle=%s",
+        getattr(_laguna_runtime, "__file__", "unknown"),
+        getattr(_laguna_runtime, "LAGUNA_MIXED_AFFINE_RUNTIME_VERSION", 0),
+        _uses_mixed_affine_modules(cfg_check),
+    )
     _laguna_load = _laguna_runtime.load
 
     # 2026-05-02 follow-up: Laguna JANGTQ now wired through

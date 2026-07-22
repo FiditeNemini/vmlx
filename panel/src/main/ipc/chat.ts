@@ -2323,6 +2323,28 @@ export function registerChatHandlers(
         // Client-side <think> tag extraction: tracks whether we're inside a <think> block
         // when the server doesn't provide reasoning_content (fallback for all parser types)
         let clientSideThinkParsing = false;
+        let clientSideThinkHoldback = "";
+
+        const normalizeThinkingMarkers = (content: string) =>
+          content
+            .replace(/<mm:think>/g, "<think>")
+            .replace(/<\/mm:think>/g, "</think>")
+            .replace(/\[THINK\]/g, "<think>")
+            .replace(/\[\/THINK\]/g, "</think>");
+
+        const thinkMarkerHoldbackLength = (content: string) => {
+          const markers = ["<think>", "</think>"];
+          let hold = 0;
+          for (const marker of markers) {
+            const max = Math.min(marker.length - 1, content.length);
+            for (let len = 1; len <= max; len++) {
+              if (content.endsWith(marker.slice(0, len))) {
+                hold = Math.max(hold, len);
+              }
+            }
+          }
+          return hold;
+        };
 
         // Helper: emit streaming delta to renderer
         // skipClientCount: when true, skip client-side token counting/TPS (used when
@@ -2975,7 +2997,9 @@ export function registerChatHandlers(
                 // chunkCounted tracks whether we've already counted this SSE chunk's token
                 // to prevent inflation from think-tag splitting into multiple emitDelta calls.
                 if (!reasoning) {
-                  let content = choice.content as string;
+                  let content =
+                    clientSideThinkHoldback + (choice.content as string);
+                  clientSideThinkHoldback = "";
                   let chunkCounted = !!reasoning; // if reasoning was emitted above, counting already happened
                   const emitWithCount = (text: string, isR: boolean) => {
                     emitDelta(text, isR, chunkCounted);
@@ -2986,44 +3010,37 @@ export function registerChatHandlers(
                   // <think>...</think> for unified fallback parsing when an
                   // older/misconfigured server streams reasoning tags in
                   // content instead of reasoning_content.
-                  content = content
-                    .replace(/<mm:think>/g, "<think>")
-                    .replace(/<\/mm:think>/g, "</think>")
-                    .replace(/\[THINK\]/g, "<think>")
-                    .replace(/\[\/THINK\]/g, "</think>");
+                  content = normalizeThinkingMarkers(content);
+                  const holdback = thinkMarkerHoldbackLength(content);
+                  if (holdback > 0) {
+                    clientSideThinkHoldback = content.slice(-holdback);
+                    content = content.slice(0, -holdback);
+                  }
 
-                  if (clientSideThinkParsing) {
-                    // We're inside a <think> block — check for closing tag
-                    const endIdx = content.indexOf("</think>");
-                    if (endIdx >= 0) {
-                      const reasoningPart = content.slice(0, endIdx);
-                      const contentPart = content.slice(endIdx + 8); // 8 = '</think>'.length
-                      clientSideThinkParsing = false;
-                      if (reasoningPart) emitWithCount(reasoningPart, true);
-                      if (contentPart) emitWithCount(contentPart, false);
+                  while (content) {
+                    if (clientSideThinkParsing) {
+                      const endIdx = content.indexOf("</think>");
+                      if (endIdx >= 0) {
+                        const reasoningPart = content.slice(0, endIdx);
+                        content = content.slice(endIdx + 8); // 8 = '</think>'.length
+                        clientSideThinkParsing = false;
+                        if (reasoningPart) emitWithCount(reasoningPart, true);
+                      } else {
+                        emitWithCount(content, true);
+                        content = "";
+                      }
                     } else {
-                      // Still in reasoning block
-                      emitWithCount(content, true);
+                      const startIdx = content.indexOf("<think>");
+                      if (startIdx >= 0) {
+                        const preContent = content.slice(0, startIdx);
+                        content = content.slice(startIdx + 7); // 7 = '<think>'.length
+                        if (preContent) emitWithCount(preContent, false);
+                        clientSideThinkParsing = true;
+                      } else {
+                        emitWithCount(content, false);
+                        content = "";
+                      }
                     }
-                  } else if (content.includes("<think>")) {
-                    // Start of think block found in this delta
-                    const startIdx = content.indexOf("<think>");
-                    const preContent = content.slice(0, startIdx);
-                    const afterStart = content.slice(startIdx + 7); // 7 = '<think>'.length
-                    if (preContent) emitWithCount(preContent, false);
-                    // Check if closing tag is also in this delta
-                    const endIdx = afterStart.indexOf("</think>");
-                    if (endIdx >= 0) {
-                      const reasoningPart = afterStart.slice(0, endIdx);
-                      const postContent = afterStart.slice(endIdx + 8);
-                      if (reasoningPart) emitWithCount(reasoningPart, true);
-                      if (postContent) emitWithCount(postContent, false);
-                    } else {
-                      clientSideThinkParsing = true;
-                      if (afterStart) emitWithCount(afterStart, true);
-                    }
-                  } else {
-                    emitWithCount(content, false);
                   }
                 } else {
                   emitDelta(choice.content, false, !!reasoning);
@@ -3690,6 +3707,7 @@ export function registerChatHandlers(
               : 0;
             clientToolCallBuffering = false;
             clientSideThinkParsing = false;
+            clientSideThinkHoldback = "";
             cumulativeTokenOffset += iterationTokenCount; // Save completed iteration tokens for cumulative total
             iterationTokenBase = tokenCount; // Save cumulative base for server-usage delta
             iterationTokenCount = 0;
@@ -3785,6 +3803,7 @@ export function registerChatHandlers(
             lastFinishReason = undefined; // Reset for next iteration
             clientToolCallBuffering = false;
             clientSideThinkParsing = false;
+            clientSideThinkHoldback = "";
             receivedToolCalls = [];
             // Reset content offset tracker to match the accumulated content position
             lastEmittedContentLength = allGeneratedContent.length

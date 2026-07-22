@@ -11069,25 +11069,28 @@ async def create_anthropic_message(
                 if delta.get("tool_calls"):
                     for tc in delta["tool_calls"]:
                         tc_idx = tc.get("index", 0)
+                        while len(tool_calls) <= tc_idx:
+                            tool_calls.append(
+                                {
+                                    "id": "",
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            )
+                        dst = tool_calls[tc_idx]
                         if tc.get("id"):
-                            # Ensure tool_calls list is big enough for this index
-                            while len(tool_calls) <= tc_idx:
-                                tool_calls.append(
-                                    {
-                                        "id": "",
-                                        "function": {"name": "", "arguments": ""},
-                                    }
-                                )
-                            tool_calls[tc_idx] = {
-                                "id": tc["id"],
-                                "function": tc.get("function", {}),
-                            }
-                        elif tc_idx < len(tool_calls):
-                            # Append arguments to the correct tool call by index
-                            args = tc.get("function", {}).get("arguments", "")
-                            if args:
-                                fn = tool_calls[tc_idx].get("function", {})
-                                fn["arguments"] = fn.get("arguments", "") + args
+                            dst["id"] = tc["id"]
+                        if tc.get("type"):
+                            dst["type"] = tc["type"]
+                        src_fn = tc.get("function") or {}
+                        dst_fn = dst.setdefault("function", {})
+                        if src_fn.get("name"):
+                            dst_fn["name"] = src_fn["name"]
+                        if "arguments" in src_fn:
+                            dst_fn["arguments"] = (
+                                dst_fn.get("arguments", "")
+                                + (src_fn.get("arguments") or "")
+                            )
                 fr = choices[0].get("finish_reason")
                 if fr:
                     finish_reason = fr
@@ -11112,6 +11115,8 @@ async def create_anthropic_message(
             content.append({"type": "text", "text": full_text})
         for tc in tool_calls:
             func = tc.get("function", {})
+            if not (tc.get("id") and func.get("name")):
+                continue
             try:
                 input_data = json.loads(func.get("arguments", "{}"))
             except json.JSONDecodeError:

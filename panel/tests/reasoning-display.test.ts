@@ -29,6 +29,29 @@ import { describe, it, expect } from 'vitest'
  */
 interface ThinkParserState {
     clientSideThinkParsing: boolean
+    clientSideThinkHoldback?: string
+}
+
+function normalizeThinkingMarkers(content: string): string {
+    return content
+        .replace(/<mm:think>/g, '<think>')
+        .replace(/<\/mm:think>/g, '</think>')
+        .replace(/\[THINK\]/g, '<think>')
+        .replace(/\[\/THINK\]/g, '</think>')
+}
+
+function thinkMarkerHoldbackLength(content: string): number {
+    const markers = ['<think>', '</think>']
+    let hold = 0
+    for (const marker of markers) {
+        const max = Math.min(marker.length - 1, content.length)
+        for (let len = 1; len <= max; len++) {
+            if (content.endsWith(marker.slice(0, len))) {
+                hold = Math.max(hold, len)
+            }
+        }
+    }
+    return hold
 }
 
 function processContentWithThinkFallback(
@@ -43,43 +66,38 @@ function processContentWithThinkFallback(
     }
 
     if (!serverReasoningProvided && sessionHasReasoningParser) {
-        content = content
-            .replace(/<mm:think>/g, '<think>')
-            .replace(/<\/mm:think>/g, '</think>')
-            .replace(/\[THINK\]/g, '<think>')
-            .replace(/\[\/THINK\]/g, '</think>')
-        if (state.clientSideThinkParsing) {
-            // Inside a <think> block — check for closing tag
-            const endIdx = content.indexOf('</think>')
-            if (endIdx >= 0) {
-                const reasoningPart = content.slice(0, endIdx)
-                const contentPart = content.slice(endIdx + 8) // 8 = '</think>'.length
-                state.clientSideThinkParsing = false
-                if (reasoningPart) emit(reasoningPart, true)
-                if (contentPart) emit(contentPart, false)
+        content = normalizeThinkingMarkers((state.clientSideThinkHoldback || '') + content)
+        state.clientSideThinkHoldback = ''
+        const holdback = thinkMarkerHoldbackLength(content)
+        if (holdback > 0) {
+            state.clientSideThinkHoldback = content.slice(-holdback)
+            content = content.slice(0, -holdback)
+        }
+
+        while (content) {
+            if (state.clientSideThinkParsing) {
+                const endIdx = content.indexOf('</think>')
+                if (endIdx >= 0) {
+                    const reasoningPart = content.slice(0, endIdx)
+                    content = content.slice(endIdx + 8) // 8 = '</think>'.length
+                    state.clientSideThinkParsing = false
+                    if (reasoningPart) emit(reasoningPart, true)
+                } else {
+                    emit(content, true)
+                    content = ''
+                }
             } else {
-                // Still in reasoning block
-                emit(content, true)
+                const startIdx = content.indexOf('<think>')
+                if (startIdx >= 0) {
+                    const preContent = content.slice(0, startIdx)
+                    content = content.slice(startIdx + 7) // 7 = '<think>'.length
+                    if (preContent) emit(preContent, false)
+                    state.clientSideThinkParsing = true
+                } else {
+                    emit(content, false)
+                    content = ''
+                }
             }
-        } else if (content.includes('<think>')) {
-            // Start of think block found
-            const startIdx = content.indexOf('<think>')
-            const preContent = content.slice(0, startIdx)
-            const afterStart = content.slice(startIdx + 7) // 7 = '<think>'.length
-            if (preContent) emit(preContent, false)
-            // Check if closing tag is also in this delta
-            const endIdx = afterStart.indexOf('</think>')
-            if (endIdx >= 0) {
-                const reasoningPart = afterStart.slice(0, endIdx)
-                const postContent = afterStart.slice(endIdx + 8)
-                if (reasoningPart) emit(reasoningPart, true)
-                if (postContent) emit(postContent, false)
-            } else {
-                state.clientSideThinkParsing = true
-                if (afterStart) emit(afterStart, true)
-            }
-        } else {
-            emit(content, false)
         }
     } else {
         emit(content, false)
@@ -241,6 +259,32 @@ describe('Client-side <think> tag extraction — streaming sequences', () => {
         ])
         expect(state.clientSideThinkParsing).toBe(true)
     })
+
+    it('does not leak a split opening <think> marker into visible content', () => {
+        const state = { clientSideThinkParsing: false }
+        expect(processContentWithThinkFallback('<thi', false, true, state)).toEqual([])
+        expect(state.clientSideThinkHoldback).toBe('<thi')
+        expect(processContentWithThinkFallback('nk>hidden</think>visible', false, true, state)).toEqual([
+            ['hidden', true],
+            ['visible', false]
+        ])
+        expect(state.clientSideThinkParsing).toBe(false)
+        expect(state.clientSideThinkHoldback).toBe('')
+    })
+
+    it('does not leak a split closing </think> marker into reasoning content', () => {
+        const state = { clientSideThinkParsing: false }
+        expect(processContentWithThinkFallback('<think>hidden</thi', false, true, state)).toEqual([
+            ['hidden', true]
+        ])
+        expect(state.clientSideThinkParsing).toBe(true)
+        expect(state.clientSideThinkHoldback).toBe('</thi')
+        expect(processContentWithThinkFallback('nk>visible', false, true, state)).toEqual([
+            ['visible', false]
+        ])
+        expect(state.clientSideThinkParsing).toBe(false)
+        expect(state.clientSideThinkHoldback).toBe('')
+    })
 })
 
 describe('Client-side <think> tag extraction — edge cases', () => {
@@ -252,20 +296,17 @@ describe('Client-side <think> tag extraction — edge cases', () => {
         expect(state.clientSideThinkParsing).toBe(true)
     })
 
-    it('handles multiple <think> blocks — only first is parsed', () => {
-        // This is intentional: we don't support nested or repeated think blocks
+    it('handles multiple sequential <think> blocks', () => {
         const state = { clientSideThinkParsing: false }
         const r = processContentWithThinkFallback(
             '<think>first</think>middle<think>second</think>end',
             false, true, state
         )
-        // First <think> found — splits at it, afterStart includes everything after first <think>
-        // afterStart = 'first</think>middle<think>second</think>end'
-        // First </think> found in afterStart at idx=5
-        // reasoningPart = 'first', postContent = 'middle<think>second</think>end'
         expect(r).toEqual([
             ['first', true],
-            ['middle<think>second</think>end', false]
+            ['middle', false],
+            ['second', true],
+            ['end', false]
         ])
     })
 

@@ -4,6 +4,10 @@ Covers: (1) stop_reason=tool_use authoritative on finish_reason==tool_calls,
 (2) signature_delta emitted for thinking blocks, (3) mid-stream error -> error event.
 """
 import json
+from types import SimpleNamespace
+
+import pytest
+
 from vmlx_engine.api.anthropic_adapter import AnthropicStreamAdapter
 
 
@@ -125,3 +129,94 @@ def test_split_tool_id_then_name_never_opens_empty_anthropic_name():
     assert '"name": ""' not in wire
     assert '"partial_json": "{\\"path\\":\\"panel/package.json\\"}"' in wire
     assert '"stop_reason": "tool_use"' in wire
+
+
+@pytest.mark.asyncio
+async def test_non_stream_messages_merges_split_tool_id_and_name(monkeypatch):
+    """The non-stream /v1/messages adapter must mirror streaming tool merging."""
+    import vmlx_engine.server as server
+
+    async def fake_stream_chat_completion(*args, **kwargs):
+        first = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_split",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            }
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        }
+        second = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {
+                                    "name": "file_info",
+                                    "arguments": '{"path":"panel/package.json"}',
+                                },
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 7},
+        }
+        yield "data: " + json.dumps(first) + "\n\n"
+        yield "data: " + json.dumps(second) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(server, "stream_chat_completion", fake_stream_chat_completion)
+    monkeypatch.setattr(server, "_model_name", "split-tool-test")
+    monkeypatch.setattr(server, "_model_path", None)
+    monkeypatch.setattr(server, "_reasoning_parser", None)
+
+    monkeypatch.setattr(
+        server,
+        "get_engine",
+        lambda: SimpleNamespace(
+            tokenizer=SimpleNamespace(has_thinking=False),
+            is_mllm=False,
+        ),
+    )
+
+    class _Request:
+        async def json(self):
+            return {
+                "model": "split-tool-test",
+                "messages": [{"role": "user", "content": "call file_info"}],
+                "stream": False,
+                "tools": [
+                    {
+                        "name": "file_info",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    }
+                ],
+            }
+
+    response = await server.create_anthropic_message(_Request())
+
+    tool_blocks = [item for item in response["content"] if item.get("type") == "tool_use"]
+    assert tool_blocks == [
+        {
+            "type": "tool_use",
+            "id": "call_split",
+            "name": "file_info",
+            "input": {"path": "panel/package.json"},
+        }
+    ]
+    assert response["stop_reason"] == "tool_use"

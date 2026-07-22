@@ -212,9 +212,21 @@ class QwenToolParser(ToolParser):
             lines = [line.strip() for line in inner.splitlines() if line.strip()]
             if not lines:
                 continue
+            params = cls.PARAMETER_PATTERN.findall(block)
             tool_name = lines[0]
+            # A second live degraded form replaced the missing function opener
+            # with an empty parameter named after the function:
+            #   <parameter=file_info></parameter>
+            #   <parameter=path>panel/package.json</parameter>
+            # Accept it only when that empty first tag names an advertised tool.
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", tool_name):
-                continue
+                if not params or params[0][1].strip():
+                    continue
+                candidate_name = params[0][0].strip()
+                if cls._function_schema_for_tool(request, candidate_name) is None:
+                    continue
+                tool_name = candidate_name
+                params = params[1:]
             schema = cls._function_schema_for_tool(request, tool_name)
             if not isinstance(schema, dict):
                 continue
@@ -222,7 +234,6 @@ class QwenToolParser(ToolParser):
             required = schema.get("required") or []
             if not isinstance(properties, dict) or not isinstance(required, list):
                 continue
-            params = cls.PARAMETER_PATTERN.findall(block)
             if not params:
                 continue
             arguments: dict[str, Any] = {}

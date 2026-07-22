@@ -505,6 +505,58 @@ class TestQwenToolParser:
         assert not parser.extract_tool_calls(unadvertised, request=request).tools_called
         assert not parser.extract_tool_calls(wrong_parameter, request=request).tools_called
 
+    def test_empty_parameter_named_for_tool_recovers_missing_function_opener(self, parser):
+        """The full UI catalog can make Qwen spell the function as an empty param."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ]
+        }
+        text = (
+            "```text\n<tool_call>\n"
+            "<parameter=file_info>\n</parameter>\n"
+            "<parameter=path>\npanel/package.json\n</parameter>\n"
+            "</function>\n</tool_call>\n```"
+        )
+
+        result = parser.extract_tool_calls(text, request=request)
+
+        assert result.tools_called
+        assert result.content is None
+        assert result.tool_calls[0]["name"] == "file_info"
+        assert json.loads(result.tool_calls[0]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+
+    def test_empty_parameter_does_not_invent_unadvertised_tool(self, parser):
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ]
+        }
+        text = (
+            "<tool_call><parameter=delete_file></parameter>"
+            "<parameter=path>x</parameter></function></tool_call>"
+        )
+
+        assert not parser.extract_tool_calls(text, request=request).tools_called
+
     def test_orphan_function_opener_streaming_completes_only_when_schema_valid(self, parser):
         request = {
             "tools": [

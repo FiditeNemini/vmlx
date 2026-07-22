@@ -169,6 +169,49 @@ class _Qwen35PartialVisiblePartitionEngine:
         )
 
 
+class _Qwen35TruncatedAnswerPassEngine:
+    """Reasoning pass is rescued by a visible-answer pass that also truncates."""
+
+    tokenizer = SimpleNamespace(has_thinking=False)
+    is_mllm = False
+    preserve_native_tool_format = False
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def stream_chat(self, *, messages, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("enable_thinking") is False:
+            text = ""
+            for index, delta in enumerate(("Q35-CUT-", "OFF"), start=1):
+                text += delta
+                yield GenerationOutput(
+                    text=text,
+                    new_text=delta,
+                    tokens=[],
+                    prompt_tokens=11,
+                    completion_tokens=(
+                        int(kwargs.get("max_tokens") or index)
+                        if index == 2
+                        else index
+                    ),
+                    finished=index == 2,
+                    finish_reason="length" if index == 2 else None,
+                )
+            return
+
+        reasoning = "<think>private reasoning ran out of budget"
+        yield GenerationOutput(
+            text=reasoning,
+            new_text=reasoning,
+            tokens=[],
+            prompt_tokens=17,
+            completion_tokens=int(kwargs["max_tokens"]),
+            finished=True,
+            finish_reason="length",
+        )
+
+
 class _Qwen35SuppressedRepeatToolEngine:
     """Post-tool reasoning emits a forbidden second native call, then direct answer."""
 
@@ -303,6 +346,17 @@ def _data_events(chunks: list[str]) -> list[dict]:
     return events
 
 
+def _completed_response_message_texts(completed: dict) -> list[str]:
+    texts: list[str] = []
+    for item in completed.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content", []):
+            if part.get("type") == "output_text":
+                texts.append(part.get("text", ""))
+    return texts
+
+
 def _responses_file_info_tool() -> dict:
     return {
         "type": "function",
@@ -362,7 +416,7 @@ async def test_qwen3_responses_streams_answer_after_explicit_thinking_budget(
     completed = next(
         event["response"] for event in events if event.get("type") == "response.completed"
     )
-    assert completed["output"][0]["content"][0]["text"] == "Q3-STREAM-DONE"
+    assert _completed_response_message_texts(completed) == ["Q3-STREAM-DONE"]
 
 
 @pytest.mark.asyncio
@@ -781,7 +835,7 @@ async def test_qwen35_responses_auto_blank_budget_still_runs_floor_answer_pass(
     completed = next(
         event["response"] for event in events if event.get("type") == "response.completed"
     )
-    assert completed["output"][0]["content"][0]["text"] == "Q35-VISIBLE-DONE"
+    assert _completed_response_message_texts(completed) == ["Q35-VISIBLE-DONE"]
 
 
 @pytest.mark.asyncio
@@ -829,6 +883,52 @@ async def test_qwen35_chat_auto_continues_partial_visible_prefix_without_duplica
         if choice.get("finish_reason")
     ]
     assert finish_reasons == ["stop"]
+
+
+@pytest.mark.asyncio
+async def test_qwen35_chat_truncated_answer_pass_reports_length_terminal(
+    monkeypatch,
+):
+    """A cut-off visible-answer retry must not masquerade as finish_reason=stop."""
+    _install_qwen_policy(monkeypatch, "qwen3_5")
+    engine = _Qwen35TruncatedAnswerPassEngine()
+    messages = [Message(role="user", content="read the marker")]
+    request = ChatCompletionRequest(
+        model="dealignai/Qwen3.6-27B-MXFP4-CRACK-MTP",
+        messages=messages,
+        stream=True,
+        enable_thinking=True,
+        max_tokens=512,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    chunks = []
+    async for chunk in server.stream_chat_completion(
+        engine,
+        messages,
+        request,
+        fastapi_request=None,
+        max_tokens=512,
+    ):
+        chunks.append(chunk)
+
+    assert engine.calls[0]["max_tokens"] == server._auto_thinking_pass_budget(512)
+    assert engine.calls[1]["enable_thinking"] is False
+    events = _data_events(chunks)
+    content_deltas = [
+        choice["delta"].get("content", "")
+        for event in events
+        for choice in event.get("choices", [])
+        if choice.get("delta", {}).get("content")
+    ]
+    assert "".join(content_deltas) == "Q35-CUT-OFF"
+    finish_reasons = [
+        choice.get("finish_reason")
+        for event in events
+        for choice in event.get("choices", [])
+        if choice.get("finish_reason")
+    ]
+    assert finish_reasons == ["length"]
 
 
 @pytest.mark.asyncio
@@ -937,4 +1037,4 @@ async def test_hy3_responses_auto_partitions_reasoning_and_streams_direct_answer
     completed = next(
         event["response"] for event in events if event.get("type") == "response.completed"
     )
-    assert completed["output"][0]["content"][0]["text"] == "Q35-VISIBLE-DONE"
+    assert _completed_response_message_texts(completed) == ["Q35-VISIBLE-DONE"]

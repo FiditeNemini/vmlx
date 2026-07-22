@@ -19734,6 +19734,10 @@ async def stream_chat_completion(
             _answer_pass_succeeded = _ans_any or (
                 _partial_visible_answer_repair and _ans_reconciled
             )
+            _ans_truncated_for_terminal = bool(
+                getattr(_ans_last_out, "finish_reason", None) == "length"
+                or (_ans_budget_cap and _ans_ct >= _ans_budget_cap)
+            )
             if _answer_pass_succeeded:
                 content_was_emitted = True
                 if _partial_visible_answer_repair:
@@ -19741,9 +19745,17 @@ async def stream_chat_completion(
                 else:
                     streamed_content += _ans_sent
                 completion_tokens += int(_ans_ct or 0)
-                # Terminal finish for the answer-pass stream (mirrors the original
-                # single chunk's finish_reason="stop"): satisfies the OpenAI
-                # terminal-finish contract so strict clients don't hang.
+                # Terminal finish for the answer-pass stream satisfies the OpenAI
+                # terminal-finish contract so strict clients do not hang.  Preserve
+                # an honest length terminal when the bounded answer pass itself
+                # truncated/spent its cap; otherwise Chat-derived adapters
+                # (Anthropic/Ollama) report a cut-off visible answer as a normal
+                # end_turn/stop.
+                _answer_finish_reason = (
+                    "length"
+                    if _ans_truncated_for_terminal
+                    else (getattr(_ans_last_out, "finish_reason", None) or "stop")
+                )
                 answer_finish_chunk = ChatCompletionChunk(
                     id=response_id,
                     created=_created_ts,
@@ -19751,7 +19763,7 @@ async def stream_chat_completion(
                     choices=[
                         ChatCompletionChunkChoice(
                             delta=ChatCompletionChunkDelta(),
-                            finish_reason="stop",
+                            finish_reason=_answer_finish_reason,
                         )
                     ],
                 )

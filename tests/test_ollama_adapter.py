@@ -544,6 +544,34 @@ def test_ollama_terminal_merge_defers_length_until_after_answer_and_usage():
     assert merged["message"]["thinking"] == "reason"
 
 
+def test_ollama_terminal_merge_preserves_truncated_answer_after_usage():
+    from vmlx_engine.api.ollama_adapter import merge_ollama_stream_terminal
+
+    answer_length = {
+        "model": "laguna",
+        "message": {"role": "assistant", "content": ""},
+        "done": True,
+        "done_reason": "length",
+    }
+    usage = {
+        "model": "laguna",
+        "message": {"role": "assistant", "content": ""},
+        "done": True,
+        # Adapter-created usage terminals default to stop; they are accounting,
+        # not a second model finish event.
+        "done_reason": "stop",
+        "eval_count": 560,
+        "prompt_eval_count": 73,
+    }
+
+    merged = merge_ollama_stream_terminal(answer_length, usage)
+
+    assert merged["done"] is True
+    assert merged["done_reason"] == "length"
+    assert merged["eval_count"] == 560
+    assert merged["prompt_eval_count"] == 73
+
+
 def test_ollama_generate_terminal_merge_retains_usage_on_single_done_row():
     from vmlx_engine.api.ollama_adapter import (
         merge_ollama_generate_stream_terminal,
@@ -572,6 +600,36 @@ def test_ollama_generate_terminal_merge_retains_usage_on_single_done_row():
     assert merged["done_reason"] == "stop"
     assert merged["eval_count"] == 215
     assert merged["prompt_eval_count"] == 78
+
+
+def test_ollama_generate_terminal_merge_preserves_length_after_usage():
+    from vmlx_engine.api.ollama_adapter import (
+        merge_ollama_generate_stream_terminal,
+    )
+
+    finish = {
+        "model": "laguna",
+        "created_at": "2026-07-22T00:00:00.000Z",
+        "response": "",
+        "done": True,
+        "done_reason": "length",
+    }
+    usage = {
+        "model": "laguna",
+        "created_at": "2026-07-22T00:00:01.000Z",
+        "response": "",
+        "done": True,
+        "done_reason": "stop",
+        "eval_count": 560,
+        "prompt_eval_count": 73,
+    }
+
+    merged = merge_ollama_generate_stream_terminal(finish, usage)
+
+    assert merged["done"] is True
+    assert merged["done_reason"] == "length"
+    assert merged["eval_count"] == 560
+    assert merged["prompt_eval_count"] == 73
 
 
 def test_ollama_chat_stream_maps_upstream_error_to_native_error_row():

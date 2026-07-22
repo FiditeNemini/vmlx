@@ -612,13 +612,28 @@ def merge_ollama_stream_terminal(
         if key in current:
             merged[key] = current[key]
 
+    current_reason = current.get("done_reason")
+    previous_reason = merged.get("done_reason", "stop")
+    current_is_usage_only = (
+        not current_message.get("content")
+        and not current_message.get("thinking")
+        and not current_message.get("tool_calls")
+        and any(key in current for key in ("eval_count", "prompt_eval_count", "total_duration"))
+    )
+
     if message.get("tool_calls"):
         merged["done_reason"] = "tool_calls"
+    elif (
+        previous_reason == "length"
+        and current_is_usage_only
+        and current_reason in (None, "stop")
+    ):
+        # Usage arrives after the finish chunk on the OpenAI SSE path. The
+        # adapter fabricates a done row for that usage with done_reason="stop";
+        # do not let that accounting-only row hide a prior max-token terminal.
+        merged["done_reason"] = "length"
     else:
-        merged["done_reason"] = current.get(
-            "done_reason",
-            merged.get("done_reason", "stop"),
-        )
+        merged["done_reason"] = current_reason or previous_reason
     return merged
 
 
@@ -682,10 +697,21 @@ def merge_ollama_generate_stream_terminal(
     for key in ("eval_count", "prompt_eval_count", "total_duration"):
         if key in current:
             merged[key] = current[key]
-    merged["done_reason"] = current.get(
-        "done_reason",
-        merged.get("done_reason", "stop"),
+    current_reason = current.get("done_reason")
+    previous_reason = merged.get("done_reason", "stop")
+    current_is_usage_only = (
+        not current.get("response")
+        and not current.get("thinking")
+        and any(key in current for key in ("eval_count", "prompt_eval_count", "total_duration"))
     )
+    if (
+        previous_reason == "length"
+        and current_is_usage_only
+        and current_reason in (None, "stop")
+    ):
+        merged["done_reason"] = "length"
+    else:
+        merged["done_reason"] = current_reason or previous_reason
     return merged
 
 

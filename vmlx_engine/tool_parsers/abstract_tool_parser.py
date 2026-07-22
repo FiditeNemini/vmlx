@@ -231,9 +231,20 @@ class ToolParser(ABC):
         if not request:
             return None
         for tool in request.get("tools") or []:
-            function = tool.get("function") if isinstance(tool, dict) else None
+            if not isinstance(tool, dict):
+                continue
+            # Chat Completions templates expose tools as
+            # {"type":"function","function":{"name":...,"parameters":...}}.
+            # The Responses API exposes function tools as
+            # {"type":"function","name":...,"parameters":...}. Parsers must
+            # see the same schema in both protocols; otherwise a schema-gated
+            # repair can pass in Electron/Chat and fail in raw Responses.
+            function = tool.get("function")
             if isinstance(function, dict) and function.get("name") == tool_name:
                 parameters = function.get("parameters")
+                return parameters if isinstance(parameters, dict) else None
+            if tool.get("type") == "function" and tool.get("name") == tool_name:
+                parameters = tool.get("parameters")
                 return parameters if isinstance(parameters, dict) else None
         return None
 

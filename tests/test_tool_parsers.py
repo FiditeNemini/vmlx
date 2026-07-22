@@ -309,6 +309,34 @@ class TestQwenToolParser:
             "path": "panel/package.json"
         }
 
+    def test_markdown_call_header_uses_responses_tool_schema(self, parser):
+        """Responses tools are top-level function specs, not nested chat specs."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ]
+        }
+
+        result = parser.extract_tool_calls(
+            "# Calling file_info\n# path=panel/package.json",
+            request=request,
+        )
+
+        assert result.tools_called
+        assert result.content is None
+        assert result.tool_calls[0]["name"] == "file_info"
+        assert json.loads(result.tool_calls[0]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+
     def test_markdown_call_requires_matching_schema(self, parser):
         request = {
             "tools": [

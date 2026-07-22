@@ -11024,6 +11024,7 @@ async def create_anthropic_message(
     if _et is not None:
         _msg_kwargs["enable_thinking"] = _et
         chat_req.enable_thinking = _et
+        _ct_kwargs["enable_thinking"] = _et
 
     # Auto-map enable_thinking → reasoning_effort for Mistral 4 (same as OpenAI path)
     if (
@@ -11108,9 +11109,13 @@ async def create_anthropic_message(
         _ct_kwargs, chat_req, _model_path or _model_name or chat_req.model)
     _normalize_openpangu_thinking(
         _ct_kwargs, chat_req, _model_path or _model_name or chat_req.model)
-    # Forward extra chat_template_kwargs to engine (exclude enable_thinking, already handled)
+    # Forward the resolved template kwargs to the engine.  Keep the resolved
+    # enable_thinking value mirrored here as well as the top-level engine kwarg:
+    # build_chat_template_kwargs() treats the top-level flag as authoritative,
+    # while renderer/processor wrappers that inspect the raw template kwargs see
+    # the same effective On/Off value instead of stale caller input.
     if _ct_kwargs:
-        extra_ct = {k: v for k, v in _ct_kwargs.items() if k != "enable_thinking"}
+        extra_ct = dict(_ct_kwargs)
         if extra_ct:
             _msg_kwargs["chat_template_kwargs"] = extra_ct
 
@@ -13965,6 +13970,7 @@ async def create_chat_completion(
     if _et is not None:
         chat_kwargs["enable_thinking"] = _et
         request.enable_thinking = _et
+        _ct_kwargs["enable_thinking"] = _et
 
     # Pass reasoning_effort if provided (for GPT-OSS and models that support thinking levels).
     # Map it to template-side thinking_budget only; output length remains owned
@@ -14084,9 +14090,13 @@ async def create_chat_completion(
         _ct_kwargs, request, _model_path or _model_name or request.model)
     _normalize_openpangu_thinking(
         _ct_kwargs, request, _model_path or _model_name or request.model)
-    # Forward extra chat_template_kwargs to engine (exclude enable_thinking, already handled)
+    # Forward the resolved template kwargs to the engine.  Keep the resolved
+    # enable_thinking value mirrored here as well as the top-level engine kwarg:
+    # build_chat_template_kwargs() treats the top-level flag as authoritative,
+    # while renderer/processor wrappers that inspect the raw template kwargs see
+    # the same effective On/Off value instead of stale caller input.
     if _ct_kwargs:
-        extra_ct = {k: v for k, v in _ct_kwargs.items() if k != "enable_thinking"}
+        extra_ct = dict(_ct_kwargs)
         if extra_ct:
             chat_kwargs["chat_template_kwargs"] = extra_ct
 
@@ -16808,6 +16818,7 @@ async def create_response(
     if _et is not None:
         chat_kwargs["enable_thinking"] = _et
         request.enable_thinking = _et
+        _ct_kwargs["enable_thinking"] = _et
 
     # Pass reasoning_effort if provided (for GPT-OSS and models that support thinking levels).
     # Map it to template-side thinking_budget only; output length remains owned
@@ -16917,9 +16928,13 @@ async def create_response(
         _ct_kwargs, request, _model_path or _model_name or request.model)
     _normalize_openpangu_thinking(
         _ct_kwargs, request, _model_path or _model_name or request.model)
-    # Forward extra chat_template_kwargs to engine (exclude enable_thinking, already handled)
+    # Forward the resolved template kwargs to the engine.  Keep the resolved
+    # enable_thinking value mirrored here as well as the top-level engine kwarg:
+    # build_chat_template_kwargs() treats the top-level flag as authoritative,
+    # while renderer/processor wrappers that inspect the raw template kwargs see
+    # the same effective On/Off value instead of stale caller input.
     if _ct_kwargs:
-        extra_ct = {k: v for k, v in _ct_kwargs.items() if k != "enable_thinking"}
+        extra_ct = dict(_ct_kwargs)
         if extra_ct:
             chat_kwargs["chat_template_kwargs"] = extra_ct
 
@@ -18290,6 +18305,10 @@ async def stream_chat_completion(
     if _effective_thinking is not None:
         kwargs["enable_thinking"] = _effective_thinking
         request.enable_thinking = _effective_thinking
+        _ct_kwargs["enable_thinking"] = _effective_thinking
+        kwargs["chat_template_kwargs"] = dict(
+            kwargs.get("chat_template_kwargs") or {}, **_ct_kwargs
+        )
 
     # Check if model's chat template injects <think> in the assistant prefix
     # Use _model_name (actual model path) not request.model (which may be "default")
@@ -20436,6 +20455,10 @@ async def stream_responses_api(
     if _effective_thinking is not None:
         kwargs["enable_thinking"] = _effective_thinking
         request.enable_thinking = _effective_thinking
+        _ct_kwargs["enable_thinking"] = _effective_thinking
+        kwargs["chat_template_kwargs"] = dict(
+            kwargs.get("chat_template_kwargs") or {}, **_ct_kwargs
+        )
 
     # Reasoning parser setup (mirrors stream_chat_completion)
     from .model_config_registry import get_model_config_registry

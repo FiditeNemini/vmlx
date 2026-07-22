@@ -451,6 +451,7 @@ class TestEnableThinkingTriState:
         )
 
         assert engine.seen_kwargs["enable_thinking"] is True
+        assert engine.seen_kwargs["chat_template_kwargs"]["enable_thinking"] is True
         assert request.enable_thinking is True
         assert reasoning == "hidden check"
         assert content == "VISIBLE-DONE"
@@ -556,6 +557,7 @@ class TestEnableThinkingTriState:
         )
 
         assert engine.seen_kwargs["enable_thinking"] is True
+        assert engine.seen_kwargs["chat_template_kwargs"]["enable_thinking"] is True
         assert request.enable_thinking is True
         assert reasoning == "private prefix"
         assert content == "VISIBLE-STAMPED-DONE"

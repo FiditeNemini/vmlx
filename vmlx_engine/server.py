@@ -3576,8 +3576,8 @@ def _resolve_enable_thinking(
     # Eric directive: reasoning-capable families default reasoning ON when the
     # request is Auto (no explicit value / server default / family hint). A
     # family whose native Auto contract differs must declare the authoritative
-    # ``default_enable_thinking`` hint above (Laguna does: false). This fallback
-    # therefore applies only when no such family contract exists. Non-reasoning
+    # ``default_enable_thinking`` hint above. This fallback therefore applies
+    # only when no such family contract exists. Non-reasoning
     # families stay None (template decides -> no think rail). Effort-based families
     # (deepseek-v4, mistral4) have downstream policy resolvers that override this.
     #
@@ -18221,16 +18221,6 @@ async def stream_chat_completion(
         engine=engine,
         auto_detect=True,
         reasoning_effort=request.reasoning_effort,
-    )
-    logger.info(
-        "Responses stream effective thinking: request=%r ct=%r default=%r "
-        "model_key=%s registry_key=%s result=%r",
-        request.enable_thinking,
-        _ct_kwargs.get("enable_thinking") if isinstance(_ct_kwargs, dict) else None,
-        _default_enable_thinking,
-        _model_path or _model_name or request.model,
-        _registry_model_key(request.model),
-        _effective_thinking,
     )
     if _effective_thinking is not None:
         kwargs["enable_thinking"] = _effective_thinking

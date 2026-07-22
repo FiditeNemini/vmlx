@@ -12,7 +12,9 @@ protocol residue cleaning, fallback threshold, streaming incremental emit).
 """
 
 import inspect
+import json
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -234,6 +236,108 @@ class TestEnableThinkingTriState:
 
         assert 'kwargs["enable_thinking"] = _effective_thinking' in source
         assert "request.enable_thinking = _effective_thinking" in source
+
+    @pytest.mark.asyncio
+    async def test_stream_responses_auto_laguna_forwards_reasoning_on_to_engine(
+        self, monkeypatch
+    ):
+        """Omitted Responses enable_thinking must render Laguna on the reasoning rail.
+
+        Laguna's bundle template defaults to ``enable_thinking=false`` when the
+        kwarg is omitted, so server Auto cannot defer to the tokenizer default.
+        The loaded bundle registry contract must resolve Auto to True and pass
+        that concrete bool to engine.stream_chat().
+        """
+        import vmlx_engine.server as server_mod
+        import vmlx_engine.model_config_registry as registry_mod
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning import get_parser
+
+        class _LagunaTokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                if kwargs.get("enable_thinking") is True:
+                    return "<user>__test__</user><assistant><think>"
+                return "<user>__test__</user><assistant></think>"
+
+        class _Engine:
+            tokenizer = _LagunaTokenizer()
+            seen_kwargs = None
+
+            async def stream_chat(self, *, messages, **kwargs):
+                self.seen_kwargs = dict(kwargs)
+                chunks = [
+                    ("hidden check", False, None),
+                    ("</think>", False, None),
+                    ("VISIBLE-DONE", True, "stop"),
+                ]
+                text = ""
+                for idx, (delta, finished, reason) in enumerate(chunks, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        raw_text=text,
+                        new_text=delta,
+                        prompt_tokens=8,
+                        completion_tokens=idx,
+                        finished=finished,
+                        finish_reason=reason,
+                    )
+
+        cfg = SimpleNamespace(
+            family_name="laguna",
+            model_type="laguna",
+            supports_thinking=True,
+            supports_instruct_mode=True,
+            reasoning_parser="deepseek_r1",
+            tool_parser="glm47",
+            think_in_template=True,
+            architecture_hints={"default_enable_thinking": True},
+        )
+        monkeypatch.setattr(server_mod, "_model_path", "/models/Laguna-S-2.1-JANG_2L")
+        monkeypatch.setattr(server_mod, "_model_name", "jangq-ai/Laguna-S-2.1-JANG_2L")
+        monkeypatch.setattr(server_mod, "_reasoning_parser", get_parser("deepseek_r1")())
+        monkeypatch.setattr(server_mod, "_default_enable_thinking", None)
+        monkeypatch.setattr(
+            registry_mod,
+            "get_model_config_registry",
+            lambda: SimpleNamespace(lookup=lambda key: cfg),
+        )
+
+        request = ResponsesRequest(
+            model="default",
+            input="reason privately then answer",
+            stream=True,
+            max_output_tokens=32,
+        )
+        engine = _Engine()
+        events = []
+        async for chunk in server_mod.stream_responses_api(
+            engine,
+            [{"role": "user", "content": "reason privately then answer"}],
+            request,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    data = line.removeprefix("data: ")
+                    if data != "[DONE]":
+                        events.append(json.loads(data))
+
+        reasoning = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.reasoning_summary_text.delta"
+        )
+        content = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        )
+
+        assert engine.seen_kwargs["enable_thinking"] is True
+        assert request.enable_thinking is True
+        assert reasoning == "hidden check"
+        assert content == "VISIBLE-DONE"
 
     def test_effective_think_in_template_cleared_when_thinking_false(self):
         """When enable_thinking=False and template respects it, think_in_template is cleared."""

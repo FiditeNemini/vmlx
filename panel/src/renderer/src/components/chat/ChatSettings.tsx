@@ -69,6 +69,9 @@ function formatTopK(value: number): string {
   return rounded.toString()
 }
 
+const CHAT_TOP_K_SLIDER_DEFAULT_MAX = 200
+const CHAT_TOP_K_HARD_MAX = 1_000_000
+
 export function ChatSettings({ chatId, session, reasoningParser, onClose, onOverridesChanged }: ChatSettingsProps) {
   const { showToast } = useToast()
   const { t } = useTranslation()
@@ -95,6 +98,11 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const thinkingSupported = detectedFamily === 'deepseek-v4' || detectedSupportsThinking === true || (detectedSupportsThinking !== false && !!effectiveReasoningParser)
   const thinkingOffSupported = detectedSupportsInstructMode !== false
   const displayedEnableThinking = thinkingSupported ? overrides.enableThinking : undefined
+  const displayedTopK = Math.max(0, Math.round(overrides.topK ?? modelDefaults.topK ?? 0))
+  const topKSliderMax = Math.min(
+    CHAT_TOP_K_HARD_MAX,
+    Math.max(CHAT_TOP_K_SLIDER_DEFAULT_MAX, displayedTopK),
+  )
   const thinkingDisabledClass = thinkingSupported ? '' : ' opacity-50 cursor-not-allowed'
   const showReasoningEffort = (detectedReasoningEfforts?.length ?? 0) > 0 || detectedFamily === 'hy3' || effectiveReasoningParser === 'openai_gptoss' || effectiveReasoningParser === 'mistral'
   const showLowEffort = detectedReasoningEfforts ? detectedReasoningEfforts.includes('low') : effectiveReasoningParser !== 'mistral'
@@ -640,12 +648,12 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
             )}
             <SliderField
               label={t('chat.settings.topK')}
-              value={Math.max(0, overrides.topK ?? modelDefaults.topK ?? 0)}
+              value={displayedTopK}
               // Zero is an explicit and useful override. Clearing it here made
               // a bundle top-k default immediately snap back on screen and in
               // the next request, so users could not actually disable top-k.
               onChange={v => update('topK', v)}
-              min={0} max={200} step={1}
+              min={0} max={topKSliderMax} step={1}
               help={t('chat.settings.topKHelp')}
               format={formatTopK}
             />

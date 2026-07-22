@@ -375,7 +375,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.reasoningParser).toBe('qwen3')
     expect(detected.supportsThinking).toBe(true)
     expect(detected.thinkInTemplate).toBe(false)
-    expect(detected.defaultEnableThinking).toBe(false)
+    expect(detected.defaultEnableThinking).toBe(true)
   })
 
   it('detects ZAYA1-VL as multimodal CCA hybrid without a reasoning claim', () => {
@@ -1581,13 +1581,79 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
     })
   }
 
-  it('keeps Laguna reasoning available while Auto follows the native off default', () => {
+  it('keeps unstamped Laguna reasoning available while Auto follows the family fallback', () => {
     const dir = makeModelDir({ model_type: 'laguna' })
     const detected = detectModelConfigFromDir(dir)
 
     expect(detected.family).toBe('laguna')
     expect(detected.supportsThinking).toBe(true)
     expect(detected.reasoningParser).toBe('qwen3')
+    expect(detected.defaultEnableThinking).toBe(false)
+  })
+
+  it('uses Laguna JANG chat metadata to default Auto reasoning on for S-2.1 bundles', () => {
+    const dir = makeModelDir(
+      { model_type: 'laguna' },
+      {
+        chat: {
+          reasoning: {
+            supported: true,
+            parser: 'deepseek_r1',
+            default_enabled: true,
+            default_mode: 'think',
+          },
+          template_kwargs_defaults: {
+            enable_thinking: true,
+          },
+          tool_calling: {
+            supported: true,
+            parser: 'glm47',
+          },
+          sampling_defaults: {
+            temperature: 1.0,
+            top_p: 1.0,
+            top_k: 20,
+          },
+        },
+        capabilities: {
+          family: 'laguna',
+          cache_type: 'kv',
+          reasoning_parser: 'deepseek_r1',
+          tool_parser: 'glm47',
+          supports_tools: true,
+          supports_thinking: true,
+          think_in_template: true,
+        },
+      },
+    )
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('laguna')
+    expect(detected.toolParser).toBe('glm47')
+    expect(detected.reasoningParser).toBe('deepseek_r1')
+    expect(detected.supportsThinking).toBe(true)
+    expect(detected.thinkInTemplate).toBe(true)
+    expect(detected.defaultEnableThinking).toBe(true)
+  })
+
+  it('lets Laguna JANG template defaults override reasoning.default_enabled when present', () => {
+    const dir = makeModelDir(
+      { model_type: 'laguna' },
+      {
+        chat: {
+          reasoning: { supported: true, default_enabled: true },
+          template_kwargs_defaults: { enable_thinking: false },
+        },
+        capabilities: {
+          family: 'laguna',
+          supports_thinking: true,
+        },
+      },
+    )
+
+    const detected = detectModelConfigFromDir(dir)
+
     expect(detected.defaultEnableThinking).toBe(false)
   })
 

@@ -43,6 +43,8 @@ const NEW_CHAT_TOOL_INHERIT_KEYS = [
   'toolResultMaxChars',
 ] as const
 
+export const CHAT_TOP_K_HARD_MAX = 1_000_000
+
 export function buildNewChatInheritedOverrides<T extends ChatOverridePolicyInput>(
   existing: T,
   previous?: Partial<ChatOverridePolicyInput> | null,
@@ -87,7 +89,7 @@ export function sanitizeChatOverrides<T extends ChatOverridePolicyInput>(overrid
     else sanitized.topP = value
   }
   if (sanitized.topK != null) {
-    const value = sanitizeFiniteNumber(sanitized.topK, 0, 1000)
+    const value = sanitizeFiniteNumber(sanitized.topK, 0, CHAT_TOP_K_HARD_MAX)
     if (value == null) delete sanitized.topK
     else sanitized.topK = value
   }

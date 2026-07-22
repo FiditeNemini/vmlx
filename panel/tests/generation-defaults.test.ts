@@ -119,6 +119,23 @@ describe('readGenerationDefaults generation_config defaults', () => {
     })
   })
 
+  it('preserves large bundle-owned top_k values for native vocab-sized samplers', async () => {
+    const dir = makeModelDir({
+      'generation_config.json': {
+        temperature: 1.0,
+        top_p: 0.8,
+        top_k: 151_552,
+      },
+    }, 'vmlx-generation-defaults-openpangu-topk-')
+
+    await expect(readGenerationDefaults(dir)).resolves.toMatchObject({
+      temperature: 1.0,
+      topP: 0.8,
+      topK: 151_552,
+      source: 'generation_config',
+    })
+  })
+
   it('treats generation_config do_sample=false as effective greedy sampling', async () => {
     const dir = makeModelDir({
       'generation_config.json': {

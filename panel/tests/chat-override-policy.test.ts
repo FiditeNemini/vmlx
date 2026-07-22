@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import {
   buildNewChatInheritedOverrides,
+  CHAT_TOP_K_HARD_MAX,
   sanitizeChatOverrides,
   type ChatOverridePolicyInput,
 } from '../src/main/chat-override-policy'
@@ -424,6 +425,26 @@ describe('new-chat override inheritance policy', () => {
     expect(sanitized.repeatPenalty).toBeUndefined()
     expect(sanitized.maxToolIterations).toBeUndefined()
     expect(sanitized.toolResultMaxChars).toBeUndefined()
+  })
+
+  it('chat:setOverrides preserves large model-scale topK overrides instead of clamping to the old UI range', () => {
+    const openPanguVocabTopK = 151_552
+
+    expect(sanitizeChatOverrides({ chatId: 'chat', topK: openPanguVocabTopK }).topK).toBe(openPanguVocabTopK)
+    expect(sanitizeChatOverrides({ chatId: 'chat', topK: CHAT_TOP_K_HARD_MAX + 1 }).topK).toBe(CHAT_TOP_K_HARD_MAX)
+  })
+
+  it('chat settings expands the Top K slider range to the displayed model default', () => {
+    const source = fs.readFileSync(
+      path.resolve(__dirname, '../src/renderer/src/components/chat/ChatSettings.tsx'),
+      'utf8',
+    )
+
+    expect(source).toContain('const displayedTopK = Math.max(0, Math.round(overrides.topK ?? modelDefaults.topK ?? 0))')
+    expect(source).toContain('const topKSliderMax = Math.min(')
+    expect(source).toContain('Math.max(CHAT_TOP_K_SLIDER_DEFAULT_MAX, displayedTopK)')
+    expect(source).toContain('max={topKSliderMax}')
+    expect(source).not.toContain('min={0} max={200} step={1}')
   })
 
   it('wires starred default profiles through the tool-only new-chat inheritance policy', () => {

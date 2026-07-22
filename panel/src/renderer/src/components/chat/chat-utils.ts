@@ -128,7 +128,8 @@ export function getMetricsItems(
   items.push({
     label: `${metrics.tokensPerSecond} t/s`,
     value: metrics.tokensPerSecond,
-    title: "Generation speed",
+    title:
+      "Decode speed after first token; includes reasoning and tool-loop completion tokens",
   });
 
   if (metrics.ppSpeed) {

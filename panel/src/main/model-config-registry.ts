@@ -112,11 +112,10 @@ function registerFamily(familyName: string, config: Omit<ModelConfig, 'familyNam
   CONFIG_BY_FAMILY.set(familyName, config)
 }
 
-// ZAYA / Zyphra: CCA attention + top-1 MoE. Live 2026-05-18 gates showed
-// thinking-on can stay in an open <think> rail without a visible answer, so
-// auto-detection keeps reasoning disabled while preserving zaya_xml tools and
-// the typed CCA cache contract.
-registerFamily('zaya', { cacheType: 'hybrid', toolParser: 'zaya_xml', reasoningParser: 'qwen3', supportsThinking: true, thinkInTemplate: false, defaultEnableThinking: false, usePagedCache: true, enableAutoToolChoice: true, description: 'ZAYA CCA hybrid MoE', priority: 3 })
+// ZAYA / Zyphra: CCA attention + top-1 MoE. Text ZAYA is reasoning-capable and
+// current engine registry policy defaults Auto reasoning ON while preserving
+// zaya_xml tools and the typed CCA cache contract.
+registerFamily('zaya', { cacheType: 'hybrid', toolParser: 'zaya_xml', reasoningParser: 'qwen3', supportsThinking: true, thinkInTemplate: false, defaultEnableThinking: true, usePagedCache: true, enableAutoToolChoice: true, description: 'ZAYA CCA hybrid MoE', priority: 3 })
 // ZAYA1-VL is detected separately so the UI does not fall through to generic
 // VLM defaults. Current plain-template ZAYA1-VL bundles are vision/tool/cache
 // capable, but live proof shows the synthetic qwen3 thinking rail produces
@@ -568,6 +567,23 @@ function isExplicitAffineJangConfig(jangCfg: any): boolean {
     value === 'jang-importance' ||
     value.startsWith('jang_')
   )
+}
+
+function readJangDefaultEnableThinking(jangCfg: any): boolean | undefined {
+  if (!jangCfg || typeof jangCfg !== 'object') return undefined
+  const chat = jangCfg.chat
+  if (!chat || typeof chat !== 'object') return undefined
+  const templateDefaults = chat.template_kwargs_defaults
+  if (templateDefaults && typeof templateDefaults === 'object') {
+    const value = templateDefaults.enable_thinking
+    if (typeof value === 'boolean') return value
+  }
+  const reasoning = chat.reasoning
+  if (reasoning && typeof reasoning === 'object') {
+    const value = reasoning.default_enabled
+    if (typeof value === 'boolean') return value
+  }
+  return undefined
 }
 
 function isAffineJangQwenHybridVlm(parsedConfig: any, jangCfg: any): boolean {
@@ -1079,7 +1095,7 @@ function applyJangCapabilities(
     next.reasoningParser = 'qwen3'
     next.supportsThinking = true
     next.thinkInTemplate = false
-    next.defaultEnableThinking = false
+    next.defaultEnableThinking = true
   } else if (next.family === 'zaya1-vl') {
     next.reasoningParser = undefined
     next.supportsThinking = false
@@ -1120,6 +1136,22 @@ function applyJangCapabilities(
     if (typeof caps.think_in_template === 'boolean' && next.supportsThinking !== false) {
       next.thinkInTemplate = caps.think_in_template
     }
+  }
+  const stampedDefaultEnableThinking = readJangDefaultEnableThinking(jangCfg)
+  if (
+    typeof stampedDefaultEnableThinking === 'boolean' &&
+    next.family !== 'zaya' &&
+    next.family !== 'zaya1-vl' &&
+    next.family !== 'hy3' &&
+    next.family !== 'mimo_v2' &&
+    next.family !== 'ling' &&
+    next.supportsThinking !== false
+  ) {
+    // Mirror vmlx_engine.model_config_registry._jang_stamp_default_enable_thinking:
+    // artifact-scoped JANG chat metadata overrides coarse family fallbacks. This
+    // is required for mixed artifacts in the same family, e.g. Laguna XS.2
+    // default-off versus Laguna S-2.1 default-on.
+    next.defaultEnableThinking = stampedDefaultEnableThinking
   }
   // openPangu-2.0-Flash: the converter stamps the coarse cache_type="hybrid",
   // which would misroute the conv-state + mixed DSA/SWA composite cache into

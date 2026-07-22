@@ -110,7 +110,8 @@ function getMetricsItems(metrics: MessageMetrics, isStreaming: boolean): MetricI
   items.push({
     label: `${metrics.tokensPerSecond} t/s`,
     value: metrics.tokensPerSecond,
-    title: 'Generation speed',
+    title:
+      'Decode speed after first token; includes reasoning and tool-loop completion tokens',
   })
 
   if (metrics.ppSpeed) {
@@ -504,6 +505,13 @@ describe('Metrics Display Items', () => {
   it('completed title says "Completion tokens"', () => {
     const items = getMetricsItems(baseMetrics, false)
     expect(items[0].title).toBe('Completion tokens')
+  })
+
+  it('tps title clarifies decode scope instead of implying end-to-end wall time', () => {
+    const items = getMetricsItems(baseMetrics, false)
+    expect(items[1].title).toBe(
+      'Decode speed after first token; includes reasoning and tool-loop completion tokens',
+    )
   })
 })
 

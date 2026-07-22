@@ -63,6 +63,8 @@ function buildRequestBody(
         detectedFamily !== 'deepseek-v4'
             ? undefined
             : overrides?.enableThinking
+    const autoEnableThinking =
+        sessionHasReasoningParser || detectedFamily === 'deepseek-v4'
     const applyLocalThinkingBudget = (obj: Record<string, any>) => {
         if (isRemote || thinkingBudget == null || obj.enable_thinking === false) return
         // Only families whose engine honors a top-level max_thinking_tokens cap
@@ -113,8 +115,8 @@ function buildRequestBody(
         }
         if (effectiveEnableThinkingOverride !== undefined) {
             obj.enable_thinking = effectiveEnableThinkingOverride
-        } else if (isRemote) {
-            obj.enable_thinking = sessionHasReasoningParser
+        } else if (isRemote || autoEnableThinking) {
+            obj.enable_thinking = autoEnableThinking
         }
         if (!isRemote && obj.enable_thinking !== undefined) obj.chat_template_kwargs = { enable_thinking: obj.enable_thinking }
         applyLocalThinkingBudget(obj)
@@ -140,8 +142,8 @@ function buildRequestBody(
         }
         if (effectiveEnableThinkingOverride !== undefined) {
             obj.enable_thinking = effectiveEnableThinkingOverride
-        } else if (isRemote) {
-            obj.enable_thinking = sessionHasReasoningParser
+        } else if (isRemote || autoEnableThinking) {
+            obj.enable_thinking = autoEnableThinking
         }
         if (!isRemote && obj.enable_thinking !== undefined) obj.chat_template_kwargs = { enable_thinking: obj.enable_thinking }
         applyLocalThinkingBudget(obj)
@@ -512,10 +514,16 @@ describe('buildRequestBody — Chat Completions API', () => {
 describe('buildRequestBody — Remote vs Local gating', () => {
     const messages = [{ role: 'user', content: 'Hello' }]
 
-    it('omits enable_thinking and chat_template_kwargs for local Auto sessions', () => {
+    it('omits enable_thinking and chat_template_kwargs for plain local Auto sessions without a reasoning parser', () => {
         const body = buildRequestBody('completions', 'model', messages, undefined, false, false)
         expect(body.enable_thinking).toBeUndefined()
         expect(body.chat_template_kwargs).toBeUndefined()
+    })
+
+    it('enables thinking for local Auto sessions with a reasoning parser', () => {
+        const body = buildRequestBody('completions', 'model', messages, undefined, false, true)
+        expect(body.enable_thinking).toBe(true)
+        expect(body.chat_template_kwargs).toEqual({ enable_thinking: true })
     })
 
     it('includes chat_template_kwargs for explicit local thinking override on reasoning-capable models', () => {
@@ -738,10 +746,10 @@ describe('buildRequestBody — Responses API', () => {
         expect(body.chat_template_kwargs).toEqual({ enable_thinking: true })
     })
 
-    it('Hy3 local Responses Auto omits enable_thinking and reasoning_effort', () => {
+    it('Hy3 local Responses Auto enables thinking but omits reasoning_effort', () => {
         const body = buildRequestBody('responses', 'hy3', messages, undefined, false, true, undefined, 'hy3')
-        expect(body.enable_thinking).toBeUndefined()
-        expect(body.chat_template_kwargs).toBeUndefined()
+        expect(body.enable_thinking).toBe(true)
+        expect(body.chat_template_kwargs).toEqual({ enable_thinking: true })
         expect(body.reasoning_effort).toBeUndefined()
     })
 
@@ -756,8 +764,8 @@ describe('buildRequestBody — Responses API', () => {
             undefined,
             'hy3',
         )
-        expect(body.enable_thinking).toBeUndefined()
-        expect(body.chat_template_kwargs).toBeUndefined()
+        expect(body.enable_thinking).toBe(true)
+        expect(body.chat_template_kwargs).toEqual({ enable_thinking: true })
         expect(body.reasoning_effort).toBeUndefined()
     })
 

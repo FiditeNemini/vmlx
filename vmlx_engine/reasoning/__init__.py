@@ -86,6 +86,13 @@ def _register_builtin_parsers():
 
     register_parser("qwen3", Qwen3ReasoningParser)
     register_parser("deepseek_r1", DeepSeekR1ReasoningParser)
+    # Poolside/Laguna v1 uses the same <think>...</think> rail contract as
+    # DeepSeek-R1 in vMLX: the template may open the rail in the assistant
+    # prefix, so output before </think> is reasoning_content and output after
+    # the close marker is visible content. Register the vendor name too so
+    # generation_config.json values such as "poolside_v1" are accepted instead
+    # of silently depending on a JANG-side canonical alias.
+    register_parser("poolside_v1", DeepSeekR1ReasoningParser)
     register_parser("minimax_m2", MiniMaxM2ReasoningParser)
     register_parser("think_xml", ThinkXmlReasoningParser)
     # GPT-OSS / GLM-4.7-Flash / Harmony protocol (<|channel|>analysis/final)

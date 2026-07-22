@@ -815,6 +815,25 @@ def test_laguna_auto_uses_bundle_stamped_reasoning_default(tmp_path, monkeypatch
     assert resolved is True
 
 
+def test_poolside_v1_reasoning_alias_matches_laguna_think_dialect():
+    """Laguna generation_config advertises reasoning_parser=poolside_v1.
+
+    Poolside v1 uses the same template-owned <think> rail shape as Laguna's
+    JANG stamp maps to deepseek_r1: when the assistant prefix opened <think>,
+    text before </think> is reasoning_content and text after it is content.
+    """
+    from vmlx_engine.reasoning import get_parser, list_parsers
+
+    assert "poolside_v1" in list_parsers()
+    parser = get_parser("poolside_v1")()
+    parser.reset_state(think_in_prompt=True)
+
+    reasoning, content = parser.extract_reasoning("check privately</think>VISIBLE")
+
+    assert reasoning == "check privately"
+    assert content == "VISIBLE"
+
+
 def test_panel_ling_registry_does_not_advertise_reasoning_parser():
     """Panel auto-detect must match engine Ling no-reasoning contract."""
     from pathlib import Path

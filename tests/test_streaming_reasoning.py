@@ -65,6 +65,48 @@ class TestEnginePromptReasoningSeed:
             is True
         )
 
+    def test_wrapped_tokenizer_inner_template_can_seed_reasoning(self):
+        """Laguna keeps multi-EOS truth via TokenizerWrapper.
+
+        The wrapper itself may not expose ``apply_chat_template`` even though the
+        inner HF tokenizer owns the template that opens ``<think>``. The server
+        seed probe must unwrap that shape; otherwise thinking-on streaming emits
+        private reasoning as visible content.
+        """
+        from vmlx_engine import server
+
+        class _InnerLagunaTokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                user = messages[-1]["content"]
+                if kwargs.get("enable_thinking"):
+                    return f"<user>{user}</user>\n<assistant><think>"
+                return f"<user>{user}</user>\n<assistant></think>"
+
+        class _TokenizerWrapper:
+            def __init__(self):
+                self._tokenizer = _InnerLagunaTokenizer()
+
+        assert (
+            server._engine_prompt_starts_in_reasoning(
+                _TokenizerWrapper(),
+                model_name="Laguna-S-2.1-JANG_2L",
+                enable_thinking=True,
+                family_name="laguna",
+                tools_present=False,
+            )
+            is True
+        )
+        assert (
+            server._engine_prompt_starts_in_reasoning(
+                _TokenizerWrapper(),
+                model_name="Laguna-S-2.1-JANG_2L",
+                enable_thinking=False,
+                family_name="laguna",
+                tools_present=False,
+            )
+            is False
+        )
+
 
 class TestThinkInPromptStreaming:
     """Tests for BaseThinkingReasoningParser with think_in_prompt=True.

@@ -19,12 +19,12 @@ from .abstract_tool_parser import (
 )
 
 
-@ToolParserManager.register_module(["glm47", "glm4"])
+@ToolParserManager.register_module(["glm47", "glm4", "poolside_v1"])
 class Glm47ToolParser(ToolParser):
     """
-    Tool call parser for GLM-4.7 and GLM-4.7-Flash models.
+    Tool call parser for GLM-4.7/GLM-4.7-Flash and Poolside/Laguna v1 models.
 
-    Supports GLM-4.7 tool call format:
+    Supports GLM-4.7 / Poolside v1 tool call format:
     <tool_call>function_name
     <arg_key>param1</arg_key><arg_value>value1</arg_value>
     <arg_key>param2</arg_key><arg_value>value2</arg_value>

@@ -643,13 +643,14 @@ function deriveEnableThinking(
     overridesEnableThinking: boolean | undefined,
     sessionHasReasoningParser: boolean
 ): boolean | undefined {
-    void sessionHasReasoningParser
+    if (overridesEnableThinking !== undefined) return overridesEnableThinking
+    if (sessionHasReasoningParser) return true
     return overridesEnableThinking
 }
 
 describe('enable_thinking derivation', () => {
-    it('Auto mode with qwen3 parser → omitted so engine resolves model default', () => {
-        expect(deriveEnableThinking(undefined, true)).toBeUndefined()
+    it('Auto mode with qwen3 parser → true so the reasoning rail is explicit', () => {
+        expect(deriveEnableThinking(undefined, true)).toBe(true)
     })
 
     it('Auto mode without parser → omitted so engine registry/fallback resolves', () => {
@@ -1175,7 +1176,7 @@ describe('Wire format — enable_thinking in request body', () => {
         }
         if (overrides?.enableThinking !== undefined) {
             obj.enable_thinking = overrides.enableThinking
-        } else if (isRemote) {
+        } else if (isRemote || sessionHasReasoningParser) {
             obj.enable_thinking = sessionHasReasoningParser
         }
         if (!isRemote && obj.enable_thinking !== undefined) obj.chat_template_kwargs = { enable_thinking: obj.enable_thinking }
@@ -1185,10 +1186,10 @@ describe('Wire format — enable_thinking in request body', () => {
         return obj
     }
 
-    it('Completions: local Auto omits enable_thinking so engine auto-detects', () => {
+    it('Completions: local Auto with reasoning parser sends enable_thinking=true', () => {
         const body = buildRequestBody('completions', undefined, false, true)
-        expect(body.enable_thinking).toBeUndefined()
-        expect(body.chat_template_kwargs).toBeUndefined()
+        expect(body.enable_thinking).toBe(true)
+        expect(body.chat_template_kwargs).toEqual({ enable_thinking: true })
     })
 
     it('Completions: Explicit Off → enable_thinking=false', () => {
@@ -1203,9 +1204,10 @@ describe('Wire format — enable_thinking in request body', () => {
         expect(body.chat_template_kwargs).toBeUndefined()
     })
 
-    it('Responses: local Auto omits enable_thinking so engine auto-detects', () => {
+    it('Responses: local Auto with reasoning parser sends enable_thinking=true', () => {
         const body = buildRequestBody('responses', undefined, false, true)
-        expect(body.enable_thinking).toBeUndefined()
+        expect(body.enable_thinking).toBe(true)
+        expect(body.chat_template_kwargs).toEqual({ enable_thinking: true })
         expect(body.max_output_tokens).toBe(4096)
     })
 

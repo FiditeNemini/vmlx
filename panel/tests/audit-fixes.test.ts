@@ -495,8 +495,9 @@ describe('enableThinking tri-state', () => {
     sessionHasReasoningParser: boolean
   ): boolean | undefined {
     if (enableThinking !== undefined) return enableThinking
+    if (!isRemote && sessionHasReasoningParser) return true
     if (isRemote) return sessionHasReasoningParser
-    return undefined // local engine auto-detects
+    return undefined // plain local model: no reasoning field
   }
 
   it('explicit On sent to local', () => {
@@ -507,8 +508,12 @@ describe('enableThinking tri-state', () => {
     expect(buildThinkingRequestField(false, false, true)).toBe(false)
   })
 
-  it('Auto on local → undefined (server auto-detects)', () => {
-    expect(buildThinkingRequestField(undefined, false, true)).toBe(undefined)
+  it('Auto on local with a reasoning parser → true', () => {
+    expect(buildThinkingRequestField(undefined, false, true)).toBe(true)
+  })
+
+  it('Auto on local without a reasoning parser → undefined', () => {
+    expect(buildThinkingRequestField(undefined, false, false)).toBe(undefined)
   })
 
   it('Auto on remote → uses sessionHasReasoningParser', () => {

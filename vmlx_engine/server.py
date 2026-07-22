@@ -4142,6 +4142,34 @@ def _rendered_prompt_starts_in_reasoning(rendered: str, marker: str = "__test__"
     return "<think>" in cleaned and "</think>" not in cleaned.split("<think>", 1)[1]
 
 
+def _chat_template_renderers(tokenizer) -> list:
+    """Return tokenizer/processor objects that can render chat templates.
+
+    Several production loaders wrap the HF tokenizer before it reaches the
+    server. Laguna is the important current case: it uses ``TokenizerWrapper`` to
+    preserve the bundle's multi-EOS contract, while the actual
+    ``apply_chat_template`` method lives on the inner HF tokenizer. Parser seed
+    probes must inspect the object that will render the final prompt, or
+    thinking-on requests are misclassified as direct visible content.
+    """
+    renderers = []
+    seen: set[int] = set()
+    for candidate in (
+        tokenizer,
+        getattr(tokenizer, "_tokenizer", None),
+        getattr(tokenizer, "tokenizer", None),
+    ):
+        if candidate is None:
+            continue
+        ident = id(candidate)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if hasattr(candidate, "apply_chat_template"):
+            renderers.append(candidate)
+    return renderers
+
+
 def _template_always_thinks(tokenizer, model_name: str) -> bool:
     """Check if model's template injects <think> even when enable_thinking=False.
 
@@ -4162,9 +4190,14 @@ def _template_always_thinks(tokenizer, model_name: str) -> bool:
 
     result = False
     try:
+        renderers = _chat_template_renderers(tokenizer)
+        if not renderers:
+            _template_always_thinks_cache[model_name] = False
+            return False
+        renderer = renderers[0]
         test_msgs = [{"role": "user", "content": "__test__"}]
         try:
-            rendered = tokenizer.apply_chat_template(
+            rendered = renderer.apply_chat_template(
                 test_msgs,
                 enable_thinking=False,
                 add_generation_prompt=True,
@@ -4173,7 +4206,7 @@ def _template_always_thinks(tokenizer, model_name: str) -> bool:
         except TypeError:
             # Tokenizer doesn't accept enable_thinking — render without it
             # and check if <think> is always present (it's an always-thinking template)
-            rendered = tokenizer.apply_chat_template(
+            rendered = renderer.apply_chat_template(
                 test_msgs,
                 add_generation_prompt=True,
                 tokenize=False,
@@ -4219,16 +4252,21 @@ def _template_starts_reasoning(
 
     result = False
     try:
+        renderers = _chat_template_renderers(tokenizer)
+        if not renderers:
+            _template_starts_reasoning_cache[key] = False
+            return False
+        renderer = renderers[0]
         test_msgs = [{"role": "user", "content": "__test__"}]
         try:
-            rendered = tokenizer.apply_chat_template(
+            rendered = renderer.apply_chat_template(
                 test_msgs,
                 enable_thinking=bool(enable_thinking),
                 add_generation_prompt=True,
                 tokenize=False,
             )
         except TypeError:
-            rendered = tokenizer.apply_chat_template(
+            rendered = renderer.apply_chat_template(
                 test_msgs,
                 add_generation_prompt=True,
                 tokenize=False,
@@ -4293,8 +4331,10 @@ def _engine_prompt_starts_in_reasoning(
     misclassified as hidden reasoning and suppressed.
     """
     test_msgs = [{"role": "user", "content": "__test__"}]
-    if not hasattr(tokenizer, "apply_chat_template"):
+    renderers = _chat_template_renderers(tokenizer)
+    if not renderers:
         return False
+    renderer = renderers[0]
     _seed_kwargs = {"enable_thinking": bool(enable_thinking)}
     if str(family_name or "").lower() == "openpangu_v2":
         # openPangu's template keys on `thinking` and silently ignores
@@ -4303,14 +4343,14 @@ def _engine_prompt_starts_in_reasoning(
         # gets, or thinking-off requests are misclassified as reasoning.
         _seed_kwargs["thinking"] = bool(enable_thinking)
     try:
-        rendered = tokenizer.apply_chat_template(
+        rendered = renderer.apply_chat_template(
             test_msgs,
             add_generation_prompt=True,
             tokenize=False,
             **_seed_kwargs,
         )
     except TypeError:
-        rendered = tokenizer.apply_chat_template(
+        rendered = renderer.apply_chat_template(
             test_msgs,
             add_generation_prompt=True,
             tokenize=False,

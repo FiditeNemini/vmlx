@@ -132,11 +132,42 @@ class TestGlm47ToolParser:
             assert out.content is None
 
     def test_registry_aliases_resolve(self):
-        """Glm47ToolParser must register under both `glm47` and `glm4`."""
+        """Glm47ToolParser must register engine and Poolside vendor aliases."""
         from vmlx_engine.tool_parsers.abstract_tool_parser import ToolParserManager
 
-        for alias in ("glm47", "glm4"):
+        for alias in ("glm47", "glm4", "poolside_v1"):
             cls = ToolParserManager.get_tool_parser(alias)
             assert cls is Glm47ToolParser, (
                 f"alias {alias!r} should resolve to Glm47ToolParser, got {cls}"
             )
+
+    def test_poolside_v1_alias_parses_laguna_tool_dialect(self):
+        """Laguna-S-2.1 generation_config advertises tool_call_parser=poolside_v1.
+
+        The JANG stamp maps that vendor dialect to the existing GLM-style parser;
+        the vendor name itself must also work for CLI/UI/config paths that surface
+        generation_config.json directly.
+        """
+        from vmlx_engine.tool_parsers.abstract_tool_parser import ToolParserManager
+
+        parser = ToolParserManager.get_tool_parser("poolside_v1")(tokenizer=None)
+        out = parser.extract_tool_calls(
+            "<tool_call>file_info"
+            "<arg_key>path</arg_key><arg_value>panel/package.json</arg_value>"
+            "</tool_call>",
+            request={
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "file_info", "parameters": {}},
+                    }
+                ]
+            },
+        )
+
+        assert out.tools_called is True
+        assert out.tool_calls[0]["name"] == "file_info"
+        assert json.loads(out.tool_calls[0]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+        assert out.content is None

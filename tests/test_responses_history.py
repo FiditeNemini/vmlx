@@ -132,6 +132,60 @@ def test_responses_reasoning_replays_before_tool_call_and_visible_answer():
     ]
 
 
+def test_responses_reasoning_visible_text_and_tool_call_share_one_assistant_turn():
+    """Electron may emit visible text before a function call in one response.
+
+    The native chat transcript must retain that as one assistant generation;
+    otherwise replay-reasoning templates see a completed answer turn followed
+    by an empty-thinking tool-call turn.
+    """
+    from vmlx_engine.server import _responses_input_to_messages
+
+    converted = _responses_input_to_messages(
+        [
+            {
+                "type": "reasoning",
+                "content": [{"type": "reasoning", "text": "inspect first"}],
+            },
+            {"type": "output_text", "text": "I will inspect it."},
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "file_info",
+                "arguments": '{"path":"panel/package.json"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Size: 5.2 KB",
+            },
+        ]
+    )
+
+    assert converted == [
+        {
+            "role": "user",
+            "content": "Previous assistant tool-call history follows.",
+        },
+        {
+            "role": "assistant",
+            "content": "I will inspect it.",
+            "reasoning_content": "inspect first",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "arguments": {"path": "panel/package.json"},
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "Size: 5.2 KB"},
+    ]
+
+
 def test_responses_role_assistant_preserves_reasoning_content():
     from vmlx_engine.server import _responses_input_to_messages
 

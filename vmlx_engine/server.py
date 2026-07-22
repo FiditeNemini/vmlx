@@ -15689,11 +15689,18 @@ def _responses_input_to_messages(
         return "system" if role == "developer" else role
 
     pending_reasoning_parts: list[str] = []
+    pending_visible_assistant: dict | None = None
 
     def _take_pending_reasoning() -> str:
         text = "\n".join(pending_reasoning_parts)
         pending_reasoning_parts.clear()
         return text
+
+    def _flush_pending_visible_assistant() -> None:
+        nonlocal pending_visible_assistant
+        if pending_visible_assistant is not None:
+            messages.append(pending_visible_assistant)
+            pending_visible_assistant = None
 
     for item in input_data:
         if not isinstance(item, dict):
@@ -15726,6 +15733,10 @@ def _responses_input_to_messages(
         # output_text item so native templates receive one correctly ordered
         # assistant turn with ``reasoning_content``.
         if item_type in _RESPONSES_REASONING_ITEM_TYPES:
+            # A reasoning item after visible output begins a new assistant
+            # generation. Commit the previous visible turn before collecting
+            # reasoning for the next one.
+            _flush_pending_visible_assistant()
             pending_reasoning_parts.extend(_responses_reasoning_texts(item))
             continue
 
@@ -15742,33 +15753,44 @@ def _responses_input_to_messages(
                     args_parsed = {}
             else:
                 args_parsed = args_raw if args_raw else {}
-            message = {
-                "role": "assistant",
-                # Tool-call-only assistant turns are valid Responses/OpenAI
-                # history anchors. Use an empty string instead of None:
-                # strict templates such as Mistral 4 accept the tool_calls
-                # but later evaluate `message['content'] | length`, which
-                # crashes on None.
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": item.get("name", ""),
-                            "arguments": args_parsed,
-                        },
-                    }
-                ],
+            tool_call = {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": item.get("name", ""),
+                    "arguments": args_parsed,
+                },
             }
-            reasoning = _take_pending_reasoning()
-            if reasoning:
-                message["reasoning_content"] = reasoning
+            if pending_visible_assistant is not None:
+                # Responses permits one assistant generation to contain both
+                # output_text and function_call items. Electron emits those as
+                # reasoning -> output_text -> function_call. Keep all three on
+                # the same native assistant turn; splitting them creates an
+                # empty <think></think> tool-call exemplar in templates such as
+                # Laguna/Poolside and breaks tool-result adjacency.
+                message = pending_visible_assistant
+                pending_visible_assistant = None
+                message["tool_calls"] = [tool_call]
+            else:
+                message = {
+                    "role": "assistant",
+                    # Tool-call-only assistant turns are valid Responses/OpenAI
+                    # history anchors. Use an empty string instead of None:
+                    # strict templates such as Mistral 4 accept the tool_calls
+                    # but later evaluate `message['content'] | length`, which
+                    # crashes on None.
+                    "content": "",
+                    "tool_calls": [tool_call],
+                }
+                reasoning = _take_pending_reasoning()
+                if reasoning:
+                    message["reasoning_content"] = reasoning
             messages.append(message)
             continue
 
         # function_call_output → tool message with result
         if item_type == "function_call_output":
+            _flush_pending_visible_assistant()
             messages.append(
                 {
                     "role": "tool",
@@ -15790,11 +15812,15 @@ def _responses_input_to_messages(
                 message = {"role": "assistant", "content": text}
                 if reasoning:
                     message["reasoning_content"] = reasoning
-                messages.append(message)
+                # Delay emission by one item so a following function_call from
+                # the same Responses generation can be attached to this turn.
+                _flush_pending_visible_assistant()
+                pending_visible_assistant = message
             continue
 
         # message type with content parts
         if item_type == "message":
+            _flush_pending_visible_assistant()
             role = _normalize_role(item.get("role", "user"))
             content = _resolve_content(item.get("content", ""))
             message = {"role": role, "content": content}
@@ -15809,6 +15835,7 @@ def _responses_input_to_messages(
             messages.append(message)
         # Standard role-based message (no type field, or type is not a special one)
         elif "role" in item:
+            _flush_pending_visible_assistant()
             role = _normalize_role(item.get("role", "user"))
             # Preserve tool messages with tool_call_id (Chat Completions format)
             if role == "tool" and "tool_call_id" in item:
@@ -15850,6 +15877,8 @@ def _responses_input_to_messages(
                         message["reasoning_content"] = reasoning
                 messages.append(message)
         # Skip unknown item types (e.g. reasoning, web_search_call, etc.)
+
+    _flush_pending_visible_assistant()
 
     if pending_reasoning_parts:
         # Preserve a trailing reasoning-only input item as a completed

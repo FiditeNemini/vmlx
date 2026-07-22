@@ -994,6 +994,30 @@ def check_and_inject_fallback_tools(
             match = re.search(pattern, binding_text, flags=re.IGNORECASE)
             if match:
                 return match.group(1).strip().rstrip(".,;")
+
+        # Natural file requests commonly name the target after the action
+        # instead of spelling out ``path`` (for example, "file_info ... to
+        # inspect panel/package.json").  LFM2 copies the native example very
+        # closely, so leaving VALUE_HERE here turns an otherwise explicit
+        # request into a schema-valid call for the wrong file.  Bind only
+        # path-like parameters, only for a request that explicitly names this
+        # tool, and only after a file-oriented verb to avoid guessing from
+        # unrelated prose.
+        if (
+            param.strip().lower() in {"path", "file_path", "filepath"}
+            and _request_mentions_tool_name(tool_name)
+        ):
+            natural_path = re.search(
+                r"\b(?:inspect|examine|stat|read|check)\s+"
+                r"(?:the\s+)?(?:file\s+)?(?:at\s+)?"
+                r"[`\"']?([A-Za-z0-9_~@%+=:,./-]{1,240})",
+                binding_text,
+                flags=re.IGNORECASE,
+            )
+            if natural_path:
+                candidate = natural_path.group(1).strip().rstrip(".,;`\"'")
+                if candidate.startswith("~") or "/" in candidate or "." in candidate:
+                    return candidate
         return ""
 
     def _render_lfm2_examples(tools: list[dict]) -> str:

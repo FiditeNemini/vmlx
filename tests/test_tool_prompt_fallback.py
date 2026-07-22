@@ -1021,6 +1021,77 @@ def test_lfm2_direct_file_info_binds_explicit_path_without_placeholder():
     assert "file_info(path='VALUE_HERE')" not in injected
 
 
+def test_lfm2_natural_file_info_request_binds_path_without_path_keyword():
+    """A natural inspect request must not leave the live LFM2 placeholder."""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "file_info",
+                "description": "Return information for a filesystem path.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    user_request = (
+        "Use file_info exactly once to inspect panel/package.json. "
+        "Do not answer before the tool result."
+    )
+
+    injected = check_and_inject_fallback_tools(
+        "<|im_start|>user\ninspect a file<|im_end|>\n<|im_start|>assistant\n",
+        [{"role": "user", "content": user_request}],
+        tools,
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="lfm2",
+    )
+
+    assert (
+        "<|tool_call_start|>[file_info(path='panel/package.json')]"
+        "<|tool_call_end|>"
+    ) in injected
+    assert "file_info(path='VALUE_HERE')" not in injected
+
+
+def test_lfm2_natural_file_info_request_does_not_bind_pronoun_as_path():
+    """The natural-language fallback must still require a path-like value."""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "file_info",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+
+    injected = check_and_inject_fallback_tools(
+        "<|im_start|>assistant\n",
+        [
+            {
+                "role": "user",
+                "content": "Use file_info once to inspect it.",
+            }
+        ],
+        tools,
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="lfm2",
+    )
+
+    assert "file_info(path='it')" not in injected
+    assert "file_info(path='VALUE_HERE')" in injected
+
+
 def test_lfm2_tool_result_continuation_removes_schema_and_requires_final_answer():
     class CaptureTokenizer:
         last_kwargs = None

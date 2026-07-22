@@ -36,7 +36,7 @@ def _chunk(delta=None, finish_reason="__omit__", raw_null=False):
     return c
 
 
-def _collect(frames):
+def _collect(frames, *, required_tool_call=False):
     """Run the terminal-finish guard over a fake SSE stream."""
 
     async def fake_stream():
@@ -45,7 +45,9 @@ def _collect(frames):
 
     async def run():
         out = []
-        async for s in server_mod._terminal_finish_guard(fake_stream()):
+        async for s in server_mod._terminal_finish_guard(
+            fake_stream(), required_tool_call=required_tool_call
+        ):
             out.append(s)
         return out
 
@@ -151,4 +153,70 @@ class TestTerminalFinishGuard:
         assert json.loads(out[-2].strip()[6:])["error"]["code"] == (
             "vlm_image_prefill_budget_exceeded"
         )
+        assert out[-1] == "data: [DONE]\n\n"
+
+    def test_required_tool_suppresses_provisional_stop_and_length_before_error(self):
+        error = {
+            "id": "chatcmpl-test1234",
+            "object": "chat.completion.chunk",
+            "error": {
+                "message": "required tool missing",
+                "type": "invalid_request_error",
+                "code": "tool_calls_required",
+            },
+        }
+        frames = [
+            _sse(_chunk(delta={"reasoning_content": "checking"}, raw_null=True)),
+            _sse(_chunk(delta={}, finish_reason="stop")),
+            _sse(_chunk(delta={}, finish_reason="length")),
+            _sse(error),
+            "data: [DONE]\n\n",
+        ]
+        out = _collect(frames, required_tool_call=True)
+        assert _finish_reasons(out) == []
+        errors = [
+            json.loads(frame.strip()[6:])["error"]
+            for frame in out
+            if frame.startswith("data: ")
+            and frame.strip() != "data: [DONE]"
+            and "error" in json.loads(frame.strip()[6:])
+        ]
+        assert [error["code"] for error in errors] == ["tool_calls_required"]
+
+    def test_required_tool_preserves_valid_tool_calls_terminal(self):
+        frames = [
+            _sse(
+                _chunk(
+                    delta={
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "file_info",
+                                    "arguments": '{"path":"panel/package.json"}',
+                                },
+                            }
+                        ]
+                    },
+                    raw_null=True,
+                )
+            ),
+            _sse(_chunk(delta={}, finish_reason="tool_calls")),
+            "data: [DONE]\n\n",
+        ]
+        out = _collect(frames, required_tool_call=True)
+        assert _finish_reasons(out) == ["tool_calls"]
+
+    def test_required_tool_fails_closed_if_generator_omits_error(self):
+        frames = [
+            _sse(_chunk(delta={"reasoning_content": "checking"}, raw_null=True)),
+            _sse(_chunk(delta={}, finish_reason="length")),
+            "data: [DONE]\n\n",
+        ]
+        out = _collect(frames, required_tool_call=True)
+        assert _finish_reasons(out) == []
+        payload = json.loads(out[-2].strip()[6:])
+        assert payload["error"]["code"] == "tool_calls_required"
         assert out[-1] == "data: [DONE]\n\n"

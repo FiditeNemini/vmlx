@@ -284,6 +284,20 @@ def check_and_inject_fallback_tools(
     # native-template fast path.
     _qwen_has_post_user_tool_activity = False
     if is_qwen_native_tool_prompt:
+        _qwen_messages = list(messages or [])
+        if (
+            len(_qwen_messages) >= 2
+            and isinstance(_qwen_messages[-1], dict)
+            and _qwen_messages[-1].get("role") == "user"
+            and isinstance(_qwen_messages[-2], dict)
+            and _qwen_messages[-2].get("role") == "tool"
+        ):
+            # A protocol adapter may flatten one native user block containing
+            # tool_result + follow-up text into adjacent OpenAI messages:
+            # tool(result), user(follow-up).  That is still post-tool activity;
+            # do not take the native-template fast path and skip the required
+            # continuation scaffold.
+            _qwen_has_post_user_tool_activity = True
         for _message in reversed(messages or []):
             if not isinstance(_message, dict):
                 continue
@@ -443,9 +457,35 @@ def check_and_inject_fallback_tools(
     recent_tool_call_arguments = _recent_tool_call_arguments()
 
     def _tool_history_after_latest_user() -> tuple[set[str], bool]:
+        """Return the tool activity that owns the current continuation turn.
+
+        Native Chat history can arrive in either of these equivalent shapes:
+
+        ``user -> assistant(tool) -> tool``
+        ``user -> assistant(tool) -> tool -> user(follow-up instruction)``
+
+        The second shape is what Anthropic produces when one user content array
+        contains both ``tool_result`` and follow-up text: the adapter must keep
+        the tool result adjacent to its assistant call, then append the new user
+        instruction.  Historically this scanner stopped on that final user
+        message and therefore forgot the immediately preceding completed call.
+        Qwen then lost its multi-tool continuation scaffold on the next required
+        tool turn.
+
+        Only look behind the newest user when the immediately preceding message
+        is a tool result.  A completed assistant answer followed by a new user
+        turn must not inherit stale tool-continuation state.
+        """
         called: set[str] = set()
         has_tool_result = False
-        for message in reversed(messages or []):
+        history = list(messages or [])
+        scan_end = len(history)
+        if history and isinstance(history[-1], dict) and history[-1].get("role") == "user":
+            previous = history[-2] if len(history) >= 2 else None
+            if isinstance(previous, dict) and previous.get("role") == "tool":
+                scan_end -= 1
+
+        for message in reversed(history[:scan_end]):
             if not isinstance(message, dict):
                 continue
             if message.get("role") == "user":

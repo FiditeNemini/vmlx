@@ -97,6 +97,47 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _canonical_request_payload(value: Any) -> Any:
+    """Normalize only volatile tool-call IDs for cross-base body comparison."""
+    if isinstance(value, list):
+        return [_canonical_request_payload(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    result: dict[str, Any] = {}
+    object_type = str(value.get("type") or "")
+    for key, item in value.items():
+        if key in {"call_id", "tool_call_id", "tool_use_id"}:
+            result[key] = "<tool-call-id>"
+        elif key == "id" and object_type in {"function", "function_call", "tool_use"}:
+            result[key] = "<tool-call-id>"
+        else:
+            result[key] = _canonical_request_payload(item)
+    return result
+
+
+def _request_public(stage: int, payload: dict[str, Any]) -> dict[str, Any]:
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    canonical = json.dumps(
+        _canonical_request_payload(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return {
+        "stage": int(stage),
+        "body_chars": len(raw),
+        "body_sha256": _sha256(raw),
+        "canonical_body_sha256": _sha256(canonical),
+        "tool_choice": copy.deepcopy(payload.get("tool_choice")),
+        "stream": bool(payload.get("stream")),
+        "enable_thinking": payload.get("enable_thinking", payload.get("think")),
+        "max_output_tokens": payload.get(
+            "max_output_tokens", payload.get("max_tokens", (payload.get("options") or {}).get("num_predict"))
+        ),
+    }
+
+
 def _milliseconds(start: float) -> float:
     return round((time.monotonic() - start) * 1000, 3)
 
@@ -1067,6 +1108,7 @@ def run_flow(
         enable_thinking=enable_thinking,
         second_tool_choice=second_tool_choice,
     )
+    request_records = [_request_public(1, request1)]
     round1 = client.send(protocol, request1, mode == "stream")
     calls1 = round1.get("tool_calls") or []
     check1 = len(calls1) == 1
@@ -1077,6 +1119,7 @@ def run_flow(
         return {
             "pass": False,
             "failure": f"round1: {error1}",
+            "requests": request_records,
             "rounds": [_sanitized_round(round1)],
         }
     execution1 = execute_allowlisted_tool(repo_root, calls1[0])
@@ -1097,6 +1140,7 @@ def run_flow(
         enable_thinking=enable_thinking,
         second_tool_choice=second_tool_choice,
     )
+    request_records.append(_request_public(2, request2))
     round2 = client.send(protocol, request2, mode == "stream")
     calls2 = round2.get("tool_calls") or []
     check2 = len(calls2) == 1
@@ -1107,6 +1151,7 @@ def run_flow(
         return {
             "pass": False,
             "failure": f"round2: {error2}",
+            "requests": request_records,
             "rounds": [_sanitized_round(round1), _sanitized_round(round2)],
             "executions": [_execution_public(execution1)],
         }
@@ -1132,6 +1177,7 @@ def run_flow(
         enable_thinking=enable_thinking,
         second_tool_choice=second_tool_choice,
     )
+    request_records.append(_request_public(3, request3))
     round3 = client.send(protocol, request3, mode == "stream")
 
     stream = mode == "stream"
@@ -1229,6 +1275,7 @@ def run_flow(
         "pass": all(checks.values()),
         "checks": checks,
         "expected_final": final_marker,
+        "requests": request_records,
         "rounds": [_sanitized_round(round1), _sanitized_round(round2), _sanitized_round(round3)],
         "executions": [_execution_public(execution1), _execution_public(execution2)],
         "terminal_classification": terminals,

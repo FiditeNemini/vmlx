@@ -326,6 +326,82 @@ def test_qwen_tool_result_continuation_allows_explicit_remaining_tool():
     assert "Do not emit another <tool_call>" not in injected
 
 
+def test_qwen_tool_result_then_followup_user_keeps_multi_tool_continuation():
+    """Anthropic-flattened result + user text must retain the prior call."""
+    tools = _qwen_test_tools()
+    messages = [
+        {
+            "role": "user",
+            "content": "Call read_file first, then call run_command.",
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "read_file",
+                        "arguments": {"path": "panel/package.json"},
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": "package metadata"},
+        {
+            "role": "user",
+            "content": "Now call run_command exactly once with command pwd.",
+        },
+    ]
+
+    injected = check_and_inject_fallback_tools(
+        _qwen_prompt(),
+        messages,
+        [tools[0]],
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": [tools[0]]},
+        tool_parser_id="qwen",
+    )
+
+    assert "Native multi-tool continuation" in injected
+    assert "Completed tool(s): read_file" in injected
+    assert "remaining tool(s): run_command" in injected
+    assert "<function=run_command>" in injected
+
+
+def test_qwen_new_user_after_visible_assistant_answer_does_not_reuse_tool_state():
+    tools = _qwen_test_tools()
+    messages = [
+        {"role": "user", "content": "Call read_file."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "read_file",
+                        "arguments": {"path": "panel/package.json"},
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": "package metadata"},
+        {"role": "assistant", "content": "The file is present."},
+        {"role": "user", "content": "Now call run_command with command pwd."},
+    ]
+
+    injected = check_and_inject_fallback_tools(
+        _qwen_prompt(),
+        messages,
+        [tools[0]],
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": [tools[0]]},
+        tool_parser_id="qwen",
+    )
+
+    assert "Native multi-tool continuation" not in injected
+    assert "Completed tool(s): read_file" not in injected
+
+
 def test_dsv4_encoder_prompt_tools_narrow_to_explicit_latest_user_tool():
     tools = [
         {"type": "function", "function": {"name": "read_file"}},

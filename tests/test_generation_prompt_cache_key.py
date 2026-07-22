@@ -109,5 +109,5 @@ def test_mllm_media_cache_side_key_merge_preserves_generation_prompt_axis():
 def test_paged_cache_schema_version_invalidates_pre_sidekey_l2_blocks():
     from vmlx_engine.prefix_cache import PAGED_CACHE_SCHEMA_VERSION
 
-    assert "v9" in PAGED_CACHE_SCHEMA_VERSION
-    assert "generation_prompt_sidekey" in PAGED_CACHE_SCHEMA_VERSION
+    assert "v10" in PAGED_CACHE_SCHEMA_VERSION
+    assert "qwen_tool_continuation" in PAGED_CACHE_SCHEMA_VERSION

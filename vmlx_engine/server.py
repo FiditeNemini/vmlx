@@ -11139,13 +11139,16 @@ async def create_anthropic_message(
 
         async def generate():
             try:
-                async for chunk_str in _terminal_finish_guard(stream_chat_completion(
-                    engine=engine,
-                    messages=messages_dump,
-                    request=chat_req,
-                    fastapi_request=fastapi_request,
-                    **_msg_kwargs,
-                )):
+                async for chunk_str in _terminal_finish_guard(
+                    stream_chat_completion(
+                        engine=engine,
+                        messages=messages_dump,
+                        request=chat_req,
+                        fastapi_request=fastapi_request,
+                        **_msg_kwargs,
+                    ),
+                    required_tool_call=_is_required_tool_choice(chat_req.tool_choice),
+                ):
                     # Pass through SSE comments (keep-alive) to prevent client timeout
                     if chunk_str.startswith(":"):
                         yield chunk_str
@@ -11184,7 +11187,14 @@ async def create_anthropic_message(
                 continue
             if "error" in chunk:
                 err = chunk.get("error") or {}
-                status_code = 413 if err.get("code") == "prompt_too_long" else 500
+                status_code = (
+                    413
+                    if err.get("code") == "prompt_too_long"
+                    else 400
+                    if err.get("code") == "tool_calls_required"
+                    or err.get("type") == "invalid_request_error"
+                    else 500
+                )
                 return JSONResponse(
                     status_code=status_code,
                     content={
@@ -12020,9 +12030,16 @@ async def ollama_chat(fastapi_request: Request):
         buffered_tcs: list[dict] = []  # ollama-shape {function:{name,arguments}}
         pending_done: dict | None = None
         stream_errored = False
-        async for sse_line in _terminal_finish_guard(stream_chat_completion(
-            engine, messages, chat_req, fastapi_request=fastapi_request, **chat_kwargs
-        )):
+        async for sse_line in _terminal_finish_guard(
+            stream_chat_completion(
+                engine,
+                messages,
+                chat_req,
+                fastapi_request=fastapi_request,
+                **chat_kwargs,
+            ),
+            required_tool_call=_is_required_tool_choice(chat_req.tool_choice),
+        ):
             if stream_errored:
                 continue
             # Ollama permits exactly one terminal line, and it must follow all
@@ -14257,13 +14274,16 @@ async def create_chat_completion(
 
     if request.stream:
         return StreamingResponse(
-            _terminal_finish_guard(stream_chat_completion(
-                engine,
-                messages,
-                request,
-                fastapi_request=fastapi_request,
-                **chat_kwargs,
-            )),
+            _terminal_finish_guard(
+                stream_chat_completion(
+                    engine,
+                    messages,
+                    request,
+                    fastapi_request=fastapi_request,
+                    **chat_kwargs,
+                ),
+                required_tool_call=_is_required_tool_choice(request.tool_choice),
+            ),
             media_type="text/event-stream",
         )
 
@@ -18140,7 +18160,11 @@ async def _stream_with_keepalive(
             pending.cancel()
 
 
-async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterator[str]:
+async def _terminal_finish_guard(
+    sse_stream: AsyncIterator[str],
+    *,
+    required_tool_call: bool = False,
+) -> AsyncIterator[str]:
     """OpenAI terminal-contract guard for chat-completion SSE streams.
 
     ``stream_chat_completion`` attaches ``finish_reason`` only inside
@@ -18161,6 +18185,7 @@ async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterato
     contract tests.
     """
     finish_seen = False
+    required_tool_finish_seen = False
     error_seen = False
     first_chunk_meta = None
     usage_field_seen = False
@@ -18186,6 +18211,7 @@ async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterato
         return terminal
 
     async for sse in sse_stream:
+        suppress_frame = False
         if sse.startswith("data: ") and not sse.startswith("data: [DONE]"):
             try:
                 _p = json.loads(sse[6:].strip())
@@ -18210,12 +18236,27 @@ async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterato
                     }
                 except Exception:
                     pass
-            if (
-                not finish_seen
-                and '"finish_reason"' in sse
-                and '"finish_reason": null' not in sse
-            ):
-                finish_seen = True
+            _finish_reasons = []
+            if isinstance(_p, dict):
+                _finish_reasons = [
+                    choice.get("finish_reason")
+                    for choice in (_p.get("choices") or [])
+                    if choice.get("finish_reason") is not None
+                ]
+            if _finish_reasons:
+                if "tool_calls" in _finish_reasons:
+                    required_tool_finish_seen = True
+                    finish_seen = True
+                elif required_tool_call and not error_seen:
+                    # A required-tool stream is unresolved until a schema-valid
+                    # call is emitted or the final parser emits its structured
+                    # error.  Engine ``stop``/``length`` terminals are
+                    # provisional and must not precede that decision: strict
+                    # clients stop at the first non-null finish_reason and would
+                    # otherwise miss the later tool_calls_required error.
+                    suppress_frame = True
+                else:
+                    finish_seen = True
             # include_usage's choices-empty total must remain the last JSON
             # chunk before [DONE]. If the generator omitted finish_reason,
             # insert the guard chunk *before* that usage tail, not at [DONE]
@@ -18223,6 +18264,7 @@ async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterato
             if (
                 not finish_seen
                 and not error_seen
+                and not required_tool_call
                 and isinstance(_p, dict)
                 and _p.get("choices") == []
                 and _p.get("usage") is not None
@@ -18236,11 +18278,33 @@ async def _terminal_finish_guard(sse_stream: AsyncIterator[str]) -> AsyncIterato
             and not finish_seen
             and not error_seen
         ):
-            terminal = _synthetic_terminal()
-            if terminal is not None:
-                yield f"data: {json.dumps(terminal, ensure_ascii=True)}\n\n"
-                finish_seen = True
-        yield sse
+            if required_tool_call and not required_tool_finish_seen:
+                # Defensive fail-closed fallback. stream_chat_completion normally
+                # emits this error itself after final parsing, but the route guard
+                # must never synthesize a successful stop if a future branch exits
+                # before that enforcement point.
+                meta = first_chunk_meta or {}
+                error = {
+                    "id": meta.get("id"),
+                    "object": "chat.completion.chunk",
+                    "error": {
+                        "message": (
+                            "tool_choice='required' was set but the model did not "
+                            "produce any tool calls."
+                        ),
+                        "type": "invalid_request_error",
+                        "code": "tool_calls_required",
+                    },
+                }
+                yield f"data: {json.dumps(error, ensure_ascii=True)}\n\n"
+                error_seen = True
+            else:
+                terminal = _synthetic_terminal()
+                if terminal is not None:
+                    yield f"data: {json.dumps(terminal, ensure_ascii=True)}\n\n"
+                    finish_seen = True
+        if not suppress_frame:
+            yield sse
 
 
 async def stream_chat_completion(

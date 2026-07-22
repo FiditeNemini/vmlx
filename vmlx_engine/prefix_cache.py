@@ -67,7 +67,14 @@ logger = logging.getLogger(__name__)
 # Laguna/other mixed-SWA tool selection with gibberish before the new clean
 # prompt-boundary block is written. Put current builds in a fresh block-disk
 # namespace instead of asking users to manually delete old caches.
-PAGED_CACHE_SCHEMA_VERSION = "paged_n1_keys_v9_generation_prompt_sidekey"
+# 2026-07-22 v10 bump: Qwen native multi-tool continuation now recognizes the
+# valid tool-result + follow-up-user history shape.  That changes the rendered
+# prompt contract before the first reusable block.  Development builds that
+# wrote v9 blocks before the continuation fix can otherwise restore a stale
+# prefix and emit malformed native tool markup (live reproduction: a truncated
+# ``<_command>`` span instead of the required second function call).  Release
+# upgrades must miss those blocks cleanly; users must not need a manual clear.
+PAGED_CACHE_SCHEMA_VERSION = "paged_n1_keys_v10_qwen_tool_continuation"
 
 
 def runtime_cache_fingerprint() -> str:

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pure contracts for the reusable four-protocol agentic matrix runner."""
 
+import copy
 import json
 from pathlib import Path
 
@@ -432,6 +433,41 @@ def test_direct_and_gateway_synthesis_prompts_are_byte_identical():
     assert direct == gateway
     assert "DIRECT" not in direct
     assert "GATEWAY" not in direct
+
+
+def test_request_metadata_hashes_full_body_and_normalizes_only_tool_ids():
+    base = {
+        "model": "served-model",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_one",
+                        "type": "function",
+                        "function": {"name": "file_info", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_one", "content": "ok"},
+        ],
+        "stream": True,
+        "max_tokens": 512,
+        "enable_thinking": True,
+        "tool_choice": {"type": "function", "function": {"name": "run_command"}},
+    }
+    other = copy.deepcopy(base)
+    other["messages"][0]["tool_calls"][0]["id"] = "call_two"
+    other["messages"][1]["tool_call_id"] = "call_two"
+
+    first = matrix._request_public(2, base)
+    second = matrix._request_public(2, other)
+
+    assert first["body_sha256"] != second["body_sha256"]
+    assert first["canonical_body_sha256"] == second["canonical_body_sha256"]
+    assert first["tool_choice"] == base["tool_choice"]
+    assert first["max_output_tokens"] == 512
 
 
 def test_first_tool_prompt_is_base_independent():

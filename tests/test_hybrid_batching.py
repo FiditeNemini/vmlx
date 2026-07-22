@@ -307,9 +307,11 @@ class TestSuppressReasoningInvariants:
         # Find the reasoning summary done emission
         idx = source.index("response.reasoning_summary_text.done")
         # Check that the guard appears before this emission in the same block
-        block_start = source.rfind("if ", 0, idx)
+        block_start = source.rfind("def _finish_reasoning_item_events", 0, idx)
         block_text = source[block_start:idx]
-        assert "not suppress_reasoning" in block_text
+        assert "suppress_reasoning" not in block_text
+        close_idx = source.index("if visible_reasoning_text and not suppress_reasoning")
+        assert close_idx < source.index("_finish_reasoning_item_events", close_idx)
 
     def test_reasoning_fallback_guarded_by_suppress(self):
         """Reasoning-only fallback must be gated by suppress_reasoning state.
@@ -603,8 +605,8 @@ class TestCachedTokensZeroOnFailure:
                 assert 'cached_tokens = 0' in context, (
                     "cached_tokens must be zeroed on reconstruction failure"
                 )
-                assert 'release_cache(request.request_id)' in context, (
-                    "reconstruction failure must release fetched block refs"
+                assert '_release_unusable_paged_hit(request)' in context, (
+                    "reconstruction failure must release fetched request refs"
                 )
                 break
         else:

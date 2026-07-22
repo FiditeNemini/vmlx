@@ -2349,27 +2349,32 @@ class TestMlxstudio73ReconstructFailReleasesBlocks:
     all new requests stall waiting for allocations that never free →
     client sees frozen session.
 
-    Fix: scheduler.py now calls release_cache(request_id) in the
-    reconstruction-failure branch, symmetric with the hybrid-cache-fix
-    branch that already did.
+    Fix: scheduler.py now releases request refs and detaches the request
+    table entry in the reconstruction-failure branch. This prevents the
+    request-ref leak without deleting still-valid reusable prefix blocks.
     """
 
     def test_reconstruct_failure_releases_block_refs(self):
-        """Source contains release_cache call on the reconstruct-fail path."""
+        """Source contains request-ref release on the reconstruct-fail path."""
         src = Path(
             "/private/tmp/vmlx-1.3.66-build/vmlx_engine/scheduler.py"
         ).read_text()
         # Find the worker-side paged-cache reconstruction-failure branch.
         idx = src.find("reconstruction failed, treating as cache miss")
         assert idx > 0, "the bugfix anchor must survive refactors"
-        # Immediately below must call release_cache(request_id)
+        # Immediately below must call the centralized request-ref rollback.
         window = src[idx:idx + 1200]
-        assert "self.block_aware_cache.release_cache(request.request_id)" in window, (
+        assert "self._release_unusable_paged_hit(request)" in window, (
             "mlxstudio#73 fix missing: reconstruct-fail branch must release "
-            "block refs or a long session leaks until the pool exhausts"
+            "request refs or a long session leaks until the pool exhausts"
         )
-        # Anchor the issue so refactors notice
-        assert "mlxstudio#73" in window
+        helper_idx = src.find("def _release_unusable_paged_hit")
+        assert helper_idx > 0, "central paged-hit rollback helper must exist"
+        helper_window = src[helper_idx:helper_idx + 1600]
+        assert "release_request_refs(block_table)" in helper_window
+        assert "detach_request(request.request_id)" in helper_window
+        # Anchor the issue class in the test text while letting source comments move.
+        assert "mlxstudio#73" in type(self).__doc__
 
 
 class TestVmlx65GemmaE2BConversion:
@@ -3892,22 +3897,15 @@ class TestPagedCacheBoundaries:
             "concurrent clients don't race to evict shared blocks"
         )
 
-    def test_release_cache_symmetric_with_fetch(self):
-        """Every fetch_cache path must have a matching release_cache,
-        especially in error-handling branches (recently added in
-        mlxstudio#73 fix)."""
+    def test_unusable_paged_hit_rollback_symmetric_with_fetch(self):
+        """Every fetch_cache path must have an unusable-hit rollback path,
+        especially in error-handling branches (mlxstudio#73)."""
         src = Path(
             "/private/tmp/vmlx-1.3.66-build/vmlx_engine/scheduler.py"
         ).read_text()
-        # Count fetch_cache vs release_cache call sites
-        import re
-        fetches = len(re.findall(r"\.fetch_cache\(", src))
-        releases = len(re.findall(r"\.release_cache\(", src))
-        # Release >= fetch because error paths release without fetching
-        # (ref counts survived from upstream). But at minimum, release
-        # must be present whenever fetch_cache can lead to None result.
-        assert releases >= 1, (
-            "scheduler.py must have release_cache calls to balance fetch_cache"
+        assert ".fetch_cache(" in src
+        assert "_release_unusable_paged_hit(" in src, (
+            "scheduler.py must roll back unusable paged hits to balance fetch_cache"
         )
 
     def test_trim_block_table_block_aligns(self):

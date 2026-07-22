@@ -544,7 +544,7 @@ class TestSchedulerBasic:
             'source="tokenized VLM media prompt"'
         ) < preprocess_src.index("self.vision_cache.set_pixel_cache")
         assert process_src.index("except PromptTooLongError") < process_src.index(
-            "req._cache_extra_keys = _mllm_media_cache_extra_keys(req)"
+            "req._cache_extra_keys = _merge_mllm_cache_extra_keys"
         )
 
     def test_mllm_prompt_limit_error_round_trips_to_api_error(self):

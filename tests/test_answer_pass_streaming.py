@@ -304,7 +304,7 @@ def test_chat_legacy_reasoning_fallback_cannot_precede_answer_pass():
     """
     chat_src = inspect.getsource(server_mod.stream_chat_completion)
     legacy_start = chat_src.index(
-        "# Fallback: if reasoning parser produced only reasoning with no content"
+        "# A parser may surface its full reasoning block only at stream finalization."
     )
     answer_start = chat_src.index(
         "and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)",

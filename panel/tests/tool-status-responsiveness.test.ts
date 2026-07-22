@@ -130,6 +130,21 @@ describe('tool status responsiveness contract', () => {
     expect(executeBlock).toContain('JSON.parse(tc.function.arguments || "{}")')
   })
 
+  it('replays current reasoning before active tool calls in follow-up requests', () => {
+    const source = readPanelSource('src/main/ipc/chat.ts')
+    const executeIdx = source.indexOf('const executeToolCalls = async')
+    const executeBlock = source.slice(executeIdx, source.indexOf('const handleToolLoop', executeIdx))
+
+    expect(source).toContain('const currentReasoningSegment = () =>')
+    expect(source).toContain('const responsesReasoningItem = (text: string) =>')
+    expect(executeBlock).toContain('const toolReasoning = currentReasoningSegment();')
+    expect(executeBlock).toContain('requestMessages.push(responsesReasoningItem(toolReasoning));')
+    expect(executeBlock).toContain('assistantToolTurn.reasoning_content = toolReasoning;')
+    expect(executeBlock.indexOf('responsesReasoningItem(toolReasoning)')).toBeLessThan(
+      executeBlock.indexOf('type: "function_call"'),
+    )
+  })
+
   it('cleans a redundant namespaced tool preview before Responses continuation', () => {
     const source = readPanelSource('src/main/ipc/chat.ts')
 

@@ -140,6 +140,7 @@ from .logprobs import (
     format_completion_logprobs as _format_completion_logprobs,
 )
 from .mlx_memory import clear_mlx_memory_cache
+from .reasoning import get_parser as _get_reasoning_parser_class
 from .reasoning.gptoss_parser import GptOssReasoningParser
 from .tool_parsers import ToolParserManager
 from .tool_parsers.abstract_tool_parser import generate_tool_id
@@ -3965,6 +3966,73 @@ def _reasoning_parser_is_harmony(parser) -> bool:
     this parser class is only ever instantiated for harmony models."""
     name = type(parser).__name__.lower() if parser is not None else ""
     return "gptoss" in name or "gpt_oss" in name or "harmony" in name
+
+
+def _new_request_reasoning_parser(
+    *,
+    configured_parser,
+    model_config,
+    effective_think_in_template: bool,
+    harmony_active: bool,
+    stream_surface: str,
+):
+    """Return a per-request reasoning parser for this API surface.
+
+    The global ``_reasoning_parser`` is normally installed at model load, but
+    live Electron/API paths can still reach streaming with a missing parser when
+    an old process, stale sidecar, or launch mismatch races detection. If the
+    concrete bundle/registry says a parser exists, use that parser instead of
+    falling back to inline ``<think>`` content. If no parser is named but the
+    rendered prompt starts inside a standard thinking rail, use DeepSeek-R1's
+    implicit ``<think>`` parser as the conservative last resort.
+    """
+    parser = None
+    parser_source = None
+    if configured_parser is not None:
+        parser = configured_parser.__class__()
+        parser_source = type(configured_parser).__name__
+    else:
+        parser_name = str(getattr(model_config, "reasoning_parser", "") or "").strip()
+        if parser_name:
+            try:
+                parser = _get_reasoning_parser_class(parser_name)()
+                parser_source = f"registry:{parser_name}"
+            except Exception as exc:
+                logger.warning(
+                    "%s reasoning parser '%s' unavailable for family %s: %s",
+                    stream_surface,
+                    parser_name,
+                    getattr(model_config, "family_name", None),
+                    exc,
+                )
+        if parser is None and effective_think_in_template:
+            try:
+                parser = _get_reasoning_parser_class("deepseek_r1")()
+                parser_source = "fallback:deepseek_r1"
+            except Exception as exc:
+                logger.warning(
+                    "%s could not install fallback <think> parser for family %s: %s",
+                    stream_surface,
+                    getattr(model_config, "family_name", None),
+                    exc,
+                )
+
+    if parser is None:
+        return None
+
+    parser.reset_state(
+        think_in_prompt=effective_think_in_template,
+        harmony_active=harmony_active or _reasoning_parser_is_harmony(parser),
+    )
+    logger.debug(
+        "[%s] Reasoning parser: %s (source=%s, think_in_template=%s, harmony_active=%s)",
+        stream_surface,
+        type(parser).__name__,
+        parser_source,
+        effective_think_in_template,
+        harmony_active or _reasoning_parser_is_harmony(parser),
+    )
+    return parser
 
 
 def _has_tool_marker_or_partial_suffix(text: str) -> bool:
@@ -18247,11 +18315,6 @@ async def stream_chat_completion(
     # requests may close it before decode.
     effective_think_in_template = think_in_template
 
-    # Track if we need to add <think> prefix for thinking models (when no reasoning parser)
-    # The template adds <think> to the prompt, so the model output starts inside the think block
-    is_thinking_model = effective_think_in_template and not _reasoning_parser
-    think_prefix_sent = False
-
     # Suppress reasoning output when user explicitly disabled thinking.
     # The parser still runs (to strip <think> tags from content), but reasoning
     # chunks are dropped so the user never sees them.
@@ -18266,17 +18329,14 @@ async def stream_chat_completion(
             "<|start|>assistant<|channel|>analysis"
         )
     ) or _reasoning_parser_is_harmony(_reasoning_parser)
-    request_parser = None
-    if _reasoning_parser:
-        request_parser = _reasoning_parser.__class__()
-        request_parser.reset_state(
-            think_in_prompt=effective_think_in_template,
-            harmony_active=_harmony_prefix_active,
-        )
-        logger.debug(
-            f"[chat] Reasoning parser: {type(request_parser).__name__} (think_in_template={effective_think_in_template}, suppress={suppress_reasoning}, harmony_active={_harmony_prefix_active})"
-        )
-    else:
+    request_parser = _new_request_reasoning_parser(
+        configured_parser=_reasoning_parser,
+        model_config=_model_config,
+        effective_think_in_template=effective_think_in_template,
+        harmony_active=_harmony_prefix_active,
+        stream_surface="chat",
+    )
+    if request_parser is None:
         logger.debug("[chat] No reasoning parser active for this request")
 
     # Track accumulated text for reasoning parser and tool call detection
@@ -18968,11 +19028,6 @@ async def stream_chat_completion(
                         )
                         yield f"data: {_dump_chat_chunk(heartbeat)}\n\n"
                     continue
-
-                # Add <think> prefix on first content chunk for thinking models
-                if is_thinking_model and not think_prefix_sent and content:
-                    content = "<think>" + content
-                    think_prefix_sent = True
 
                 if _suppress_tools and content:
                     safe_text_prefix = (
@@ -20267,10 +20322,6 @@ async def stream_responses_api(
     # requests may close it before decode.
     effective_think_in_template = think_in_template
 
-    # For thinking models without reasoning parser, prepend <think>
-    is_thinking_model = effective_think_in_template and not _reasoning_parser
-    think_prefix_sent = False
-
     # Suppress reasoning output when user explicitly disabled thinking
     suppress_reasoning = _effective_thinking is False
     m3_reasoning_only_answer_budget: int | None = None
@@ -20423,17 +20474,14 @@ async def stream_responses_api(
             "<|start|>assistant<|channel|>analysis"
         )
     ) or _reasoning_parser_is_harmony(_reasoning_parser)
-    request_parser = None
-    if _reasoning_parser:
-        request_parser = _reasoning_parser.__class__()
-        request_parser.reset_state(
-            think_in_prompt=effective_think_in_template,
-            harmony_active=_harmony_prefix_active,
-        )
-        logger.debug(
-            f"[responses] Reasoning parser: {type(request_parser).__name__} (think_in_template={effective_think_in_template}, suppress={suppress_reasoning}, harmony_active={_harmony_prefix_active})"
-        )
-    else:
+    request_parser = _new_request_reasoning_parser(
+        configured_parser=_reasoning_parser,
+        model_config=_model_config,
+        effective_think_in_template=effective_think_in_template,
+        harmony_active=_harmony_prefix_active,
+        stream_surface="responses",
+    )
+    if request_parser is None:
         logger.debug("[responses] No reasoning parser active for this request")
 
     # Use per-request timeout if provided, otherwise server default
@@ -20804,11 +20852,6 @@ async def stream_responses_api(
                         )
                         continue
                     else:
-                        # Add <think> prefix on first chunk for thinking models
-                        if is_thinking_model and not think_prefix_sent and content:
-                            content = "<think>" + content
-                            think_prefix_sent = True
-
                         if _suppress_tools and content:
                             safe_text_prefix = (
                                 _tool_safe_stream_prefix(

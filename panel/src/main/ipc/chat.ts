@@ -1730,6 +1730,14 @@ export function registerChatHandlers(
         joinReasoningSegments(reasoningSegments) || reasoningContent;
       const currentReasoningSegments = () =>
         visibleReasoningSegments(reasoningSegments);
+      const currentReasoningSegment = () => {
+        const segments = currentReasoningSegments();
+        return segments[segments.length - 1] || reasoningContent;
+      };
+      const responsesReasoningItem = (text: string) => ({
+        type: "reasoning",
+        content: [{ type: "reasoning", text }],
+      });
       let responseWarnings: string[] | null = null;
       // A model can complete the first post-tool stream with reasoning but no
       // visible answer. The one recovery request is intentionally answer-only:
@@ -3309,8 +3317,12 @@ export function registerChatHandlers(
 
         // ─── Helper: execute tool calls and push results to messages ───────
         const executeToolCalls = async () => {
+          const toolReasoning = currentReasoningSegment();
           if (useResponsesApi) {
             // Responses API: push individual output items (not Chat Completions format)
+            if (toolReasoning.trim()) {
+              requestMessages.push(responsesReasoningItem(toolReasoning));
+            }
             if (fullContent) {
               requestMessages.push({ type: "output_text", text: fullContent });
             }
@@ -3324,7 +3336,7 @@ export function registerChatHandlers(
             }
           } else {
             // Chat Completions: push assistant message with tool_calls array
-            requestMessages.push({
+            const assistantToolTurn: any = {
               role: "assistant",
               content: fullContent || null,
               tool_calls: receivedToolCalls.map((tc) => ({
@@ -3335,7 +3347,11 @@ export function registerChatHandlers(
                   arguments: tc.function.arguments,
                 },
               })),
-            });
+            };
+            if (toolReasoning.trim()) {
+              assistantToolTurn.reasoning_content = toolReasoning;
+            }
+            requestMessages.push(assistantToolTurn);
           }
 
           const pendingImageDataUrls: string[] = [];

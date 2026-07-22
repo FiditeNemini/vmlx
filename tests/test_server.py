@@ -2700,6 +2700,167 @@ class TestOpenAILogprobsFormatting:
         assert done_text == "Answer  done"
 
     @pytest.mark.asyncio
+    async def test_streaming_chat_uses_registry_reasoning_parser_when_global_missing(
+        self, monkeypatch
+    ):
+        """A missing global parser must not make an open think rail visible."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.model_config_registry as registry_mod
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _Registry:
+            def lookup(self, _model):
+                return SimpleNamespace(
+                    family_name="qwen3_5_moe",
+                    reasoning_parser="qwen3",
+                    think_in_template=True,
+                )
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = "private thought</think>VISIBLE-DONE"
+                yield GenerationOutput(
+                    text=text,
+                    new_text=text,
+                    tokens=[],
+                    prompt_tokens=3,
+                    completion_tokens=7,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        monkeypatch.setattr(registry_mod, "get_model_config_registry", lambda: _Registry())
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "registry-parser-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+        monkeypatch.setattr(server, "_template_completes_thinking", lambda *a, **k: False)
+        monkeypatch.setattr(server, "_engine_prompt_starts_in_reasoning", lambda *a, **k: True)
+
+        request = ChatCompletionRequest(
+            model="registry-parser-test",
+            messages=[Message(role="user", content="test")],
+            stream=True,
+            enable_thinking=True,
+        )
+
+        chunks = []
+        async for line in server.stream_chat_completion(
+            _Engine(),
+            [m.model_dump(exclude_none=True) for m in request.messages],
+            request,
+            fastapi_request=None,
+        ):
+            if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                chunks.append(json.loads(line.removeprefix("data: ")))
+
+        reasoning = "".join(
+            c["choices"][0]["delta"].get("reasoning_content", "")
+            for c in chunks
+            if c.get("choices")
+        )
+        visible = "".join(
+            c["choices"][0]["delta"].get("content", "")
+            for c in chunks
+            if c.get("choices")
+        )
+        assert reasoning == "private thought"
+        assert visible == "VISIBLE-DONE"
+        assert "<think" not in visible
+        assert "</think>" not in visible
+
+    @pytest.mark.asyncio
+    async def test_streaming_responses_uses_registry_reasoning_parser_when_global_missing(
+        self, monkeypatch
+    ):
+        """Responses must emit reasoning-summary deltas instead of inline tags."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.model_config_registry as registry_mod
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _Registry:
+            def lookup(self, _model):
+                return SimpleNamespace(
+                    family_name="qwen3_5_moe",
+                    reasoning_parser="qwen3",
+                    think_in_template=True,
+                )
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = "private thought</think>VISIBLE-DONE"
+                yield GenerationOutput(
+                    text=text,
+                    new_text=text,
+                    tokens=[],
+                    prompt_tokens=3,
+                    completion_tokens=7,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        monkeypatch.setattr(registry_mod, "get_model_config_registry", lambda: _Registry())
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "registry-parser-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+        monkeypatch.setattr(server, "_template_completes_thinking", lambda *a, **k: False)
+        monkeypatch.setattr(server, "_engine_prompt_starts_in_reasoning", lambda *a, **k: True)
+
+        request = ResponsesRequest(
+            model="registry-parser-test",
+            input="test",
+            stream=True,
+            enable_thinking=True,
+        )
+
+        events = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": "test"}],
+            request,
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        reasoning = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.reasoning_summary_text.delta"
+        )
+        visible = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        )
+        done_text = "".join(
+            event.get("text", "")
+            for event in events
+            if event.get("type") == "response.output_text.done"
+        )
+        assert reasoning == "private thought"
+        assert visible == "VISIBLE-DONE"
+        assert done_text == "VISIBLE-DONE"
+        assert "<think" not in visible
+        assert "</think>" not in visible
+
+    @pytest.mark.asyncio
     async def test_streaming_responses_separates_late_gemma4_thought_after_content(
         self, monkeypatch
     ):

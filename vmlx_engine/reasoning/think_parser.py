@@ -115,11 +115,33 @@ class BaseThinkingReasoningParser(ReasoningParser):
 
         # Case 1: Both tags present (normal case)
         if self.start_token in text and self.end_token in text:
-            # Get everything after start token
-            _, _, after_start = text.partition(self.start_token)
-            # Split on end token
-            reasoning, _, content = after_start.partition(self.end_token)
-            return reasoning.strip() or None, content.strip() or None
+            reasoning_parts: list[str] = []
+            content_parts: list[str] = []
+            pos = 0
+            in_reasoning = False
+            while pos < len(text):
+                if in_reasoning:
+                    end_idx = text.find(self.end_token, pos)
+                    if end_idx < 0:
+                        reasoning_parts.append(text[pos:])
+                        pos = len(text)
+                    else:
+                        reasoning_parts.append(text[pos:end_idx])
+                        pos = end_idx + len(self.end_token)
+                        in_reasoning = False
+                    continue
+
+                start_idx = text.find(self.start_token, pos)
+                if start_idx < 0:
+                    content_parts.append(text[pos:])
+                    break
+                content_parts.append(text[pos:start_idx])
+                pos = start_idx + len(self.start_token)
+                in_reasoning = True
+
+            reasoning = "\n".join(part.strip() for part in reasoning_parts if part.strip())
+            content = "".join(content_parts).strip()
+            return reasoning or None, content or None
 
         # Case 2: Only closing tag (think was injected in prompt)
         # Everything before </think> is reasoning
@@ -207,10 +229,16 @@ class BaseThinkingReasoningParser(ReasoningParser):
     ) -> DeltaMessage | None:
         """Handle case where <think> tag is explicitly in the output."""
         start_in_delta = self.start_token in delta_text
+        last_start_prev = previous_text.rfind(self.start_token)
+        last_end_prev = previous_text.rfind(self.end_token)
+        in_explicit_reasoning = last_start_prev >= 0 and last_start_prev > last_end_prev
 
         if start_in_prev:
-            # We're after the start token
-            if end_in_delta:
+            # We're after at least one start token. Use the most recent
+            # boundary, not the first one, so a later post-tool
+            # <think>...</think> block is routed back to reasoning instead of
+            # leaking as visible content.
+            if in_explicit_reasoning and end_in_delta:
                 # Transition: end token in this delta
                 idx = delta_text.find(self.end_token)
                 reasoning_part = delta_text[:idx]
@@ -219,8 +247,28 @@ class BaseThinkingReasoningParser(ReasoningParser):
                     reasoning=reasoning_part if reasoning_part else None,
                     content=content_part if content_part else None,
                 )
+            elif in_explicit_reasoning:
+                # Still inside the most recent explicit reasoning block.
+                return DeltaMessage(reasoning=delta_text)
             elif end_in_prev:
-                # Already past reasoning phase - pure content
+                # Already past a reasoning phase. A new start token in this
+                # delta opens a later reasoning segment; otherwise pure content.
+                if start_in_delta:
+                    start_idx = delta_text.find(self.start_token)
+                    pre_content = delta_text[:start_idx]
+                    after_start = delta_text[start_idx + len(self.start_token) :]
+                    end_idx = after_start.find(self.end_token)
+                    if end_idx >= 0:
+                        reasoning_part = after_start[:end_idx]
+                        post_content = after_start[end_idx + len(self.end_token) :].lstrip()
+                        content_part = pre_content + post_content
+                    else:
+                        reasoning_part = after_start
+                        content_part = pre_content
+                    return DeltaMessage(
+                        reasoning=reasoning_part if reasoning_part else None,
+                        content=content_part if content_part else None,
+                    )
                 content_part = self._content_after_reasoning_boundary(
                     previous_text,
                     delta_text,

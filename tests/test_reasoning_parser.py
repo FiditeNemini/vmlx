@@ -112,6 +112,20 @@ class TestQwen3Parser:
         assert "Step 3" in reasoning
         assert content == "Result: 42"
 
+    def test_extract_repeated_reasoning_blocks(self, parser):
+        """Interleaved post-tool reasoning blocks must not leak into content."""
+        output = (
+            "<think>plan tool</think>"
+            "TOOL_CALL_OR_VISIBLE"
+            "<think>inspect tool result</think>"
+            "FINAL"
+        )
+        reasoning, content = parser.extract_reasoning(output)
+        assert reasoning == "plan tool\ninspect tool result"
+        assert content == "TOOL_CALL_OR_VISIBLEFINAL"
+        assert "<think>" not in content
+        assert "</think>" not in content
+
     def test_no_tags_returns_content_only(self, parser):
         """Qwen3 requires both tags - no tags means pure content."""
         output = "Just a regular response without thinking."
@@ -187,6 +201,35 @@ class TestQwen3Parser:
         assert result is not None
         assert result.reasoning == " more"
         assert result.content == "content here"
+
+    def test_streaming_repeated_reasoning_blocks_after_content(self, parser):
+        """A later explicit think block should reopen the reasoning rail."""
+        parser.reset_state()
+
+        deltas = [
+            "<think>",
+            "first",
+            "</think>",
+            "VISIBLE",
+            "<think>",
+            "second",
+            "</think>",
+            "FINAL",
+        ]
+        accumulated = ""
+        reasoning_parts = []
+        content_parts = []
+        for delta in deltas:
+            prev = accumulated
+            accumulated += delta
+            msg = parser.extract_reasoning_streaming(prev, accumulated, delta)
+            if msg and msg.reasoning:
+                reasoning_parts.append(msg.reasoning)
+            if msg and msg.content:
+                content_parts.append(msg.content)
+
+        assert "".join(reasoning_parts) == "firstsecond"
+        assert "".join(content_parts) == "VISIBLEFINAL"
 
 
 class TestDeepSeekR1Parser:

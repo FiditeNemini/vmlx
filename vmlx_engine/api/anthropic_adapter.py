@@ -548,6 +548,7 @@ class AnthropicStreamAdapter:
         self._output_tokens = 0
         self._finish_reason: str | None = None
         self._errored = False
+        self._finalized = False
 
     def _sse(self, event_type: str, data: dict) -> str:
         return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=True)}\n\n"
@@ -573,12 +574,47 @@ class AnthropicStreamAdapter:
         self._content_index += 1
         self._thinking_block_open = False
 
+    def _close_text(self, events: list[str]) -> None:
+        """Close the current text block and advance to the next block index."""
+        if not self._text_block_open:
+            return
+        events.append(self._sse("content_block_stop", {
+            "type": "content_block_stop",
+            "index": self._content_index,
+        }))
+        self._content_index += 1
+        self._text_block_open = False
+
+    def _close_tool(self, events: list[str]) -> None:
+        """Close the current tool block and advance to the next block index."""
+        if not self._tool_block_open:
+            return
+        events.append(self._sse("content_block_stop", {
+            "type": "content_block_stop",
+            "index": self._content_index,
+        }))
+        self._content_index += 1
+        self._tool_block_open = False
+        self._active_tool_index = None
+
+    def _close_open_blocks(self, events: list[str]) -> None:
+        """Close the one active Anthropic content block before a rail transition."""
+        self._close_thinking(events)
+        self._close_text(events)
+        self._close_tool(events)
+
     def process_chunk(self, chunk_line: str) -> list[str]:
         """Process a single SSE line from Chat Completions stream.
 
         Returns list of Anthropic SSE event strings.
         """
         events = []
+
+        # A terminal/error event owns the remainder of the stream. Ignore any
+        # trailing upstream data so Anthropic clients never see post-terminal
+        # blocks or a second terminal sequence.
+        if self._finalized or self._errored:
+            return events
 
         # Skip non-data lines and keep-alive comments
         if not chunk_line.startswith("data: "):
@@ -622,22 +658,8 @@ class AnthropicStreamAdapter:
                             "usage": {"input_tokens": 0, "output_tokens": 0},
                         },
                     }))
-                # Close any open non-text blocks before opening the notice block.
-                self._close_thinking(events)
-                if self._tool_block_open:
-                    events.append(self._sse("content_block_stop", {
-                        "type": "content_block_stop",
-                        "index": self._content_index,
-                    }))
-                    self._content_index += 1
-                    self._tool_block_open = False
-                if self._text_block_open:
-                    events.append(self._sse("content_block_stop", {
-                        "type": "content_block_stop",
-                        "index": self._content_index,
-                    }))
-                    self._content_index += 1
-                    self._text_block_open = False
+                # Close the active block before opening the notice block.
+                self._close_open_blocks(events)
                 # Open a fresh text block for the notice + emit + close.
                 events.append(self._sse("content_block_start", {
                     "type": "content_block_start",
@@ -716,6 +738,11 @@ class AnthropicStreamAdapter:
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         if reasoning:
             if not self._thinking_block_open:
+                # Some families (including Gemma4) may emit a late thought
+                # after visible text. Anthropic permits sequential content
+                # blocks, not overlapping blocks or index reuse.
+                self._close_text(events)
+                self._close_tool(events)
                 self._thinking_block_open = True
                 events.append(self._sse("content_block_start", {
                     "type": "content_block_start",
@@ -732,16 +759,9 @@ class AnthropicStreamAdapter:
         text = delta.get("content")
         if text:
             # Close any open non-text blocks when transitioning to text
-            if self._thinking_block_open and not self._text_block_open:
+            if not self._text_block_open:
                 self._close_thinking(events)
-
-            if self._tool_block_open and not self._text_block_open:
-                events.append(self._sse("content_block_stop", {
-                    "type": "content_block_stop",
-                    "index": self._content_index,
-                }))
-                self._content_index += 1
-                self._tool_block_open = False
+                self._close_tool(events)
 
             if not self._text_block_open:
                 self._text_block_open = True
@@ -799,24 +819,7 @@ class AnthropicStreamAdapter:
             # tool_use block until both the id and non-empty name are known.
             if pending["id"] and pending["name"]:
                 # Close any open blocks before starting tool block
-                if self._thinking_block_open:
-                    self._close_thinking(events)
-
-                if self._tool_block_open:
-                    events.append(self._sse("content_block_stop", {
-                        "type": "content_block_stop",
-                        "index": self._content_index,
-                    }))
-                    self._content_index += 1
-                    self._tool_block_open = False
-
-                if self._text_block_open:
-                    events.append(self._sse("content_block_stop", {
-                        "type": "content_block_stop",
-                        "index": self._content_index,
-                    }))
-                    self._content_index += 1
-                    self._text_block_open = False
+                self._close_open_blocks(events)
 
                 events.append(self._sse("content_block_start", {
                     "type": "content_block_start",
@@ -849,10 +852,13 @@ class AnthropicStreamAdapter:
 
     def finalize(self) -> list[str]:
         """Generate closing events for the stream."""
+        if self._finalized:
+            return []
         # Guard: if stream errored before any data was emitted, don't send
         # orphaned message_delta/message_stop without a preceding message_start
         if not self._started:
             return []
+        self._finalized = True
         events = []
 
         # If an error event was already emitted, end without a normal terminal.
@@ -868,25 +874,8 @@ class AnthropicStreamAdapter:
         else:
             stop_reason = "end_turn"
 
-        # Close any open blocks
-        self._close_thinking(events)
-
-        if self._text_block_open:
-            events.append(self._sse("content_block_stop", {
-                "type": "content_block_stop",
-                "index": self._content_index,
-            }))
-            self._content_index += 1
-            self._text_block_open = False
-
-        if self._tool_block_open:
-            events.append(self._sse("content_block_stop", {
-                "type": "content_block_stop",
-                "index": self._content_index,
-            }))
-            self._content_index += 1
-            self._tool_block_open = False
-            self._active_tool_index = None
+        # Close the one active block before the message terminal sequence.
+        self._close_open_blocks(events)
 
         # message_delta with final usage (include input_tokens since message_start
         # emits 0 — prompt tokens aren't known until the final streaming chunk)

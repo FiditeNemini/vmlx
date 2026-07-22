@@ -41,6 +41,42 @@ def _types(events):
     return types
 
 
+def _data(events):
+    rows = []
+    for event in events:
+        for line in event.splitlines():
+            if line.startswith("data: "):
+                rows.append(json.loads(line[6:]))
+    return rows
+
+
+def _assert_balanced_monotonic_blocks(rows):
+    active_index = None
+    started_indices = []
+    stopped_indices = []
+    for row in rows:
+        if row.get("type") == "content_block_start":
+            assert active_index is None, (
+                f"content block {row['index']} opened while {active_index} was active"
+            )
+            active_index = row["index"]
+            started_indices.append(active_index)
+        elif row.get("type") == "content_block_delta":
+            assert row["index"] == active_index, (
+                f"delta index {row['index']} does not match active block {active_index}"
+            )
+        elif row.get("type") == "content_block_stop":
+            assert row["index"] == active_index, (
+                f"stop index {row['index']} does not match active block {active_index}"
+            )
+            stopped_indices.append(row["index"])
+            active_index = None
+
+    assert active_index is None
+    assert started_indices == list(range(len(started_indices)))
+    assert stopped_indices == started_indices
+
+
 def test_stop_reason_tool_use_when_finish_is_tool_calls():
     # reasoning, then text, then a tool call with finish_reason=tool_calls
     events, _ = _run([
@@ -129,6 +165,75 @@ def test_split_tool_id_then_name_never_opens_empty_anthropic_name():
     assert '"name": ""' not in wire
     assert '"partial_json": "{\\"path\\":\\"panel/package.json\\"}"' in wire
     assert '"stop_reason": "tool_use"' in wire
+
+
+def test_text_then_late_reasoning_then_final_text_has_distinct_balanced_blocks():
+    """Gemma-style late thought must not overlap or reuse the visible text block."""
+    adapter = AnthropicStreamAdapter("test-model", "msg_test")
+    events = []
+    events += adapter.process_chunk(_chunk({"content": "Visible first."}))
+    events += adapter.process_chunk(_chunk({"reasoning_content": "Late thought."}))
+    events += adapter.process_chunk(_chunk({"content": "Visible final."}, finish="stop"))
+    events += adapter.finalize()
+
+    # Stream finalization is terminal and must not emit a second message_stop.
+    assert adapter.finalize() == []
+
+    rows = _data(events)
+    _assert_balanced_monotonic_blocks(rows)
+    starts = [
+        (row["index"], row["content_block"]["type"])
+        for row in rows
+        if row.get("type") == "content_block_start"
+    ]
+    assert starts == [(0, "text"), (1, "thinking"), (2, "text")]
+    assert [
+        row["delta"]["thinking"]
+        for row in rows
+        if row.get("delta", {}).get("type") == "thinking_delta"
+    ] == ["Late thought."]
+    assert [
+        row["delta"]["text"]
+        for row in rows
+        if row.get("delta", {}).get("type") == "text_delta"
+    ] == ["Visible first.", "Visible final."]
+    assert sum(row.get("type") == "message_stop" for row in rows) == 1
+
+
+def test_text_then_late_reasoning_then_tool_has_balanced_monotonic_blocks():
+    """A late thought before a tool must close text and thinking in order."""
+    events, _ = _run([
+        _chunk({"content": "I need to inspect the file."}),
+        _chunk({"reasoning_content": "Use the supplied tool."}),
+        _chunk({
+            "tool_calls": [{
+                "index": 0,
+                "id": "call_late",
+                "type": "function",
+                "function": {
+                    "name": "file_info",
+                    "arguments": '{"path":"panel/package.json"}',
+                },
+            }]
+        }, finish="tool_calls"),
+    ])
+
+    rows = _data(events)
+    _assert_balanced_monotonic_blocks(rows)
+    starts = [
+        (row["index"], row["content_block"]["type"])
+        for row in rows
+        if row.get("type") == "content_block_start"
+    ]
+    assert starts == [(0, "text"), (1, "thinking"), (2, "tool_use")]
+    assert [
+        row["delta"]["partial_json"]
+        for row in rows
+        if row.get("delta", {}).get("type") == "input_json_delta"
+    ] == ['{"path":"panel/package.json"}']
+    message_deltas = [row for row in rows if row.get("type") == "message_delta"]
+    assert [row["delta"]["stop_reason"] for row in message_deltas] == ["tool_use"]
+    assert sum(row.get("type") == "message_stop" for row in rows) == 1
 
 
 @pytest.mark.asyncio

@@ -272,6 +272,7 @@ def _convert_assistant_message(msg: dict) -> Message:
 
     if isinstance(content, list):
         text_parts = []
+        thinking_parts = []
         tool_calls = []
 
         for block in content:
@@ -282,9 +283,12 @@ def _convert_assistant_message(msg: dict) -> Message:
             if block_type == "text":
                 text_parts.append(block.get("text", ""))
             elif block_type == "thinking":
-                # Thinking blocks from previous turns are dropped — local models
-                # don't need prior reasoning context (matches Anthropic guidance)
-                pass
+                # Anthropic requires prior assistant thinking blocks to be sent
+                # back during tool-result continuation.  Preserve the plain-text
+                # reasoning privately; never concatenate it into visible content.
+                _thinking = block.get("thinking", "")
+                if isinstance(_thinking, str) and _thinking:
+                    thinking_parts.append(_thinking)
             elif block_type == "tool_use":
                 tool_calls.append({
                     "id": block.get("id", f"call_{uuid.uuid4().hex[:8]}"),
@@ -305,6 +309,7 @@ def _convert_assistant_message(msg: dict) -> Message:
         return Message(
             role="assistant",
             content=_content,
+            reasoning_content="\n".join(thinking_parts) if thinking_parts else None,
             tool_calls=tool_calls if tool_calls else None,
         )
 

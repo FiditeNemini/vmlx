@@ -809,6 +809,33 @@ describe('Responses API — reasoning events', () => {
         const r4 = parseResponsesApiEvent('response.output_text.delta', { delta: 'The answer' }, isReasoning)
         expect(r4.emitted).toEqual([['The answer', false]])
     })
+
+    it('renders standard reasoning-index-0 then message-index-1 streams by event type', () => {
+        let isReasoning = false
+
+        const reasoning = parseResponsesApiEvent(
+            'response.reasoning_summary_text.delta',
+            { item_id: 'rs_1', output_index: 0, delta: 'Private step.' },
+            isReasoning
+        )
+        isReasoning = reasoning.isReasoning
+        expect(reasoning.emitted).toEqual([['Private step.', true]])
+
+        const done = parseResponsesApiEvent(
+            'response.reasoning_summary_text.done',
+            { item_id: 'rs_1', output_index: 0, text: 'Private step.' },
+            isReasoning
+        )
+        isReasoning = done.isReasoning
+        expect(done.reasoningDone).toBe(true)
+
+        const content = parseResponsesApiEvent(
+            'response.output_text.delta',
+            { item_id: 'msg_1', output_index: 1, delta: 'Visible answer.' },
+            isReasoning
+        )
+        expect(content.emitted).toEqual([['Visible answer.', false]])
+    })
 })
 
 // ════════════════════════════════════════════════════════════════════════════════

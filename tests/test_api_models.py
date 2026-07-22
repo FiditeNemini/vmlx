@@ -114,6 +114,20 @@ class TestMessage:
         assert msg.tool_calls is None
         assert msg.tool_call_id is None
 
+    def test_assistant_reasoning_content_is_accepted_and_serialized_for_history(self):
+        msg = Message(
+            role="assistant",
+            content="visible answer",
+            reasoning_content="private reasoning",
+        )
+
+        assert msg.reasoning_content == "private reasoning"
+        assert msg.model_dump(exclude_none=True) == {
+            "role": "assistant",
+            "content": "visible answer",
+            "reasoning_content": "private reasoning",
+        }
+
     def test_system_message(self):
         msg = Message(role="system", content="You are helpful.")
         assert msg.role == "system"

@@ -119,6 +119,11 @@ class Message(BaseModel):
 
     role: str
     content: str | list[ContentPart] | list[dict] | None = None
+    # Private assistant reasoning carried forward for local multi-turn
+    # templates.  This stays separate from visible ``content`` so OpenAI Chat,
+    # Ollama ``message.thinking``, and Anthropic thinking blocks can round-trip
+    # through the shared prompt renderer without polluting the answer rail.
+    reasoning_content: str | None = None
     # For assistant messages with tool calls
     tool_calls: list[dict] | None = None
     # For tool response messages (role="tool")
@@ -785,6 +790,30 @@ class ResponsesOutputMessage(BaseModel):
     content: list[ResponsesOutputText] = Field(default_factory=list)
 
 
+class ResponsesReasoningSummaryText(BaseModel):
+    """A summary part in a Responses API reasoning output item."""
+
+    type: str = "summary_text"
+    text: str = ""
+
+
+class ResponsesReasoningText(BaseModel):
+    """Raw reasoning content in a Responses API reasoning output item."""
+
+    type: str = "reasoning_text"
+    text: str = ""
+
+
+class ResponsesReasoningItem(BaseModel):
+    """A reasoning item in the Responses API output array."""
+
+    type: str = "reasoning"
+    id: str = Field(default_factory=lambda: f"rs_{uuid.uuid4().hex[:12]}")
+    status: str = "completed"
+    summary: list[ResponsesReasoningSummaryText] = Field(default_factory=list)
+    content: list[ResponsesReasoningText] = Field(default_factory=list)
+
+
 class ResponsesFunctionCall(BaseModel):
     """A function call in the Responses API output array."""
 
@@ -1023,7 +1052,9 @@ class ResponsesObject(BaseModel):
     created_at: int = Field(default_factory=lambda: int(time.time()))
     status: str = "completed"
     model: str
-    output: list[ResponsesOutputMessage | ResponsesFunctionCall] = Field(default_factory=list)
+    output: list[
+        ResponsesOutputMessage | ResponsesReasoningItem | ResponsesFunctionCall
+    ] = Field(default_factory=list)
     usage: ResponsesUsage = Field(default_factory=ResponsesUsage)
     previous_response_id: str | None = None
     error: dict | None = None

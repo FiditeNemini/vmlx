@@ -243,6 +243,83 @@ class TestExtractMultimodalContent:
         assert images == []
         assert videos == []
 
+    def test_assistant_reasoning_history_stays_separate_from_visible_content(self):
+        messages = [
+            Message(
+                role="assistant",
+                content="visible answer",
+                reasoning_content="private reasoning",
+            )
+        ]
+
+        processed, images, videos = extract_multimodal_content(messages)
+
+        assert processed == [
+            {
+                "role": "assistant",
+                "content": "visible answer",
+                "reasoning_content": "private reasoning",
+            }
+        ]
+        assert images == []
+        assert videos == []
+
+    def test_reasoning_only_assistant_history_is_not_dropped(self):
+        messages = [
+            Message(
+                role="assistant",
+                content="",
+                reasoning_content="private reasoning only",
+            )
+        ]
+
+        processed, _, _ = extract_multimodal_content(messages)
+
+        assert processed == [
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "private reasoning only",
+            }
+        ]
+
+    def test_reasoning_and_native_tool_call_history_remain_adjacent(self):
+        messages = [
+            Message(
+                role="assistant",
+                content="",
+                reasoning_content="I should inspect the path.",
+                tool_calls=[
+                    {
+                        "id": "call_file",
+                        "type": "function",
+                        "function": {
+                            "name": "file_info",
+                            "arguments": '{"path":"panel/package.json"}',
+                        },
+                    }
+                ],
+            ),
+            Message(
+                role="tool",
+                tool_call_id="call_file",
+                content="Size: 5.2 KB",
+            ),
+        ]
+
+        processed, _, _ = extract_multimodal_content(
+            messages, preserve_native_format=True
+        )
+
+        assert processed[0]["reasoning_content"] == "I should inspect the path."
+        assert processed[0]["content"] == ""
+        assert processed[0]["tool_calls"][0]["id"] == "call_file"
+        assert processed[1] == {
+            "role": "tool",
+            "tool_call_id": "call_file",
+            "content": "Size: 5.2 KB",
+        }
+
     def test_none_content(self):
         messages = [Message(role="assistant", content=None)]
         processed, images, videos = extract_multimodal_content(messages)

@@ -137,6 +137,20 @@ def ollama_chat_to_openai(body: dict) -> dict:
     src_messages = body.get("messages", [])
     translated_messages = []
     for msg in src_messages:
+        if not isinstance(msg, dict):
+            translated_messages.append(msg)
+            continue
+        # Ollama exposes private reasoning as ``message.thinking``.  Normalize
+        # it into the shared Chat history field before either the text-only or
+        # multimodal path runs, keeping it out of visible ``content``.
+        normalized_msg = dict(msg)
+        if (
+            normalized_msg.get("role") == "assistant"
+            and isinstance(normalized_msg.get("thinking"), str)
+            and normalized_msg.get("thinking")
+        ):
+            normalized_msg["reasoning_content"] = normalized_msg.pop("thinking")
+        msg = normalized_msg
         images = msg.get("images") if isinstance(msg, dict) else None
         videos = msg.get("videos") if isinstance(msg, dict) else None
         audio = (

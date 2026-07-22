@@ -223,6 +223,53 @@ class TestToolConversion:
         assert assistant_msg.tool_calls[0]["function"]["name"] == "get_weather"
         assert json.loads(assistant_msg.tool_calls[0]["function"]["arguments"]) == {"city": "Paris"}
 
+    def test_assistant_thinking_survives_tool_result_continuation_privately(self):
+        req = AnthropicRequest(
+            model="test-model",
+            messages=[
+                {"role": "user", "content": "inspect the file"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "I should inspect the requested path.",
+                            "signature": "local-test-signature",
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_file",
+                            "name": "file_info",
+                            "input": {"path": "panel/package.json"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_file",
+                            "content": "Size: 5.2 KB",
+                        }
+                    ],
+                },
+            ],
+        )
+
+        chat_req = to_chat_completion(req)
+        assistant = chat_req.messages[1]
+        assert assistant.content == ""
+        assert assistant.reasoning_content == (
+            "I should inspect the requested path."
+        )
+        assert assistant.tool_calls[0]["id"] == "toolu_file"
+        dumped = assistant.model_dump(exclude_none=True)
+        assert dumped["content"] == ""
+        assert dumped["reasoning_content"] == (
+            "I should inspect the requested path."
+        )
+
     def test_user_tool_result_blocks(self):
         """Anthropic user messages with tool_result blocks → OpenAI tool response messages."""
         req = AnthropicRequest(

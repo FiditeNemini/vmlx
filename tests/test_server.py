@@ -1,11 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the OpenAI-compatible API server."""
 
+import json
 import platform
 import sys
 from pathlib import Path
 
 import pytest
+
+
+def test_thinking_off_history_strip_is_shared_and_preserves_tool_anchors():
+    from vmlx_engine.server import _strip_prior_reasoning_for_thinking_off
+
+    messages = [
+        {"role": "user", "content": "first"},
+        {
+            "role": "assistant",
+            "content": "visible",
+            "reasoning_content": "private",
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "private only",
+        },
+        {
+            "role": "assistant",
+            "content": "<think>private tool plan</think>",
+            "reasoning_content": "private tool plan",
+            "tool_calls": [{"id": "call_file"}],
+        },
+        {"role": "tool", "tool_call_id": "call_file", "content": "result"},
+    ]
+
+    cleaned = _strip_prior_reasoning_for_thinking_off(messages)
+
+    assert cleaned == [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "visible"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_file"}],
+        },
+        {"role": "tool", "tool_call_id": "call_file", "content": "result"},
+    ]
+    assert "private" not in json.dumps(cleaned)
 
 # Skip all tests if not on Apple Silicon
 pytestmark = pytest.mark.skipif(
@@ -3656,6 +3696,28 @@ class TestOpenAILogprobsFormatting:
             for event in events
             if event.get("type") == "response.reasoning_summary_text.done"
         ]
+        reasoning_added = [
+            event
+            for event in events
+            if event.get("type") == "response.output_item.added"
+            and event.get("item", {}).get("type") == "reasoning"
+        ]
+        reasoning_part_added = [
+            event
+            for event in events
+            if event.get("type") == "response.reasoning_summary_part.added"
+        ]
+        reasoning_part_done = [
+            event
+            for event in events
+            if event.get("type") == "response.reasoning_summary_part.done"
+        ]
+        reasoning_item_done = [
+            event
+            for event in events
+            if event.get("type") == "response.output_item.done"
+            and event.get("item", {}).get("type") == "reasoning"
+        ]
         function_items = [
             event["item"]
             for event in events
@@ -3670,6 +3732,28 @@ class TestOpenAILogprobsFormatting:
 
         assert reasoning_deltas.strip() == "I will call the requested tool."
         assert reasoning_done[-1] == "I will call the requested tool."
+        assert len(reasoning_added) == 1
+        assert len(reasoning_part_added) == 1
+        assert len(reasoning_part_done) == 1
+        assert len(reasoning_item_done) == 1
+        reasoning_item_id = reasoning_added[0]["item"]["id"]
+        assert reasoning_item_id.startswith("rs_")
+        assert reasoning_added[0]["output_index"] == 0
+        assert {
+            event["item_id"]
+            for event in events
+            if event.get("type")
+            in {
+                "response.reasoning_summary_part.added",
+                "response.reasoning_summary_text.delta",
+                "response.reasoning_summary_text.done",
+                "response.reasoning_summary_part.done",
+            }
+        } == {reasoning_item_id}
+        assert reasoning_item_done[0]["item"]["id"] == reasoning_item_id
+        assert reasoning_item_done[0]["item"]["summary"] == [
+            {"type": "summary_text", "text": "I will call the requested tool."}
+        ]
         assert "DSML" not in reasoning_deltas
         assert "DSML" not in reasoning_done[-1]
         assert len(function_items) == 1
@@ -3680,10 +3764,401 @@ class TestOpenAILogprobsFormatting:
         reasoning_items = [
             item for item in completed["output"] if item.get("type") == "reasoning"
         ]
-        assert reasoning_items[-1]["content"][0]["text"] == (
+        assert reasoning_items[-1]["id"] == reasoning_item_id
+        assert reasoning_items[-1]["summary"][0]["text"] == (
             "I will call the requested tool."
         )
         assert "DSML" not in json.dumps(completed)
+        added_items = [
+            event
+            for event in events
+            if event.get("type") == "response.output_item.added"
+        ]
+        assert [event["item"]["type"] for event in added_items] == [
+            "reasoning",
+            "function_call",
+        ]
+        assert [event["output_index"] for event in added_items] == [0, 1]
+        assert [item["type"] for item in completed["output"]] == [
+            "reasoning",
+            "function_call",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_streaming_responses_reasoning_closes_before_message_starts(
+        self, monkeypatch
+    ):
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+
+        class _ReasoningParser:
+            def reset_state(self, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, previous_text, current_text, delta_text):
+                if delta_text.startswith("R:"):
+                    return SimpleNamespace(reasoning=delta_text[2:], content=None)
+                assert delta_text.startswith("C:")
+                return SimpleNamespace(reasoning=None, content=delta_text[2:])
+
+            def extract_reasoning(self, text):
+                return "private plan", "visible answer"
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                text = ""
+                for idx, delta in enumerate(("R:private plan", "C:visible answer"), start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text,
+                        new_text=delta,
+                        tokens=[idx],
+                        prompt_tokens=4,
+                        completion_tokens=idx,
+                        finished=(idx == 2),
+                        finish_reason="stop" if idx == 2 else None,
+                    )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "laguna-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", _ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+
+        events = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": "reason then answer"}],
+            ResponsesRequest(
+                model="laguna-test",
+                input="reason then answer",
+                stream=True,
+                enable_thinking=True,
+            ),
+            fastapi_request=None,
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        lifecycle = [
+            (event.get("type"), event.get("output_index"), event.get("item", {}).get("type"))
+            for event in events
+            if event.get("type") in {
+                "response.output_item.added",
+                "response.output_item.done",
+            }
+        ]
+        assert lifecycle == [
+            ("response.output_item.added", 0, "reasoning"),
+            ("response.output_item.done", 0, "reasoning"),
+            ("response.output_item.added", 1, "message"),
+            ("response.output_item.done", 1, "message"),
+        ]
+        completed = next(
+            event["response"]
+            for event in events
+            if event.get("type") == "response.completed"
+        )
+        assert [item["type"] for item in completed["output"]] == [
+            "reasoning",
+            "message",
+        ]
+        assert completed["output_text"] == "visible answer"
+
+    @pytest.mark.asyncio
+    async def test_nonstream_responses_serializes_reasoning_as_standard_item(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.deepseek_r1_parser import DeepSeekR1ReasoningParser
+
+        class _Engine:
+            is_mllm = False
+            preserve_native_tool_format = False
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            async def chat(self, *, messages, **kwargs):
+                return GenerationOutput(
+                    text="<think>private analysis</think>visible answer",
+                    raw_text="<think>private analysis</think>visible answer",
+                    prompt_tokens=8,
+                    completion_tokens=7,
+                    finish_reason="stop",
+                )
+
+        monkeypatch.setattr(server, "_engine", _Engine())
+        monkeypatch.setattr(server, "_served_model_name", "laguna-test")
+        monkeypatch.setattr(server, "_model_name", "laguna-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_model_type", "llm")
+        monkeypatch.setattr(server, "_reasoning_parser", DeepSeekR1ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+        monkeypatch.setattr(server, "_mcp_manager", None)
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+
+        response = await server.create_response(
+            ResponsesRequest(
+                model="laguna-test",
+                input="reason, then answer",
+                max_output_tokens=64,
+                enable_thinking=True,
+            ),
+            fastapi_request=None,
+        )
+
+        assert response.output_text == "visible answer"
+        assert [item.type for item in response.output] == ["reasoning", "message"]
+        reasoning = response.output[0]
+        assert reasoning.id.startswith("rs_")
+        assert reasoning.summary[0].type == "summary_text"
+        assert reasoning.summary[0].text == "private analysis"
+        assert reasoning.content == []
+        assert "private analysis" not in response.output_text
+
+    @pytest.mark.asyncio
+    async def test_nonstream_responses_thinking_off_never_promotes_private_reasoning(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.deepseek_r1_parser import DeepSeekR1ReasoningParser
+
+        class _Engine:
+            is_mllm = False
+            preserve_native_tool_format = False
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            async def chat(self, *, messages, **kwargs):
+                return GenerationOutput(
+                    text="<think>private analysis only",
+                    raw_text="<think>private analysis only",
+                    prompt_tokens=8,
+                    completion_tokens=4,
+                    finish_reason="length",
+                )
+
+        monkeypatch.setattr(server, "_engine", _Engine())
+        monkeypatch.setattr(server, "_served_model_name", "laguna-test")
+        monkeypatch.setattr(server, "_model_name", "laguna-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_model_type", "llm")
+        monkeypatch.setattr(server, "_reasoning_parser", DeepSeekR1ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+        monkeypatch.setattr(server, "_mcp_manager", None)
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+
+        response = await server.create_response(
+            ResponsesRequest(
+                model="laguna-test",
+                input="answer without thinking",
+                max_output_tokens=16,
+                enable_thinking=False,
+            ),
+            fastapi_request=None,
+        )
+
+        assert response.output_text in (None, "")
+        assert all(item.type != "reasoning" for item in response.output)
+        assert "private analysis" not in response.model_dump_json()
+
+    @pytest.mark.asyncio
+    async def test_nonstream_chat_thinking_off_extracts_private_tool_without_leak(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.deepseek_r1_parser import DeepSeekR1ReasoningParser
+
+        hidden = (
+            "<think>private plan must stay hidden\n"
+            '<tool_call>{"name":"file_info","arguments":{"path":"panel/package.json"}}</tool_call>'
+            "</think>"
+        )
+
+        class _Engine:
+            is_mllm = False
+            preserve_native_tool_format = False
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            async def chat(self, *, messages, **kwargs):
+                return GenerationOutput(
+                    text=hidden,
+                    raw_text=hidden,
+                    prompt_tokens=8,
+                    completion_tokens=9,
+                    finish_reason="stop",
+                )
+
+        monkeypatch.setattr(server, "_engine", _Engine())
+        monkeypatch.setattr(server, "_served_model_name", "hidden-tool-test")
+        monkeypatch.setattr(server, "_model_name", "hidden-tool-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_model_type", "llm")
+        monkeypatch.setattr(server, "_reasoning_parser", DeepSeekR1ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        monkeypatch.setattr(server, "_mcp_manager", None)
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+
+        response = await server.create_chat_completion(
+            ChatCompletionRequest(
+                model="hidden-tool-test",
+                messages=[Message(role="user", content="use file_info")],
+                enable_thinking=False,
+                max_tokens=32,
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "file_info",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                                "required": ["path"],
+                            },
+                        },
+                    }
+                ],
+            ),
+            fastapi_request=None,
+        )
+
+        body = json.loads(response.body)
+        message = body["choices"][0]["message"]
+        call = message["tool_calls"][0]
+
+        assert body["choices"][0]["finish_reason"] == "tool_calls"
+        assert message["content"] is None
+        assert "reasoning_content" not in message
+        assert call["function"]["name"] == "file_info"
+        assert json.loads(call["function"]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+        assert "private plan" not in json.dumps(body)
+
+    @pytest.mark.asyncio
+    async def test_nonstream_responses_thinking_off_extracts_private_tool_without_leak(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.deepseek_r1_parser import DeepSeekR1ReasoningParser
+
+        hidden = (
+            "<think>private responses plan must stay hidden\n"
+            '<tool_call>{"name":"file_info","arguments":{"path":"panel/package.json"}}</tool_call>'
+            "</think>"
+        )
+
+        class _Engine:
+            is_mllm = False
+            preserve_native_tool_format = False
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            async def chat(self, *, messages, **kwargs):
+                return GenerationOutput(
+                    text=hidden,
+                    raw_text=hidden,
+                    prompt_tokens=8,
+                    completion_tokens=9,
+                    finish_reason="stop",
+                )
+
+        monkeypatch.setattr(server, "_engine", _Engine())
+        monkeypatch.setattr(server, "_served_model_name", "hidden-tool-test")
+        monkeypatch.setattr(server, "_model_name", "hidden-tool-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_model_type", "llm")
+        monkeypatch.setattr(server, "_reasoning_parser", DeepSeekR1ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        monkeypatch.setattr(server, "_mcp_manager", None)
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+
+        response = await server.create_response(
+            ResponsesRequest(
+                model="hidden-tool-test",
+                input="use file_info",
+                enable_thinking=False,
+                max_output_tokens=32,
+                tools=[
+                    {
+                        "type": "function",
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    }
+                ],
+            ),
+            fastapi_request=None,
+        )
+
+        assert [item.type for item in response.output] == ["function_call"]
+        function_item = response.output[0]
+        assert function_item.name == "file_info"
+        assert json.loads(function_item.arguments) == {"path": "panel/package.json"}
+        assert response.output_text in ("", None)
+        assert "private responses plan" not in response.model_dump_json()
+
+    def test_parser_init_failure_still_filters_request_tools(self, monkeypatch):
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, Message
+
+        def _raise_parser_init(_name):
+            raise RuntimeError("parser unavailable")
+
+        monkeypatch.setattr(server, "_tool_call_parser", "broken_parser")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        monkeypatch.setattr(server.ToolParserManager, "get_tool_parser", _raise_parser_init)
+
+        request = ChatCompletionRequest(
+            model="filter-test",
+            messages=[Message(role="user", content="use a tool")],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ],
+        )
+
+        _cleaned, calls = server._parse_tool_calls_with_parser(
+            '{"name":"not_available","arguments":{"path":"panel/package.json"}}',
+            request,
+        )
+
+        assert calls is None
+        assert "not_available" in _cleaned
 
     @pytest.mark.asyncio
     async def test_nonstream_responses_minimax_tools_available_no_call_runs_answer_pass(
@@ -4569,10 +5044,10 @@ class TestOpenAILogprobsFormatting:
             )
         ]
 
-        assert message_done_indexes == [0]
-        assert function_added_indexes == [1]
-        assert function_done_indexes == [1]
-        assert function_arg_indexes and set(function_arg_indexes) == {1}
+        assert message_done_indexes == []
+        assert function_added_indexes == [0]
+        assert function_done_indexes == [0]
+        assert function_arg_indexes and set(function_arg_indexes) == {0}
 
     @pytest.mark.asyncio
     async def test_streaming_responses_required_empty_xml_tool_call_is_rejected(

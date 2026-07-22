@@ -6913,6 +6913,45 @@ class TestAnthropicOmniStreamingAdapter:
         assert 'effective_temperature=chat_kwargs["temperature"]' in block
         assert 'effective_top_p=chat_kwargs["top_p"]' in block
 
+    def test_omni_nonstream_responses_keeps_reasoning_separate(self):
+        from vmlx_engine.server import (
+            _adapt_omni_chat_completion_to_responses_payload,
+        )
+
+        payload = _adapt_omni_chat_completion_to_responses_payload(
+            {
+                "created": 123,
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "reasoning_content": "private analysis",
+                            "content": "visible answer",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 5,
+                    "total_tokens": 12,
+                },
+            },
+            "omni-test",
+        )
+
+        assert payload["id"].startswith("resp_")
+        assert payload["output_text"] == "visible answer"
+        reasoning, message = payload["output"]
+        assert reasoning["id"].startswith("rs_")
+        assert reasoning["type"] == "reasoning"
+        assert reasoning["summary"] == [
+            {"type": "summary_text", "text": "private analysis"}
+        ]
+        assert message["type"] == "message"
+        assert message["content"][0]["text"] == "visible answer"
+        assert "private analysis" not in payload["output_text"]
+
     @pytest.mark.asyncio
     async def test_omni_chat_stream_translates_to_incremental_responses_events(
         self, monkeypatch
@@ -7001,6 +7040,40 @@ class TestAnthropicOmniStreamingAdapter:
             for event in events
             if event.get("type") == "response.output_text.delta"
         ) == "visible answer"
+        reasoning_added = [
+            event
+            for event in events
+            if event.get("type") == "response.output_item.added"
+            and event.get("item", {}).get("type") == "reasoning"
+        ]
+        reasoning_done = [
+            event
+            for event in events
+            if event.get("type") == "response.output_item.done"
+            and event.get("item", {}).get("type") == "reasoning"
+        ]
+        assert len(reasoning_added) == 1
+        assert len(reasoning_done) == 1
+        reasoning_id = reasoning_added[0]["item"]["id"]
+        assert reasoning_id.startswith("rs_")
+        assert reasoning_done[0]["item"]["id"] == reasoning_id
+        assert {
+            event["item_id"]
+            for event in events
+            if event.get("type", "").startswith("response.reasoning_summary_")
+        } == {reasoning_id}
+        reasoning_added_index = events.index(reasoning_added[0])
+        reasoning_done_index = events.index(reasoning_done[0])
+        message_added = next(
+            event
+            for event in events
+            if event.get("type") == "response.output_item.added"
+            and event.get("item", {}).get("type") == "message"
+        )
+        assert reasoning_added[0]["output_index"] == 0
+        assert reasoning_done[0]["output_index"] == 0
+        assert message_added["output_index"] == 1
+        assert reasoning_added_index < reasoning_done_index < events.index(message_added)
         terminal = next(
             event["response"]
             for event in events
@@ -7012,6 +7085,17 @@ class TestAnthropicOmniStreamingAdapter:
             "output_tokens": 5,
             "total_tokens": 28,
         }
+        terminal_reasoning = next(
+            item for item in terminal["output"] if item["type"] == "reasoning"
+        )
+        assert [item["type"] for item in terminal["output"]] == [
+            "reasoning",
+            "message",
+        ]
+        assert terminal_reasoning["id"] == reasoning_id
+        assert terminal_reasoning["summary"] == [
+            {"type": "summary_text", "text": "private"}
+        ]
         assert stored["reasoning_only"] is False
 
 
@@ -16241,10 +16325,10 @@ class TestStreamUsagePropagatesCacheDetail:
             if line.startswith("data: ") and line.strip() != "data: [DONE]":
                 chunks.append(json.loads(line.removeprefix("data: ")))
 
-        # Once visible bytes have streamed, they cannot be retracted and replaced
-        # by a second direct-answer pass. Preserve the progressive prefix and the
-        # honest length terminal; content-empty reasoning runs exercise F6.
-        assert [call[0] for call in calls] == ["stream"]
+        # The direct pass may extend a visible prefix only after byte-for-byte
+        # reconciliation.  It must emit the missing suffix, never duplicate or
+        # retract the already-streamed bytes.
+        assert [call[0] for call in calls] == ["stream", "stream"]
         content_deltas = [
             choice["delta"].get("content")
             for chunk in chunks
@@ -16260,9 +16344,16 @@ class TestStreamUsagePropagatesCacheDetail:
         ]
 
         assert any("MM3_STREAM_CHAT_OK" in delta for delta in reasoning_deltas)
-        assert content_deltas == ["MM3_STREAM_CHAT"]
+        assert content_deltas == [
+            "MM3_STREAM_CHAT",
+            "_OK Oracle EBS is an integrated Oracle business application suite.",
+        ]
+        assert "".join(content_deltas) == (
+            "MM3_STREAM_CHAT_OK Oracle EBS is an integrated Oracle business "
+            "application suite."
+        )
         assert any(
-            choice.get("finish_reason") == "length"
+            choice.get("finish_reason") == "stop"
             for chunk in chunks
             for choice in chunk.get("choices", [])
         )

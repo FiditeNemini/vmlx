@@ -362,6 +362,42 @@ def test_ollama_chat_preserves_two_tool_results_for_continuation():
     assert converted["tools"] == [{"type": "function"}]
 
 
+def test_ollama_chat_preserves_prior_thinking_privately_for_tool_continuation():
+    from vmlx_engine.api.ollama_adapter import ollama_chat_to_openai
+
+    converted = ollama_chat_to_openai(
+        {
+            "model": "laguna",
+            "messages": [
+                {"role": "user", "content": "inspect the file"},
+                {
+                    "role": "assistant",
+                    "thinking": "I should call file_info.",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "file_info",
+                                "arguments": {"path": "panel/package.json"},
+                            }
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_name": "file_info",
+                    "content": "Size: 5.2 KB",
+                },
+            ],
+        }
+    )
+
+    assistant = converted["messages"][1]
+    assert "thinking" not in assistant
+    assert assistant["reasoning_content"] == "I should call file_info."
+    assert assistant["content"] == ""
+
+
 def test_ollama_stream_terminal_preserves_two_object_argument_tool_calls():
     from vmlx_engine.api.ollama_adapter import openai_chat_chunk_to_ollama_ndjson
 

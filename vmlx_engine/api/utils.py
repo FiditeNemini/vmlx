@@ -890,9 +890,13 @@ def extract_multimodal_content(
         if isinstance(msg, dict):
             role = msg.get("role", "user")
             content = msg.get("content")
+            reasoning_content = msg.get("reasoning_content", msg.get("reasoning"))
         else:
             role = msg.role
             content = msg.content
+            reasoning_content = getattr(
+                msg, "reasoning_content", getattr(msg, "reasoning", None)
+            )
 
         # Map "developer" role to "system" (OpenAI API compatibility)
         if role == "developer":
@@ -938,7 +942,7 @@ def extract_multimodal_content(
         # no semantic history, and keeping them can crash prompt rendering.
         # Preserve tool-call-only assistant turns: those are valid OpenAI
         # history anchors and are required for tool-result continuation.
-        if role == "assistant" and not tool_calls:
+        if role == "assistant" and not tool_calls and not reasoning_content:
             empty_content = (
                 content == ""
                 or (isinstance(content, list) and len(content) == 0)
@@ -963,6 +967,8 @@ def extract_multimodal_content(
                 if isinstance(content, list):
                     content = _flatten_content_list(content)
                 msg_dict = {"role": role, "content": content if content else ""}
+                if reasoning_content:
+                    msg_dict["reasoning_content"] = reasoning_content
                 if tool_calls_list:
                     msg_dict["tool_calls"] = tool_calls_list
                 processed_messages.append(msg_dict)
@@ -988,17 +994,26 @@ def extract_multimodal_content(
                 if tool_calls_text:
                     text = (text + "\n" if text else "") + "\n".join(tool_calls_text)
 
-                processed_messages.append({"role": role, "content": text})
+                msg_dict = {"role": role, "content": text}
+                if reasoning_content:
+                    msg_dict["reasoning_content"] = reasoning_content
+                processed_messages.append(msg_dict)
             continue
 
         # Handle None content
         if content is None:
-            processed_messages.append({"role": role, "content": ""})
+            msg_dict = {"role": role, "content": ""}
+            if role == "assistant" and reasoning_content:
+                msg_dict["reasoning_content"] = reasoning_content
+            processed_messages.append(msg_dict)
             continue
 
         if isinstance(content, str):
             # Simple text message
-            processed_messages.append({"role": role, "content": content})
+            msg_dict = {"role": role, "content": content}
+            if role == "assistant" and reasoning_content:
+                msg_dict["reasoning_content"] = reasoning_content
+            processed_messages.append(msg_dict)
         elif isinstance(content, list):
             # Multimodal message - extract text and media
             text_parts = []
@@ -1051,9 +1066,15 @@ def extract_multimodal_content(
 
             # Combine text parts
             combined_text = "\n".join(text_parts) if text_parts else ""
-            processed_messages.append({"role": role, "content": combined_text})
+            msg_dict = {"role": role, "content": combined_text}
+            if role == "assistant" and reasoning_content:
+                msg_dict["reasoning_content"] = reasoning_content
+            processed_messages.append(msg_dict)
         else:
             # Unknown format, try to convert
-            processed_messages.append({"role": role, "content": str(content)})
+            msg_dict = {"role": role, "content": str(content)}
+            if role == "assistant" and reasoning_content:
+                msg_dict["reasoning_content"] = reasoning_content
+            processed_messages.append(msg_dict)
 
     return processed_messages, images, videos

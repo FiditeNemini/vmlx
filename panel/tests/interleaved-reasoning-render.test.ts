@@ -68,6 +68,27 @@ describe('interleaved reasoning rendered display', () => {
     expect(html).toContain('<img')
   })
 
+  it('preserves TeX-looking source inside GFM tilde-fenced code', () => {
+    const html = renderBubble({
+      message: {
+        ...baseMessage,
+        content: [
+          'Rendered math: \\(6 \\times 7 = 42\\).',
+          '~~~python',
+          'raw = r"\\frac{94}{90} and $x_1$ and 2 * 3"',
+          '~~~',
+        ].join('\n'),
+      },
+      isStreaming: false,
+    })
+
+    expect(html).toContain('class="katex"')
+    expect(html).toContain('class="hljs language-python"')
+    expect(html).toContain('\\frac{94}{90}')
+    expect(html).toContain('$x_1$')
+    expect(html).toContain('2 * 3')
+  })
+
   it('live-replaces previous reasoning segments while streaming and shows all after completion', () => {
     const segments = [
       'First reasoning segment before tool.',

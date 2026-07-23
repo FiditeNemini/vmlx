@@ -1,6 +1,9 @@
 import { renderToString } from 'katex'
 
-const CODE_RE = /```[\s\S]*?```|`[^`\n]*`/g
+// Preserve both CommonMark backtick fences and GFM tilde fences before any
+// TeX normalization. Model-generated code frequently uses either spelling;
+// rewriting `\times`, `$...$`, or `*` inside a tilde fence corrupts source.
+const CODE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g
 
 const KATEX_OPTIONS = {
   output: 'html' as const,

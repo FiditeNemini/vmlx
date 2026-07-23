@@ -186,6 +186,7 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
     }
     if (detectedFamily === 'deepseek-v4') {
       const dsv4PrefixOptIn = config.dsv4PrefixCache !== false
+      const dsv4PoolQuantDefault = detected.dsv4PoolQuantDefault ?? true
       const desiredPrefix = dsv4PrefixOptIn
       const desiredPaged = dsv4PrefixOptIn
       const desiredBlockDisk = dsv4PrefixOptIn
@@ -210,7 +211,7 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         changed = true
       }
       if (config.dsv4PoolQuant == null) {
-        config.dsv4PoolQuant = true
+        config.dsv4PoolQuant = dsv4PrefixOptIn && dsv4PoolQuantDefault
         changed = true
       }
       if (!dsv4PrefixOptIn && config.dsv4PoolQuant === true) {
@@ -2788,7 +2789,7 @@ export class SessionManager extends EventEmitter {
           toolCallParser: 'auto',
           reasoningParser: 'auto',
           dsv4PrefixCache: dsv4DefaultCacheOptIn,
-          dsv4PoolQuant: dsv4DefaultCacheOptIn,
+          dsv4PoolQuant: dsv4DefaultCacheOptIn && (detected.dsv4PoolQuantDefault ?? true),
           defaultEnableThinking: undefined,
           nativeMtpMode: 'deterministic',
           nativeMtpDepth: (detected as any).nativeMtp?.depth ?? 3,

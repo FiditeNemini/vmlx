@@ -80,6 +80,8 @@ export interface DetectedConfig {
   supportsThinkingBudget?: boolean
   thinkInTemplate?: boolean
   defaultEnableThinking?: boolean
+  /** Bundle-owned DSV4 native CSA/HCA pool codec startup default. */
+  dsv4PoolQuantDefault?: boolean
   cacheType: string
   cacheSubtype?: string
   architectureHints?: Record<string, string | number | boolean>
@@ -1095,6 +1097,12 @@ function applyJangCapabilities(
 ): DetectedConfig {
   const caps = jangCfg?.capabilities
   const next = readJangChatMetadata(detected, jangCfg)
+  if (
+    next.family === 'deepseek-v4' &&
+    typeof jangCfg?.cache?.pool_quant_default === 'boolean'
+  ) {
+    next.dsv4PoolQuantDefault = jangCfg.cache.pool_quant_default
+  }
   const zayaTypedCca = next.family === 'zaya' || next.family === 'zaya1-vl'
   const quantizationLabel = formatJangQuantizationLabel(jangCfg ?? {})
   if (quantizationLabel) {

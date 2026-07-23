@@ -59,6 +59,24 @@ describe('prepareMarkdownWithMath', () => {
     expect(rendered).not.toContain('\\times')
   })
 
+  it('does not let an unmatched inline opener consume later paragraphs', () => {
+    const rendered = prepareMarkdownWithMath(
+      'Draft \\(47/45\nLater valid math: \\(2 + 2 = 4\\)',
+    )
+
+    expect(rendered).toContain('Draft (47/45')
+    expect(rendered).toContain('Later valid math:')
+    expect(rendered.match(/class="katex"/g)).toHaveLength(1)
+  })
+
+  it('uses readable escaped fallback instead of a visible KaTeX error node', () => {
+    const rendered = prepareMarkdownWithMath('Malformed: \\(\\frac{47}{\\)')
+
+    expect(rendered).toContain('math-fallback')
+    expect(rendered).not.toContain('katex-error')
+    expect(rendered).toContain('\\frac{47}{')
+  })
+
   it('does not treat plain dollar amounts as math', () => {
     const rendered = prepareMarkdownWithMath('The cost is $43 today.')
 

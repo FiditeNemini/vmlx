@@ -674,7 +674,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
   const [restarting, setRestarting] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [showPreview, setShowPreview] = useState(false)
-  const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; maxContextLength?: number; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string } } | null>(null)
+  const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; maxContextLength?: number; dsv4PoolQuantDefault?: boolean; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string } } | null>(null)
   const sessionIdRef = useRef(sessionId)
   const resetRequestRef = useRef(0)
   sessionIdRef.current = sessionId
@@ -844,7 +844,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
             base.dsv4PrefixCache = true
-            base.dsv4PoolQuant = true
+            base.dsv4PoolQuant = detected.dsv4PoolQuantDefault ?? true
             base.enablePrefixCache = true
             base.usePagedCache = true
             base.enableDiskCache = false

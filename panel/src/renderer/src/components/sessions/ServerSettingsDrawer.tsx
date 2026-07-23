@@ -230,7 +230,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
             base.dsv4PrefixCache = true
-            base.dsv4PoolQuant = true
+            base.dsv4PoolQuant = detected.dsv4PoolQuantDefault ?? true
             base.enablePrefixCache = true
             base.usePagedCache = true
             base.enableBlockDiskCache = true

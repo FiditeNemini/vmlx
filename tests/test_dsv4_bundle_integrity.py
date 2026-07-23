@@ -246,7 +246,7 @@ def test_dsv4_affine_loader_uses_generic_jang_hydration(monkeypatch, tmp_path):
     monkeypatch.setattr(loader, "_verify_dsv4_attention_contract", lambda: None)
     monkeypatch.setattr(loader, "_install_dsv4_memory_defaults", lambda: None)
     monkeypatch.setattr(
-        loader, "_configure_dsv4_pool_quant_default", lambda: "0"
+        loader, "_configure_dsv4_pool_quant_default", lambda _model_path=None: "0"
     )
     monkeypatch.setattr(
         jang_loader,

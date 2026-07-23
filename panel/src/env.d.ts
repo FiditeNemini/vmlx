@@ -30,6 +30,7 @@ declare global {
           supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>;
           supportsThinkingBudget?: boolean;
           thinkInTemplate?: boolean;
+          dsv4PoolQuantDefault?: boolean;
           cacheType: string;
           cacheSubtype?: string;
           usePagedCache: boolean;

@@ -359,7 +359,9 @@ def _apply_dsv4_runtime_policy(args, logger, *, clamp_max_num_seqs: bool = False
             _configure_dsv4_pool_quant_default,
         )
 
-        dsv4_pool_quant = _configure_dsv4_pool_quant_default()
+        dsv4_pool_quant = _configure_dsv4_pool_quant_default(
+            getattr(args, "model", None)
+        )
     except Exception:
         os.environ["DSV4_LONG_CTX"] = "1"
         os.environ.setdefault("DSV4_POOL_QUANT", "1")

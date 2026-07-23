@@ -4,7 +4,10 @@ const CODE_RE = /```[\s\S]*?```|`[^`\n]*`/g
 
 const KATEX_OPTIONS = {
   output: 'html' as const,
-  throwOnError: false,
+  // A failed parse must take the escaped text fallback below. KaTeX's
+  // throwOnError=false path emits a visible `.katex-error` node, which makes
+  // malformed model scratch math look like renderer corruption.
+  throwOnError: true,
   strict: 'ignore' as const,
   trust: false,
 }
@@ -77,6 +80,8 @@ function normalizeBareLatexCommands(markdown: string): string {
       return `${base}${[...exponent].map((char) => superscript[char] || char).join('')}`
     })
   return out
+    .replace(/\\\(/g, '(')
+    .replace(/\\\)/g, ')')
     .replace(/\\times\b/g, '×')
     .replace(/\\div\b/g, '÷')
     .replace(/\\cdot\b/g, '·')
@@ -122,7 +127,7 @@ export function prepareStreamingPlainTextMath(markdown: string): string {
   return normalizeBareLatexCommands(
     markdown
       .replace(/\\\[([\s\S]*?)(?:\\\]|$)/g, '$1')
-      .replace(/\\\(([\s\S]*?)(?:\\\)|$)/g, '$1')
+      .replace(/\\\(([^\n]*?)(?:\\\)|$)/g, '$1')
       .replace(/\$\$([\s\S]*?)(?:\$\$|$)/g, '$1')
       .replace(/(^|[^\\])\$([^$\n]+)\$/g, (match, prefix, body) => {
         if (!looksLikeSingleDollarMath(body)) return match
@@ -135,7 +140,9 @@ function transformMath(markdown: string): string {
   let out = markdown
     .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body) => renderMath(body, true))
     .replace(/\$\$([\s\S]*?)\$\$/g, (_match, body) => renderMath(body, true))
-    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, body) => renderMath(body, false))
+    // Inline math must not consume later paragraphs when a model leaves one
+    // opener unmatched in a reasoning stream.
+    .replace(/\\\(([^\n]*?)\\\)/g, (_match, body) => renderMath(body, false))
     .replace(/(^|[^\\])\$([^$\n]+)\$/g, (match, prefix, body) => {
       if (!looksLikeSingleDollarMath(body)) return match
       return `${prefix}${renderMath(body, false)}`

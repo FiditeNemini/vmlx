@@ -2366,10 +2366,12 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(dsv4, '--kv-cache-group-size')).toBe(false)
     })
 
-    it('deepseek-v4 family defaults preserve explicit pool quant and initialize missing false', () => {
+    it('deepseek-v4 family defaults preserve explicit pool quant and initialize from the bundle stamp', () => {
         const source = readFileSync(resolve(__dirname, '../src/main/sessions.ts'), 'utf8')
         expect(source).toContain('config.dsv4PoolQuant == null')
-        expect(source).toContain('dsv4PoolQuant: dsv4DefaultCacheOptIn')
+        expect(source).toContain('const dsv4PoolQuantDefault = detected.dsv4PoolQuantDefault ?? true')
+        expect(source).toContain('config.dsv4PoolQuant = dsv4PrefixOptIn && dsv4PoolQuantDefault')
+        expect(source).toContain('dsv4PoolQuant: dsv4DefaultCacheOptIn && (detected.dsv4PoolQuantDefault ?? true)')
     })
 
     it('detected Qwen3.6 hybrid cache honors paged Off when block SSD L2 owns the prefix backend', () => {

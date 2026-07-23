@@ -52,6 +52,28 @@ describe('detectModelConfigFromDir quantization label', () => {
   })
 })
 
+describe('detectModelConfigFromDir DSV4 native cache defaults', () => {
+  it('reads the native pool codec default from the bundle cache stamp', () => {
+    const disabledDir = makeModelDir(
+      { model_type: 'deepseek_v4' },
+      {
+        capabilities: { family: 'deepseek_v4' },
+        cache: { pool_quant_default: false },
+      },
+    )
+    const enabledDir = makeModelDir(
+      { model_type: 'deepseek_v4' },
+      {
+        capabilities: { family: 'deepseek_v4' },
+        cache: { pool_quant_default: true },
+      },
+    )
+
+    expect(detectModelConfigFromDir(disabledDir).dsv4PoolQuantDefault).toBe(false)
+    expect(detectModelConfigFromDir(enabledDir).dsv4PoolQuantDefault).toBe(true)
+  })
+})
+
 describe('detectModelConfigFromDir JANG multimodal detection', () => {
   it('detects Nemotron Omni media from its sidecar and matching component tensors', () => {
     const dir = makeModelDir(

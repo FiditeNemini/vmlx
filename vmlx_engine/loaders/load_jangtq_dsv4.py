@@ -1285,12 +1285,26 @@ def _install_dsv4_memory_defaults() -> None:
         pass
 
 
-def _configure_dsv4_pool_quant_default() -> str:
-    """Default DSV4 to the materialized native pool codec unless overridden."""
+def _configure_dsv4_pool_quant_default(model_path: str | None = None) -> str:
+    """Resolve the DSV4 native pool codec from env, bundle, then legacy fallback."""
     os.environ["DSV4_LONG_CTX"] = "1"
     if "DSV4_POOL_QUANT" in os.environ:
         return os.environ["DSV4_POOL_QUANT"]
-    os.environ["DSV4_POOL_QUANT"] = "1"
+    pool_quant_default = True
+    if model_path:
+        try:
+            with open(
+                os.path.join(os.path.expanduser(model_path), "jang_config.json"),
+                encoding="utf-8",
+            ) as handle:
+                stamped_default = json.load(handle).get("cache", {}).get(
+                    "pool_quant_default"
+                )
+            if isinstance(stamped_default, bool):
+                pool_quant_default = stamped_default
+        except (OSError, TypeError, ValueError):
+            pass
+    os.environ["DSV4_POOL_QUANT"] = "1" if pool_quant_default else "0"
     return os.environ["DSV4_POOL_QUANT"]
 
 
@@ -1378,11 +1392,10 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
     # DSV4_LONG_CTX=1 is the only supported runtime mode. The installed JANG
     # attention path must carry the native mask-width and per-query compressed
     # pool fixes; vMLX verifies that contract below and does not patch the class.
-    # DSV4 pool quant now defaults on because the bundled JANG runtime keeps a
-    # materialized pool view and no longer dequantizes/concats historical pool
-    # rows on each read. Explicit DSV4_POOL_QUANT env overrides are preserved
-    # for debug/bisect.
-    pool_quant = _configure_dsv4_pool_quant_default()
+    # The bundle owns the native pool-codec startup default. Explicit
+    # DSV4_POOL_QUANT env overrides remain the highest-precedence control;
+    # unstamped legacy bundles retain the historical enabled fallback.
+    pool_quant = _configure_dsv4_pool_quant_default(model_path)
     _log.info("DSV4 runtime defaults: DSV4_LONG_CTX=1, DSV4_POOL_QUANT=%s", pool_quant)
     _install_dsv4_memory_defaults()
 

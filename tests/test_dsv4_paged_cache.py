@@ -10,6 +10,7 @@ reconstruction and L2 disk promotion.
 from __future__ import annotations
 
 import os
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -124,8 +125,10 @@ def test_pool_quantized_v4_cache_does_not_route_to_hybrid_ssm():
     assert not Scheduler._is_hybrid_model(_Model())
 
 
-def test_dsv4_pool_quant_default_uses_materialized_native_pool(monkeypatch, request):
-    """DSV4 pool quant defaults on now that historical pool reads are materialized."""
+def test_dsv4_pool_quant_default_preserves_legacy_fallback_and_env_override(
+    monkeypatch, request
+):
+    """Unstamped bundles default on, while explicit env remains authoritative."""
     from vmlx_engine.loaders.load_jangtq_dsv4 import (
         _configure_dsv4_pool_quant_default,
     )
@@ -140,6 +143,31 @@ def test_dsv4_pool_quant_default_uses_materialized_native_pool(monkeypatch, requ
 
     monkeypatch.setenv("DSV4_POOL_QUANT", "0")
     assert _configure_dsv4_pool_quant_default() == "0"
+
+
+def test_dsv4_pool_quant_default_reads_bundle_cache_stamp(
+    monkeypatch, request, tmp_path
+):
+    """Direct CLI/load paths use the same model-owned pool codec default as UI."""
+    from vmlx_engine.loaders.load_jangtq_dsv4 import (
+        _configure_dsv4_pool_quant_default,
+    )
+
+    _restore_process_env_after_test(request, "DSV4_LONG_CTX", "DSV4_POOL_QUANT")
+    monkeypatch.delenv("DSV4_LONG_CTX", raising=False)
+    monkeypatch.delenv("DSV4_POOL_QUANT", raising=False)
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps({"cache": {"pool_quant_default": False}})
+    )
+
+    assert _configure_dsv4_pool_quant_default(str(tmp_path)) == "0"
+    assert os.environ["DSV4_POOL_QUANT"] == "0"
+
+    monkeypatch.delenv("DSV4_POOL_QUANT", raising=False)
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps({"cache": {"pool_quant_default": True}})
+    )
+    assert _configure_dsv4_pool_quant_default(str(tmp_path)) == "1"
 
 
 def test_dsv4_cli_cache_policy_defaults_to_native_composite_cache(caplog, monkeypatch):
@@ -1129,6 +1157,10 @@ def test_dsv4_pool_quant_appends_only_new_pool_rows(monkeypatch):
         return original_quant(pool, *args, **kwargs)
 
     monkeypatch.setattr(pq, "_quant_pool", recording_quant)
+    # The current codec keeps a bounded BF16 hot tier before promoting it to
+    # quantized segments. Lower only that threshold so this focused test
+    # exercises the quantized append path without allocating a multi-MB pool.
+    monkeypatch.setattr(pq, "_POOL_BF16_MAX_BYTES", 64)
 
     cache = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
     first = mx.ones((1, 3, 16), dtype=mx.bfloat16)

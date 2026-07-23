@@ -80,7 +80,9 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         toolCallParser: 'auto',
         reasoningParser: 'auto',
         dsv4PrefixCache: detected?.family === 'deepseek-v4' ? true : prev.dsv4PrefixCache,
-        dsv4PoolQuant: detected?.family === 'deepseek-v4' ? true : prev.dsv4PoolQuant,
+        dsv4PoolQuant: detected?.family === 'deepseek-v4'
+          ? detected?.dsv4PoolQuantDefault ?? true
+          : prev.dsv4PoolQuant,
         enablePrefixCache: detected?.family === 'openpangu_v2' ? true : detected?.family === 'deepseek-v4' ? true : prev.enablePrefixCache,
         usePagedCache: detected?.family === 'deepseek-v4' ? true : detected?.usePagedCache,
         enableDiskCache: detected?.family === 'openpangu_v2',
@@ -200,7 +202,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           if (detected.family === 'deepseek-v4') {
             base.timeout = 900
             base.dsv4PrefixCache = true
-            base.dsv4PoolQuant = true
+            base.dsv4PoolQuant = detected.dsv4PoolQuantDefault ?? true
             base.enablePrefixCache = true
             base.usePagedCache = true
             base.enableBlockDiskCache = true

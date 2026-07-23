@@ -5,7 +5,7 @@ import { useTranslation } from '../../i18n'
 import { resolveCacheLaunchPolicy } from '../../../../shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../../../../shared/mcpPolicy'
 import { resolveEffectiveReasoningParser } from '../../../../shared/reasoningParserAliases'
-import { canonicalizeToolParserId } from '../../../../shared/toolParserAliases'
+import { resolveEffectiveToolParser } from '../../../../shared/toolParserAliases'
 import { buildToolLaunchArgs } from '../../../../shared/toolLaunchArgs'
 import { applyBundleGenerationDefaultsToSessionConfig } from '../../../../shared/sessionGenerationDefaults'
 
@@ -434,10 +434,10 @@ function buildCommandPreview(
   // (mirrors buildArgs: user choice wins over detection)
   // "" = user chose "None" → engine needs the literal "none" flag to opt out
   // (absence auto-configures from the registry). Mirrors buildArgs in sessions.ts.
-  const effectiveToolParser = config.toolCallParser === ''
-    ? 'none'
-    : canonicalizeToolParserId(config.toolCallParser && config.toolCallParser !== 'auto' ? config.toolCallParser
-      : detected?.toolParser)
+  const effectiveToolParser = resolveEffectiveToolParser({
+    configuredParser: config.toolCallParser,
+    detectedParser: detected?.toolParser,
+  })
   const effectiveAutoTool = config.enableAutoToolChoice ?? detected?.enableAutoToolChoice
   const effectiveReasoningParser = resolveEffectiveReasoningParser({
     configuredParser: config.reasoningParser,

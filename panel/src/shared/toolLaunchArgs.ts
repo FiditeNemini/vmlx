@@ -1,3 +1,5 @@
+import { toolParserIsEnabled } from './toolParserAliases'
+
 export interface ToolLaunchArgsInput {
   toolParser?: string | null
   enableAutoToolChoice?: boolean | null
@@ -19,11 +21,11 @@ export function buildToolLaunchArgs({
     return args
   }
 
-  if (toolParser) {
+  if (typeof toolParser === 'string' && toolParserIsEnabled(toolParser)) {
     args.push('--tool-call-parser', toolParser)
-  }
-  if (enableAutoToolChoice === true) {
-    args.push('--enable-auto-tool-choice')
+    if (enableAutoToolChoice === true) {
+      args.push('--enable-auto-tool-choice')
+    }
   }
 
   return args

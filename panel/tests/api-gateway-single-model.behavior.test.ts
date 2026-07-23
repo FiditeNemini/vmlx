@@ -1432,6 +1432,77 @@ describe("ApiGateway single-model mode behavior", () => {
 
   it.each([
     {
+      name: "explicit None suppresses a detected tool parser",
+      configuredParser: "",
+      detectedParser: "qwen",
+      expectedTools: false,
+    },
+    {
+      name: "Auto without detection does not invent tool support",
+      configuredParser: "auto",
+      detectedParser: undefined,
+      expectedTools: false,
+    },
+    {
+      name: "Auto advertises a valid detected parser",
+      configuredParser: "auto",
+      detectedParser: "qwen",
+      expectedTools: true,
+    },
+    {
+      name: "a stale saved parser falls back to current detection",
+      configuredParser: "removed_parser_v0",
+      detectedParser: "qwen",
+      expectedTools: true,
+    },
+    {
+      name: "a stale saved parser without detection stays disabled",
+      configuredParser: "removed_parser_v0",
+      detectedParser: undefined,
+      expectedTools: false,
+    },
+  ])(
+    "reports Ollama tools capability from the effective parser: $name",
+    async ({ configuredParser, detectedParser, expectedTools }) => {
+      const session = {
+        id: "target",
+        modelPath: "/models/Target-JANG",
+        modelName: "target-model",
+        servedModelName: "target-alias",
+        host: "127.0.0.1",
+        port: await freePort(),
+        status: "running",
+        type: "local",
+        config: JSON.stringify({ toolCallParser: configuredParser }),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      dbMock.getSetting.mockReturnValue(undefined);
+      dbMock.getSessions.mockReturnValue([session]);
+      dbMock.getSession.mockReturnValue(session);
+      modelConfigRegistryMock.detectModelConfigFromDir.mockReturnValue({
+        toolParser: detectedParser,
+      });
+
+      const { ApiGateway } = await import("../src/main/api-gateway");
+      gateway = new ApiGateway();
+      const port = await freePort();
+      await gateway.start(port, "127.0.0.1");
+
+      const response = await fetch(`http://127.0.0.1:${port}/api/show`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "target-alias" }),
+      });
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.capabilities.includes("tools")).toBe(expectedTools);
+    },
+  );
+
+  it.each([
+    {
       name: "Auto uses the detected reasoning parser",
       configuredParser: "auto",
       detectedParser: "qwen3",

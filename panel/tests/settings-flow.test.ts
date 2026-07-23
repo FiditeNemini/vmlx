@@ -12,7 +12,7 @@ import { resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import { resolveCacheLaunchPolicy } from '../src/shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../src/shared/mcpPolicy'
-import { canonicalizeToolParserId } from '../src/shared/toolParserAliases'
+import { resolveEffectiveToolParser } from '../src/shared/toolParserAliases'
 import {
     canonicalizeReasoningParserForCli,
     resolveEffectiveReasoningParser,
@@ -388,10 +388,10 @@ function buildCommandPreview(
 
     // Parser resolution: User explicit choice -> Detected config -> Fallback
     // (mirrors buildArgs: user choice wins over detection)
-    const effectiveToolParser = config.toolCallParser === ''
-        ? 'none'
-        : canonicalizeToolParserId(config.toolCallParser && config.toolCallParser !== 'auto' ? config.toolCallParser
-            : detected?.toolParser)
+    const effectiveToolParser = resolveEffectiveToolParser({
+        configuredParser: config.toolCallParser,
+        detectedParser: detected?.toolParser,
+    })
     const effectiveAutoTool = config.enableAutoToolChoice ?? detected?.enableAutoToolChoice
     const effectiveReasoningParser = resolveEffectiveReasoningParser({
         configuredParser: config.reasoningParser,
@@ -1294,9 +1294,15 @@ describe('Tool Integration', () => {
         }
     })
 
-    it('enables auto tool choice', () => {
-        const out = preview({ enableAutoToolChoice: true })
+    it('enables auto tool choice with a valid parser', () => {
+        const out = preview({ enableAutoToolChoice: true, toolCallParser: 'qwen' })
         expect(hasFlag(out, '--enable-auto-tool-choice')).toBe(true)
+    })
+
+    it('does not enable auto tool choice when Auto has no detected parser', () => {
+        const out = preview({ enableAutoToolChoice: true, toolCallParser: 'auto' })
+        expect(hasFlag(out, '--tool-call-parser')).toBe(false)
+        expect(hasFlag(out, '--enable-auto-tool-choice')).toBe(false)
     })
 
     it('uses detected tool parser when user is auto', () => {
@@ -1307,6 +1313,21 @@ describe('Tool Integration', () => {
     it('manual tool parser overrides when no detected', () => {
         const out = preview({ enableAutoToolChoice: true, toolCallParser: 'llama' })
         expect(getFlagValue(out, '--tool-call-parser')).toBe('llama')
+    })
+
+    it('falls back from a stale saved tool parser instead of emitting invalid argv', () => {
+        const detected = preview(
+            { enableAutoToolChoice: true, toolCallParser: 'removed_parser_v0' },
+            { toolParser: 'qwen' },
+        )
+        expect(getFlagValue(detected, '--tool-call-parser')).toBe('qwen')
+
+        const unavailable = preview({
+            enableAutoToolChoice: true,
+            toolCallParser: 'removed_parser_v0',
+        })
+        expect(hasFlag(unavailable, '--tool-call-parser')).toBe(false)
+        expect(hasFlag(unavailable, '--enable-auto-tool-choice')).toBe(false)
     })
 
     it('canonicalizes legacy DSV4 and Hy3 parser aliases before launch', () => {

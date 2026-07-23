@@ -26,6 +26,10 @@ import {
   reasoningParserIsEnabled,
   resolveEffectiveReasoningParser,
 } from "../shared/reasoningParserAliases";
+import {
+  resolveEffectiveToolParser,
+  toolParserIsEnabled,
+} from "../shared/toolParserAliases";
 
 const DEFAULT_PORT = 8080;
 const JIT_TIMEOUT_MS = 120_000;
@@ -2379,9 +2383,6 @@ export class ApiGateway extends EventEmitter {
     } catch (_) {
       cfg = {};
     }
-    const capabilities: string[] = ["completion"];
-    const toolParser = cfg.toolCallParser || cfg.toolParser;
-    if (!toolParser || toolParser !== "none") capabilities.push("tools");
     let detectedConfig: ReturnType<typeof detectModelConfigFromDir> | null = null;
     try {
       detectedConfig = session.modelPath
@@ -2390,6 +2391,12 @@ export class ApiGateway extends EventEmitter {
     } catch (_) {
       detectedConfig = null;
     }
+    const capabilities: string[] = ["completion"];
+    const effectiveToolParser = resolveEffectiveToolParser({
+      configuredParser: cfg.toolCallParser ?? cfg.toolParser,
+      detectedParser: detectedConfig?.toolParser,
+    });
+    if (toolParserIsEnabled(effectiveToolParser)) capabilities.push("tools");
     const detectedForceTextOnly = detectedConfig?.forceTextOnly === true;
     if (!detectedForceTextOnly && (cfg.isMultimodal === true || cfg.modelType === "vlm"))
       capabilities.push("vision");

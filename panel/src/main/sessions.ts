@@ -12,7 +12,10 @@ import { resolveImageModelFromDirectoryName } from '../shared/imageModels'
 import { dsv4EnvFromConfig } from '../shared/dsv4Env'
 import { resolveCacheLaunchPolicy } from '../shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../shared/mcpPolicy'
-import { canonicalizeToolParserId } from '../shared/toolParserAliases'
+import {
+  canonicalizeToolParserId,
+  resolveEffectiveToolParser,
+} from '../shared/toolParserAliases'
 import { buildToolLaunchArgs } from '../shared/toolLaunchArgs'
 import { resolveEffectiveReasoningParser } from '../shared/reasoningParserAliases'
 import {
@@ -3718,10 +3721,17 @@ export class SessionManager extends EventEmitter {
     // LITERAL "none" as a hard opt-out; an ABSENT flag makes it auto-configure the
     // detected parser from the registry (cli.py:785,1047-1054). So map "" -> "none"
     // and emit it — otherwise the "None (disable tool parsing)" option is inert.
-    const effectiveToolParser = userToolParser === ''
-      ? 'none'
-      : canonicalizeToolParserId(userToolParser && userToolParser !== 'auto' ? userToolParser
-        : detected.toolParser)       // Fallback to detection if auto or missing
+    const effectiveToolParser = resolveEffectiveToolParser({
+      configuredParser: userToolParser,
+      detectedParser: detected.toolParser,
+    })
+    if (
+      userToolParser &&
+      userToolParser !== 'auto' &&
+      !canonicalizeToolParserId(userToolParser)
+    ) {
+      console.warn(`[SESSION] Ignoring unsupported tool parser "${userToolParser}" for CLI launch; using detected parser "${effectiveToolParser || 'none'}"`)
+    }
 
     const effectiveAutoTool = config.enableAutoToolChoice ?? detected.enableAutoToolChoice
 

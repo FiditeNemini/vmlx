@@ -99,13 +99,6 @@ function shouldForwardReasoningEffort(
   return sessionHasReasoningParser || detectedFamily === "deepseek-v4";
 }
 
-function autoEnableThinkingForReasoningSession(
-  sessionHasReasoningParser: boolean,
-  detectedFamily?: string,
-): boolean {
-  return sessionHasReasoningParser || detectedFamily === "deepseek-v4";
-}
-
 function shouldSuppressGenericAgenticPromptForNativeTools(
   detectedFamily?: string,
   modelNameOrPath?: string,
@@ -2006,25 +1999,14 @@ export function registerChatHandlers(
                 parameters: t.function.parameters,
               }));
             }
-            // enable_thinking: explicit user override sent to both local and remote.
-            // When undefined (Auto), a local reasoning-capable session must still
-            // send true so the server seeds the native reasoning parser and streams
-            // reasoning_content separately instead of treating template thinking as
-            // visible text. Plain local models still omit the field; remote sessions
-            // keep using the parser hint.
+            // Only explicit On/Off is serialized. Auto stays omitted so the
+            // concrete bundle/family owns its native default (for example,
+            // Laguna S2.1's stamped default-on, MiniMax M3 adaptive, and DSV4's
+            // reasoning.default_mode). Parser seeding is resolved by the engine
+            // from that same effective policy; the presence of a parser alone is
+            // not permission for the panel to force thinking on.
             if (effectiveEnableThinkingOverride !== undefined) {
               obj.enable_thinking = effectiveEnableThinkingOverride;
-            } else if (
-              isRemote ||
-              autoEnableThinkingForReasoningSession(
-                sessionHasReasoningParser,
-                chatDetectedFamily,
-              )
-            ) {
-              obj.enable_thinking = autoEnableThinkingForReasoningSession(
-                sessionHasReasoningParser,
-                chatDetectedFamily,
-              );
             }
             // chat_template_kwargs: local only (vMLX Engine internal, no remote provider supports this)
             if (!isRemote && obj.enable_thinking !== undefined)
@@ -2091,12 +2073,8 @@ export function registerChatHandlers(
               // e.g. {"type": "function", "function": {"name": ..., "parameters": ...}}
               obj.tools = availableToolDefinitions();
             }
-            // enable_thinking: explicit user override sent to both local and remote.
-            // When undefined (Auto), a local reasoning-capable session must still
-            // send true so the server seeds the native reasoning parser and streams
-            // reasoning_content separately instead of treating template thinking as
-            // visible text. Plain local models still omit the field; remote sessions
-            // keep using the parser hint.
+            // Only explicit On/Off is serialized. Auto stays omitted so the
+            // provider or local engine can apply the model's native policy.
             // STRICT ENV: Filter out enable_thinking for strict generic 3rd-party API hosts that throw 400 Bad Request.
             const isStrictApi =
               isRemote &&
@@ -2111,17 +2089,6 @@ export function registerChatHandlers(
             if (!isStrictApi) {
               if (effectiveEnableThinkingOverride !== undefined) {
                 obj.enable_thinking = effectiveEnableThinkingOverride;
-              } else if (
-                isRemote ||
-                autoEnableThinkingForReasoningSession(
-                  sessionHasReasoningParser,
-                  chatDetectedFamily,
-                )
-              ) {
-                obj.enable_thinking = autoEnableThinkingForReasoningSession(
-                  sessionHasReasoningParser,
-                  chatDetectedFamily,
-                );
               }
             }
 

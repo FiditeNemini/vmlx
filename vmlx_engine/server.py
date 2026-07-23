@@ -3563,6 +3563,15 @@ def _resolve_enable_thinking(
         _reject_unsupported_instruct_mode("the server default")
         return False
 
+    # Some families have a richer native Auto policy than a boolean parser
+    # capability can express. Preserve None until their scoped normalizer runs:
+    # MiniMax M3 maps it to thinking_mode=adaptive, while DSV4 resolves its
+    # concrete bundle's chat.reasoning.default_mode. Collapsing Auto to True
+    # here makes both downstream branches unreachable. Explicit request,
+    # template, effort, and server defaults have already won above.
+    if _family_l in {"minimax_m3", "minimax_m3_vl", "deepseek_v4"}:
+        return None
+
     default_hint = None
     try:
         default_hint = (getattr(_mc, "architecture_hints", None) or {}).get(

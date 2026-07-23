@@ -815,6 +815,46 @@ def test_laguna_auto_uses_bundle_stamped_reasoning_default(tmp_path, monkeypatch
     assert resolved is True
 
 
+@pytest.mark.parametrize("model_type", ["minimax_m3", "deepseek_v4"])
+def test_native_adaptive_families_keep_auto_unresolved(model_type, tmp_path, monkeypatch):
+    """Shared resolution must not preempt the family's richer Auto policy."""
+    import json
+    from vmlx_engine import server
+    import vmlx_engine.model_config_registry as mcr
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": model_type}))
+    mcr.ModelConfigRegistry._instance = None
+    mcr._configs_loaded = False
+    registry = mcr.get_model_config_registry()
+    registry.clear_cache()
+    monkeypatch.setattr(server, "_default_enable_thinking", None)
+
+    assert server._resolve_enable_thinking(
+        request_value=None,
+        ct_kwargs={},
+        tools_present=False,
+        model_key=str(tmp_path),
+        engine=None,
+        auto_detect=True,
+    ) is None
+    assert server._resolve_enable_thinking(
+        request_value=True,
+        ct_kwargs={},
+        tools_present=False,
+        model_key=str(tmp_path),
+        engine=None,
+        auto_detect=True,
+    ) is True
+    assert server._resolve_enable_thinking(
+        request_value=False,
+        ct_kwargs={},
+        tools_present=False,
+        model_key=str(tmp_path),
+        engine=None,
+        auto_detect=True,
+    ) is False
+
+
 def test_poolside_v1_reasoning_alias_matches_laguna_think_dialect():
     """Laguna generation_config advertises reasoning_parser=poolside_v1.
 

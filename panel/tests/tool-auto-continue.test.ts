@@ -239,6 +239,9 @@ describe('tool auto-continue policy', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
     const planned = source.indexOf('plannedDirectAnswerPass =')
     const followUp = source.indexOf('if (!(await sendFollowUp())) break;', planned)
+    const policyStart = source.indexOf('const applyPostToolAnswerPolicy =')
+    const policyEnd = source.indexOf('if (useResponsesApi)', policyStart)
+    const policy = source.slice(policyStart, policyEnd)
 
     expect(source).toContain('requestsDirectAnswerAfterSingleTool(latestUserText)')
     expect(source).toContain('requestedExactFinalToolNames(latestUserText)')
@@ -246,6 +249,11 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('completedExactFinalTools.add(normalizedToolName)')
     expect(source).toContain('exactFinalToolNames.every((name) =>')
     expect(source).toContain('if (!(finalAnswerRecovery || plannedDirectAnswerPass)) return')
+    expect(policy).toContain('delete obj.tools')
+    expect(policy).toContain('if (!finalAnswerRecovery) return')
+    expect(policy.indexOf('if (!finalAnswerRecovery) return')).toBeLessThan(
+      policy.indexOf('obj.enable_thinking = false'),
+    )
     expect(planned).toBeGreaterThan(-1)
     expect(followUp).toBeGreaterThan(planned)
   })

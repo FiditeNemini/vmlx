@@ -1926,9 +1926,16 @@ export function registerChatHandlers(
               };
             }
           };
-          const applyFinalAnswerRecovery = (obj: Record<string, any>) => {
+          const applyPostToolAnswerPolicy = (obj: Record<string, any>) => {
             if (!(finalAnswerRecovery || plannedDirectAnswerPass)) return;
             delete obj.tools;
+            // A normal exact-final follow-up is still part of the user's
+            // requested reasoning mode. Retiring the completed tool prevents
+            // a duplicate call; it must not silently turn an explicit On (or
+            // model-owned Auto) into Thinking Off. Only the bounded recovery
+            // after an actually empty/incomplete post-tool pass may request
+            // instruct mode.
+            if (!finalAnswerRecovery) return;
             if (isRemote) return;
             // Some native templates (currently Step-3.7) have no truthful
             // thinking-off rail. Keep their bounded follow-up answer-only by
@@ -2041,7 +2048,7 @@ export function registerChatHandlers(
             // Send timeout to server so streaming timeout matches client-side timeout
             if (!isRemote && timeoutSeconds !== 300)
               obj.timeout = timeoutSeconds;
-            applyFinalAnswerRecovery(obj);
+            applyPostToolAnswerPolicy(obj);
             return obj;
           } else {
             const obj: Record<string, any> = {
@@ -2125,7 +2132,7 @@ export function registerChatHandlers(
             // Send timeout to server so streaming timeout matches client-side timeout
             if (!isRemote && timeoutSeconds !== 300)
               obj.timeout = timeoutSeconds;
-            applyFinalAnswerRecovery(obj);
+            applyPostToolAnswerPolicy(obj);
             return obj;
           }
         };

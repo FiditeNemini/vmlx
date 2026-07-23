@@ -413,6 +413,24 @@ def test_scheduler_paged_m3_cache_hit_store_rederives_clean_prompt_cache(monkeyp
     assert request._extracted_cache_from_prompt_snapshot is True
 
 
+def test_m3_paged_store_avoids_full_numpy_mirror_and_deferred_disk_payloads():
+    """Pin the bounded-memory shape used by the live long-prompt gate."""
+    import inspect
+
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    source = inspect.getsource(BlockAwarePrefixCache.store_cache)
+    m3_mirror_start = source.index("if _is_minimax_m3_cache_class(cls):")
+    m3_mirror_end = source.index(
+        "state = layer_state.get", m3_mirror_start
+    )
+    m3_mirror_branch = source[m3_mirror_start:m3_mirror_end]
+
+    assert "np.array(" not in m3_mirror_branch
+    assert "np_block = block_kv_data" in source
+    assert "if has_minimax_m3_cache_data or _has_native_tq:" in source
+
+
 def test_scheduler_memory_aware_m3_store_also_writes_prompt_disk_l2(monkeypatch):
     """M3's default paged-off route must still populate SSD prompt L2.
 

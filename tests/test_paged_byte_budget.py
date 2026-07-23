@@ -272,3 +272,19 @@ def test_both_schedulers_pass_max_resident_bytes_to_paged_manager():
         assert any("compute_memory_limit()" in src for _ in prod), (
             f"{name}: must derive the ceiling from MemoryCacheConfig.compute_memory_limit()"
         )
+
+
+def test_finished_paged_store_reenforces_budget_after_ref_release():
+    """The L1 ceiling must run after completed-request blocks become evictable."""
+    source = open("vmlx_engine/scheduler.py").read()
+    release = source.index(
+        "self.block_aware_cache.paged_cache.release_request_refs("
+    )
+    post_store_release = source.index(
+        "self.block_aware_cache.paged_cache.release_request_refs(",
+        release + 1,
+    )
+    next_handler = source.index("except Exception as _rel_e:", post_store_release)
+    branch = source[post_store_release:next_handler]
+
+    assert "self.block_aware_cache.paged_cache.enforce_byte_budget()" in branch

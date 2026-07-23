@@ -8389,6 +8389,15 @@ class Scheduler:
                                 self.block_aware_cache.paged_cache.detach_request(
                                     request_id
                                 )
+                                # store_cache() cannot evict the just-stored
+                                # blocks while this completed request still
+                                # pins them. Enforce the configured L1 byte
+                                # ceiling again after releasing those refs.
+                                if (
+                                    self.block_aware_cache.paged_cache.max_resident_bytes
+                                    > 0
+                                ):
+                                    self.block_aware_cache.paged_cache.enforce_byte_budget()
                             except Exception as _rel_e:
                                 logger.debug(
                                     "Post-store paged ref release failed for %s: %s",

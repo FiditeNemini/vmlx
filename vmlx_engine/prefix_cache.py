@@ -834,6 +834,15 @@ def _is_minimax_m3_cache_class(class_name: str) -> bool:
     return (class_name or "") == "MiniMaxM3SparseCache"
 
 
+def _cache_data_has_minimax_m3(cache_data) -> bool:
+    """Return whether extracted states contain MiniMax-M3 sparse cache data."""
+    return any(
+        isinstance(layer_state, dict)
+        and _is_minimax_m3_cache_class(layer_state.get("class_name", ""))
+        for layer_state in (cache_data or [])
+    )
+
+
 def _cache_data_has_dsv4(cache_data) -> bool:
     """Return True when extracted cache states include DSV4 composite layers."""
     try:
@@ -2297,6 +2306,9 @@ class BlockAwarePrefixCache:
         has_rotating_kv_cache_data = (
             _cache_data_has_rotating_kv(cache_data) if is_tensor_data else False
         )
+        has_minimax_m3_cache_data = (
+            _cache_data_has_minimax_m3(cache_data) if is_tensor_data else False
+        )
         rotating_kv_layer_count = (
             _rotating_kv_layer_count(cache_data) if has_rotating_kv_cache_data else 0
         )
@@ -2476,33 +2488,12 @@ class BlockAwarePrefixCache:
                         logger.debug(f"np_sources skip ZAYA layer {idx}: {_npe}")
                     continue
                 if _is_minimax_m3_cache_class(cls):
-                    # MSA sparse layer: state = (keys, values, idx_keys), all
-                    # append-only on the seq axis (dim 2). Capture all three as
-                    # numpy so _numpy_block_slice can carve per-block slices with
-                    # zero Metal ops, exactly like the plain-KV positional path.
-                    try:
-                        m3_state = layer_state.get("state")
-                        if not (isinstance(m3_state, (tuple, list)) and len(m3_state) == 3):
-                            continue
-                        m3_k, m3_v, m3_idx = m3_state
-                        if not hasattr(m3_k, "shape"):
-                            continue
-                        orig_dt = m3_k.dtype
-                        if "bfloat16" in str(orig_dt):
-                            # fp32 round-trip (NOT fp16 — see the Gemma 4 note above)
-                            m3_k = m3_k.astype(mx.float32)
-                            m3_v = m3_v.astype(mx.float32)
-                            if m3_idx is not None:
-                                m3_idx = m3_idx.astype(mx.float32)
-                        np_idx = None
-                        if m3_idx is not None:
-                            np_idx = np.array(m3_idx)
-                        np_sources[idx] = {
-                            "type": "minimax_m3",
-                            "kv": (np.array(m3_k), np.array(m3_v), np_idx, orig_dt),
-                        }
-                    except Exception as _npe:
-                        logger.debug(f"np_sources skip M3 layer {idx}: {_npe}")
+                    # Never create a full-prompt FP32 NumPy mirror for M3.
+                    # A live 6K post-tool cleanup was killed while holding that
+                    # mirror plus two payloads for every extracted block. M3
+                    # state is fully positional, so the block loop below slices
+                    # one independent (K, V, idx_keys) payload and immediately
+                    # uses the same payload for L1 and L2 serialization.
                     continue
                 state = layer_state.get("state")
                 if state is None:
@@ -2828,14 +2819,21 @@ class BlockAwarePrefixCache:
                             f"{' (includes cumulative states)' if is_last and store_cumulative_state else ''}"
                         )
 
-                    # Defer disk write using numpy slices (no MLX ops)
+                    # Ordinary caches use independent numpy slices for L2.
+                    # M3 deliberately reuses its already-independent typed L1
+                    # block and serializes it immediately: retaining a second
+                    # disk payload for every block caused unbounded cleanup
+                    # growth and a live SIGKILL on a 6K tool continuation.
                     if disk_store is not None:
-                        np_block = _numpy_block_slice(
-                            cache_data, np_sources or {},
-                            global_start, global_end, is_last, existing_tokens,
-                            store_cumulative_state,
-                            self.block_size,
-                        )
+                        if has_minimax_m3_cache_data:
+                            np_block = block_kv_data
+                        else:
+                            np_block = _numpy_block_slice(
+                                cache_data, np_sources or {},
+                                global_start, global_end, is_last, existing_tokens,
+                                store_cumulative_state,
+                                self.block_size,
+                            )
                         if np_block:
                             # The numpy mirror is authoritative for ordinary KV
                             # and cumulative/path-dependent state, but it cannot
@@ -2876,7 +2874,7 @@ class BlockAwarePrefixCache:
                                 _entry_has_native_tq(_entry)
                                 for _entry in np_block
                             )
-                            if _has_native_tq:
+                            if has_minimax_m3_cache_data or _has_native_tq:
                                 # Native TQ entries contain lazy MLX encode graphs.
                                 # Deferring every page until after the extraction
                                 # loop retains prompt_blocks * layers graphs and can
@@ -2885,7 +2883,8 @@ class BlockAwarePrefixCache:
                                 # page now; the disk store still queues only the
                                 # rename/index update on its background thread.
                                 logger.info(
-                                    f"Block disk: writing bounded TQ block "
+                                    f"Block disk: writing bounded "
+                                    f"{'MiniMax-M3' if has_minimax_m3_cache_data else 'TQ'} block "
                                     f"{block.block_id} ({_layer_summary}, "
                                     f"{len(block_tokens)} tokens)"
                                 )

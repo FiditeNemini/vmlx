@@ -378,7 +378,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const architectureBlockDiskOnlySupported =
     (detectedCacheType === 'mamba' ||
       detectedCacheType === 'hybrid' ||
-      mixedSwaBlockDiskOnlySupported) &&
+      mixedSwaBlockDiskOnlySupported ||
+      m3Active) &&
     !zayaCcaActive &&
     !dsv4Active &&
     !openPanguExactTypedCache
@@ -1035,7 +1036,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             : "Native sliding/mixed-SWA SSD-only mode is available: turn In-Memory Paged Cache Off to keep typed KV blocks and rotating-window metadata in Block Disk L2 without retaining RAM payloads."
           : "Hybrid/Mamba SSD-only mode is available: turn In-Memory Paged Cache Off to keep attention KV blocks in Block Disk L2 while restoring full-precision SSM/GDN companion state from its typed SSD store or clean-prefill rederive."} />}
         {dsv4CompositeRequiresPaged && <InfoNote text="DSV4 uses native SWA+CSA/HCA composite cache snapshots, so its internal paged transport stays on and block size is fixed to 256 tokens for diagnostic decode-cache testing." />}
-        {m3Active && <InfoNote text="MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets. Block Disk Cache provides its persistent L2; generic KV q4/q8 remains disabled." />}
+        {m3Active && <InfoNote text={blockDiskOnly
+          ? "MiniMax-M3 SSD-only mode preserves native MSA keys, values, idx_keys, and absolute offsets in Block Disk L2 while keeping persistent RAM payloads disabled."
+          : "MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets. Block Disk Cache provides its persistent L2; generic KV q4/q8 remains disabled."} />}
         {openPanguExactTypedCache && <InfoNote text="openPangu does not use generic paged blocks: causal-convolution state is cumulative and cannot be reconstructed from an arbitrary block. Use Prefix Cache plus prompt-level Disk Cache (L2) instead." />}
         {!dsv4Active && (
           <CheckField label="In-Memory Paged Cache (RAM)" tooltip="Keeps reusable prompt-prefix and KV blocks in Apple unified memory (shared by CPU and GPU) for faster repeated prompts. This is the fast RAM tier and is not persistent. Block Disk Cache (SSD / L2) is the persistent tier and can remain enabled when this RAM tier is Off." checked={effectiveUsePagedCache} onChange={v => applyCacheControlUpdates(cacheControlUpdatesForPagedToggle(v, cacheControlState))} disabled={genericPagedCacheToggleDisabled} />

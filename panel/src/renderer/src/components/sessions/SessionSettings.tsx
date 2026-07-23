@@ -387,7 +387,8 @@ function buildCommandPreview(
   const hybridCacheActive = cacheTypeRequiresPaged(detected?.cacheType)
   const architectureBlockDiskOnlySupported =
     (cacheTypeSupportsBlockDiskOnly(detected?.cacheType) ||
-      cacheSubtypeSupportsBlockDiskOnly(detected?.cacheSubtype)) &&
+      cacheSubtypeSupportsBlockDiskOnly(detected?.cacheSubtype) ||
+      m3Active) &&
     !zayaCcaActive &&
     !dsv4Active &&
     !openPanguExactTypedCache

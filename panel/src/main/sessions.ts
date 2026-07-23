@@ -231,21 +231,24 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         config.maxTokens = 0
         changed = true
       }
-      const m3PrefixOptIn = config.enablePrefixCache !== false
-      if (config.enablePrefixCache !== m3PrefixOptIn) {
-        config.enablePrefixCache = m3PrefixOptIn
+      // Defaults are applied only when a control has never been saved. M3's
+      // typed MSA block records (K/V/idx_keys/offsets) support SSD-only L2,
+      // so an explicit In-Memory Paged Cache=Off must survive restart while
+      // Prefix Cache and Block Disk Cache remain enabled.
+      if (config.enablePrefixCache === undefined) {
+        config.enablePrefixCache = true
         changed = true
       }
-      if (config.usePagedCache !== m3PrefixOptIn) {
-        config.usePagedCache = m3PrefixOptIn
+      if (config.usePagedCache === undefined) {
+        config.usePagedCache = true
         changed = true
       }
       if (config.enableDiskCache !== false) {
         config.enableDiskCache = false
         changed = true
       }
-      if (config.enableBlockDiskCache !== m3PrefixOptIn) {
-        config.enableBlockDiskCache = m3PrefixOptIn
+      if (config.enableBlockDiskCache === undefined) {
+        config.enableBlockDiskCache = true
         changed = true
       }
       if (config.enableJit !== false) {
@@ -1921,24 +1924,30 @@ export class SessionManager extends EventEmitter {
                 : '[INFO] DSV4-Flash detected; native composite prefix/paged/L2 cache explicitly disabled for this session')
             }
           } else if (freshFamily === 'minimax_m3') {
-            const m3PrefixOptIn = config.enablePrefixCache !== false
+            const m3PrefixEnabled = config.enablePrefixCache !== false
+            const m3PagedEnabled = m3PrefixEnabled && config.usePagedCache !== false
+            const m3BlockDiskEnabled = m3PrefixEnabled && config.enableBlockDiskCache !== false
             const m3Changed =
-              config.enablePrefixCache !== m3PrefixOptIn ||
-              config.usePagedCache !== m3PrefixOptIn ||
+              config.enablePrefixCache === undefined ||
+              config.usePagedCache === undefined ||
               config.enableDiskCache !== false ||
-              config.enableBlockDiskCache !== m3PrefixOptIn ||
+              config.enableBlockDiskCache === undefined ||
               config.kvCacheQuantization !== 'auto' ||
               config.enableJit === true
-            config.enablePrefixCache = m3PrefixOptIn
-            config.usePagedCache = m3PrefixOptIn
+            if (config.enablePrefixCache === undefined) config.enablePrefixCache = true
+            if (config.usePagedCache === undefined) config.usePagedCache = true
             config.enableDiskCache = false
-            config.enableBlockDiskCache = m3PrefixOptIn
+            if (config.enableBlockDiskCache === undefined) config.enableBlockDiskCache = true
             config.kvCacheQuantization = 'auto'
             config.enableJit = false
             if (m3Changed) {
-              this.pushLog(sessionId, m3PrefixOptIn
-                ? '[INFO] MiniMax-M3 detected; using typed MSA paged prefix cache + block-disk L2 with idx_keys, generic KV quantization off, and JIT off'
-                : '[INFO] MiniMax-M3 detected; native typed prefix/paged/L2 cache explicitly disabled for this session')
+              this.pushLog(sessionId, !m3PrefixEnabled
+                ? '[INFO] MiniMax-M3 detected; native typed prefix cache explicitly disabled for this session'
+                : m3PagedEnabled
+                  ? '[INFO] MiniMax-M3 detected; using typed MSA paged prefix cache + block-disk L2 with idx_keys, generic KV quantization off, and JIT off'
+                  : m3BlockDiskEnabled
+                    ? '[INFO] MiniMax-M3 detected; using typed MSA SSD-only prefix cache with idx_keys, persistent RAM payloads disabled, generic KV quantization off, and JIT off'
+                    : '[INFO] MiniMax-M3 detected; prefix cache enabled without paged RAM or block-disk L2')
             }
           } else if (freshFamily === 'openpangu_v2') {
             const panguChanged =
@@ -3758,7 +3767,8 @@ export class SessionManager extends EventEmitter {
       ((hybridCacheActive || subtypePagedCacheActive) && detected.usePagedCache === true)
     const architectureBlockDiskOnlySupported =
       (cacheTypeSupportsBlockDiskOnly(detected.cacheType) ||
-        cacheSubtypeSupportsBlockDiskOnly(detected.cacheSubtype)) &&
+        cacheSubtypeSupportsBlockDiskOnly(detected.cacheSubtype) ||
+        m3Active) &&
       !zayaCcaActive &&
       !dsv4Active &&
       !openPanguExactTypedCache

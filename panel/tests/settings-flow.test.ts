@@ -1494,6 +1494,31 @@ describe('Tool Integration', () => {
         expect(hasFlag(out, '--enable-jit')).toBe(false)
     })
 
+    it('honors MiniMax-M3 paged Off while retaining typed block-disk L2', () => {
+        const out = preview(
+            {
+                enablePrefixCache: true,
+                usePagedCache: false,
+                enableDiskCache: false,
+                enableBlockDiskCache: true,
+                kvCacheQuantization: 'auto',
+                enableJit: false,
+            },
+            {
+                family: 'minimax_m3',
+                reasoningParser: 'minimax_m3',
+                toolParser: 'minimax_m3',
+                enableAutoToolChoice: true,
+                usePagedCache: true,
+            },
+        )
+
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
+        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
+    })
+
     it('exposes MiniMax as its own reasoning parser option instead of under qwen3', () => {
         const formSource = readFileSync(resolve(__dirname, '../src/renderer/src/components/sessions/SessionConfigForm.tsx'), 'utf8')
 
@@ -2626,7 +2651,7 @@ describe('Default IP and New Settings', () => {
         expect(adoptCreateBlock).toContain('maxTokens: 0')
     })
 
-    it('MiniMax-M3 start refresh defaults cache on but preserves an explicit prefix-cache opt-out', () => {
+    it('MiniMax-M3 start refresh defaults missing cache fields on but preserves every explicit cache toggle', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const familyStart = source.indexOf("} else if (detectedFamily === 'minimax_m3')")
         const familyEnd = source.indexOf("} else if (detectedFamily === 'openpangu_v2')", familyStart)
@@ -2635,17 +2660,16 @@ describe('Default IP and New Settings', () => {
         const end = source.indexOf("} else if (freshFamily === 'openpangu_v2')", start)
         const block = source.slice(start, end)
 
-        expect(familyBlock).toContain('const m3PrefixOptIn = config.enablePrefixCache !== false')
-        expect(familyBlock).toContain('config.enablePrefixCache = m3PrefixOptIn')
-        expect(familyBlock).toContain('config.usePagedCache = m3PrefixOptIn')
-        expect(familyBlock).toContain('config.enableBlockDiskCache = m3PrefixOptIn')
+        expect(familyBlock).toContain('if (config.enablePrefixCache === undefined)')
+        expect(familyBlock).toContain('if (config.usePagedCache === undefined)')
+        expect(familyBlock).toContain('if (config.enableBlockDiskCache === undefined)')
+        expect(familyBlock).not.toContain('config.usePagedCache = m3PrefixOptIn')
         expect(familyBlock).toContain('config.enableDiskCache = false')
-        expect(block).toContain('const m3PrefixOptIn = config.enablePrefixCache !== false')
-        expect(block).toContain('config.enablePrefixCache = m3PrefixOptIn')
-        expect(block).toContain('config.usePagedCache = m3PrefixOptIn')
-        expect(block).toContain('config.enableBlockDiskCache = m3PrefixOptIn')
-        expect(block).toContain('native typed prefix/paged/L2 cache explicitly disabled for this session')
-        expect(block).not.toContain('config.enablePrefixCache = true')
+        expect(block).toContain('if (config.enablePrefixCache === undefined) config.enablePrefixCache = true')
+        expect(block).toContain('if (config.usePagedCache === undefined) config.usePagedCache = true')
+        expect(block).toContain('if (config.enableBlockDiskCache === undefined) config.enableBlockDiskCache = true')
+        expect(block).toContain('using typed MSA SSD-only prefix cache with idx_keys')
+        expect(block).not.toContain('config.usePagedCache = m3PrefixOptIn')
     })
 
     it('openPangu defaults to exact typed memory plus prompt L2 while keeping unsafe paged/block lanes off', () => {
@@ -3361,6 +3385,7 @@ describe('JIT Toggle', () => {
 
         expect(form).toContain('const genericPagedCacheToggleDisabled = !dsv4Active && (cachePolicy.pagedCacheDisabled || openPanguExactTypedCache)')
         expect(form).toContain('MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets')
+        expect(form).toContain('MiniMax-M3 SSD-only mode preserves native MSA keys, values, idx_keys, and absolute offsets')
         expect(form).toContain('Block Disk Cache provides its persistent L2')
         expect(form).not.toContain('LOCKED OFF')
         expect(form).toContain('disabled={genericPagedCacheToggleDisabled}')

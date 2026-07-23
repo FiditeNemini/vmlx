@@ -350,6 +350,132 @@ def test_tq_block_batch_decode_matches_individual_q4_pages_exactly():
     assert info.hits == 0
 
 
+def test_tq_block_q4_pages_match_one_monolithic_live_encode_exactly():
+    """Paging must not add loss beyond TurboQuant's one q4 encode.
+
+    Mixed-SWA models such as Laguna keep rotating layers native and store only
+    their full-attention layers through this block codec.  Use the relevant
+    128-wide head shape plus a partial tail so packing boundaries are covered.
+    """
+    from jang_tools.turboquant.cache import TurboQuantKVCache
+    from vmlx_engine.tq_disk_store import decode_tq_blocks, encode_tq_block
+
+    mx.random.seed(4242)
+    keys = mx.random.normal(shape=(1, 2, 129, 128)).astype(mx.float16)
+    values = mx.random.normal(shape=(1, 2, 129, 128)).astype(mx.float16)
+    config = {"key_bits": 4, "value_bits": 4, "seed": 4242}
+    entries = [
+        encode_tq_block(
+            keys[:, :, start : start + 64, :],
+            values[:, :, start : start + 64, :],
+            config,
+        )
+        for start in range(0, 129, 64)
+    ]
+    paged_keys, paged_values = decode_tq_blocks(entries)
+
+    live = TurboQuantKVCache(
+        key_dim=128,
+        value_dim=128,
+        key_bits=4,
+        value_bits=4,
+        seed=4242,
+        compress_after=0,
+        sink_tokens=0,
+    )
+    live.keys = keys
+    live.values = values
+    live.offset = 129
+    live.compress()
+    monolithic_keys, monolithic_values = live.state
+    mx.eval(paged_keys, paged_values, monolithic_keys, monolithic_values)
+
+    assert paged_keys.shape == keys.shape
+    assert paged_values.shape == values.shape
+    assert bool(mx.all(paged_keys == monolithic_keys).item())
+    assert bool(mx.all(paged_values == monolithic_values).item())
+
+
+def test_tq_storage_only_rewrap_does_not_reencode_q4_or_change_next_append():
+    """Decoded pages are rewrapped for cache-class parity without a second loss."""
+    from jang_tools.turboquant.cache import TurboQuantKVCache
+    from mlx_lm.models.cache import KVCache
+    from vmlx_engine.mllm_batch_generator import _recompress_to_tq
+    from vmlx_engine.tq_disk_store import decode_tq_blocks, encode_tq_block
+
+    mx.random.seed(4343)
+    keys = mx.random.normal(shape=(1, 2, 81, 128)).astype(mx.float16)
+    values = mx.random.normal(shape=(1, 2, 81, 128)).astype(mx.float16)
+    config = {"key_bits": 4, "value_bits": 4, "seed": 4343}
+    entries = [
+        encode_tq_block(
+            keys[:, :, start : start + 64, :],
+            values[:, :, start : start + 64, :],
+            config,
+        )
+        for start in range(0, 81, 64)
+    ]
+    decoded_keys, decoded_values = decode_tq_blocks(entries)
+
+    plain = KVCache()
+    plain.keys = decoded_keys
+    plain.values = decoded_values
+    plain.offset = 81
+
+    class _StorageOnlyModel:
+        @staticmethod
+        def make_cache():
+            return [
+                TurboQuantKVCache(
+                    key_dim=128,
+                    value_dim=128,
+                    key_bits=4,
+                    value_bits=4,
+                    seed=4343,
+                    compress_after=0,
+                    sink_tokens=0,
+                )
+            ]
+
+    rewrapped = _recompress_to_tq([plain], _StorageOnlyModel())[0]
+    before_keys, before_values = rewrapped.state
+    mx.eval(before_keys, before_values, decoded_keys, decoded_values)
+
+    assert type(rewrapped).__name__ == "TurboQuantKVCache"
+    assert rewrapped.compress_after == 0
+    assert rewrapped._compressed_tokens == 0
+    assert bool(mx.all(before_keys == decoded_keys).item())
+    assert bool(mx.all(before_values == decoded_values).item())
+
+    next_keys = mx.random.normal(shape=(1, 2, 1, 128)).astype(mx.float16)
+    next_values = mx.random.normal(shape=(1, 2, 1, 128)).astype(mx.float16)
+    expected_keys, expected_values = plain.update_and_fetch(next_keys, next_values)
+    actual_keys, actual_values = rewrapped.update_and_fetch(next_keys, next_values)
+    mx.eval(expected_keys, expected_values, actual_keys, actual_values)
+
+    assert bool(mx.all(actual_keys == expected_keys).item())
+    assert bool(mx.all(actual_values == expected_values).item())
+
+
+def test_tq_storage_only_q4_is_not_cold_float_numerically_equivalent():
+    """Pin the policy boundary: storage q4 is lossy even when paging is exact."""
+    from vmlx_engine.tq_disk_store import decode_tq_block, encode_tq_block
+
+    values = mx.sin(mx.arange(2 * 65 * 128).reshape(1, 2, 65, 128) * 0.013)
+    keys = values.astype(mx.float16)
+    values = mx.cos(values.astype(mx.float32) * 1.7).astype(mx.float16)
+    entry = encode_tq_block(
+        keys,
+        values,
+        {"key_bits": 4, "value_bits": 4, "seed": 4444},
+    )
+    decoded_keys, decoded_values = decode_tq_block(entry)
+    mx.eval(decoded_keys, decoded_values)
+
+    assert float(mx.max(mx.abs(decoded_keys - keys)).item()) > 0.0
+    assert float(mx.max(mx.abs(decoded_values - values)).item()) > 0.0
+
+
 def test_tq_block_batch_decode_preserves_partial_tail_order():
     from vmlx_engine import tq_disk_store
 

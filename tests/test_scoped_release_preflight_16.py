@@ -5,11 +5,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_scoped_release_preflight_16_passes_current_emergency_artifacts(tmp_path: Path) -> None:
+    package = json.loads((ROOT / "panel/package.json").read_text(encoding="utf-8"))
+    if package.get("version") != "1.6.16":
+        pytest.skip("historical 1.6.16 preflight only applies to the 1.6.16 source version")
     out = tmp_path / "scoped-release-preflight-16.json"
     result = subprocess.run(
         [

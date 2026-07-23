@@ -7553,7 +7553,8 @@ class TestStartupCompatibilityGuards:
         release_gate = Path("./panel/scripts/release-gate-python-app.py").read_text()
 
         assert 'JANG_LOCAL="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}"' in bundle_script
-        assert 'JANG_TOOLS_SOURCE_DIR="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}/jang_tools"' in verify_script
+        assert 'JANG_TOOLS_SOURCE_ROOT="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}"' in verify_script
+        assert 'JANG_TOOLS_SOURCE_DIR="$JANG_TOOLS_SOURCE_ROOT/jang_tools"' in verify_script
         assert 'os.environ.get("VMLX_JANG_TOOLS_SOURCE")' in release_gate
         assert 'os.environ.get("VMLINUX_JANG_TOOLS_SOURCE")' in release_gate
         assert '${VMLX_ALLOW_DIRTY_JANG_SOURCE:-${VMLINUX_ALLOW_DIRTY_JANG_SOURCE:-0}}' in bundle_script

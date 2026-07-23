@@ -29,6 +29,7 @@ BONSAI_ROOT = ROOT / "docs/internal/release-gates/20260722_bonsai_r16_ui_api"
 QWEN_ROOT = ROOT / "docs/internal/release-gates/20260722_qwen35_release_checkpoint"
 CACHE_LABEL_ROOT = ROOT / "docs/internal/release-gates/20260722_cache_names_ram_ssd"
 CAMPAIGN_ROOT = ROOT / "docs/internal/release-gates/20260722_v1_6_16_campaign"
+CURRENT_RERUN_ROOT = CAMPAIGN_ROOT / "current-reruns"
 
 
 def load_json(path: Path, failures: list[str]) -> dict[str, Any]:
@@ -347,6 +348,78 @@ def validate_api_proofs(failures: list[str]) -> dict[str, Any]:
     }
 
 
+def validate_current_reruns(failures: list[str]) -> dict[str, Any]:
+    ui_tool = load_json(CURRENT_RERUN_ROOT / "ui-tool-rerun.json", failures)
+    turns = ui_tool.get("turns") if isinstance(ui_tool.get("turns"), list) else []
+    by_wire = {
+        str(turn.get("wireApi")): turn
+        for turn in turns
+        if isinstance(turn, dict)
+    }
+    for wire, expected in [
+        ("responses", "R16-LAGUNA-UI-TOOL-RESPONSES-DONE"),
+        ("completions", "R16-LAGUNA-UI-TOOL-COMPLETIONS-DONE"),
+    ]:
+        turn = by_wire.get(wire) if isinstance(by_wire.get(wire), dict) else {}
+        saved = turn.get("savedOverrides") if isinstance(turn.get("savedOverrides"), dict) else {}
+        require(saved.get("wireApi") == wire, failures, f"current UI {wire} saved wireApi={saved.get('wireApi')!r}")
+        require(saved.get("builtinToolsEnabled") is True, failures, f"current UI {wire} built-in tools not enabled")
+        require(saved.get("enableThinking") is True, failures, f"current UI {wire} explicit thinking not enabled")
+        assistant_rows = [
+            row for row in (turn.get("messages") or [])
+            if isinstance(row, dict) and row.get("role") == "assistant"
+        ]
+        require(len(assistant_rows) == 1, failures, f"current UI {wire} assistant row count={len(assistant_rows)}")
+        assistant = assistant_rows[0] if assistant_rows else {}
+        require(assistant.get("content") == expected, failures, f"current UI {wire} content={assistant.get('content')!r}")
+        tool_calls = str(assistant.get("toolCallsJson") or assistant.get("toolCallsOaiJson") or "")
+        tool_results = str(assistant.get("toolResultsJson") or assistant.get("toolResultsOaiJson") or "")
+        require("file_info" in tool_calls, failures, f"current UI {wire} missing file_info tool call")
+        require("panel/package.json" in tool_calls, failures, f"current UI {wire} missing panel/package.json args")
+        require("Path: panel/package.json" in tool_results and "Size: 5.2 KB" in tool_results, failures, f"current UI {wire} missing real file_info result")
+
+    complete_events = ui_tool.get("events", {}).get("complete") if isinstance(ui_tool.get("events"), dict) else []
+    require(
+        any(isinstance(event, dict) and event.get("content") == "R16-LAGUNA-UI-TOOL-RESPONSES-DONE" and event.get("finishReason") == "stop" for event in complete_events),
+        failures,
+        "current UI Responses completion event missing exact stop",
+    )
+    require(
+        any(isinstance(event, dict) and event.get("content") == "R16-LAGUNA-UI-TOOL-COMPLETIONS-DONE" and event.get("finishReason") == "stop" for event in complete_events),
+        failures,
+        "current UI Chat completion event missing exact stop",
+    )
+
+    responses = load_json(CURRENT_RERUN_ROOT / "responses-terminal-rerun.json", failures)
+    response = responses.get("response") if isinstance(responses.get("response"), dict) else {}
+    require(response.get("status") == 200, failures, f"current Responses status={response.get('status')!r}")
+    require(response.get("completed") is True, failures, "current Responses did not emit response.completed")
+    require(response.get("incomplete") is False, failures, "current Responses emitted response.incomplete")
+    require(response.get("outputTextDone") is True, failures, "current Responses missing response.output_text.done")
+    require(int(len(str(response.get("reasoning") or ""))) >= 500, failures, "current Responses missing substantial reasoning stream")
+    require("43 × 18 is larger" in str(response.get("content") or ""), failures, "current Responses visible answer missing expected comparison")
+
+    chat_tool = load_json(CURRENT_RERUN_ROOT / "chat-tool-continuation-rerun.json", failures)
+    first = chat_tool.get("first") if isinstance(chat_tool.get("first"), dict) else {}
+    second = chat_tool.get("second") if isinstance(chat_tool.get("second"), dict) else {}
+    parsed_args = chat_tool.get("parsedArgs") if isinstance(chat_tool.get("parsedArgs"), dict) else {}
+    require("tool_calls" in (first.get("finish") or []), failures, f"current Chat tool first finish={first.get('finish')!r}")
+    require(parsed_args.get("path") == "panel/package.json", failures, f"current Chat tool args={parsed_args!r}")
+    require(second.get("status") == 200, failures, f"current Chat tool continuation status={second.get('status')!r}")
+    require("stop" in (second.get("finish") or []), failures, f"current Chat tool continuation finish={second.get('finish')!r}")
+    require(second.get("content") == "R16-LAGUNA-API-CHAT-TOOL-CONT-DONE", failures, f"current Chat tool continuation content={second.get('content')!r}")
+    health_after = chat_tool.get("healthAfter") if isinstance(chat_tool.get("healthAfter"), dict) else {}
+    block_disk = _get(health_after, "cache", "block_disk_cache", default={})
+    require(int(block_disk.get("disk_hits") or 0) >= 48, failures, f"current Chat tool disk_hits={block_disk.get('disk_hits')!r}")
+    require(int(block_disk.get("tq_native_hits") or 0) >= 48, failures, f"current Chat tool tq_native_hits={block_disk.get('tq_native_hits')!r}")
+
+    return {
+        "ui_tool_rerun": str(CURRENT_RERUN_ROOT / "ui-tool-rerun.json"),
+        "responses_terminal_rerun": str(CURRENT_RERUN_ROOT / "responses-terminal-rerun.json"),
+        "chat_tool_continuation_rerun": str(CURRENT_RERUN_ROOT / "chat-tool-continuation-rerun.json"),
+    }
+
+
 def validate_laguna_low_limit(failures: list[str]) -> dict[str, Any]:
     four = load_json(LAGUNA_ROOT / "laguna-four-block-eviction-refault.json", failures)
     rows = {row.get("label"): row for row in four.get("rows", []) if isinstance(row, dict)}
@@ -459,6 +532,7 @@ def main() -> int:
         "cache_partial_ssd_evidence": validate_cache_proofs(failures),
         "laguna_low_limit_evidence": validate_laguna_low_limit(failures),
         "api_reasoning_tool_evidence": validate_api_proofs(failures),
+        "current_laguna_rerun_evidence": validate_current_reruns(failures),
         "deferred_full_matrix_boundaries": [
             "full cross-family media breadth",
             "MiniMax M3 sparse/MSA restart/eviction",

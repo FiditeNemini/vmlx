@@ -292,7 +292,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
     const next = !singleModelMode
     setSingleModelMode(next)
     try {
-      const status = await window.api.gateway?.setSingleModelMode?.(next, session.id)
+      const status = await window.api.gateway?.setSingleModelMode?.(next)
       if (typeof status?.singleModelMode === 'boolean') {
         setSingleModelMode(status.singleModelMode)
       }

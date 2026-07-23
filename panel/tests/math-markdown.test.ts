@@ -89,12 +89,29 @@ describe('prepareMarkdownWithMath', () => {
     expect(rendered).not.toContain('\\times')
   })
 
+  it('renders a Unicode operator emitted after a TeX escape', () => {
+    const malformed = 'CURRENCY=$43 TEX=\\(47 \\× 19 = 893\\)'
+    const rendered = prepareMarkdownWithMath(malformed)
+
+    expect(rendered).toContain('$43')
+    expect(rendered).toContain('class="katex"')
+    expect(rendered).toContain('×')
+    expect(rendered).not.toContain('math-fallback')
+    expect(rendered).not.toContain('\\×')
+  })
+
   it('keeps duplicated adjacent delimiters readable during reasoning streaming', () => {
     const rendered = prepareStreamingPlainTextMath(
       'Draft: \\(\\(47 \\times 19 = 893 < 920',
     )
 
     expect(rendered).toBe('Draft: 47 × 19 = 893 < 920')
+  })
+
+  it('keeps an escaped Unicode operator readable during reasoning streaming', () => {
+    const rendered = prepareStreamingPlainTextMath('Draft: \\(47 \\× 19 = 893')
+
+    expect(rendered).toBe('Draft: 47 × 19 = 893')
   })
 
   it('does not treat plain dollar amounts as math', () => {

@@ -38,8 +38,17 @@ function looksLikeSingleDollarMath(text: string): boolean {
   return false
 }
 
+function normalizeEscapedUnicodeMath(text: string): string {
+  // A model can begin a TeX command with `\` and then emit the equivalent
+  // Unicode operator token instead of the command letters (`\×` rather than
+  // `\times`). That byte sequence is invalid TeX but has one unambiguous
+  // display meaning. Remove only the stray slash before known math glyphs;
+  // ordinary backslashes and API payloads remain untouched.
+  return text.replace(/\\([×÷·≈≤≥≠±→←∞π])/g, '$1')
+}
+
 function renderMath(raw: string, displayMode: boolean): string {
-  const source = raw.trim()
+  const source = normalizeEscapedUnicodeMath(raw.trim())
   if (!source) return ''
 
   try {
@@ -62,7 +71,7 @@ function normalizeBareLatexCommands(markdown: string): string {
   // Models sometimes emit a few TeX commands without delimiters. Do not try to
   // parse arbitrary surrounding prose as math here; just make common commands
   // readable so the UI never shows broken-looking backslash words in normal text.
-  let out = markdown
+  let out = normalizeEscapedUnicodeMath(markdown)
   for (let i = 0; i < 8; i++) {
     const next = out.replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, '$1/$2')
     if (next === out) break

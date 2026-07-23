@@ -14,7 +14,7 @@ import { resolveCacheLaunchPolicy } from '../shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../shared/mcpPolicy'
 import { canonicalizeToolParserId } from '../shared/toolParserAliases'
 import { buildToolLaunchArgs } from '../shared/toolLaunchArgs'
-import { canonicalizeReasoningParserForCli } from '../shared/reasoningParserAliases'
+import { resolveEffectiveReasoningParser } from '../shared/reasoningParserAliases'
 import {
   applyBundleGenerationDefaultsToSessionConfig,
   hasDeclaredBundleSamplingDefaults,
@@ -176,6 +176,7 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
     let changed = migrateModelParserDefaults(
       config as Record<string, any>,
       detectedFamily,
+      detected.reasoningParser,
     )
     if (
       detectedFamily === 'deepseek-v4' &&
@@ -3692,17 +3693,17 @@ export class SessionManager extends EventEmitter {
     const effectiveAutoTool = config.enableAutoToolChoice ?? detected.enableAutoToolChoice
 
     const userReasoningParser = config.reasoningParser
-    // Empty string = user chose "None". Same engine gotcha as the tool parser:
-    // only the literal "none" is a hard opt-out; an absent flag auto-configures
-    // from the registry (cli.py:882,1056-1067). Map "" -> "none" so "None"
-    // actually disables reasoning extraction instead of silently acting as Auto.
-    const requestedReasoningParser = userReasoningParser === ''
-      ? 'none'
-      : (userReasoningParser && userReasoningParser !== 'auto' ? userReasoningParser
-        : detected.reasoningParser)  // Fallback to detection if auto or missing
-    const effectiveReasoningParser = canonicalizeReasoningParserForCli(requestedReasoningParser)
-    if (requestedReasoningParser && !effectiveReasoningParser) {
-      console.warn(`[SESSION] Ignoring unsupported reasoning parser "${requestedReasoningParser}" for CLI launch`)
+    const effectiveReasoningParser = resolveEffectiveReasoningParser({
+      configuredParser: userReasoningParser,
+      detectedParser: detected.reasoningParser,
+      supportsThinking: detected.supportsThinking,
+    })
+    if (
+      userReasoningParser &&
+      userReasoningParser !== 'auto' &&
+      !effectiveReasoningParser
+    ) {
+      console.warn(`[SESSION] Ignoring unsupported reasoning parser "${userReasoningParser}" for CLI launch`)
     }
 
     // Pass resolved parsers directly to the CLI so backend doesn't guess.

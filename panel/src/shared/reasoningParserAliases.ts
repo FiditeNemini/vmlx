@@ -20,3 +20,41 @@ export function canonicalizeReasoningParserForCli(parser?: string): string | und
   if (parser === 'poolside_v1') return 'deepseek_r1'
   return REASONING_PARSERS_FOR_CLI.has(parser) ? parser : undefined
 }
+
+export interface ReasoningParserResolution {
+  configuredParser?: string | null
+  detectedParser?: string | null
+  supportsThinking?: boolean
+}
+
+/**
+ * Resolve the one parser identity used by launch argv, command preview,
+ * gateway capabilities, chat request policy, and renderer settings.
+ *
+ * `""` and `"none"` are explicit opt-outs. `auto` and an omitted setting use
+ * current bundle detection. A detector that explicitly says the model does
+ * not support thinking emits the engine's literal opt-out rather than leaving
+ * an absent CLI flag that the backend could reinterpret as Auto.
+ */
+export function resolveEffectiveReasoningParser(
+  input: ReasoningParserResolution,
+): string | undefined {
+  const configured = typeof input.configuredParser === 'string'
+    ? input.configuredParser.trim()
+    : undefined
+  const detected = typeof input.detectedParser === 'string'
+    ? input.detectedParser.trim()
+    : undefined
+
+  if (configured === '' || configured === 'none') return 'none'
+  if (input.supportsThinking === false) return 'none'
+
+  return canonicalizeReasoningParserForCli(
+    configured && configured !== 'auto' ? configured : detected,
+  )
+}
+
+export function reasoningParserIsEnabled(parser?: string): boolean {
+  const canonical = canonicalizeReasoningParserForCli(parser)
+  return canonical !== undefined && canonical !== 'none'
+}

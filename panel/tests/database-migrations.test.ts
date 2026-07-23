@@ -18,6 +18,35 @@ describe('database startup migrations', () => {
     expect(config.toolCallParser).toBe('qwen')
   })
 
+  it('migrates stale Laguna qwen3 reasoning only when current bundle detection proves deepseek_r1', () => {
+    const config: Record<string, any> = {
+      modelParserDefaultsVersion: 1,
+      reasoningParser: 'qwen3',
+    }
+
+    expect(
+      migrateModelParserDefaults(config, 'laguna', 'poolside_v1'),
+    ).toBe(true)
+    expect(config.reasoningParser).toBe('deepseek_r1')
+    expect(config.modelParserDefaultsVersion).toBe(MODEL_PARSER_DEFAULTS_VERSION)
+
+    config.reasoningParser = 'qwen3'
+    expect(
+      migrateModelParserDefaults(config, 'laguna', 'poolside_v1'),
+    ).toBe(false)
+    expect(config.reasoningParser).toBe('qwen3')
+  })
+
+  it('does not rewrite Laguna qwen3 when current bundle detection does not prove a replacement', () => {
+    const config: Record<string, any> = {
+      modelParserDefaultsVersion: 1,
+      reasoningParser: 'qwen3',
+    }
+
+    expect(migrateModelParserDefaults(config, 'laguna', 'qwen3')).toBe(true)
+    expect(config.reasoningParser).toBe('qwen3')
+  })
+
   it('versions parser defaults without changing unrelated family choices', () => {
     const config: Record<string, any> = { toolCallParser: 'qwen' }
 

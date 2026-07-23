@@ -1481,7 +1481,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         <ParserField
           label="Reasoning Parser"
           tooltip="Separates reasoning/thinking from final content. Use Auto-detect unless it picks wrong. Qwen3: Qwen, QwQ, MiniMax, StepFun (strict <think> tags). DeepSeek R1: DeepSeek-R1, GLM-4.7, Phi-4, Nemotron (lenient <think> tags). GPT-OSS: GLM-4.7 Flash (Harmony protocol). Mistral 4: Mistral Small/Large 4 ([THINK] tags). Click '?' for full model list."
-          value={config.reasoningParser}
+          value={config.reasoningParser === 'none' ? '' : config.reasoningParser}
           onChange={v => onChange('reasoningParser', v)}
           options={REASONING_PARSER_OPTIONS}
           detectedValue={detectedReasoningParser}

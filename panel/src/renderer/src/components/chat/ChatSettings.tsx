@@ -5,6 +5,10 @@ import { useTranslation } from '../../i18n'
 import { buildChatSettingsCompatibilityWarnings } from './chatSettingsCompatibility'
 import { buildChatSettingsResetOverrides } from '../../../../shared/chatSettingsResetPolicy'
 import { applyEffectiveSessionGenerationDefaults } from '../../../../shared/effectiveGenerationDefaults'
+import {
+  reasoningParserIsEnabled,
+  resolveEffectiveReasoningParser,
+} from '../../../../shared/reasoningParserAliases'
 
 interface ChatProfile {
   id: string
@@ -95,8 +99,27 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const loadRequestRef = useRef(0)
   const isRemote = session.type === 'remote'
   const effectiveWireApi = overrides.wireApi ?? (isRemote ? 'completions' : 'responses')
-  const effectiveReasoningParser = detectedSupportsThinking === false ? undefined : (detectedReasoningParser ?? reasoningParser)
-  const thinkingSupported = detectedFamily === 'deepseek-v4' || detectedSupportsThinking === true || (detectedSupportsThinking !== false && !!effectiveReasoningParser)
+  const configuredReasoningParser = (() => {
+    try {
+      const config = session.config ? JSON.parse(session.config) : {}
+      return config.reasoningParser ?? reasoningParser
+    } catch {
+      return reasoningParser
+    }
+  })()
+  const resolvedReasoningParser = resolveEffectiveReasoningParser({
+    configuredParser: configuredReasoningParser,
+    detectedParser: detectedReasoningParser,
+    supportsThinking: detectedSupportsThinking,
+  })
+  const effectiveReasoningParser = reasoningParserIsEnabled(resolvedReasoningParser)
+    ? resolvedReasoningParser
+    : undefined
+  const thinkingSupported = resolvedReasoningParser !== 'none' && (
+    detectedFamily === 'deepseek-v4' ||
+    detectedSupportsThinking === true ||
+    (detectedSupportsThinking !== false && !!effectiveReasoningParser)
+  )
   const thinkingOffSupported = detectedSupportsInstructMode !== false
   const displayedEnableThinking = thinkingSupported ? overrides.enableThinking : undefined
   const displayedTopK = Math.max(0, Math.round(overrides.topK ?? modelDefaults.topK ?? 0))

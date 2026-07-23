@@ -4,7 +4,7 @@ import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG, commitActiveSettingsI
 import { useTranslation } from '../../i18n'
 import { resolveCacheLaunchPolicy } from '../../../../shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../../../../shared/mcpPolicy'
-import { canonicalizeReasoningParserForCli } from '../../../../shared/reasoningParserAliases'
+import { resolveEffectiveReasoningParser } from '../../../../shared/reasoningParserAliases'
 import { canonicalizeToolParserId } from '../../../../shared/toolParserAliases'
 import { buildToolLaunchArgs } from '../../../../shared/toolLaunchArgs'
 import { applyBundleGenerationDefaultsToSessionConfig } from '../../../../shared/sessionGenerationDefaults'
@@ -356,7 +356,7 @@ function filterAdditionalArgs(raw: string | undefined, blockedFlags: Set<string>
 function buildCommandPreview(
   modelPath: string,
   config: SessionConfig,
-  detected?: { toolParser?: string; reasoningParser?: string; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; cacheType?: string; cacheSubtype?: string; family?: string; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string } } | null
+  detected?: { toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; cacheType?: string; cacheSubtype?: string; family?: string; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string } } | null
 ): string {
   const parts = ['vmlx-engine serve', modelPath]
   const requestedDistributed = !!(config as any).distributedEnabled
@@ -438,11 +438,11 @@ function buildCommandPreview(
     : canonicalizeToolParserId(config.toolCallParser && config.toolCallParser !== 'auto' ? config.toolCallParser
       : detected?.toolParser)
   const effectiveAutoTool = config.enableAutoToolChoice ?? detected?.enableAutoToolChoice
-  const requestedReasoningParser = config.reasoningParser === ''
-    ? 'none'
-    : (config.reasoningParser && config.reasoningParser !== 'auto' ? config.reasoningParser
-      : detected?.reasoningParser)
-  const effectiveReasoningParser = canonicalizeReasoningParserForCli(requestedReasoningParser)
+  const effectiveReasoningParser = resolveEffectiveReasoningParser({
+    configuredParser: config.reasoningParser,
+    detectedParser: detected?.reasoningParser,
+    supportsThinking: detected?.supportsThinking,
+  })
 
   // Prefix cache (mirrors buildArgs): explicit user opt-out stays off even
   // when tools are configured. Tool sessions benefit from cache but do not
@@ -674,7 +674,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
   const [restarting, setRestarting] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [showPreview, setShowPreview] = useState(false)
-  const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; maxContextLength?: number; dsv4PoolQuantDefault?: boolean; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string } } | null>(null)
+  const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; maxContextLength?: number; dsv4PoolQuantDefault?: boolean; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string } } | null>(null)
   const sessionIdRef = useRef(sessionId)
   const resetRequestRef = useRef(0)
   sessionIdRef.current = sessionId

@@ -89,6 +89,9 @@ async function main() {
     console.log(JSON.stringify(r, null, 2))
   }
   // Intentionally do not call browser.close(): over CDP that may terminate the
-  // live Electron app. Process exit disconnects this short-lived client.
+  // live Electron app. Flush stdout, then explicitly exit so the CDP socket
+  // cannot keep this short-lived driver (and its parent SSH client) alive.
+  await new Promise(resolve => process.stdout.write('', resolve))
+  process.exit(0)
 }
 main().catch(e => { console.error('DRV_ERR', e.message); process.exit(1) })

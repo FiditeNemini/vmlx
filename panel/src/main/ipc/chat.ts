@@ -59,6 +59,10 @@ import {
   buildNewChatInheritedOverrides,
   sanitizeChatOverrides,
 } from "../chat-override-policy";
+import {
+  reasoningParserIsEnabled,
+  resolveEffectiveReasoningParser,
+} from "../../shared/reasoningParserAliases";
 
 // Default connection config (fallback values)
 const DEFAULT_PORT = 8000;
@@ -1138,22 +1142,15 @@ export function registerChatHandlers(
                       ? false
                       : false;
 
-            if (detected.supportsThinking === false || !detected.reasoningParser) {
-              sessionHasReasoningParser = false;
-              isHarmonyModel = false;
-            } else if (
-              sessionConfig.reasoningParser &&
-              sessionConfig.reasoningParser !== "auto"
-            ) {
-              sessionHasReasoningParser = true;
-              isHarmonyModel =
-                sessionConfig.reasoningParser === "openai_gptoss";
-            } else if (chat.modelPath) {
-              // Session config missing reasoningParser (model still loading) or set to "auto" —
-              // detect from model directory so thinking toggle works on first message
-              sessionHasReasoningParser = !!detected.reasoningParser;
-              isHarmonyModel = detected.reasoningParser === "openai_gptoss";
-            }
+            const effectiveReasoningParser = resolveEffectiveReasoningParser({
+              configuredParser: sessionConfig.reasoningParser,
+              detectedParser: detected.reasoningParser,
+              supportsThinking: detected.supportsThinking,
+            });
+            sessionHasReasoningParser = reasoningParserIsEnabled(
+              effectiveReasoningParser,
+            );
+            isHarmonyModel = effectiveReasoningParser === "openai_gptoss";
             // VLM video sampling knobs (undefined → engine default)
             if (
               chatDetectedFamily === "gemma4" &&

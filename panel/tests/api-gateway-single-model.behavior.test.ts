@@ -21,11 +21,13 @@ const gatewayBodyMock = vi.hoisted(() => ({
   extractGatewayModelFromBody: vi.fn(),
 }));
 
-vi.mock("../src/main/database", () => ({ db: dbMock }));
-vi.mock("../src/main/sessions", () => ({ sessionManager: sessionManagerMock }));
-vi.mock("../src/main/model-config-registry", () => ({
+const modelConfigRegistryMock = vi.hoisted(() => ({
   detectModelConfigFromDir: vi.fn(),
 }));
+
+vi.mock("../src/main/database", () => ({ db: dbMock }));
+vi.mock("../src/main/sessions", () => ({ sessionManager: sessionManagerMock }));
+vi.mock("../src/main/model-config-registry", () => modelConfigRegistryMock);
 vi.mock("../src/main/gateway-body", () => gatewayBodyMock);
 
 interface BackendHandle {
@@ -1385,6 +1387,69 @@ describe("ApiGateway single-model mode behavior", () => {
     expect(sessionManagerMock.touchSession).toHaveBeenCalledWith("target");
     expect(paths).toEqual(["/v1/models/target-alias/capabilities"]);
   });
+
+  it.each([
+    {
+      name: "Auto uses the detected reasoning parser",
+      configuredParser: "auto",
+      detectedParser: "qwen3",
+      supportsThinking: true,
+      expectedThinking: true,
+    },
+    {
+      name: "explicit None suppresses detected reasoning",
+      configuredParser: "none",
+      detectedParser: "qwen3",
+      supportsThinking: true,
+      expectedThinking: false,
+    },
+    {
+      name: "a model-declared no-thinking capability suppresses Auto",
+      configuredParser: "auto",
+      detectedParser: "qwen3",
+      supportsThinking: false,
+      expectedThinking: false,
+    },
+  ])(
+    "reports Ollama thinking capability from the effective parser: $name",
+    async ({ configuredParser, detectedParser, supportsThinking, expectedThinking }) => {
+      const session = {
+        id: "target",
+        modelPath: "/models/Target-JANG",
+        modelName: "target-model",
+        servedModelName: "target-alias",
+        host: "127.0.0.1",
+        port: await freePort(),
+        status: "running",
+        type: "local",
+        config: JSON.stringify({ reasoningParser: configuredParser }),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      dbMock.getSetting.mockReturnValue(undefined);
+      dbMock.getSessions.mockReturnValue([session]);
+      dbMock.getSession.mockReturnValue(session);
+      modelConfigRegistryMock.detectModelConfigFromDir.mockReturnValue({
+        reasoningParser: detectedParser,
+        supportsThinking,
+      });
+
+      const { ApiGateway } = await import("../src/main/api-gateway");
+      gateway = new ApiGateway();
+      const port = await freePort();
+      await gateway.start(port, "127.0.0.1");
+
+      const response = await fetch(`http://127.0.0.1:${port}/api/show`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "target-alias" }),
+      });
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.capabilities.includes("thinking")).toBe(expectedThinking);
+    },
+  );
 
   it("auto-switches cache endpoints by query model before proxying cache stats", async () => {
     const bodies: any[] = [];

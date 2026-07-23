@@ -14,6 +14,10 @@
  */
 import { readFileSync } from 'fs'
 import { describe, it, expect } from 'vitest'
+import {
+    reasoningParserIsEnabled,
+    resolveEffectiveReasoningParser,
+} from '../src/shared/reasoningParserAliases'
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 1. Client-side <think> tag extraction
@@ -681,12 +685,10 @@ function resolveSessionHasReasoningParser(
     sessionConfig: { reasoningParser?: string },
     modelPathDetectedParser?: string
 ): boolean {
-    if (sessionConfig.reasoningParser && sessionConfig.reasoningParser !== 'auto') {
-        return true
-    } else if (sessionConfig.reasoningParser === 'auto') {
-        return !!modelPathDetectedParser
-    }
-    return false
+    return reasoningParserIsEnabled(resolveEffectiveReasoningParser({
+        configuredParser: sessionConfig.reasoningParser,
+        detectedParser: modelPathDetectedParser,
+    }))
 }
 
 describe('sessionHasReasoningParser resolution', () => {
@@ -722,8 +724,8 @@ describe('sessionHasReasoningParser resolution', () => {
         expect(resolveSessionHasReasoningParser({ reasoningParser: '' })).toBe(false)
     })
 
-    it('none parser → true (it is a non-auto, non-empty value)', () => {
-        expect(resolveSessionHasReasoningParser({ reasoningParser: 'none' })).toBe(true)
+    it('none parser → false (literal hard opt-out)', () => {
+        expect(resolveSessionHasReasoningParser({ reasoningParser: 'none' })).toBe(false)
     })
 })
 

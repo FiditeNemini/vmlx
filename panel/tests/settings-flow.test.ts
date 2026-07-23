@@ -13,7 +13,10 @@ import { describe, it, expect } from 'vitest'
 import { resolveCacheLaunchPolicy } from '../src/shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../src/shared/mcpPolicy'
 import { canonicalizeToolParserId } from '../src/shared/toolParserAliases'
-import { canonicalizeReasoningParserForCli } from '../src/shared/reasoningParserAliases'
+import {
+    canonicalizeReasoningParserForCli,
+    resolveEffectiveReasoningParser,
+} from '../src/shared/reasoningParserAliases'
 import { buildToolLaunchArgs } from '../src/shared/toolLaunchArgs'
 
 // ─── SessionConfig replica (from SessionConfigForm.tsx) ──────────────────────
@@ -175,6 +178,7 @@ const DEFAULT_CONFIG: SessionConfig = {
 type DetectedConfig = {
     toolParser?: string
     reasoningParser?: string
+    supportsThinking?: boolean
     isMultimodal?: boolean
     forceTextOnly?: boolean
     usePagedCache?: boolean
@@ -389,11 +393,11 @@ function buildCommandPreview(
         : canonicalizeToolParserId(config.toolCallParser && config.toolCallParser !== 'auto' ? config.toolCallParser
             : detected?.toolParser)
     const effectiveAutoTool = config.enableAutoToolChoice ?? detected?.enableAutoToolChoice
-    const requestedReasoningParser = config.reasoningParser === ''
-        ? 'none'
-        : (config.reasoningParser && config.reasoningParser !== 'auto' ? config.reasoningParser
-            : detected?.reasoningParser)
-    const effectiveReasoningParser = canonicalizeReasoningParserForCli(requestedReasoningParser)
+    const effectiveReasoningParser = resolveEffectiveReasoningParser({
+        configuredParser: config.reasoningParser,
+        detectedParser: detected?.reasoningParser,
+        supportsThinking: detected?.supportsThinking,
+    })
 
     const cacheLaunchPolicy = resolveCacheLaunchPolicy({
         continuousBatching: cacheStackActive,
@@ -1326,6 +1330,13 @@ describe('Tool Integration', () => {
         expect(getFlagValue(out, '--reasoning-parser')).toBe('none')
     })
 
+    it('renders persisted literal none as the reasoning-parser None option', () => {
+        const formSource = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
+        expect(formSource).toContain(
+            "value={config.reasoningParser === 'none' ? '' : config.reasoningParser}",
+        )
+    })
+
     it('tool parser dropdown exposes DSV4 DSML, Hy3, and ZAYA parsers', () => {
         const formSource = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
         expect(formSource).toContain("value: 'dsml'")
@@ -1397,6 +1408,24 @@ describe('Tool Integration', () => {
     it('uses detected reasoning parser when user is auto', () => {
         const out = preview({ reasoningParser: 'auto' }, { reasoningParser: 'qwen3' })
         expect(getFlagValue(out, '--reasoning-parser')).toBe('qwen3')
+    })
+
+    it('emits literal reasoning none for both explicit None spellings', () => {
+        for (const reasoningParser of ['', 'none']) {
+            const out = preview(
+                { reasoningParser },
+                { reasoningParser: 'qwen3', supportsThinking: true },
+            )
+            expect(getFlagValue(out, '--reasoning-parser')).toBe('none')
+        }
+    })
+
+    it('uses literal reasoning none when current detection explicitly disables thinking', () => {
+        const out = preview(
+            { reasoningParser: 'auto' },
+            { reasoningParser: 'qwen3', supportsThinking: false },
+        )
+        expect(getFlagValue(out, '--reasoning-parser')).toBe('none')
     })
 
     it('canonicalizes Poolside/Laguna vendor parser to the exact backend alias', () => {

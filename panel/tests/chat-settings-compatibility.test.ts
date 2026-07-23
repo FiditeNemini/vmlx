@@ -89,8 +89,9 @@ describe('chat settings cross-family compatibility warnings', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 
     expect(source).toContain('const [detectedSupportsThinking, setDetectedSupportsThinking]')
-    expect(source).toContain('const effectiveReasoningParser = detectedSupportsThinking === false ? undefined : (detectedReasoningParser ?? reasoningParser)')
-    expect(source).toContain("const thinkingSupported = detectedFamily === 'deepseek-v4' || detectedSupportsThinking === true || (detectedSupportsThinking !== false && !!effectiveReasoningParser)")
+    expect(source).toContain('const resolvedReasoningParser = resolveEffectiveReasoningParser({')
+    expect(source).toContain("const thinkingSupported = resolvedReasoningParser !== 'none' && (")
+    expect(source).toContain('reasoningParserIsEnabled(resolvedReasoningParser)')
     expect(source).toContain("const showReasoningEffort = (detectedReasoningEfforts?.length ?? 0) > 0")
     expect(source).toContain('const displayedEnableThinking = thinkingSupported ? overrides.enableThinking : undefined')
     expect(source).toContain('disabled={!thinkingSupported}')
@@ -111,7 +112,8 @@ describe('chat settings cross-family compatibility warnings', () => {
     expect(source).toContain('const thinkingOffSupported = detectedSupportsInstructMode !== false')
     expect(source).toContain('{thinkingOffSupported && (')
     expect(source).toContain("'chat.settings.thinkingNativeOnlyHelp'")
-    expect(source).toContain('setDetectedReasoningEfforts(detected?.supportedReasoningEfforts)')
+    expect(source).toContain('nextDetectedReasoningEfforts = detected?.supportedReasoningEfforts')
+    expect(source).toContain('setDetectedReasoningEfforts(nextDetectedReasoningEfforts)')
     expect(ipc).toContain('supportsInstructMode === false && overrides?.enableThinking === false')
     expect(ipc).toContain('if (supportsInstructMode === false) return;')
   })
@@ -145,8 +147,9 @@ describe('chat settings cross-family compatibility warnings', () => {
   it('main IPC refuses stale local Thinking On when fresh detection has no reasoning parser', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
 
-    expect(source).toContain('if (detected.supportsThinking === false || !detected.reasoningParser) {')
-    expect(source).toContain('sessionHasReasoningParser = false;')
+    expect(source).toContain('const effectiveReasoningParser = resolveEffectiveReasoningParser({')
+    expect(source).toContain('sessionHasReasoningParser = reasoningParserIsEnabled(')
+    expect(source).toContain('supportsThinking: detected.supportsThinking,')
     expect(source).toContain('const effectiveEnableThinkingOverride =')
     expect(source).toContain('!sessionHasReasoningParser')
     expect(source).toContain('chatDetectedFamily !== "deepseek-v4"')
@@ -156,7 +159,8 @@ describe('chat settings cross-family compatibility warnings', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 
     expect(source).toContain('const [supportsThinkingBudget, setSupportsThinkingBudget]')
-    expect(source).toContain('setSupportsThinkingBudget(detected?.supportsThinkingBudget)')
+    expect(source).toContain('nextSupportsThinkingBudget = detected?.supportsThinkingBudget')
+    expect(source).toContain('setSupportsThinkingBudget(nextSupportsThinkingBudget)')
     expect(source).toContain('{(supportsThinkingBudget === true || thinkingBudgetSupported === true) && displayedEnableThinking !== false && (')
   })
 

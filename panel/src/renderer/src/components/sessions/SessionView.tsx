@@ -12,7 +12,10 @@ import { LogsPanel } from './LogsPanel'
 import { useToast } from '../Toast'
 import { useAppState } from '../../contexts/AppStateContext'
 import { useSessionsContext } from '../../contexts/SessionsContext'
-import { canonicalizeReasoningParserForCli } from '../../../../shared/reasoningParserAliases'
+import {
+  reasoningParserIsEnabled,
+  resolveEffectiveReasoningParser,
+} from '../../../../shared/reasoningParserAliases'
 import { useTranslation } from '../../i18n'
 
 interface Session {
@@ -99,15 +102,21 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
             const cfg = s.config ? JSON.parse(s.config) : {}
             if (!s.modelPath.startsWith('remote://')) {
               const detected = await window.api.models.detectConfig(s.modelPath)
-              if (detected?.supportsThinking === false || !detected?.reasoningParser) {
-                setEffectiveReasoningParser(undefined)
-              } else if (cfg.reasoningParser && cfg.reasoningParser !== 'auto') {
-                setEffectiveReasoningParser(canonicalizeReasoningParserForCli(cfg.reasoningParser))
-              } else {
-                setEffectiveReasoningParser(canonicalizeReasoningParserForCli(detected.reasoningParser))
-              }
-            } else if (cfg.reasoningParser && cfg.reasoningParser !== 'auto') {
-              setEffectiveReasoningParser(canonicalizeReasoningParserForCli(cfg.reasoningParser))
+              const effective = resolveEffectiveReasoningParser({
+                configuredParser: cfg.reasoningParser,
+                detectedParser: detected?.reasoningParser,
+                supportsThinking: detected?.supportsThinking,
+              })
+              setEffectiveReasoningParser(
+                reasoningParserIsEnabled(effective) ? effective : undefined,
+              )
+            } else {
+              const effective = resolveEffectiveReasoningParser({
+                configuredParser: cfg.reasoningParser,
+              })
+              setEffectiveReasoningParser(
+                reasoningParserIsEnabled(effective) ? effective : undefined,
+              )
             }
           } catch (_) { /* ignore detection errors */ }
 

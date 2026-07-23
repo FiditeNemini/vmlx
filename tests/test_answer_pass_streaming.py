@@ -338,3 +338,21 @@ def test_nonstream_answer_pass_replaces_length_truncated_visible_prefix():
             "(not _ns_visible_content_for_answer_gate or _ns_reasoning_truncated)"
             in source
         )
+
+
+def test_streaming_answer_pass_announces_phase_without_nonstandard_json():
+    """Strict API clients ignore the phase while the local panel stays live."""
+    chat_source = inspect.getsource(server_mod.stream_chat_completion)
+    responses_source = inspect.getsource(server_mod.stream_responses_api)
+    for source in (chat_source, responses_source):
+        assert 'yield ": vmlx-answer-pass-start\\n\\n"' in source
+        assert '"type": "vmlx-answer-pass-start"' not in source
+
+
+def test_responses_answer_pass_continues_incremental_usage_counter():
+    source = inspect.getsource(server_mod.stream_responses_api)
+    marker = source.index('yield ": vmlx-answer-pass-start\\n\\n"')
+    answer_pass = source[marker:]
+    assert "if incremental_usage_extension:" in answer_pass
+    assert '"output_tokens": completion_tokens + _ans_ct' in answer_pass
+    assert '"response.usage"' in answer_pass

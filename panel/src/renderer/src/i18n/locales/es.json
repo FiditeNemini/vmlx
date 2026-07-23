@@ -456,6 +456,7 @@
       "copyTitle": "Copiar respuesta",
       "regenerateTitle": "Regenerar respuesta",
       "waitingForResponse": "Esperando la respuesta del modelo...",
+      "finalizingAnswer": "Finalizando la respuesta...",
       "noVisibleResponse": "No se generó ninguna respuesta visible."
     },
     "messages": {

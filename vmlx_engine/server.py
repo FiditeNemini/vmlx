@@ -19872,6 +19872,12 @@ async def stream_chat_completion(
         answer_kwargs.pop("_vmlx_tools_present", None)
         answer_kwargs.pop("_vmlx_template_tools", None)
         try:
+            # SSE comments are ignored by standard OpenAI clients but let the
+            # local Electron panel distinguish a real second-generation prefill
+            # from a stalled reasoning-to-content transition.  Do not encode
+            # this as a JSON chunk: strict Chat clients must never see a
+            # non-OpenAI object in the data stream.
+            yield ": vmlx-answer-pass-start\n\n"
             # F6: STREAM the bounded answer pass token-by-token instead of
             # generating it in full and emitting it as one content delta. The
             # single-delta form made the whole answer land at once after a long
@@ -21908,6 +21914,10 @@ async def stream_responses_api(
             answer_kwargs.pop("_vmlx_tools_present", None)
             answer_kwargs.pop("_vmlx_template_tools", None)
             try:
+                # Standards-safe phase marker. SSE consumers ignore comments;
+                # the negotiated local panel uses it to keep the UI visibly
+                # active and to exclude this second prefill from decode TPS.
+                yield ": vmlx-answer-pass-start\n\n"
                 # F6: STREAM the answer pass token-by-token (see the Chat
                 # Completions site for the full rationale + mechanics). The MLLM
                 # stream only assembles GenerationOutput.text at finished=True, so
@@ -21945,6 +21955,25 @@ async def stream_responses_api(
                         or _ans_ct
                     )
                     _ans_raw += getattr(answer_output, "new_text", "") or ""
+                    if incremental_usage_extension:
+                        # The first pass already established authoritative
+                        # cumulative usage.  Continue that same counter during
+                        # the second pass; otherwise the Electron counter
+                        # freezes while answer text is actively decoding.
+                        _answer_usage = {
+                            "input_tokens": prompt_tokens,
+                            "output_tokens": completion_tokens + _ans_ct,
+                            "total_tokens": (
+                                prompt_tokens + completion_tokens + _ans_ct
+                            ),
+                        }
+                        yield _sse(
+                            "response.usage",
+                            {
+                                "type": "response.usage",
+                                "usage": _answer_usage,
+                            },
+                        )
                     if _buffer_answer_pass:
                         continue
                     _delta, _ans_sent, _reconciled_now = _answer_pass_reconcile_delta(

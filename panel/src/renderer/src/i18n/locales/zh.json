@@ -456,6 +456,7 @@
       "copyTitle": "复制响应",
       "regenerateTitle": "重新生成响应",
       "waitingForResponse": "正在等待模型响应...",
+      "finalizingAnswer": "正在整理最终回答...",
       "noVisibleResponse": "未生成可见响应。"
     },
     "messages": {

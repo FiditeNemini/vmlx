@@ -456,6 +456,7 @@
       "copyTitle": "응답 복사",
       "regenerateTitle": "응답 재생성",
       "waitingForResponse": "모델 응답을 기다리는 중...",
+      "finalizingAnswer": "답변을 마무리하는 중...",
       "noVisibleResponse": "표시할 응답이 생성되지 않았습니다."
     },
     "messages": {

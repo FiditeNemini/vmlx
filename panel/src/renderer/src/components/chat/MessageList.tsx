@@ -32,6 +32,7 @@ interface MessageListProps {
   reasoningMap?: Record<string, string>
   reasoningSegmentMap?: Record<string, string[]>
   reasoningDoneMap?: Record<string, boolean>
+  answerPassMap?: Record<string, boolean>
   toolStatusMap?: Record<string, any[]>
   hideToolStatus?: boolean
   sessionId?: string
@@ -40,7 +41,7 @@ interface MessageListProps {
   onEdit?: (messageId: string, newContent: string) => void
 }
 
-export function MessageList({ messages, streamingMessageId, currentMetrics, reasoningMap, reasoningSegmentMap, reasoningDoneMap, toolStatusMap, hideToolStatus, sessionId, sessionEndpoint, onRegenerate, onEdit }: MessageListProps) {
+export function MessageList({ messages, streamingMessageId, currentMetrics, reasoningMap, reasoningSegmentMap, reasoningDoneMap, answerPassMap, toolStatusMap, hideToolStatus, sessionId, sessionEndpoint, onRegenerate, onEdit }: MessageListProps) {
   const { t } = useTranslation()
   const bottomRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -132,6 +133,7 @@ export function MessageList({ messages, streamingMessageId, currentMetrics, reas
               reasoningContent={reasoningMap?.[message.id]}
               reasoningSegments={reasoningSegmentMap?.[message.id]}
               reasoningDone={reasoningDoneMap?.[message.id] ?? false}
+              answerPassPending={answerPassMap?.[message.id] ?? false}
               toolStatuses={hideToolStatus ? undefined : toolStatusMap?.[message.id]}
               warnings={message.warnings}
               sessionId={sessionId}

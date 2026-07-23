@@ -163,6 +163,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
   const [reasoningMap, setReasoningMap] = useState<Record<string, string>>({})
   const [reasoningSegmentMap, setReasoningSegmentMap] = useState<Record<string, string[]>>({})
   const [reasoningDoneMap, setReasoningDoneMap] = useState<Record<string, boolean>>({})
+  const [answerPassMap, setAnswerPassMap] = useState<Record<string, boolean>>({})
   // Tool call status: track per-message tool call phases
   const [toolStatusMap, setToolStatusMap] = useState<Record<string, Array<{ phase: string; toolName: string; toolCallId?: string; detail?: string; iteration?: number; contentOffset?: number; timestamp: number }>>>({})
   // Per-chat setting: hide tool status display
@@ -178,6 +179,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
       setReasoningMap({})
       setReasoningSegmentMap({})
       setReasoningDoneMap({})
+      setAnswerPassMap({})
       return
     }
 
@@ -309,6 +311,8 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
         return
       }
 
+      setAnswerPassMap(prev => ({ ...prev, [data.messageId]: false }))
+
       // Regular content update
       setMessages(prev => {
         const existing = prev.find(m => m.id === data.messageId)
@@ -355,6 +359,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
       }
       setStreamingMessageId(null)
       setCurrentMetrics(null)
+      setAnswerPassMap(prev => ({ ...prev, [data.messageId]: false }))
     }
 
     const handleReasoningDone = (data: any) => {
@@ -367,6 +372,11 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
       if (Array.isArray(data.reasoningSegments)) {
         setReasoningSegmentMap(prev => ({ ...prev, [data.messageId]: data.reasoningSegments }))
       }
+    }
+
+    const handleAnswerPass = (data: any) => {
+      if (data.chatId !== chatId) return
+      setAnswerPassMap(prev => ({ ...prev, [data.messageId]: true }))
     }
 
     const handleToolStatus = (data: any) => {
@@ -400,6 +410,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
     const cleanupStream = window.api.chat.onStream(handleStream)
     const cleanupComplete = window.api.chat.onComplete(handleComplete)
     const cleanupReasoningDone = window.api.chat.onReasoningDone(handleReasoningDone)
+    const cleanupAnswerPass = window.api.chat.onAnswerPass(handleAnswerPass)
     const cleanupToolStatus = window.api.chat.onToolStatus(handleToolStatus)
     const cleanupAskUser = window.api.chat.onAskUser(handleAskUser)
 
@@ -411,11 +422,13 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
       cleanupStream()
       cleanupComplete()
       cleanupReasoningDone()
+      cleanupAnswerPass()
       cleanupToolStatus()
       cleanupAskUser()
       setReasoningMap({})
       setReasoningSegmentMap({})
       setReasoningDoneMap({})
+      setAnswerPassMap({})
       setToolStatusMap({})
       setAskUserQuestion(null)
     }
@@ -667,6 +680,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
         reasoningMap={reasoningMap}
         reasoningSegmentMap={reasoningSegmentMap}
         reasoningDoneMap={reasoningDoneMap}
+        answerPassMap={answerPassMap}
         toolStatusMap={toolStatusMap}
         hideToolStatus={hideToolStatus}
         sessionId={sessionId}

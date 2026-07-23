@@ -28,6 +28,7 @@ interface MessageBubbleProps {
   reasoningContent?: string
   reasoningSegments?: string[]
   reasoningDone?: boolean
+  answerPassPending?: boolean
   toolStatuses?: any[]
   warnings?: string[]
   sessionId?: string
@@ -176,7 +177,7 @@ function useTypewriter(fullContent: string, isStreaming: boolean): string {
   return displayed
 }
 
-export const MessageBubble = memo(function MessageBubble({ message, isStreaming, metrics, reasoningContent, reasoningSegments, reasoningDone, toolStatuses, warnings, sessionId, sessionEndpoint, isLastAssistant, onRegenerate, onEdit }: MessageBubbleProps) {
+export const MessageBubble = memo(function MessageBubble({ message, isStreaming, metrics, reasoningContent, reasoningSegments, reasoningDone, answerPassPending, toolStatuses, warnings, sessionId, sessionEndpoint, isLastAssistant, onRegenerate, onEdit }: MessageBubbleProps) {
   const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
   const [zoomedImage, setZoomedImage] = useState<string | null>(null)
@@ -553,7 +554,13 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
         {/* Main content */}
         <div className="text-sm">
           {renderInlineContent()}
-          {isEmptyAssistant && isStreaming && (
+          {answerPassPending && isStreaming && !message.content && (
+            <div className="flex items-center gap-2 text-muted-foreground py-1">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+              <span>{t('chat.bubble.finalizingAnswer')}</span>
+            </div>
+          )}
+          {isEmptyAssistant && isStreaming && !answerPassPending && (
             <div className="flex items-center gap-2 text-muted-foreground py-1">
               <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
               <span>{t('chat.bubble.waitingForResponse')}</span>

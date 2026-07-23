@@ -123,6 +123,11 @@ const api = {
       ipcRenderer.on('chat:reasoningDone', handler)
       return () => { ipcRenderer.removeListener('chat:reasoningDone', handler) }
     },
+    onAnswerPass: (callback: (data: any) => void) => {
+      const handler = (_: any, data: any) => callback(data)
+      ipcRenderer.on('chat:answerPass', handler)
+      return () => { ipcRenderer.removeListener('chat:answerPass', handler) }
+    },
     onTyping: (callback: (data: any) => void) => {
       const handler = (_: any, data: any) => callback(data)
       ipcRenderer.on('chat:typing', handler)

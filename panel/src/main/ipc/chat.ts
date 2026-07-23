@@ -2367,6 +2367,27 @@ export function registerChatHandlers(
           await new Promise<void>((resolve) => setImmediate(resolve));
         };
 
+        const beginAnswerPass = () => {
+          // The bounded answer pass is a second model generation. Its prompt
+          // prefill is real end-to-end latency, but it is not decode time. Keep
+          // totalTime honest while starting a fresh physical decode window so
+          // the UI does not report a healthy ~50 t/s model as ~3 t/s during
+          // the silent second prefill.
+          lastTokenTime = null;
+          tpsSnapshots.length = 0;
+          tpsTokenBase = tokenCount;
+          liveTps = 0;
+          try {
+            const win = getWindow();
+            if (win && !win.isDestroyed()) {
+              win.webContents.send("chat:answerPass", {
+                chatId,
+                messageId: assistantMessage.id,
+              });
+            }
+          } catch (_) {}
+        };
+
         // Client-side tool call buffering: suppress content when leaked tool call XML detected.
         // Must check RAW content before template token stripping, since markers like
         // <minimax:tool_call> get stripped by TEMPLATE_TOKEN_REGEX and never reach fullContent.
@@ -2600,6 +2621,13 @@ export function registerChatHandlers(
 
         // Process a single SSE data line (with event type context)
         const processLine = (trimmed: string) => {
+          // Standards-safe vMLX phase signal. The server emits this as an SSE
+          // comment, so generic OpenAI clients ignore it. The local panel uses
+          // it to distinguish answer synthesis from a stalled stream.
+          if (trimmed === ": vmlx-answer-pass-start") {
+            beginAnswerPass();
+            return;
+          }
           // Track SSE event type (Responses API uses "event:" lines)
           if (trimmed.startsWith("event: ")) {
             currentEventType = trimmed.slice(7);

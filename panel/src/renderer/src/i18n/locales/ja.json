@@ -456,6 +456,7 @@
       "copyTitle": "応答をコピー",
       "regenerateTitle": "応答を再生成",
       "waitingForResponse": "モデルの応答を待っています...",
+      "finalizingAnswer": "回答を仕上げています...",
       "noVisibleResponse": "表示可能な応答は生成されませんでした。"
     },
     "messages": {

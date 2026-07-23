@@ -207,6 +207,7 @@ declare global {
         onStream: (callback: (data: any) => void) => () => void;
         onComplete: (callback: (data: any) => void) => () => void;
         onReasoningDone: (callback: (data: any) => void) => () => void;
+        onAnswerPass: (callback: (data: any) => void) => () => void;
         onTyping: (callback: (data: any) => void) => () => void;
         onToolStatus: (callback: (data: any) => void) => () => void;
         abort: (chatId: string) => Promise<void>;

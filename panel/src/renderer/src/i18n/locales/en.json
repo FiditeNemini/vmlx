@@ -456,6 +456,7 @@
       "copyTitle": "Copy response",
       "regenerateTitle": "Regenerate response",
       "waitingForResponse": "Waiting for model response...",
+      "finalizingAnswer": "Finalizing answer...",
       "noVisibleResponse": "No visible response was produced."
     },
     "messages": {

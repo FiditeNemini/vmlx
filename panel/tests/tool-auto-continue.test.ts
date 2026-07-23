@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   requestedExactFinalToolNames,
+  requestedOnceToolNames,
   requestsDirectAnswerAfterSingleTool,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
@@ -103,6 +104,24 @@ describe('tool auto-continue policy', () => {
         'Call file_info exactly once. After checking prerequisites. The tool result may be long; reply exactly DONE.',
       ),
     ).toBe(false)
+  })
+
+  it('retires explicitly named exactly-once tools even without exact final wording', () => {
+    expect(
+      requestedOnceToolNames(
+        'Call the built-in file_info tool exactly once with path panel/package.json. After the real tool result, report the human-readable size.',
+      ),
+    ).toEqual(['file_info'])
+    expect(
+      requestedExactFinalToolNames(
+        'Call the built-in file_info tool exactly once with path panel/package.json. After the real tool result, report the human-readable size.',
+      ),
+    ).toEqual([])
+    expect(
+      requestedOnceToolNames(
+        'First call file_info exactly once. Then call run_command exactly once.',
+      ),
+    ).toEqual(['file_info', 'run_command'])
   })
 
   it('maps an explicit current-turn no-tool directive to the API contract', () => {
@@ -250,6 +269,9 @@ describe('tool auto-continue policy', () => {
 
     expect(source).toContain('requestsDirectAnswerAfterSingleTool(latestUserText)')
     expect(source).toContain('requestedExactFinalToolNames(latestUserText)')
+    expect(source).toContain('requestedOnceToolNames(latestUserText)')
+    expect(source).toContain('completedExactlyOnceTools.has(name)')
+    expect(source).toContain('Duplicate ${tc.function.name} call was not executed')
     expect(source).toContain('const availableToolDefinitions = () =>')
     expect(source).toContain('completedExactFinalTools.add(normalizedToolName)')
     expect(source).toContain('exactFinalToolNames.every((name) =>')

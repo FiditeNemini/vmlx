@@ -31,6 +31,7 @@ import {
 } from "../../shared/interleavedReasoning";
 import {
   requestedExactFinalToolNames,
+  requestedOnceToolNames,
   requestsDirectAnswerAfterSingleTool,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
@@ -1484,7 +1485,12 @@ export function registerChatHandlers(
         overrides?.builtinToolsEnabled === true
           ? requestedExactFinalToolNames(latestUserText)
           : [];
+      const exactlyOnceToolNames =
+        overrides?.builtinToolsEnabled === true
+          ? requestedOnceToolNames(latestUserText)
+          : [];
       const completedExactFinalTools = new Set<string>();
+      const completedExactlyOnceTools = new Set<string>();
       const suppressGenericAgenticToolPromptForNativeTools =
         overrides?.builtinToolsEnabled === true &&
         shouldSuppressGenericAgenticPromptForNativeTools(
@@ -1875,7 +1881,8 @@ export function registerChatHandlers(
               return (
                 (exactFinalToolNames.length === 0 ||
                   exactFinalToolNames.includes(name)) &&
-                !completedExactFinalTools.has(name)
+                !completedExactFinalTools.has(name) &&
+                !completedExactlyOnceTools.has(name)
               );
             },
           );
@@ -3406,6 +3413,41 @@ export function registerChatHandlers(
                 name: "AbortError",
               });
             let resultText = "";
+            const normalizedToolName = tc.function.name.toLowerCase();
+            const isExactlyOnceTool =
+              exactlyOnceToolNames.includes(normalizedToolName);
+            if (
+              isExactlyOnceTool &&
+              completedExactlyOnceTools.has(normalizedToolName)
+            ) {
+              resultText = `Duplicate ${tc.function.name} call was not executed because the user requested it exactly once.`;
+              emitToolStatus(
+                "error",
+                tc.function.name,
+                resultText,
+                toolIteration,
+                tc.id,
+              );
+              requestMessages.push(
+                useResponsesApi
+                  ? {
+                      type: "function_call_output",
+                      call_id: tc.id,
+                      output: resultText,
+                    }
+                  : {
+                      role: "tool",
+                      tool_call_id: tc.id,
+                      content: resultText,
+                    },
+              );
+              continue;
+            }
+            if (isExactlyOnceTool) {
+              // Mark before execution so two calls emitted in one model pass
+              // cannot both reach the executor.
+              completedExactlyOnceTools.add(normalizedToolName);
+            }
             try {
               let toolArgs: Record<string, any>;
               try {
@@ -3635,7 +3677,6 @@ export function registerChatHandlers(
                   }
                 : { role: "tool", tool_call_id: tc.id, content: resultText },
             );
-            const normalizedToolName = tc.function.name.toLowerCase();
             if (exactFinalToolNames.includes(normalizedToolName)) {
               completedExactFinalTools.add(normalizedToolName);
             }

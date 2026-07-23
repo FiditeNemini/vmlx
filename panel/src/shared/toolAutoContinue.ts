@@ -26,13 +26,11 @@ export function shouldFinishZayaAppleScriptToolRound(
   )
 }
 
-export function requestedExactFinalToolNames(text: string): string[] {
-  // This optimization removes the tool catalog from the first follow-up, so
-  // recognize only unambiguous singular call directives. A multi-tool contract
-  // remains agentic until every explicitly named tool has completed.
-  // A broad `exactly once` check misclassified multi-tool requests such as
-  // "call file_info ... after that result call run_command ... after both
-  // results reply exactly ..." and made the requested second call impossible.
+export function requestedOnceToolNames(text: string): string[] {
+  // An explicit per-tool `exactly once` directive is an execution invariant,
+  // independent of how the user phrases the final-answer request. Retire each
+  // named tool after its first call while leaving other tools available for
+  // genuinely agentic multi-tool work.
   const names = Array.from(
     text.matchAll(
       /\bcall\s+(?:the\s+)?(?:built-in\s+)?([a-z][\w-]*)(?:\s+tool)?\s+exactly\s+once\b/gi,
@@ -40,6 +38,16 @@ export function requestedExactFinalToolNames(text: string): string[] {
     match => match[1].toLowerCase(),
   )
   if (names.length === 0 || new Set(names).size !== names.length) return []
+  return names
+}
+
+export function requestedExactFinalToolNames(text: string): string[] {
+  // This optimization removes the whole tool catalog from the final-answer
+  // follow-up, so keep it narrower than the per-tool exactly-once invariant.
+  // A multi-tool contract remains agentic until every explicitly named tool
+  // has completed.
+  const names = requestedOnceToolNames(text)
+  if (names.length === 0) return []
 
   // Keep this bounded to the final-result clause, but allow ordinary
   // modifiers from the exact contract ("the real tool result", "both tool

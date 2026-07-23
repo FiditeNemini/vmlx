@@ -267,10 +267,21 @@ class BlockDiskStore:
         self._writer_thread = threading.Thread(
             target=self._background_writer, daemon=True, name="block-disk-writer"
         )
-        self._writer_thread.start()
 
         # Clean up orphaned .tmp files from crashed writes
         self._cleanup_orphaned_tmp()
+
+        # A user can lower the disk-cap slider between sessions. Enforce that
+        # new ceiling before serving reads or accepting writes; waiting for the
+        # first background write left an oversized cache indefinitely after
+        # restart. This synchronous startup trim touches only files and SQLite.
+        startup_conn = sqlite3.connect(str(self._db_path), timeout=5.0)
+        try:
+            self._maybe_evict(startup_conn)
+        finally:
+            startup_conn.close()
+
+        self._writer_thread.start()
 
         entry_count = self._count_entries()
         total_size = self._total_size()

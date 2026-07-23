@@ -755,3 +755,53 @@ def test_block_disk_store_derives_native_tq_disable_from_cli_environment(
         assert store.get_stats()["tq_native_enabled"] is False
     finally:
         store.shutdown()
+
+
+def test_block_disk_store_enforces_lowered_capacity_on_startup(tmp_path):
+    import sqlite3
+    import time
+
+    from vmlx_engine.block_disk_store import BlockDiskStore
+
+    unlimited = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    unlimited.shutdown()
+
+    now = time.time()
+    conn = sqlite3.connect(str(tmp_path / "block_index.db"))
+    try:
+        for index in range(2):
+            name = f"blocks/manual-{index}.safetensors"
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x" * 100)
+            conn.execute(
+                "INSERT INTO blocks "
+                "(block_hash, file_name, num_tokens, num_layers, dtype, "
+                "file_size, created_at, last_accessed, access_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"{index:064x}",
+                    name,
+                    8,
+                    1,
+                    "float16",
+                    100,
+                    now + index,
+                    now + index,
+                    0,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # About 107 bytes; startup eviction trims to 80%, so both 100-byte
+    # records must be removed before the store reports ready.
+    limited = BlockDiskStore(str(tmp_path), max_size_gb=0.0000001)
+    try:
+        stats = limited.get_stats()
+        assert stats["disk_size_bytes"] <= limited.max_size_bytes
+        assert stats["blocks_on_disk"] == 0
+        assert stats["disk_evictions"] == 2
+    finally:
+        limited.shutdown()

@@ -7518,7 +7518,7 @@ class TestStartupCompatibilityGuards:
         assert '${VMLX_ALLOW_MISSING_JANG_SOURCE_HASH:-${VMLINUX_ALLOW_MISSING_JANG_SOURCE_HASH:-0}}' in verify_script
         assert "RELEASE BLOCKED — local jang_tools source unavailable for hash parity" in verify_script
 
-    def test_bundled_python_blocks_tracked_dirty_local_jang_tools_by_default(self):
+    def test_bundled_python_blocks_tracked_or_untracked_local_jang_tools_by_default(self):
         bundle_script = Path("./panel/scripts/bundle-python.sh").read_text()
         local_install_block = bundle_script[
             bundle_script.index('JANG_LOCAL="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}"')
@@ -7528,10 +7528,24 @@ class TestStartupCompatibilityGuards:
         dirty_guard_index = bundle_script.index("check_local_jang_source_clean")
 
         assert '${VMLX_ALLOW_DIRTY_JANG_SOURCE:-${VMLINUX_ALLOW_DIRTY_JANG_SOURCE:-0}}' in local_install_block
-        assert "RELEASE BLOCKED — local jang-tools source has tracked changes" in local_install_block
-        assert 'git -C "$JANG_LOCAL" diff --quiet --ignore-submodules --' in local_install_block
-        assert 'git -C "$JANG_LOCAL" diff --cached --quiet --ignore-submodules --' in local_install_block
+        assert "RELEASE BLOCKED — local jang-tools package source is dirty" in local_install_block
+        assert "status --porcelain --untracked-files=all" in local_install_block
+        assert "pyproject.toml jang_tools" in local_install_block
+        assert "tracked or untracked JANG runtime changes" in local_install_block
         assert dirty_guard_index < destructive_build_index
+
+    def test_bundled_python_records_and_verifies_exact_jang_provenance(self):
+        bundle_script = Path("./panel/scripts/bundle-python.sh").read_text()
+        verify_script = Path("./panel/scripts/verify-bundled-python.sh").read_text()
+
+        assert "vmlx-bundle-provenance.json" in bundle_script
+        assert 'JANG_SOURCE_COMMIT="$(git -C "$JANG_LOCAL" rev-parse HEAD)"' in bundle_script
+        assert 'from importlib.metadata import version; print(version("jang"))' in bundle_script
+        assert '"mlx_wheel_platform": os.environ["BUNDLE_MLX_WHEEL_PLATFORM"]' in bundle_script
+        assert "bundled-Python provenance manifest is missing" in verify_script
+        assert "bundled JANG distribution version drift" in verify_script
+        assert "bundled JANG provenance mismatch" in verify_script
+        assert 'JANG_MIN_VERSION="2.5.33"' in verify_script
 
     def test_release_scripts_accept_documented_jang_tools_env_names_with_legacy_fallback(self):
         bundle_script = Path("./panel/scripts/bundle-python.sh").read_text()

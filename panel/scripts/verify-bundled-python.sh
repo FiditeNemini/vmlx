@@ -167,7 +167,10 @@ done
 echo "  ok   bundled critical vmlx_engine files match source content"
 
 BUNDLED_JANG_TOOLS_DIR="$(run_bundled_python -c 'import pathlib, jang_tools; print(pathlib.Path(jang_tools.__file__).resolve().parent)' 2>/dev/null || true)"
-JANG_TOOLS_SOURCE_DIR="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}/jang_tools"
+JANG_TOOLS_SOURCE_ROOT="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}"
+JANG_TOOLS_SOURCE_DIR="$JANG_TOOLS_SOURCE_ROOT/jang_tools"
+JANG_MIN_VERSION="2.5.33"
+PROVENANCE_FILE="$PANEL/bundled-python/vmlx-bundle-provenance.json"
 HASH_GATED_JANG_TOOLS_FILES=(
   "capabilities.py"
   "convert.py"
@@ -200,6 +203,62 @@ if [ -z "$BUNDLED_JANG_TOOLS_DIR" ] || [ ! -d "$BUNDLED_JANG_TOOLS_DIR" ]; then
   echo "   resolved path: ${BUNDLED_JANG_TOOLS_DIR:-<empty>}"
   exit 1
 fi
+if [ ! -f "$PROVENANCE_FILE" ]; then
+  echo "❌ RELEASE BLOCKED — bundled-Python provenance manifest is missing"
+  echo "   expected: $PROVENANCE_FILE"
+  exit 1
+fi
+SOURCE_JANG_VERSION="$(
+  sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$JANG_TOOLS_SOURCE_ROOT/pyproject.toml" 2>/dev/null | head -1
+)"
+BUNDLED_JANG_VERSION="$(
+  run_bundled_python -c 'from importlib.metadata import version; print(version("jang"))'
+)"
+if [ -z "$SOURCE_JANG_VERSION" ] || [ "$SOURCE_JANG_VERSION" != "$BUNDLED_JANG_VERSION" ]; then
+  echo "❌ RELEASE BLOCKED — bundled JANG distribution version drift"
+  echo "   source version : ${SOURCE_JANG_VERSION:-<missing>}"
+  echo "   bundled version: $BUNDLED_JANG_VERSION"
+  exit 1
+fi
+run_bundled_python - "$BUNDLED_JANG_VERSION" "$JANG_MIN_VERSION" <<'PYEOF'
+import sys
+from packaging.version import Version
+
+installed, minimum = map(Version, sys.argv[1:3])
+if installed < minimum:
+    raise SystemExit(
+        f"RELEASE BLOCKED — bundled JANG {installed} is below required {minimum}"
+    )
+PYEOF
+EXPECTED_JANG_COMMIT="$(git -C "$JANG_TOOLS_SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+PROVENANCE_JANG_COMMIT="$(
+  run_bundled_python - "$PROVENANCE_FILE" <<'PYEOF'
+import json
+import sys
+
+print(json.load(open(sys.argv[1], encoding="utf-8"))["jang"]["commit"])
+PYEOF
+)"
+PROVENANCE_JANG_VERSION="$(
+  run_bundled_python - "$PROVENANCE_FILE" <<'PYEOF'
+import json
+import sys
+
+print(json.load(open(sys.argv[1], encoding="utf-8"))["jang"]["version"])
+PYEOF
+)"
+if [ -z "$EXPECTED_JANG_COMMIT" ] \
+  || [ "$PROVENANCE_JANG_COMMIT" != "$EXPECTED_JANG_COMMIT" ] \
+  || [ "$PROVENANCE_JANG_VERSION" != "$BUNDLED_JANG_VERSION" ]; then
+  echo "❌ RELEASE BLOCKED — bundled JANG provenance mismatch"
+  echo "   source commit     : ${EXPECTED_JANG_COMMIT:-<missing>}"
+  echo "   provenance commit : $PROVENANCE_JANG_COMMIT"
+  echo "   bundled version   : $BUNDLED_JANG_VERSION"
+  echo "   provenance version: $PROVENANCE_JANG_VERSION"
+  exit 1
+fi
+echo "  ok   bundled JANG provenance matches source ($BUNDLED_JANG_VERSION @ $EXPECTED_JANG_COMMIT)"
 if [ ! -d "$JANG_TOOLS_SOURCE_DIR" ]; then
   if [ "${VMLX_ALLOW_MISSING_JANG_SOURCE_HASH:-${VMLINUX_ALLOW_MISSING_JANG_SOURCE_HASH:-0}}" = "1" ]; then
     echo "⚠️  skipping jang_tools content hash parity; local source not present: $JANG_TOOLS_SOURCE_DIR"

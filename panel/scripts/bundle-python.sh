@@ -13,6 +13,9 @@ PANEL_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_DIR="$(dirname "$PANEL_DIR")"
 BUNDLE_DIR="$PANEL_DIR/bundled-python"
 JANG_LOCAL="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}"
+JANG_MIN_VERSION="2.5.33"
+JANG_SOURCE_COMMIT=""
+JANG_SOURCE_VERSION=""
 
 echo "==> Bundling Python $PYTHON_VERSION for standalone vMLX distribution"
 
@@ -21,22 +24,100 @@ check_local_jang_source_clean() {
     return 0
   fi
   if ! git -C "$JANG_LOCAL" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    return 0
-  fi
-  if [ "${VMLX_ALLOW_DIRTY_JANG_SOURCE:-${VMLINUX_ALLOW_DIRTY_JANG_SOURCE:-0}}" = "1" ]; then
-    echo "    WARNING: VMLX_ALLOW_DIRTY_JANG_SOURCE=1 — bundling tracked-dirty jang-tools" >&2
-    return 0
-  fi
-  if ! git -C "$JANG_LOCAL" diff --quiet --ignore-submodules -- \
-    || ! git -C "$JANG_LOCAL" diff --cached --quiet --ignore-submodules --; then
-    echo "ERROR: RELEASE BLOCKED — local jang-tools source has tracked changes: $JANG_LOCAL" >&2
-    echo "       Release bundles must not silently package uncommitted JANG runtime changes." >&2
-    echo "       Commit/stash/drop those changes, point VMLX_JANG_TOOLS_SOURCE at a clean" >&2
-    echo "       checkout, or set VMLX_ALLOW_DIRTY_JANG_SOURCE=1 only for local smoke builds." >&2
-    echo "       Tracked dirty files:" >&2
-    git -C "$JANG_LOCAL" status --short --untracked-files=no >&2 || true
+    if [ "${VMLX_ALLOW_UNVERSIONED_JANG_SOURCE:-${VMLINUX_ALLOW_UNVERSIONED_JANG_SOURCE:-0}}" = "1" ]; then
+      echo "    WARNING: VMLX_ALLOW_UNVERSIONED_JANG_SOURCE=1 — JANG provenance is unavailable" >&2
+      return 0
+    fi
+    echo "ERROR: RELEASE BLOCKED — local jang-tools source is not a Git checkout: $JANG_LOCAL" >&2
+    echo "       Release bundles require an exact source commit. Set" >&2
+    echo "       VMLX_ALLOW_UNVERSIONED_JANG_SOURCE=1 only for local smoke builds." >&2
     exit 1
   fi
+  if [ "${VMLX_ALLOW_DIRTY_JANG_SOURCE:-${VMLINUX_ALLOW_DIRTY_JANG_SOURCE:-0}}" = "1" ]; then
+    echo "    WARNING: VMLX_ALLOW_DIRTY_JANG_SOURCE=1 — bundling dirty jang-tools" >&2
+  else
+    local package_status
+    package_status="$(
+      git -C "$JANG_LOCAL" status --porcelain --untracked-files=all -- \
+        pyproject.toml jang_tools
+    )"
+    if [ -n "$package_status" ]; then
+      echo "ERROR: RELEASE BLOCKED — local jang-tools package source is dirty: $JANG_LOCAL" >&2
+      echo "       Release bundles must not silently package tracked or untracked JANG runtime changes." >&2
+      echo "       Package-scope status:" >&2
+      printf '%s\n' "$package_status" >&2
+      echo >&2
+      echo "       Commit/stash/drop those changes, point VMLX_JANG_TOOLS_SOURCE at a clean" >&2
+      echo "       checkout, or set VMLX_ALLOW_DIRTY_JANG_SOURCE=1 only for local smoke builds." >&2
+      exit 1
+    fi
+  fi
+
+  JANG_SOURCE_COMMIT="$(git -C "$JANG_LOCAL" rev-parse HEAD)"
+  JANG_SOURCE_VERSION="$(
+    sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "$JANG_LOCAL/pyproject.toml" | head -1
+  )"
+  if [ -z "$JANG_SOURCE_VERSION" ]; then
+    echo "ERROR: RELEASE BLOCKED — cannot read JANG version from $JANG_LOCAL/pyproject.toml" >&2
+    exit 1
+  fi
+  echo "    JANG source commit: $JANG_SOURCE_COMMIT"
+  echo "    JANG source version: $JANG_SOURCE_VERSION"
+}
+
+write_bundle_provenance() {
+  local installed_jang_version
+  local vmlx_source_commit
+  installed_jang_version="$(
+    "$PYTHON" -c 'from importlib.metadata import version; print(version("jang"))'
+  )"
+  if [ -n "$JANG_SOURCE_VERSION" ] && [ "$installed_jang_version" != "$JANG_SOURCE_VERSION" ]; then
+    echo "ERROR: RELEASE BLOCKED — installed JANG version does not match source" >&2
+    echo "       source version   : $JANG_SOURCE_VERSION" >&2
+    echo "       installed version: $installed_jang_version" >&2
+    exit 1
+  fi
+  "$PYTHON" - "$installed_jang_version" "$JANG_MIN_VERSION" <<'PY'
+import sys
+from packaging.version import Version
+
+installed, minimum = map(Version, sys.argv[1:3])
+if installed < minimum:
+    raise SystemExit(
+        f"RELEASE BLOCKED — bundled JANG {installed} is below required {minimum}"
+    )
+PY
+  vmlx_source_commit="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo UNKNOWN)"
+  BUNDLE_PROVENANCE_PATH="$BUNDLE_DIR/vmlx-bundle-provenance.json" \
+  BUNDLE_VMLX_COMMIT="$vmlx_source_commit" \
+  BUNDLE_VMLX_VERSION="$("$PYTHON" -c 'import vmlx_engine; print(vmlx_engine.__version__)')" \
+  BUNDLE_JANG_COMMIT="${JANG_SOURCE_COMMIT:-UNVERSIONED}" \
+  BUNDLE_JANG_VERSION="$installed_jang_version" \
+  BUNDLE_MLX_WHEEL_PLATFORM="$MLX_WHEEL_PLATFORM" \
+  "$PYTHON" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+payload = {
+    "schema_version": 1,
+    "vmlx": {
+        "commit": os.environ["BUNDLE_VMLX_COMMIT"],
+        "version": os.environ["BUNDLE_VMLX_VERSION"],
+    },
+    "jang": {
+        "commit": os.environ["BUNDLE_JANG_COMMIT"],
+        "version": os.environ["BUNDLE_JANG_VERSION"],
+    },
+    "mlx_wheel_platform": os.environ["BUNDLE_MLX_WHEEL_PLATFORM"],
+}
+Path(os.environ["BUNDLE_PROVENANCE_PATH"]).write_text(
+    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+  echo "    wrote bundle provenance: $BUNDLE_DIR/vmlx-bundle-provenance.json"
 }
 
 check_local_jang_source_clean
@@ -221,6 +302,7 @@ else
     exit 1
   fi
 fi
+write_bundle_provenance
 
 # Local source installs generate the vmlx/jang console entrypoints after the
 # dependency install pass. Relocate their shebangs immediately so a later

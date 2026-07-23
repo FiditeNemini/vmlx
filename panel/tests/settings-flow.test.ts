@@ -3386,6 +3386,7 @@ describe('JIT Toggle', () => {
         expect(form).toContain('const genericPagedCacheToggleDisabled = !dsv4Active && (cachePolicy.pagedCacheDisabled || openPanguExactTypedCache)')
         expect(form).toContain('MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets')
         expect(form).toContain('MiniMax-M3 SSD-only mode preserves native MSA keys, values, idx_keys, and absolute offsets')
+        expect(form).toContain('architectureBlockDiskOnlySupported && !m3Active && cachePolicy.blockDiskCacheChecked')
         expect(form).toContain('Block Disk Cache provides its persistent L2')
         expect(form).not.toContain('LOCKED OFF')
         expect(form).toContain('disabled={genericPagedCacheToggleDisabled}')

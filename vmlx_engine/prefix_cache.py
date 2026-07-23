@@ -4837,9 +4837,11 @@ class BlockAwarePrefixCache:
             return reconstructed_caches
 
         except Exception as e:
-            logger.warning(f"Failed to reconstruct cache: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
+            logger.warning(
+                "Failed to reconstruct cache: %s",
+                e,
+                exc_info=True,
+            )
             return None
         finally:
             _disk_only = bool(getattr(self.paged_cache, "disk_only", False))

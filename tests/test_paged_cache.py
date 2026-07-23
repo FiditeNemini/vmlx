@@ -873,6 +873,45 @@ class TestBlockAwarePrefixCache:
         finally:
             restarted_store.shutdown()
 
+    def test_block_l2_reads_run_on_model_owner_executor(self, tmp_path):
+        """API-thread L2 lookup must create MLX arrays on the model worker."""
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+
+        from vmlx_engine.block_disk_store import BlockDiskStore
+
+        store = BlockDiskStore(
+            cache_dir=str(tmp_path / "owner-thread-blocks"),
+            max_size_gb=0.01,
+            expected_num_layers=1,
+        )
+        observed_threads = []
+
+        def fake_read(_block_hash):
+            observed_threads.append(threading.current_thread().name)
+            return [("skip",)]
+
+        store._read_block_impl = fake_read
+        try:
+            with ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="model-owner",
+            ) as executor:
+                store.set_load_executor(executor)
+
+                assert store.read_block(b"a" * 32) == [("skip",)]
+                assert executor.submit(
+                    store.read_block,
+                    b"b" * 32,
+                ).result() == [("skip",)]
+
+            assert observed_threads == [
+                "model-owner_0",
+                "model-owner_0",
+            ]
+        finally:
+            store.shutdown()
+
     def test_disk_only_rotating_terminal_restores_across_restart(self, tmp_path):
         """SSD-only L2 preserves pending chain nodes plus the exact SWA window."""
         mx = pytest.importorskip("mlx.core")

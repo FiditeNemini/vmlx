@@ -249,6 +249,12 @@ class BlockDiskStore:
         # connections created on one thread can't be used from another.
         # Using threading.local() gives each thread its own connection.
         self._thread_local = threading.local()
+        # MLX arrays loaded from safetensors retain the creating thread's
+        # stream identity. The scheduler reconstructs and consumes block
+        # payloads on its single model-owning worker, so L2 reads must happen
+        # on that same executor even when prefix lookup starts on an API thread.
+        self._load_executor: Any = None
+        self._load_worker_prefix = "llm-worker"
         # Initialize for the current (main) thread
         self._ensure_read_conn()
 
@@ -423,7 +429,38 @@ class BlockDiskStore:
     # Read
     # =========================================================================
 
+    def set_load_executor(
+        self,
+        executor: Any,
+        worker_name_prefix: Optional[str] = None,
+    ) -> None:
+        """Bind MLX-backed block reads to the model-owning worker thread."""
+        self._load_executor = executor
+        if worker_name_prefix is None:
+            worker_name_prefix = (
+                getattr(executor, "_thread_name_prefix", "") or "llm-worker"
+            )
+        self._load_worker_prefix = worker_name_prefix
+
     def read_block(self, block_hash: bytes) -> Optional[List[Tuple]]:
+        """Read and deserialize a block on the model-owning MLX worker."""
+        executor = getattr(self, "_load_executor", None)
+        prefix = getattr(self, "_load_worker_prefix", "llm-worker")
+        if executor is None or threading.current_thread().name.startswith(prefix):
+            return self._read_block_impl(block_hash)
+        try:
+            return executor.submit(self._read_block_impl, block_hash).result()
+        except Exception as exc:
+            logger.warning(
+                "Block L2 worker-owned load failed; treating as miss: %s",
+                exc,
+                exc_info=True,
+            )
+            with self._stats_lock:
+                self.disk_misses += 1
+            return None
+
+    def _read_block_impl(self, block_hash: bytes) -> Optional[List[Tuple]]:
         """
         Read a block from disk by its chain hash.
 

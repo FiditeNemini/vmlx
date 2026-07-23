@@ -1070,6 +1070,10 @@ class Scheduler:
                             max_size_gb=self.config.block_disk_cache_max_gb,
                             expected_num_layers=_expected_n_layers,
                         )
+                        if self.config.step_executor is not None:
+                            block_disk_store.set_load_executor(
+                                self.config.step_executor
+                            )
                         logger.info(
                             f"Block disk cache enabled: dir={cache_dir}, "
                             f"max={self.config.block_disk_cache_max_gb}GB, "

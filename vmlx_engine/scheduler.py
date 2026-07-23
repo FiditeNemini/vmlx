@@ -65,6 +65,18 @@ from .utils.memory_limits import (
 logger = logging.getLogger(__name__)
 
 
+def _call_with_optional_cache_extra(
+    method: Callable[..., Any],
+    *args: Any,
+    cache_extra_keys: Any = None,
+    **kwargs: Any,
+) -> Any:
+    """Preserve legacy cache call shapes unless a discriminator is present."""
+    if cache_extra_keys is not None:
+        kwargs["cache_extra_keys"] = cache_extra_keys
+    return method(*args, **kwargs)
+
+
 def _typed_paged_cache_detail(cache_type: str, *, disk_hit: bool) -> str:
     """Describe a typed paged hit without losing its L2 promotion source."""
     base = f"paged+{cache_type}"
@@ -2747,10 +2759,23 @@ class Scheduler:
 
         def _do_store(tokens_seg: List[int], cache_seg: List[Any], role: str) -> None:
             """Single-layer store dispatcher honouring cache_type."""
+            cache_extra_keys = getattr(request, "_cache_extra_keys", None)
             if active_layer == "prefix":
-                self.prefix_cache.store_cache(tokens_seg, cache_seg, cache_type=role)
+                _call_with_optional_cache_extra(
+                    self.prefix_cache.store_cache,
+                    tokens_seg,
+                    cache_seg,
+                    cache_type=role,
+                    cache_extra_keys=cache_extra_keys,
+                )
             elif active_layer == "memory":
-                self.memory_aware_cache.store(tokens_seg, cache_seg, cache_type=role)
+                _call_with_optional_cache_extra(
+                    self.memory_aware_cache.store,
+                    tokens_seg,
+                    cache_seg,
+                    cache_type=role,
+                    cache_extra_keys=cache_extra_keys,
+                )
             elif active_layer == "block":
                 # Block cache stores per-request; segment-prefix storage isn't
                 # block-friendly, so we only tag the full-prompt store.
@@ -5339,10 +5364,13 @@ class Scheduler:
         elif (
             self.memory_aware_cache is not None
             and not _bypass
-            and not _cache_extra_keys
         ):
             # Use memory-aware prefix cache (gpl-stripped fetch; suffix re-attached)
-            cache, remaining = self.memory_aware_cache.fetch(_fetch_tokens)
+            cache, remaining = _call_with_optional_cache_extra(
+                self.memory_aware_cache.fetch,
+                _fetch_tokens,
+                cache_extra_keys=_cache_extra_keys,
+            )
             remaining, cached_tokens = self._prefix_hit_tail_and_cached_tokens(
                 fetch_tokens=_fetch_tokens,
                 remaining=remaining or [],
@@ -5380,9 +5408,13 @@ class Scheduler:
                     f"Request {request.request_id}: cache miss, "
                     f"processing all {len(request.prompt_token_ids)} tokens"
                 )
-        elif self.prefix_cache is not None and not _bypass and not _cache_extra_keys:
+        elif self.prefix_cache is not None and not _bypass:
             # Use legacy prefix cache (gpl-stripped fetch; suffix re-attached)
-            cache, remaining = self.prefix_cache.fetch_cache(_fetch_tokens)
+            cache, remaining = _call_with_optional_cache_extra(
+                self.prefix_cache.fetch_cache,
+                _fetch_tokens,
+                cache_extra_keys=_cache_extra_keys,
+            )
             remaining, cached_tokens = self._prefix_hit_tail_and_cached_tokens(
                 fetch_tokens=_fetch_tokens,
                 remaining=remaining or [],
@@ -5426,7 +5458,6 @@ class Scheduler:
             request.prompt_cache is None
             and self.disk_cache is not None
             and not _bypass
-            and not _cache_extra_keys
             and not getattr(request, "_paged_block_table_needs_worker_reconstruct", False)
         ):
             _disk_fetch_tokens = list(request.prompt_token_ids)
@@ -5443,12 +5474,20 @@ class Scheduler:
                 _disk_suffix_tokens = []
             _disk_matched_tokens = list(_disk_fetch_tokens)
             if hasattr(self.disk_cache, "fetch_longest_prefix"):
-                disk_cache, _disk_matched_tokens = self.disk_cache.fetch_longest_prefix(
-                    _disk_fetch_tokens
+                disk_cache, _disk_matched_tokens = _call_with_optional_cache_extra(
+                    self.disk_cache.fetch_longest_prefix,
+                    _disk_fetch_tokens,
+                    cache_extra_keys=_cache_extra_keys,
                 )
                 _disk_matched_tokens = list(_disk_matched_tokens or [])
             else:
-                disk_cache = self.disk_cache.fetch(_disk_fetch_tokens)
+                if _cache_extra_keys is None:
+                    disk_cache = self.disk_cache.fetch(_disk_fetch_tokens)
+                else:
+                    disk_cache = self.disk_cache.fetch(
+                        _disk_fetch_tokens,
+                        cache_extra_keys=_cache_extra_keys,
+                    )
             if disk_cache is not None:
                 # Disk cache stores full-precision N-1 tokens (last prompt token re-fed on hit)
                 # Dequantize if KV cache quantization is active (disk stores full precision
@@ -5587,10 +5626,12 @@ class Scheduler:
                                 if len(_disk_matched_tokens) > 1
                                 else list(_disk_matched_tokens)
                             )
-                            self.memory_aware_cache.store(
+                            _call_with_optional_cache_extra(
+                                self.memory_aware_cache.store,
                                 _l1_store_tokens,
                                 l1_data,
                                 cache_type=_l1_type,
+                                cache_extra_keys=_cache_extra_keys,
                             )
                         except Exception:
                             pass
@@ -5601,10 +5642,12 @@ class Scheduler:
                                 if len(_disk_matched_tokens) > 1
                                 else list(_disk_matched_tokens)
                             )
-                            self.prefix_cache.store_cache(
+                            _call_with_optional_cache_extra(
+                                self.prefix_cache.store_cache,
                                 _l1_store_tokens,
                                 l1_data,
                                 cache_type=_l1_type,
+                                cache_extra_keys=_cache_extra_keys,
                             )
                         except Exception:
                             pass
@@ -7371,9 +7414,6 @@ class Scheduler:
                                         if (
                                             self.disk_cache is not None
                                             and not self._is_hybrid
-                                            and not getattr(
-                                                request, "_cache_extra_keys", None
-                                            )
                                         ):
                                             try:
                                                 from .mllm_batch_generator import (
@@ -7398,11 +7438,17 @@ class Scheduler:
                                                     _disk_store_tokens = (
                                                         _disk_store_tokens[:-_gpl_s]
                                                     )
-                                                self.disk_cache.store(
+                                                _call_with_optional_cache_extra(
+                                                    self.disk_cache.store,
                                                     _disk_store_tokens,
                                                     tq_for_disk,
                                                     cache_type=self._pick_cache_type_for_request(
                                                         request
+                                                    ),
+                                                    cache_extra_keys=getattr(
+                                                        request,
+                                                        "_cache_extra_keys",
+                                                        None,
                                                     ),
                                                 )
                                             except Exception as de:
@@ -7708,7 +7754,6 @@ class Scheduler:
             if (
                 self.disk_cache is not None
                 and not self._is_hybrid
-                and not getattr(request, "_cache_extra_keys", None)
             ):
                 try:
                     from .mllm_batch_generator import _recompress_to_tq
@@ -7718,10 +7763,16 @@ class Scheduler:
                     gen_prompt_len = getattr(request, "_gen_prompt_len", 0) or 0
                     if 0 < gen_prompt_len < len(disk_store_tokens):
                         disk_store_tokens = disk_store_tokens[:-gen_prompt_len]
-                    self.disk_cache.store(
+                    _call_with_optional_cache_extra(
+                        self.disk_cache.store,
                         disk_store_tokens,
                         tq_for_disk,
                         cache_type=self._pick_cache_type_for_request(request),
+                        cache_extra_keys=getattr(
+                            request,
+                            "_cache_extra_keys",
+                            None,
+                        ),
                     )
                 except Exception as exc:
                     logger.debug(
@@ -8358,7 +8409,6 @@ class Scheduler:
 
                 elif (
                     self.memory_aware_cache is not None
-                    and not getattr(request, "_cache_extra_keys", None)
                 ):
                     # Store in memory-aware prefix cache
                     # Key is prompt tokens only. Cache is truncated to prompt_len-1
@@ -8426,10 +8476,16 @@ class Scheduler:
                                     and len(cache_key_tokens) == max(prompt_len - 1, 0)
                                 ):
                                     try:
-                                        self.disk_cache.store(
+                                        _call_with_optional_cache_extra(
+                                            self.disk_cache.store,
                                             prompt_tokens,
                                             cache_to_store,
                                             cache_type=cache_type,
+                                            cache_extra_keys=getattr(
+                                                request,
+                                                "_cache_extra_keys",
+                                                None,
+                                            ),
                                         )
                                     except Exception as de:
                                         logger.debug(
@@ -8441,10 +8497,16 @@ class Scheduler:
                                     cache_to_store = self._quantize_cache_for_storage(
                                         cache_to_store
                                     )
-                                stored = self.memory_aware_cache.store(
+                                stored = _call_with_optional_cache_extra(
+                                    self.memory_aware_cache.store,
                                     cache_key_tokens,
                                     cache_to_store,
                                     cache_type=cache_type,
+                                    cache_extra_keys=getattr(
+                                        request,
+                                        "_cache_extra_keys",
+                                        None,
+                                    ),
                                 )
                                 if stored:
                                     if getattr(self, "_uses_openpangu_cache", False):
@@ -8480,7 +8542,6 @@ class Scheduler:
 
                 elif (
                     self.prefix_cache is not None
-                    and not getattr(request, "_cache_extra_keys", None)
                 ):
                     # Store in legacy prefix cache (same truncation as memory-aware)
                     if (

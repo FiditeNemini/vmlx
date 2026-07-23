@@ -43,11 +43,28 @@ except ImportError:
     _HAS_MLX = False
 
 
-def _hash_tokens(tokens: List[int]) -> str:
-    """Create a stable hash of a token sequence for cache indexing."""
+def _hash_tokens_with_marker(
+    tokens: List[int],
+    cache_extra_marker: Optional[str],
+) -> str:
     # Use SHA-256 of the token list serialized as compact JSON
     data = json.dumps(tokens, separators=(",", ":")).encode()
+    if cache_extra_marker is not None:
+        data += b"\0vmlx-cache-extra-v1\0" + cache_extra_marker.encode(
+            "utf-8",
+            "surrogatepass",
+        )
     return hashlib.sha256(data).hexdigest()
+
+
+def _hash_tokens(tokens: List[int], cache_extra_keys: Any = None) -> str:
+    """Create a stable hash of tokens plus non-token cache discriminators."""
+    from .cache_key import canonical_cache_extra_marker
+
+    return _hash_tokens_with_marker(
+        tokens,
+        canonical_cache_extra_marker(cache_extra_keys),
+    )
 
 
 def _runtime_cache_fingerprint() -> str:
@@ -261,6 +278,12 @@ class DiskCacheManager:
             )
         except sqlite3.OperationalError:
             pass  # Column already exists
+        try:
+            conn.execute(
+                "ALTER TABLE cache_entries ADD COLUMN cache_extra_marker TEXT"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_last_accessed
             ON cache_entries(last_accessed)
@@ -342,15 +365,25 @@ class DiskCacheManager:
             )
         self._load_worker_prefix = worker_name_prefix
 
-    def fetch(self, tokens: List[int]) -> Optional[List[Any]]:
-        """Load a disk cache on the thread that owns the model's MLX stream."""
-        return self._fetch_on_owner(tokens)
+    def fetch(
+        self,
+        tokens: List[int],
+        cache_extra_keys: Any = None,
+    ) -> Optional[List[Any]]:
+        """Load a disk cache with the same discriminator used at store time."""
+        if cache_extra_keys is None:
+            return self._fetch_on_owner(tokens)
+        return self._fetch_on_owner(
+            tokens,
+            cache_extra_keys=cache_extra_keys,
+        )
 
     def _fetch_on_owner(
         self,
         tokens: List[int],
         *,
         token_hash_override: Optional[str] = None,
+        cache_extra_keys: Any = None,
     ) -> Optional[List[Any]]:
         """Load one indexed record, optionally by its stored full-key hash.
 
@@ -363,11 +396,20 @@ class DiskCacheManager:
         prefix = getattr(self, "_load_worker_prefix", "llm-worker")
         if executor is None or threading.current_thread().name.startswith(prefix):
             if token_hash_override is None:
-                return self._fetch_impl(tokens)
+                if cache_extra_keys is None:
+                    return self._fetch_impl(tokens)
+                return self._fetch_impl(tokens, cache_extra_keys=cache_extra_keys)
             return self._fetch_impl(tokens, token_hash_override)
         try:
             if token_hash_override is None:
-                return executor.submit(self._fetch_impl, tokens).result()
+                if cache_extra_keys is None:
+                    return executor.submit(self._fetch_impl, tokens).result()
+                return executor.submit(
+                    self._fetch_impl,
+                    tokens,
+                    None,
+                    cache_extra_keys,
+                ).result()
             return executor.submit(
                 self._fetch_impl,
                 tokens,
@@ -397,6 +439,7 @@ class DiskCacheManager:
         self,
         tokens: List[int],
         token_hash_override: Optional[str] = None,
+        cache_extra_keys: Any = None,
     ) -> Optional[List[Any]]:
         """
         Look up a cached KV state for the given token sequence.
@@ -404,7 +447,7 @@ class DiskCacheManager:
         Returns the cache object list if found, None on miss.
         The returned cache is ready to be used as prompt_cache in BatchGenerator.
         """
-        token_hash = token_hash_override or _hash_tokens(tokens)
+        token_hash = token_hash_override or _hash_tokens(tokens, cache_extra_keys)
 
         conn = self._pool.get()
         try:
@@ -698,6 +741,7 @@ class DiskCacheManager:
         tokens: List[int],
         *,
         min_tokens: int = 2,
+        cache_extra_keys: Any = None,
     ) -> Tuple[Optional[List[Any]], List[int]]:
         """Fetch the longest stored prompt prefix for ``tokens``.
 
@@ -724,13 +768,27 @@ class DiskCacheManager:
         min_tokens = max(1, int(min_tokens or 1))
         conn = self._pool.get()
         try:
-            rows = conn.execute(
-                "SELECT token_hash, num_tokens, payload_prefix_hash "
-                "FROM cache_entries "
-                "WHERE num_tokens <= ? AND num_tokens >= ? "
-                "ORDER BY num_tokens DESC",
-                (len(full_tokens), min_tokens),
-            ).fetchall()
+            from .cache_key import canonical_cache_extra_marker
+
+            extra_marker = canonical_cache_extra_marker(cache_extra_keys)
+            if extra_marker is None:
+                rows = conn.execute(
+                    "SELECT token_hash, num_tokens, payload_prefix_hash "
+                    "FROM cache_entries "
+                    "WHERE num_tokens <= ? AND num_tokens >= ? "
+                    "AND cache_extra_marker IS NULL "
+                    "ORDER BY num_tokens DESC",
+                    (len(full_tokens), min_tokens),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT token_hash, num_tokens, payload_prefix_hash "
+                    "FROM cache_entries "
+                    "WHERE num_tokens <= ? AND num_tokens >= ? "
+                    "AND cache_extra_marker = ? "
+                    "ORDER BY num_tokens DESC",
+                    (len(full_tokens), min_tokens, extra_marker),
+                ).fetchall()
         finally:
             self._pool.put(conn)
 
@@ -750,7 +808,10 @@ class DiskCacheManager:
                 continue
             prefix_hash = prefix_hash_by_len.get(n)
             if prefix_hash is None:
-                prefix_hash = _hash_tokens(full_tokens[:n])
+                prefix_hash = _hash_tokens(
+                    full_tokens[:n],
+                    cache_extra_keys,
+                )
                 prefix_hash_by_len[n] = prefix_hash
             if stored_hash != prefix_hash:
                 # The persisted cache owns N-1 tokens even though its exact
@@ -763,7 +824,10 @@ class DiskCacheManager:
                     continue
                 payload_hash = prefix_hash_by_len.get(covered)
                 if payload_hash is None:
-                    payload_hash = _hash_tokens(full_tokens[:covered])
+                    payload_hash = _hash_tokens(
+                        full_tokens[:covered],
+                        cache_extra_keys,
+                    )
                     prefix_hash_by_len[covered] = payload_hash
                 if stored_payload_hash != payload_hash:
                     continue
@@ -785,7 +849,13 @@ class DiskCacheManager:
 
             attempted_load = True
             matched_tokens = full_tokens[:n]
-            cache = self.fetch(matched_tokens)
+            if cache_extra_keys is None:
+                cache = self.fetch(matched_tokens)
+            else:
+                cache = self.fetch(
+                    matched_tokens,
+                    cache_extra_keys=cache_extra_keys,
+                )
             if cache is not None:
                 if n < len(full_tokens):
                     logger.info(
@@ -806,6 +876,7 @@ class DiskCacheManager:
         cache: List[Any],
         metadata: Optional[Dict[str, str]] = None,
         cache_type: str = "assistant",
+        cache_extra_keys: Any = None,
     ) -> bool:
         """
         Enqueue a KV cache for background storage to disk.
@@ -833,8 +904,15 @@ class DiskCacheManager:
         Returns:
             True if enqueued or already cached, False otherwise.
         """
-        token_hash = _hash_tokens(tokens)
-        payload_prefix_hash = _hash_tokens(tokens[:-1]) if len(tokens) > 1 else None
+        from .cache_key import canonical_cache_extra_marker
+
+        extra_marker = canonical_cache_extra_marker(cache_extra_keys)
+        token_hash = _hash_tokens(tokens, cache_extra_keys)
+        payload_prefix_hash = (
+            _hash_tokens(tokens[:-1], cache_extra_keys)
+            if len(tokens) > 1
+            else None
+        )
 
         # Quick check if already cached (read-only, no write lock needed)
         conn = self._pool.get()
@@ -886,7 +964,14 @@ class DiskCacheManager:
             cache_type = "assistant"
 
         if use_tq_native:
-            return self._store_tq_native(token_hash, tokens, cache, metadata, cache_type)
+            return self._store_tq_native(
+                token_hash,
+                tokens,
+                cache,
+                metadata,
+                cache_type,
+                cache_extra_marker=extra_marker,
+            )
 
         # ─── Standard serialization (non-TQ or TQ without compressed data) ───
         # Verify cache objects have the required .state/.meta_state protocol
@@ -956,7 +1041,14 @@ class DiskCacheManager:
         # Enqueue for background write (pre-evaluated arrays — no lazy Metal ops)
         try:
             self._write_queue.put_nowait(
-                (token_hash, tokens, cache_data_flat, cache_metadata_flat, cache_type)
+                (
+                    token_hash,
+                    tokens,
+                    cache_data_flat,
+                    cache_metadata_flat,
+                    cache_type,
+                    extra_marker,
+                )
             )
             return True
         except queue.Full:
@@ -970,6 +1062,7 @@ class DiskCacheManager:
         cache: List[Any],
         metadata: Optional[Dict[str, str]],
         cache_type: str = "assistant",
+        cache_extra_marker: Optional[str] = None,
     ) -> bool:
         """Store cache using TQ-native serialization (26x smaller files).
 
@@ -1024,7 +1117,15 @@ class DiskCacheManager:
         # Queue item format: ("__tq_native__", token_hash, tokens, tmp_path, file_name, cache_type)
         try:
             self._write_queue.put_nowait(
-                ("__tq_native__", token_hash, tokens, str(tmp_path), file_name, cache_type)
+                (
+                    "__tq_native__",
+                    token_hash,
+                    tokens,
+                    str(tmp_path),
+                    file_name,
+                    cache_type,
+                    cache_extra_marker,
+                )
             )
             return True
         except queue.Full:
@@ -1060,25 +1161,76 @@ class DiskCacheManager:
                     # TQ-native: file already written, just rename + DB update.
                     # 6-tuple includes cache_type (F3); fall back to 5-tuple
                     # for any in-flight items enqueued before this upgrade.
-                    if len(item) >= 6:
+                    if len(item) >= 7:
+                        (
+                            _,
+                            token_hash,
+                            tokens,
+                            tmp_path_str,
+                            file_name,
+                            cache_type,
+                            cache_extra_marker,
+                        ) = item
+                    elif len(item) >= 6:
                         _, token_hash, tokens, tmp_path_str, file_name, cache_type = item
+                        cache_extra_marker = None
                     else:
                         _, token_hash, tokens, tmp_path_str, file_name = item
                         cache_type = "assistant"
-                    self._finalize_tq_native(
-                        token_hash, tokens, tmp_path_str, file_name, cache_type
-                    )
+                        cache_extra_marker = None
+                    if cache_extra_marker is None:
+                        self._finalize_tq_native(
+                            token_hash,
+                            tokens,
+                            tmp_path_str,
+                            file_name,
+                            cache_type,
+                        )
+                    else:
+                        self._finalize_tq_native(
+                            token_hash,
+                            tokens,
+                            tmp_path_str,
+                            file_name,
+                            cache_type,
+                            cache_extra_marker,
+                        )
                 else:
                     # Standard: write from pre-serialized numpy arrays.
                     # 5-tuple includes cache_type; fall back to 4-tuple legacy.
-                    if len(item) >= 5:
+                    if len(item) >= 6:
+                        (
+                            token_hash,
+                            tokens,
+                            cache_data_flat,
+                            cache_metadata_flat,
+                            cache_type,
+                            cache_extra_marker,
+                        ) = item
+                    elif len(item) >= 5:
                         token_hash, tokens, cache_data_flat, cache_metadata_flat, cache_type = item
+                        cache_extra_marker = None
                     else:
                         token_hash, tokens, cache_data_flat, cache_metadata_flat = item
                         cache_type = "assistant"
-                    self._write_cache(
-                        token_hash, tokens, cache_data_flat, cache_metadata_flat, cache_type
-                    )
+                        cache_extra_marker = None
+                    if cache_extra_marker is None:
+                        self._write_cache(
+                            token_hash,
+                            tokens,
+                            cache_data_flat,
+                            cache_metadata_flat,
+                            cache_type,
+                        )
+                    else:
+                        self._write_cache(
+                            token_hash,
+                            tokens,
+                            cache_data_flat,
+                            cache_metadata_flat,
+                            cache_type,
+                            cache_extra_marker,
+                        )
             except OSError as e:
                 if e.errno == errno.ENOSPC:
                     logger.warning(
@@ -1102,6 +1254,7 @@ class DiskCacheManager:
         cache_data_flat: Dict[str, Any],
         cache_metadata_flat: Dict[str, str],
         cache_type: str = "assistant",
+        cache_extra_marker: Optional[str] = None,
     ) -> None:
         """Write a pre-serialized cache to disk (called from background thread).
 
@@ -1153,11 +1306,13 @@ class DiskCacheManager:
                     "INSERT OR REPLACE INTO cache_entries "
                     "(token_hash, file_name, num_tokens, file_size, created_at, "
                     "last_accessed, access_count, metadata, cache_type, "
-                    "payload_prefix_hash) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                    "payload_prefix_hash, cache_extra_marker) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
                     (token_hash, file_name, len(tokens), file_size, now, now,
                      json.dumps(db_meta), cache_type,
-                     _hash_tokens(tokens[:-1]) if len(tokens) > 1 else None)
+                     _hash_tokens_with_marker(tokens[:-1], cache_extra_marker)
+                     if len(tokens) > 1 else None,
+                     cache_extra_marker)
                 )
                 conn.commit()
             finally:
@@ -1189,6 +1344,7 @@ class DiskCacheManager:
         tmp_path_str: str,
         file_name: str,
         cache_type: str = "assistant",
+        cache_extra_marker: Optional[str] = None,
     ) -> None:
         """Finalize a TQ-native cache write (called from background thread).
 
@@ -1247,8 +1403,8 @@ class DiskCacheManager:
                     "INSERT OR REPLACE INTO cache_entries "
                     "(token_hash, file_name, num_tokens, file_size, "
                     "created_at, last_accessed, access_count, metadata, cache_type, "
-                    "payload_prefix_hash) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                    "payload_prefix_hash, cache_extra_marker) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
                     (
                         token_hash,
                         file_name,
@@ -1258,7 +1414,13 @@ class DiskCacheManager:
                         now,
                         db_meta,
                         cache_type,
-                        _hash_tokens(tokens[:-1]) if len(tokens) > 1 else None,
+                        _hash_tokens_with_marker(
+                            tokens[:-1],
+                            cache_extra_marker,
+                        )
+                        if len(tokens) > 1
+                        else None,
+                        cache_extra_marker,
                     )
                 )
                 conn.commit()

@@ -421,8 +421,18 @@ class PrefixCacheManager:
         # Statistics
         self.stats = PrefixCacheStats()
 
+    def _scoped_model_key(self, cache_extra_keys: Optional[Any] = None) -> Any:
+        from .cache_key import canonical_cache_extra_marker
+
+        marker = canonical_cache_extra_marker(cache_extra_keys)
+        if marker is None:
+            return self.model_key
+        return (self.model_key, "__extra__", marker)
+
     def _search(
-        self, tokens: List[int]
+        self,
+        tokens: List[int],
+        scoped_model_key: Optional[Any] = None,
     ) -> Tuple[Optional[List[int]], Optional[List[int]], Optional[List[int]], int]:
         """
         Search for cached prefix matching tokens.
@@ -434,10 +444,11 @@ class PrefixCacheManager:
             - longer: Tokens of longer cached prefix
             - common_prefix_len: Length of common prefix with longer match
         """
-        if self.model_key not in self._cache:
+        model_key = self.model_key if scoped_model_key is None else scoped_model_key
+        if model_key not in self._cache:
             return None, None, None, 0
 
-        current = self._cache[self.model_key]
+        current = self._cache[model_key]
         path = []
 
         # Traverse trie following token sequence
@@ -471,7 +482,11 @@ class PrefixCacheManager:
 
         return None, None, None, 0
 
-    def fetch_cache(self, tokens: List[int]) -> Tuple[Optional[List[Any]], List[int]]:
+    def fetch_cache(
+        self,
+        tokens: List[int],
+        cache_extra_keys: Optional[Any] = None,
+    ) -> Tuple[Optional[List[Any]], List[int]]:
         """
         Find cached prefix for the given tokens.
 
@@ -485,27 +500,31 @@ class PrefixCacheManager:
         """
         self.stats.total_queries += 1
         tokens_tuple = tuple(tokens)
+        scoped_model_key = self._scoped_model_key(cache_extra_keys)
 
-        exact, shorter, longer, common_len = self._search(tokens)
+        exact, shorter, longer, common_len = self._search(
+            tokens,
+            scoped_model_key=scoped_model_key,
+        )
 
         if exact:
             # Exact match - return full cache
-            cache_entry = self._get_cache_entry(exact)
+            cache_entry = self._get_cache_entry(exact, scoped_model_key)
             if cache_entry:
                 self.stats.hits += 1
                 self.stats.tokens_saved += len(tokens)
-                self._touch_lru(tokens_tuple)
+                self._touch_lru(tokens_tuple, scoped_model_key)
                 # Return reference directly — MLX arrays are immutable,
                 # so sharing the cache is safe (no mutation possible).
                 return cache_entry.prompt_cache, []
 
         if shorter:
             # Shorter prefix cached - return cache and remaining tokens
-            cache_entry = self._get_cache_entry(shorter)
+            cache_entry = self._get_cache_entry(shorter, scoped_model_key)
             if cache_entry:
                 self.stats.hits += 1
                 self.stats.tokens_saved += len(shorter)
-                self._touch_lru(tuple(shorter))
+                self._touch_lru(tuple(shorter), scoped_model_key)
                 remaining = tokens[len(shorter) :]
                 # Return reference directly — MLX arrays are immutable,
                 # so sharing the cache is safe (no mutation possible).
@@ -513,7 +532,7 @@ class PrefixCacheManager:
 
         if longer:
             # Longer prefix cached - trim to match and return
-            cache_entry = self._get_cache_entry(longer)
+            cache_entry = self._get_cache_entry(longer, scoped_model_key)
             if cache_entry:
                 # Check if cache supports trimming
                 prompt_cache = cache_entry.prompt_cache
@@ -550,6 +569,7 @@ class PrefixCacheManager:
         tokens: List[int],
         prompt_cache: List[Any],
         cache_type: str = "assistant",
+        cache_extra_keys: Optional[Any] = None,
     ) -> None:
         """
         Store computed cache for future reuse.
@@ -568,12 +588,13 @@ class PrefixCacheManager:
             cache_type = "assistant"
 
         tokens_tuple = tuple(tokens)
+        scoped_model_key = self._scoped_model_key(cache_extra_keys)
 
         # Build trie path
-        if self.model_key not in self._cache:
-            self._cache[self.model_key] = {}
+        if scoped_model_key not in self._cache:
+            self._cache[scoped_model_key] = {}
 
-        current = self._cache[self.model_key]
+        current = self._cache[scoped_model_key]
         for tok in tokens:
             if tok not in current:
                 current[tok] = {}
@@ -588,7 +609,7 @@ class PrefixCacheManager:
         except Exception:
             entry_nbytes = 0
 
-        key = (self.model_key, tokens_tuple)
+        key = (scoped_model_key, tokens_tuple)
 
         # Replace existing entry: drop old byte counters before re-tracking
         if "cache" in current:
@@ -659,12 +680,17 @@ class PrefixCacheManager:
             if key in d:
                 del d[key]
 
-    def _get_cache_entry(self, tokens: List[int]) -> Optional[CacheEntry]:
+    def _get_cache_entry(
+        self,
+        tokens: List[int],
+        scoped_model_key: Optional[Any] = None,
+    ) -> Optional[CacheEntry]:
         """Get cache entry for given tokens."""
-        if self.model_key not in self._cache:
+        model_key = self.model_key if scoped_model_key is None else scoped_model_key
+        if model_key not in self._cache:
             return None
 
-        current = self._cache[self.model_key]
+        current = self._cache[model_key]
         for tok in tokens:
             if tok not in current:
                 return None
@@ -672,9 +698,14 @@ class PrefixCacheManager:
 
         return current.get("cache")
 
-    def _touch_lru(self, tokens_tuple: tuple) -> None:
+    def _touch_lru(
+        self,
+        tokens_tuple: tuple,
+        scoped_model_key: Optional[Any] = None,
+    ) -> None:
         """Move entry to end of its type's LRU (most recently used). O(1)."""
-        key = (self.model_key, tokens_tuple)
+        model_key = self.model_key if scoped_model_key is None else scoped_model_key
+        key = (model_key, tokens_tuple)
         # Find the type that owns this key (entries live in exactly one bucket)
         for t in _CACHE_TYPE_PRIORITY:
             d = self._lru_by_type[t]
@@ -694,7 +725,10 @@ class PrefixCacheManager:
             if d:
                 (model_key, tokens_tuple), _ = d.popitem(last=False)
                 # Untrack bytes BEFORE deleting the entry (lookup needs it)
-                entry = self._get_cache_entry(list(tokens_tuple))
+                entry = self._get_cache_entry(
+                    list(tokens_tuple),
+                    scoped_model_key=model_key,
+                )
                 if entry is not None:
                     self._n_bytes -= entry.nbytes
                     self._n_bytes_by_type[entry.cache_type] = max(

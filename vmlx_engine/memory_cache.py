@@ -338,13 +338,16 @@ class MemoryAwarePrefixCache:
         self._lock = threading.Lock()
         # OrderedDict maintains insertion order for LRU
         # Key: tuple(tokens), Value: _CacheEntry
-        self._entries: OrderedDict[tuple[int, ...], _CacheEntry] = OrderedDict()
+        # Unsalted entries retain the historical tuple(tokens) key shape.
+        # Salted/discriminated entries use ("__extra__", marker, tuple(tokens))
+        # so token-prefix matching remains separate from the non-token key.
+        self._entries: OrderedDict[tuple[Any, ...], _CacheEntry] = OrderedDict()
 
         # Per-cache-type LRU buckets for priority eviction (F1 backport).
         # Each bucket holds the same keys as `_entries` but partitioned by
         # cache_type. Eviction pops from the lowest-priority non-empty bucket
         # first so system entries survive longest. Mirrors PrefixCacheManager.
-        self._lru_by_type: dict[str, OrderedDict[tuple[int, ...], bool]] = {
+        self._lru_by_type: dict[str, OrderedDict[tuple[Any, ...], bool]] = {
             t: OrderedDict() for t in _CACHE_TYPE_PRIORITY
         }
         # Per-type byte counters
@@ -942,7 +945,30 @@ class MemoryAwarePrefixCache:
                 self._max_memory = self._base_memory_limit
                 self._stats.max_memory_bytes = self._max_memory
 
-    def fetch(self, tokens: list[int]) -> tuple[list[Any] | None, list[int]]:
+    @staticmethod
+    def _entry_key(
+        tokens: list[int] | tuple[int, ...],
+        cache_extra_keys: Any = None,
+    ) -> tuple[Any, ...]:
+        from .cache_key import canonical_cache_extra_marker
+
+        tokens_key = tuple(tokens)
+        marker = canonical_cache_extra_marker(cache_extra_keys)
+        if marker is None:
+            return tokens_key
+        return ("__extra__", marker, tokens_key)
+
+    @staticmethod
+    def _entry_key_parts(key: tuple[Any, ...]) -> tuple[str | None, tuple[int, ...]]:
+        if len(key) == 3 and key[0] == "__extra__" and isinstance(key[1], str):
+            return key[1], tuple(key[2])
+        return None, tuple(key)
+
+    def fetch(
+        self,
+        tokens: list[int],
+        cache_extra_keys: Any = None,
+    ) -> tuple[list[Any] | None, list[int]]:
         """
         Find cached KV state for the given tokens.
 
@@ -983,7 +1009,7 @@ class MemoryAwarePrefixCache:
         # `del entry.cache`, so touching the entry attribute after release is
         # an intermittent AttributeError that reads as a flaky miss.
         _hit_entry = None  # the _CacheEntry OBJECT — identity token for revalidation
-        _hit_key: tuple[int, ...] | None = None
+        _hit_key: tuple[Any, ...] | None = None
         _hit_cache: list | None = None  # snapshot of entry.cache
         _hit_kind = ""  # "exact" | "forward"
         _hit_len = 0
@@ -995,16 +1021,20 @@ class MemoryAwarePrefixCache:
             if self._ttl_seconds > 0:
                 self._evict_expired()
 
+            from .cache_key import canonical_cache_extra_marker
+
             tokens_key = tuple(tokens)
+            extra_marker = canonical_cache_extra_marker(cache_extra_keys)
+            entry_key = self._entry_key(tokens_key, cache_extra_keys)
 
             # Check for exact match
-            if tokens_key in self._entries:
-                entry = self._entries[tokens_key]
+            if entry_key in self._entries:
+                entry = self._entries[entry_key]
                 # issue #198 (1C): return an isolated clone so generation
                 # advancing offset/appending KV in place cannot contaminate
                 # the stored entry for future hits on the same prefix. A clone we
                 # cannot build is a miss — only count the hit once it succeeds.
-                _hit_entry, _hit_key, _hit_cache = entry, tokens_key, entry.cache
+                _hit_entry, _hit_key, _hit_cache = entry, entry_key, entry.cache
                 _hit_kind, _hit_len = "exact", len(tokens)
 
             # Prefix scan: O(n) over all entries (Issue #62).
@@ -1025,7 +1055,10 @@ class MemoryAwarePrefixCache:
             best_reverse_length = 0
 
             _scan_entries = () if _hit_entry is not None else self._entries.items()
-            for cached_key, entry in _scan_entries:
+            for stored_key, entry in _scan_entries:
+                cached_marker, cached_key = self._entry_key_parts(stored_key)
+                if cached_marker != extra_marker:
+                    continue
                 cached_len = len(cached_key)
 
                 if cached_len < len(tokens):
@@ -1053,7 +1086,10 @@ class MemoryAwarePrefixCache:
                 # entry's FULL cached length (best_forward_length == cached_len), which
                 # is what lets cumulative SSM layers be copied rather than reduced.
                 _hit_entry = best_forward_match
-                _hit_key = best_forward_match.tokens
+                _hit_key = self._entry_key(
+                    best_forward_match.tokens,
+                    cache_extra_keys,
+                )
                 _hit_cache = best_forward_match.cache
                 _hit_kind, _hit_len = "forward", best_forward_length
 
@@ -1078,7 +1114,10 @@ class MemoryAwarePrefixCache:
             # Fall back to reverse match with cache truncation
             cloned = self._truncate_cache(_rev_cache, len(tokens))
             if cloned is not None:
-                _hit_entry, _hit_key = _rev_entry, _rev_entry.tokens
+                _hit_entry, _hit_key = (
+                    _rev_entry,
+                    self._entry_key(_rev_entry.tokens, cache_extra_keys),
+                )
                 _hit_len = len(tokens)
                 remaining = []
 
@@ -1105,6 +1144,7 @@ class MemoryAwarePrefixCache:
         tokens: list[int],
         cache: list[Any],
         cache_type: str = "assistant",
+        cache_extra_keys: Any = None,
     ) -> bool:
         """
         Store KV cache for future reuse.
@@ -1134,7 +1174,7 @@ class MemoryAwarePrefixCache:
             # Periodic memory pressure adaptation (Issue #53)
             self._check_memory_pressure()
 
-            tokens_key = tuple(tokens)
+            tokens_key = self._entry_key(tokens, cache_extra_keys)
             norm_type = cache_type if cache_type in _CACHE_TYPE_PRIORITY else "assistant"
 
             # If already cached, refresh LRU order and possibly upgrade type.
@@ -1218,7 +1258,7 @@ class MemoryAwarePrefixCache:
         if not self._entries:
             return False
 
-        target_key: tuple[int, ...] | None = None
+        target_key: tuple[Any, ...] | None = None
         target_type: str | None = None
         for t in _CACHE_TYPE_PRIORITY:
             d = self._lru_by_type[t]
@@ -1241,6 +1281,7 @@ class MemoryAwarePrefixCache:
             return False
         freed_bytes = entry.memory_bytes
         ent_type = entry.cache_type
+        token_count = len(entry.tokens)
 
         # Delete the entry's cache reference to allow Metal to free GPU memory
         if hasattr(entry, 'cache'):
@@ -1256,12 +1297,12 @@ class MemoryAwarePrefixCache:
         self._stats.current_memory_bytes = self._current_memory
 
         logger.debug(
-            f"Evicted cache ({ent_type}): {len(target_key)} tokens, "
+            f"Evicted cache ({ent_type}): {token_count} tokens, "
             f"freed {freed_bytes / _BYTES_PER_MB:.2f}MB"
         )
         return True
 
-    def _touch_type_lru(self, tokens_key: tuple[int, ...], cache_type: str) -> None:
+    def _touch_type_lru(self, tokens_key: tuple[Any, ...], cache_type: str) -> None:
         """Mark an entry as most-recently-used in its per-type bucket. O(1)."""
         d = self._lru_by_type.get(cache_type)
         if d is None:
@@ -1313,13 +1354,13 @@ class MemoryAwarePrefixCache:
 
         return len(expired_keys)
 
-    def remove(self, tokens: list[int]) -> bool:
+    def remove(self, tokens: list[int], cache_extra_keys: Any = None) -> bool:
         """Remove a specific cache entry by token key.
 
         Returns True if removed, False if not found.
         """
         with self._lock:
-            tokens_key = tuple(tokens)
+            tokens_key = self._entry_key(tokens, cache_extra_keys)
             if tokens_key not in self._entries:
                 return False
             entry = self._entries.pop(tokens_key)

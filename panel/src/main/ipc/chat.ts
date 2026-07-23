@@ -3281,6 +3281,21 @@ export function registerChatHandlers(
           if (!reconciliation.clearSpeculativeBuffering) return;
 
           clientToolCallBuffering = false;
+          if (reconciliation.rejectedControlMarkup) {
+            const warning =
+              "The model emitted parser-rejected tool control markup. It was hidden instead of being shown as assistant content.";
+            console.warn(`[CHAT] ${warning}`);
+            responseWarnings = Array.from(
+              new Set([...(responseWarnings || []), warning]),
+            );
+            emitToolStatus(
+              "error",
+              "",
+              warning,
+              toolIteration,
+            );
+            return;
+          }
           if (reconciliation.authoritativeText === null) return;
 
           console.log(
@@ -3290,20 +3305,11 @@ export function registerChatHandlers(
           // from completed tool iterations and emitDelta will prepend it for UI.
           fullContent = "";
           rawAccumulated = "";
-          // bypassToolMarkerDetection: the restored text is authoritative
-          // zero-tool output and frequently still contains the marker that
-          // activated buffering (e.g. a hallucinated <run_command> dialect).
-          // Re-scanning it would re-activate buffering and swallow the text
-          // permanently — the stream is over, nothing reconciles twice.
-          // Tool-dialect text is fenced so the markdown renderer shows it
-          // verbatim instead of parsing the tags as invisible HTML. The final
-          // sanitizer's never-empty guard is what protects it at persistence.
-          const restoredText = TOOL_CALL_MARKER_LINE_START.test(
-            reconciliation.authoritativeText,
-          )
-            ? "```text\n" + reconciliation.authoritativeText.trim() + "\n```"
-            : reconciliation.authoritativeText;
-          emitDelta(restoredText, false, false, true);
+          // The shared reconciliation helper has already rejected tool
+          // control markup. Bypass speculative marker detection only for the
+          // remaining authoritative prose so a false-positive heartbeat
+          // cannot swallow the completed answer.
+          emitDelta(reconciliation.authoritativeText, false, false, true);
           _sawResponsesTextDelta = true;
         };
 

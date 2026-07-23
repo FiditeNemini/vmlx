@@ -1,17 +1,18 @@
 export interface ResponsesToolBufferReconciliation {
   clearSpeculativeBuffering: boolean;
   authoritativeText: string | null;
+  rejectedControlMarkup?: boolean;
 }
 
 /**
  * Line-start tool-call markers that activate client-side speculative
  * buffering. Includes real native dialects and common hallucinated tags.
  *
- * Contract: text restored by reconcileResponsesToolBufferAtStreamEnd is
- * authoritative zero-tool output and MUST NOT be re-scanned with this
- * pattern — the restored text often still contains the very marker that
- * activated buffering, and re-scanning re-suppresses it forever (the
- * stream is already over, so no second reconciliation can rescue it).
+ * Contract: line-start tool control markup is never visible assistant prose.
+ * A Responses terminal can carry parser-rejected or incomplete tool markup in
+ * output_text even though no concrete function_call item was emitted. That
+ * control text must be rejected, not fenced and shown to the user. Ordinary
+ * authoritative prose is still restored after a false-positive heartbeat.
  */
 export const TOOL_CALL_MARKER_LINE_START =
   /(?:^|\n)\s*(?:<zyphra_tool_call\b|<function(?:=|\b)|<minimax:tool_call|<tool_call\b|\[Calling tool:|<invoke name=|<read_file\b|<write_file\b|<run_command\b|<search_files\b|<edit_file\b|<list_directory\b|<execute_command\b|<bash\b)/;
@@ -40,6 +41,17 @@ export function reconcileResponsesToolBufferAtStreamEnd(args: {
     return {
       clearSpeculativeBuffering: false,
       authoritativeText: null,
+    };
+  }
+
+  if (
+    args.finalText.length > 0 &&
+    TOOL_CALL_MARKER_LINE_START.test(args.finalText)
+  ) {
+    return {
+      clearSpeculativeBuffering: true,
+      authoritativeText: null,
+      rejectedControlMarkup: true,
     };
   }
 

@@ -42,6 +42,23 @@ describe("Responses speculative tool-buffer reconciliation", () => {
     ).toEqual({ clearSpeculativeBuffering: false, authoritativeText: null });
   });
 
+  it("rejects parser-missed tool control markup instead of restoring it as prose", () => {
+    expect(
+      reconcileResponsesToolBufferAtStreamEnd({
+        useResponsesApi: true,
+        clientToolCallBuffering: true,
+        receivedToolCallCount: 0,
+        finalText:
+          "<tool_calls>\n<tool_call>file_info<arg_key>\n" +
+          "<arg_key>path</arg_key>\n<arg_value>panel/package.json",
+      }),
+    ).toEqual({
+      clearSpeculativeBuffering: true,
+      authoritativeText: null,
+      rejectedControlMarkup: true,
+    });
+  });
+
   it("does nothing for non-Responses or non-buffered streams", () => {
     for (const [useResponsesApi, clientToolCallBuffering] of [
       [false, true],
@@ -86,7 +103,7 @@ describe("Responses speculative tool-buffer reconciliation", () => {
     ).toBe(false);
   });
 
-  it("restore path bypasses marker re-detection so restored text cannot be re-swallowed", () => {
+  it("ordinary restore bypasses marker re-detection after control markup was rejected", () => {
     const source = readFileSync(
       new URL("../src/main/ipc/chat.ts", import.meta.url),
       "utf8",
@@ -99,21 +116,27 @@ describe("Responses speculative tool-buffer reconciliation", () => {
     expect(source).toContain(
       "if (!isReasoningDelta && !bypassToolMarkerDetection) {",
     );
-    // The zero-tool restore call must pass bypass=true.
-    expect(source).toContain("emitDelta(restoredText, false, false, true);");
+    // The zero-tool prose restore call must pass bypass=true.
+    expect(source).toContain(
+      "emitDelta(reconciliation.authoritativeText, false, false, true);",
+    );
     // Detection uses the shared exported pattern (kept in sync with tests).
     expect(source).toContain("TOOL_CALL_MARKER_LINE_START");
   });
 
-  it("restored tool-dialect text is fenced and the sanitizer cannot empty it", () => {
+  it("tool-dialect text is rejected and the sanitizer cannot silently empty prose", () => {
     const source = readFileSync(
       new URL("../src/main/ipc/chat.ts", import.meta.url),
       "utf8",
     );
 
-    // Restore path fences tool-dialect text so markdown renders it verbatim
-    // instead of swallowing the tags as HTML.
-    expect(source).toContain('"```text\\n" + reconciliation.authoritativeText.trim() + "\\n```"');
+    expect(source).toContain("if (reconciliation.rejectedControlMarkup)");
+    expect(source).toContain(
+      "The model emitted parser-rejected tool control markup.",
+    );
+    expect(source).not.toContain(
+      '"```text\\n" + reconciliation.authoritativeText.trim() + "\\n```"',
+    );
     // Final persistence guard: sanitizing a non-empty answer down to nothing
     // (with no executed tool) must preserve the original in a fence rather
     // than persisting a blank assistant turn.

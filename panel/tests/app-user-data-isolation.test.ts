@@ -1,8 +1,10 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
+  ensureUserDataDirExists,
   resolveUserDataDirOverride,
 } from '../src/main/user-data-dir'
 
@@ -51,5 +53,22 @@ describe('app user-data isolation bootstrap', () => {
     expect(resolveUserDataDirOverride(['vMLX', '--vmlx-user-data-dir', '/tmp/vmlx-b'], {})).toBe(
       '/tmp/vmlx-b',
     )
+  })
+
+  it('creates a fresh override directory before database startup', () => {
+    const profile = resolve(
+      tmpdir(),
+      `vmlx-user-data-bootstrap-${process.pid}-${Date.now()}`,
+      'nested',
+      'profile',
+    )
+    rmSync(resolve(profile, '..', '..'), { recursive: true, force: true })
+
+    try {
+      ensureUserDataDirExists(profile)
+      expect(existsSync(profile)).toBe(true)
+    } finally {
+      rmSync(resolve(profile, '..', '..'), { recursive: true, force: true })
+    }
   })
 })

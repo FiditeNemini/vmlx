@@ -21,6 +21,53 @@ function renderBubble(props: Record<string, unknown>): string {
 }
 
 describe('interleaved reasoning rendered display', () => {
+  it('renders user-message TeX through the same sanitized KaTeX path as assistant messages', () => {
+    const html = renderBubble({
+      message: {
+        id: 'user-math-1',
+        role: 'user',
+        content: 'The literal currency string is $43 and \\(47 \\times 19 = 893 < 920 = 46 \\times 20\\).',
+        timestamp: Date.now(),
+      },
+      isStreaming: false,
+    })
+
+    expect(html).toContain('class="katex"')
+    expect(html).toContain('47')
+    expect(html).toContain('×')
+    expect(html).toContain('$43')
+    expect(html).not.toContain('\\times')
+    expect(html).not.toContain('\\(')
+  })
+
+  it('renders multimodal user text as math without rewriting currency or code', () => {
+    const html = renderBubble({
+      message: {
+        id: 'user-math-2',
+        role: 'user',
+        content: JSON.stringify([
+          {
+            type: 'text',
+            text: 'Cost $43; calculate \\(6 \\times 7 = 42\\); keep `\\times` literal in code.',
+          },
+          {
+            type: 'image_url',
+            image_url: { url: 'data:image/png;base64,AA==' },
+          },
+        ]),
+        timestamp: Date.now(),
+      },
+      isStreaming: false,
+    })
+
+    expect(html).toContain('class="katex"')
+    expect(html).toContain('6')
+    expect(html).toContain('×')
+    expect(html).toContain('$43')
+    expect(html).toContain('<code>\\times</code>')
+    expect(html).toContain('<img')
+  })
+
   it('live-replaces previous reasoning segments while streaming and shows all after completion', () => {
     const segments = [
       'First reasoning segment before tool.',

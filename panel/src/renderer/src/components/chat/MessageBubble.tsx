@@ -312,13 +312,13 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
               ))}
             </div>
           )}
-          {textParts.map((p, i) => (
-            <p key={i} className="whitespace-pre-wrap">{p.text}</p>
-          ))}
+          {textParts.map((p, i) =>
+            renderMarkdownSegment(p.text!, `user-text-${i}`)
+          )}
         </div>
       )
     }
-    return <p className="whitespace-pre-wrap">{message.content}</p>
+    return renderMarkdownSegment(message.content, 'user-text')
   }
 
   const renderInlineContent = () => {

@@ -595,8 +595,8 @@ class TestEnableThinkingTriState:
             assert 'getattr(_model_config, "think_in_template", False)' in source
             assert "_engine_prompt_starts_in_reasoning(" in source
 
-    def test_minimax_m3_streaming_enabled_mode_seeds_prompt_reasoning(self):
-        """M3 thinking_mode=enabled prompt-opens <mm:think> in streaming too."""
+    def test_minimax_m3_streaming_seeds_only_prompt_opened_enabled_mode(self):
+        """Adaptive M3 must wait for a marker so tagless direct answers stay visible."""
         import vmlx_engine.server as server_mod
 
         chat_source = inspect.getsource(server_mod.stream_chat_completion)
@@ -604,10 +604,10 @@ class TestEnableThinkingTriState:
 
         for source in (chat_source, responses_source):
             assert "thinking_mode" in source
-            assert '_m3_thinking_mode in ("enabled", "adaptive")' in source
-            assert '"minimax_m3"' in source
-            assert "_effective_thinking is True" in source
-            assert "think_in_template = True" in source
+            assert (
+                'if _m3_thinking_mode == "enabled":\n'
+                "        think_in_template = True"
+            ) in source
 
     def test_minimax_m3_responses_forced_on_has_visible_answer_pass(self):
         """M3 forced-On can otherwise spend all max_tokens inside <mm:think>."""

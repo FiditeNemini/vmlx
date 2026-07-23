@@ -18615,12 +18615,10 @@ async def stream_chat_completion(
     # emitting an opening tag. Seed the streaming parser the same way the
     # non-streaming parser is seeded, otherwise internal reasoning is emitted
     # as visible content on /v1/chat/completions stream=true.
-    if _m3_thinking_mode in ("enabled", "adaptive"):
-        think_in_template = True
-    if (
-        _is_minimax_m3
-        and _effective_thinking is True
-    ):
+    # Adaptive emits no template prefix: the model may either open an
+    # <mm:think> block or answer directly.  Pre-seeding adaptive as implicit
+    # reasoning misroutes a valid tagless direct answer to reasoning_content.
+    if _m3_thinking_mode == "enabled":
         think_in_template = True
 
     # The parser seed must match the final prompt the engine renders. Tool
@@ -20784,12 +20782,9 @@ async def stream_responses_api(
     # emitting an opening tag. Seed the streaming parser the same way the
     # non-streaming parser is seeded, otherwise internal reasoning is emitted
     # as visible content on /v1/responses stream=true.
-    if _m3_thinking_mode in ("enabled", "adaptive"):
-        think_in_template = True
-    if (
-        getattr(_model_config, "family_name", None) in ("minimax_m3", "minimax_m3_vl")
-        and _effective_thinking is True
-    ):
+    # Adaptive emits no template prefix: wait for an actual <mm:think> marker.
+    # Only enabled mode starts decode inside an already-open reasoning rail.
+    if _m3_thinking_mode == "enabled":
         think_in_template = True
 
     # The parser seed must match the final prompt the engine renders. Tool

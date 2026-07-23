@@ -1009,11 +1009,12 @@ class TestBlockAwarePrefixCache:
             manager.allocated_blocks[block_id].cache_data[0]
             for block_id in table.block_ids
         ]
-        assert [entry[0] for entry in entries[:-1]] == [
-            "rotating_kv_pending",
+        assert [entry[0] for entry in entries[:-2]] == [
             "rotating_kv_pending",
             "rotating_kv_pending",
         ]
+        assert entries[-2][0] == "rotating_kv"
+        assert entries[-2][3:] == (128, 0, 192, 128)
         assert entries[-1][0] == "rotating_kv"
         assert entries[-1][3:] == (128, 0, 256, 128)
         assert entries[-1][1].shape[2] == 128
@@ -1037,6 +1038,141 @@ class TestBlockAwarePrefixCache:
         assert rebuilt[0].offset == 257
         assert fetched_keys.shape[2] == 128
         assert float(fetched_keys[0, 0, rebuilt[0]._idx - 1, 0].item()) == 256.0
+
+    @pytest.mark.parametrize("keep", [0, 2])
+    def test_rotating_cache_changed_tail_reuses_previous_block_checkpoint(
+        self,
+        keep,
+    ):
+        """A changed final block resumes mixed-SWA at the shared boundary."""
+        mx = pytest.importorskip("mlx.core")
+
+        from mlx_lm.models.cache import RotatingKVCache
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        def append(cache, positions):
+            keys = mx.array(positions, dtype=mx.float32).reshape(1, 1, -1, 1)
+            values = keys + 1000
+            fetched = cache.update_and_fetch(keys, values)
+            mx.eval(*fetched)
+            return fetched
+
+        # Match mlx-lm's real concat shape: after an 8-token saturated window,
+        # appending four tokens retains positions 1..11 (max_size + S - 1).
+        live = RotatingKVCache(max_size=8, keep=keep)
+        append(live, list(range(8)))
+        append(live, list(range(8, 12)))
+        assert live.keys.shape[2] == 11
+
+        tokens = list(range(12))
+        state = [{
+            "class_name": "RotatingKVCache",
+            "state": live.state,
+            "meta_state": live.meta_state,
+        }]
+        manager = PagedCacheManager(block_size=4, max_blocks=8)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        table = cache.store_cache("writer", tokens, state)
+        assert table is not None
+
+        changed_tokens = list(range(8)) + [80, 81, 82, 83]
+        hit, remaining = cache.fetch_cache("changed", changed_tokens)
+        assert hit is not None
+        assert hit.num_tokens == 8
+        assert remaining == [80, 81, 82, 83]
+
+        restored = cache.reconstruct_cache(hit)
+        assert restored is not None
+        assert restored[0].offset == 8
+        assert restored[0]._idx == 8
+        restored_fetch = append(restored[0], remaining)
+
+        cold = RotatingKVCache(max_size=8, keep=keep)
+        append(cold, list(range(8)))
+        cold_fetch = append(cold, remaining)
+        assert mx.array_equal(restored_fetch[0], cold_fetch[0]).item()
+        assert mx.array_equal(restored_fetch[1], cold_fetch[1]).item()
+        assert restored[0].offset == cold.offset == 12
+        assert restored[0]._idx == cold._idx == 11
+
+    def test_disk_only_rotating_changed_tail_restores_previous_block(self, tmp_path):
+        """The preceding mixed-SWA checkpoint survives SSD-only restart."""
+        mx = pytest.importorskip("mlx.core")
+
+        from mlx_lm.models.cache import RotatingKVCache
+        from vmlx_engine.block_disk_store import BlockDiskStore
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        def append(cache, positions):
+            keys = mx.array(positions, dtype=mx.float32).reshape(1, 1, -1, 1)
+            values = keys + 1000
+            fetched = cache.update_and_fetch(keys, values)
+            mx.eval(*fetched)
+            return fetched
+
+        live = RotatingKVCache(max_size=8)
+        append(live, list(range(8)))
+        append(live, list(range(8, 12)))
+        tokens = list(range(12))
+        state = [{
+            "class_name": "RotatingKVCache",
+            "state": live.state,
+            "meta_state": live.meta_state,
+        }]
+        cache_dir = tmp_path / "disk-only-rotating-partial"
+        store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.01,
+            expected_num_layers=1,
+        )
+        manager = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        writer = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        assert writer.store_cache("writer", tokens, state) is not None
+        store.shutdown()
+
+        restarted_store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.01,
+            expected_num_layers=1,
+        )
+        restarted_manager = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=restarted_store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        restarted = BlockAwarePrefixCache(
+            model=None,
+            paged_cache_manager=restarted_manager,
+        )
+        try:
+            changed_tokens = list(range(8)) + [80, 81, 82, 83]
+            hit, remaining = restarted.fetch_cache("reader", changed_tokens)
+            assert hit is not None
+            assert hit.num_tokens == 8
+            assert remaining == [80, 81, 82, 83]
+            restored = restarted.reconstruct_cache(hit)
+            assert restored is not None
+            restored_fetch = append(restored[0], remaining)
+
+            cold = RotatingKVCache(max_size=8)
+            append(cold, list(range(8)))
+            cold_fetch = append(cold, remaining)
+            assert mx.array_equal(restored_fetch[0], cold_fetch[0]).item()
+            assert mx.array_equal(restored_fetch[1], cold_fetch[1]).item()
+            assert restarted_manager.stats.disk_hits >= 2
+            assert restarted_manager.resident_bytes == 0
+        finally:
+            restarted_store.shutdown()
 
     def test_rotating_cache_extension_uses_new_terminal_not_old_snapshot(self):
         """A longer chain must not combine rotating state from two snapshots."""

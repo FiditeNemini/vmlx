@@ -1066,6 +1066,155 @@ def _rotating_terminal_window(
     return temporal_keys, temporal_values, max_size, keep, offset, physical_len
 
 
+def _rotating_previous_block_window(
+    keys,
+    values,
+    meta_state,
+    *,
+    target_offset: int,
+    block_size: int,
+    concatenate=None,
+):
+    """Derive the immediately preceding rotating-KV resume checkpoint.
+
+    mlx-lm's multi-token ``RotatingKVCache._update_concat`` retains
+    ``max_size + S - 1`` entries: the previous temporal window minus the one
+    token that the first appended token replaces, followed by the ``S`` new
+    entries.  That overhang is sufficient to materialize the block boundary
+    immediately before a terminal partial/full block.  Persisting that exact
+    boundary lets a changed-tail request reuse the shared paged prefix instead
+    of finding only ``rotating_kv_pending`` markers and falling back cold.
+
+    A saturated cache can be short by exactly one oldest token.  That token is
+    unobservable on resume because the mandatory first uncached token replaces
+    its ring slot before attention.  In that single case we duplicate the
+    oldest available entry into the disposable slot; any larger history gap is
+    rejected.  Only the immediately preceding block boundary is eligible, so
+    this adds one bounded rotating snapshot rather than duplicating a window in
+    every page.
+    """
+    if not isinstance(meta_state, (tuple, list)) or len(meta_state) < 4:
+        raise ValueError("RotatingKVCache resume snapshot is missing meta_state")
+    try:
+        keep, max_size, offset, idx_state = map(int, meta_state[:4])
+        target_offset = int(target_offset)
+        block_size = int(block_size)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("RotatingKVCache resume metadata is not integral") from exc
+    if max_size <= 0 or keep < 0 or keep > max_size:
+        raise ValueError(
+            f"invalid RotatingKVCache window metadata keep={keep} max_size={max_size}"
+        )
+    distance = offset - target_offset
+    if target_offset <= 0 or distance <= 0 or block_size <= 0 or distance > block_size:
+        raise ValueError(
+            "RotatingKVCache resume boundary is not the preceding block: "
+            f"target={target_offset} offset={offset} block_size={block_size}"
+        )
+
+    ndim = len(keys.shape)
+    if ndim == 4:
+        seq_axis = 2
+    elif ndim == 3:
+        seq_axis = 1
+    else:
+        raise ValueError(f"unsupported RotatingKVCache rank={ndim}")
+    if len(values.shape) != ndim:
+        raise ValueError("RotatingKVCache key/value rank mismatch")
+    seq_len = int(keys.shape[seq_axis])
+    if int(values.shape[seq_axis]) != seq_len:
+        raise ValueError("RotatingKVCache key/value sequence mismatch")
+    if idx_state < 0 or idx_state > seq_len:
+        raise ValueError(
+            f"invalid RotatingKVCache idx={idx_state} physical_len={seq_len}"
+        )
+    if concatenate is None:
+        concatenate = mx.concatenate
+
+    def _slice(value, start=None, stop=None):
+        index = [slice(None)] * ndim
+        index[seq_axis] = slice(start, stop)
+        return value[tuple(index)]
+
+    def _cat(parts):
+        return concatenate(parts, axis=seq_axis)
+
+    if idx_state == seq_len:
+        temporal_keys, temporal_values = keys, values
+    elif idx_state < offset:
+        temporal_keys = _cat(
+            [_slice(keys, 0, keep), _slice(keys, idx_state, None), _slice(keys, keep, idx_state)]
+        )
+        temporal_values = _cat(
+            [_slice(values, 0, keep), _slice(values, idx_state, None), _slice(values, keep, idx_state)]
+        )
+    else:
+        temporal_keys = _slice(keys, 0, idx_state)
+        temporal_values = _slice(values, 0, idx_state)
+
+    temporal_len = int(temporal_keys.shape[seq_axis])
+    sink_len = min(keep, target_offset)
+    if sink_len and temporal_len < sink_len:
+        raise ValueError("RotatingKVCache resume snapshot is missing sink tokens")
+    sink_keys = _slice(temporal_keys, 0, sink_len)
+    sink_values = _slice(temporal_values, 0, sink_len)
+    recent_keys = _slice(temporal_keys, keep, None)
+    recent_values = _slice(temporal_values, keep, None)
+    recent_len = int(recent_keys.shape[seq_axis])
+    recent_start = offset - recent_len
+
+    required_len = min(target_offset, max_size)
+    required_recent = required_len - sink_len
+    desired_recent_start = (
+        sink_len if target_offset < max_size else target_offset - required_recent
+    )
+    desired_recent_end = target_offset
+    if desired_recent_end > offset:
+        raise ValueError("RotatingKVCache resume boundary exceeds live offset")
+
+    missing_oldest = max(recent_start - desired_recent_start, 0)
+    if missing_oldest > 1 or (missing_oldest and target_offset < max_size):
+        raise ValueError(
+            "RotatingKVCache resume history is incomplete: "
+            f"available_start={recent_start} required_start={desired_recent_start}"
+        )
+    available_start = max(desired_recent_start, recent_start)
+    start_idx = available_start - recent_start
+    end_idx = desired_recent_end - recent_start
+    if start_idx < 0 or end_idx < start_idx or end_idx > recent_len:
+        raise ValueError(
+            "RotatingKVCache resume slice is outside the retained temporal window"
+        )
+    selected_keys = _slice(recent_keys, start_idx, end_idx)
+    selected_values = _slice(recent_values, start_idx, end_idx)
+    selected_len = int(selected_keys.shape[seq_axis])
+    if missing_oldest:
+        if selected_len <= 0:
+            raise ValueError("RotatingKVCache resume snapshot has no disposable source")
+        selected_keys = _cat([_slice(selected_keys, 0, 1), selected_keys])
+        selected_values = _cat([_slice(selected_values, 0, 1), selected_values])
+
+    if sink_len:
+        resume_keys = _cat([sink_keys, selected_keys])
+        resume_values = _cat([sink_values, selected_values])
+    else:
+        resume_keys, resume_values = selected_keys, selected_values
+    resume_len = int(resume_keys.shape[seq_axis])
+    if resume_len != required_len:
+        raise ValueError(
+            "RotatingKVCache resume normalization failed: "
+            f"physical={resume_len} required={required_len}"
+        )
+    return (
+        resume_keys,
+        resume_values,
+        max_size,
+        keep,
+        target_offset,
+        resume_len,
+    )
+
+
 def _block_has_complete_rotating_terminal(
     cache_data,
     *,
@@ -1153,6 +1302,7 @@ def _numpy_block_slice(
     is_last_block,
     existing_tokens=0,
     store_cumulative_state=True,
+    rotating_resume_block_size=0,
 ):
     """Create per-block cache_data using NumPy slicing.
 
@@ -1296,22 +1446,33 @@ def _numpy_block_slice(
                 # collection of immutable token pages.  Reusing slices written
                 # from snapshots with different logical offsets produced the
                 # live Laguna mosaic (old offset metadata + an incomplete new
-                # physical window).  Keep non-terminal blocks shareable and put
-                # the exact bounded temporal window on the terminal block only.
-                if not is_last_block:
-                    block_slices.append(("rotating_kv_pending", cls))
-                    continue
+                # physical window).  Keep old non-terminal blocks shareable,
+                # but use mlx-lm's bounded concat overhang to checkpoint the
+                # immediately preceding boundary when it is exact.
                 try:
-                    terminal = _rotating_terminal_window(
-                        np_k,
-                        np_v,
-                        layer_state.get("meta_state", ()),
-                        expected_offset=end_idx,
-                        concatenate=np.concatenate,
-                    )
+                    if is_last_block:
+                        terminal = _rotating_terminal_window(
+                            np_k,
+                            np_v,
+                            layer_state.get("meta_state", ()),
+                            expected_offset=end_idx,
+                            concatenate=np.concatenate,
+                        )
+                    else:
+                        terminal = _rotating_previous_block_window(
+                            np_k,
+                            np_v,
+                            layer_state.get("meta_state", ()),
+                            target_offset=end_idx,
+                            block_size=rotating_resume_block_size,
+                            concatenate=np.concatenate,
+                        )
                 except ValueError as exc:
-                    logger.warning("Layer %s (%s): %s", idx, cls, exc)
-                    block_slices.append(("skip",))
+                    if is_last_block:
+                        logger.warning("Layer %s (%s): %s", idx, cls, exc)
+                        block_slices.append(("skip",))
+                    else:
+                        block_slices.append(("rotating_kv_pending", cls))
                     continue
                 tk, tv, max_size, keep, offset, idx_state = terminal
                 tk = mx.array(tk)
@@ -2620,6 +2781,7 @@ class BlockAwarePrefixCache:
                             cache_data, np_sources or {},
                             global_start, global_end, is_last, existing_tokens,
                             store_cumulative_state,
+                            self.block_size,
                         )
                         if np_block:
                             # The numpy mirror is authoritative for ordinary KV
@@ -3182,21 +3344,28 @@ class BlockAwarePrefixCache:
                         continue
 
                     if "Rotating" in class_name:
-                        if not is_last_block:
-                            block_slices.append(("rotating_kv_pending", class_name))
-                            continue
                         try:
                             if np_sources is not None and layer_idx in np_sources:
                                 import numpy as np
 
                                 np_k, np_v, orig_dtype = np_sources[layer_idx]
-                                terminal = _rotating_terminal_window(
-                                    np_k,
-                                    np_v,
-                                    layer_state.get("meta_state", ()),
-                                    expected_offset=end_idx,
-                                    concatenate=np.concatenate,
-                                )
+                                if is_last_block:
+                                    terminal = _rotating_terminal_window(
+                                        np_k,
+                                        np_v,
+                                        layer_state.get("meta_state", ()),
+                                        expected_offset=end_idx,
+                                        concatenate=np.concatenate,
+                                    )
+                                else:
+                                    terminal = _rotating_previous_block_window(
+                                        np_k,
+                                        np_v,
+                                        layer_state.get("meta_state", ()),
+                                        target_offset=end_idx,
+                                        block_size=self.block_size,
+                                        concatenate=np.concatenate,
+                                    )
                                 tk, tv, max_size, keep, offset, idx_state = terminal
                                 tk = mx.array(tk)
                                 tv = mx.array(tv)
@@ -3204,13 +3373,23 @@ class BlockAwarePrefixCache:
                                     tk = tk.astype(orig_dtype)
                                     tv = tv.astype(orig_dtype)
                             else:
-                                terminal = _rotating_terminal_window(
-                                    keys,
-                                    values,
-                                    layer_state.get("meta_state", ()),
-                                    expected_offset=end_idx,
-                                    concatenate=mx.concatenate,
-                                )
+                                if is_last_block:
+                                    terminal = _rotating_terminal_window(
+                                        keys,
+                                        values,
+                                        layer_state.get("meta_state", ()),
+                                        expected_offset=end_idx,
+                                        concatenate=mx.concatenate,
+                                    )
+                                else:
+                                    terminal = _rotating_previous_block_window(
+                                        keys,
+                                        values,
+                                        layer_state.get("meta_state", ()),
+                                        target_offset=end_idx,
+                                        block_size=self.block_size,
+                                        concatenate=mx.concatenate,
+                                    )
                                 tk, tv, max_size, keep, offset, idx_state = terminal
                                 tk = _copy_mlx_tree(tk)
                                 tv = _copy_mlx_tree(tv)
@@ -3224,10 +3403,16 @@ class BlockAwarePrefixCache:
                                 idx_state,
                             ))
                         except ValueError as exc:
-                            logger.warning(
-                                "Layer %s (%s): %s", layer_idx, class_name, exc
-                            )
-                            block_slices.append(("skip",))
+                            if is_last_block:
+                                logger.warning(
+                                    "Layer %s (%s): %s", layer_idx, class_name, exc
+                                )
+                                block_slices.append(("skip",))
+                            else:
+                                block_slices.append((
+                                    "rotating_kv_pending",
+                                    class_name,
+                                ))
                         continue
 
                     seq_len = keys.shape[seq_dim]

@@ -24,14 +24,12 @@ function sessionConfigObject(config: string | Record<string, unknown> | undefine
 }
 
 /**
- * Apply server-startup policy to bundle-derived generation defaults.
+ * Apply an explicit saved server policy to bundle-derived chat defaults.
  *
- * Native MTP's `deterministic-defaults` launch mode intentionally changes
- * omitted requests to greedy sampling so they exercise identity-verified MTP.
- * Chat sliders describe the effective inherited request, so they must show
- * that startup policy instead of the bundle's stochastic generation_config.
- * Explicit per-chat slider changes still travel in the request and therefore
- * retain request-over-server precedence.
+ * Fresh sessions default to nativeMtpMode=auto and therefore preserve the
+ * bundle's generation_config/jang_config sampling. Only a session explicitly
+ * saved as deterministic replaces omitted request values with greedy sampling;
+ * its Chat Settings controls must display that real effective inheritance.
  */
 export function applyEffectiveSessionGenerationDefaults<T extends GenerationDefaultsLike>(
   defaults: T,
@@ -41,7 +39,7 @@ export function applyEffectiveSessionGenerationDefaults<T extends GenerationDefa
   const config = sessionConfigObject(sessionConfig)
   const mode = typeof config.nativeMtpMode === 'string'
     ? config.nativeMtpMode
-    : 'deterministic'
+    : 'auto'
   if (nativeMtp?.supported !== true || mode !== 'deterministic') return defaults
   return {
     ...defaults,

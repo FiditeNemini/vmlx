@@ -1322,6 +1322,7 @@ export class SessionManager extends EventEmitter {
 
         let healthy = false
         let modelName: string | undefined
+        let nativeMtpSamplingPolicy = parsed.nativeMtpSamplingPolicy
         let standbyDepth: 'soft' | 'deep' | null = null
         try {
           const res = await fetch(
@@ -1332,6 +1333,13 @@ export class SessionManager extends EventEmitter {
             const data = await res.json()
             healthy = true
             modelName = data.model_name
+            const healthMtpPolicy = data?.mtp?.request_policy
+            if (
+              healthMtpPolicy === 'compatible-only' ||
+              healthMtpPolicy === 'deterministic-defaults'
+            ) {
+              nativeMtpSamplingPolicy = healthMtpPolicy
+            }
             // Detect standby state for proper re-adoption
             if (data.status === 'standby_soft') standbyDepth = 'soft'
             else if (data.status === 'standby_deep') standbyDepth = 'deep'
@@ -1344,6 +1352,7 @@ export class SessionManager extends EventEmitter {
           modelPath: parsed.modelPath,
           healthy,
           modelName,
+          nativeMtpSamplingPolicy,
           standbyDepth
         })
       }
@@ -1352,7 +1361,12 @@ export class SessionManager extends EventEmitter {
     return detected
   }
 
-  private parsePsLine(line: string): { pid: number; port: number; modelPath: string } | null {
+  private parsePsLine(line: string): {
+    pid: number
+    port: number
+    modelPath: string
+    nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults'
+  } | null {
     try {
       const parts = line.trim().split(/\s+/)
       const pid = parseInt(parts[1])
@@ -1384,7 +1398,15 @@ export class SessionManager extends EventEmitter {
       const portMatch = cmdStart.match(/--port\s+(\d+)/)
       if (portMatch) port = parseInt(portMatch[1])
 
-      return { pid, port, modelPath }
+      const mtpPolicyMatch = cmdStart.match(
+        /--native-mtp-sampling-policy\s+(compatible-only|deterministic-defaults)/,
+      )
+      const nativeMtpSamplingPolicy = mtpPolicyMatch?.[1] as
+        | 'compatible-only'
+        | 'deterministic-defaults'
+        | undefined
+
+      return { pid, port, modelPath, nativeMtpSamplingPolicy }
     } catch (_) {
       return null
     }
@@ -2801,7 +2823,9 @@ export class SessionManager extends EventEmitter {
           dsv4PrefixCache: dsv4DefaultCacheOptIn,
           dsv4PoolQuant: dsv4DefaultCacheOptIn && (detected.dsv4PoolQuantDefault ?? true),
           defaultEnableThinking: undefined,
-          nativeMtpMode: 'deterministic',
+          nativeMtpMode: proc.nativeMtpSamplingPolicy === 'deterministic-defaults'
+            ? 'deterministic'
+            : 'auto',
           nativeMtpDepth: (detected as any).nativeMtp?.depth ?? 3,
           nativeMtpDepthOverride: false,
           enableAutoToolChoice: detected.enableAutoToolChoice
@@ -4016,14 +4040,13 @@ export class SessionManager extends EventEmitter {
 
     // Native in-model MTP. This is separate from external speculative decoding:
     // Qwen3.6 preserved-MTP bundles carry their own draft head and the current
-    // verified path is deterministic. The default app mode therefore launches
-    // native-MTP bundles with the measured model-local depth when present
-    // (D3 fallback) plus deterministic startup sampling so normal app/API
-    // requests actually reach the native MTP runtime instead of silently taking
-    // autoregressive decode through generation_config temperature=1.0.
+    // verified path is deterministic. Fresh sessions default to Auto so model
+    // generation_config/jang_config sampling remains authoritative. Users may
+    // explicitly select Deterministic to replace omitted request sampling with
+    // greedy values and force compatible native-MTP requests.
     const nativeMtp = (detected as any).nativeMtp
     if (!dsv4Active && nativeMtp?.supported) {
-      const mode = (config as any).nativeMtpMode || 'deterministic'
+      const mode = (config as any).nativeMtpMode || 'auto'
       if (mode === 'off') {
         args.push('--disable-native-mtp')
       } else {

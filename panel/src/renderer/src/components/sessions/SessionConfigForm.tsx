@@ -163,7 +163,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
   servedModelName: '',
   speculativeModel: '',
   numDraftTokens: 3,
-  nativeMtpMode: 'deterministic',
+  nativeMtpMode: 'auto',
   nativeMtpDepth: 3,
   nativeMtpDepthOverride: false,
   smelt: false,
@@ -490,7 +490,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   )
   const nativeMtpSupported = !!detectedNativeMtp?.supported
   const omniBackendVisible = normalizedDetectedFamily === 'nemotron-h' && multimodalActive
-  const nativeMtpMode = config.nativeMtpMode || DEFAULT_CONFIG.nativeMtpMode || 'deterministic'
+  const nativeMtpMode = config.nativeMtpMode || DEFAULT_CONFIG.nativeMtpMode || 'auto'
   const nativeMtpDepth = config.nativeMtpDepthOverride === true
     ? (config.nativeMtpDepth || detectedNativeMtp?.depth || 3)
     : (detectedNativeMtp?.depth || config.nativeMtpDepth || 3)
@@ -1594,21 +1594,21 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
       {/* Native in-model MTP */}
       <Section title="Native MTP" expanded={expandedSections.nativeMtp} onToggle={() => toggleSection('nativeMtp')} hidden={isImage || dsv4Active || !nativeMtpSupported}>
-        <PerformanceHint text="Uses the model's own preserved MTP heads. Current Qwen3.6 runtime is deterministic and uses measured model-local depth when present, with D3 as the generic fallback." />
+        <PerformanceHint text="Uses the model's own preserved MTP heads and measured model-local depth when present, with D3 as the generic fallback." />
         {nativeMtpMode === 'auto' && (
-          <InfoNote text="Auto mode only activates MTP for API/chat requests that already use deterministic sampling. Sampled requests fall back to autoregressive decode and the server logs the reason." />
+          <InfoNote text="Auto preserves the bundle's generation_config/jang_config sampling defaults. It activates MTP only for compatible requests; sampled requests fall back to autoregressive decode and the server logs the reason." />
         )}
         {nativeMtpMode === 'deterministic' && (
-          <InfoNote text={`Default mode applies D${nativeMtpDepth} and deterministic startup sampling so normal app chats actually enter the native MTP path. Explicit API sampling parameters still win per request.`} />
+          <InfoNote text={`Explicit deterministic mode applies D${nativeMtpDepth} and greedy startup sampling so omitted API/chat sampling values enter the native MTP path. Explicit per-request sampling parameters still win.`} />
         )}
         <SelectField
           label="Native MTP Mode"
-          tooltip="Deterministic mode uses the bundle's measured MTP depth when available, otherwise D3. Auto leaves sampling defaults alone and only uses MTP when a request is already compatible. Off disables the in-model MTP runtime."
+          tooltip="Auto preserves bundle sampling defaults and uses MTP only when a request is compatible. Deterministic mode explicitly replaces omitted sampling values with greedy defaults. Off disables the in-model MTP runtime."
           value={nativeMtpMode}
           onChange={v => onChange('nativeMtpMode', v as 'deterministic' | 'auto' | 'off')}
           options={[
-            { value: 'deterministic', label: 'Deterministic tuned default' },
-            { value: 'auto', label: 'Auto gate only' },
+            { value: 'auto', label: 'Auto (bundle defaults)' },
+            { value: 'deterministic', label: 'Deterministic override' },
             { value: 'off', label: 'Off' },
           ]}
         />

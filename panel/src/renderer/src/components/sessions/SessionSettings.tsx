@@ -616,11 +616,12 @@ function buildCommandPreview(
     }
   }
 
-  // Native in-model MTP mirrors sessions.ts: deterministic mode owns the
-  // startup sampling override needed for Qwen3.6 MTP to enter the native path.
+  // Native in-model MTP mirrors sessions.ts. Auto is the default so a fresh
+  // session preserves generation_config/jang_config sampling. Deterministic is
+  // an explicit server-level override for users who prefer the native MTP path.
   const nativeMtp = detected?.nativeMtp
   if (!dsv4Active && nativeMtp?.supported) {
-    const mode = (config as any).nativeMtpMode || 'deterministic'
+    const mode = (config as any).nativeMtpMode || 'auto'
     if (mode === 'off') {
       parts.push('--disable-native-mtp')
     } else {

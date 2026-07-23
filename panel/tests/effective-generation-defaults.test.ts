@@ -11,7 +11,7 @@ const bundleDefaults = {
 }
 
 describe('effective session generation defaults', () => {
-  it('shows the greedy defaults actually installed by deterministic native MTP', () => {
+  it('shows greedy values only for an explicit saved deterministic MTP override', () => {
     expect(applyEffectiveSessionGenerationDefaults(
       bundleDefaults,
       JSON.stringify({ nativeMtpMode: 'deterministic' }),
@@ -26,12 +26,12 @@ describe('effective session generation defaults', () => {
     })
   })
 
-  it('uses deterministic mode when an older session omitted the mode field', () => {
+  it('keeps bundle defaults when a fresh or older session has no MTP mode', () => {
     expect(applyEffectiveSessionGenerationDefaults(
       bundleDefaults,
       '{}',
       { supported: true },
-    ).temperature).toBe(0)
+    )).toEqual(bundleDefaults)
   })
 
   it.each(['auto', 'off'])('keeps bundle defaults for native MTP mode %s', mode => {

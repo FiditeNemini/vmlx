@@ -161,7 +161,7 @@ const DEFAULT_CONFIG: SessionConfig = {
     defaultEnableThinking: undefined,
     dsv4PrefixCache: true,
     dsv4PoolQuant: true,
-    nativeMtpMode: 'deterministic',
+    nativeMtpMode: 'auto',
     nativeMtpDepth: 3,
     nativeMtpDepthOverride: false,
     embeddingModel: '',
@@ -538,7 +538,7 @@ function buildCommandPreview(
     }
 
     if (!dsv4Active && detected?.nativeMtp?.supported) {
-        const mode = config.nativeMtpMode || 'deterministic'
+        const mode = config.nativeMtpMode || 'auto'
         if (mode === 'off') {
             parts.push('--disable-native-mtp')
         } else {
@@ -1658,11 +1658,11 @@ describe('Native MTP', () => {
         },
     }
 
-    it('defaults native-MTP bundles to deterministic measured-depth launch policy without hidden sampler flags', () => {
+    it('defaults native-MTP bundles to bundle-owned sampling with compatible-only MTP gating', () => {
         const out = preview({}, qwenMtpDetected)
 
         expect(getFlagValue(out, '--native-mtp-depth')).toBe('2')
-        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('deterministic-defaults')
+        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('compatible-only')
         expect(hasFlag(out, '--default-temperature')).toBe(false)
         expect(hasFlag(out, '--default-top-p')).toBe(false)
         expect(hasFlag(out, '--default-top-k')).toBe(false)
@@ -1693,11 +1693,15 @@ describe('Native MTP', () => {
 
     it('real session launcher and settings form expose native MTP controls', () => {
         const sessionsSource = readFileSync('src/main/sessions.ts', 'utf8')
+        const serverTypesSource = readFileSync('src/main/server.ts', 'utf8')
         const formSource = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
 
         expect(sessionsSource).toContain('--native-mtp-depth')
         expect(sessionsSource).toContain('--native-mtp-sampling-policy')
         expect(sessionsSource).toContain('--disable-native-mtp')
+        expect(sessionsSource).toContain('data?.mtp?.request_policy')
+        expect(sessionsSource).toContain("proc.nativeMtpSamplingPolicy === 'deterministic-defaults'")
+        expect(serverTypesSource).toContain("nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults'")
         expect(formSource).toContain('Native MTP')
         expect(formSource).toContain('nativeMtpMode')
         expect(formSource).toContain('nativeMtpDepth')
@@ -4036,7 +4040,7 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         expect(source).toContain('format={formatTopK}')
     })
 
-    it('chat settings applies the effective native-MTP startup policy and receives session config', () => {
+    it('chat settings applies only an explicit saved native-MTP override and receives session config', () => {
         const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
         const toolbar = readFileSync('src/renderer/src/components/layout/ChatModeToolbar.tsx', 'utf8')
         const sessionView = readFileSync('src/renderer/src/components/sessions/SessionView.tsx', 'utf8')

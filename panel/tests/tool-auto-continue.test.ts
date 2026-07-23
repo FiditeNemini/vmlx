@@ -119,6 +119,11 @@ describe('tool auto-continue policy', () => {
     ).toBe(true)
     expect(requestsNoToolCalls('Without using any tools, answer directly.')).toBe(true)
     expect(
+      requestsNoToolCalls(
+        '[FOLLOW] Without calling any tool, recall the previous result.',
+      ),
+    ).toBe(true)
+    expect(
       requestsNoToolCalls('Do not call any tool unless the file is missing.'),
     ).toBe(false)
     expect(

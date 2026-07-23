@@ -110,6 +110,6 @@ export function requestsNoToolCalls(text: string): boolean {
   const explicitProhibition =
     /(?:^|[.!?\]\n])\s*(?:please\s+)?(?:do not|don['’]?t|dont|never)\s+(?:call|use)\s+(?:any\s+)?tools?\b(?!\s+unless)/i
   const explicitWithoutTools =
-    /(?:^|[.!?\]\n])\s*(?:please\s+)?without\s+(?:using\s+)?(?:any\s+)?tools?\b/i
+    /(?:^|[.!?\]\n])\s*(?:please\s+)?without\s+(?:(?:using|calling)\s+)?(?:any\s+)?tools?\b/i
   return explicitProhibition.test(text) || explicitWithoutTools.test(text)
 }

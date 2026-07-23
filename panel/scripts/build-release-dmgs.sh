@@ -79,6 +79,14 @@ case "$RELEASE_SCOPE" in
       fi
     )
     ;;
+  r16_parser_cache)
+    (
+      cd "$ROOT_DIR"
+      "$PYTHON_BIN" "panel/scripts/scoped-release-preflight-16.py" \
+        --expected-version "$VERSION" \
+        --out "$PREPACKAGE_READY_MANIFEST_OUT"
+    )
+    ;;
   "")
     (
       cd "$ROOT_DIR"
@@ -89,9 +97,10 @@ case "$RELEASE_SCOPE" in
     ;;
   *)
     echo "ERROR: unsupported release scope: $RELEASE_SCOPE" >&2
-    echo "Set VMLX_RELEASE_SCOPE=mm3_gemma_vl (or VMLINUX_RELEASE_SCOPE=mm3_gemma_vl)," >&2
+    echo "Set VMLX_RELEASE_SCOPE=r16_parser_cache for the 1.6.16 emergency parser/cache scope," >&2
+    echo "or VMLX_RELEASE_SCOPE=mm3_gemma_vl (or VMLINUX_RELEASE_SCOPE=mm3_gemma_vl)," >&2
     echo "or VMLX_RELEASE_SCOPE=codex_ui_only for Codex-driven UI validation flow." >&2
-    echo "Supported scoped release values: mm3_gemma_vl, codex_ui_only" >&2
+    echo "Supported scoped release values: r16_parser_cache, mm3_gemma_vl, codex_ui_only" >&2
     exit 2
     ;;
 esac

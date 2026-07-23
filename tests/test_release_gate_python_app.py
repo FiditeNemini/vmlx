@@ -461,6 +461,15 @@ def test_bundle_python_preserves_release_gate_evidence_directory():
     assert "tracked release-gate evidence" in bundler
 
 
+def test_bundle_python_rejects_dirty_vmlx_package_source_by_default():
+    bundler = Path("panel/scripts/bundle-python.sh").read_text()
+
+    assert "check_local_vmlx_source_clean" in bundler
+    assert "VMLX_ALLOW_DIRTY_SOURCE" in bundler
+    assert "vMLX package source is dirty" in bundler
+    assert "panel/scripts panel/src" in bundler
+
+
 def test_release_gate_uses_anthropic_native_thinking_disable():
     gate_module = _load_gate_module()
 
@@ -595,6 +604,7 @@ def test_packaged_bundled_hash_gate_covers_runtime_files_changed_for_release():
         "omni_multimodal.py",
         "paged_cache.py",
         "prefix_cache.py",
+        "runtime_patches/gemma4_vision.py",
         "runtime_patches/gemma4_processing.py",
         "scheduler.py",
         "patches/mlx_vlm_mtp/qwen35_vl.py",

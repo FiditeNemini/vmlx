@@ -16,8 +16,38 @@ JANG_LOCAL="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/ja
 JANG_MIN_VERSION="2.5.33"
 JANG_SOURCE_COMMIT=""
 JANG_SOURCE_VERSION=""
+VMLX_SOURCE_COMMIT=""
 
 echo "==> Bundling Python $PYTHON_VERSION for standalone vMLX distribution"
+
+check_local_vmlx_source_clean() {
+  if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "ERROR: RELEASE BLOCKED — vMLX source is not a Git checkout: $REPO_DIR" >&2
+    exit 1
+  fi
+  if [ "${VMLX_ALLOW_DIRTY_SOURCE:-${VMLINUX_ALLOW_DIRTY_SOURCE:-0}}" = "1" ]; then
+    echo "    WARNING: VMLX_ALLOW_DIRTY_SOURCE=1 — bundling dirty vMLX source" >&2
+  else
+    local package_status
+    package_status="$(
+      git -C "$REPO_DIR" status --porcelain --untracked-files=all -- \
+        pyproject.toml uv.lock vmlx_engine \
+        panel/package.json panel/package-lock.json panel/scripts panel/src
+    )"
+    if [ -n "$package_status" ]; then
+      echo "ERROR: RELEASE BLOCKED — vMLX package source is dirty: $REPO_DIR" >&2
+      echo "       Release provenance cannot identify uncommitted runtime or packaging code." >&2
+      echo "       Package-scope status:" >&2
+      printf '%s\n' "$package_status" >&2
+      echo >&2
+      echo "       Commit/stash/drop those changes, or set VMLX_ALLOW_DIRTY_SOURCE=1" >&2
+      echo "       only for local smoke builds." >&2
+      exit 1
+    fi
+  fi
+  VMLX_SOURCE_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
+  echo "    vMLX source commit: $VMLX_SOURCE_COMMIT"
+}
 
 check_local_jang_source_clean() {
   if [ ! -f "$JANG_LOCAL/pyproject.toml" ]; then
@@ -68,7 +98,6 @@ check_local_jang_source_clean() {
 
 write_bundle_provenance() {
   local installed_jang_version
-  local vmlx_source_commit
   installed_jang_version="$(
     "$PYTHON" -c 'from importlib.metadata import version; print(version("jang"))'
   )"
@@ -88,9 +117,8 @@ if installed < minimum:
         f"RELEASE BLOCKED — bundled JANG {installed} is below required {minimum}"
     )
 PY
-  vmlx_source_commit="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo UNKNOWN)"
   BUNDLE_PROVENANCE_PATH="$BUNDLE_DIR/vmlx-bundle-provenance.json" \
-  BUNDLE_VMLX_COMMIT="$vmlx_source_commit" \
+  BUNDLE_VMLX_COMMIT="$VMLX_SOURCE_COMMIT" \
   BUNDLE_VMLX_VERSION="$("$PYTHON" -c 'import vmlx_engine; print(vmlx_engine.__version__)')" \
   BUNDLE_JANG_COMMIT="${JANG_SOURCE_COMMIT:-UNVERSIONED}" \
   BUNDLE_JANG_VERSION="$installed_jang_version" \
@@ -120,6 +148,7 @@ PY
   echo "    wrote bundle provenance: $BUNDLE_DIR/vmlx-bundle-provenance.json"
 }
 
+check_local_vmlx_source_clean
 check_local_jang_source_clean
 
 # Clean previous build
@@ -508,10 +537,21 @@ try:
         print('  Patched: gemma4 vision pixel_values list coercion')
     elif 'mlxstudio#88' in content and 'isinstance(v, mx.array)' in content:
         print('  Already patched: gemma4 vision pixel_values list coercion')
+    elif all(
+        needle in content
+        for needle in (
+            'if isinstance(pixel_values, list):',
+            'if not isinstance(img, mx.array):',
+            'img = mx.array(img)',
+        )
+    ):
+        print('  Native support: gemma4 vision handles mixed and different-sized image lists')
     else:
-        print('  WARNING: gemma4 vision patch target not found')
+        raise SystemExit(
+            '  ERROR: gemma4 vision mixed-list support is neither patchable nor native'
+        )
 except FileNotFoundError:
-    print('  Skipped: gemma4 vision.py not found')
+    raise SystemExit('  ERROR: gemma4 vision.py not found')
 "
 
 # --- Patch: mlx_lm MLA fp32 SDPA absorb (DeepSeek V3 / V3.2 / Mistral 4) ---

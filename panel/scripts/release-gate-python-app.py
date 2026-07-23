@@ -463,6 +463,7 @@ BUNDLED_SOURCE_HASH_PATHS = (
     "omni_multimodal.py",
     "paged_cache.py",
     "prefix_cache.py",
+    "runtime_patches/gemma4_vision.py",
     "runtime_patches/gemma4_processing.py",
     "scheduler.py",
     "patches/mlx_vlm_mtp/qwen35_vl.py",

@@ -128,6 +128,7 @@ HASH_GATED_ENGINE_FILES=(
   "omni_multimodal.py"
   "paged_cache.py"
   "prefix_cache.py"
+  "runtime_patches/gemma4_vision.py"
   "runtime_patches/gemma4_processing.py"
   "sampling.py"
   "scheduler.py"
@@ -432,18 +433,32 @@ except Exception as e:
     print(f"  FAIL Gemma 4 assistant alias check: {type(e).__name__}: {e}")
     sys.exit(1)
 
-# mlxstudio#88: Gemma 4 vision `pixel_values` list coercion patch must be
-# baked into bundled mlx_vlm. If this fails, the Gemma 4 VLM crashes on
-# multi-image requests with `TypeError: concatenate(): incompatible function
-# arguments` because upstream only handles all-mx.array lists.
+# mlxstudio#88: bundled Gemma 4 vision must either carry the compatibility
+# wrapper or mlx-vlm's newer native mixed/different-sized-image list path.
 try:
     import inspect
     import mlx_vlm.models.gemma4.vision as _g4v
     _src = inspect.getsource(_g4v.VisionModel.__call__)
-    if "mlxstudio#88" in _src and "isinstance(v, mx.array)" in _src:
-        print("  ok   Gemma 4 vision pixel_values list coercion in bundled mlx_vlm")
+    _compat = "mlxstudio#88" in _src and "isinstance(v, mx.array)" in _src
+    _native = all(
+        needle in _src
+        for needle in (
+            "if isinstance(pixel_values, list):",
+            "if not isinstance(img, mx.array):",
+            "img = mx.array(img)",
+        )
+    )
+    if _compat or _native:
+        implementation = "compatibility wrapper" if _compat else "native mlx-vlm"
+        print(
+            "  ok   Gemma 4 vision mixed/different-sized image lists "
+            f"({implementation})"
+        )
     else:
-        print("  FAIL Gemma 4 vision pixel_values coercion patch missing from bundled mlx_vlm/models/gemma4/vision.py")
+        print(
+            "  FAIL Gemma 4 vision mixed-list support missing from bundled "
+            "mlx_vlm/models/gemma4/vision.py"
+        )
         print("       re-run bundle-python.sh (mlxstudio#88)")
         sys.exit(1)
 except Exception as e:

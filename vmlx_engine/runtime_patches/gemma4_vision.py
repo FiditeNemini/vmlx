@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Runtime guard for Gemma 4 VLM pixel-value list inputs.
 
-The release bundle patches ``mlx_vlm.models.gemma4.vision`` in place before
-signing. PyPI/source users still import upstream ``mlx_vlm`` directly, so this
-module installs a lazy import hook and normalizes mixed numpy/MLX pixel lists
-before upstream Gemma 4 vision code concatenates them.
+Older ``mlx-vlm`` releases concatenate a mixed numpy/MLX list directly. Newer
+releases process each image independently and already coerce every item. Keep
+the compatibility wrapper for the older implementation, but never replace the
+new native different-sized-image path with the legacy concatenate behavior.
 """
 
 from __future__ import annotations
@@ -18,6 +18,17 @@ _TARGET = "mlx_vlm.models.gemma4.vision"
 _PATCH_MARKER = "_vmlx_gemma4_pixel_values_patch"
 
 
+def _has_native_mixed_list_support(source: str) -> bool:
+    return all(
+        needle in source
+        for needle in (
+            "if isinstance(pixel_values, list):",
+            "if not isinstance(img, mx.array):",
+            "img = mx.array(img)",
+        )
+    )
+
+
 def _patch_module(module: Any) -> None:
     vision_model = getattr(module, "VisionModel", None)
     if vision_model is None:
@@ -29,7 +40,10 @@ def _patch_module(module: Any) -> None:
         import inspect
 
         src = inspect.getsource(original)
-        if "mlxstudio#88" in src and "isinstance(v, mx.array)" in src:
+        if (
+            "mlxstudio#88" in src
+            and "isinstance(v, mx.array)" in src
+        ) or _has_native_mixed_list_support(src):
             setattr(original, _PATCH_MARKER, True)
             return
     except Exception:

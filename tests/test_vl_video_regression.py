@@ -828,9 +828,9 @@ class TestIssueGuards:
         without coercing per-item; MLX 0.31+ rejects non-mx.array items
         and multi-image prompts produce exactly that mixed list.
 
-        Patch applied at build time via `panel/scripts/bundle-python.sh`
-        (idempotent marker: `mlxstudio#88`). Verify the marker is in the
-        bundled mlx_vlm source AND the per-item coercion actually works.
+        Older mlx-vlm releases need the `mlxstudio#88` compatibility wrapper.
+        Newer releases handle different-sized image lists natively. Verify one
+        of those implementations is active and per-item coercion works.
         """
         import inspect
         import mlx.core as mx
@@ -838,14 +838,19 @@ class TestIssueGuards:
         from mlx_vlm.models.gemma4 import vision as _g4v
 
         src = inspect.getsource(_g4v.VisionModel.__call__)
-        assert "mlxstudio#88" in src, (
-            "mlxstudio#88 patch missing from bundled mlx_vlm/models/gemma4/"
-            "vision.py — Gemma 4 multi-image prompts will crash on concat. "
-            "Re-run panel/scripts/bundle-python.sh."
+        compat = "mlxstudio#88" in src and "isinstance(v, mx.array)" in src
+        native = all(
+            needle in src
+            for needle in (
+                "if isinstance(pixel_values, list):",
+                "if not isinstance(img, mx.array):",
+                "img = mx.array(img)",
+            )
         )
-        assert "isinstance(v, mx.array)" in src, (
-            "mlxstudio#88 per-item coercion missing; list handling reverted "
-            "to the broken all-mx.array-required form."
+        assert compat or native, (
+            "Gemma 4 mixed-list support missing from mlx_vlm/models/gemma4/"
+            "vision.py — multi-image prompts may crash or lose per-image "
+            "shape handling."
         )
 
         # Exercise the patched pattern end-to-end on a mixed list — this

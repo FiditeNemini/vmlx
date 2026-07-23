@@ -98,6 +98,19 @@ function normalizeBareLatexCommands(markdown: string): string {
     .replace(/\\right\b/g, '')
 }
 
+function escapeBareArithmeticAsterisks(markdown: string): string {
+  // CommonMark may pair multiplication operators from separate expressions as
+  // emphasis delimiters. A model list such as `37*28=...\n37*29=...` then
+  // renders as `3728=...3729=...`, even though the API/SQLite bytes are intact.
+  // Escape only operator runs directly between operands. Normal prose emphasis
+  // (`*important*`) and code spans/fences remain untouched.
+  return markdown.replace(
+    /([\p{L}\p{N})\]])(\*{1,2})(?=[\p{L}\p{N}(\[])/gu,
+    (_match, left: string, operator: string) =>
+      `${left}${operator.replace(/\*/g, '\\*')}`,
+  )
+}
+
 /**
  * Readable, allocation-light math view for the actively streaming reasoning
  * rail. The completed rail is rendered with KaTeX; this path only prevents
@@ -129,7 +142,7 @@ function transformMath(markdown: string): string {
     })
 
   out = normalizeBareLatexCommands(out)
-  return out
+  return escapeBareArithmeticAsterisks(out)
 }
 
 export function prepareMarkdownWithMath(markdown: string): string {

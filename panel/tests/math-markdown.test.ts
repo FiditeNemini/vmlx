@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { marked } from 'marked'
 import {
   prepareMarkdownWithMath,
   prepareStreamingPlainTextMath,
@@ -77,6 +78,27 @@ describe('prepareMarkdownWithMath', () => {
     expect(rendered).toContain('class="katex"')
     expect(rendered).not.toContain('<em>')
     expect(rendered).not.toContain('*')
+  })
+
+  it('preserves bare arithmetic asterisks across repeated model calculations', () => {
+    const prepared = prepareMarkdownWithMath(
+      '37*28=1036 (sum 10)\n37*29=1073 (sum 11)\n37*30=1110 (sum 3)',
+    )
+    const rendered = marked.parse(prepared) as string
+
+    expect(rendered).toContain('37*28=1036')
+    expect(rendered).toContain('37*29=1073')
+    expect(rendered).toContain('37*30=1110')
+    expect(rendered).not.toContain('<em>')
+    expect(rendered).not.toContain('<strong>')
+  })
+
+  it('keeps ordinary Markdown emphasis while escaping only arithmetic operators', () => {
+    const prepared = prepareMarkdownWithMath('This is *important*, and x*y stays multiplication.')
+    const rendered = marked.parse(prepared) as string
+
+    expect(rendered).toContain('<em>important</em>')
+    expect(rendered).toContain('x*y stays multiplication')
   })
 
   it('preserves raw TeX inside inline code and fenced code', () => {

@@ -1399,6 +1399,16 @@ describe('Tool Integration', () => {
         expect(getFlagValue(out, '--reasoning-parser')).toBe('qwen3')
     })
 
+    it('canonicalizes Poolside/Laguna vendor parser to the exact backend alias', () => {
+        expect(canonicalizeReasoningParserForCli('poolside_v1')).toBe('deepseek_r1')
+        const out = preview(
+            { reasoningParser: 'auto' },
+            { family: 'laguna', reasoningParser: 'poolside_v1' },
+        )
+        expect(getFlagValue(out, '--reasoning-parser')).toBe('deepseek_r1')
+        expect(out.args).not.toContain('--reasoning-parser think_xml')
+    })
+
     it('manual reasoning parser when no detected', () => {
         const out = preview({ reasoningParser: 'deepseek_r1' })
         expect(getFlagValue(out, '--reasoning-parser')).toBe('deepseek_r1')

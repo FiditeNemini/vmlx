@@ -865,6 +865,7 @@ def test_poolside_v1_reasoning_alias_matches_laguna_think_dialect():
     from vmlx_engine.reasoning import get_parser, list_parsers
 
     assert "poolside_v1" in list_parsers()
+    assert get_parser("poolside_v1") is get_parser("deepseek_r1")
     parser = get_parser("poolside_v1")()
     parser.reset_state(think_in_prompt=True)
 

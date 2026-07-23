@@ -17,6 +17,7 @@ def _run_streaming_ollama_chat(
     model_type: str,
     body: dict,
     reasoning_parser=None,
+    preserve_native_tool_format: bool = False,
 ) -> dict:
     import vmlx_engine.server as server
 
@@ -62,7 +63,7 @@ def _run_streaming_ollama_chat(
     fake_engine = SimpleNamespace(
         is_mllm=False,
         tokenizer=SimpleNamespace(has_thinking=False),
-        preserve_native_tool_format=False,
+        preserve_native_tool_format=preserve_native_tool_format,
     )
     monkeypatch.setattr(server, "_engine", fake_engine)
     monkeypatch.setattr(server, "_model_path", None)
@@ -210,3 +211,61 @@ def test_ollama_streaming_think_false_strips_historical_private_reasoning(
         {"role": "user", "content": "second"},
     ]
     assert "PRIVATE-PLAN" not in repr(captured["messages"])
+
+
+@pytest.mark.parametrize("preserve_native_tool_format", [True, False])
+def test_ollama_streaming_respects_engine_native_tool_history_format(
+    monkeypatch,
+    preserve_native_tool_format,
+):
+    captured = _run_streaming_ollama_chat(
+        monkeypatch,
+        family_name="hunyuan_v1" if preserve_native_tool_format else "qwen3",
+        model_type="hy_v3" if preserve_native_tool_format else "qwen3",
+        preserve_native_tool_format=preserve_native_tool_format,
+        body={
+            "model": "tool-history-test",
+            "messages": [
+                {"role": "user", "content": "inspect the package"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "file_info",
+                                "arguments": {"path": "panel/package.json"},
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "Size: 5.2 KB",
+                },
+                {"role": "user", "content": "now run pwd"},
+            ],
+            "stream": True,
+        },
+    )
+
+    messages = captured["messages"]
+    if preserve_native_tool_format:
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["tool_calls"][0]["function"] == {
+            "name": "file_info",
+            "arguments": {"path": "panel/package.json"},
+        }
+        assert messages[2] == {
+            "role": "tool",
+            "content": "Size: 5.2 KB",
+            "tool_call_id": "",
+        }
+    else:
+        assert messages[1]["role"] == "assistant"
+        assert "tool_calls" not in messages[1]
+        assert "[Calling tool: file_info(" in messages[1]["content"]
+        assert messages[2]["role"] == "user"
+        assert "[Tool Result ()]" in messages[2]["content"]
+        assert "Size: 5.2 KB" in messages[2]["content"]

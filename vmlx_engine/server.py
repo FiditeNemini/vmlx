@@ -12066,7 +12066,10 @@ async def ollama_chat(fastapi_request: Request):
     else:
         from .api.utils import extract_multimodal_content
 
-        messages, _, _ = extract_multimodal_content(chat_req.messages)
+        messages, _, _ = extract_multimodal_content(
+            chat_req.messages,
+            preserve_native_format=engine.preserve_native_tool_format,
+        )
 
     # Ollama translates historical message.thinking into reasoning_content.
     # Explicit Off must remove that private rail before prompt rendering, just

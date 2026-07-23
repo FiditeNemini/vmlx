@@ -14,6 +14,7 @@ from vmlx_engine.tool_parsers import (
     FunctionaryToolParser,
     GraniteToolParser,
     HermesToolParser,
+    HunyuanToolParser,
     KimiToolParser,
     LlamaToolParser,
     MistralToolParser,
@@ -36,6 +37,7 @@ class TestNativeToolFormatCapability:
             GraniteToolParser,
             FunctionaryToolParser,
             KimiToolParser,
+            HunyuanToolParser,
         ]
         for parser_cls in native_parsers:
             assert (
@@ -65,7 +67,15 @@ class TestNativeToolFormatCapability:
     def test_via_manager(self):
         """Test native format detection via ToolParserManager."""
         # Native support
-        for name in ["mistral", "llama", "deepseek", "granite", "functionary", "kimi"]:
+        for name in [
+            "mistral",
+            "llama",
+            "deepseek",
+            "granite",
+            "functionary",
+            "kimi",
+            "hunyuan",
+        ]:
             parser_cls = ToolParserManager.get_tool_parser(name)
             assert (
                 parser_cls.supports_native_format() is True

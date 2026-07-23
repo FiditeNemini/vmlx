@@ -308,7 +308,7 @@ def validate_campaign_boundary(failures: list[str]) -> dict[str, Any]:
     ]:
         require(marker in campaign, failures, f"campaign boundary missing marker: {marker}")
     for marker in [
-        "DEV UI+API+PANEL PASS / BUNDLE+SIGNED APP OPEN",
+        "DEV UI+API PASS / PREPACKAGE BUNDLE+SUITES PASS / SIGNED APP OPEN",
         "Remaining release gates",
         "Retained broader family/media/cache/stress rows remain follow-up work",
     ]:

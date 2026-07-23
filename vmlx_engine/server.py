@@ -22054,6 +22054,17 @@ async def stream_responses_api(
                                 prompt_tokens + completion_tokens + _ans_ct
                             ),
                         }
+                        # The answer pass is a continuation of the same
+                        # Responses request. Preserve the first pass's cache
+                        # accounting instead of making the last incremental
+                        # usage event appear to have lost its L1/L2 hit.
+                        if _cached > 0 or _cache_detail:
+                            _answer_input_details = {"cached_tokens": _cached}
+                            if _cache_detail:
+                                _answer_input_details["cache_detail"] = _cache_detail
+                            _answer_usage["input_tokens_details"] = (
+                                _answer_input_details
+                            )
                         yield _sse(
                             "response.usage",
                             {

@@ -451,14 +451,20 @@ class TestRotatingKVCachePreservation:
 
     def test_block_slice_extracts_rotating_params_from_meta(self):
         """_extract_block_tensor_slice should read max_size/keep from meta_state."""
-        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+        from vmlx_engine.prefix_cache import (
+            BlockAwarePrefixCache,
+            _positional_layer_slice_bounds,
+        )
         import inspect
 
         source = inspect.getsource(BlockAwarePrefixCache._extract_block_tensor_slice)
+        bounds_source = inspect.getsource(_positional_layer_slice_bounds)
         # Should parse meta_state for RotatingKVCache params
         assert "meta_state" in source
-        # The meta tuple format is (keep, max_size, ...)
-        assert "int(meta[" in source
+        # Absolute rotating offsets are now parsed in the shared bounds helper
+        # used by both MLX and NumPy block extraction paths.
+        assert "_positional_layer_slice_bounds" in source
+        assert "int(meta[2])" in bounds_source
 
 
 class TestVLMPrefixCacheImageGuard:

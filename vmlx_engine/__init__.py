@@ -136,7 +136,13 @@ def _install_mlx_vlm_registry_patches() -> None:
         _mapping = getattr(_mlx_vlm_utils, "MODEL_REMAPPING", None)
         if _mapping is not None:
             _mapping.setdefault("kimi_k25", "kimi_vl")
-            _mapping.setdefault("minicpmv4_6", "minicpmo")
+            # mlx-vlm 0.3.12 added its own MiniCPM-V-4.6 entry, but the model
+            # implementation still resolves through the MiniCPM-o runtime.
+            # Keep the remap and prompt-message format atomic: retaining the
+            # upstream IMAGE_TOKEN_WRAPPED format while remapping the runtime
+            # to minicpmo gives the selected implementation the wrong prompt
+            # contract.
+            _mapping["minicpmv4_6"] = "minicpmo"
     except Exception:
         pass
     try:
@@ -179,7 +185,7 @@ def _install_mlx_vlm_registry_patches() -> None:
             _KV_MODEL_CONFIG["gemma4_unified_assistant"] = _KV_MODEL_CONFIG["gemma4"]
         if "kimi_k25" not in _KV_MODEL_CONFIG and "kimi_vl" in _KV_MODEL_CONFIG:
             _KV_MODEL_CONFIG["kimi_k25"] = _KV_MODEL_CONFIG["kimi_vl"]
-        if "minicpmv4_6" not in _KV_MODEL_CONFIG and "minicpmo" in _KV_MODEL_CONFIG:
+        if "minicpmo" in _KV_MODEL_CONFIG:
             _KV_MODEL_CONFIG["minicpmv4_6"] = _KV_MODEL_CONFIG["minicpmo"]
     except Exception:
         pass
@@ -192,7 +198,7 @@ def _patch_loaded_mlx_vlm_registry_module(module_name: str, module) -> None:
             _mapping = getattr(module, "MODEL_REMAPPING", None)
             if _mapping is not None:
                 _mapping.setdefault("kimi_k25", "kimi_vl")
-                _mapping.setdefault("minicpmv4_6", "minicpmo")
+                _mapping["minicpmv4_6"] = "minicpmo"
         elif module_name == "mlx_vlm.prompt_utils":
             _model_config = getattr(module, "MODEL_CONFIG", None)
             _message_format = getattr(module, "MessageFormat", None)
@@ -210,7 +216,7 @@ def _patch_loaded_mlx_vlm_registry_module(module_name: str, module) -> None:
                     _model_config["gemma4_unified_assistant"] = _model_config["gemma4"]
                 if "kimi_k25" not in _model_config and "kimi_vl" in _model_config:
                     _model_config["kimi_k25"] = _model_config["kimi_vl"]
-                if "minicpmv4_6" not in _model_config and "minicpmo" in _model_config:
+                if "minicpmo" in _model_config:
                     _model_config["minicpmv4_6"] = _model_config["minicpmo"]
     except Exception:
         pass

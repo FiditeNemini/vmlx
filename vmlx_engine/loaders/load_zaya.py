@@ -15,6 +15,33 @@ from ..utils.quant_shape_inference import infer_quant_overrides_for_bundle
 logger = logging.getLogger(__name__)
 
 
+def _zaya_tokenizer_config(config: dict):
+    """Build a Transformers config without mutating the model bundle.
+
+    Older ZAYA bundles use ``rope_scaling: false`` to mean "no RoPE
+    scaling". Transformers 5 models that field as ``dict | None`` and rejects
+    the legacy boolean before AutoTokenizer can load. Normalize only that
+    semantically equivalent legacy value in memory and pass the resulting
+    config directly to AutoTokenizer through mlx-lm.
+    """
+
+    normalized = dict(config)
+    changed = False
+    for key in ("rope_scaling", "rope_parameters"):
+        if normalized.get(key) is False:
+            normalized[key] = None
+            changed = True
+    if not changed:
+        return None
+
+    from transformers.models.zaya.configuration_zaya import ZayaConfig
+
+    logger.info(
+        "ZAYA tokenizer compatibility: normalized legacy false RoPE config to None"
+    )
+    return ZayaConfig(**normalized)
+
+
 def load_zaya_model(model_path: str | Path, *, lazy: bool = False):
     """Load a ZAYA BF16/MXFP4/affine bundle with the local CCA runtime.
 
@@ -36,7 +63,14 @@ def load_zaya_model(model_path: str | Path, *, lazy: bool = False):
         lazy=lazy,
         strict=True,
     )
-    tokenizer = load_tokenizer(path, eos_token_ids=loaded_cfg.get("eos_token_id"))
+    tokenizer_config = _zaya_tokenizer_config(cfg)
+    tokenizer = load_tokenizer(
+        path,
+        tokenizer_config_extra=(
+            {"config": tokenizer_config} if tokenizer_config is not None else None
+        ),
+        eos_token_ids=loaded_cfg.get("eos_token_id"),
+    )
     if not hasattr(model, "config"):
         model.config = loaded_cfg
     if not lazy:

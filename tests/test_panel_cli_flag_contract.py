@@ -390,11 +390,13 @@ def test_large_model_low_memory_preflight_blocks_before_engine_spawn() -> None:
     assert "throw new Error(memoryPreflight.message)" in sessions
 
     preflight_index = sessions.index("const memoryPreflight = classifyLargeModelMemoryPreflight")
-    kill_port_index = sessions.index("await this.killByPort(session.port)")
+    owned_port_index = sessions.index("await this.ensureOwnedSessionPortAvailable(session)")
     bundled_spawn_index = sessions.index("proc = spawn(engineResult.pythonPath")
     system_spawn_index = sessions.index("proc = spawn(engineResult.binaryPath")
-    assert preflight_index < kill_port_index < bundled_spawn_index
-    assert preflight_index < kill_port_index < system_spawn_index
+    assert preflight_index < owned_port_index < bundled_spawn_index
+    assert preflight_index < owned_port_index < system_spawn_index
+    assert "await this.killByPort(session.port)" not in sessions
+    assert "terminateDetectedEngineForSession(session)" in sessions
 
 
 def test_jang_loader_wired_limit_honors_sysctl_by_default() -> None:

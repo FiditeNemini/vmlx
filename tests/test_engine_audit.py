@@ -13249,11 +13249,15 @@ class TestTurboQuantKVTelemetry:
             assert "flag.includes('=')" in source
             assert "flag.slice(0, flag.indexOf('='))" in source
         assert "canonicalizeToolParserId" in sessions_source
+        parser_aliases_source = Path(
+            "./panel/src/shared/toolParserAliases.ts"
+        ).read_text()
         preview_parser_block = preview_source[
             preview_source.index("// Parser resolution"):
             preview_source.index("// Prefix cache", preview_source.index("// Parser resolution"))
         ]
-        assert "canonicalizeToolParserId" in preview_parser_block
+        assert "resolveEffectiveToolParser" in preview_parser_block
+        assert "canonicalizeToolParserId" in parser_aliases_source
 
         assert "server._default_repetition_penalty = 1.0" not in cli_source
         assert "_default_repetition_penalty = 1.0" not in server_source

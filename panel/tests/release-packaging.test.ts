@@ -61,4 +61,18 @@ describe('release packaging', () => {
     expect(source).toContain('NODE_MODULES_REAL=')
     expect(source).toContain('release node_modules resolves outside this checkout')
   })
+
+  it('uses one controlled Developer-ID owner after unsigned staging', () => {
+    const source = read('scripts/build-release-dmgs.sh')
+    const stage = source.indexOf(
+      'CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --dir',
+    )
+    const finalSign = source.indexOf(
+      'finalize_release_app_signature "$app_path" "$RELEASE_CODESIGN_IDENTITY"',
+    )
+
+    expect(stage).toBeGreaterThan(0)
+    expect(finalSign).toBeGreaterThan(stage)
+    expect(source).toContain('sole Developer-ID owner')
+  })
 })

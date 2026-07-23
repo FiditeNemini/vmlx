@@ -197,7 +197,12 @@ build_one() {
   ./scripts/verify-bundled-python.sh
   npx electron-vite build
   rm -rf "$staged_output"
-  npx electron-builder --mac --dir \
+  # Stage with ad-hoc normalized native files only. The controlled finalizer
+  # below is the sole Developer-ID owner for every bundled native file and the
+  # outer app. Letting electron-builder auto-discover the same identity here
+  # double-signs the 1.4 GB Python tree and can leave a partially sealed app if
+  # keychain access changes midway through its recursive signer.
+  CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --dir \
     --config.directories.output="$staged_output"
   app_path="$(find_staged_app "$staged_output")"
   finalize_release_app_signature "$app_path" "$RELEASE_CODESIGN_IDENTITY"

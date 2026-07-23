@@ -14329,17 +14329,23 @@ async def create_chat_completion(
             )
         except Exception:
             _ns_pre_family = None
-        if (
+        _ns_pre_cap_family = (
             _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
-        ) and (
-            not _ns_pre_tools_available
-            or _auto_thinking_partition_allowed(
+        )
+        _ns_explicit_budget_cap = bool(
+            _ns_pre_cap_family and _ns_pre_mtt is not None
+        )
+        _ns_auto_partition_allowed = bool(
+            _ns_pre_cap_family
+            and _ns_pre_mtt is None
+            and _auto_thinking_partition_allowed(
                 request,
                 _ns_pre_family,
                 tools_available=_ns_pre_tools_available,
             )
-        ):
+        )
+        if _ns_explicit_budget_cap or _ns_auto_partition_allowed:
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
             _ns_auto_partition = False
             if (
@@ -17293,17 +17299,23 @@ async def create_response(
             )
         except Exception:
             _ns_pre_family = None
-        if (
+        _ns_pre_cap_family = (
             _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
-        ) and (
-            not _ns_pre_tools_available
-            or _auto_thinking_partition_allowed(
+        )
+        _ns_explicit_budget_cap = bool(
+            _ns_pre_cap_family and _ns_pre_mtt is not None
+        )
+        _ns_auto_partition_allowed = bool(
+            _ns_pre_cap_family
+            and _ns_pre_mtt is None
+            and _auto_thinking_partition_allowed(
                 request,
                 _ns_pre_family,
                 tools_available=_ns_pre_tools_available,
             )
-        ):
+        )
+        if _ns_explicit_budget_cap or _ns_auto_partition_allowed:
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
             _ns_auto_partition = False
             if (
@@ -18764,13 +18776,20 @@ async def stream_chat_completion(
             _requested_thinking_budget = getattr(
                 request, "max_thinking_tokens", None
             )
-            _can_partition_reasoning_pass = _auto_thinking_partition_allowed(
-                request,
-                _family_name,
-                tools_available=_stream_tools_available,
-                post_tool_continuation=_post_tool_continuation,
+            _explicit_thinking_budget_cap = bool(
+                _requested_thinking_budget is not None
+                and _family_name in _THINKING_BUDGET_CAP_FAMILIES
             )
-            if _can_partition_reasoning_pass:
+            _can_synthesize_auto_partition = bool(
+                _requested_thinking_budget is None
+                and _auto_thinking_partition_allowed(
+                    request,
+                    _family_name,
+                    tools_available=_stream_tools_available,
+                    post_tool_continuation=_post_tool_continuation,
+                )
+            )
+            if _explicit_thinking_budget_cap or _can_synthesize_auto_partition:
                 if (
                     _requested_thinking_budget is None
                     and _family_name in _AUTO_THINKING_PARTITION_FAMILIES
@@ -20817,13 +20836,20 @@ async def stream_responses_api(
             _requested_thinking_budget = getattr(
                 request, "max_thinking_tokens", None
             )
-            _can_partition_reasoning_pass = _auto_thinking_partition_allowed(
-                request,
-                _family_name,
-                tools_available=_stream_tools_available,
-                post_tool_continuation=_post_tool_continuation,
+            _explicit_thinking_budget_cap = bool(
+                _requested_thinking_budget is not None
+                and _family_name in _THINKING_BUDGET_CAP_FAMILIES
             )
-            if _can_partition_reasoning_pass:
+            _can_synthesize_auto_partition = bool(
+                _requested_thinking_budget is None
+                and _auto_thinking_partition_allowed(
+                    request,
+                    _family_name,
+                    tools_available=_stream_tools_available,
+                    post_tool_continuation=_post_tool_continuation,
+                )
+            )
+            if _explicit_thinking_budget_cap or _can_synthesize_auto_partition:
                 if (
                     _requested_thinking_budget is None
                     and _family_name in _AUTO_THINKING_PARTITION_FAMILIES

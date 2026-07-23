@@ -79,7 +79,22 @@ def _generation_prompt_cache_extra_key(
     if prompt_with_generation.startswith(prompt_without_generation):
         suffix_text = prompt_with_generation[len(prompt_without_generation):]
     elif prompt_with_generation:
-        suffix_text = prompt_with_generation[-512:]
+        # Some templates replace their trailing user/EOS sentinel when
+        # ``add_generation_prompt`` is enabled instead of appending to the
+        # no-generation render.  In that shape, hashing the last N characters
+        # of the entire prompt mixes user content into this side key.  Two
+        # requests with an identical block-aligned prefix but different tails
+        # then receive different hashes for *every* cache block, defeating
+        # partial-prefix reuse in both paged RAM and block-disk-only modes.
+        #
+        # Keep only the text introduced after the two renders diverge.  The
+        # token suffix below remains the authoritative discriminator; this
+        # textual suffix preserves family markers that may share token IDs
+        # under wrapper tokenizers without incorporating conversation text.
+        common_prefix = os.path.commonprefix(
+            (prompt_with_generation, prompt_without_generation)
+        )
+        suffix_text = prompt_with_generation[len(common_prefix):]
 
     suffix_tokens: list[int] = []
     if tokens_with_generation is not None:

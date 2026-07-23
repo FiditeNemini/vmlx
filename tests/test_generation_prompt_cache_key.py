@@ -50,6 +50,43 @@ def test_generation_prompt_cache_key_is_stable_for_identical_suffix():
     assert first == second
 
 
+def test_generation_prompt_cache_key_ignores_user_tail_for_replacing_templates():
+    """A replacement-style generation prompt must not salt the whole prompt.
+
+    MiniMax M2.x thinking-off rendering is one real example: the engine adds
+    an empty think sentinel to both renders, while ``add_generation_prompt``
+    inserts the assistant marker before it.  The two strings are therefore not
+    literal prefix extensions even though the generation suffix is identical.
+    """
+
+    first = _generation_prompt_cache_extra_key(
+        prompt_with_generation=(
+            "<user>shared prefix tail A</user>"
+            "<assistant><think></think>"
+        ),
+        prompt_without_generation=(
+            "<user>shared prefix tail A</user><think></think>"
+        ),
+        gen_prompt_len=3,
+        tokens_with_generation=[10, 11, 20, 30, 31, 32],
+        tokens_without_generation=[10, 11, 20],
+    )
+    second = _generation_prompt_cache_extra_key(
+        prompt_with_generation=(
+            "<user>shared prefix tail B differs</user>"
+            "<assistant><think></think>"
+        ),
+        prompt_without_generation=(
+            "<user>shared prefix tail B differs</user><think></think>"
+        ),
+        gen_prompt_len=3,
+        tokens_with_generation=[40, 41, 42, 30, 31, 32],
+        tokens_without_generation=[40, 41, 42],
+    )
+
+    assert first == second
+
+
 def test_generation_prompt_cache_key_skips_when_nothing_was_stripped():
     assert (
         _generation_prompt_cache_extra_key(

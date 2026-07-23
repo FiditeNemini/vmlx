@@ -1075,7 +1075,7 @@ def _rotating_previous_block_window(
     block_size: int,
     concatenate=None,
 ):
-    """Derive the immediately preceding rotating-KV resume checkpoint.
+    """Derive a bounded changed-tail rotating-KV resume checkpoint.
 
     mlx-lm's multi-token ``RotatingKVCache._update_concat`` retains
     ``max_size + S - 1`` entries: the previous temporal window minus the one
@@ -1089,9 +1089,21 @@ def _rotating_previous_block_window(
     unobservable on resume because the mandatory first uncached token replaces
     its ring slot before attention.  In that single case we duplicate the
     oldest available entry into the disposable slot; any larger history gap is
-    rejected.  Only the immediately preceding block boundary is eligible, so
-    this adds one bounded rotating snapshot rather than duplicating a window in
-    every page.
+    rejected.
+
+    Keep the checkpoint fan-out deliberately bounded to the two block
+    boundaries before the terminal record.  A final partial block can make the
+    longest shared prefix end *two* boundaries behind the final offset (for
+    example, offset 1026 with 64-token blocks and a changed 961..1024 block
+    matches through token 960).  The old one-block limit therefore stored an
+    exact 1024 checkpoint but left 960 as ``rotating_kv_pending``.  Allowing two
+    boundaries covers that common changed-tail shape while adding at most one
+    more rotating window per stored prompt; older boundaries remain clean
+    misses rather than multiplying a max-size SWA window into every page.
+
+    The distance bound is only an allocation bound.  The retained-history
+    checks below remain authoritative and reject a checkpoint unless the live
+    mlx-lm concat overhang can reproduce the target temporal window exactly.
     """
     if not isinstance(meta_state, (tuple, list)) or len(meta_state) < 4:
         raise ValueError("RotatingKVCache resume snapshot is missing meta_state")
@@ -1106,10 +1118,17 @@ def _rotating_previous_block_window(
             f"invalid RotatingKVCache window metadata keep={keep} max_size={max_size}"
         )
     distance = offset - target_offset
-    if target_offset <= 0 or distance <= 0 or block_size <= 0 or distance > block_size:
+    max_checkpoint_distance = 2 * block_size
+    if (
+        target_offset <= 0
+        or distance <= 0
+        or block_size <= 0
+        or distance > max_checkpoint_distance
+    ):
         raise ValueError(
-            "RotatingKVCache resume boundary is not the preceding block: "
-            f"target={target_offset} offset={offset} block_size={block_size}"
+            "RotatingKVCache resume boundary is outside the bounded tail: "
+            f"target={target_offset} offset={offset} block_size={block_size} "
+            f"max_distance={max_checkpoint_distance}"
         )
 
     ndim = len(keys.shape)

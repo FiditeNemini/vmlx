@@ -1174,6 +1174,108 @@ class TestBlockAwarePrefixCache:
         finally:
             restarted_store.shutdown()
 
+    @pytest.mark.parametrize("keep", [0, 4])
+    def test_rotating_cache_changed_full_tail_reuses_second_checkpoint(
+        self,
+        keep,
+    ):
+        """A terminal partial must not hide the preceding shared full block.
+
+        This reproduces the live Laguna boundary exactly: a 1,026-token stored
+        prompt ended in a two-token partial block, while a changed full block
+        matched only through token 960.  The final offset was therefore 66
+        tokens beyond the 960 boundary -- just outside the former one-block
+        checkpoint limit even though the exact rotating window was retained.
+        """
+        mx = pytest.importorskip("mlx.core")
+
+        from mlx_lm.models.cache import RotatingKVCache
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        def append(cache, positions):
+            keys = mx.array(positions, dtype=mx.float32).reshape(1, 1, -1, 1)
+            values = keys + 1000
+            fetched = cache.update_and_fetch(keys, values)
+            mx.eval(*fetched)
+            return fetched
+
+        live = RotatingKVCache(max_size=512, keep=keep)
+        append(live, list(range(1026)))
+        tokens = list(range(1026))
+        state = [{
+            "class_name": "RotatingKVCache",
+            "state": live.state,
+            "meta_state": live.meta_state,
+        }]
+        manager = PagedCacheManager(block_size=64, max_blocks=32)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        table = cache.store_cache("writer", tokens, state)
+        assert table is not None
+
+        entries = [
+            manager.allocated_blocks[block_id].cache_data[0]
+            for block_id in table.block_ids
+        ]
+        assert all(entry[0] == "rotating_kv_pending" for entry in entries[:-3])
+        assert [entry[0] for entry in entries[-3:]] == [
+            "rotating_kv",
+            "rotating_kv",
+            "rotating_kv",
+        ]
+        assert entries[-3][3:] == (512, keep, 960, 512)
+
+        changed_tail = list(range(10_000, 10_066))
+        changed_tokens = list(range(960)) + changed_tail
+        hit, remaining = cache.fetch_cache("changed", changed_tokens)
+        assert hit is not None
+        assert hit.num_tokens == 960
+        assert remaining == changed_tail
+
+        restored = cache.reconstruct_cache(hit)
+        assert restored is not None
+        assert type(restored[0]).__name__ == "RotatingKVCache"
+        assert restored[0].offset == 960
+        assert restored[0]._idx == 512
+        restored_fetch = append(restored[0], remaining)
+
+        cold = RotatingKVCache(max_size=512, keep=keep)
+        append(cold, list(range(960)))
+        cold_fetch = append(cold, remaining)
+        assert mx.array_equal(restored_fetch[0], cold_fetch[0]).item()
+        assert mx.array_equal(restored_fetch[1], cold_fetch[1]).item()
+
+    def test_rotating_checkpoint_fanout_stays_bounded_to_two_blocks(self):
+        """Do not duplicate a full rotating window into arbitrary old pages."""
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        tokens = list(range(18))
+        positions = mx.arange(18, dtype=mx.float32).reshape(1, 1, 18, 1)
+        state = [{
+            "class_name": "RotatingKVCache",
+            "state": (positions, positions + 1000),
+            "meta_state": (0, 16, 18, 18),
+        }]
+        manager = PagedCacheManager(block_size=4, max_blocks=8)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        table = cache.store_cache("writer", tokens, state)
+        assert table is not None
+
+        tags = [
+            manager.allocated_blocks[block_id].cache_data[0][0]
+            for block_id in table.block_ids
+        ]
+        assert tags == [
+            "rotating_kv_pending",
+            "rotating_kv_pending",
+            "rotating_kv",
+            "rotating_kv",
+            "rotating_kv",
+        ]
+
     def test_rotating_cache_extension_uses_new_terminal_not_old_snapshot(self):
         """A longer chain must not combine rotating state from two snapshots."""
         mx = pytest.importorskip("mlx.core")

@@ -1105,22 +1105,30 @@ export class ApiGateway extends EventEmitter {
   ): Promise<PreparedSession> {
     return this.withSingleModelTransition(async () => {
       const target = this.getResolvedSessionById(session.id) || session;
-      try {
-        // A stale/malformed target must fail before Single Model mode unloads
-        // the currently healthy engine. The session manager repeats this same
-        // shared validation at spawn time to cover filesystem races.
-        sessionManager.preflightSessionStart(target.id);
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        console.error(
-          `[gateway] target session ${target.id} failed preflight: ${error}`,
-        );
-        return {
-          status: "load_failed",
-          session: target,
-          code: "model_preflight_failed",
-          message: `Model '${target.modelName}' cannot be loaded: ${detail}`,
-        };
+      if (target.status !== "running") {
+        try {
+          // A stale/malformed target must fail before Single Model mode unloads
+          // the currently healthy engine. The session manager repeats this same
+          // shared validation at spawn time to cover filesystem races.
+          //
+          // Do not repeat this launch preflight for an already-running target.
+          // In development it resolves the project engine by importing
+          // vmlx_engine in a fresh Python process, which otherwise adds seconds
+          // of fixed latency to every gateway request even though no process is
+          // being launched. Single Model enforcement still runs below.
+          sessionManager.preflightSessionStart(target.id);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          console.error(
+            `[gateway] target session ${target.id} failed preflight: ${error}`,
+          );
+          return {
+            status: "load_failed",
+            session: target,
+            code: "model_preflight_failed",
+            message: `Model '${target.modelName}' cannot be loaded: ${detail}`,
+          };
+        }
       }
 
       const rollbackCandidate = this.getSingleModelRollbackCandidate(target.id);

@@ -440,6 +440,48 @@ describe("ApiGateway single-model mode behavior", () => {
     );
   });
 
+  it("does not repeat launch preflight for a running target but still enforces single-model mode", async () => {
+    dbMock.getSetting.mockImplementation((key: string) =>
+      key === "gateway_single_model_mode" ? "true" : undefined,
+    );
+    const target = {
+      id: "target",
+      modelPath: "/models/Target-JANG",
+      modelName: "target-model",
+      host: "127.0.0.1",
+      port: 9002,
+      status: "running",
+      type: "local",
+      config: "{}",
+    };
+    const other = {
+      id: "other",
+      modelPath: "/models/Other-JANG",
+      modelName: "other-model",
+      host: "127.0.0.1",
+      port: 9001,
+      status: "running",
+      type: "local",
+      config: "{}",
+    };
+    dbMock.getSessions.mockReturnValue([target, other]);
+    dbMock.getSession.mockImplementation((id: string) =>
+      id === target.id ? target : id === other.id ? other : undefined,
+    );
+
+    const { ApiGateway } = await import("../src/main/api-gateway");
+    const gateway = new ApiGateway();
+    const result = await (gateway as any).prepareSessionForRouting(target);
+
+    expect(result.status).toBe("ready");
+    expect(result.session.id).toBe(target.id);
+    expect(result.session.status).toBe("running");
+    expect(sessionManagerMock.preflightSessionStart).not.toHaveBeenCalled();
+    expect(sessionManagerMock.stopSession).toHaveBeenCalledTimes(1);
+    expect(sessionManagerMock.stopSession).toHaveBeenCalledWith(other.id);
+    expect(sessionManagerMock.startSession).not.toHaveBeenCalled();
+  });
+
   it("rejects an invalid target before unloading the healthy single model", async () => {
     dbMock.getSetting.mockImplementation((key: string) =>
       key === "gateway_single_model_mode" ? "true" : undefined,

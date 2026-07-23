@@ -2361,6 +2361,68 @@ def _resolve_repetition_penalty(
     return None
 
 
+def _model_effective_defaults_status(model_name: str = "") -> dict[str, Any]:
+    """Return bundle-owned and runtime-effective omitted-request defaults.
+
+    ``sampling_defaults`` is artifact metadata only. ``effective_defaults`` is
+    what a request that omits sampler/output fields will receive after explicit
+    server/session overrides and the bounded engine fallback are applied.
+    Keeping both views in one shared helper prevents /health and
+    /v1/capabilities from drifting while preserving the important distinction
+    between a displayed model default and a user-owned server override.
+    """
+    bundle_key = _model_path or model_name or _model_name or ""
+    sampling_defaults = {
+        key: _bundle_sampling_default(bundle_key, key)
+        for key in (
+            "temperature",
+            "top_p",
+            "top_k",
+            "min_p",
+            "max_new_tokens",
+            "repetition_penalty",
+            "repetition_penalty_chat",
+            "repetition_penalty_thinking",
+        )
+    }
+    sampling_defaults = {
+        key: value
+        for key, value in sampling_defaults.items()
+        if value is not None
+    }
+    for integer_key in ("top_k", "max_new_tokens"):
+        if integer_key in sampling_defaults:
+            sampling_defaults[integer_key] = int(sampling_defaults[integer_key])
+
+    effective_defaults: dict[str, Any] = {
+        "temperature": _resolve_temperature(None, bundle_key),
+        "top_p": _resolve_top_p(None, bundle_key),
+        "top_k": _resolve_top_k(None, bundle_key),
+        "min_p": _resolve_min_p(None, bundle_key),
+        "max_output_tokens": _resolve_max_tokens(None, bundle_key),
+    }
+    repetition_penalty = _resolve_repetition_penalty(
+        None,
+        bundle_key,
+        enable_thinking=None,
+    )
+    if repetition_penalty is not None:
+        effective_defaults["repetition_penalty"] = repetition_penalty
+    effective_defaults = {
+        key: value
+        for key, value in effective_defaults.items()
+        if value is not None
+    }
+
+    return {
+        "sampling_defaults": sampling_defaults,
+        "effective_defaults": effective_defaults,
+        "max_prompt_tokens": (
+            int(_max_prompt_tokens) if int(_max_prompt_tokens or 0) > 0 else None
+        ),
+    }
+
+
 def _set_resolved_repetition_penalty(
     target: dict,
     request_value: float | None,
@@ -9595,6 +9657,9 @@ async def health():
         result["quantization"] = _model_quantization_status(bundle_key)
         result["acceleration"] = _model_acceleration_status(bundle_key)
         result["mtp"] = _model_mtp_status_with_loaded_runtime(bundle_key)
+        generation_status = _model_effective_defaults_status(bundle_key)
+        result["sampling_defaults"] = generation_status["sampling_defaults"]
+        result["effective_defaults"] = generation_status["effective_defaults"]
         routing_status = _model_routing_status(bundle_key)
         if routing_status:
             result["routing"] = routing_status
@@ -10695,20 +10760,7 @@ async def model_capabilities(model_id: str) -> dict:
         reasoning_efforts = []
 
     bundle_path = _model_path or model_key
-    sampling_defaults = {
-        key: _bundle_sampling_default(bundle_path, key)
-        for key in (
-            "temperature",
-            "top_p",
-            "top_k",
-            "min_p",
-            "max_new_tokens",
-            "repetition_penalty",
-            "repetition_penalty_chat",
-            "repetition_penalty_thinking",
-        )
-    }
-    sampling_defaults = {k: v for k, v in sampling_defaults.items() if v is not None}
+    generation_status = _model_effective_defaults_status(bundle_path)
 
     scheduler = _get_scheduler()
     scheduler_config = getattr(scheduler, "config", None)
@@ -10790,7 +10842,9 @@ async def model_capabilities(model_id: str) -> dict:
         "acceleration": acceleration_status,
         "mtp": mtp_status,
         "routing": routing_status or None,
-        "sampling_defaults": sampling_defaults,
+        "sampling_defaults": generation_status["sampling_defaults"],
+        "effective_defaults": generation_status["effective_defaults"],
+        "max_prompt_tokens": generation_status["max_prompt_tokens"],
     }
 
 

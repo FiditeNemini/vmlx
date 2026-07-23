@@ -825,6 +825,159 @@ class TestBatchedEngineVideoTemplate:
 class TestServerSamplingResolution:
     """Tests for server-side sampling parameter resolution."""
 
+    def test_effective_defaults_status_keeps_bundle_and_runtime_separate(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        import vmlx_engine.server as server
+
+        (tmp_path / "generation_config.json").write_text(
+            json.dumps(
+                {
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": 99,
+                    "max_new_tokens": 8192,
+                }
+            )
+        )
+        (tmp_path / "jang_config.json").write_text(
+            json.dumps(
+                {
+                    "chat": {
+                        "sampling_defaults": {
+                            "temperature": 0.7,
+                            "top_p": 0.9,
+                            "top_k": 17,
+                            "min_p": 0.02,
+                            "max_new_tokens": 4096,
+                            "repetition_penalty": 1.05,
+                        }
+                    }
+                }
+            )
+        )
+
+        monkeypatch.setattr(server, "_model_path", str(tmp_path))
+        monkeypatch.setattr(server, "_model_name", "defaults-test")
+        monkeypatch.setattr(server, "_default_temperature", 0.2)
+        monkeypatch.setattr(server, "_default_top_p", None)
+        monkeypatch.setattr(server, "_default_top_k", None)
+        monkeypatch.setattr(server, "_default_min_p", None)
+        monkeypatch.setattr(server, "_default_repetition_penalty", None)
+        monkeypatch.setattr(server, "_default_max_tokens", 512)
+        monkeypatch.setattr(server, "_default_max_tokens_explicit", True)
+        monkeypatch.setattr(server, "_max_prompt_tokens", 12288)
+        monkeypatch.setattr(
+            server,
+            "_metal_projected_output_token_cap",
+            lambda _model_name="": None,
+        )
+        server._jang_sampling_defaults_cache.clear()
+        server._generation_defaults_cache.clear()
+
+        status = server._model_effective_defaults_status(str(tmp_path))
+
+        assert status["sampling_defaults"] == {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 17,
+            "min_p": 0.02,
+            "max_new_tokens": 4096,
+            "repetition_penalty": 1.05,
+        }
+        assert status["effective_defaults"] == {
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "top_k": 17,
+            "min_p": 0.02,
+            "max_output_tokens": 512,
+            "repetition_penalty": 1.05,
+        }
+        assert status["max_prompt_tokens"] == 12288
+
+    def test_health_and_capabilities_share_effective_defaults_status(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        import asyncio
+
+        import vmlx_engine.server as server
+
+        (tmp_path / "config.json").write_text(
+            json.dumps({"model_type": "qwen3"})
+        )
+        (tmp_path / "generation_config.json").write_text(
+            json.dumps({"temperature": 1.0, "top_p": 0.95, "top_k": 64})
+        )
+        (tmp_path / "jang_config.json").write_text(
+            json.dumps(
+                {
+                    "chat": {
+                        "sampling_defaults": {
+                            "temperature": 0.8,
+                            "top_p": 0.9,
+                            "top_k": 32,
+                            "max_new_tokens": 2048,
+                        }
+                    }
+                }
+            )
+        )
+
+        class _Engine:
+            is_mllm = False
+
+            def get_stats(self):
+                return {"engine_type": "batched"}
+
+        class _Scheduler:
+            config = SimpleNamespace(enable_prefix_cache=False)
+            block_aware_cache = None
+            paged_cache_manager = None
+            memory_aware_cache = None
+            prefix_cache = None
+
+            def get_stats(self):
+                return {}
+
+        monkeypatch.setattr(server, "_engine", _Engine())
+        monkeypatch.setattr(server, "_get_scheduler", lambda: _Scheduler())
+        monkeypatch.setattr(server, "_model_path", str(tmp_path))
+        monkeypatch.setattr(server, "_model_name", "defaults-test")
+        monkeypatch.setattr(server, "_model_type", "llm")
+        monkeypatch.setattr(server, "_standby_state", None)
+        monkeypatch.setattr(server, "_mcp_manager", None)
+        monkeypatch.setattr(server, "_model_load_error", None)
+        monkeypatch.setattr(server, "_jang_metadata", None)
+        monkeypatch.setattr(server, "_default_temperature", None)
+        monkeypatch.setattr(server, "_default_top_p", None)
+        monkeypatch.setattr(server, "_default_top_k", None)
+        monkeypatch.setattr(server, "_default_min_p", None)
+        monkeypatch.setattr(server, "_default_repetition_penalty", None)
+        monkeypatch.setattr(server, "_default_max_tokens", 512)
+        monkeypatch.setattr(server, "_default_max_tokens_explicit", True)
+        monkeypatch.setattr(server, "_max_prompt_tokens", 8192)
+        monkeypatch.setattr(
+            server,
+            "_metal_projected_output_token_cap",
+            lambda _model_name="": None,
+        )
+        server._jang_sampling_defaults_cache.clear()
+        server._generation_defaults_cache.clear()
+
+        health = asyncio.run(server.health())
+        capabilities = asyncio.run(server.model_capabilities("defaults-test"))
+
+        assert health["sampling_defaults"] == capabilities["sampling_defaults"]
+        assert health["effective_defaults"] == capabilities["effective_defaults"]
+        assert health["sampling_defaults"]["max_new_tokens"] == 2048
+        assert health["effective_defaults"]["max_output_tokens"] == 512
+        assert health["max_prompt_tokens"] == 8192
+        assert capabilities["max_prompt_tokens"] == 8192
+
     def test_family_fallback_prefers_loaded_model_path_over_served_alias(
         self, monkeypatch, tmp_path
     ):

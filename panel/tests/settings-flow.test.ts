@@ -1406,7 +1406,7 @@ describe('Tool Integration', () => {
             { family: 'laguna', reasoningParser: 'poolside_v1' },
         )
         expect(getFlagValue(out, '--reasoning-parser')).toBe('deepseek_r1')
-        expect(out.args).not.toContain('--reasoning-parser think_xml')
+        expect(out).not.toContain('--reasoning-parser think_xml')
     })
 
     it('manual reasoning parser when no detected', () => {

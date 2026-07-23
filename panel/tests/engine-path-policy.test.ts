@@ -20,6 +20,47 @@ describe('engine path policy', () => {
     expect(projectVenvIndex).toBeLessThan(staleSystemIndex)
   })
 
+  it('packaged sessions use bundled Python authoritatively and never fall back to stale system engines', () => {
+    const sessions = readFileSync('src/main/sessions.ts', 'utf8')
+    const engineManager = readFileSync('src/main/engine-manager.ts', 'utf8')
+    const findEnginePath = sessions.slice(
+      sessions.indexOf('findEnginePath(): EnginePath | null'),
+      sessions.indexOf('  private async findAvailablePort'),
+    )
+    const bundledBlock = findEnginePath.slice(
+      findEnginePath.indexOf('const bundledPython = getBundledPythonPath()'),
+      findEnginePath.indexOf('// Development builds must exercise the source tree'),
+    )
+
+    expect(bundledBlock).toContain('if (verifyBundledEngineOnFilesystem())')
+    expect(bundledBlock).toContain("return { type: 'bundled', pythonPath: bundledPython }")
+    expect(bundledBlock).toContain('if (electronApp.isPackaged)')
+    expect(bundledBlock).toContain('return null')
+    expect(bundledBlock).toContain('spawning a system binary would ship')
+    expect(bundledBlock.indexOf('return null')).toBeLessThan(
+      findEnginePath.indexOf('// System binary search'),
+    )
+
+    expect(engineManager).toContain('export function verifyBundledEngineOnFilesystem()')
+    expect(engineManager).toContain("join(pkgDir, '__init__.py')")
+    expect(engineManager).toContain("entry.startsWith('vmlx-')")
+    expect(engineManager).toContain("entry.startsWith('vmlx_engine-')")
+  })
+
+  it('packaged startup does not pip-update or hash-compare the signed bundled engine at runtime', () => {
+    const source = readFileSync('src/main/engine-manager.ts', 'utf8')
+    const checkEngineVersion = source.slice(
+      source.indexOf('export function checkEngineVersion()'),
+      source.indexOf('export function cancelInstall()'),
+    )
+
+    expect(checkEngineVersion).toContain('!app.isPackaged')
+    expect(checkEngineVersion).toContain('signed bundle')
+    expect(checkEngineVersion).toContain('Skip it for packaged builds')
+    expect(checkEngineVersion).toContain('current !== bundled')
+    expect(checkEngineVersion).toContain('if (!needsUpdate && bundled && sourcePath && !app.isPackaged)')
+  })
+
   it('uses one project-venv probe for setup detection and development session startup', () => {
     const engineManager = readFileSync('src/main/engine-manager.ts', 'utf8')
     const sessions = readFileSync('src/main/sessions.ts', 'utf8')

@@ -162,6 +162,38 @@ describe('cache control policy', () => {
     expect(policy.enableBlockDiskCache).toBe(true)
   })
 
+  it('keeps block SSD/L2 toggle available whether paged RAM is on or off', () => {
+    for (const usePagedCache of [true, false]) {
+      const policy = resolveCacheControlPolicy({
+        continuousBatching: true,
+        enablePrefixCache: true,
+        usePagedCache,
+        enableDiskCache: false,
+        enableBlockDiskCache: true,
+      })
+
+      expect(policy.blockDiskCacheVisible).toBe(true)
+      expect(policy.blockDiskCacheDisabled).toBe(false)
+      expect(policy.blockDiskCacheChecked).toBe(true)
+      expect(policy.legacyDiskCacheDisabled).toBe(true)
+    }
+  })
+
+  it('allows legacy disk cache only after both paged RAM and block SSD/L2 are off', () => {
+    const policy = resolveCacheControlPolicy({
+      continuousBatching: true,
+      enablePrefixCache: true,
+      usePagedCache: false,
+      enableDiskCache: true,
+      enableBlockDiskCache: false,
+    })
+
+    expect(policy.blockDiskCacheVisible).toBe(true)
+    expect(policy.blockDiskCacheDisabled).toBe(false)
+    expect(policy.legacyDiskCacheDisabled).toBe(false)
+    expect(policy.legacyDiskCacheChecked).toBe(true)
+  })
+
   it('lets a hybrid SSM architecture use block SSD L2 without paged RAM', () => {
     const ui = resolveCacheControlPolicy({
       continuousBatching: true,

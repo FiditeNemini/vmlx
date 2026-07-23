@@ -144,6 +144,12 @@ class SSMCompanionDiskStore:
         self._hits = 0
         self._misses = 0
         self._restore_suppressed = 0
+        # Lazily rebuilt from sidecars after process restart. The content-hash
+        # key cannot reveal its token boundary, so a fresh process needs this
+        # tiny metadata index to discover shorter on-disk checkpoints when the
+        # block cache selected a longer shared prefix.
+        self._token_lengths: Optional[set[int]] = None
+        self._candidate_scans = 0
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -496,8 +502,70 @@ class SSMCompanionDiskStore:
             if ok:
                 with self._stats_lock:
                     self._stores += 1
+                if self._token_lengths is not None:
+                    self._token_lengths.add(int(num_tokens))
                 self._enforce_budget()
             return ok
+
+    def candidate_lengths(self, max_len: int) -> List[int]:
+        """Return persisted checkpoint boundaries at or below max_len.
+
+        Entry keys intentionally hash the model identity and token prefix, so
+        the key alone cannot discover a shorter partial boundary after restart.
+        Sidecars already carry num_tokens; build a process-local index from
+        that metadata and let the caller recompute the full model/prefix key
+        before fetch. A returned length is only a candidate, never proof of a
+        hit. fetch remains authoritative for model identity, token prefix,
+        record version, runtime fingerprint, and safetensors validation.
+        """
+        if max_len <= 0 or self._dir is None:
+            return []
+        if os.environ.get("VMLX_DISABLE_SSM_DISK_RESTORE", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            return []
+        with self._lock:
+            if self._token_lengths is None:
+                lengths: set[int] = set()
+                current_runtime = _runtime_cache_fingerprint()
+                try:
+                    for sub in self._dir.iterdir() if self._dir.exists() else []:
+                        if not sub.is_dir():
+                            continue
+                        for side in sub.iterdir():
+                            if side.suffix != ".json" or side.stem.endswith(".tmp"):
+                                continue
+                            data = side.with_suffix(".safetensors")
+                            if not data.exists():
+                                continue
+                            try:
+                                metadata = json.loads(side.read_text())
+                                if int(metadata.get("version") or 0) != _RECORD_VERSION:
+                                    continue
+                                if metadata.get("runtime_cache_fingerprint") != current_runtime:
+                                    continue
+                                num_tokens = int(metadata.get("num_tokens") or 0)
+                            except (
+                                OSError,
+                                TypeError,
+                                ValueError,
+                                json.JSONDecodeError,
+                            ):
+                                continue
+                            if num_tokens > 0:
+                                lengths.add(num_tokens)
+                except OSError:
+                    pass
+                self._token_lengths = lengths
+                with self._stats_lock:
+                    self._candidate_scans += 1
+            return sorted(
+                (n for n in self._token_lengths if n <= max_len),
+                reverse=True,
+            )
 
     def fetch(self, key: str) -> Optional[Tuple[List[Any], bool]]:
         """Look up by key. Returns ``(states, is_complete)`` or ``None``."""
@@ -529,6 +597,7 @@ class SSMCompanionDiskStore:
                 p.unlink()
             except OSError:
                 pass
+        self._token_lengths = None
 
     def clear(self) -> None:
         if self._dir is None:
@@ -546,6 +615,7 @@ class SSMCompanionDiskStore:
                     sub.rmdir()
                 except OSError:
                     pass
+            self._token_lengths = set()
 
     def stats(self) -> Dict[str, Any]:
         """Best-effort L2 footprint stats for health/cache endpoints."""
@@ -589,6 +659,7 @@ class SSMCompanionDiskStore:
             hits = self._hits
             misses = self._misses
             restore_suppressed = self._restore_suppressed
+            candidate_scans = self._candidate_scans
         return {
             "enabled": True,
             "directory": str(self._dir),
@@ -606,6 +677,12 @@ class SSMCompanionDiskStore:
                 "VMLX_DISABLE_SSM_DISK_RESTORE", ""
             ).lower() not in {"1", "true", "yes", "on"},
             "restore_suppressed": restore_suppressed,
+            "candidate_length_scans": candidate_scans,
+            "candidate_lengths_indexed": (
+                len(self._token_lengths)
+                if self._token_lengths is not None
+                else 0
+            ),
             "hit_rate": round(hits / max(hits + misses, 1), 3),
         }
 
@@ -639,6 +716,7 @@ class SSMCompanionDiskStore:
         if total <= self._budget:
             return
         files.sort(key=lambda t: t[0])  # oldest first
+        evicted = False
         for mtime, size, data, side in files:
             if total <= self._budget:
                 break
@@ -648,7 +726,10 @@ class SSMCompanionDiskStore:
                 except OSError:
                     pass
             total -= size
+            evicted = True
             logger.debug("SSM disk store evicted %s (%.2f MB)", data.name, size / 1e6)
+        if evicted:
+            self._token_lengths = None
 
 
 # Module-level singleton — built lazily so importing the module is cheap

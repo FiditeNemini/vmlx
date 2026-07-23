@@ -564,11 +564,31 @@ class SSMCompanionCache:
                 "source": "exact_boundary_l1_or_l2",
             }
             return (max_len, states, is_complete)
-        # Scan lengths in descending order so we find the longest match
-        # first.  Typical cache sizes are small (<=20 entries), so the
-        # walk is O(entries) per request — negligible vs a 50K prefill.
+        # Scan lengths in descending order so we find the longest match.
+        # L1 supplies boundaries learned in this process. L2 supplies
+        # sidecar-derived boundaries so a fresh process can discover a shorter
+        # typed-state checkpoint when the block cache selected a longer shared
+        # prefix. These are candidates only: fetch() recomputes the complete
+        # model/prefix key and performs all disk record validation.
+        disk_candidate_lengths: List[int] = []
+        if self._disk is not None:
+            try:
+                candidate_fn = getattr(self._disk, "candidate_lengths", None)
+                if callable(candidate_fn):
+                    disk_candidate_lengths = list(candidate_fn(max_len) or [])
+            except Exception as e:
+                logger.debug("SSM disk candidate-length scan failed: %s", e)
+        disk_candidate_set = set(disk_candidate_lengths)
+        # Keep exact-length L1 candidates for existing prefix-mismatch
+        # diagnostics. The exact L2 boundary was already probed above, so only
+        # shorter L2 boundaries need another fetch attempt.
         candidate_lengths = sorted(
-            (n for n in self._length_index.keys() if n <= max_len),
+            {
+                n for n in self._length_index.keys() if n <= max_len
+            }
+            | {
+                n for n in disk_candidate_lengths if n < max_len
+            },
             reverse=True,
         )
         if not candidate_lengths:
@@ -587,7 +607,8 @@ class SSMCompanionCache:
                 token_ids, n, cache_extra_keys=cache_extra_keys
             )
             stored_key = self._length_index.get(n, {}).get(query_ph)
-            if stored_key is None:
+            disk_candidate = n in disk_candidate_set
+            if stored_key is None and not disk_candidate:
                 continue
             # Delegate to fetch() so deep-copy discipline is uniform.
             result = self.fetch(token_ids, n, cache_extra_keys=cache_extra_keys)
@@ -601,7 +622,11 @@ class SSMCompanionCache:
                 "matched": True,
                 "checkpoint_tokens": int(n),
                 "is_complete": bool(is_complete),
-                "source": "l1_or_l2",
+                "source": (
+                    "partial_boundary_disk_l2"
+                    if stored_key is None and disk_candidate
+                    else "l1_or_l2"
+                ),
             }
             return (n, states, is_complete)
         self.last_prefix_lookup = {

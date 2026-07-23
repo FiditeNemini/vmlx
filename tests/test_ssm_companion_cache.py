@@ -825,6 +825,71 @@ def test_disk_store_restores_selected_boundary_without_l1_length_index(tmp_path)
     assert disk2.stats()["hits"] == 1
 
 
+def test_disk_store_discovers_shorter_partial_boundary_after_restart(tmp_path):
+    """A fresh process must discover a shorter typed-state checkpoint on L2.
+
+    The block cache may find a 4-token shared KV prefix while the latest
+    persisted SSM companion boundary is 3. L1 has no length index after
+    restart, so the disk sidecar index must supply 3 as a candidate. The
+    normal fetch key still proves the model and token prefix before restore.
+    """
+    from vmlx_engine.utils.ssm_companion_disk_store import SSMCompanionDiskStore
+
+    tokens = [10, 20, 30, 40, 50]
+    model_key = "qwen-hybrid|restart-partial-v1"
+    disk1 = SSMCompanionDiskStore(
+        directory=tmp_path, budget_bytes=32 * 1024 * 1024
+    )
+    cache1 = SSMCompanionCache(
+        max_entries=2,
+        model_key=model_key,
+        disk_store=disk1,
+    )
+    cache1.store(tokens, 3, [_FakeSSMLayer(12.0, n_arrays=2)], is_complete=True)
+
+    disk2 = SSMCompanionDiskStore(
+        directory=tmp_path, budget_bytes=32 * 1024 * 1024
+    )
+    cache2 = SSMCompanionCache(
+        max_entries=2,
+        model_key=model_key,
+        disk_store=disk2,
+    )
+    assert cache2._length_index == {}
+
+    hit = cache2.fetch_longest_prefix(tokens, max_len=4)
+
+    assert hit is not None
+    checkpoint_len, states, is_complete = hit
+    assert checkpoint_len == 3
+    assert is_complete is True
+    assert states[0].cache[0].tolist() == [12.0, 12.0, 12.0, 12.0]
+    assert cache2.last_prefix_lookup == {
+        "max_len": 4,
+        "candidate_lengths": [3],
+        "matched": True,
+        "checkpoint_tokens": 3,
+        "is_complete": True,
+        "source": "partial_boundary_disk_l2",
+    }
+    stats = disk2.stats()
+    assert stats["hits"] == 1
+    assert stats["misses"] == 1
+    assert stats["candidate_length_scans"] == 1
+    assert stats["candidate_lengths_indexed"] == 1
+
+    # Candidate lengths are not authority: a different model key must miss.
+    disk3 = SSMCompanionDiskStore(
+        directory=tmp_path, budget_bytes=32 * 1024 * 1024
+    )
+    cache3 = SSMCompanionCache(
+        max_entries=2,
+        model_key="different-model",
+        disk_store=disk3,
+    )
+    assert cache3.fetch_longest_prefix(tokens, max_len=4) is None
+
+
 def test_disk_store_stats_include_tokens_and_io_counters(tmp_path):
     """Hybrid SSM L2 telemetry must expose persistent token and hit counts."""
     from vmlx_engine.utils.ssm_companion_disk_store import SSMCompanionDiskStore

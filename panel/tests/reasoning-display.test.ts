@@ -641,16 +641,15 @@ describe('emitDelta state machine — reasoning→content transitions', () => {
  */
 function deriveEnableThinking(
     overridesEnableThinking: boolean | undefined,
-    sessionHasReasoningParser: boolean
+    _sessionHasReasoningParser: boolean
 ): boolean | undefined {
     if (overridesEnableThinking !== undefined) return overridesEnableThinking
-    if (sessionHasReasoningParser) return true
     return overridesEnableThinking
 }
 
 describe('enable_thinking derivation', () => {
-    it('Auto mode with qwen3 parser → true so the reasoning rail is explicit', () => {
-        expect(deriveEnableThinking(undefined, true)).toBe(true)
+    it('Auto mode with qwen3 parser → omitted so the model policy remains native', () => {
+        expect(deriveEnableThinking(undefined, true)).toBeUndefined()
     })
 
     it('Auto mode without parser → omitted so engine registry/fallback resolves', () => {
@@ -1196,9 +1195,9 @@ describe('Wire format — enable_thinking in request body', () => {
         expect(body.chat_template_kwargs).toEqual({ enable_thinking: false })
     })
 
-    it('Completions: remote excludes chat_template_kwargs', () => {
+    it('Completions: remote Auto omits engine-specific thinking kwargs', () => {
         const body = buildRequestBody('completions', undefined, true, true)
-        expect(body.enable_thinking).toBe(true)
+        expect(body.enable_thinking).toBeUndefined()
         expect(body.chat_template_kwargs).toBeUndefined()
     })
 

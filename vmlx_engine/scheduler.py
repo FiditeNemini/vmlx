@@ -3450,6 +3450,28 @@ class Scheduler:
         cached_tokens = min(cached_tokens, len(prompt_tokens))
         return list(prompt_tokens[cached_tokens:])
 
+    @staticmethod
+    def _dsv4_paged_hit_requires_full_prefill(
+        *,
+        fetch_token_count: int,
+        cached_token_count: int,
+    ) -> bool:
+        """Reject DSV4 paged restores until composite state is equivalent.
+
+        DSV4 paged/L2 snapshots are native composite N-1 checkpoints: the
+        final cache-key token is deliberately re-fed to produce first-token
+        logits. Exact N-1 restore can succeed for a simple one-turn prompt, but
+        a live three-turn Responses replay restored an exact 336/337 checkpoint
+        and then looped instead of matching the cold full-prefill answer.
+
+        A shorter 269/337 checkpoint also replayed stale visible output. Until
+        both exact and partial CSA/HCA/SWA restore are cold-vs-warm equivalent,
+        correctness requires full prefill for every DSV4 paged/L2 hit.
+        """
+        fetch_token_count = max(0, int(fetch_token_count or 0))
+        cached_token_count = max(0, int(cached_token_count or 0))
+        return cached_token_count > 0
+
     def _release_unusable_paged_hit(self, request: Request) -> None:
         """Drop refs and optimistic credit for a paged hit not actually used."""
         if self.block_aware_cache is not None:
@@ -5143,6 +5165,35 @@ class Scheduler:
             # Re-append gpl suffix to remaining so model sees template trailer.
             if _gpl_suffix_tokens:
                 remaining = list(remaining or []) + list(_gpl_suffix_tokens)
+            if (
+                block_table
+                and block_table.num_tokens > 0
+                and self._uses_dsv4_cache
+                and self._dsv4_paged_hit_requires_full_prefill(
+                    fetch_token_count=len(_fetch_tokens),
+                    cached_token_count=block_table.num_tokens,
+                )
+            ):
+                _dsv4_cached_tokens = int(block_table.num_tokens)
+                _dsv4_fetch_tokens = len(_fetch_tokens)
+                request.block_table = block_table
+                request.cached_tokens = _dsv4_cached_tokens
+                request.shared_prefix_blocks = len(block_table.block_ids)
+                self._release_unusable_paged_hit(request)
+                request.cached_tokens = 0
+                request.remaining_tokens = list(request.prompt_token_ids)
+                request._paged_block_table_needs_worker_reconstruct = False
+                request._paged_disk_hit = False
+                logger.warning(
+                    "Request %s: rejecting unsafe DSV4 paged/L2 "
+                    "extension (%d cached of %d cache-key tokens); exact N-1 "
+                    "and partial restore both require full prefill until "
+                    "CSA/HCA/SWA equivalence is proven.",
+                    request.request_id,
+                    _dsv4_cached_tokens,
+                    _dsv4_fetch_tokens,
+                )
+                block_table = None
             if block_table and block_table.num_tokens > 0:
                 paged_cold_tokens = self._paged_cold_block_tokens(block_table)
                 warm_cache = None

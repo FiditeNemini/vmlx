@@ -1589,6 +1589,31 @@ def test_dsv4_length_capped_clean_snapshot_is_cacheable():
     )
 
 
+def test_dsv4_paged_restore_requires_full_prefill():
+    """All DSV4 paged/L2 checkpoints currently fail closed.
+
+    A live Responses A/B proved that 269 cached tokens plus a 68-token tail
+    replayed stale output, while a full prefill of the identical 337-token
+    history returned the requested answer. A subsequent exact 336/337 restore
+    looped in reasoning, so exact N-1 reconstruction is not sufficient proof of
+    composite-state equivalence either.
+    """
+    from vmlx_engine.scheduler import Scheduler
+
+    requires_full = Scheduler._dsv4_paged_hit_requires_full_prefill
+
+    assert requires_full(fetch_token_count=337, cached_token_count=269) is True
+    assert requires_full(fetch_token_count=1292, cached_token_count=1291) is True
+    assert requires_full(fetch_token_count=1, cached_token_count=0) is False
+    assert requires_full(fetch_token_count=337, cached_token_count=337) is True
+
+    import inspect
+
+    add_request = inspect.getsource(Scheduler.add_request)
+    assert "_dsv4_paged_hit_requires_full_prefill" in add_request
+    assert "_release_unusable_paged_hit(request)" in add_request
+
+
 def test_dsv4_cache_hit_store_skips_sync_full_reprefill_when_snapshot_missing():
     """DSV4 cache-hit kickoff must not synchronously re-prefill long prompts.
 

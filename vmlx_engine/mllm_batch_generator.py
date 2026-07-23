@@ -297,6 +297,28 @@ def _merge_mllm_cache_extra_keys(
     return merged or None
 
 
+def _uses_ssm_companion_cache(
+    kv_positions: Optional[List[int]],
+    num_layers: Optional[int],
+    *,
+    mixed_attention: bool,
+) -> bool:
+    """Return whether a mixed cache layout needs a separate state companion.
+
+    Gemma/Step mixed-SWA layouts contain only KV-like cache objects
+    (``KVCache`` + ``RotatingKVCache``). Their paged blocks already preserve
+    rotating-window metadata and must be reconstructed directly. Treating that
+    shape as SSM hybrid makes a valid mixed-SWA block hit wait for a second,
+    unrelated companion entry and downgrade to full prefill.
+    """
+    return bool(
+        not mixed_attention
+        and kv_positions is not None
+        and num_layers is not None
+        and len(kv_positions) < num_layers
+    )
+
+
 @dataclass(frozen=True)
 class VLMImagePrefillBudgetDecision:
     should_reject: bool
@@ -1558,6 +1580,14 @@ def _should_use_safe_processor_path(
 # but does NOT inherit from KVCache. This constant enables KV-like detection without
 # importing TQ (which may not be installed for non-JANG users).
 _TQ_CLASS_NAME = "TurboQuantKVCache"
+_ATTENTION_CACHE_CLASS_NAMES = {
+    "KVCache",
+    "BatchKVCache",
+    "RotatingKVCache",
+    "BatchRotatingKVCache",
+    "QuantizedKVCache",
+    _TQ_CLASS_NAME,
+}
 
 
 def _is_kv_like(c) -> bool:
@@ -1570,6 +1600,20 @@ def _is_kv_like(c) -> bool:
     from mlx_lm.models.cache import KVCache, RotatingKVCache
 
     return isinstance(c, (KVCache, RotatingKVCache)) or type(c).__name__ == _TQ_CLASS_NAME
+
+
+def _is_attention_cache_slot(cache: Any) -> bool:
+    """Recognize attention cache slots across mlx-lm and mlx-vlm namespaces.
+
+    ``mlx_vlm.models.cache`` vendors classes named ``KVCache`` and
+    ``RotatingKVCache`` that are not instances of the same-named mlx-lm
+    classes. Cache-layout detection previously classified every Gemma 4 slot
+    as non-KV, then ``_fix_hybrid_cache`` replaced a valid reconstructed
+    48-layer prefix with a fresh all-empty template. Keep merge mechanics on
+    their existing concrete-type checks; this predicate is only for structural
+    attention-vs-SSM layout decisions.
+    """
+    return _is_kv_like(cache) or type(cache).__name__ in _ATTENTION_CACHE_CLASS_NAMES
 
 
 _CACHE_OWNER_WRAPPER_ATTRS = (
@@ -1656,7 +1700,11 @@ def _hybrid_cache_layout(
         template = list(owner.make_cache() or [])
     except Exception as exc:
         return owner, owner_path, None, None, f"{type(exc).__name__}: {exc}"
-    positions = [index for index, cache in enumerate(template) if _is_kv_like(cache)]
+    positions = [
+        index
+        for index, cache in enumerate(template)
+        if _is_attention_cache_slot(cache)
+    ]
     return owner, owner_path, template, positions, None
 
 
@@ -2204,6 +2252,56 @@ def _validate_prompt_cache(cache: Any, *, source: str) -> bool:
         return cache is not None and (not isinstance(cache, list) or len(cache) > 0)
 
 
+def _cache_has_materialized_state(cache: Any) -> bool:
+    """Return true when a reconstructed prefix owns at least one real tensor.
+
+    A cache list full of freshly constructed KV/rotating objects has the right
+    classes and layer count but represents zero prefix tokens. Such a list must
+    never be accepted for a non-zero cache hit.
+    """
+    seen: set[int] = set()
+
+    def _contains_tensor(value: Any) -> bool:
+        if value is None:
+            return False
+        value_id = id(value)
+        if value_id in seen:
+            return False
+        seen.add(value_id)
+        shape = getattr(value, "shape", None)
+        if shape is not None:
+            try:
+                return all(int(dim) > 0 for dim in shape)
+            except Exception:
+                return True
+        if isinstance(value, dict):
+            return any(_contains_tensor(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(_contains_tensor(item) for item in value)
+        for attr in ("state", "keys", "values", "cache", "caches"):
+            try:
+                child = getattr(value, attr, None)
+            except Exception:
+                child = None
+            if child is not None and child is not value and _contains_tensor(child):
+                return True
+        return False
+
+    return _contains_tensor(cache)
+
+
+def _block_table_block_count(block_table: Any) -> int:
+    """Return the number of blocks represented by a paged-cache table.
+
+    The production ``BlockTable`` field is ``block_ids``. Keep the legacy
+    ``blocks`` fallback only for compatibility with older test doubles.
+    """
+    block_ids = getattr(block_table, "block_ids", None)
+    if block_ids is not None:
+        return len(block_ids)
+    return len(getattr(block_table, "blocks", []) or [])
+
+
 def _fix_hybrid_cache(
     cache: List[Any],
     language_model: nn.Module,
@@ -2261,7 +2359,10 @@ def _fix_hybrid_cache(
             fixed = False
             result = list(cache)
             for i, (tmpl, cached) in enumerate(zip(template, cache)):
-                if not _is_kv_like(tmpl) and _is_kv_like(cached):
+                if (
+                    not _is_attention_cache_slot(tmpl)
+                    and _is_attention_cache_slot(cached)
+                ):
                     result[i] = tmpl
                     fixed = True
             if fixed:
@@ -2270,7 +2371,7 @@ def _fix_hybrid_cache(
 
         # Cache shorter than model — expand using template
         positions = kv_positions if kv_positions is not None else [
-            i for i, t in enumerate(template) if _is_kv_like(t)
+            i for i, t in enumerate(template) if _is_attention_cache_slot(t)
         ]
         if len(cache) != len(positions):
             logger.warning(
@@ -4315,10 +4416,10 @@ class MLLMBatchGenerator:
         # Pre-computed bool: is this a hybrid model (SSM + attention)?
         # Used throughout _process_prompts and _run_vision_encoding to gate
         # hybrid-specific logic (SSM companion cache, chunked prefill skip, etc.)
-        self._is_hybrid: bool = (
-            self._hybrid_kv_positions is not None
-            and self._hybrid_num_layers is not None
-            and len(self._hybrid_kv_positions) < self._hybrid_num_layers
+        self._is_hybrid: bool = _uses_ssm_companion_cache(
+            self._hybrid_kv_positions,
+            self._hybrid_num_layers,
+            mixed_attention=self._mixed_attention_cache_model,
         )
         _warn_if_hybrid_detection_disabled(
             model=model,
@@ -6275,7 +6376,7 @@ class MLLMBatchGenerator:
                                     "request_id": req.request_id,
                                     "cache_detail": None,
                                     "cached_tokens": int(getattr(block_table, "num_tokens", 0) or 0),
-                                    "blocks": len(getattr(block_table, "blocks", []) or []),
+                                    "blocks": _block_table_block_count(block_table),
                                     "selection": (
                                         "block-disk" if _block_disk_only else "paged"
                                     ),
@@ -6748,6 +6849,40 @@ class MLLMBatchGenerator:
                         req_cache,
                         getattr(self, "_cache_model", None) or self.language_model,
                     )
+                    if not _cache_has_materialized_state(req_cache):
+                        logger.warning(
+                            "Rejecting empty reconstructed VLM prefix for %s "
+                            "(claimed_cached_tokens=%d); retrying full prefill",
+                            req.request_id,
+                            int(getattr(req, "_cached_tokens", 0) or 0),
+                        )
+                        if self.block_aware_cache is not None:
+                            try:
+                                self.block_aware_cache.release_cache(req.request_id)
+                            except Exception:
+                                pass
+                        req.prompt_cache = None
+                        req._cached_tokens = 0
+                        req._cache_detail = None
+                        req.input_ids = mx.array(
+                            [
+                                list(
+                                    getattr(req, "_original_token_ids", None) or []
+                                )
+                                + list(
+                                    getattr(req, "_gen_prefix_tokens", None) or []
+                                )
+                            ]
+                        )
+                        cache_model = getattr(self, "_cache_model", None)
+                        if cache_model is not None:
+                            req_cache = cache_model.make_cache()
+                        else:
+                            from mlx_lm.models.cache import KVCache
+
+                            req_cache = [
+                                KVCache() for _ in self.language_model.layers
+                            ]
                 else:
                     try:
                         cache_model = getattr(self, "_cache_model", None)

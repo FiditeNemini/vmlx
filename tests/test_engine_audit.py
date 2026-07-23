@@ -11710,10 +11710,72 @@ class TestTurboQuantKVTelemetry:
     def test_mllm_rotating_kv_cache_is_kv_like_for_mixed_swa(self):
         """Gemma4 RotatingKVCache layers must not enter the SSM hybrid path."""
         from mlx_lm.models.cache import KVCache, RotatingKVCache
-        from vmlx_engine.mllm_batch_generator import _is_kv_like
+        from vmlx_engine.mllm_batch_generator import (
+            _block_table_block_count,
+            _cache_has_materialized_state,
+            _fix_hybrid_cache,
+            _hybrid_cache_layout,
+            _is_attention_cache_slot,
+            _is_kv_like,
+            _uses_ssm_companion_cache,
+        )
 
         assert _is_kv_like(KVCache()) is True
         assert _is_kv_like(RotatingKVCache(max_size=4096)) is True
+        assert _uses_ssm_companion_cache(
+            list(range(8)),
+            48,
+            mixed_attention=True,
+        ) is False
+        assert _uses_ssm_companion_cache(
+            list(range(8)),
+            48,
+            mixed_attention=False,
+        ) is True
+
+        # mlx-vlm vendors same-named cache classes that are not isinstance()
+        # compatible with mlx-lm. Layout detection must still classify them as
+        # attention slots or _fix_hybrid_cache replaces valid restored state
+        # with an all-empty template.
+        VLMKVCache = type("KVCache", (), {})
+        VLMRotatingKVCache = type("RotatingKVCache", (), {})
+
+        class VendoredOwner:
+            def make_cache(self):
+                return [VLMRotatingKVCache(), VLMKVCache()]
+
+        owner = VendoredOwner()
+        _, owner_path, template, positions, error = _hybrid_cache_layout(
+            owner,
+            owner,
+        )
+        assert owner_path == "language_model"
+        assert error is None
+        assert len(template) == 2
+        assert positions == [0, 1]
+        assert _is_attention_cache_slot(template[0]) is True
+        assert _is_attention_cache_slot(template[1]) is True
+
+        restored = [RotatingKVCache(max_size=4096), KVCache()]
+        fixed = _fix_hybrid_cache(
+            restored,
+            owner,
+            kv_positions=positions,
+            num_model_layers=len(template),
+        )
+        assert fixed is restored
+        assert _cache_has_materialized_state(fixed) is False
+
+        import mlx.core as mx
+
+        restored[1].keys = mx.zeros((1, 1, 1, 8))
+        restored[1].values = mx.zeros((1, 1, 1, 8))
+        restored[1].offset = 1
+        assert _cache_has_materialized_state(restored) is True
+        assert _block_table_block_count(
+            SimpleNamespace(block_ids=[7, 8, 9], blocks=[])
+        ) == 3
+        assert _block_table_block_count(SimpleNamespace(blocks=[7, 8])) == 2
 
     def test_step37_registry_subtype_marks_scheduler_mixed_attention(self):
         """Step3.7 may lack layer_types but still needs mixed full/sliding KV handling."""

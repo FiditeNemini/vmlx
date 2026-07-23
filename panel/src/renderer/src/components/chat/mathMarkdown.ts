@@ -119,6 +119,19 @@ function escapeBareArithmeticAsterisks(markdown: string): string {
   )
 }
 
+function normalizeRepeatedMathDelimiters(markdown: string): string {
+  // Some model streams duplicate an adjacent opener while producing only one
+  // closer (for example `\(\(47 \times 19\)`). Nested TeX math delimiters are
+  // invalid, so collapse only immediately repeated delimiter tokens. This
+  // keeps currency and ordinary parentheses untouched and gives KaTeX the
+  // valid span the model clearly intended.
+  return markdown
+    .replace(/(?:\\\(\s*){2,}/g, '\\(')
+    .replace(/(?:\\\)\s*){2,}/g, '\\)')
+    .replace(/(?:\\\[\s*){2,}/g, '\\[')
+    .replace(/(?:\\\]\s*){2,}/g, '\\]')
+}
+
 /**
  * Readable, allocation-light math view for the actively streaming reasoning
  * rail. The completed rail is rendered with KaTeX; this path only prevents
@@ -127,8 +140,9 @@ function escapeBareArithmeticAsterisks(markdown: string): string {
  */
 export function prepareStreamingPlainTextMath(markdown: string): string {
   if (!markdown) return ''
+  const normalized = normalizeRepeatedMathDelimiters(markdown)
   return normalizeBareLatexCommands(
-    markdown
+    normalized
       .replace(/\\\[([\s\S]*?)(?:\\\]|$)/g, '$1')
       .replace(/\\\(([^\n]*?)(?:\\\)|$)/g, '$1')
       .replace(/\$\$([\s\S]*?)(?:\$\$|$)/g, '$1')
@@ -164,7 +178,9 @@ export function prepareMarkdownWithMath(markdown: string): string {
     return `\u0000CODE${index}\u0000`
   })
 
-  const transformed = transformMath(protectedMarkdown)
+  const transformed = transformMath(
+    normalizeRepeatedMathDelimiters(protectedMarkdown)
+  )
 
   return transformed.replace(/\u0000CODE(\d+)\u0000/g, (_match, indexText) => {
     const index = Number(indexText)

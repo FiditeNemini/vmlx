@@ -77,6 +77,26 @@ describe('prepareMarkdownWithMath', () => {
     expect(rendered).toContain('\\frac{47}{')
   })
 
+  it('repairs duplicated adjacent model delimiters before KaTeX rendering', () => {
+    const malformed =
+      'Path: panel/package.json — Size: 5.2 KB\n$43 and inline TeX: \\(\\(47 \\times 19 = 893 < 920 = 46 \\times 20\\)'
+    const rendered = prepareMarkdownWithMath(malformed)
+
+    expect(rendered).toContain('$43')
+    expect(rendered).toContain('class="katex"')
+    expect(rendered).not.toContain('math-fallback')
+    expect(rendered).not.toContain('\\(')
+    expect(rendered).not.toContain('\\times')
+  })
+
+  it('keeps duplicated adjacent delimiters readable during reasoning streaming', () => {
+    const rendered = prepareStreamingPlainTextMath(
+      'Draft: \\(\\(47 \\times 19 = 893 < 920',
+    )
+
+    expect(rendered).toBe('Draft: 47 × 19 = 893 < 920')
+  })
+
   it('does not treat plain dollar amounts as math', () => {
     const rendered = prepareMarkdownWithMath('The cost is $43 today.')
 

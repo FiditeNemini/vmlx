@@ -303,6 +303,7 @@ interface SessionConfigFormProps {
     runtimeScope?: string
     nativeCacheType?: string
     requiresDeterministicSampling?: boolean
+    blockedReason?: string
   }
   /** Model type — image models show minimal settings */
   modelType?: 'text' | 'image'
@@ -488,6 +489,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     detectedRuntimeVideoCapable ||
     (!normalizedDetectedFamily && config.isMultimodal === true)
   )
+  const nativeMtpDetected = detectedNativeMtp !== undefined
   const nativeMtpSupported = !!detectedNativeMtp?.supported
   const omniBackendVisible = normalizedDetectedFamily === 'nemotron-h' && multimodalActive
   const nativeMtpMode = config.nativeMtpMode || DEFAULT_CONFIG.nativeMtpMode || 'auto'
@@ -1593,7 +1595,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       </Section>
 
       {/* Native in-model MTP */}
-      <Section title="Native MTP" expanded={expandedSections.nativeMtp} onToggle={() => toggleSection('nativeMtp')} hidden={isImage || dsv4Active || !nativeMtpSupported}>
+      <Section title="Native MTP" expanded={expandedSections.nativeMtp} onToggle={() => toggleSection('nativeMtp')} hidden={isImage || dsv4Active || !nativeMtpDetected}>
+        {!nativeMtpSupported && (
+          <IncompatWarning text={detectedNativeMtp?.blockedReason || 'Native MTP weights were detected, but this bundle has not passed the runtime compatibility gate. Autoregressive decode remains active.'} />
+        )}
+        {nativeMtpSupported && (
+          <>
         <PerformanceHint text="Uses the model's own preserved MTP heads and measured model-local depth when present, with D3 as the generic fallback." />
         {nativeMtpMode === 'auto' && (
           <InfoNote text="Auto preserves the bundle's generation_config/jang_config sampling defaults. It activates MTP only for compatible requests; sampled requests fall back to autoregressive decode and the server logs the reason." />
@@ -1627,6 +1634,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           disabled={nativeMtpMode === 'off'}
         />
         <InfoNote text={`Detected scope: ${detectedNativeMtp?.runtimeScope || 'text'}; native cache: ${detectedNativeMtp?.nativeCacheType || detectedCacheSubtype || detectedCacheType || 'unknown'}; depth source: ${detectedNativeMtp?.depthSource || 'default'}. Hybrid cache bundles use the in-memory paged tier while Prefix Cache is enabled so KV blocks and SSM state stay in one cache contract.`} />
+          </>
+        )}
       </Section>
 
       {/* Speculative Decoding */}

@@ -468,36 +468,68 @@ def _env_disabled(*names: str) -> bool:
     return any(os.environ.get(name, "") in _DISABLE_ENV_VALUES for name in names)
 
 
-def _runtime_validation_block_reason(jang_cfg: dict[str, Any]) -> str | None:
+def _runtime_validation_block_reason(
+    bundle_path: str | Path | None,
+    jang_cfg: dict[str, Any],
+    family: str | None,
+) -> str | None:
     """Block native MTP for artifacts that failed live validation.
 
-    Single source, a runtime *acceleration* block — never an artifact metadata
-    failure (the MTP weights stay valid and present):
+    This is a runtime *acceleration* block, never an artifact metadata failure
+    (the MTP weights stay valid and present). It can come from either:
 
     ``jang_config["runtime"]["native_mtp_blocked"] = "<measured reason>"``.
+
+    or, for Hy3's affine multi-row verifier, a missing/failed exact-output
+    attestation in ``vmlx_mtp_tuning.json``. Hy3's standard greedy decode runs
+    one token at a time, while the native-MTP verifier runs two tokens through
+    the affine backbone. MLX affine matmul is not bit-identical across those
+    shapes, so a speed/quality-only tuning pass cannot establish speculative
+    decode correctness. The tuning sidecar must explicitly stamp
+    ``output_equivalent: true`` after comparing real-artifact token IDs.
+
     A bundle that measured MTP as a net slowdown declares it here, rather
     than the engine hardcoding profile names. Override with
     ``VMLX_NATIVE_MTP_FORCE=1`` to re-run the experiment.
 
-    History: a legacy engine-side JANG_2K profile block (from the 2026-05-17
-    packaged six-variant gate on the Hy3 PREVIEW) lived here until 2026-07-10,
-    when the final post-train Hy3-JANG_2K-MTP measured depth-1 native MTP as a
-    net win with coherent output (d1 30.6 vs 27.8 tok/s baseline, ~full
-    acceptance; d2 -6% at 24.5%; d3 -31% at 1.9%). Profile-name blocks rot
-    when models are re-trained; measured per-bundle stamps and tuning
-    sidecars are the only block/depth sources now.
+    A profile name alone is not a block. The gate is the model-local measured
+    attestation, so a future Hy3 artifact can re-enable the fast verifier after
+    it proves exact greedy identity on its real quantized weights.
     """
+    forced = _env_enabled("VMLINUX_NATIVE_MTP_FORCE", "VMLX_NATIVE_MTP_FORCE")
     runtime = (
         jang_cfg.get("runtime") if isinstance(jang_cfg.get("runtime"), dict) else {}
     )
     declared = runtime.get("native_mtp_blocked")
     if isinstance(declared, str) and declared.strip():
-        if _env_enabled("VMLINUX_NATIVE_MTP_FORCE", "VMLX_NATIVE_MTP_FORCE"):
+        if forced:
             return None
         return (
             f"bundle declares native MTP blocked: {declared.strip()} "
             "(set VMLX_NATIVE_MTP_FORCE=1 to force the experimental path)"
         )
+
+    if _normalize_family(family) == "hy_v3":
+        tuning = _read_json(bundle_path, "vmlx_mtp_tuning.json")
+        native_mtp = (
+            tuning.get("native_mtp")
+            if isinstance(tuning.get("native_mtp"), dict)
+            else {}
+        )
+        output_equivalent = native_mtp.get("output_equivalent")
+        if output_equivalent is not True and not forced:
+            detail = (
+                "explicitly failed"
+                if output_equivalent is False
+                else "is missing"
+            )
+            return (
+                "Hy3 affine native MTP is validation-blocked because "
+                f"vmlx_mtp_tuning.json native_mtp.output_equivalent {detail}; "
+                "the two-token affine verifier must prove token-identical "
+                "greedy output against one-token autoregressive decode "
+                "(set VMLX_NATIVE_MTP_FORCE=1 only for measurement)"
+            )
     return None
 
 
@@ -695,7 +727,9 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
     )
     runtime_env_enabled = _runtime_enabled_by_env()
     runtime_validation_block_reason = (
-        _runtime_validation_block_reason(jang_cfg) if runtime_supported else None
+        _runtime_validation_block_reason(bundle_path, jang_cfg, family)
+        if runtime_supported
+        else None
     )
     runtime_available = bool(
         runtime_supported

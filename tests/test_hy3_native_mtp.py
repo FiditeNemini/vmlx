@@ -66,6 +66,20 @@ def _write_hy3_jang_2l_native_bundle(path):
             }
         )
     )
+    # Hy3's affine verifier batches two tokens while ordinary greedy decode
+    # uses one. Runtime readiness therefore requires an explicit real-artifact
+    # token-identity attestation; speed/coherence alone is not sufficient.
+    (path / "vmlx_mtp_tuning.json").write_text(
+        json.dumps(
+            {
+                "native_mtp": {
+                    "best_depth": 1,
+                    "validated": True,
+                    "output_equivalent": True,
+                }
+            }
+        )
+    )
 
 
 class TestHy3NativeMtpAutodetect:
@@ -125,6 +139,31 @@ class TestHy3NativeMtpAutodetect:
         forced = inspect_native_mtp_bundle(str(tmp_path))
         assert forced["runtime_available"] is True
         assert forced["status"] == "native_runtime_ready"
+
+    def test_missing_output_equivalence_blocks_affine_runtime_but_keeps_artifact(
+        self, tmp_path, monkeypatch
+    ):
+        from vmlx_engine.native_mtp import inspect_native_mtp_bundle
+
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP_FORCE", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP_FORCE", raising=False)
+        _write_hy3_jang_2l_native_bundle(tmp_path)
+        tuning = json.loads((tmp_path / "vmlx_mtp_tuning.json").read_text())
+        tuning["native_mtp"].pop("output_equivalent")
+        tuning["native_mtp"]["measured"] = (
+            "coherent but byte-divergent multi-row verifier"
+        )
+        (tmp_path / "vmlx_mtp_tuning.json").write_text(json.dumps(tuning))
+
+        status = inspect_native_mtp_bundle(tmp_path)
+
+        assert status["artifact_available"] is True
+        assert status["runtime_supported"] is True
+        assert status["runtime_available"] is False
+        assert status["runtime_validation_blocked"] is True
+        assert status["status"] == "runtime_validation_blocked"
+        assert "output_equivalent is missing" in status["runtime_reason"]
+        assert "token-identical greedy output" in status["runtime_reason"]
 
     def test_env_kill_switch_still_wins(self, tmp_path, monkeypatch):
         from vmlx_engine.native_mtp import inspect_native_mtp_bundle

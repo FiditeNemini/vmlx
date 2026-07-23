@@ -224,6 +224,106 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     })
   })
 
+  it('keeps HY3 MTP visible but blocks runtime without token-identity proof', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'hy_v3',
+        num_hidden_layers: 80,
+        num_nextn_predict_layers: 1,
+      },
+      {
+        format: 'jang',
+        profile: 'JANG_2K',
+        runtime: {
+          bundle_has_mtp: true,
+          mtp_layers: 1,
+          mtp_mode: 'preserved_native_candidate',
+        },
+        mtp: { kept: true, enabled: true, num_layers: 1 },
+        capabilities: {
+          family: 'hy_v3',
+          modality: 'text',
+          cache_type: 'kv',
+        },
+      },
+    )
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: {
+        'model.embed_tokens.weight': 'model.safetensors',
+        'mtp.0.eh_proj.weight': 'model.safetensors',
+        'mtp.0.block.self_attn.q_proj.weight': 'model.safetensors',
+      },
+    }))
+    writeFileSync(join(dir, 'vmlx_mtp_tuning.json'), JSON.stringify({
+      native_mtp: {
+        best_depth: 1,
+        validated: true,
+        measured: 'coherent but byte-divergent multi-row verifier',
+      },
+    }))
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.nativeMtp).toMatchObject({
+      supported: false,
+      depth: 1,
+      depthSource: 'validation-blocked',
+      runtimeScope: 'text',
+      nativeCacheType: 'plain_kv_v1',
+      requiresDeterministicSampling: true,
+    })
+    expect(detected.nativeMtp?.blockedReason).toContain('token-identical greedy output')
+  })
+
+  it('enables HY3 MTP only with an explicit token-identity attestation', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'hy_v3',
+        num_hidden_layers: 80,
+        num_nextn_predict_layers: 1,
+      },
+      {
+        format: 'jang',
+        profile: 'JANG_2K',
+        runtime: {
+          bundle_has_mtp: true,
+          mtp_layers: 1,
+          mtp_mode: 'preserved_native_candidate',
+        },
+        mtp: { kept: true, enabled: true, num_layers: 1 },
+        capabilities: {
+          family: 'hy_v3',
+          modality: 'text',
+          cache_type: 'kv',
+        },
+      },
+    )
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: {
+        'model.embed_tokens.weight': 'model.safetensors',
+        'mtp.0.eh_proj.weight': 'model.safetensors',
+        'mtp.0.block.self_attn.q_proj.weight': 'model.safetensors',
+      },
+    }))
+    writeFileSync(join(dir, 'vmlx_mtp_tuning.json'), JSON.stringify({
+      native_mtp: {
+        best_depth: 1,
+        validated: true,
+        output_equivalent: true,
+      },
+    }))
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.nativeMtp).toMatchObject({
+      supported: true,
+      depth: 1,
+      depthSource: 'vmlx_mtp_tuning.json:native_mtp.best_depth',
+      runtimeScope: 'text',
+      nativeCacheType: 'plain_kv_v1',
+    })
+  })
+
   it('does not expose Native MTP when model-local tuning blocks the runtime', () => {
     const dir = makeModelDir(
       {

@@ -103,6 +103,7 @@ export interface DetectedConfig {
     runtimeScope: 'text' | 'text+vl'
     nativeCacheType: string
     requiresDeterministicSampling: boolean
+    blockedReason?: string
   }
   description: string
   maxContextLength?: number
@@ -871,6 +872,21 @@ function nativeMtpBlockedByTuning(modelPath: string): boolean {
   }
 }
 
+function nativeMtpOutputEquivalent(modelPath: string): boolean | undefined {
+  try {
+    const tuningPath = join(modelPath, 'vmlx_mtp_tuning.json')
+    if (!existsSync(tuningPath)) return undefined
+    const tuning = JSON.parse(readFileSync(tuningPath, 'utf-8'))
+    const nativeMtp = tuning?.native_mtp
+    if (!nativeMtp || typeof nativeMtp !== 'object') return undefined
+    return typeof nativeMtp.output_equivalent === 'boolean'
+      ? nativeMtp.output_equivalent
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function nativeMtpBlockedByProfile(jangCfg: any): boolean {
   const profile = String(
     jangCfg?.quantization?.profile ??
@@ -892,12 +908,6 @@ function detectNativeMtpCapability(
   if (jangCfg?.drop_mtp === true || jangCfg?.mtp?.enabled === false || jangCfg?.mtp?.kept === false) {
     return undefined
   }
-  const tuningDepth = readNativeMtpTuningDepth(modelPath)
-  if (
-    nativeMtpBlockedByTuning(modelPath) ||
-    (nativeMtpBlockedByProfile(jangCfg) && !tuningDepth)
-  ) return undefined
-
   const supportedFamilies = new Set([
     'qwen3_5',
     'qwen3_5_text',
@@ -911,6 +921,16 @@ function detectNativeMtpCapability(
     jangCfg?.capabilities?.family,
   ].map(value => String(value || '').toLowerCase())
   if (!modelTypes.some(value => supportedFamilies.has(value))) return undefined
+  const hy3 = modelTypes.includes('hy_v3')
+  const tuningDepth = readNativeMtpTuningDepth(modelPath)
+  const hy3OutputEquivalent = hy3
+    ? nativeMtpOutputEquivalent(modelPath)
+    : undefined
+  const hy3IdentityBlocked = hy3 && hy3OutputEquivalent !== true
+  if (
+    (!hy3 && nativeMtpBlockedByTuning(modelPath)) ||
+    (!hy3 && nativeMtpBlockedByProfile(jangCfg) && !tuningDepth)
+  ) return undefined
 
   if (configuredNativeMtpLayers(parsedConfig, jangCfg) <= 0) return undefined
 
@@ -925,7 +945,18 @@ function detectNativeMtpCapability(
     const hasVisionWeights = keys.some(key =>
       /(^|\.)(vision_tower|vision_model|visual|patch_embed|multi_modal_projector|mm_projector|image_newline)(\.|$)/.test(key),
     )
-    const hy3 = modelTypes.includes('hy_v3')
+    if (hy3IdentityBlocked) {
+      return {
+        supported: false,
+        depth: 1,
+        depthSource: 'validation-blocked',
+        runtimeScope: 'text',
+        nativeCacheType: 'plain_kv_v1',
+        requiresDeterministicSampling: true,
+        blockedReason:
+          'Native MTP weights were detected, but this HY3 affine bundle has not proven token-identical greedy output for its two-token verifier. Autoregressive decode remains active.',
+      }
+    }
     return {
       supported: true,
       depth: tuningDepth?.depth ?? 3,

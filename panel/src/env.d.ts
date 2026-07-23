@@ -46,6 +46,7 @@ declare global {
             runtimeScope: 'text' | 'text+vl';
             nativeCacheType: string;
             requiresDeterministicSampling: boolean;
+            blockedReason?: string;
           };
           description: string;
           maxContextLength?: number;

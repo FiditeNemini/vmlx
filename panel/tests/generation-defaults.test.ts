@@ -136,6 +136,20 @@ describe('readGenerationDefaults generation_config defaults', () => {
     })
   })
 
+  it('ignores non-positive max_new_tokens instead of surfacing an invalid output default', async () => {
+    const dir = makeModelDir({
+      'generation_config.json': {
+        temperature: 0.8,
+        max_new_tokens: -1,
+      },
+    }, 'vmlx-generation-defaults-invalid-max-new-tokens-')
+
+    await expect(readGenerationDefaults(dir)).resolves.toEqual({
+      temperature: 0.8,
+      source: 'generation_config',
+    })
+  })
+
   it('treats generation_config do_sample=false as effective greedy sampling', async () => {
     const dir = makeModelDir({
       'generation_config.json': {

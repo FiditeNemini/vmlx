@@ -6,6 +6,7 @@ export interface BundleGenerationDefaults {
   minP?: number
   repeatPenalty?: number
   maxNewTokens?: number
+  source?: 'generation_config' | 'jang_config'
 }
 
 export interface SessionGenerationDefaultFields {
@@ -17,6 +18,88 @@ export interface SessionGenerationDefaultFields {
   defaultMaxNewTokens: number
   defaultDoSample?: boolean
   defaultSamplingDefaultsDeclared: boolean
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const number = finiteNumber(value)
+  return number != null && number > 0 ? Math.floor(number) : undefined
+}
+
+function objectRecord(value: unknown): Record<string, any> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, any>
+    : undefined
+}
+
+/**
+ * Resolve the bundle-owned sampling contract once for every main/renderer
+ * settings surface. JANG chat metadata wins field-by-field over the standard
+ * generation config; absent JANG fields retain valid generation defaults.
+ */
+export function resolveBundleGenerationDefaults(
+  generationConfig: unknown,
+  jangConfig: unknown,
+  modelConfig: unknown,
+): BundleGenerationDefaults | null {
+  const defaults: BundleGenerationDefaults = {}
+  const generation = objectRecord(generationConfig)
+  if (generation) {
+    const samplingDisabled = generation.do_sample === false
+    if (typeof generation.do_sample === 'boolean') defaults.doSample = generation.do_sample
+    const temperature = finiteNumber(generation.temperature)
+    if (temperature != null) defaults.temperature = samplingDisabled ? 0 : temperature
+    const topP = finiteNumber(generation.top_p)
+    if (topP != null) defaults.topP = samplingDisabled ? 1 : topP
+    const topK = finiteNumber(generation.top_k)
+    if (topK != null) defaults.topK = samplingDisabled ? 0 : Math.max(0, Math.round(topK))
+    const minP = finiteNumber(generation.min_p)
+    if (minP != null) defaults.minP = minP
+    const repeatPenalty = finiteNumber(generation.repetition_penalty)
+    if (repeatPenalty != null) defaults.repeatPenalty = repeatPenalty
+    const maxNewTokens = positiveInteger(generation.max_new_tokens)
+    if (maxNewTokens != null) defaults.maxNewTokens = maxNewTokens
+    if (Object.keys(defaults).length > 0) defaults.source = 'generation_config'
+  }
+
+  const jang = objectRecord(jangConfig)
+  const sampling = objectRecord(jang?.chat?.sampling_defaults)
+  if (sampling) {
+    // JANG chat metadata owns sampling mode. A generation_config do_sample
+    // value must not silently override a stamped JANG request contract.
+    delete defaults.doSample
+    const temperature = finiteNumber(sampling.temperature)
+    if (temperature != null) defaults.temperature = temperature
+    const topP = finiteNumber(sampling.top_p)
+    if (topP != null) defaults.topP = topP
+    const topK = finiteNumber(sampling.top_k)
+    if (topK != null) defaults.topK = Math.max(0, Math.round(topK))
+    const minP = finiteNumber(sampling.min_p)
+    if (minP != null) defaults.minP = minP
+
+    const defaultMode = jang?.chat?.reasoning?.default_mode
+    const repThinking = finiteNumber(sampling.repetition_penalty_thinking)
+    const repChat = finiteNumber(sampling.repetition_penalty_chat)
+    const repScalar = finiteNumber(sampling.repetition_penalty)
+    const modelType = objectRecord(modelConfig)?.model_type
+    const repeatPenalty = modelType === 'deepseek_v4'
+      ? (defaultMode === 'thinking'
+        ? (repThinking ?? repScalar ?? repChat)
+        : (repScalar ?? repChat ?? repThinking))
+      : defaultMode === 'thinking'
+        ? (repThinking ?? repChat ?? repScalar)
+        : (repChat ?? repThinking ?? repScalar)
+    if (repeatPenalty != null) defaults.repeatPenalty = repeatPenalty
+
+    const maxNewTokens = positiveInteger(sampling.max_new_tokens)
+    if (maxNewTokens != null) defaults.maxNewTokens = maxNewTokens
+    defaults.source = 'jang_config'
+  }
+
+  return Object.keys(defaults).some((key) => key !== 'source') ? defaults : null
 }
 
 export function hasDeclaredBundleSamplingDefaults(

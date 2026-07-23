@@ -30,6 +30,7 @@ import {
   normalizeHfEndpointSetting,
   normalizeHfTokenSetting,
 } from "../../shared/hfSettings";
+import { resolveBundleGenerationDefaults } from "../../shared/sessionGenerationDefaults";
 
 /**
  * ms#75: resolve the HuggingFace-compatible base URL for API calls
@@ -263,101 +264,73 @@ export async function readGenerationDefaults(
       // detection is best-effort; absence leaves the field undefined.
     }
 
-    const configPath = join(modelPath, "generation_config.json");
+    let generationConfig: Record<string, any> | undefined;
+    let jangConfig: Record<string, any> | undefined;
+    let modelConfig: Record<string, any> | undefined;
     try {
-      const raw = await readFile(configPath, "utf-8");
-      const config = JSON.parse(raw);
+      generationConfig = JSON.parse(
+        await readFile(join(modelPath, "generation_config.json"), "utf-8"),
+      );
+    } catch {
+      // generation_config.json is optional.
+    }
+    try {
+      jangConfig = JSON.parse(
+        await readFile(join(modelPath, "jang_config.json"), "utf-8"),
+      );
+    } catch {
+      // jang_config.json is optional for non-JANG bundles.
+    }
+    try {
+      modelConfig = JSON.parse(
+        await readFile(join(modelPath, "config.json"), "utf-8"),
+      );
+    } catch {
+      // config.json is optional for generation defaults.
+    }
 
-      const generationConfigDisablesSampling = config.do_sample === false;
-      if (typeof config.do_sample === "boolean")
-        defaults.doSample = config.do_sample;
-      if (typeof config.temperature === "number")
-        defaults.temperature = generationConfigDisablesSampling
-          ? 0
-          : config.temperature;
-      if (typeof config.top_p === "number")
-        defaults.topP = generationConfigDisablesSampling ? 1 : config.top_p;
-      if (typeof config.top_k === "number")
-        defaults.topK = generationConfigDisablesSampling
-          ? 0
-          : Math.max(0, Math.round(config.top_k));
-      if (typeof config.min_p === "number") defaults.minP = config.min_p;
-      if (typeof config.repetition_penalty === "number")
-        defaults.repeatPenalty = config.repetition_penalty;
-      if (typeof config.max_new_tokens === "number")
-        defaults.maxNewTokens = config.max_new_tokens;
+    const resolved = resolveBundleGenerationDefaults(
+      generationConfig,
+      jangConfig,
+      modelConfig,
+    );
+    if (resolved) Object.assign(defaults, resolved);
+
+    if (generationConfig) {
       const maxThinkingTokens = positiveIntegerDefault(
-        config.max_thinking_tokens,
-        config.thinking_budget,
-        config.reasoning_budget,
-        config.reasoning?.budget_tokens,
+        generationConfig.max_thinking_tokens,
+        generationConfig.thinking_budget,
+        generationConfig.reasoning_budget,
+        generationConfig.reasoning?.budget_tokens,
       );
       if (maxThinkingTokens != null && defaults.thinkingBudgetSupported !== false)
         defaults.maxThinkingTokens = maxThinkingTokens;
-      if (Object.keys(defaults).length > 0) defaults.source = "generation_config";
-    } catch {
-      // generation_config.json is optional; JANG metadata below may still exist.
     }
 
-    try {
-      const raw = await readFile(join(modelPath, "jang_config.json"), "utf-8");
-      const jang = JSON.parse(raw);
-      const sampling = jang?.chat?.sampling_defaults;
-      if (sampling && typeof sampling === "object") {
-        delete defaults.doSample;
-        if (typeof sampling.temperature === "number")
-          defaults.temperature = sampling.temperature;
-        if (typeof sampling.top_p === "number") defaults.topP = sampling.top_p;
-        if (typeof sampling.top_k === "number")
-          defaults.topK = Math.max(0, Math.round(sampling.top_k));
-        if (typeof sampling.min_p === "number") defaults.minP = sampling.min_p;
-        const defaultMode = jang?.chat?.reasoning?.default_mode;
-        const repThinking =
-          typeof sampling.repetition_penalty_thinking === "number"
-            ? sampling.repetition_penalty_thinking
-            : undefined;
-        const repChat =
-          typeof sampling.repetition_penalty_chat === "number"
-            ? sampling.repetition_penalty_chat
-            : undefined;
-        const repScalar =
-          typeof sampling.repetition_penalty === "number"
-            ? sampling.repetition_penalty
-            : undefined;
-        let modelType: string | undefined;
-        try {
-          const configRaw = await readFile(join(modelPath, "config.json"), "utf-8");
-          const config = JSON.parse(configRaw);
-          modelType =
-            typeof config?.model_type === "string" ? config.model_type : undefined;
-        } catch {
-          // config.json is optional for generation defaults.
-        }
-        const rep =
-          modelType === "deepseek_v4"
-            ? defaultMode === "thinking"
-              ? (repThinking ?? repScalar ?? repChat)
-              : (repScalar ?? repChat ?? repThinking)
-            : defaultMode === "thinking"
-            ? (repThinking ?? repChat ?? repScalar)
-            : (repChat ?? repThinking ?? repScalar);
-        if (typeof rep === "number") defaults.repeatPenalty = rep;
-        if (typeof sampling.max_new_tokens === "number")
-          defaults.maxNewTokens = sampling.max_new_tokens;
+    const sampling = jangConfig?.chat?.sampling_defaults;
+    if (sampling && typeof sampling === "object") {
         const maxThinkingTokens = positiveIntegerDefault(
           sampling.max_thinking_tokens,
           sampling.thinking_budget,
           sampling.reasoning_budget,
-          jang?.chat?.reasoning?.max_thinking_tokens,
-          jang?.chat?.reasoning?.thinking_budget,
-          jang?.chat?.reasoning?.budget_tokens,
+          jangConfig?.chat?.reasoning?.max_thinking_tokens,
+          jangConfig?.chat?.reasoning?.thinking_budget,
+          jangConfig?.chat?.reasoning?.budget_tokens,
         );
         if (maxThinkingTokens != null && defaults.thinkingBudgetSupported !== false)
           defaults.maxThinkingTokens = maxThinkingTokens;
-        defaults.source = "jang_config";
-      }
-    } catch {
-      // jang_config.json is optional for non-JANG bundles.
+    }
+
+    // Preserve provenance for capability-only generation configs. Older
+    // bundles can declare a reasoning budget or registry capability without
+    // declaring any sampler value, and settings diagnostics still need to
+    // report which bundle file supplied that contract.
+    if (
+      !defaults.source &&
+      generationConfig &&
+      Object.keys(defaults).some((key) => key !== "source")
+    ) {
+      defaults.source = "generation_config";
     }
 
     // Only return if at least one param was found

@@ -1,8 +1,73 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { applyBundleGenerationDefaultsToSessionConfig } from '../src/shared/sessionGenerationDefaults'
+import {
+  applyBundleGenerationDefaultsToSessionConfig,
+  resolveBundleGenerationDefaults,
+} from '../src/shared/sessionGenerationDefaults'
 
 describe('session generation-default hydration', () => {
+  it('uses one resolver for standard and JANG sampling precedence', () => {
+    expect(resolveBundleGenerationDefaults(
+      {
+        do_sample: false,
+        temperature: 1,
+        top_p: 0.95,
+        top_k: 40,
+        repetition_penalty: 1.1,
+        max_new_tokens: 2048,
+      },
+      {
+        chat: {
+          reasoning: { default_mode: 'chat' },
+          sampling_defaults: {
+            temperature: 0.6,
+            top_p: 0.9,
+            repetition_penalty_chat: 1.05,
+          },
+        },
+      },
+      { model_type: 'qwen3' },
+    )).toEqual({
+      temperature: 0.6,
+      topP: 0.9,
+      topK: 0,
+      repeatPenalty: 1.05,
+      maxNewTokens: 2048,
+      source: 'jang_config',
+    })
+  })
+
+  it('rejects invalid output-token defaults and normalizes disabled top-k', () => {
+    expect(resolveBundleGenerationDefaults(
+      { max_new_tokens: -1, top_k: -1 },
+      null,
+      null,
+    )).toEqual({
+      topK: 0,
+      source: 'generation_config',
+    })
+  })
+
+  it('keeps DSV4 direct-chat scalar repetition precedence', () => {
+    expect(resolveBundleGenerationDefaults(
+      null,
+      {
+        chat: {
+          reasoning: { default_mode: 'chat' },
+          sampling_defaults: {
+            repetition_penalty: 1,
+            repetition_penalty_chat: 1.05,
+            repetition_penalty_thinking: 1.1,
+          },
+        },
+      },
+      { model_type: 'deepseek_v4' },
+    )).toMatchObject({
+      repeatPenalty: 1,
+      source: 'jang_config',
+    })
+  })
+
   it('preserves an explicit do_sample=false declaration', () => {
     expect(applyBundleGenerationDefaultsToSessionConfig({}, { doSample: false })).toMatchObject({
       defaultDoSample: false,

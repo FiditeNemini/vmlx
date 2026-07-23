@@ -16,6 +16,11 @@ import { canonicalizeToolParserId } from '../shared/toolParserAliases'
 import { buildToolLaunchArgs } from '../shared/toolLaunchArgs'
 import { canonicalizeReasoningParserForCli } from '../shared/reasoningParserAliases'
 import {
+  applyBundleGenerationDefaultsToSessionConfig,
+  hasDeclaredBundleSamplingDefaults,
+  resolveBundleGenerationDefaults,
+} from '../shared/sessionGenerationDefaults'
+import {
   GENERATION_STARTUP_DEFAULTS_VERSION,
   LEGACY_GENERIC_MAX_OUTPUT_TOKENS,
   MODEL_PARSER_DEFAULTS_VERSION,
@@ -90,10 +95,6 @@ interface BundleStartupDefaults {
   maxTokens?: number
   samplingDefaultsDeclared?: boolean
   source?: 'generation_config' | 'jang_config'
-}
-
-function hasSamplingDefaultsRecord(record: Record<string, unknown>, keys: string[]): boolean {
-  return keys.some((key) => typeof record[key] === 'number')
 }
 
 function normalizeDetectedFamilyName(family?: string): string | undefined {
@@ -565,65 +566,33 @@ function filterAdditionalArgs(raw: string | undefined, blockedFlags: Set<string>
 
 function readBundleStartupDefaults(modelPath?: string): BundleStartupDefaults {
   if (!modelPath) return {}
-  const out: BundleStartupDefaults = {}
+  let generationConfig: Record<string, any> | undefined
+  let jangConfig: Record<string, any> | undefined
+  let modelConfig: Record<string, any> | undefined
   try {
-    const gen = JSON.parse(readFileSync(join(modelPath, 'generation_config.json'), 'utf8'))
-    const generationConfigDisablesSampling = gen.do_sample === false
-    if (typeof gen.do_sample === 'boolean') out.doSample = gen.do_sample
-    if (typeof gen.temperature === 'number') out.defaultTemperature = generationConfigDisablesSampling ? 0 : Math.round(gen.temperature * 100)
-    if (typeof gen.top_p === 'number') out.defaultTopP = generationConfigDisablesSampling ? 100 : Math.round(gen.top_p * 100)
-    if (typeof gen.top_k === 'number') out.defaultTopK = generationConfigDisablesSampling ? 0 : Math.max(0, Math.round(gen.top_k))
-    if (typeof gen.min_p === 'number') out.defaultMinP = Math.max(0, Math.round(gen.min_p * 100))
-    if (typeof gen.repetition_penalty === 'number') out.defaultRepetitionPenalty = Math.round(gen.repetition_penalty * 100)
-    if (hasSamplingDefaultsRecord(gen, ['temperature', 'top_p', 'top_k', 'min_p', 'repetition_penalty'])) {
-      out.samplingDefaultsDeclared = true
-    }
-    if (typeof gen.max_new_tokens === 'number' && gen.max_new_tokens > 0) out.maxTokens = Math.round(gen.max_new_tokens)
-    if (Object.keys(out).length > 0) out.source = 'generation_config'
+    generationConfig = JSON.parse(readFileSync(join(modelPath, 'generation_config.json'), 'utf8'))
   } catch { /* generation_config.json is optional */ }
-
   try {
-    const jang = JSON.parse(readFileSync(join(modelPath, 'jang_config.json'), 'utf8'))
-    const sampling = jang?.chat?.sampling_defaults
-    if (sampling && typeof sampling === 'object') {
-      delete out.doSample
-      if (typeof sampling.temperature === 'number') out.defaultTemperature = Math.round(sampling.temperature * 100)
-      if (typeof sampling.top_p === 'number') out.defaultTopP = Math.round(sampling.top_p * 100)
-      if (typeof sampling.top_k === 'number') out.defaultTopK = Math.max(0, Math.round(sampling.top_k))
-      if (typeof sampling.min_p === 'number') out.defaultMinP = Math.max(0, Math.round(sampling.min_p * 100))
-      if (hasSamplingDefaultsRecord(sampling, ['temperature', 'top_p', 'top_k', 'min_p', 'repetition_penalty', 'repetition_penalty_thinking', 'repetition_penalty_chat'])) {
-        out.samplingDefaultsDeclared = true
-      }
-      // Pick mode-specific repetition penalty based on the bundle's
-      // default reasoning mode. Bundles can split _thinking vs _chat because
-      // the correct value is part of the bundle's chat contract. Falls back
-      // to the unified scalar if either side is missing.
-      const defaultMode = jang?.chat?.reasoning?.default_mode
-      const repThinking = typeof sampling.repetition_penalty_thinking === 'number'
-        ? sampling.repetition_penalty_thinking : undefined
-      const repChat = typeof sampling.repetition_penalty_chat === 'number'
-        ? sampling.repetition_penalty_chat : undefined
-      const repScalar = typeof sampling.repetition_penalty === 'number'
-        ? sampling.repetition_penalty : undefined
-      let modelType: string | undefined
-      try {
-        const config = JSON.parse(readFileSync(join(modelPath, 'config.json'), 'utf8'))
-        modelType = typeof config?.model_type === 'string' ? config.model_type : undefined
-      } catch { /* config.json is optional here */ }
-      const rep = modelType === 'deepseek_v4'
-        ? (defaultMode === 'thinking'
-          ? (repThinking ?? repScalar ?? repChat)
-          : (repScalar ?? repChat ?? repThinking))
-        : defaultMode === 'thinking'
-        ? (repThinking ?? repChat ?? repScalar)
-        : (repChat ?? repThinking ?? repScalar)
-      if (typeof rep === 'number') out.defaultRepetitionPenalty = Math.round(rep * 100)
-      if (typeof sampling.max_new_tokens === 'number' && sampling.max_new_tokens > 0) out.maxTokens = Math.round(sampling.max_new_tokens)
-      out.source = 'jang_config'
-    }
+    jangConfig = JSON.parse(readFileSync(join(modelPath, 'jang_config.json'), 'utf8'))
   } catch { /* jang_config.json is optional */ }
+  try {
+    modelConfig = JSON.parse(readFileSync(join(modelPath, 'config.json'), 'utf8'))
+  } catch { /* config.json is optional */ }
 
-  return out
+  const defaults = resolveBundleGenerationDefaults(generationConfig, jangConfig, modelConfig)
+  if (!defaults) return {}
+  const mapped = applyBundleGenerationDefaultsToSessionConfig({}, defaults)
+  return {
+    doSample: mapped.defaultDoSample,
+    defaultTemperature: mapped.defaultTemperature,
+    defaultTopP: mapped.defaultTopP,
+    defaultTopK: mapped.defaultTopK,
+    defaultMinP: mapped.defaultMinP,
+    defaultRepetitionPenalty: mapped.defaultRepetitionPenalty,
+    maxTokens: mapped.defaultMaxNewTokens || undefined,
+    samplingDefaultsDeclared: hasDeclaredBundleSamplingDefaults(defaults),
+    source: defaults.source,
+  }
 }
 
 function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: string): boolean {

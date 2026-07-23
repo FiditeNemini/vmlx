@@ -34,12 +34,17 @@ def _zaya_tokenizer_config(config: dict):
     if not changed:
         return None
 
-    from transformers.models.zaya.configuration_zaya import ZayaConfig
+    # Do not depend on a model-specific Transformers config class here.
+    # Transformers 5.7 (used by the bundled runtime) does not expose
+    # ``transformers.models.zaya``, while newer development environments do.
+    # AutoTokenizer only needs a config object with the normalized attributes,
+    # so the stable generic base keeps this compatibility shim version-neutral.
+    from transformers import PreTrainedConfig
 
     logger.info(
         "ZAYA tokenizer compatibility: normalized legacy false RoPE config to None"
     )
-    return ZayaConfig(**normalized)
+    return PreTrainedConfig(**normalized)
 
 
 def load_zaya_model(model_path: str | Path, *, lazy: bool = False):

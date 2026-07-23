@@ -2592,6 +2592,26 @@ def test_local_zaya_mxfp4_loads_strictly_when_present():
     assert cfg["model_type"] == "zaya"
 
 
+def test_zaya_legacy_rope_normalization_uses_version_stable_config():
+    from transformers import PreTrainedConfig
+
+    from vmlx_engine.loaders.load_zaya import _zaya_tokenizer_config
+
+    source = {
+        "model_type": "zaya",
+        "rope_scaling": False,
+        "rope_parameters": False,
+        "hidden_size": 64,
+    }
+    normalized = _zaya_tokenizer_config(source)
+
+    assert isinstance(normalized, PreTrainedConfig)
+    assert normalized.rope_scaling is None
+    assert normalized.rope_parameters is None
+    assert source["rope_scaling"] is False
+    assert source["rope_parameters"] is False
+
+
 def test_zaya_xml_tool_parser_registered_and_parses_native_format():
     from vmlx_engine.tool_parsers import ToolParserManager
 

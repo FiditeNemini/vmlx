@@ -1545,27 +1545,50 @@ export class ApiGateway extends EventEmitter {
   private translateOllamaMessages(messages: any): any[] {
     if (!Array.isArray(messages)) return [];
     return messages.map((msg: any) => {
-      const images = Array.isArray(msg?.images)
-        ? msg.images
-        : typeof msg?.images === "string"
-          ? [msg.images]
+      if (!msg || typeof msg !== "object" || Array.isArray(msg)) return msg;
+
+      // Ollama names prior assistant private reasoning `thinking`; the shared
+      // Chat/Responses history contract names it `reasoning_content`. Normalize
+      // before the text-only/media split so the Electron gateway and direct
+      // Python Ollama route render identical follow-up prompts.
+      const normalized = { ...msg };
+      if (
+        normalized.role === "assistant" &&
+        Object.prototype.hasOwnProperty.call(normalized, "thinking")
+      ) {
+        const thinking = normalized.thinking;
+        delete normalized.thinking;
+        if (
+          typeof thinking === "string" &&
+          thinking.length > 0 &&
+          !(typeof normalized.reasoning_content === "string" &&
+            normalized.reasoning_content.length > 0)
+        ) {
+          normalized.reasoning_content = thinking;
+        }
+      }
+
+      const images = Array.isArray(normalized.images)
+        ? normalized.images
+        : typeof normalized.images === "string"
+          ? [normalized.images]
           : [];
-      const videos = Array.isArray(msg?.videos)
-        ? msg.videos
-        : typeof msg?.videos === "string"
-          ? [msg.videos]
+      const videos = Array.isArray(normalized.videos)
+        ? normalized.videos
+        : typeof normalized.videos === "string"
+          ? [normalized.videos]
           : [];
-      const rawAudio = msg?.audio ?? msg?.audios;
+      const rawAudio = normalized.audio ?? normalized.audios;
       const audio = Array.isArray(rawAudio)
         ? rawAudio
         : typeof rawAudio === "string"
           ? [rawAudio]
           : [];
-      if (!msg || (images.length === 0 && videos.length === 0 && audio.length === 0)) {
-        return msg;
+      if (images.length === 0 && videos.length === 0 && audio.length === 0) {
+        return normalized;
       }
       const parts: any[] = [];
-      const text = msg.content || "";
+      const text = normalized.content || "";
       if (text) parts.push({ type: "text", text });
       for (const img of images) {
         if (typeof img !== "string") continue;
@@ -1595,10 +1618,10 @@ export class ApiGateway extends EventEmitter {
         audios: _audios,
         content: _content,
         ...rest
-      } = msg;
+      } = normalized;
       return {
         ...rest,
-        role: msg.role || "user",
+        role: normalized.role || "user",
         content: parts,
       };
     });

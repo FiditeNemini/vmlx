@@ -551,6 +551,75 @@ describe("Ollama gateway request translation behavior", () => {
     }]);
   });
 
+  it("normalizes prior Ollama assistant thinking before text and media history forwarding", async () => {
+    backend = await startCaptureBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    await postJson(`http://127.0.0.1:${started.port}/api/chat`, {
+      model: "hy3-model",
+      stream: false,
+      messages: [
+        { role: "user", content: "first" },
+        {
+          role: "assistant",
+          thinking: "PRIVATE-PLAN-TEXT",
+          content: "visible text",
+        },
+        {
+          role: "assistant",
+          thinking: "PRIVATE-PLAN-MEDIA",
+          content: "visible media",
+          images: ["aW1hZ2U="],
+        },
+        {
+          role: "assistant",
+          thinking: "",
+          content: "empty private rail",
+        },
+        {
+          role: "assistant",
+          thinking: "ALIAS-MUST-NOT-WIN",
+          reasoning_content: "CANONICAL-PRIVATE-PLAN",
+          content: "canonical wins",
+        },
+        { role: "user", content: "second" },
+      ],
+    });
+
+    expect(backend.paths).toEqual(["/v1/chat/completions"]);
+    expect(backend.bodies[0].messages).toEqual([
+      { role: "user", content: "first" },
+      {
+        role: "assistant",
+        reasoning_content: "PRIVATE-PLAN-TEXT",
+        content: "visible text",
+      },
+      {
+        role: "assistant",
+        reasoning_content: "PRIVATE-PLAN-MEDIA",
+        content: [
+          { type: "text", text: "visible media" },
+          {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,aW1hZ2U=" },
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: "empty private rail",
+      },
+      {
+        role: "assistant",
+        reasoning_content: "CANONICAL-PRIVATE-PLAN",
+        content: "canonical wins",
+      },
+      { role: "user", content: "second" },
+    ]);
+    expect(JSON.stringify(backend.bodies[0].messages)).not.toContain('"thinking"');
+  });
+
   it("omits malformed Ollama num_predict values instead of poisoning max_tokens", async () => {
     backend = await startCaptureBackend();
     const started = await startGateway(backend.port);

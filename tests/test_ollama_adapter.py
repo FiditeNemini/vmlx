@@ -85,6 +85,75 @@ def test_ollama_chat_translates_video_and_audio_extensions():
     }]
 
 
+def test_ollama_chat_normalizes_private_thinking_before_text_and_media_history():
+    from vmlx_engine.api.ollama_adapter import ollama_chat_to_openai
+
+    req = ollama_chat_to_openai(
+        {
+            "model": "omni",
+            "messages": [
+                {"role": "user", "content": "first"},
+                {
+                    "role": "assistant",
+                    "thinking": "PRIVATE-PLAN-TEXT",
+                    "content": "visible text",
+                },
+                {
+                    "role": "assistant",
+                    "thinking": "PRIVATE-PLAN-MEDIA",
+                    "content": "visible media",
+                    "images": ["aW1hZ2U="],
+                },
+                {
+                    "role": "assistant",
+                    "thinking": "",
+                    "content": "empty private rail",
+                },
+                {
+                    "role": "assistant",
+                    "thinking": "ALIAS-MUST-NOT-WIN",
+                    "reasoning_content": "CANONICAL-PRIVATE-PLAN",
+                    "content": "canonical wins",
+                },
+                {"role": "user", "content": "second"},
+            ],
+        }
+    )
+
+    assert req["messages"] == [
+        {"role": "user", "content": "first"},
+        {
+            "role": "assistant",
+            "reasoning_content": "PRIVATE-PLAN-TEXT",
+            "content": "visible text",
+        },
+        {
+            "role": "assistant",
+            "reasoning_content": "PRIVATE-PLAN-MEDIA",
+            "content": [
+                {"type": "text", "text": "visible media"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,aW1hZ2U=",
+                    },
+                },
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": "empty private rail",
+        },
+        {
+            "role": "assistant",
+            "reasoning_content": "CANONICAL-PRIVATE-PLAN",
+            "content": "canonical wins",
+        },
+        {"role": "user", "content": "second"},
+    ]
+    assert '"thinking"' not in json.dumps(req["messages"])
+
+
 def test_ollama_generate_omits_disabled_top_k_sentinels():
     from vmlx_engine.api.ollama_adapter import (
         ollama_generate_to_openai,

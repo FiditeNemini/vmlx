@@ -146,10 +146,19 @@ def ollama_chat_to_openai(body: dict) -> dict:
         normalized_msg = dict(msg)
         if (
             normalized_msg.get("role") == "assistant"
-            and isinstance(normalized_msg.get("thinking"), str)
-            and normalized_msg.get("thinking")
+            and "thinking" in normalized_msg
         ):
-            normalized_msg["reasoning_content"] = normalized_msg.pop("thinking")
+            thinking = normalized_msg.pop("thinking")
+            existing_reasoning = normalized_msg.get("reasoning_content")
+            if (
+                isinstance(thinking, str)
+                and thinking
+                and not (
+                    isinstance(existing_reasoning, str)
+                    and existing_reasoning
+                )
+            ):
+                normalized_msg["reasoning_content"] = thinking
         msg = normalized_msg
         images = msg.get("images") if isinstance(msg, dict) else None
         videos = msg.get("videos") if isinstance(msg, dict) else None

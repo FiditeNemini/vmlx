@@ -1,0 +1,16 @@
+name: Public repository hygiene
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tracked-private-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject tracked private or internal artifacts
+        run: sh scripts/check-public-repo-hygiene.sh

@@ -376,6 +376,7 @@ class TestMLLMBatchResponse:
         assert resp.request_id == "test-1"
         assert resp.token == 42
         assert resp.finish_reason is None
+        assert resp.cache_execution is None
 
     def test_finished_response(self):
         """Test response with finish reason."""
@@ -390,6 +391,76 @@ class TestMLLMBatchResponse:
         )
 
         assert resp.finish_reason == "stop"
+
+    def test_response_carries_request_associated_cache_execution(self):
+        from vmlx_engine.mllm_batch_generator import MLLMBatchResponse
+
+        execution = {
+            "request_id": "test-cache",
+            "cache_outcome": "miss",
+            "cached_tokens": 0,
+            "prefill_tokens": 17,
+        }
+        resp = MLLMBatchResponse(
+            uid=1,
+            request_id="test-cache",
+            token=2,
+            logprobs=mx.array([0.1]),
+            cache_execution=execution,
+        )
+
+        assert resp.cache_execution == execution
+
+
+def test_mllm_discarded_hit_restores_full_prefill_and_reconciles_paged_credit():
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchGenerator,
+        MLLMBatchRequest,
+    )
+
+    adjustments = []
+    releases = []
+    generator = object.__new__(MLLMBatchGenerator)
+    generator.block_aware_cache = MagicMock()
+    generator.block_aware_cache.adjust_cache_hit_credit.side_effect = (
+        lambda request_id, accepted_tokens: adjustments.append(
+            (request_id, accepted_tokens)
+        )
+    )
+    generator.block_aware_cache.release_cache.side_effect = releases.append
+
+    request = MLLMBatchRequest(uid=7, request_id="req-discard", prompt="x")
+    request.prompt_cache = [object()]
+    request._cached_tokens = 2
+    request._cache_detail = "paged+disk"
+    request._original_token_ids = [10, 11, 12, 13, 14]
+    request._gen_prefix_tokens = [20, 21]
+    request.input_ids = mx.array([[12, 13, 14, 20, 21]])
+    request._cache_execution = {
+        "request_id": request.request_id,
+        "attempted_cached_tokens": 2,
+        "cached_tokens": 2,
+    }
+
+    generator._discard_request_cache_hit(
+        request,
+        reason="media_placeholders_in_uncached_tail",
+    )
+
+    assert adjustments == [("req-discard", 0)]
+    assert releases == ["req-discard"]
+    assert request.prompt_cache is None
+    assert request._cached_tokens == 0
+    assert request._cache_detail is None
+    assert request.input_ids.tolist() == [[10, 11, 12, 13, 14, 20, 21]]
+    assert request._cache_execution["attempted_cached_tokens"] == 2
+    assert request._cache_execution["cached_tokens"] == 0
+    assert request._cache_execution["cache_outcome"] == "discarded"
+    assert request._cache_execution["cache_reuse_applied"] is False
+    assert (
+        request._cache_execution["fallback_reason"]
+        == "media_placeholders_in_uncached_tail"
+    )
 
 
 class TestMLLMBatch:

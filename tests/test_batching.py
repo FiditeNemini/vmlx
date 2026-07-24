@@ -1168,7 +1168,13 @@ class TestSchedulerBasic:
         execution = scheduler.get_stats()["last_cache_execution"]
         assert execution["request_id"] == "req-cache-timing"
         assert execution["cache_detail"] == "paged+disk+tq"
+        assert execution["prompt_tokens"] == 160
+        assert execution["attempted_cached_tokens"] == 128
         assert execution["cached_tokens"] == 128
+        assert execution["uncached_prompt_tokens"] == 32
+        assert execution["prefill_tokens"] == 32
+        assert execution["cache_outcome"] == "hit"
+        assert execution["cache_reuse_applied"] is True
         assert execution["blocks"] == 2
         assert execution["selection"]["selected"] == "paged"
         assert execution["reconstructed"] is True
@@ -1176,6 +1182,56 @@ class TestSchedulerBasic:
         assert execution["reconstruction_seconds"] >= 0
         assert execution["dequantization_seconds"] >= 0
         assert execution["total_worker_cache_seconds"] >= execution["reconstruction_seconds"]
+
+    def test_cold_miss_replaces_previous_last_cache_execution(
+        self,
+        mock_model,
+        mock_tokenizer,
+    ):
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+
+        class _BatchGenerator:
+            stop_tokens = set()
+
+            def insert(self, tokens, max_tokens, caches=None, **_kwargs):
+                self.tokens = tokens
+                self.caches = caches
+                return [71]
+
+        sampling = SamplingParams(max_tokens=4)
+        request = Request("req-cold-miss", "x", sampling)
+        request.prompt_token_ids = list(range(12))
+        request.num_prompt_tokens = 12
+        request.remaining_tokens = request.prompt_token_ids
+
+        batch_generator = _BatchGenerator()
+        scheduler.batch_generator = batch_generator
+        scheduler._current_sampler_params = (
+            sampling.temperature,
+            sampling.top_p,
+            sampling.min_p,
+            sampling.top_k,
+            sampling.repetition_penalty,
+        )
+        scheduler._last_cache_execution = {
+            "request_id": "older-hit",
+            "cache_outcome": "hit",
+            "cached_tokens": 64,
+        }
+        scheduler.waiting.append(request)
+        scheduler.requests[request.request_id] = request
+
+        assert scheduler._schedule_waiting() == [request]
+        execution = scheduler.get_stats()["last_cache_execution"]
+        assert execution["request_id"] == "req-cold-miss"
+        assert execution["prompt_tokens"] == 12
+        assert execution["attempted_cached_tokens"] == 0
+        assert execution["cached_tokens"] == 0
+        assert execution["uncached_prompt_tokens"] == 12
+        assert execution["prefill_tokens"] == 12
+        assert execution["cache_outcome"] == "miss"
+        assert execution["cache_reuse_applied"] is False
+        assert execution["total_worker_cache_seconds"] == 0.0
 
     def test_worker_paged_tq_hit_rewraps_decoded_full_kv_for_live_cache_parity(
         self,

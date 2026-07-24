@@ -1001,6 +1001,15 @@ def test_scheduler_single_batch_m3_partial_media_hit_falls_back_to_atomic_prefil
     assert kwargs["pixel_values"][0] is request.pixel_values
     assert kwargs["image_grid_thw"][0] is request.image_grid_thw
     assert "all_tokens" not in kwargs
+    execution = scheduler._last_cache_execution
+    assert execution["prompt_tokens"] == 5
+    assert execution["attempted_cached_tokens"] == 2
+    assert execution["cached_tokens"] == 0
+    assert execution["uncached_prompt_tokens"] == 5
+    assert execution["prefill_tokens"] == 5
+    assert execution["cache_outcome"] == "discarded"
+    assert execution["cache_reuse_applied"] is False
+    assert execution["fallback_reason"] == "media_placeholders_outside_cached_prefix"
 
 
 def test_single_batch_m3_prefills_full_prompt_before_sampling():

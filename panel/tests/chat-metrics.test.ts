@@ -1,5 +1,71 @@
 import { describe, expect, it } from 'vitest'
-import { selectFinalDecodeTps } from '../src/shared/chatMetrics'
+import { readFileSync } from 'node:fs'
+import {
+  calculatePrefillTps,
+  selectFinalDecodeTps,
+} from '../src/shared/chatMetrics'
+
+describe('chat prefill TPS', () => {
+  it('uses only the uncached prompt tail', () => {
+    expect(
+      calculatePrefillTps({
+        promptTokens: 939,
+        cachedTokens: 832,
+        ttftSeconds: 0.18,
+        serverUsageKnown: true,
+      }),
+    ).toBe('594.4')
+  })
+
+  it('clamps cache counts and rejects requests with no uncached prefill', () => {
+    expect(
+      calculatePrefillTps({
+        promptTokens: 128,
+        cachedTokens: 256,
+        ttftSeconds: 0.25,
+        serverUsageKnown: true,
+      }),
+    ).toBeUndefined()
+  })
+
+  it('does not report a rate before authoritative server usage', () => {
+    expect(
+      calculatePrefillTps({
+        promptTokens: 939,
+        cachedTokens: 0,
+        ttftSeconds: 0.18,
+        serverUsageKnown: false,
+      }),
+    ).toBeUndefined()
+  })
+
+  it('rejects invalid token counts and TTFT', () => {
+    expect(
+      calculatePrefillTps({
+        promptTokens: Number.NaN,
+        cachedTokens: 0,
+        ttftSeconds: 0.18,
+        serverUsageKnown: true,
+      }),
+    ).toBeUndefined()
+    expect(
+      calculatePrefillTps({
+        promptTokens: 100,
+        cachedTokens: 0,
+        ttftSeconds: 0.001,
+        serverUsageKnown: true,
+      }),
+    ).toBeUndefined()
+  })
+
+  it('routes live, final, and abort prefill metrics through the shared helper', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+    expect(source.match(/calculatePrefillTps\(\{/g)).toHaveLength(3)
+    expect(source).not.toMatch(/promptTokens\s*\/\s*ttft/)
+    expect(source).not.toMatch(/promptTokens\s*\/\s*abortTtft/)
+    expect(source).toContain('finalStreamCachedTokens')
+  })
+})
 
 describe('final chat decode TPS', () => {
   it('keeps cumulative multi-iteration throughput when only the final tail is slow', () => {

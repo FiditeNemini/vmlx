@@ -6145,7 +6145,7 @@ class TestV4FixHybridCacheDequantize:
         # Look at the nearby prefill branch before this call. Keep the window
         # wide enough to include the explicit dequantize failure guard without
         # becoming a whole-file substring assertion.
-        before = source[max(0, idx - 1200):idx]
+        before = source[max(0, idx - 2000):idx]
         assert "_dequantize_cache" in before, (
             "Must call _dequantize_cache before _fix_hybrid_cache in prefill path"
         )
@@ -10315,7 +10315,10 @@ class TestV6MinimumSystemVersion:
             f"{min_ver} reopens mlxstudio#90/#104 metallib/libc++ failures."
         )
 
-        for rel in ("panel/README.md", "panel/SETUP.md"):
+        # SETUP.md was an untracked/private setup note and is intentionally not
+        # part of the public repository. Keep the public compatibility claim
+        # pinned in the tracked panel README.
+        for rel in ("panel/README.md",):
             text = open(os.path.join(root, rel), encoding="utf-8").read()
             assert "macOS 14.5+" in text
             assert "macOS 26+" not in text
@@ -11925,6 +11928,53 @@ class TestTurboQuantKVTelemetry:
         scheduler._tq_decoder_warmup_stats = None
 
         assert scheduler.get_stats()["last_cache_execution"] == execution
+
+    def test_mllm_scheduler_zero_cache_response_replaces_stale_last_hit(self):
+        import threading
+        from types import SimpleNamespace
+
+        from vmlx_engine.mllm_scheduler import MLLMScheduler
+
+        stale_hit = {
+            "request_id": "older-hit",
+            "cache_outcome": "hit",
+            "cached_tokens": 64,
+        }
+        current_miss = {
+            "request_id": "current-miss",
+            "prompt_tokens": 17,
+            "cached_tokens": 0,
+            "uncached_prompt_tokens": 17,
+            "prefill_tokens": 19,
+            "cache_outcome": "miss",
+            "cache_reuse_applied": False,
+        }
+        batch_stats = SimpleNamespace(
+            last_cache_execution=stale_hit,
+            to_dict=lambda: {
+                "last_cache_execution": batch_stats.last_cache_execution,
+            },
+        )
+        scheduler = MLLMScheduler.__new__(MLLMScheduler)
+        scheduler._cache_hit_requests = 0
+        scheduler._cache_hit_tokens = 0
+        scheduler._cache_hit_tokens_by_detail = {}
+        scheduler._queue_lock = threading.RLock()
+        scheduler.batch_generator = SimpleNamespace(_stats=batch_stats)
+
+        request = SimpleNamespace()
+        response = SimpleNamespace(
+            cached_tokens=0,
+            cache_detail="",
+            cache_execution=current_miss,
+        )
+
+        scheduler._record_cache_hit(response, request)
+
+        assert request._cache_execution == current_miss
+        assert batch_stats.last_cache_execution == current_miss
+        assert scheduler._cache_hit_requests == 0
+        assert scheduler._cache_hit_tokens == 0
 
     def test_mllm_paged_cache_hits_have_source_detail_labels(self):
         source = Path("./vmlx_engine/mllm_batch_generator.py").read_text()

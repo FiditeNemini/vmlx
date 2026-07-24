@@ -3590,6 +3590,10 @@ class MLLMBatchResponse:
     prompt_token_ids: Optional[List[int]] = None  # Original tokenized prompt for prefix key
     cached_tokens: int = 0  # Number of prompt tokens served from cache
     cache_detail: str = ""  # e.g. "paged+ssm", "paged+ssm+disk", "disk"
+    # Request-associated cache execution truth. This is carried on every
+    # response (including misses/discarded hits) so concurrent batches cannot
+    # accidentally project another request's generator-global snapshot.
+    cache_execution: Optional[Dict[str, Any]] = None
     cache_extra_keys: Optional[Dict[str, str]] = None
     # Generation-prefix tokens captured from the untruncated prompt tail
     # (e.g. [<|im_start|>, assistant, \n, <think>, \n] for Qwen 3.6 thinking-on).
@@ -5173,6 +5177,51 @@ class MLLMBatchGenerator:
         if callable(adjust):
             adjust(request_id, accepted_tokens=accepted_tokens)
 
+    def _discard_request_cache_hit(
+        self,
+        request: "MLLMBatchRequest",
+        *,
+        reason: str,
+        attempted_cached_tokens: Optional[int] = None,
+        release_paged: bool = True,
+    ) -> None:
+        """Rollback an unusable MLLM cache candidate and preserve truthful telemetry."""
+
+        execution = dict(getattr(request, "_cache_execution", None) or {})
+        accepted_before = int(getattr(request, "_cached_tokens", 0) or 0)
+        attempted = max(
+            int(execution.get("attempted_cached_tokens", 0) or 0),
+            int(attempted_cached_tokens or 0),
+            accepted_before,
+        )
+        if release_paged and self.block_aware_cache is not None:
+            self._adjust_paged_hit_credit(request.request_id, 0)
+            try:
+                self.block_aware_cache.release_cache(request.request_id)
+            except Exception:
+                pass
+
+        request.prompt_cache = None
+        request._cached_tokens = 0  # type: ignore[attr-defined]
+        request._cache_detail = None  # type: ignore[attr-defined]
+        request.input_ids = mx.array(
+            [
+                list(getattr(request, "_original_token_ids", None) or [])
+                + list(getattr(request, "_gen_prefix_tokens", None) or [])
+            ]
+        )
+        execution.update(
+            {
+                "request_id": request.request_id,
+                "attempted_cached_tokens": attempted,
+                "cached_tokens": 0,
+                "cache_outcome": "discarded" if attempted > 0 else "miss",
+                "cache_reuse_applied": False,
+                "fallback_reason": reason,
+            }
+        )
+        request._cache_execution = execution  # type: ignore[attr-defined]
+
     def _clean_ssm_boundary_for(
         self, request: "MLLMBatchRequest", seq_len: int, has_images: bool
     ) -> int:
@@ -6047,6 +6096,30 @@ class MLLMBatchGenerator:
             req._original_token_ids = _all_tokens
             # Track how many prompt tokens were served from cache (for usage reporting)
             req._cached_tokens = 0
+            req._cache_execution_started = time.perf_counter()
+            req._cache_execution = {
+                "request_id": req.request_id,
+                "cache_detail": None,
+                # API usage counts the cache-key prompt. The template-owned
+                # generation suffix is tracked separately and still forwarded.
+                "prompt_tokens": len(_all_tokens),
+                "cache_key_tokens": len(_all_tokens),
+                "generation_prompt_suffix_tokens": len(
+                    getattr(req, "_gen_prefix_tokens", None) or []
+                ),
+                "attempted_cached_tokens": 0,
+                "cached_tokens": 0,
+                "uncached_prompt_tokens": len(_all_tokens),
+                "prefill_tokens": _mllm_input_ids_token_count(req.input_ids),
+                "selection": "miss",
+                "cache_outcome": "miss",
+                "cache_reuse_applied": False,
+                "reconstructed": False,
+                "dequantized": False,
+                "reconstruction_seconds": 0.0,
+                "dequantization_seconds": 0.0,
+                "total_worker_cache_seconds": 0.0,
+            }
             trace.set(
                 prompt_tokens=len(_all_tokens),
                 has_images=req.pixel_values is not None,
@@ -6134,6 +6207,23 @@ class MLLMBatchGenerator:
                         except Exception:
                             _paged_disk_hit = False
                         if block_table is not None:
+                                req._cache_execution["attempted_cached_tokens"] = int(
+                                    getattr(block_table, "num_tokens", 0) or 0
+                                )
+                                req._cache_execution["blocks"] = (
+                                    _block_table_block_count(block_table)
+                                )
+                                req._cache_execution["selection"] = (
+                                    "block-disk"
+                                    if bool(
+                                        getattr(
+                                            self.paged_cache_manager,
+                                            "disk_only",
+                                            False,
+                                        )
+                                    )
+                                    else "paged"
+                                )
                                 # Hybrid models (SSM + attention, e.g. Qwen3.5-VL):
                                 # Prefix cache stores only KVCache (attention) layers.
                                 # SSM layers are cumulative state that must process ALL tokens.
@@ -6372,22 +6462,30 @@ class MLLMBatchGenerator:
                                 _block_disk_only = bool(
                                     getattr(self.paged_cache_manager, "disk_only", False)
                                 )
-                                _cache_execution = {
-                                    "request_id": req.request_id,
-                                    "cache_detail": None,
-                                    "cached_tokens": int(getattr(block_table, "num_tokens", 0) or 0),
-                                    "blocks": _block_table_block_count(block_table),
-                                    "selection": (
-                                        "block-disk" if _block_disk_only else "paged"
-                                    ),
-                                    "disk_hit": bool(_paged_disk_hit),
-                                    "reconstructed": False,
-                                    "dequantized": False,
-                                    "reconstruction_seconds": 0.0,
-                                    "dequantization_seconds": 0.0,
-                                    "total_worker_cache_seconds": 0.0,
-                                }
-                                _cache_execution_started = time.perf_counter()
+                                _cache_execution = dict(
+                                    getattr(req, "_cache_execution", None) or {}
+                                )
+                                _cache_execution.update(
+                                    {
+                                        "request_id": req.request_id,
+                                        "cache_detail": None,
+                                        "attempted_cached_tokens": int(
+                                            getattr(block_table, "num_tokens", 0) or 0
+                                        ),
+                                        "blocks": _block_table_block_count(block_table),
+                                        "selection": (
+                                            "block-disk" if _block_disk_only else "paged"
+                                        ),
+                                        "disk_hit": bool(_paged_disk_hit),
+                                    }
+                                )
+                                _cache_execution_started = float(
+                                    getattr(
+                                        req,
+                                        "_cache_execution_started",
+                                        time.perf_counter(),
+                                    )
+                                )
                                 _reconstruct_started = time.perf_counter()
                                 reconstructed = self.block_aware_cache.reconstruct_cache(block_table)
                                 _cache_execution["reconstruction_seconds"] = round(
@@ -6475,7 +6573,6 @@ class MLLMBatchGenerator:
                                         6,
                                     )
                                     req._cache_execution = dict(_cache_execution)
-                                    self._stats.last_cache_execution = dict(_cache_execution)
                                     # Re-attach the gen-prompt suffix: fetch key was
                                     # gpl-stripped but the model MUST see the template
                                     # suffix (<|im_start|>assistant\n<think>\n) to enter
@@ -6526,7 +6623,6 @@ class MLLMBatchGenerator:
                                         6,
                                     )
                                     req._cache_execution = dict(_cache_execution)
-                                    self._stats.last_cache_execution = dict(_cache_execution)
                                     # Re-attach gen-prompt suffix (see hybrid branch above
                                     # for full rationale — same correctness requirement
                                     # for attention-only thinking VLMs).
@@ -6539,9 +6635,18 @@ class MLLMBatchGenerator:
                                             _full_remaining
                                         )
                                         if has_images:
-                                            req.prompt_cache = None
-                                            req._cached_tokens = 0  # reset — full prefill needed
-                                            req._cache_detail = None
+                                            self._discard_request_cache_hit(
+                                                req,
+                                                reason="media_placeholders_in_uncached_tail",
+                                                attempted_cached_tokens=int(
+                                                    getattr(
+                                                        block_table,
+                                                        "num_tokens",
+                                                        0,
+                                                    )
+                                                    or 0
+                                                ),
+                                            )
                                             logger.info(
                                                 f"VLM prefix cache HIT for {req.request_id}: "
                                                 f"{block_table.num_tokens} cached tokens, "
@@ -6771,13 +6876,36 @@ class MLLMBatchGenerator:
                     except Exception as e:
                         logger.debug(f"VLM disk cache fetch failed for {req.request_id}: {e}")
             trace.stop("cache_lookup")
+            _lookup_execution = dict(
+                getattr(req, "_cache_execution", None) or {}
+            )
+            _lookup_execution["total_worker_cache_seconds"] = round(
+                max(
+                    0.0,
+                    time.perf_counter()
+                    - float(
+                        getattr(
+                            req,
+                            "_cache_execution_started",
+                            time.perf_counter(),
+                        )
+                    ),
+                ),
+                6,
+            )
+            req._cache_execution = _lookup_execution
 
         # Get token sequences and lengths
         input_ids_list = [
             req.input_ids.tolist() if req.input_ids is not None else [0]
             for req in requests
         ]
-        lengths = [len(ids) for ids in input_ids_list]
+        # Processor inputs are commonly shaped [1, seq]. ``len(ids)`` reports
+        # 1 for that form and made MLLM prompt throughput/statistics false.
+        lengths = [
+            _mllm_input_ids_token_count(req.input_ids)
+            for req in requests
+        ]
 
         self._stats.prompt_tokens += sum(lengths)
 
@@ -6822,7 +6950,13 @@ class MLLMBatchGenerator:
                     if self._kv_cache_bits:
                         cache_for_fix = _dequantize_cache(req.prompt_cache)
                         if cache_for_fix is None:
-                            req.prompt_cache = None
+                            self._discard_request_cache_hit(
+                                req,
+                                reason="cache_dequantization_failed",
+                                attempted_cached_tokens=int(
+                                    getattr(req, "_cached_tokens", 0) or 0
+                                ),
+                            )
                     else:
                         cache_for_fix = req.prompt_cache
                 if req.prompt_cache is not None:
@@ -6830,7 +6964,13 @@ class MLLMBatchGenerator:
                         cache_for_fix,
                         source=f"mllm-prefill-cache:{req.request_id}",
                     ):
-                        req.prompt_cache = None
+                        self._discard_request_cache_hit(
+                            req,
+                            reason="cache_validation_failed",
+                            attempted_cached_tokens=int(
+                                getattr(req, "_cached_tokens", 0) or 0
+                            ),
+                        )
                         cache_for_fix = None
                 if req.prompt_cache is not None:
                     req_cache = _fix_hybrid_cache(
@@ -6856,23 +6996,12 @@ class MLLMBatchGenerator:
                             req.request_id,
                             int(getattr(req, "_cached_tokens", 0) or 0),
                         )
-                        if self.block_aware_cache is not None:
-                            try:
-                                self.block_aware_cache.release_cache(req.request_id)
-                            except Exception:
-                                pass
-                        req.prompt_cache = None
-                        req._cached_tokens = 0
-                        req._cache_detail = None
-                        req.input_ids = mx.array(
-                            [
-                                list(
-                                    getattr(req, "_original_token_ids", None) or []
-                                )
-                                + list(
-                                    getattr(req, "_gen_prefix_tokens", None) or []
-                                )
-                            ]
+                        self._discard_request_cache_hit(
+                            req,
+                            reason="empty_reconstructed_cache",
+                            attempted_cached_tokens=int(
+                                getattr(req, "_cached_tokens", 0) or 0
+                            ),
                         )
                         cache_model = getattr(self, "_cache_model", None)
                         if cache_model is not None:
@@ -6972,13 +7101,13 @@ class MLLMBatchGenerator:
                         # Release stale blocks so they can be evicted/overwritten —
                         # without this, next turn would hit the same stale block
                         # and retry every single turn
-                        if self.block_aware_cache is not None:
-                            try:
-                                self.block_aware_cache.release_cache(req.request_id)
-                            except Exception:
-                                pass
-                        req.prompt_cache = None
-                        req.input_ids = mx.array([req._original_token_ids])
+                        self._discard_request_cache_hit(
+                            req,
+                            reason="cache_shape_broadcast_mismatch",
+                            attempted_cached_tokens=int(
+                                getattr(req, "_cached_tokens", 0) or 0
+                            ),
+                        )
                         req.attention_mask = None
                         # vmlx#109 hardening: drop stale inline SSM stash
                         # captured against the aborted prefill — see
@@ -7011,6 +7140,62 @@ class MLLMBatchGenerator:
                             trace.stop("forward")
                     else:
                         raise
+                execution = dict(getattr(req, "_cache_execution", None) or {})
+                _prompt_tokens = len(
+                    getattr(req, "_original_token_ids", None) or []
+                )
+                _final_cached_tokens = int(
+                    getattr(req, "_cached_tokens", 0) or 0
+                )
+                _attempted_cached_tokens = max(
+                    int(execution.get("attempted_cached_tokens", 0) or 0),
+                    _final_cached_tokens,
+                )
+                execution.update(
+                    {
+                        "request_id": req.request_id,
+                        "cache_detail": getattr(req, "_cache_detail", None),
+                        "prompt_tokens": _prompt_tokens,
+                        "cache_key_tokens": _prompt_tokens,
+                        "generation_prompt_suffix_tokens": len(
+                            getattr(req, "_gen_prefix_tokens", None) or []
+                        ),
+                        "attempted_cached_tokens": _attempted_cached_tokens,
+                        "cached_tokens": _final_cached_tokens,
+                        "uncached_prompt_tokens": max(
+                            _prompt_tokens - _final_cached_tokens, 0
+                        ),
+                        # Actual token tail submitted to the model. It includes
+                        # any template-owned generation suffix and, on exact
+                        # hits, the single kickoff token.
+                        "prefill_tokens": _mllm_input_ids_token_count(
+                            req.input_ids
+                        ),
+                        "cache_outcome": (
+                            "hit"
+                            if _final_cached_tokens > 0
+                            else "discarded"
+                            if _attempted_cached_tokens > 0
+                            else "miss"
+                        ),
+                        "cache_reuse_applied": bool(
+                            req.prompt_cache is not None
+                            and _final_cached_tokens > 0
+                        ),
+                    }
+                )
+                if (
+                    _final_cached_tokens == 0
+                    and _attempted_cached_tokens > 0
+                    and "fallback_reason" not in execution
+                ):
+                    execution["fallback_reason"] = "cache_candidate_discarded"
+                req._cache_execution = {
+                    key: value
+                    for key, value in execution.items()
+                    if value is not None
+                }
+                self._stats.last_cache_execution = dict(req._cache_execution)
                 per_request_caches.append(req_cache)
 
                 # Free pixel_values and vision tensors after encoding —
@@ -8681,6 +8866,9 @@ class MLLMBatchGenerator:
                     ),
                     cached_tokens=getattr(req, '_cached_tokens', 0),
                     cache_detail=getattr(req, '_cache_detail', "") or "",
+                    cache_execution=dict(
+                        getattr(req, "_cache_execution", None) or {}
+                    ),
                     cache_extra_keys=getattr(req, '_cache_extra_keys', None),
                     gen_prefix_tokens=getattr(req, '_gen_prefix_tokens', None),
                 )

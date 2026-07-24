@@ -6126,6 +6126,17 @@ class Scheduler:
                 pass  # Metal API not available — skip check
 
             request = self.waiting.popleft()
+            try:
+                _attempted_cached_tokens = int(
+                    getattr(request, "cached_tokens", 0) or 0
+                )
+            except (TypeError, ValueError):
+                _attempted_cached_tokens = 0
+            _cache_fallback_reason: Optional[str] = None
+            _initial_block_table = getattr(request, "block_table", None)
+            _initial_cache_blocks = len(
+                getattr(_initial_block_table, "block_ids", []) or []
+            )
 
             # Ensure we have a batch generator
             _cache_cleared = self._ensure_batch_generator(request.sampling_params)
@@ -6154,6 +6165,7 @@ class Scheduler:
                 request._paged_block_table_needs_worker_reconstruct = False
                 request._hybrid_prompt_cache_needs_worker_ssm = False
                 request._prompt_cache_needs_worker_dequant = False
+                _cache_fallback_reason = "batch_generator_recreated"
 
             # Track first-schedule time for TTFT (only set once per request)
             if not hasattr(request, "_schedule_time"):
@@ -6174,31 +6186,44 @@ class Scheduler:
             else:
                 tokens_to_process = request.prompt_token_ids
             cache_to_use = request.prompt_cache  # May be None
-            cache_execution: Optional[Dict[str, Any]] = None
-            if (
-                getattr(request, "cached_tokens", 0)
-                or getattr(request, "_cache_detail", None)
-                or getattr(request, "_paged_block_table_needs_worker_reconstruct", False)
-                or getattr(request, "_prompt_cache_needs_worker_dequant", False)
-            ):
-                _block_table_for_stats = getattr(request, "block_table", None)
-                cache_execution = {
-                    "request_id": request.request_id,
-                    "cache_detail": getattr(request, "_cache_detail", None),
-                    "cached_tokens": int(getattr(request, "cached_tokens", 0) or 0),
-                    "blocks": len(getattr(_block_table_for_stats, "block_ids", []) or []),
-                    "selection": getattr(request, "_cache_selection", None),
-                    "reconstructed": False,
-                    "dequantized": False,
-                    "reconstruction_seconds": 0.0,
-                    "dequantization_seconds": 0.0,
-                    "total_worker_cache_seconds": 0.0,
-                }
-                if getattr(request, "_tq_disk_direct_restore", False):
-                    cache_execution["tq_disk_direct_restore"] = True
-                _cache_worker_start = time.perf_counter()
-            else:
-                _cache_worker_start = 0.0
+            _prompt_tokens = int(
+                getattr(request, "num_prompt_tokens", 0)
+                or len(getattr(request, "prompt_token_ids", []) or [])
+            )
+            _accepted_cached_tokens = int(
+                getattr(request, "cached_tokens", 0) or 0
+            )
+            cache_execution: Dict[str, Any] = {
+                "request_id": request.request_id,
+                "cache_detail": getattr(request, "_cache_detail", None),
+                "prompt_tokens": _prompt_tokens,
+                "attempted_cached_tokens": _attempted_cached_tokens,
+                "cached_tokens": _accepted_cached_tokens,
+                "uncached_prompt_tokens": max(
+                    _prompt_tokens - _accepted_cached_tokens, 0
+                ),
+                "prefill_tokens": len(tokens_to_process),
+                "blocks": _initial_cache_blocks,
+                "selection": getattr(request, "_cache_selection", None),
+                "cache_outcome": (
+                    "hit"
+                    if _accepted_cached_tokens > 0
+                    else "discarded"
+                    if _attempted_cached_tokens > 0
+                    else "miss"
+                ),
+                "cache_reuse_applied": bool(
+                    cache_to_use is not None and _accepted_cached_tokens > 0
+                ),
+                "reconstructed": False,
+                "dequantized": False,
+                "reconstruction_seconds": 0.0,
+                "dequantization_seconds": 0.0,
+                "total_worker_cache_seconds": 0.0,
+            }
+            if getattr(request, "_tq_disk_direct_restore", False):
+                cache_execution["tq_disk_direct_restore"] = True
+            _cache_worker_start = time.perf_counter()
 
             if getattr(request, "_paged_block_table_needs_worker_reconstruct", False):
                 block_table = getattr(request, "block_table", None)
@@ -6275,6 +6300,7 @@ class Scheduler:
                     tokens_to_process = request.prompt_token_ids
                     request._hybrid_prompt_cache_needs_worker_ssm = False
                     request._prompt_cache_needs_worker_dequant = False
+                    _cache_fallback_reason = "paged_reconstruction_failed"
                 else:
                     request.prompt_cache = cache_to_use
 
@@ -6363,6 +6389,7 @@ class Scheduler:
                     request.cached_tokens = 0
                     request.remaining_tokens = request.prompt_token_ids
                     tokens_to_process = request.prompt_token_ids
+                    _cache_fallback_reason = "cache_dequantization_failed"
                 else:
                     request.prompt_cache = cache_to_use
                     request._prompt_cache_needs_worker_dequant = False
@@ -6434,6 +6461,7 @@ class Scheduler:
                     request.cached_tokens = 0
                     request.remaining_tokens = request.prompt_token_ids
                     tokens_to_process = request.prompt_token_ids
+                    _cache_fallback_reason = "cache_validation_failed"
                 else:
                     # Check memory: _merge_caches doubles cache memory temporarily
                     # Skip cache if available memory is tight
@@ -6490,6 +6518,7 @@ class Scheduler:
                                 request.cached_tokens = 0
                                 request.remaining_tokens = request.prompt_token_ids
                                 tokens_to_process = request.prompt_token_ids
+                                _cache_fallback_reason = "cache_memory_budget_exceeded"
                     except ImportError:
                         pass  # psutil is a required dep but handle gracefully
                     except Exception as e:
@@ -6528,6 +6557,7 @@ class Scheduler:
                 request.prompt_cache = None
                 request.cached_tokens = 0
                 request.remaining_tokens = request.prompt_token_ids
+                _cache_fallback_reason = "media_placeholders_outside_cached_prefix"
             if _m3vl_active and not _m3vl_cache_replay:
                 tokens_to_process = list(request.prompt_token_ids)
 
@@ -6639,6 +6669,7 @@ class Scheduler:
                         request.cached_tokens = 0
                         request.remaining_tokens = request.prompt_token_ids
                         tokens_to_process = request.prompt_token_ids
+                        _cache_fallback_reason = "cache_insert_failed"
                         insert_kwargs = {}
                         request_sampler = self._request_seeded_sampler(request)
                         if request_sampler is not None:
@@ -6709,17 +6740,54 @@ class Scheduler:
                 if request.sampling_params.logprobs:
                     register_generation_logprobs(self.model, uid)
                 request.status = RequestStatus.RUNNING
-                if cache_execution is not None and request.cached_tokens > 0:
-                    cache_execution["total_worker_cache_seconds"] = round(
-                        max(0.0, time.perf_counter() - _cache_worker_start),
-                        6,
-                    )
-                    request._cache_execution = {
-                        key: value
-                        for key, value in cache_execution.items()
-                        if value is not None
+                _final_cached_tokens = int(
+                    getattr(request, "cached_tokens", 0) or 0
+                )
+                cache_execution.update(
+                    {
+                        "cache_detail": getattr(request, "_cache_detail", None),
+                        "cached_tokens": _final_cached_tokens,
+                        "uncached_prompt_tokens": max(
+                            _prompt_tokens - _final_cached_tokens, 0
+                        ),
+                        # This is the actual tail handed to the generator. An
+                        # exact prefix hit still forwards one kickoff token.
+                        "prefill_tokens": len(tokens_to_process),
+                        "cache_outcome": (
+                            "hit"
+                            if _final_cached_tokens > 0
+                            else "discarded"
+                            if _attempted_cached_tokens > 0
+                            else "miss"
+                        ),
+                        "cache_reuse_applied": bool(
+                            cache_to_use is not None and _final_cached_tokens > 0
+                        ),
+                        "total_worker_cache_seconds": (
+                            round(
+                                max(
+                                    0.0,
+                                    time.perf_counter() - _cache_worker_start,
+                                ),
+                                6,
+                            )
+                            if _attempted_cached_tokens > 0
+                            else 0.0
+                        ),
                     }
-                    self._last_cache_execution = dict(request._cache_execution)
+                )
+                if _final_cached_tokens == 0 and _attempted_cached_tokens > 0:
+                    cache_execution["fallback_reason"] = (
+                        _cache_fallback_reason or "cache_candidate_discarded"
+                    )
+                request._cache_execution = {
+                    key: value
+                    for key, value in cache_execution.items()
+                    if value is not None
+                }
+                # Publish misses and discarded hits too. Otherwise a cold
+                # request leaves an older hit masquerading as "last".
+                self._last_cache_execution = dict(request._cache_execution)
                 self.running[request.request_id] = request
                 scheduled.append(request)
 

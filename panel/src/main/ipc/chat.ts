@@ -49,7 +49,10 @@ import {
   TOOL_CALL_MARKER_LINE_START,
 } from "../../shared/responsesStreamRecovery";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
-import { selectFinalDecodeTps } from "../../shared/chatMetrics";
+import {
+  calculatePrefillTps,
+  selectFinalDecodeTps,
+} from "../../shared/chatMetrics";
 import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
 import { replayPersistedAssistantHistory } from "../../shared/toolHistoryReplay";
 import { orderComposerContentParts } from "../../shared/composerContentOrder";
@@ -1782,6 +1785,9 @@ export function registerChatHandlers(
       // follow-up boundary and the final metrics report coherent sums.
       let exchangePromptTokens = 0;
       let exchangeCachedTokens = 0;
+      // Per-HTTP-pass provenance for prompt/cache counts. This remains in the
+      // outer scope so interrupted responses can refuse client-estimated pp/s.
+      let serverSendsUsage = false;
       let cacheDetail = "";
       const recordCacheUsage = (details: any) => {
         const nextCachedTokens = Number(details?.cached_tokens);
@@ -2347,9 +2353,6 @@ export function registerChatHandlers(
           return argsBuffer;
         };
 
-        // Track whether server sends real token counts (via usage in each SSE chunk)
-        let serverSendsUsage = false;
-
         // Codex 2026-05-06 #2: track if Responses-API stream emitted any
         // text-delta. When the server sends final text via .done events
         // only (no deltas), we fall back to consuming those — otherwise
@@ -2639,10 +2642,12 @@ export function registerChatHandlers(
             0,
             firstTokenTime ? (firstTokenTime - fetchStartTime) / 1000 : 0,
           );
-          const ppSpeed =
-            promptTokens > 0 && ttft > 0.001
-              ? (promptTokens / ttft).toFixed(1)
-              : undefined;
+          const ppSpeed = calculatePrefillTps({
+            promptTokens,
+            cachedTokens,
+            ttftSeconds: ttft,
+            serverUsageKnown: serverSendsUsage,
+          });
 
           try {
             const win = getWindow();
@@ -4152,11 +4157,20 @@ export function registerChatHandlers(
           0,
           firstTokenTime ? (firstTokenTime - fetchStartTime) / 1000 : 0,
         );
-        // Guard against Infinity when TTFT is near zero (e.g., prefix cache hit)
-        const finalPpSpeed =
-          promptTokens > 0 && ttft > 0.001
-            ? (promptTokens / ttft).toFixed(1)
-            : undefined;
+        // TTFT belongs to the final HTTP pass. Keep its prefill rate paired
+        // with that pass's authoritative server usage rather than combining
+        // one pass's TTFT with exchange-wide tool-loop prompt totals.
+        const finalStreamPromptTokens = promptTokens;
+        const finalStreamCachedTokens = Math.min(
+          cachedTokens,
+          finalStreamPromptTokens,
+        );
+        const finalPpSpeed = calculatePrefillTps({
+          promptTokens: finalStreamPromptTokens,
+          cachedTokens: finalStreamCachedTokens,
+          ttftSeconds: ttft,
+          serverUsageKnown: serverSendsUsage,
+        });
 
         // Combine content from all tool iterations into the final message
         if (allGeneratedContent && fullContent.trim()) {
@@ -4297,11 +4311,10 @@ export function registerChatHandlers(
         // Fold the final stream into the exchange totals so persisted metrics
         // and the completion log report coherent prompt/cached pairs across
         // tool-loop streams (cached can never exceed prompt).
-        const finalStreamPromptTokens = promptTokens;
         promptTokens = exchangePromptTokens + finalStreamPromptTokens;
         cachedTokens =
           exchangeCachedTokens +
-          Math.min(cachedTokens, finalStreamPromptTokens);
+          finalStreamCachedTokens;
         assistantMessage.metricsJson = JSON.stringify({
           tokenCount: totalTokenCount,
           promptTokens: promptTokens || undefined,
@@ -4503,7 +4516,7 @@ export function registerChatHandlers(
         } catch (_) {}
 
         console.log(
-          `[CHAT] Response complete: ${totalTokenCount} tokens in ${totalTime.toFixed(1)}s (${finalTps.toFixed(1)} t/s, live=${liveTps.toFixed(1)} t/s, TTFT: ${ttft.toFixed(2)}s${promptTokens ? `, pp: ${promptTokens} tokens${cachedTokens ? ` (${cachedTokens} cached)` : ""}, ${finalPpSpeed} pp/s` : ""}, usage=${serverSendsUsage ? "server" : "client"})`,
+          `[CHAT] Response complete: ${totalTokenCount} tokens in ${totalTime.toFixed(1)}s (${finalTps.toFixed(1)} t/s, live=${liveTps.toFixed(1)} t/s, TTFT: ${ttft.toFixed(2)}s${finalStreamPromptTokens ? `, final-pass pp: ${finalStreamPromptTokens} tokens${finalStreamCachedTokens ? ` (${finalStreamCachedTokens} cached)` : ""}${finalPpSpeed ? `, ${finalPpSpeed} pp/s` : ", rate unavailable"}` : ""}, exchange prompt: ${promptTokens} tokens${cachedTokens ? ` (${cachedTokens} cached)` : ""}, usage=${serverSendsUsage ? "server" : "client"})`,
         );
 
         return assistantMessage;
@@ -4656,10 +4669,12 @@ export function registerChatHandlers(
           const abortTtft = firstTokenTime
             ? (firstTokenTime - fetchStartTime) / 1000
             : 0;
-          const abortPpSpeed =
-            promptTokens > 0 && abortTtft > 0.001
-              ? (promptTokens / abortTtft).toFixed(1)
-              : undefined;
+          const abortPpSpeed = calculatePrefillTps({
+            promptTokens,
+            cachedTokens,
+            ttftSeconds: abortTtft,
+            serverUsageKnown: serverSendsUsage,
+          });
 
           const abortMetrics = {
             tokenCount: abortTotalTokens,

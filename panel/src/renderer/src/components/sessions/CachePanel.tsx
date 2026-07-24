@@ -94,6 +94,9 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
 
   const schedulerCache = stats?.scheduler_cache
   const schedulerStats = stats?.scheduler_stats
+  const lastCacheExecution =
+    schedulerStats?.last_cache_execution ??
+    schedulerStats?.batch_generator?.last_cache_execution
   const diskCache = stats?.disk_cache
   const kvQuant = stats?.kv_cache_quantization
   const nativeCache = stats?.native_cache
@@ -162,6 +165,11 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       {schedulerCache && (
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Prefix Cache</h4>
+          <p className="mb-2 text-xs text-muted-foreground">
+            Reuse matches the longest continuous causal token prefix from token 0.
+            Only the unmatched tail is sent through prefill; arbitrary suffix or
+            interior token sequences are never reused.
+          </p>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {schedulerCache.hit_rate != null && (
               <StatCard label="Hit Rate" value={`${(schedulerCache.hit_rate * 100).toFixed(1)}%`} />
@@ -366,6 +374,105 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
               {schedulerStats.last_cache_reuse_skip.partial_reuse_unavailable_reason && (
                 <> Partial reason: {schedulerStats.last_cache_reuse_skip.partial_reuse_unavailable_reason}.</>
               )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {lastCacheExecution && (
+        <div>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+            Last Cache Execution
+          </h4>
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            {lastCacheExecution.cache_detail && (
+              <StatCard label="Cache Detail" value={String(lastCacheExecution.cache_detail)} />
+            )}
+            {(lastCacheExecution.selection?.selected ?? lastCacheExecution.selection) != null && (
+              <StatCard
+                label="Selection"
+                value={String(lastCacheExecution.selection?.selected ?? lastCacheExecution.selection)}
+              />
+            )}
+            {lastCacheExecution.cache_reuse_applied != null && (
+              <StatCard
+                label="Reuse Applied"
+                value={lastCacheExecution.cache_reuse_applied ? 'yes' : 'no'}
+              />
+            )}
+            {lastCacheExecution.cache_outcome && (
+              <StatCard label="Outcome" value={String(lastCacheExecution.cache_outcome)} />
+            )}
+            {lastCacheExecution.prompt_tokens != null && (
+              <StatCard
+                label="Prompt Tokens"
+                value={Number(lastCacheExecution.prompt_tokens || 0).toLocaleString()}
+              />
+            )}
+            {lastCacheExecution.cached_tokens != null && (
+              <StatCard
+                label="Cached Prefix"
+                value={Number(lastCacheExecution.cached_tokens || 0).toLocaleString()}
+              />
+            )}
+            {lastCacheExecution.attempted_cached_tokens != null && (
+              <StatCard
+                label="Attempted Prefix"
+                value={Number(lastCacheExecution.attempted_cached_tokens || 0).toLocaleString()}
+              />
+            )}
+            {lastCacheExecution.uncached_prompt_tokens != null && (
+              <StatCard
+                label="Uncached Tail"
+                value={Number(lastCacheExecution.uncached_prompt_tokens || 0).toLocaleString()}
+              />
+            )}
+            {lastCacheExecution.prefill_tokens != null && (
+              <StatCard
+                label="Forwarded Prefill"
+                value={Number(lastCacheExecution.prefill_tokens || 0).toLocaleString()}
+              />
+            )}
+            {lastCacheExecution.generation_prompt_suffix_tokens != null && (
+              <StatCard
+                label="Generation Suffix"
+                value={Number(lastCacheExecution.generation_prompt_suffix_tokens || 0).toLocaleString()}
+              />
+            )}
+            {lastCacheExecution.blocks != null && (
+              <StatCard label="Matched Blocks" value={Number(lastCacheExecution.blocks || 0).toLocaleString()} />
+            )}
+            {lastCacheExecution.disk_blocks != null && (
+              <StatCard label="SSD Blocks Read" value={Number(lastCacheExecution.disk_blocks || 0).toLocaleString()} />
+            )}
+            {lastCacheExecution.reconstruction_seconds != null && (
+              <StatCard
+                label="Reconstruction"
+                value={`${(Number(lastCacheExecution.reconstruction_seconds || 0) * 1000).toFixed(2)} ms`}
+              />
+            )}
+            {lastCacheExecution.dequantization_seconds != null && (
+              <StatCard
+                label="Dequantization"
+                value={`${(Number(lastCacheExecution.dequantization_seconds || 0) * 1000).toFixed(2)} ms`}
+              />
+            )}
+            {lastCacheExecution.tq_rewrap_seconds != null && (
+              <StatCard
+                label="TQ Re-wrap"
+                value={`${(Number(lastCacheExecution.tq_rewrap_seconds || 0) * 1000).toFixed(2)} ms`}
+              />
+            )}
+            {lastCacheExecution.total_worker_cache_seconds != null && (
+              <StatCard
+                label="Worker Cache Time"
+                value={`${(Number(lastCacheExecution.total_worker_cache_seconds || 0) * 1000).toFixed(2)} ms`}
+              />
+            )}
+          </div>
+          {lastCacheExecution.fallback_reason && (
+            <div className="mt-2 text-xs bg-warning/10 border border-warning/30 text-warning-foreground px-3 py-2 rounded">
+              Cache reuse fell back to prefill: {String(lastCacheExecution.fallback_reason)}.
             </div>
           )}
         </div>

@@ -3043,6 +3043,14 @@ class MLLMScheduler:
         except Exception:
             cached_tokens = 0
         request._cached_tokens = cached_tokens
+        response_execution = getattr(response, "cache_execution", None)
+        if isinstance(response_execution, dict):
+            request._cache_execution = dict(response_execution)
+            batch_stats = getattr(
+                getattr(self, "batch_generator", None), "_stats", None
+            )
+            if batch_stats is not None:
+                batch_stats.last_cache_execution = dict(response_execution)
         if cached_tokens <= 0:
             request._cache_hit_recorded = True
             return

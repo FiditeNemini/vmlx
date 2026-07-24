@@ -2,7 +2,10 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { ChevronRight, Maximize2, Minimize2 } from 'lucide-react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { prepareMarkdownWithMath, prepareStreamingPlainTextMath } from './mathMarkdown'
+import {
+  prepareAssistantMarkdownWithMath,
+  prepareStreamingPlainTextMath,
+} from './mathMarkdown'
 import { useTranslation } from '../../i18n'
 
 interface ReasoningBoxProps {
@@ -73,7 +76,7 @@ export function ReasoningBox({ content, isStreaming, isDone }: ReasoningBoxProps
   const renderedHtml = useMemo(() => {
     if (!content) return ''
     if (isStreaming && !isDone) return ''  // plain text path during streaming
-    return sanitizeHtml(marked.parse(prepareMarkdownWithMath(content)) as string)
+    return sanitizeHtml(marked.parse(prepareAssistantMarkdownWithMath(content)) as string)
   }, [content, isStreaming, isDone])
 
   // Handle copy button clicks inside code blocks (same as MessageBubble)

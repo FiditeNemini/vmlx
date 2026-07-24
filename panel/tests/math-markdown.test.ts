@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { marked } from 'marked'
 import {
   prepareMarkdownWithMath,
+  prepareAssistantMarkdownWithMath,
   prepareStreamingPlainTextMath,
   prepareUserMarkdownWithMath,
 } from '../src/renderer/src/components/chat/mathMarkdown'
@@ -177,5 +178,19 @@ describe('prepareMarkdownWithMath', () => {
     expect(rendered).toContain('class="katex"')
     expect(rendered).toContain('893')
     expect(rendered).toContain('<code>&lt;tag&gt;</code>')
+  })
+
+  it('preserves structured assistant XML as visible text alongside KaTeX', () => {
+    const prepared = prepareAssistantMarkdownWithMath(
+      'XML=<result status="ok">5.2 KB</result>; compare \\(893 < 920\\).',
+    )
+    const rendered = marked.parse(prepared) as string
+
+    expect(rendered).toContain(
+      'XML=&lt;result status=&quot;ok&quot;&gt;5.2 KB&lt;/result&gt;',
+    )
+    expect(rendered).not.toContain('<result')
+    expect(rendered).toContain('class="katex"')
+    expect(rendered).toContain('893')
   })
 })

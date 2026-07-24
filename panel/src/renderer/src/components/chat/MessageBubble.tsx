@@ -9,7 +9,10 @@ import { ToolCallStatus } from './ToolCallStatus'
 import { InlineToolCall, InlineToolGroup } from './InlineToolCall'
 import { TTSPlayer } from './VoiceChat'
 import { formatTimestamp, parseContentArray, getMetricsItems, type MessageMetrics } from './chat-utils'
-import { prepareMarkdownWithMath, prepareUserMarkdownWithMath } from './mathMarkdown'
+import {
+  prepareAssistantMarkdownWithMath,
+  prepareUserMarkdownWithMath,
+} from './mathMarkdown'
 import { reasoningSegmentsForDisplay as getReasoningSegmentsForDisplay } from '../../../../shared/interleavedReasoning'
 import { useTranslation } from '../../i18n'
 
@@ -58,7 +61,7 @@ function parseMarkdown(
   }
   const prepared = userContent
     ? prepareUserMarkdownWithMath(markdown)
-    : prepareMarkdownWithMath(markdown)
+    : prepareAssistantMarkdownWithMath(markdown)
   return marked.parse(prepared, { renderer, breaks: true, gfm: true }) as string
 }
 

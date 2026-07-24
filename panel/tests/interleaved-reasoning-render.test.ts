@@ -2,6 +2,7 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { MessageBubble } from '../src/renderer/src/components/chat/MessageBubble'
+import { ReasoningBox } from '../src/renderer/src/components/chat/ReasoningBox'
 
 vi.mock('dompurify', () => ({
   default: {
@@ -54,6 +55,40 @@ describe('interleaved reasoning rendered display', () => {
 
     expect(html).toContain('SIZE=&lt;human-readable size&gt;')
     expect(html).not.toContain('<human-readable')
+    expect(html).toContain('class="katex"')
+  })
+
+  it('shows structured assistant XML literally instead of dropping its tags', () => {
+    const html = renderBubble({
+      message: {
+        ...baseMessage,
+        content:
+          'XML=<result status="ok">5.2 KB</result>\nMATH: \\(893 < 920\\)',
+      },
+      isStreaming: false,
+    })
+
+    expect(html).toContain(
+      'XML=&lt;result status=&quot;ok&quot;&gt;5.2 KB&lt;/result&gt;',
+    )
+    expect(html).not.toContain('<result')
+    expect(html).toContain('class="katex"')
+  })
+
+  it('shows structured XML literally in a completed reasoning rail', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(ReasoningBox, {
+        content:
+          'Check <constraint status="active">x < 4</constraint> and \\(2 + 2 = 4\\).',
+        isStreaming: false,
+        isDone: false,
+      }),
+    )
+
+    expect(html).toContain(
+      'Check &lt;constraint status=&quot;active&quot;&gt;x &lt; 4&lt;/constraint&gt;',
+    )
+    expect(html).not.toContain('<constraint')
     expect(html).toContain('class="katex"')
   })
 

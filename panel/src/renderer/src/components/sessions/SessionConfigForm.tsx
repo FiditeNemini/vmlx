@@ -248,7 +248,7 @@ export const CASUAL_CONFIG: SessionConfig = {
   maxCacheBlocks: 500,        // Fewer paged blocks (half)
   prefixCacheSize: 50,        // Fewer cached prefixes
   kvCacheQuantization: 'auto', // Do not pass explicit q4; that disables calibrated live TQ-KV.
-  maxTokens: 0,               // Model-owned output cap. Users can set an explicit cap per server/chat/API request.
+  maxTokens: 0,               // Bundle/engine-owned output cap. Users can set an explicit cap per server/chat/API request.
   enableJit: true,            // JIT on by default (includes warmup for cold-start OOM prevention)
 }
 
@@ -450,7 +450,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           : hy3Active
             ? 'Native HY3 KV + TQ4 stored prefixes'
             : mixedSwaCacheActive
-              ? 'TQ4 full-attention KV + native rotating SWA'
+              ? 'Engine-selected mixed-SWA live cache + q4 stored prefixes'
               : qwenFullTqActive
                 ? 'TQ4 bulk attention KV + TQ8 boundary layers'
               : qwenHybridTqActive
@@ -1127,7 +1127,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       <Section title={t('sessions.config.kvCacheQuantization')} expanded={expandedSections.kvCacheQuant} onToggle={() => toggleSection('kvCacheQuant')} hidden={isImage}>
         {batchingOff && <IncompatWarning text="KV cache quantization requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above." />}
         {!batchingOff && prefixOff && <IncompatWarning text="KV cache quantization requires prefix cache. Enable 'Prefix Cache' above to use KV cache quantization." />}
-        {!effectivelyNoBatching && !prefixOff && mixedSwaCacheActive && <PerformanceHint text="Mixed sliding/full attention cache detected — Auto applies TQ4 only to compatible full-attention KV slots and preserves native rotating-SWA metadata. Explicit None disables both live TQ-KV and stored quantization." />}
+        {!effectivelyNoBatching && !prefixOff && mixedSwaCacheActive && <PerformanceHint text="Mixed sliding/full attention cache detected — Auto preserves the model's native cache-slot and rotating-window metadata and applies q4 at a compatible live or stored-cache boundary selected by the engine. The running health panel reports whether live full-attention TurboQuant or storage-only q4 is active. Explicit None disables both." />}
         {!effectivelyNoBatching && !prefixOff && hy3Active && <PerformanceHint text="HY3 plain-KV cache detected — Auto uses TQ4 for RAM/SSD L2 stored prefixes while live decode stays on the native KV cache. Native MTP D1 copies this cache independently before batch split/verify." />}
         {!effectivelyNoBatching && !prefixOff && qwenHybridTqActive && !mixedSwaCacheActive && <PerformanceHint text={bonsaiActive ? 'Bonsai hybrid cache detected — Auto applies TQ8 only to compatible attention KV and preserves native SSM/GLA companion state.' : 'Qwen hybrid cache detected — Auto applies TQ4 only to compatible attention KV and preserves native SSM/GLA companion state.'} />}
         {!effectivelyNoBatching && !prefixOff && qwenFullTqActive && <PerformanceHint text="Qwen full-KV cache detected — Auto stores bulk attention KV with TQ4 and protects the first/last six boundary layers with TQ8. Explicit None disables both live TQ-KV and stored quantization." />}
@@ -1312,10 +1312,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             ? "JIT is disabled for MiniMax-M3 native MSA cache. The Lightning-Indexer idx_keys path must stay on the uncompiled scheduler path."
             : zayaCcaActive
             ? "JIT is disabled for ZAYA typed CCA cache. CCA state is path-dependent and the full cache stack benchmarks faster on the uncompiled scheduler path."
-            : hybridCacheActive
-            ? "JIT is disabled for hybrid SSM/Mamba cache models. Their path-dependent Python cache objects are not mx.compile safe."
             : multimodalActive
             ? "JIT is disabled for multimodal/VLM models. The mlx-vlm streaming path owns image/video preprocessing and stream context state that is not safe to trace with mx.compile."
+            : hybridCacheActive
+            ? "JIT is disabled for hybrid SSM/Mamba cache models. Their path-dependent Python cache objects are not mx.compile safe."
             : turboQuantActive
             ? "Server-level mx.compile is disabled for JANGTQ/TurboQuant KV because the live cache uses custom TurboQuant objects that mx.compile cannot trace. JANGTQ fused Metal kernels still run."
             : flashMoeActive
@@ -1335,7 +1335,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         />
         <SliderField
           label="Max Output Tokens"
-          tooltip="Default generated-token cap for this local server. This maps to --max-tokens and only limits response length; it does not change prompt/context length. Leave on Model-owned unless you intentionally want a server-level cap."
+          tooltip="Default generated-token cap for this local server. This maps to --max-tokens and only limits response length; it does not change prompt/context length. Leave on Bundle / engine default unless you intentionally want a server-level cap."
           value={config.maxTokens}
           onChange={v => onChange('maxTokens', v)}
           min={1}
@@ -1344,7 +1344,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={(config.defaultMaxNewTokens ?? 0) > 0 ? Math.floor(config.defaultMaxNewTokens ?? 0) : 4096}
           allowUnlimited
           unlimitedValue={0}
-          unlimitedLabel={(config.defaultMaxNewTokens ?? 0) > 0 ? `Model (${Math.floor(config.defaultMaxNewTokens ?? 0)})` : 'Model-owned'}
+          unlimitedLabel={(config.defaultMaxNewTokens ?? 0) > 0 ? `Bundle (${Math.floor(config.defaultMaxNewTokens ?? 0)})` : 'Bundle / engine default'}
           maxInput={1000000}
         />
         <SliderField

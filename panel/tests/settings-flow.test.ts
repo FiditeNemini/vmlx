@@ -923,8 +923,9 @@ describe('KV Cache Quantization', () => {
         )
 
         expect(source).toContain("detectedCacheType === 'rotating_kv'")
-        expect(source).toContain('TQ4 full-attention KV + native rotating SWA')
-        expect(source).toContain('preserves native rotating-SWA metadata')
+        expect(source).toContain('Engine-selected mixed-SWA live cache + q4 stored prefixes')
+        expect(source).toContain("preserves the model's native cache-slot and rotating-window metadata")
+        expect(source).toContain('live full-attention TurboQuant or storage-only q4')
         expect(source).toContain('Live TurboQuant and stored quantization disabled')
         expect(source).toContain('Live TurboQuant disabled; stored cache ${effectiveStoredCacheQuantization}')
         expect(source).toContain("? 'TURBOQUANT OFF'")
@@ -1213,7 +1214,7 @@ describe('Performance & Generation', () => {
         expect(formSource).toContain("onChange={v => onChange('maxTokens', v)}")
         expect(formSource).toContain('maps to --max-tokens')
         expect(formSource).toContain('does not change prompt/context length')
-        expect(formSource).toContain('Leave on Model-owned unless you intentionally want a server-level cap')
+        expect(formSource).toContain('Leave on Bundle / engine default unless you intentionally want a server-level cap')
     })
 
     it('persists bundle/default migration so stale 32768 sessions do not keep relaunching huge output caps', () => {
@@ -1248,7 +1249,7 @@ describe('Performance & Generation', () => {
         expect(DEFAULT_CONFIG.maxTokens).toBe(0)
         expect(casualBlock).toContain('maxTokens: 0')
         expect(casualBlock).not.toContain('maxContextLength')
-        expect(formSource).toContain('Model-owned output cap')
+        expect(formSource).toContain('Bundle/engine-owned output cap')
         expect(formSource).not.toContain('prevents huge KV allocation')
     })
 
@@ -3183,8 +3184,27 @@ describe('JIT Toggle', () => {
 
         expect(form).toContain('detectedIsMultimodal')
         expect(form).toContain('multimodal/VLM models')
+        const warningStart = form.indexOf('<IncompatWarning text={dsv4Active')
+        const warningEnd = form.indexOf('/>\\n        )}', warningStart)
+        const warning = form.slice(warningStart, warningEnd)
+        expect(warning.indexOf(': multimodalActive')).toBeGreaterThan(-1)
+        expect(warning.indexOf(': hybridCacheActive')).toBeGreaterThan(-1)
+        expect(warning.indexOf(': multimodalActive')).toBeLessThan(
+            warning.indexOf(': hybridCacheActive'),
+        )
         expect(settings).toContain('detectedIsMultimodal={detectedConfig?.isMultimodal}')
         expect(sessions).toContain('mlx-vlm streaming path')
+    })
+
+    it('does not promise live full-attention TQ before mixed-SWA runtime health resolves the boundary', () => {
+        const form = readFileSync(
+            resolve(__dirname, '../src/renderer/src/components/sessions/SessionConfigForm.tsx'),
+            'utf8',
+        )
+
+        expect(form).toContain('Engine-selected mixed-SWA live cache + q4 stored prefixes')
+        expect(form).toContain('whether live full-attention TurboQuant or storage-only q4 is active')
+        expect(form).not.toContain('TQ4 full-attention KV + native rotating SWA')
     })
 
     it('settings form surfaces ZAYA typed CCA JIT as effectively disabled', () => {

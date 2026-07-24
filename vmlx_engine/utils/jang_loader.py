@@ -1634,7 +1634,9 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
 
     if is_mla_model(model_config):
         logger.info(
-            "  TurboQuant skipped: MLA model uses CacheList (incompatible with TQ flat cache)"
+            "  TurboQuant live-cache patch skipped: model uses a native "
+            "latent/shared cache layout incompatible with flat TQ cache; "
+            "compatible scheduler stored-prefix quantization may remain active"
         )
         return
 

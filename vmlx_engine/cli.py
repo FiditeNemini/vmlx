@@ -19,6 +19,7 @@ import sys
 
 DSV4_PAGED_CACHE_BLOCK_SIZE = 256
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
+DEFAULT_MAX_OUTPUT_TOKENS_REASONING = DEFAULT_MAX_OUTPUT_TOKENS * 4
 DSV4_PREFIX_CACHE_ENV = "VMLX_DSV4_ENABLE_PREFIX_CACHE"
 
 
@@ -1488,8 +1489,10 @@ def serve_command(args):
         print(f"Default max tokens override: {args.max_tokens}")
     else:
         print(
-            f"Max output fallback: {args.max_tokens} "
-            "(bundle max_new_tokens wins when present)"
+            f"Max output fallback: {args.max_tokens} base / "
+            f"{DEFAULT_MAX_OUTPUT_TOKENS_REASONING} reasoning-capable "
+            "(bundle max_new_tokens wins when present; projected Metal guard "
+            "may lower the effective per-request cap)"
         )
     if getattr(args, 'max_prompt_tokens', None):
         print(f"Max prompt/context tokens: {args.max_prompt_tokens}")

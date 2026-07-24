@@ -203,7 +203,10 @@ def _apply_turboquant_to_model(model, model_path: str):
     from .model_inspector import _detect_turboquant_layer_types, is_mla_model
 
     if is_mla_model(model_path):
-        logger.info("  TurboQuant skipped: MLA model (CacheList incompatible)")
+        logger.info(
+            "  TurboQuant live-cache patch skipped: native latent/shared cache "
+            "layout is incompatible with flat TQ cache"
+        )
         return
 
     try:

@@ -3111,9 +3111,15 @@ class TestServerSamplingResolution:
         ]
 
         assert cli.DEFAULT_MAX_OUTPUT_TOKENS == server._FALLBACK_MAX_OUTPUT_TOKENS
+        assert (
+            cli.DEFAULT_MAX_OUTPUT_TOKENS_REASONING
+            == server._FALLBACK_MAX_OUTPUT_TOKENS_REASONING
+        )
         assert "default=DEFAULT_MAX_OUTPUT_TOKENS" in serve_max_tokens_block
         assert "default=32768" not in serve_max_tokens_block
         assert 'getattr(args, "max_tokens", 32768) != 32768' not in cli_source
+        assert "reasoning-capable" in cli_source
+        assert "projected Metal guard" in cli_source
 
 
 # ===========================================================================

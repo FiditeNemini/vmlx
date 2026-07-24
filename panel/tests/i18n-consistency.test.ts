@@ -28,6 +28,13 @@ const EXPECTED_MAX_THINKING_TOKENS_HELP: Record<LocaleKey, string> = {
   ja: '空欄のままにすると、モデル/ランタイムのネイティブ既定値とリクエストの全出力予算が維持されます。この UI で明示的な値を入力するか、API で max_thinking_tokens を指定した場合にのみ、別個の推論上限が設定されます。思考予算に対応していないモデルでは無視される場合があります。',
   es: 'Déjelo vacío para conservar el valor nativo predeterminado del modelo/runtime y el presupuesto de salida completo de la solicitud. Solo un valor explícito en esta interfaz o max_thinking_tokens en la API establece un límite de razonamiento independiente. Los modelos que no admiten un presupuesto de pensamiento pueden ignorarlo.',
 }
+const EXPECTED_TOP_P_HELP: Record<LocaleKey, string> = {
+  en: 'Nucleus sampling. Keeps the smallest set of highest-probability tokens whose cumulative probability reaches this threshold.',
+  zh: '核采样。按概率从高到低保留累计概率达到该阈值所需的最小 token 集合。',
+  ko: '핵 샘플링. 누적 확률이 이 임계값에 도달할 때까지 확률이 높은 토큰의 최소 집합을 사용합니다.',
+  ja: '核サンプリング。累積確率がこの閾値に達するまで、確率の高い順に最小限のトークン集合を使用します。',
+  es: 'Muestreo por núcleo. Conserva el conjunto más pequeño de tokens de mayor probabilidad cuya probabilidad acumulada alcanza este umbral.',
+}
 const LOCALE_DIR = resolve(
   __dirname,
   '..',
@@ -139,6 +146,12 @@ describe('i18n locale consistency', () => {
       expect(locales[l].chat.settings.maxThinkingTokensHelp).not.toMatch(
         /Qwen|3[.]5|3[.]6|1,?024|256/,
       )
+    }
+  })
+
+  it('describes Top P as a highest-probability nucleus, not tokens above the threshold', () => {
+    for (const l of LOCALES) {
+      expect(locales[l].chat.settings.topPHelp).toBe(EXPECTED_TOP_P_HELP[l])
     }
   })
 

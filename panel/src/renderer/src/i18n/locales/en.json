@@ -364,7 +364,7 @@
       "temperature": "Temperature",
       "temperatureHelp": "Controls randomness. Lower = more focused, higher = more creative.",
       "topP": "Top P",
-      "topPHelp": "Nucleus sampling. Only tokens with cumulative probability above this threshold.",
+      "topPHelp": "Nucleus sampling. Keeps the smallest set of highest-probability tokens whose cumulative probability reaches this threshold.",
       "maxTokens": "Max Tokens",
       "maxTokensPlaceholder": "Use bundle / engine default",
       "maxTokensHelp": "Maximum new tokens for responses in this chat. Leave blank to use the bundle's generation_config/jang_config value when declared, otherwise the engine fallback; set a value here or send max_tokens/max_output_tokens in the API request to override it.",

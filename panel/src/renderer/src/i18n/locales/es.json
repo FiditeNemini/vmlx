@@ -364,7 +364,7 @@
       "temperature": "Temperatura",
       "temperatureHelp": "Controla la aleatoriedad. Menor = más enfocado, mayor = más creativo.",
       "topP": "Top P",
-      "topPHelp": "Muestreo por núcleo. Solo tokens cuya probabilidad acumulada supere este umbral.",
+      "topPHelp": "Muestreo por núcleo. Conserva el conjunto más pequeño de tokens de mayor probabilidad cuya probabilidad acumulada alcanza este umbral.",
       "maxTokens": "Tokens máximos",
       "maxTokensPlaceholder": "Usar valor del paquete / motor",
       "maxTokensHelp": "Tokens nuevos máximos para las respuestas de este chat. Déjelo vacío para usar generation_config/jang_config del paquete cuando exista o, de lo contrario, el valor de respaldo del motor; escriba un valor aquí o envíe max_tokens/max_output_tokens en la API para anularlo.",

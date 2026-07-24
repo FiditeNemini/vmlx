@@ -364,7 +364,7 @@
       "temperature": "온도",
       "temperatureHelp": "무작위성을 제어합니다. 낮을수록 더 집중, 높을수록 더 창의적입니다.",
       "topP": "Top P",
-      "topPHelp": "핵 샘플링. 누적 확률이 이 임계값을 초과하는 토큰만 사용합니다.",
+      "topPHelp": "핵 샘플링. 누적 확률이 이 임계값에 도달할 때까지 확률이 높은 토큰의 최소 집합을 사용합니다.",
       "maxTokens": "최대 토큰",
       "maxTokensPlaceholder": "번들 / 엔진 기본값 사용",
       "maxTokensHelp": "이 채팅 응답에서 생성할 새 토큰의 최대값입니다. 비워 두면 선언된 경우 번들의 generation_config/jang_config 값을, 없으면 엔진 대체값을 사용합니다. 여기에서 값을 설정하거나 API 요청의 max_tokens/max_output_tokens로 재정의할 수 있습니다.",

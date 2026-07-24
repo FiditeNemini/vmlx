@@ -364,7 +364,7 @@
       "temperature": "温度",
       "temperatureHelp": "控制随机性。越低 = 越聚焦,越高 = 越有创意。",
       "topP": "Top P",
-      "topPHelp": "核采样。仅选取累计概率高于该阈值的 tokens。",
+      "topPHelp": "核采样。按概率从高到低保留累计概率达到该阈值所需的最小 token 集合。",
       "maxTokens": "最大 Tokens",
       "maxTokensPlaceholder": "使用模型包 / 引擎默认值",
       "maxTokensHelp": "此聊天每次响应可生成的新 token 上限。留空时，若模型包声明了 generation_config/jang_config 值则使用该值，否则使用引擎回退值；也可以在这里设置，或在 API 请求中发送 max_tokens/max_output_tokens 来覆盖。",

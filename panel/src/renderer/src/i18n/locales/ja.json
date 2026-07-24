@@ -364,7 +364,7 @@
       "temperature": "温度",
       "temperatureHelp": "ランダム性を制御します。低いほど集中的、高いほど創造的です。",
       "topP": "Top P",
-      "topPHelp": "核サンプリング(nucleus sampling)。累積確率がこの閾値を超えるトークンのみを使用します。",
+      "topPHelp": "核サンプリング。累積確率がこの閾値に達するまで、確率の高い順に最小限のトークン集合を使用します。",
       "maxTokens": "最大トークン",
       "maxTokensPlaceholder": "バンドル / エンジン既定値を使用",
       "maxTokensHelp": "このチャットの応答で生成する新規トークンの上限です。空欄の場合は、宣言されていればバンドルの generation_config/jang_config 値を、なければエンジンのフォールバック値を使用します。ここで値を設定するか、API の max_tokens/max_output_tokens で上書きできます。",

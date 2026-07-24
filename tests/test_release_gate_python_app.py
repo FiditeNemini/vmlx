@@ -415,19 +415,20 @@ def test_release_dmg_final_sign_preserves_hardened_runtime_entitlements():
     assert "build/entitlements.mac.plist" in final_sign_block
 
 
-def test_release_dmg_staging_has_one_developer_id_signing_owner():
+def test_release_dmg_staging_uses_recursive_signer_before_final_audit():
     script = Path("panel/scripts/build-release-dmgs.sh").read_text()
     build_one = script[script.index("build_one()") : script.index('case "${1:-all}"')]
 
-    stage_idx = build_one.index(
-        "CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --dir"
-    )
+    stage_idx = build_one.index("npx electron-builder --mac --dir")
     final_sign_idx = build_one.index(
         'finalize_release_app_signature "$app_path" "$RELEASE_CODESIGN_IDENTITY"'
     )
 
     assert stage_idx < final_sign_idx
-    assert "sole Developer-ID owner" in build_one
+    assert "CSC_IDENTITY_AUTO_DISCOVERY=false" not in build_one
+    assert "inside-out Developer-ID signing" in build_one
+    assert "sign_remaining_app_macho_leaves" in script
+    assert "verify_release_macho_leaves" in script
 
 
 def test_bundled_verifier_rejects_non_relocatable_console_shebangs():

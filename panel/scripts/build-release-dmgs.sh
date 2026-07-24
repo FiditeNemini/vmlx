@@ -134,6 +134,65 @@ sign_bundled_python_native_files() {
   echo "  signed $signed_count bundled Python native files"
 }
 
+sign_remaining_app_macho_leaves() {
+  local app_path="$1"
+  local identity="$2"
+  local bundled_python="$app_path/Contents/Resources/bundled-python"
+  local signed_count=0
+  local signature
+
+  echo "==> Signing remaining ad-hoc or unsigned app Mach-O leaves"
+  while IFS= read -r native_file; do
+    if ! file "$native_file" | grep -q "Mach-O"; then
+      continue
+    fi
+
+    signature=""
+    if ! signature="$(codesign -dv --verbose=4 "$native_file" 2>&1)"; then
+      :
+    elif ! printf '%s\n' "$signature" |
+      grep -Eq "Signature=adhoc|flags=.*adhoc|TeamIdentifier=not set"; then
+      continue
+    fi
+
+    codesign --force --timestamp --options runtime --sign "$identity" "$native_file" >/dev/null
+    signed_count=$((signed_count + 1))
+  done < <(
+    find "$app_path/Contents" \
+      -path "$bundled_python" -prune -o \
+      -type f -print
+  )
+  echo "  signed $signed_count remaining app Mach-O leaves"
+}
+
+verify_release_macho_leaves() {
+  local app_path="$1"
+  local failed=0
+  local checked_count=0
+  local signature
+
+  echo "==> Verifying every app Mach-O leaf has Developer ID, timestamp, and hardened runtime"
+  while IFS= read -r native_file; do
+    if ! file "$native_file" | grep -q "Mach-O"; then
+      continue
+    fi
+    checked_count=$((checked_count + 1))
+    signature="$(codesign -dv --verbose=4 "$native_file" 2>&1 || true)"
+    if ! printf '%s\n' "$signature" | grep -q "^Authority=Developer ID Application:" ||
+      ! printf '%s\n' "$signature" | grep -q "^Timestamp=" ||
+      ! printf '%s\n' "$signature" | grep -Eq "^CodeDirectory .*flags=.*runtime"; then
+      echo "ERROR: release Mach-O leaf is not fully Developer ID signed: $native_file" >&2
+      printf '%s\n' "$signature" >&2
+      failed=1
+    fi
+  done < <(find "$app_path/Contents" -type f -print)
+
+  if [[ "$failed" -ne 0 ]]; then
+    exit 1
+  fi
+  echo "  verified $checked_count app Mach-O leaves"
+}
+
 finalize_release_app_signature() {
   local app_path="$1"
   local identity="${2:-$RELEASE_CODESIGN_IDENTITY}"
@@ -156,9 +215,11 @@ finalize_release_app_signature() {
   fi
 
   sign_bundled_python_native_files "$bundled_python" "$identity"
+  sign_remaining_app_macho_leaves "$app_path" "$identity"
   echo "==> Final release app seal/signature: $app_path"
   codesign --force --deep --timestamp --options runtime --entitlements "$entitlements" --sign "$identity" "$app_path"
   codesign --verify --deep --strict --verbose=2 "$app_path"
+  verify_release_macho_leaves "$app_path"
 }
 
 find_staged_app() {
@@ -197,12 +258,11 @@ build_one() {
   ./scripts/verify-bundled-python.sh
   npx electron-vite build
   rm -rf "$staged_output"
-  # Stage with ad-hoc normalized native files only. The controlled finalizer
-  # below is the sole Developer-ID owner for every bundled native file and the
-  # outer app. Letting electron-builder auto-discover the same identity here
-  # double-signs the 1.4 GB Python tree and can leave a partially sealed app if
-  # keychain access changes midway through its recursive signer.
-  CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --dir \
+  # Let electron-builder perform its proven inside-out Developer-ID signing of
+  # Electron and Squirrel framework leaves. The controlled finalizer below then
+  # re-signs bundled Python, repairs any remaining ad-hoc Mach-O leaves, audits
+  # every leaf, and applies the final outer app seal.
+  npx electron-builder --mac --dir \
     --config.directories.output="$staged_output"
   app_path="$(find_staged_app "$staged_output")"
   finalize_release_app_signature "$app_path" "$RELEASE_CODESIGN_IDENTITY"

@@ -62,10 +62,10 @@ describe('release packaging', () => {
     expect(source).toContain('release node_modules resolves outside this checkout')
   })
 
-  it('uses one controlled Developer-ID owner after unsigned staging', () => {
+  it('uses recursive Developer-ID staging before final audit and reseal', () => {
     const source = read('scripts/build-release-dmgs.sh')
     const stage = source.indexOf(
-      'CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --dir',
+      'npx electron-builder --mac --dir',
     )
     const finalSign = source.indexOf(
       'finalize_release_app_signature "$app_path" "$RELEASE_CODESIGN_IDENTITY"',
@@ -73,6 +73,22 @@ describe('release packaging', () => {
 
     expect(stage).toBeGreaterThan(0)
     expect(finalSign).toBeGreaterThan(stage)
-    expect(source).toContain('sole Developer-ID owner')
+    expect(source).not.toContain(
+      'CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --dir',
+    )
+    expect(source).toContain('inside-out Developer-ID signing')
+  })
+
+  it('Developer-ID signs and audits Mach-O leaves outside bundled Python', () => {
+    const source = read('scripts/build-release-dmgs.sh')
+
+    expect(source).toContain('sign_remaining_app_macho_leaves()')
+    expect(source).toContain('Signature=adhoc|flags=.*adhoc|TeamIdentifier=not set')
+    expect(source).toContain('verify_release_macho_leaves()')
+    expect(source).toContain('^Authority=Developer ID Application:')
+    expect(source).toContain('^Timestamp=')
+    expect(source).toContain('flags=.*runtime')
+    expect(source).toContain('sign_remaining_app_macho_leaves "$app_path" "$identity"')
+    expect(source).toContain('verify_release_macho_leaves "$app_path"')
   })
 })

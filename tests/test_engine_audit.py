@@ -8948,6 +8948,9 @@ class TestStartupCompatibilityGuards:
         source = Path("./panel/scripts/build-release-dmgs.sh").read_text()
 
         assert "sign_bundled_python_native_files()" in source
+        assert "sign_remaining_app_macho_leaves()" in source
+        assert "verify_release_macho_leaves()" in source
+        assert "Signature=adhoc|flags=.*adhoc|TeamIdentifier=not set" in source
         assert 'find "$bundled_python" -type f' in source
         assert '-name "*.dylib" -o -name "*.so" -o -perm +111' in source
         assert 'codesign --force --timestamp --options runtime --sign "$identity" "$native_file"' in source
@@ -8957,6 +8960,8 @@ class TestStartupCompatibilityGuards:
             '--sign "$identity" "$app_path"'
         ) in source
         assert 'codesign --verify --deep --strict --verbose=2 "$app_path"' in source
+        assert 'sign_remaining_app_macho_leaves "$app_path" "$identity"' in source
+        assert 'verify_release_macho_leaves "$app_path"' in source
         assert 'finalize_release_app_signature "$app_path"' in source
         assert '--prepackaged "$app_path"' in source
 

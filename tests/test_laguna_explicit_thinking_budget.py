@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -197,5 +198,6 @@ async def test_laguna_responses_explicit_thinking_budget_caps_first_pass_and_ans
 
 def test_laguna_remains_outside_omitted_budget_auto_partition_allowlist():
     assert "laguna" in server._THINKING_BUDGET_CAP_FAMILIES
-    assert "laguna" not in server._AUTO_THINKING_PARTITION_FAMILIES
-
+    source = Path(server.__file__).read_text(encoding="utf-8")
+    assert "_AUTO_THINKING_PARTITION_FAMILIES" not in source
+    assert "_auto_thinking_partition_allowed" not in source

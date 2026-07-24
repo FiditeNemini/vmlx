@@ -617,7 +617,8 @@ class TestEnableThinkingTriState:
 
         assert "m3_reasoning_only_answer_enabled" in source
         assert "max_thinking_tokens" in source
-        assert "kwargs[\"max_tokens\"] = min(" in source
+        assert "_explicit_answer_pass_mtt = getattr(request, \"max_thinking_tokens\", None)" in source
+        assert "_auto_thinking_partition_allowed" not in source
         assert "reasoning_content" in source
         assert "thinking_mode\"] = \"disabled\"" in source
         # The family label now feeds the shared progressive visible-answer

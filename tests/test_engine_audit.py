@@ -6544,32 +6544,25 @@ class TestResponsesStreamingExactToolResult:
             ]
         )
 
-    def test_post_tool_reasoning_partition_is_shared_by_chat_and_responses(self):
+    def test_auto_reasoning_never_uses_an_implicit_synthetic_partition(self):
         import inspect
+
         import vmlx_engine.server as server
 
-        # Pin the shared policy's behavior directly instead of matching the
-        # pre-refactor inline conditional in the whole server module.
-        assert server._auto_thinking_partition_allowed(
-            None, "qwen3_5", tools_available=False
-        )
-        assert server._auto_thinking_partition_allowed(
-            None,
-            "qwen3_5_moe",
-            tools_available=True,
-            post_tool_continuation=True,
-        )
-        assert not server._auto_thinking_partition_allowed(
-            None, "minimax_m3", tools_available=False
-        )
-
-        # Both streaming API surfaces must use that same policy helper.
-        chat_source = inspect.getsource(server.stream_chat_completion)
-        responses_source = inspect.getsource(server.stream_responses_api)
-        for source in (chat_source, responses_source):
-            assert source.count("_auto_thinking_partition_allowed(") == 1
-            assert "tools_available=_stream_tools_available" in source
-            assert "post_tool_continuation=_post_tool_continuation" in source
+        # Auto/On with no max_thinking_tokens is one native full-cap generation
+        # on every Chat and Responses surface. Only an explicit thinking cap may
+        # reserve a remainder for a distinct visible-answer pass.
+        for handler in (
+            server.create_chat_completion,
+            server.create_response,
+            server.stream_chat_completion,
+            server.stream_responses_api,
+        ):
+            source = inspect.getsource(handler)
+            assert "_auto_thinking_partition_allowed(" not in source
+            assert "_auto_thinking_pass_budget(" not in source
+        assert not hasattr(server, "_auto_thinking_partition_allowed")
+        assert not hasattr(server, "_auto_thinking_pass_budget")
 
     @pytest.mark.asyncio
     async def test_exact_once_tool_result_continuation_streams_visible_answer(
@@ -16274,6 +16267,8 @@ class TestStreamUsagePropagatesCacheDetail:
             input="hi",
             stream=True,
             enable_thinking=True,
+            max_thinking_tokens=64,
+            max_output_tokens=128,
             stream_options=StreamOptions(include_usage=True),
         )
         events = [
@@ -16401,6 +16396,8 @@ class TestStreamUsagePropagatesCacheDetail:
             input="answer without a tool",
             stream=True,
             enable_thinking=True,
+            max_thinking_tokens=64,
+            max_output_tokens=256,
             stream_options=StreamOptions(include_usage=True),
             tools=[
                 {
@@ -16446,6 +16443,8 @@ class TestStreamUsagePropagatesCacheDetail:
             messages=[Message(role="user", content="answer without a tool")],
             stream=True,
             enable_thinking=True,
+            max_thinking_tokens=64,
+            max_tokens=256,
             stream_options=StreamOptions(include_usage=True),
             tools=[
                 {
@@ -16564,6 +16563,8 @@ class TestStreamUsagePropagatesCacheDetail:
             messages=[Message(role="user", content="hi")],
             stream=True,
             enable_thinking=True,
+            max_thinking_tokens=64,
+            max_tokens=128,
             chat_template_kwargs={"thinking_mode": "enabled"},
             stream_options=StreamOptions(include_usage=True),
         )
@@ -16611,7 +16612,7 @@ class TestStreamUsagePropagatesCacheDetail:
         }
 
     @pytest.mark.asyncio
-    async def test_minimax_m3_chat_stream_length_truncated_visible_prefix_stays_progressive(
+    async def test_minimax_m3_chat_stream_visible_prefix_preserves_native_length(
         self, monkeypatch
     ):
         import json
@@ -16637,24 +16638,10 @@ class TestStreamUsagePropagatesCacheDetail:
 
             async def stream_chat(self, *, messages, **kwargs):
                 calls.append(("stream", messages, dict(kwargs)))
-                # F6: the bounded thinking-off visible answer pass now STREAMS
-                # via engine.stream_chat (enable_thinking=False).
                 if kwargs.get("enable_thinking") is False:
-                    assert kwargs["chat_template_kwargs"]["thinking_mode"] == "disabled"
-                    # One total client cap: 180 - 120 leaves exactly 60 tokens.
-                    assert kwargs["max_tokens"] == 60
-                    assert messages[-1]["role"] == "assistant"
-                    assert messages[-1]["content"] == ""
-                    assert "MM3_STREAM_CHAT_OK" in messages[-1]["reasoning_content"]
-                    yield GenerationOutput(
-                        text="MM3_STREAM_CHAT_OK Oracle EBS is an integrated Oracle business application suite.",
-                        new_text="MM3_STREAM_CHAT_OK Oracle EBS is an integrated Oracle business application suite.",
-                        prompt_tokens=35,
-                        completion_tokens=15,
-                        finished=True,
-                        finish_reason="stop",
+                    raise AssertionError(
+                        "visible native content must not trigger a fresh answer sample"
                     )
-                    return
                 yield GenerationOutput(
                     text=(
                         "The user asked for MM3_STREAM_CHAT_OK."
@@ -16717,10 +16704,9 @@ class TestStreamUsagePropagatesCacheDetail:
             if line.startswith("data: ") and line.strip() != "data: [DONE]":
                 chunks.append(json.loads(line.removeprefix("data: ")))
 
-        # The direct pass may extend a visible prefix only after byte-for-byte
-        # reconciliation.  It must emit the missing suffix, never duplicate or
-        # retract the already-streamed bytes.
-        assert [call[0] for call in calls] == ["stream", "stream"]
+        # Once the native generation has emitted visible bytes, its length
+        # terminal is authoritative. A second sample cannot continue that prefix.
+        assert [call[0] for call in calls] == ["stream"]
         content_deltas = [
             choice["delta"].get("content")
             for chunk in chunks
@@ -16736,16 +16722,9 @@ class TestStreamUsagePropagatesCacheDetail:
         ]
 
         assert any("MM3_STREAM_CHAT_OK" in delta for delta in reasoning_deltas)
-        assert content_deltas == [
-            "MM3_STREAM_CHAT",
-            "_OK Oracle EBS is an integrated Oracle business application suite.",
-        ]
-        assert "".join(content_deltas) == (
-            "MM3_STREAM_CHAT_OK Oracle EBS is an integrated Oracle business "
-            "application suite."
-        )
+        assert content_deltas == ["MM3_STREAM_CHAT"]
         assert any(
-            choice.get("finish_reason") == "stop"
+            choice.get("finish_reason") == "length"
             for chunk in chunks
             for choice in chunk.get("choices", [])
         )

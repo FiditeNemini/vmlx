@@ -1175,63 +1175,6 @@ def _answer_pass_visible_delta(
     return target[len(already_sent):], target
 
 
-def _answer_pass_reconcile_delta(
-    raw_text: str,
-    existing_visible_prefix: str,
-    regenerated_sent: str,
-    request: Any,
-    finished: bool,
-    *,
-    holdback: int | None = None,
-    think_in_prompt: bool = False,
-) -> tuple[str, str, bool]:
-    """Continue a length-truncated visible prefix without duplicating it.
-
-    A partitioned reasoning pass can cross into visible content just before its
-    token share expires.  The direct pass regenerates the answer from the start;
-    withhold it until its cleaned output covers the already-emitted prefix, then
-    emit only the suffix.  If the regenerated text diverges, emit nothing because
-    streamed bytes cannot be retracted.
-    """
-    if not existing_visible_prefix:
-        delta, cursor = _answer_pass_visible_delta(
-            raw_text,
-            regenerated_sent,
-            request,
-            finished,
-            holdback=holdback,
-            think_in_prompt=think_in_prompt,
-        )
-        return delta, cursor, bool(cursor)
-
-    if regenerated_sent:
-        delta, cursor = _answer_pass_visible_delta(
-            raw_text,
-            regenerated_sent,
-            request,
-            finished,
-            holdback=holdback,
-            think_in_prompt=think_in_prompt,
-        )
-        return delta, cursor, True
-
-    _, current = _answer_pass_visible_delta(
-        raw_text,
-        "",
-        request,
-        finished,
-        holdback=holdback,
-        think_in_prompt=think_in_prompt,
-    )
-    if not current:
-        return "", "", False
-    if existing_visible_prefix.startswith(current) and not finished:
-        return "", "", False
-    if current.startswith(existing_visible_prefix):
-        return current[len(existing_visible_prefix):], current, True
-    return "", "", False
-
-
 def _main_pass_finish_reason(
     finish_reason: str | None,
     *,
@@ -1242,15 +1185,11 @@ def _main_pass_finish_reason(
 ) -> str | None:
     """Return only a terminal reason that is final for the external stream.
 
-    A reasoning-first request can finish its initial generation with ``length``
-    and then continue through the bounded direct-answer pass.  Emitting that
-    first-pass reason tells OpenAI clients the *whole* response is terminal;
-    many coding harnesses correctly stop reading there and never receive the
-    visible answer.  Hold the internal terminal while a reasoning-bearing request
-    has a real answer-pass path pending, including when the first pass crossed
-    into visible content just before its partition expired.  The answer pass
-    emits its own final ``stop`` after prefix reconciliation; if reconciliation
-    fails, the post-stream path emits an honest final ``length``.
+    A request with an explicit ``max_thinking_tokens`` can finish its bounded
+    reasoning stage before the separately budgeted direct-answer stage.  Hold
+    that internal terminal only while no visible content has been emitted.
+    Once native content is visible, its terminal is authoritative: streamed
+    bytes cannot be retracted or regenerated from a second sample.
 
     This is state-based and applies to every reasoning family using the shared
     answer-pass contract, including tool-enabled fallbacks.  Genuine terminal
@@ -1262,7 +1201,7 @@ def _main_pass_finish_reason(
     if (
         answer_pass_pending
         and bool((accumulated_reasoning or "").strip())
-        and (not content_was_emitted or finish_reason == "length")
+        and not content_was_emitted
     ):
         return None
     return finish_reason
@@ -1373,85 +1312,13 @@ def _answer_pass_safe_visible_raw(
     return raw
 
 
-# Minimum tokens the reasoning-runaway answer pass may draw even when the first
-# (reasoning) pass already consumed the whole cap. A native always-reasoning or
-# degraded runaway reasoner can fill the entire budget inside its hidden rail;
-# with a hard-zero remainder the visible answer comes back EMPTY (2026-07-11
-# reasoning-stress: Chat/Responses/Anthropic reasoning-on turn-3 empty at 384
-# reasoning tokens). An empty turn is a worse failure than a small, BOUNDED
-# overage, so the answer pass is guaranteed this floor. This is distinct from
-# the audit-Critical-1 defect, which was an UNBOUNDED fresh-full-budget retry
-# (up to ~2x the cap); the overage here is bounded by ANSWER_PASS_FLOOR.
-ANSWER_PASS_FLOOR = 48
+def _remaining_answer_pass_budget(cap: Any, used: Any) -> int:
+    """Return the exact unspent output budget for an explicit two-stage request.
 
-
-# Reasoning families can keep revising an already-complete solution inside their
-# hidden rail until the entire output cap is exhausted.  The visible-answer pass
-# then receives only ANSWER_PASS_FLOOR, which is too small for a normal terminal
-# response.  When neither the request nor the bundle supplies a thinking budget,
-# partition the existing total output cap instead of granting a hidden retry
-# overage: at most 1,024 tokens go to reasoning and at least 256 tokens (or half
-# of a smaller cap) remain available for visible content.  Explicit
-# max_thinking_tokens remains authoritative.
-#
-# Keep this an architecture allowlist: membership requires both a bounded
-# thinking-off answer pass and a template/runtime whose first-pass max_tokens can
-# safely act as a reasoning budget.  Hy3 meets both conditions: Auto deliberately
-# maps to reasoning_effort=high, while its native no_think template owns the
-# direct answer pass.  Omitting it made a 512-token Auto turn spend all 512 tokens
-# in reasoning and expose only a three-character answer before terminal length.
-AUTO_THINKING_PASS_LIMIT = 1024
-AUTO_VISIBLE_ANSWER_RESERVE = 256
-_AUTO_THINKING_PARTITION_FAMILIES = frozenset(
-    {"hy_v3", "qwen3", "qwen3_5", "qwen3_5_moe"}
-)
-
-
-def _auto_thinking_pass_budget(total_cap: Any) -> int:
-    """Return the Auto reasoning share without exceeding ``total_cap``."""
-    try:
-        resolved_cap = max(0, int(total_cap or 0))
-    except (TypeError, ValueError):
-        resolved_cap = 0
-    if resolved_cap <= 1:
-        return resolved_cap
-    reserve = min(
-        AUTO_VISIBLE_ANSWER_RESERVE,
-        max(1, resolved_cap // 2),
-    )
-    return max(1, min(AUTO_THINKING_PASS_LIMIT, resolved_cap - reserve))
-
-
-def _auto_thinking_partition_allowed(
-    request: ChatCompletionRequest | ResponsesRequest | None,
-    family_name: str | None,
-    *,
-    tools_available: bool,
-    post_tool_continuation: bool = False,
-) -> bool:
-    """Whether Auto reasoning may reserve visible-output budget on this pass.
-
-    An ordinary ``tool_choice=auto`` request must not lose its entire output
-    budget to hidden reasoning merely because a coding harness attached a tool
-    catalog.  Reserve the same bounded answer share used by tools-free
-    requests, then remove the tool catalog only if final parsing found neither a
-    call nor visible content.  Required, named, or explicitly requested tool
-    turns remain unpartitioned and fail closed; they must never be converted
-    into a tools-free prose answer.
+    Implicit Auto/On requests never use an answer pass.  The remaining explicit
+    path must stay inside the caller's total output cap; it may not fabricate a
+    token-floor overage after the first stage has exhausted that cap.
     """
-    if family_name not in _AUTO_THINKING_PARTITION_FAMILIES:
-        return False
-    if not tools_available or post_tool_continuation:
-        return True
-    return not _request_explicitly_requests_tool_use(request)
-
-
-def _remaining_answer_pass_budget(
-    cap: Any, used: Any, floor: int = ANSWER_PASS_FLOOR
-) -> int:
-    """Return the answer-pass token budget: the unspent cap, floored so the
-    visible answer is never starved to zero. The floor is a bounded overage,
-    not the unbounded fresh-full-budget the audit removed."""
     try:
         resolved_cap = max(0, int(cap or 0))
     except (TypeError, ValueError):
@@ -1460,12 +1327,7 @@ def _remaining_answer_pass_budget(
         resolved_used = max(0, int(used or 0))
     except (TypeError, ValueError):
         resolved_used = 0
-    remaining = max(0, resolved_cap - resolved_used)
-    try:
-        resolved_floor = max(0, int(floor))
-    except (TypeError, ValueError):
-        resolved_floor = 0
-    return max(resolved_floor, remaining)
+    return max(0, resolved_cap - resolved_used)
 
 
 def _visible_text_for_dsv4_completion(output: Any, engine: Any, request: Any) -> str:
@@ -2124,6 +1986,7 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
     {
         "gemma4",
         "hy_v3",
+        "laguna",
         # MiniMax-M2.x bundles report family_name "minimax" ("minimax_m2" is
         # only their REASONING PARSER name — no bundle resolves to it as a
         # family, so that entry alone left M2.7 reasoning-only turns EMPTY at
@@ -14370,23 +14233,14 @@ async def create_chat_completion(
     timeout = request.timeout if request.timeout is not None else _default_timeout
     response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
-    # Cap the thinking (first) pass at max_thinking_tokens for reasoning
-    # answer-pass families, mirroring the streaming path (15734-97) which caps
-    # the first pass at mtt so the bounded thinking-off answer pass keeps real
-    # budget. Without this the non-stream first pass runs reasoning to the full
-    # max_tokens (finish=length), leaving only ANSWER_PASS_FLOOR (48) for the
-    # answer pass — too small for qwen3.5/3.6 to complete, so the W2-1 scope
-    # rejects the truncated salvage and content is empty. Live-proven: qwen3.6
-    # mtt=128 non-stream reasoning=2208 content='' vs streaming reasoning=451
-    # content=answer. The original cap is preserved so the answer pass below
-    # sizes off the full budget, not the capped thinking budget.
+    # An explicit max_thinking_tokens may reserve part of the caller's output
+    # cap for the existing direct-answer stage. Auto/On without an explicit
+    # thinking cap always receives the full native generation budget.
     _ns_answer_pass_original_cap = None
     _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
-    _ns_pre_tools_available = _tools_available_for_generation(
-        request, chat_kwargs.get("tools")
-    )
     if (
-        chat_kwargs.get("enable_thinking") is not False
+        _ns_pre_mtt is not None
+        and chat_kwargs.get("enable_thinking") is not False
         and getattr(request, "enable_thinking", None) is not False
         and (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is not False
     ):
@@ -14402,46 +14256,13 @@ async def create_chat_completion(
             _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
         )
-        _ns_explicit_budget_cap = bool(
-            _ns_pre_cap_family and _ns_pre_mtt is not None
-        )
-        _ns_auto_partition_allowed = bool(
-            _ns_pre_cap_family
-            and _ns_pre_mtt is None
-            and _auto_thinking_partition_allowed(
-                request,
-                _ns_pre_family,
-                tools_available=_ns_pre_tools_available,
-            )
-        )
-        if _ns_explicit_budget_cap or _ns_auto_partition_allowed:
+        if _ns_pre_cap_family:
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
-            _ns_auto_partition = False
-            if (
-                _ns_pre_mtt is None
-                and _ns_pre_family in _AUTO_THINKING_PARTITION_FAMILIES
-                and chat_kwargs.get("thinking_budget") is None
-                and (chat_kwargs.get("chat_template_kwargs") or {}).get(
-                    "thinking_budget"
-                ) is None
-            ):
-                _ns_pre_mtt = _auto_thinking_pass_budget(_ns_pre_orig)
-                _ns_auto_partition = True
-            if _ns_pre_mtt is not None:
-                _ns_pre_capped = max(1, min(_ns_pre_orig, int(_ns_pre_mtt)))
-                if _ns_pre_capped < _ns_pre_orig:
-                    _ns_answer_pass_original_cap = _ns_pre_orig
-                    chat_kwargs = dict(chat_kwargs)
-                    chat_kwargs["max_tokens"] = _ns_pre_capped
-                    if _ns_auto_partition:
-                        logger.info(
-                            "%s non-stream chat Auto reasoning partition: "
-                            "total_cap=%d thinking_cap=%d visible_reserve=%d",
-                            _ns_pre_family,
-                            _ns_pre_orig,
-                            _ns_pre_capped,
-                            _ns_pre_orig - _ns_pre_capped,
-                        )
+            _ns_pre_capped = max(1, min(_ns_pre_orig, int(_ns_pre_mtt)))
+            if _ns_pre_capped < _ns_pre_orig:
+                _ns_answer_pass_original_cap = _ns_pre_orig
+                chat_kwargs = dict(chat_kwargs)
+                chat_kwargs["max_tokens"] = _ns_pre_capped
 
     try:
         output = await _await_chat_with_disconnect_abort(
@@ -14667,21 +14488,16 @@ async def create_chat_completion(
             request,
         )
     )
-    _ns_ordinary_auto_tool_fallback = (
-        _auto_thinking_partition_allowed(
-            request,
-            _ns_family,
-            tools_available=_ns_tools_available,
-        )
+    _ns_explicit_tool_fallback = (
+        _ns_answer_pass_original_cap is not None
+        and _ns_tools_available
+        and not _request_explicitly_requests_tool_use(request)
+        and _ns_family in _REASONING_ANSWER_PASS_FAMILIES
         and not _has_schema_valid_tool_call_candidate(
             content_for_parsing,
             reasoning_text,
             request,
         )
-    )
-    _ns_reasoning_truncated = (
-        bool(reasoning_text)
-        and getattr(output, "finish_reason", None) == "length"
     )
     _ns_visible_content_for_answer_gate = content_for_parsing
     if _ns_native_tool_recovery and not _ns_native_valid_tool_call:
@@ -14700,17 +14516,18 @@ async def create_chat_completion(
             )
         )
     if (
-        (not _ns_visible_content_for_answer_gate or _ns_reasoning_truncated)
+        not _ns_visible_content_for_answer_gate
         and reasoning_text
         and not _ns_thinking_off
+        and _ns_answer_pass_original_cap is not None
         and (
             not _ns_tools_available
             or (_ns_is_m3 and not _ns_m3_valid_tool_call)
             or (_ns_native_tool_recovery and not _ns_native_valid_tool_call)
-            or _ns_ordinary_auto_tool_fallback
+            or _ns_explicit_tool_fallback
         )
         and _remaining_answer_pass_budget(
-            _ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256,
+            _ns_answer_pass_original_cap,
             getattr(output, "completion_tokens", 0),
         ) > 0
     ):
@@ -14719,7 +14536,7 @@ async def create_chat_completion(
             or _ns_is_m3
             or _ns_native_tool_recovery
         ):
-            _ns_cap = int(_ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256)
+            _ns_cap = int(_ns_answer_pass_original_cap)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
             _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
             logger.info(
@@ -17381,17 +17198,13 @@ async def create_response(
     timeout = request.timeout if request.timeout is not None else _default_timeout
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
 
-    # Cap the thinking (first) pass at max_thinking_tokens for reasoning
-    # answer-pass families — mirror of the non-stream chat path (see there for
-    # the qwen3.6 mtt=128 empty-content live proof). Without it the Responses
-    # API non-stream surface hits the same runaway-reasoning empty-content bug.
+    # Responses parity with Chat: only an explicit max_thinking_tokens may
+    # reserve output for the direct-answer stage.
     _ns_answer_pass_original_cap = None
     _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
-    _ns_pre_tools_available = _tools_available_for_generation(
-        request, chat_kwargs.get("tools")
-    )
     if (
-        chat_kwargs.get("enable_thinking") is not False
+        _ns_pre_mtt is not None
+        and chat_kwargs.get("enable_thinking") is not False
         and getattr(request, "enable_thinking", None) is not False
         and (chat_kwargs.get("chat_template_kwargs") or {}).get("enable_thinking") is not False
     ):
@@ -17407,46 +17220,13 @@ async def create_response(
             _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
         )
-        _ns_explicit_budget_cap = bool(
-            _ns_pre_cap_family and _ns_pre_mtt is not None
-        )
-        _ns_auto_partition_allowed = bool(
-            _ns_pre_cap_family
-            and _ns_pre_mtt is None
-            and _auto_thinking_partition_allowed(
-                request,
-                _ns_pre_family,
-                tools_available=_ns_pre_tools_available,
-            )
-        )
-        if _ns_explicit_budget_cap or _ns_auto_partition_allowed:
+        if _ns_pre_cap_family:
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
-            _ns_auto_partition = False
-            if (
-                _ns_pre_mtt is None
-                and _ns_pre_family in _AUTO_THINKING_PARTITION_FAMILIES
-                and chat_kwargs.get("thinking_budget") is None
-                and (chat_kwargs.get("chat_template_kwargs") or {}).get(
-                    "thinking_budget"
-                ) is None
-            ):
-                _ns_pre_mtt = _auto_thinking_pass_budget(_ns_pre_orig)
-                _ns_auto_partition = True
-            if _ns_pre_mtt is not None:
-                _ns_pre_capped = max(1, min(_ns_pre_orig, int(_ns_pre_mtt)))
-                if _ns_pre_capped < _ns_pre_orig:
-                    _ns_answer_pass_original_cap = _ns_pre_orig
-                    chat_kwargs = dict(chat_kwargs)
-                    chat_kwargs["max_tokens"] = _ns_pre_capped
-                    if _ns_auto_partition:
-                        logger.info(
-                            "%s non-stream Responses Auto reasoning partition: "
-                            "total_cap=%d thinking_cap=%d visible_reserve=%d",
-                            _ns_pre_family,
-                            _ns_pre_orig,
-                            _ns_pre_capped,
-                            _ns_pre_orig - _ns_pre_capped,
-                        )
+            _ns_pre_capped = max(1, min(_ns_pre_orig, int(_ns_pre_mtt)))
+            if _ns_pre_capped < _ns_pre_orig:
+                _ns_answer_pass_original_cap = _ns_pre_orig
+                chat_kwargs = dict(chat_kwargs)
+                chat_kwargs["max_tokens"] = _ns_pre_capped
 
     try:
         output = await _await_chat_with_disconnect_abort(
@@ -17679,21 +17459,16 @@ async def create_response(
             request,
         )
     )
-    _ns_ordinary_auto_tool_fallback = (
-        _auto_thinking_partition_allowed(
-            request,
-            _ns_family,
-            tools_available=_ns_tools_available,
-        )
+    _ns_explicit_tool_fallback = (
+        _ns_answer_pass_original_cap is not None
+        and _ns_tools_available
+        and not _request_explicitly_requests_tool_use(request)
+        and _ns_family in _REASONING_ANSWER_PASS_FAMILIES
         and not _has_schema_valid_tool_call_candidate(
             content_for_parsing,
             reasoning_text,
             request,
         )
-    )
-    _ns_reasoning_truncated = (
-        bool(reasoning_text)
-        and getattr(output, "finish_reason", None) == "length"
     )
     _ns_visible_content_for_answer_gate = content_for_parsing
     if _ns_native_tool_recovery and not _ns_native_valid_tool_call:
@@ -17712,17 +17487,18 @@ async def create_response(
             )
         )
     if (
-        (not _ns_visible_content_for_answer_gate or _ns_reasoning_truncated)
+        not _ns_visible_content_for_answer_gate
         and reasoning_text
         and not _ns_thinking_off
+        and _ns_answer_pass_original_cap is not None
         and (
             not _ns_tools_available
             or (_ns_is_m3 and not _ns_m3_valid_tool_call)
             or (_ns_native_tool_recovery and not _ns_native_valid_tool_call)
-            or _ns_ordinary_auto_tool_fallback
+            or _ns_explicit_tool_fallback
         )
         and _remaining_answer_pass_budget(
-            _ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256,
+            _ns_answer_pass_original_cap,
             getattr(output, "completion_tokens", 0),
         ) > 0
     ):
@@ -17731,7 +17507,7 @@ async def create_response(
             or _ns_is_m3
             or _ns_native_tool_recovery
         ):
-            _ns_cap = int(_ns_answer_pass_original_cap or chat_kwargs.get("max_tokens") or 256)
+            _ns_cap = int(_ns_answer_pass_original_cap)
             _ns_used = int(getattr(output, "completion_tokens", 0) or 0)
             _ns_budget = _remaining_answer_pass_budget(_ns_cap, _ns_used)
             logger.info(
@@ -18027,10 +17803,16 @@ async def create_response(
     # shells do not count as visible output. Tracked so chained turns surface
     # a warning.
     _reasoning_only = _responses_output_is_reasoning_only(output_items)
+    _response_status = (
+        "incomplete"
+        if _reasoning_only or getattr(output, "finish_reason", None) == "length"
+        else "completed"
+    )
 
     response_obj = ResponsesObject(
         id=response_id,
         model=request.model,
+        status=_response_status,
         output=output_items,
         usage=_get_responses_usage(output),
         previous_response_id=request.previous_response_id,
@@ -18787,8 +18569,10 @@ async def stream_chat_completion(
     reasoning_only_answer_enabled = False
     reasoning_only_answer_family = ""
     reasoning_tools_fallback_answer_budget: int | None = None
+    _explicit_answer_pass_mtt = getattr(request, "max_thinking_tokens", None)
     if (
-        _is_minimax_m3
+        _explicit_answer_pass_mtt is not None
+        and _is_minimax_m3
         and (
             _m3_thinking_mode in ("enabled", "adaptive")
             or _effective_thinking is True
@@ -18796,130 +18580,61 @@ async def stream_chat_completion(
     ):
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            if _stream_tools_available:
-                # Keep the native tool-capable first pass untouched. If final
-                # parsing finds no valid call, the post-stream path re-arms the
-                # direct visible-answer pass from this original request budget.
-                m3_tools_fallback_answer_budget = max(0, _requested_output_budget)
-            else:
-                m3_reasoning_only_answer_budget = max(0, _requested_output_budget)
-                m3_reasoning_only_answer_enabled = True
-                _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
-                if _requested_thinking_budget is not None:
-                    _requested_thinking_budget = max(1, int(_requested_thinking_budget))
-                    kwargs = dict(kwargs)
-                    kwargs["max_tokens"] = min(
-                        _requested_output_budget,
-                        _requested_thinking_budget,
-                    )
+            _requested_thinking_budget = max(1, int(_explicit_answer_pass_mtt))
+            if _requested_thinking_budget < _requested_output_budget:
+                kwargs = dict(kwargs)
+                kwargs["max_tokens"] = _requested_thinking_budget
+                if _stream_tools_available:
+                    m3_tools_fallback_answer_budget = _requested_output_budget
+                else:
+                    m3_reasoning_only_answer_budget = _requested_output_budget
+                    m3_reasoning_only_answer_enabled = True
         except Exception:
             m3_reasoning_only_answer_budget = None
             m3_reasoning_only_answer_enabled = False
             m3_tools_fallback_answer_budget = None
     if (
-        _family_name == "gemma4"
+        _explicit_answer_pass_mtt is not None
+        and _family_name == "gemma4"
         and _effective_thinking is not False
         and not _stream_tools_available
     ):
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            reasoning_only_answer_budget = max(0, _requested_output_budget)
-            reasoning_only_answer_enabled = True
-            reasoning_only_answer_family = "Gemma4"
-            _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
-            if _requested_thinking_budget is not None:
-                _requested_thinking_budget = max(1, int(_requested_thinking_budget))
+            _requested_thinking_budget = max(1, int(_explicit_answer_pass_mtt))
+            if _requested_thinking_budget < _requested_output_budget:
                 kwargs = dict(kwargs)
-                kwargs["max_tokens"] = min(
-                    _requested_output_budget,
-                    _requested_thinking_budget,
-                )
+                kwargs["max_tokens"] = _requested_thinking_budget
+                reasoning_only_answer_budget = _requested_output_budget
+                reasoning_only_answer_enabled = True
+                reasoning_only_answer_family = "Gemma4"
         except Exception:
             reasoning_only_answer_budget = None
             reasoning_only_answer_enabled = False
             reasoning_only_answer_family = ""
     if (
         not reasoning_only_answer_enabled
-        and (
-            _family_name in _REASONING_ANSWER_PASS_FAMILIES
-            or _native_reasoning_tool_recovery_allowed(
-                _family_name,
-                request,
-                tools_available=_stream_tools_available,
-                effective_thinking=_effective_thinking,
-            )
-        )
+        and _explicit_answer_pass_mtt is not None
+        and _family_name in _THINKING_BUDGET_CAP_FAMILIES
         and _effective_thinking is not False
     ):
-        # Degraded qwen3.5/3.6 quants (e.g. MXFP4-CRACK) can run their thinking
-        # block away without ever closing </think>, yielding empty content. Arm
-        # the bounded thinking-off answer pass so a runaway reasoner still emits
-        # a visible answer. No-op for healthy reasoners (only fires when the turn
-        # produced reasoning but no content). thinking-off is coherent for this
-        # family, so the answer pass is reliable.
+        # The two-stage path is an explicit API contract only. Auto/On without
+        # max_thinking_tokens stays in one native decode and preserves its real
+        # content and terminal instead of fabricating a fresh-context answer.
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            _post_tool_continuation = (
-                _responses_messages_have_tool_result_after_latest_user(messages)
-            )
-            reasoning_only_answer_family = _reasoning_answer_pass_family_label(
-                _family_name
-            )
-            if _stream_tools_available:
-                # Preserve the native tool-capable first pass. If final parsing
-                # finds neither a valid call nor visible content, the post-stream
-                # path re-arms this same direct-answer pass without tool schemas.
-                reasoning_tools_fallback_answer_budget = max(
-                    0, _requested_output_budget
+            _requested_thinking_budget = max(1, int(_explicit_answer_pass_mtt))
+            if _requested_thinking_budget < _requested_output_budget:
+                reasoning_only_answer_family = _reasoning_answer_pass_family_label(
+                    _family_name
                 )
-            else:
-                reasoning_only_answer_budget = max(0, _requested_output_budget)
-                reasoning_only_answer_enabled = True
-            _requested_thinking_budget = getattr(
-                request, "max_thinking_tokens", None
-            )
-            _explicit_thinking_budget_cap = bool(
-                _requested_thinking_budget is not None
-                and _family_name in _THINKING_BUDGET_CAP_FAMILIES
-            )
-            _can_synthesize_auto_partition = bool(
-                _requested_thinking_budget is None
-                and _auto_thinking_partition_allowed(
-                    request,
-                    _family_name,
-                    tools_available=_stream_tools_available,
-                    post_tool_continuation=_post_tool_continuation,
-                )
-            )
-            if _explicit_thinking_budget_cap or _can_synthesize_auto_partition:
-                if (
-                    _requested_thinking_budget is None
-                    and _family_name in _AUTO_THINKING_PARTITION_FAMILIES
-                    and kwargs.get("thinking_budget") is None
-                    and (kwargs.get("chat_template_kwargs") or {}).get(
-                        "thinking_budget"
-                    ) is None
-                ):
-                    _requested_thinking_budget = _auto_thinking_pass_budget(
-                        _requested_output_budget
-                    )
-                    logger.info(
-                        "%s Chat Completions Auto reasoning partition: "
-                        "total_cap=%d thinking_cap=%d visible_reserve=%d",
-                        _family_name,
-                        _requested_output_budget,
-                        _requested_thinking_budget,
-                        _requested_output_budget - _requested_thinking_budget,
-                    )
-                if _requested_thinking_budget is not None:
-                    _requested_thinking_budget = max(
-                        1, int(_requested_thinking_budget)
-                    )
-                    kwargs = dict(kwargs)
-                    kwargs["max_tokens"] = min(
-                        _requested_output_budget,
-                        _requested_thinking_budget,
-                    )
+                if _stream_tools_available:
+                    reasoning_tools_fallback_answer_budget = _requested_output_budget
+                else:
+                    reasoning_only_answer_budget = _requested_output_budget
+                    reasoning_only_answer_enabled = True
+                kwargs = dict(kwargs)
+                kwargs["max_tokens"] = _requested_thinking_budget
         except Exception:
             reasoning_only_answer_budget = None
             reasoning_only_answer_enabled = False
@@ -19904,29 +19619,11 @@ async def stream_chat_completion(
         yield f"data: {_dump_chat_chunk(fallback_chunk)}\n\n"
         reasoning_was_streamed = True
 
-    _partial_visible_answer_repair = bool(
-        content_was_emitted
-        and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
-        and accumulated_reasoning.strip()
-        and streamed_content
-        and getattr(last_output, "finish_reason", None) == "length"
-    )
     if (
-        (not content_was_emitted or _partial_visible_answer_repair)
+        not content_was_emitted
         and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
         and accumulated_reasoning.strip()
         and not tool_calls_emitted
-        # W2-1 (parity fix): qwen3_5* used to be SUPPRESSED here whenever the
-        # first pass hit finish_reason="length" — the streamed salvage can't be
-        # recalled, so a length-truncated (leaky) salvage was pre-empted. But
-        # that starved the UI (streaming) of a visible answer while the API
-        # (non-stream) answered fine: non-stream RUNS the bounded thinking-off
-        # pass and adopts it only if it COMPLETES. We now match that here by
-        # BUFFERING the qwen3_5* pass (see _buffer_answer_pass): hold every delta
-        # until the pass finishes, then emit only if it completed cleanly
-        # (finish_reason != "length"); a truncated salvage is discarded before
-        # any byte is sent, so planning prose still can't leak. All reasoning
-        # modes (on/auto) arm this; explicit thinking-off never reaches here.
         and _remaining_answer_pass_budget(
             (
                 m3_reasoning_only_answer_budget
@@ -19947,15 +19644,10 @@ async def stream_chat_completion(
             else reasoning_only_answer_budget
         )
         logger.info(
-            "%s Chat Completions stream %s; "
+            "%s Chat Completions stream produced no visible content; "
             "running bounded %s answer pass "
             "(reasoning_chars=%d, answer_budget=%s)",
             _answer_family,
-            (
-                "ended with a length-truncated visible prefix"
-                if _partial_visible_answer_repair
-                else "produced no visible content"
-            ),
             (
                 "native tools-free"
                 if _family_name in _NATIVE_REASONING_TOOL_RECOVERY_FAMILIES
@@ -20028,10 +19720,6 @@ async def stream_chat_completion(
             _ans_budget_cap = int(answer_kwargs.get("max_tokens") or 0)
             _ans_raw = ""
             _ans_sent = ""
-            _ans_existing_prefix = (
-                streamed_content if _partial_visible_answer_repair else ""
-            )
-            _ans_reconciled = False
             _ans_ct = 0
             _ans_any = False
             _ans_last_out = None
@@ -20059,9 +19747,8 @@ async def stream_chat_completion(
                 if _buffer_answer_pass:
                     # Accumulate only; emit after we confirm clean completion.
                     continue
-                _delta, _ans_sent, _reconciled_now = _answer_pass_reconcile_delta(
+                _delta, _ans_sent = _answer_pass_visible_delta(
                     _ans_raw,
-                    _ans_existing_prefix,
                     _ans_sent,
                     request,
                     bool(getattr(answer_output, "finished", False)),
@@ -20071,7 +19758,6 @@ async def stream_chat_completion(
                     ),
                     think_in_prompt=_native_reasoning_retry,
                 )
-                _ans_reconciled = _ans_reconciled or _reconciled_now
                 if not _delta:
                     continue
                 _ans_any = True
@@ -20097,9 +19783,8 @@ async def stream_chat_completion(
                     getattr(_ans_last_out, "finish_reason", None) == "length"
                     or (_ans_budget_cap and _ans_ct >= _ans_budget_cap)
                 )
-                _full_delta, _ans_sent, _ans_reconciled = _answer_pass_reconcile_delta(
+                _full_delta, _ans_sent = _answer_pass_visible_delta(
                     _ans_raw,
-                    _ans_existing_prefix,
                     "",
                     request,
                     True,
@@ -20120,9 +19805,8 @@ async def stream_chat_completion(
                 )
                 # 2026-07-12 (live-proven on Qwen3.6-27B-MXFP4-CRACK-MTP): the
                 # W2-1 blanket discard-on-truncation threw away a CLEAN, usable
-                # answer whenever a runaway reasoner left the answer pass only the
-                # ANSWER_PASS_FLOOR budget — the turn came back EMPTY and stalled
-                # agentic loops. The direct-rail thinking-off pass emits a plain
+                # answer from an explicitly budgeted direct pass. The direct-rail
+                # thinking-off pass emits a plain
                 # answer with NO <think> block, so a length-truncated pass is a
                 # cut-off answer, not the planning-prose leak W2-1 guarded against.
                 # Emit it. Discard ONLY when the pass actually re-entered reasoning
@@ -20157,19 +19841,14 @@ async def stream_chat_completion(
                         "content (ct=%d/%d) — client should raise max_tokens",
                         _answer_family, _ans_ct, _ans_budget_cap,
                     )
-            _answer_pass_succeeded = _ans_any or (
-                _partial_visible_answer_repair and _ans_reconciled
-            )
+            _answer_pass_succeeded = _ans_any
             _ans_truncated_for_terminal = bool(
                 getattr(_ans_last_out, "finish_reason", None) == "length"
                 or (_ans_budget_cap and _ans_ct >= _ans_budget_cap)
             )
             if _answer_pass_succeeded:
                 content_was_emitted = True
-                if _partial_visible_answer_repair:
-                    streamed_content = _ans_sent
-                else:
-                    streamed_content += _ans_sent
+                streamed_content += _ans_sent
                 completion_tokens += int(_ans_ct or 0)
                 # Terminal finish for the answer-pass stream satisfies the OpenAI
                 # terminal-finish contract so strict clients do not hang.  Preserve
@@ -20194,24 +19873,6 @@ async def stream_chat_completion(
                     ],
                 )
                 yield f"data: {_dump_chat_chunk(answer_finish_chunk)}\n\n"
-            elif _partial_visible_answer_repair:
-                logger.warning(
-                    "%s direct answer diverged from the already-streamed prefix; "
-                    "preserving the honest length-truncated prefix",
-                    _answer_family,
-                )
-                repair_finish_chunk = ChatCompletionChunk(
-                    id=response_id,
-                    created=_created_ts,
-                    model=request.model,
-                    choices=[
-                        ChatCompletionChunkChoice(
-                            delta=ChatCompletionChunkDelta(),
-                            finish_reason="length",
-                        )
-                    ],
-                )
-                yield f"data: {_dump_chat_chunk(repair_finish_chunk)}\n\n"
         except Exception as e:
             logger.error(
                 "%s Chat Completions visible answer pass failed for %s: %s",
@@ -20313,7 +19974,11 @@ async def stream_chat_completion(
         # calls). The chat-completion finalizer below would normally do this
         # for content/tool paths but only when content_was_emitted or
         # tool_calls_emitted is true.
-        if not content_was_emitted and not tool_calls_emitted:
+        if (
+            not content_was_emitted
+            and not tool_calls_emitted
+            and not getattr(last_output, "finish_reason", None)
+        ):
             warning_finish_chunk = ChatCompletionChunk(
                 id=response_id,
                 created=_created_ts,
@@ -20474,6 +20139,10 @@ async def stream_responses_api(
     """
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
     kwargs["request_id"] = response_id
+    kwargs.setdefault(
+        "max_tokens",
+        _resolve_max_tokens(getattr(request, "max_output_tokens", None), request.model),
+    )
     seq = 0
     created_at = int(time.time())
 
@@ -20851,8 +20520,10 @@ async def stream_responses_api(
     reasoning_only_answer_enabled = False
     reasoning_only_answer_family = ""
     reasoning_tools_fallback_answer_budget: int | None = None
+    _explicit_answer_pass_mtt = getattr(request, "max_thinking_tokens", None)
     if (
-        _is_minimax_m3
+        _explicit_answer_pass_mtt is not None
+        and _is_minimax_m3
         and (
             _m3_thinking_mode in ("enabled", "adaptive")
             or _effective_thinking is True
@@ -20860,123 +20531,60 @@ async def stream_responses_api(
     ):
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            if _stream_tools_available:
-                # Preserve the normal native tool stream. The budget is used
-                # only if final parsing proves the turn produced no valid call.
-                m3_tools_fallback_answer_budget = max(0, _requested_output_budget)
-            else:
-                m3_reasoning_only_answer_budget = max(0, _requested_output_budget)
-                m3_reasoning_only_answer_enabled = True
-                _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
-                if _requested_thinking_budget is not None:
-                    _requested_thinking_budget = max(1, int(_requested_thinking_budget))
-                    kwargs = dict(kwargs)
-                    kwargs["max_tokens"] = min(_requested_output_budget, _requested_thinking_budget)
+            _requested_thinking_budget = max(1, int(_explicit_answer_pass_mtt))
+            if _requested_thinking_budget < _requested_output_budget:
+                kwargs = dict(kwargs)
+                kwargs["max_tokens"] = _requested_thinking_budget
+                if _stream_tools_available:
+                    m3_tools_fallback_answer_budget = _requested_output_budget
+                else:
+                    m3_reasoning_only_answer_budget = _requested_output_budget
+                    m3_reasoning_only_answer_enabled = True
         except Exception:
             m3_reasoning_only_answer_budget = None
             m3_reasoning_only_answer_enabled = False
             m3_tools_fallback_answer_budget = None
     if (
-        _family_name == "gemma4"
+        _explicit_answer_pass_mtt is not None
+        and _family_name == "gemma4"
         and _effective_thinking is not False
         and not _stream_tools_available
     ):
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            reasoning_only_answer_budget = max(0, _requested_output_budget)
-            reasoning_only_answer_enabled = True
-            reasoning_only_answer_family = "Gemma4"
-            _requested_thinking_budget = getattr(request, "max_thinking_tokens", None)
-            if _requested_thinking_budget is not None:
-                _requested_thinking_budget = max(1, int(_requested_thinking_budget))
+            _requested_thinking_budget = max(1, int(_explicit_answer_pass_mtt))
+            if _requested_thinking_budget < _requested_output_budget:
                 kwargs = dict(kwargs)
-                kwargs["max_tokens"] = min(_requested_output_budget, _requested_thinking_budget)
+                kwargs["max_tokens"] = _requested_thinking_budget
+                reasoning_only_answer_budget = _requested_output_budget
+                reasoning_only_answer_enabled = True
+                reasoning_only_answer_family = "Gemma4"
         except Exception:
             reasoning_only_answer_budget = None
             reasoning_only_answer_enabled = False
             reasoning_only_answer_family = ""
     if (
         not reasoning_only_answer_enabled
-        and (
-            _family_name in _REASONING_ANSWER_PASS_FAMILIES
-            or _native_reasoning_tool_recovery_allowed(
-                _family_name,
-                request,
-                tools_available=_stream_tools_available,
-                effective_thinking=_effective_thinking,
-            )
-        )
+        and _explicit_answer_pass_mtt is not None
+        and _family_name in _THINKING_BUDGET_CAP_FAMILIES
         and _effective_thinking is not False
     ):
-        # Degraded qwen3.5/3.6 quants (e.g. MXFP4-CRACK) can run their thinking
-        # block away without ever closing </think>, yielding empty content. Arm
-        # the bounded thinking-off answer pass so a runaway reasoner still emits
-        # a visible answer. No-op for healthy reasoners (only fires when the turn
-        # produced reasoning but no content). thinking-off is coherent for this
-        # family, so the answer pass is reliable.
+        # Explicit two-stage parity with Chat. Implicit Auto/On is always a
+        # single native generation and never receives a synthetic retry.
         try:
             _requested_output_budget = int(kwargs.get("max_tokens") or 256)
-            _post_tool_continuation = (
-                _responses_messages_have_tool_result_after_latest_user(messages)
-            )
-            reasoning_only_answer_family = _reasoning_answer_pass_family_label(
-                _family_name
-            )
-            if _stream_tools_available:
-                # Preserve the native tool-capable first pass. Re-arm the
-                # tools-free direct rail only after final parsing rejects every
-                # tool-call candidate and visible content is still empty.
-                reasoning_tools_fallback_answer_budget = max(
-                    0, _requested_output_budget
+            _requested_thinking_budget = max(1, int(_explicit_answer_pass_mtt))
+            if _requested_thinking_budget < _requested_output_budget:
+                reasoning_only_answer_family = _reasoning_answer_pass_family_label(
+                    _family_name
                 )
-            else:
-                reasoning_only_answer_budget = max(0, _requested_output_budget)
-                reasoning_only_answer_enabled = True
-            _requested_thinking_budget = getattr(
-                request, "max_thinking_tokens", None
-            )
-            _explicit_thinking_budget_cap = bool(
-                _requested_thinking_budget is not None
-                and _family_name in _THINKING_BUDGET_CAP_FAMILIES
-            )
-            _can_synthesize_auto_partition = bool(
-                _requested_thinking_budget is None
-                and _auto_thinking_partition_allowed(
-                    request,
-                    _family_name,
-                    tools_available=_stream_tools_available,
-                    post_tool_continuation=_post_tool_continuation,
-                )
-            )
-            if _explicit_thinking_budget_cap or _can_synthesize_auto_partition:
-                if (
-                    _requested_thinking_budget is None
-                    and _family_name in _AUTO_THINKING_PARTITION_FAMILIES
-                    and kwargs.get("thinking_budget") is None
-                    and (kwargs.get("chat_template_kwargs") or {}).get(
-                        "thinking_budget"
-                    ) is None
-                ):
-                    _requested_thinking_budget = _auto_thinking_pass_budget(
-                        _requested_output_budget
-                    )
-                    logger.info(
-                        "%s Responses Auto reasoning partition: "
-                        "total_cap=%d thinking_cap=%d visible_reserve=%d",
-                        _family_name,
-                        _requested_output_budget,
-                        _requested_thinking_budget,
-                        _requested_output_budget - _requested_thinking_budget,
-                    )
-                if _requested_thinking_budget is not None:
-                    _requested_thinking_budget = max(
-                        1, int(_requested_thinking_budget)
-                    )
-                    kwargs = dict(kwargs)
-                    kwargs["max_tokens"] = min(
-                        _requested_output_budget,
-                        _requested_thinking_budget,
-                    )
+                if _stream_tools_available:
+                    reasoning_tools_fallback_answer_budget = _requested_output_budget
+                else:
+                    reasoning_only_answer_budget = _requested_output_budget
+                    reasoning_only_answer_enabled = True
+                kwargs = dict(kwargs)
+                kwargs["max_tokens"] = _requested_thinking_budget
         except Exception:
             reasoning_only_answer_budget = None
             reasoning_only_answer_enabled = False
@@ -21954,25 +21562,12 @@ async def stream_responses_api(
             # here was the bug that pollutes history.
             if not reasoning_was_streamed and not _buffered_reasoning_only:
                 display_text = clean_output_text(full_text) if full_text else ""
-        _partial_visible_answer_repair = bool(
-            display_text
-            and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
-            and accumulated_reasoning.strip()
-            and streamed_text
-            and getattr(last_output, "finish_reason", None) == "length"
-        )
         if (
             not _response_was_cancelled
-            and (not display_text or _partial_visible_answer_repair)
+            and not display_text
             and (m3_reasoning_only_answer_enabled or reasoning_only_answer_enabled)
             and accumulated_reasoning.strip()
             and not tool_calls
-            # W2-1 parity (streaming Responses sibling of stream_chat_completion):
-            # RUN the qwen3_5* pass even on a length-truncated first pass, but
-            # BUFFER it (see _buffer_answer_pass below) and emit only on clean
-            # completion — matching the non-stream run-then-adopt-if-complete
-            # semantics without risking a streamed planning-prose leak. All
-            # reasoning modes (on/auto) arm this; explicit off never reaches here.
             and _remaining_answer_pass_budget(
                 (
                     m3_reasoning_only_answer_budget
@@ -21993,15 +21588,10 @@ async def stream_responses_api(
                 else reasoning_only_answer_budget
             )
             logger.info(
-                "%s reasoning %s; "
+                "%s reasoning produced no visible content; "
                 "running bounded %s answer pass "
                 "(reasoning_chars=%d, answer_budget=%s)",
                 _answer_family,
-                (
-                    "ended with a length-truncated visible prefix"
-                    if _partial_visible_answer_repair
-                    else "produced no visible content"
-                ),
                 (
                     "native tools-free"
                     if _family_name in _NATIVE_REASONING_TOOL_RECOVERY_FAMILIES
@@ -22067,10 +21657,6 @@ async def stream_responses_api(
                 _ans_budget_cap = int(answer_kwargs.get("max_tokens") or 0)
                 _ans_raw = ""
                 _ans_sent = ""
-                _ans_existing_prefix = (
-                    streamed_text if _partial_visible_answer_repair else ""
-                )
-                _ans_reconciled = False
                 _ans_ct = 0
                 _ans_last_out = None
                 async for answer_output in _stream_with_keepalive(
@@ -22121,9 +21707,8 @@ async def stream_responses_api(
                         )
                     if _buffer_answer_pass:
                         continue
-                    _delta, _ans_sent, _reconciled_now = _answer_pass_reconcile_delta(
+                    _delta, _ans_sent = _answer_pass_visible_delta(
                         _ans_raw,
-                        _ans_existing_prefix,
                         _ans_sent,
                         request,
                         bool(getattr(answer_output, "finished", False)),
@@ -22133,7 +21718,6 @@ async def stream_responses_api(
                         ),
                         think_in_prompt=_native_reasoning_retry,
                     )
-                    _ans_reconciled = _ans_reconciled or _reconciled_now
                     if not _delta:
                         continue
                     for _event in _start_message_item_events():
@@ -22153,9 +21737,8 @@ async def stream_responses_api(
                         getattr(_ans_last_out, "finish_reason", None) == "length"
                         or (_ans_budget_cap and _ans_ct >= _ans_budget_cap)
                     )
-                    _full_delta, _ans_sent, _ans_reconciled = _answer_pass_reconcile_delta(
+                    _full_delta, _ans_sent = _answer_pass_visible_delta(
                         _ans_raw,
-                        _ans_existing_prefix,
                         "",
                         request,
                         True,
@@ -22206,15 +21789,10 @@ async def stream_responses_api(
                                 "no visible content (ct=%d/%d) — raise max_tokens",
                                 _answer_family, _ans_ct, _ans_budget_cap,
                             )
-                _answer_pass_succeeded = bool(_ans_sent) or (
-                    _partial_visible_answer_repair and _ans_reconciled
-                )
+                _answer_pass_succeeded = bool(_ans_sent)
                 if _answer_pass_succeeded:
                     display_text = _ans_sent
-                    if _partial_visible_answer_repair:
-                        streamed_text = _ans_sent
-                    else:
-                        streamed_text += _ans_sent
+                    streamed_text += _ans_sent
                     completion_tokens += int(_ans_ct or 0)
                     # The visible-answer pass now owns the terminal status. The
                     # first reasoning pass commonly ended with finish=length by
@@ -22222,12 +21800,6 @@ async def stream_responses_api(
                     # response.incomplete even when this pass stopped cleanly.
                     if _ans_last_out is not None:
                         last_output = _ans_last_out
-                elif _partial_visible_answer_repair:
-                    logger.warning(
-                        "%s direct answer diverged from the already-streamed "
-                        "Responses prefix; preserving the honest incomplete terminal",
-                        _answer_family,
-                    )
             except Exception as e:
                 logger.error(
                     "%s visible answer pass failed for %s: %s",

@@ -1,10 +1,8 @@
 """F6: the bounded thinking-off answer pass streams token-by-token.
 
-When a reasoning model exhausts its token budget in the first (thinking-on) pass
-it produces no visible content, so the server runs a bounded thinking-off answer
-pass. That pass used to be generated in full and emitted as ONE content delta,
-so the whole answer landed at once after a long silent wait (a progressive-UI /
-coding-harness hazard). It now streams incrementally via
+When a caller explicitly supplies ``max_thinking_tokens`` and the bounded
+thinking-on pass produces no visible content, the server may use the reserved
+remainder for a thinking-off answer pass. That pass streams incrementally via
 ``_answer_pass_visible_delta``.
 
 These tests cover the pure delta helper directly (the two streaming call sites —
@@ -16,15 +14,14 @@ import inspect
 from types import SimpleNamespace
 
 import vmlx_engine.server as server_mod
+from vmlx_engine.api.utils import clean_output_text
 from vmlx_engine.server import (
     _ANS_MARKER_HOLDBACK,
     _ANSWER_PASS_LEAK_GUARD_FAMILIES,
-    _answer_pass_reconcile_delta,
     _answer_pass_stream_holdback,
     _answer_pass_visible_delta,
     _main_pass_finish_reason,
 )
-from vmlx_engine.api.utils import clean_output_text
 
 
 def _req(enable_thinking=True):
@@ -139,7 +136,15 @@ def test_laguna_does_not_run_a_synthetic_thinking_off_answer_pass():
     does not make a second independently sampled pass semantically equivalent
     to continuing the first turn.
     """
-    assert "laguna" not in server_mod._REASONING_ANSWER_PASS_FAMILIES
+    for handler in (
+        server_mod.create_chat_completion,
+        server_mod.create_response,
+        server_mod.stream_chat_completion,
+        server_mod.stream_responses_api,
+    ):
+        source = inspect.getsource(handler)
+        assert "max_thinking_tokens" in source
+        assert "_auto_thinking_partition_allowed(" not in source
 
 
 def test_partial_close_think_marker_never_leaks_then_answer_streams():
@@ -209,12 +214,18 @@ def test_enable_thinking_false_splits_on_close_think():
 def test_both_stream_sites_use_the_delta_helper():
     # Neither streaming answer pass may regress to the old single-chunk emit.
     chat_src = inspect.getsource(server_mod.stream_chat_completion)
-    assert "_answer_pass_reconcile_delta" in chat_src
+    assert "_answer_pass_visible_delta" in chat_src
+    assert "_answer_pass_reconcile_delta" not in chat_src
     assert "engine.stream_chat(messages=answer_messages" in chat_src
     # Responses API streaming answer pass lives in stream_responses_api.
     resp_src = inspect.getsource(server_mod.stream_responses_api)
-    assert "_answer_pass_reconcile_delta" in resp_src
+    assert "_answer_pass_visible_delta" in resp_src
+    assert "_answer_pass_reconcile_delta" not in resp_src
     assert "engine.stream_chat(messages=answer_messages" in resp_src
+
+
+def test_partial_prefix_regeneration_helper_is_removed():
+    assert not hasattr(server_mod, "_answer_pass_reconcile_delta")
 
 
 def test_internal_reasoning_pass_terminal_is_held_until_visible_answer_finishes():
@@ -227,16 +238,15 @@ def test_internal_reasoning_pass_terminal_is_held_until_visible_answer_finishes(
         answer_pass_pending=True,
     ) is None
 
-    # A partition can cross into content just before its token share expires.
-    # The internal length terminal must still be held while the direct pass
-    # reconciles and continues that prefix.
+    # Once native visible content exists, the first generation owns the
+    # terminal. A fresh sample cannot retract or "continue" that prefix.
     assert _main_pass_finish_reason(
         "length",
         finished=True,
         content_was_emitted=True,
         accumulated_reasoning="private planning",
         answer_pass_pending=True,
-    ) is None
+    ) == "length"
     assert _main_pass_finish_reason(
         "stop",
         finished=True,
@@ -270,44 +280,6 @@ def test_genuine_main_pass_terminal_reasons_are_preserved():
     ) is None
 
 
-def test_partial_visible_prefix_reconciliation_emits_only_new_suffix():
-    existing = "BANANA8426\nQ35-PARTIAL-"
-    raw = ""
-    sent = ""
-    reconciled = False
-    deltas = []
-    chunks = ("BANANA8426\n", "Q35-PARTIAL-", "DONE")
-    for index, piece in enumerate(chunks):
-        raw += piece
-        delta, sent, now_reconciled = _answer_pass_reconcile_delta(
-            raw,
-            existing,
-            sent,
-            _req(),
-            index == len(chunks) - 1,
-        )
-        reconciled = reconciled or now_reconciled
-        if delta:
-            deltas.append(delta)
-
-    assert reconciled is True
-    assert deltas == ["DONE"]
-    assert sent == existing + "DONE"
-
-
-def test_partial_visible_prefix_reconciliation_fails_closed_on_divergence():
-    delta, sent, reconciled = _answer_pass_reconcile_delta(
-        "A different regenerated answer",
-        "BANANA8426\nQ35-PARTIAL-",
-        "",
-        _req(),
-        True,
-    )
-    assert delta == ""
-    assert sent == ""
-    assert reconciled is False
-
-
 def test_chat_legacy_reasoning_fallback_cannot_precede_answer_pass():
     """An armed answer pass must be the sole visible fallback.
 
@@ -337,19 +309,17 @@ def test_main_chat_reasoning_content_is_never_terminally_buffered():
     assert "deferred_reasoning_visible_content" not in source
     assert 'finish_reason="length"' in source
     assert "_answer_pass_stream_holdback(" in source
-    assert "synthetic terminal blob" in source
+    assert "_answer_pass_reconcile_delta" not in source
 
 
-def test_nonstream_answer_pass_replaces_length_truncated_visible_prefix():
+def test_nonstream_answer_pass_only_arms_when_visible_content_is_empty():
     chat_source = inspect.getsource(server_mod.create_chat_completion)
     responses_source = inspect.getsource(server_mod.create_response)
     for source in (chat_source, responses_source):
         assert "_ns_visible_content_for_answer_gate = content_for_parsing" in source
         assert "_clean_suppressed_tool_markup_for_display(" in source
-        assert (
-            "(not _ns_visible_content_for_answer_gate or _ns_reasoning_truncated)"
-            in source
-        )
+        assert "_ns_reasoning_truncated" not in source
+        assert "not _ns_visible_content_for_answer_gate" in source
 
 
 def test_streaming_answer_pass_announces_phase_without_nonstandard_json():

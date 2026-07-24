@@ -52,7 +52,8 @@ forbidden=$(
       /^\.codex\// ||
       /^\.sisyphus\// ||
       /^\.factory\// ||
-      /(^|\/)(screenshots?|screen-recordings?|cdp-captures?|raw-sse|runtime-logs?)(\/|$)/ {
+      /(^|\/)(botes|evidence|private-evidence|vmlx-proof|screenshots?|screen-recordings?|cdp-captures?|raw-sse|runtime-logs?)(\/|$)/ ||
+      /(^|\/)[^\/]+\.(sqlite|db)$/ {
         print
       }
     '

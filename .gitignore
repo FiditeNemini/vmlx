@@ -199,6 +199,17 @@ docs/*LEDGER*
 docs/*EVIDENCE*
 docs/*PROOF*
 docs/*RELEASE-GATE*
+botes/
+evidence/
+private-evidence/
+vmlx-proof/
+screenshots/
+screen-recordings/
+cdp-captures/
+raw-sse/
+runtime-logs/
+*.sqlite
+*.db
 AUDIT_FIXES.md
 BENCHMARK_RESULTS.md
 FIXES_SUMMARY.md

@@ -26,12 +26,10 @@ All notable changes to vMLX Engine will be documented in this file.
   for a bundle-grounded `nemotron-h` Omni route.
 
 ### Verified checkpoint boundary
-- Current-source proof on `test-host.local` covers real Electron Start
-  materialization, Gemma image/cache/reasoning rows, Nemotron Omni audio
-  attachment and no-attachment continuation, and progressive Chat and
-  Responses reasoning/content/terminal events. The release record contains
-  the exact screenshots, sanitized database rows, health snapshots, and raw
-  SSE timing artifacts.
+- Current-source validation covers real Electron Start materialization, Gemma
+  image/cache/reasoning rows, Nemotron Omni audio attachment and no-attachment
+  continuation, and progressive Chat and Responses
+  reasoning/content/terminal events.
 - This checkpoint does not promote retained PARTIAL/OPEN rows. Gemma exact
   small-text OCR, stochastic strict-format reliability, Omni process-restart
   media-state restoration, broader signed-app family repetition, long-context
@@ -88,10 +86,9 @@ All notable changes to vMLX Engine will be documented in this file.
   decoding retains its persistent scheduler owner for cancellation/recovery.
 
 ### Verified checkpoint boundary
-- Current-source live Electron and API evidence covers the named cache,
-  streaming, tool, media, lifecycle, and gateway rows recorded under
-  `docs/internal/release-gates/`; those scoped results are not generalized to
-  untested artifacts or parser families.
+- Current-source live Electron and API validation covers the named cache,
+  streaming, tool, media, lifecycle, and gateway rows; those scoped results
+  are not generalized to untested artifacts or parser families.
 - Historical generated `build/` proof output is no longer tracked as source
   truth. Clean checkouts classify absent generated/staged evidence as OPEN,
   while partial, stale, or mismatched present artifacts remain FAIL.
@@ -167,8 +164,10 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ### Notes
 - Future release notes for the current runtime/model/UI/API issue wave must credit GitHub `@Hornsan1` for reporting many of these issues.
-- JANGQ/JANG tools MiMo V2 support is on `jjang-ai/jangq` main at `d1316c3`; the local `/Users/example/jang` checkout is now aligned to that commit, with the prior local equivalent head and overlapping untracked files preserved in backups.
-- Local MiMo V2.5 JANG_2L was refreshed from max2 over the TB-routed HTTP endpoint and verified byte-for-byte by manifest. This is still not full MiMo release clearance: live text/cache now works, but tool behavior, VL/audio/video, and performance remain separate proof rows.
+- JANGQ/JANG tools MiMo V2 support is on `jjang-ai/jangq` main at `d1316c3`.
+- MiMo V2.5 JANG_2L text/cache validation does not provide full MiMo release
+  clearance; tool behavior, VL/audio/video, and performance remain separate
+  rows.
 - MiMo V2.5 JANG_2L tool behavior remains a release blocker: a forced XML-function tool call stayed HTTP 200 but produced raw malformed `<tool_call>` text and punctuation garbage with zero parsed tool calls.
 
 ## [1.6.7] - 2026-07-12

@@ -2124,7 +2124,6 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
     {
         "gemma4",
         "hy_v3",
-        "laguna",
         # MiniMax-M2.x bundles report family_name "minimax" ("minimax_m2" is
         # only their REASONING PARSER name — no bundle resolves to it as a
         # family, so that entry alone left M2.7 reasoning-only turns EMPTY at

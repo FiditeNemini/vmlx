@@ -130,6 +130,18 @@ def test_no_family_batches_ordinary_answer_text_by_name():
     assert _answer_pass_stream_holdback("deepseek_v4", buffer_answer_pass=False) == 0
 
 
+def test_laguna_does_not_run_a_synthetic_thinking_off_answer_pass():
+    """Preserve Laguna's real first-pass terminal instead of inventing a final.
+
+    Live XS-2.1 evidence showed a reasoning pass exhausting its requested
+    output budget, followed by the old thinking-off retry returning a
+    confident but wrong answer. Laguna's native variable-reasoning contract
+    does not make a second independently sampled pass semantically equivalent
+    to continuing the first turn.
+    """
+    assert "laguna" not in server_mod._REASONING_ANSWER_PASS_FAMILIES
+
+
 def test_partial_close_think_marker_never_leaks_then_answer_streams():
     chunks = ["<", "/t", "hink", ">", "B1", "-", "OK"]
     deltas, raw = _drive(chunks, _req(enable_thinking=False))

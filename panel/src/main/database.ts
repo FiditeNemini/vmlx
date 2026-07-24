@@ -84,6 +84,10 @@ export interface Message {
   // so the DB schema does not need hidden role="tool" rows that would show
   // up in the renderer and violate older SQLite CHECK constraints.
   toolResultsOaiJson?: string;
+  // Hash of the exact function schema catalog attached when this assistant
+  // turn was generated. Used to mark request-scoped tool capability changes
+  // without deleting or heuristically rewriting prior assistant history.
+  toolCapabilityFingerprint?: string;
   reasoningContent?: string; // Reasoning/thinking content (from <think> tags or similar)
   reasoningSegmentsJson?: string; // JSON array of interleaved reasoning segments split by tool boundaries
 }
@@ -387,6 +391,11 @@ class DatabaseManager {
       if (!msgColumns.find((c) => c.name === "tool_results_oai_json")) {
         this.db.exec(
           "ALTER TABLE messages ADD COLUMN tool_results_oai_json TEXT",
+        );
+      }
+      if (!msgColumns.find((c) => c.name === "tool_capability_fingerprint")) {
+        this.db.exec(
+          "ALTER TABLE messages ADD COLUMN tool_capability_fingerprint TEXT",
         );
       }
 
@@ -1474,9 +1483,9 @@ class DatabaseManager {
           id, chat_id, role, content, timestamp, tokens,
           metrics_json, warnings_json, tool_calls_json, reasoning_content,
           reasoning_segments_json, tool_calls_oai_json, tool_call_id,
-          tool_results_oai_json
+          tool_results_oai_json, tool_capability_fingerprint
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       stmt.run(
         message.id,
@@ -1493,6 +1502,7 @@ class DatabaseManager {
         message.toolCallsOaiJson,
         message.toolCallId,
         message.toolResultsOaiJson,
+        message.toolCapabilityFingerprint,
       );
 
       // Update chat's updatedAt atomically with the message insert
@@ -1554,6 +1564,7 @@ class DatabaseManager {
       toolCallsOaiJson: row.tool_calls_oai_json,
       toolCallId: row.tool_call_id,
       toolResultsOaiJson: row.tool_results_oai_json,
+      toolCapabilityFingerprint: row.tool_capability_fingerprint,
     }));
   }
 

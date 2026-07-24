@@ -64,6 +64,11 @@ import {
   reasoningParserIsEnabled,
   resolveEffectiveReasoningParser,
 } from "../../shared/reasoningParserAliases";
+import {
+  toolCapabilityFingerprint,
+  toolCapabilityNames,
+  toolCapabilityTransitionInstruction,
+} from "../tool-capability-epoch";
 
 // Default connection config (fallback values)
 const DEFAULT_PORT = 8000;
@@ -1501,6 +1506,31 @@ export function registerChatHandlers(
         hasMediaAttachments && attachBuiltinToolsForCurrentTurn
           ? DIRECT_MEDIA_ATTACHMENT_TOOL_RULE
           : "";
+      const currentTurnToolDefinitions = attachBuiltinToolsForCurrentTurn
+        ? filterTools(overrides || {}, {
+            hasDirectMediaAttachments: hasMediaAttachments,
+            zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
+          }).filter((tool) => {
+            const name = tool.function.name.toLowerCase();
+            return (
+              exactFinalToolNames.length === 0 ||
+              exactFinalToolNames.includes(name)
+            );
+          })
+        : [];
+      const currentToolCapabilityFingerprint = toolCapabilityFingerprint(
+        currentTurnToolDefinitions,
+      );
+      const latestPriorAssistant = [...messages]
+        .reverse()
+        .find((message) => message.role === "assistant");
+      const toolCapabilityTransition =
+        latestPriorAssistant &&
+        toolCapabilityTransitionInstruction(
+          latestPriorAssistant.toolCapabilityFingerprint,
+          currentToolCapabilityFingerprint,
+          toolCapabilityNames(currentTurnToolDefinitions),
+        );
       if (hasSystemPrompt && overrides?.builtinToolsEnabled) {
         const toolRule =
           "\n\nIMPORTANT: After using any tools, provide a final response. If the user explicitly requested exact final wording or a strict output format, follow that format exactly; otherwise provide a substantive response explaining what you found or did. Never stop after just executing tools.";
@@ -1534,6 +1564,12 @@ export function registerChatHandlers(
         requestMessages.push({
           role: "system",
           content: directMediaAttachmentRule.trim(),
+        });
+      }
+      if (toolCapabilityTransition) {
+        requestMessages.push({
+          role: "system",
+          content: toolCapabilityTransition,
         });
       }
       // No default system prompt injected — let the model's native template handle defaults.
@@ -1691,6 +1727,7 @@ export function registerChatHandlers(
         role: "assistant",
         content: "",
         timestamp: Date.now(),
+        toolCapabilityFingerprint: currentToolCapabilityFingerprint,
       };
 
       // Metrics tracking
@@ -1872,15 +1909,10 @@ export function registerChatHandlers(
           : undefined;
 
         const availableToolDefinitions = () =>
-          filterTools(overrides || {}, {
-            hasDirectMediaAttachments: hasMediaAttachments,
-            zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
-          }).filter(
+          currentTurnToolDefinitions.filter(
             (tool) => {
               const name = tool.function.name.toLowerCase();
               return (
-                (exactFinalToolNames.length === 0 ||
-                  exactFinalToolNames.includes(name)) &&
                 !completedExactFinalTools.has(name) &&
                 !completedExactlyOnceTools.has(name)
               );

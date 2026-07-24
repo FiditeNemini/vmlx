@@ -15578,6 +15578,30 @@ def _responses_scrub_multimodal_history_for_text_followup(messages: list[dict]) 
     return scrubbed
 
 
+def _responses_should_scrub_multimodal_history_for_followup(
+    input_data: str | list,
+    *,
+    current_request_has_media: bool,
+) -> bool:
+    """Decide whether a chained text request may discard prior media payloads.
+
+    A normal text-only follow-up should not re-run old image/video/audio
+    encoders. A ``function_call_output`` request is different: it is the
+    continuation of the same assistant turn that consumed the media. Scrubbing
+    at that boundary makes the model forget media-derived facts between its
+    tool call and final answer. Keep prior media for that one logical tool loop;
+    later ordinary text turns retain the existing scrub behavior.
+    """
+    if current_request_has_media:
+        return False
+    if not isinstance(input_data, list):
+        return True
+    return not any(
+        _responses_field(item, "type") == "function_call_output"
+        for item in input_data
+    )
+
+
 def _extract_text_from_content(content) -> str:
     """Extract plain text from a content field that may be a string or list of parts."""
     if isinstance(content, str):
@@ -16864,7 +16888,10 @@ async def create_response(
     )
     if request.previous_response_id:
         previous_messages = _responses_get_history(request.previous_response_id)
-        if previous_messages and not _responses_has_media:
+        if previous_messages and _responses_should_scrub_multimodal_history_for_followup(
+            request.input,
+            current_request_has_media=_responses_has_media,
+        ):
             previous_messages = _responses_scrub_multimodal_history_for_text_followup(
                 previous_messages
             )

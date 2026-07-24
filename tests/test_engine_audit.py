@@ -4806,6 +4806,52 @@ class TestMediaDiagnostics:
         assert "SECRET_RESPONSE_IMAGE" not in json.dumps(scrubbed)
         assert isinstance(previous_messages[0]["content"], list)
 
+    def test_responses_media_history_scrub_policy_keeps_tool_result_continuation(self):
+        from vmlx_engine.server import (
+            _responses_should_scrub_multimodal_history_for_followup,
+        )
+
+        tool_continuation = [
+            {
+                "type": "function_call_output",
+                "call_id": "call_media",
+                "output": "Path: panel/package.json\nSize: 5.2 KB",
+            },
+            {
+                "role": "user",
+                "content": "Use the media fact and tool result in the final answer.",
+            },
+        ]
+
+        assert not _responses_should_scrub_multimodal_history_for_followup(
+            tool_continuation,
+            current_request_has_media=False,
+        )
+
+    def test_responses_media_history_scrub_policy_keeps_current_media(self):
+        from vmlx_engine.server import (
+            _responses_should_scrub_multimodal_history_for_followup,
+        )
+
+        assert not _responses_should_scrub_multimodal_history_for_followup(
+            [{"role": "user", "content": "new media request"}],
+            current_request_has_media=True,
+        )
+
+    def test_responses_media_history_scrub_policy_scrubs_ordinary_text_followup(self):
+        from vmlx_engine.server import (
+            _responses_should_scrub_multimodal_history_for_followup,
+        )
+
+        assert _responses_should_scrub_multimodal_history_for_followup(
+            [{"role": "user", "content": "ordinary later text turn"}],
+            current_request_has_media=False,
+        )
+        assert _responses_should_scrub_multimodal_history_for_followup(
+            "ordinary string follow-up",
+            current_request_has_media=False,
+        )
+
     def test_responses_multimodal_history_coerces_orphan_tool_results(self):
         from vmlx_engine.server import _coerce_orphan_tool_messages_for_template
 

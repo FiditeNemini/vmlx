@@ -107,6 +107,7 @@ temp/
 .worktrees/
 
 # Panel (Electron app)
+node_modules/
 panel/node_modules/
 panel/dist/
 panel/out/
@@ -118,6 +119,7 @@ panel/.env
 # Production builds (contains .app with bundled Python ~1.4GB)
 productionapp/vMLX.app
 productionapp/*.dmg
+/build/
 
 # Claude Code
 .claude/
@@ -154,6 +156,7 @@ CODEX.md
 notes/
 panel/docs/plans/
 tests/e2e/results/
+tests/e2e/panel-driver/node_modules/
 tests/e2e/AUDIT-REPORT.md
 tests/e2e/MATRIX.md
 tests/e2e/UI-SUITE.md
@@ -195,6 +198,9 @@ AUDIT-*.md
 HANDOFF-*.md
 TEST-MATRIX-*.md
 BENCHMARK-*.md
+nohup.out
+trace_err*.txt
+/*_results.json
 /*.md
 !/README.md
 !/CHANGELOG.md

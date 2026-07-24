@@ -156,7 +156,17 @@ CODEX.md
 .factory/
 notes/
 PLANS/
+autoresearch/
+tmp/
+assets/tools-tab.png
 panel/docs/plans/
+panel/CHANGELOG.md
+panel/ENGINE-UPDATES.md
+panel/PROJECT.md
+panel/SETUP.md
+productionapp/INSTALL.md
+productionapp/TECHNICAL-NOTES.md
+vmlx_engine/docs/CODEBOOK-DEVELOPMENT.md
 tests/e2e/results/
 tests/e2e/panel-driver/node_modules/
 tests/benchmark/outputs/

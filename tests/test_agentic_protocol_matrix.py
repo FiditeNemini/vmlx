@@ -2,10 +2,16 @@
 """Pure contracts for the reusable four-protocol agentic matrix runner."""
 
 import copy
+import hashlib
 import json
+import stat
+import subprocess
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import requests
 
 from tests.cross_matrix import run_agentic_protocol_matrix as matrix
 
@@ -316,7 +322,10 @@ def test_allowlist_rejects_path_command_and_extra_argument_variants():
 
     for invalid, name in [
         ({**valid_file, "arguments": {"path": "pyproject.toml"}}, "file_info"),
-        ({**valid_file, "arguments": {"path": "panel/package.json", "extra": 1}}, "file_info"),
+        (
+            {**valid_file, "arguments": {"path": "panel/package.json", "extra": 1}},
+            "file_info",
+        ),
         ({**valid_pwd, "arguments": {"command": "pwd; env"}}, "run_command"),
     ]:
         assert matrix.validate_allowlisted_call(invalid, name)[0] is False
@@ -405,8 +414,18 @@ def test_visible_control_markup_rejects_reasoning_and_tool_protocol_leaks(visibl
 @pytest.mark.parametrize(
     ("protocol", "payload", "event_name", "error_kind"),
     [
-        ("responses", {"type": "error", "error": {"message": "boom"}}, "error", "error"),
-        ("anthropic", {"type": "error", "error": {"message": "boom"}}, "error", "error"),
+        (
+            "responses",
+            {"type": "error", "error": {"message": "boom"}},
+            "error",
+            "error",
+        ),
+        (
+            "anthropic",
+            {"type": "error", "error": {"message": "boom"}},
+            "error",
+            "error",
+        ),
         ("ollama", {"error": "boom"}, None, "ollama.error"),
     ],
 )
@@ -558,3 +577,815 @@ def test_import_safe_parser_requires_caller_supplied_model_and_base(tmp_path: Pa
         "direct=http://127.0.0.1:8000",
         "gateway=http://127.0.0.1:8088",
     ]
+    assert args.raw_artifact_dir is None
+
+
+def test_raw_capture_rejects_worktree_and_symlink_escape(
+    tmp_path: Path,
+):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+
+    with pytest.raises(ValueError, match="outside every Git worktree"):
+        matrix.DecompressedParserInputCaptureRecorder(
+            worktree / "captures",
+            worktree,
+            run_id="rejected",
+        )
+    assert not (worktree / "captures").exists()
+
+    link = tmp_path / "repo-link"
+    link.symlink_to(worktree, target_is_directory=True)
+    with pytest.raises(ValueError, match="outside every Git worktree"):
+        matrix.DecompressedParserInputCaptureRecorder(
+            link / "captures",
+            worktree,
+            run_id="rejected-link",
+        )
+
+
+def test_raw_capture_rejects_apfs_case_alias_and_sibling_git_worktree(
+    tmp_path: Path,
+):
+    worktree = tmp_path / "GuardedRepo"
+    worktree.mkdir()
+    case_alias = tmp_path / "guardedrepo"
+    if case_alias.exists() and case_alias.samefile(worktree):
+        with pytest.raises(ValueError, match="outside every Git worktree"):
+            matrix.DecompressedParserInputCaptureRecorder(
+                case_alias / "captures",
+                worktree,
+                run_id="rejected-case-alias",
+            )
+        assert not (worktree / "captures").exists()
+
+    sibling_repo = tmp_path / "sibling-public-repo"
+    subprocess.run(
+        ["git", "init", "-q", str(sibling_repo)],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(ValueError, match="outside every Git worktree"):
+        matrix.DecompressedParserInputCaptureRecorder(
+            sibling_repo / "captures",
+            worktree,
+            run_id="rejected-sibling",
+        )
+    assert not (sibling_repo / "captures").exists()
+
+
+def test_opt_in_capture_preserves_parser_input_bytes_and_allowlists_metadata(
+    monkeypatch,
+    tmp_path: Path,
+):
+    secret = "SECRET-AUTH-VALUE"
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    capture_root = tmp_path / "private-captures"
+    response_body = (
+        b'data: {"id":"chat_1","choices":[{"delta":'
+        b'{"reasoning_content":"private"},"finish_reason":null}]}\r\n\r\n'
+        b'data: {"id":"chat_1","choices":[{"delta":'
+        b'{"content":"$43 \\\\times 2"},"finish_reason":"stop"}]}\r\n\r\n'
+        b"data: [DONE]\r\n\r\n"
+    )
+
+    class FakeRaw:
+        def __init__(self):
+            self.headers = {
+                "Content-Type": "text/event-stream",
+                "Set-Cookie": f"session={secret}",
+                "X-Trace-Id": "trace-safe",
+                "Location": f"https://example.invalid/callback?token={secret}",
+            }
+            self.closed = False
+
+        def stream(self, _amount, decode_content=None):
+            assert decode_content is True
+            yield response_body[:37]
+            yield response_body[37:91]
+            yield response_body[91:]
+
+        def close(self):
+            self.closed = True
+
+    payload = {
+        "model": "served-model",
+        "messages": [{"role": "user", "content": "private prompt"}],
+        "stream": True,
+        "max_tokens": 32,
+    }
+    prepared = requests.Request(
+        "POST",
+        "http://user:password@127.0.0.1:8000/v1/chat/completions?key=secret",
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "X-Api-Key": secret,
+            "Content-Type": "application/json",
+        },
+        json=payload,
+    ).prepare()
+    response = requests.Response()
+    response.status_code = 200
+    response.reason = "OK"
+    response.raw = FakeRaw()
+    response.request = prepared
+    response.encoding = "utf-8"
+
+    def fake_post(*_args, **_kwargs):
+        return response
+
+    monkeypatch.setattr(matrix.requests, "post", fake_post)
+    recorder = matrix.DecompressedParserInputCaptureRecorder(
+        capture_root,
+        worktree,
+        run_id="unit-test",
+    )
+    recorder.configure_expected([("direct", "chat", "stream-round1")])
+    client = matrix.ProtocolClient(
+        "http://127.0.0.1:8000",
+        secret,
+        30,
+        base_label="direct",
+        raw_recorder=recorder,
+    )
+
+    result = client.send(
+        "chat",
+        payload,
+        True,
+        capture_label="stream-round1",
+    )
+
+    assert result["reasoning"] == "private"
+    assert result["content"] == "$43 \\times 2"
+    capture_summary = recorder.finalize()
+    body_path = next(recorder.run_dir.glob("*.decompressed-parser-input.bin"))
+    metadata_path = next(recorder.run_dir.glob("*.metadata.json"))
+    assert body_path.read_bytes() == response_body
+    metadata_text = metadata_path.read_text()
+    assert secret not in metadata_text
+    assert "password" not in metadata_text
+    assert "?key=secret" not in metadata_text
+
+    metadata = json.loads(metadata_text)
+    assert metadata["capture_layer"] == matrix.CAPTURE_LAYER
+    assert metadata["capture_semantics"] == matrix.CAPTURE_SEMANTICS
+    assert metadata["request"]["url"] == ("http://127.0.0.1:8000/v1/chat/completions")
+    assert metadata["request"]["body_bytes"] == len(prepared.body)
+    assert (
+        metadata["request"]["body_sha256"] == hashlib.sha256(prepared.body).hexdigest()
+    )
+    assert metadata["request"]["payload"]["top_level_fields"] == [
+        "max_tokens",
+        "messages",
+        "model",
+        "stream",
+    ]
+    assert {
+        row["name"].lower(): row["value"] for row in metadata["request"]["headers"]
+    }["authorization"] == "<redacted>"
+    assert {
+        row["name"].lower(): row["value"] for row in metadata["response"]["headers"]
+    }["set-cookie"] == "<redacted>"
+    assert {
+        row["name"].lower(): row["value"] for row in metadata["response"]["headers"]
+    }["location"] == "<redacted>"
+    assert {
+        row["name"].lower(): row["value"] for row in metadata["response"]["headers"]
+    }["x-trace-id"] == "<redacted>"
+    assert {
+        row["name"].lower(): row["value"] for row in metadata["response"]["headers"]
+    }["content-type"] == "text/event-stream"
+    assert metadata["response"]["status_code"] == 200
+    assert metadata["response"]["body_bytes"] == len(response_body)
+    assert (
+        metadata["response"]["body_sha256"] == hashlib.sha256(response_body).hexdigest()
+    )
+    assert metadata["response"]["first_byte_ms"] is not None
+    assert (
+        metadata["response"]["completed_ms"] >= (metadata["response"]["first_byte_ms"])
+    )
+    assert stat.S_IMODE(body_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(metadata_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(recorder.manifest_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(recorder.run_dir.stat().st_mode) == 0o700
+    assert capture_summary["expected"] == 1
+    assert capture_summary["started"] == 1
+    assert capture_summary["finished"] == 1
+    assert capture_summary["errors"] == 0
+    assert capture_summary["complete"] is True
+
+
+@pytest.mark.parametrize("base_label", ["direct", "gateway"])
+@pytest.mark.parametrize(
+    ("protocol", "response_body"),
+    [
+        (
+            "chat",
+            b'data: {"choices":[{"delta":{"content":"ok"},'
+            b'"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        ),
+        (
+            "responses",
+            b"event: response.output_text.delta\n"
+            b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+        ),
+        (
+            "anthropic",
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":'
+            b'{"type":"text_delta","text":"ok"}}\n\n'
+            b"event: message_delta\n"
+            b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+            b"event: message_stop\n"
+            b'data: {"type":"message_stop"}\n\n',
+        ),
+        (
+            "ollama",
+            b'{"message":{"content":"ok"},"done":true,"done_reason":"stop"}\n',
+        ),
+    ],
+)
+def test_parser_input_capture_covers_each_protocol_and_base(
+    monkeypatch,
+    tmp_path: Path,
+    base_label: str,
+    protocol: str,
+    response_body: bytes,
+):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+
+    class FakeRaw:
+        headers = {"Content-Type": "application/octet-stream"}
+
+        def stream(self, _amount, decode_content=None):
+            assert decode_content is True
+            midpoint = len(response_body) // 2
+            yield response_body[:midpoint]
+            yield response_body[midpoint:]
+
+        def close(self):
+            return None
+
+    payload = {"model": "served-model", "stream": True}
+    prepared = requests.Request(
+        "POST",
+        f"http://127.0.0.1:8000{matrix.ProtocolClient.route(protocol)}",
+        json=payload,
+    ).prepare()
+    response = requests.Response()
+    response.status_code = 200
+    response.reason = "OK"
+    response.raw = FakeRaw()
+    response.request = prepared
+    response.encoding = "utf-8"
+    monkeypatch.setattr(matrix.requests, "post", lambda *_args, **_kwargs: response)
+
+    recorder = matrix.DecompressedParserInputCaptureRecorder(
+        tmp_path / "private-captures",
+        worktree,
+        run_id=f"{base_label}-{protocol}",
+    )
+    recorder.configure_expected([(base_label, protocol, "stream-flow-round1")])
+    client = matrix.ProtocolClient(
+        "http://127.0.0.1:8000",
+        None,
+        30,
+        base_label=base_label,
+        raw_recorder=recorder,
+    )
+
+    result = client.send(
+        protocol,
+        payload,
+        True,
+        capture_label="stream-flow-round1",
+    )
+
+    assert result["content"] == "ok"
+    summary = recorder.finalize()
+    body_path = next(recorder.run_dir.glob("*.decompressed-parser-input.bin"))
+    metadata_path = next(recorder.run_dir.glob("*.metadata.json"))
+    assert body_path.read_bytes() == response_body
+    metadata = json.loads(metadata_path.read_text())
+    assert metadata["base_label"] == base_label
+    assert metadata["protocol"] == protocol
+    assert metadata["request"]["payload"]["model"] == "served-model"
+    assert summary["complete"] is True
+
+
+def test_capture_setup_failure_closes_response(monkeypatch):
+    class FailingRecorder:
+        def begin(self, **_kwargs):
+            raise OSError("capture unavailable")
+
+    response = requests.Response()
+    response.status_code = 200
+    response.raw = SimpleNamespace()
+    response.request = requests.Request(
+        "POST",
+        "http://127.0.0.1:8000/v1/chat/completions",
+        json={"model": "served-model", "stream": True},
+    ).prepare()
+    closed = False
+
+    def close_response():
+        nonlocal closed
+        closed = True
+
+    response.close = close_response
+    monkeypatch.setattr(
+        matrix.requests,
+        "post",
+        lambda *_args, **_kwargs: response,
+    )
+    client = matrix.ProtocolClient(
+        "http://127.0.0.1:8000",
+        None,
+        30,
+        raw_recorder=FailingRecorder(),
+    )
+
+    with pytest.raises(OSError, match="capture unavailable"):
+        client.send(
+            "chat",
+            {"model": "served-model", "stream": True},
+            True,
+        )
+    assert closed is True
+
+
+def test_abort_capture_setup_failure_closes_response(monkeypatch):
+    class FailingRecorder:
+        def begin(self, **_kwargs):
+            raise OSError("capture unavailable")
+
+    response = requests.Response()
+    response.status_code = 200
+    response.raw = SimpleNamespace()
+    response.request = requests.Request(
+        "POST",
+        "http://127.0.0.1:8000/v1/chat/completions",
+        json={"model": "served-model", "stream": True},
+    ).prepare()
+    closed = False
+
+    def close_response():
+        nonlocal closed
+        closed = True
+
+    response.close = close_response
+    monkeypatch.setattr(
+        matrix.requests,
+        "post",
+        lambda *_args, **_kwargs: response,
+    )
+    client = matrix.ProtocolClient(
+        "http://127.0.0.1:8000",
+        None,
+        30,
+        raw_recorder=FailingRecorder(),
+    )
+
+    with pytest.raises(OSError, match="capture unavailable"):
+        matrix.abort_stream_after_deltas(
+            client,
+            "chat",
+            {
+                "model": "served-model",
+                "messages": [{"role": "user", "content": "final"}],
+                "stream": True,
+            },
+            health_url="http://127.0.0.1:8000/health",
+            minimum_deltas=1,
+        )
+    assert closed is True
+
+
+def test_capture_session_setup_failure_removes_partial_body(tmp_path: Path):
+    class ExplodingHeaders:
+        def items(self):
+            raise RuntimeError("header enumeration failed")
+
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    recorder = matrix.DecompressedParserInputCaptureRecorder(
+        tmp_path / "private-captures",
+        worktree,
+        run_id="setup-failure",
+    )
+    recorder.configure_expected([("direct", "chat", "stream-round1")])
+    response = requests.Response()
+    response.status_code = 200
+    response.raw = SimpleNamespace(headers=ExplodingHeaders())
+    response.request = requests.Request(
+        "POST",
+        "http://127.0.0.1:8000/v1/chat/completions",
+        json={"model": "served-model", "stream": True},
+    ).prepare()
+
+    with pytest.raises(RuntimeError, match="header enumeration failed"):
+        recorder.begin(
+            base_label="direct",
+            protocol="chat",
+            capture_label="stream-round1",
+            payload={"model": "served-model", "stream": True},
+            response=response,
+            started=time.monotonic(),
+            started_at="2026-07-24T00:00:00+00:00",
+        )
+
+    assert not list(recorder.run_dir.glob("*.decompressed-parser-input.bin"))
+    assert not list(recorder.run_dir.glob("*.metadata.json"))
+    summary = recorder.finalize()
+    assert summary["started"] == 1
+    assert summary["finished"] == 0
+    assert summary["errors"] == 1
+    assert summary["complete"] is False
+
+
+def test_capture_finish_failure_removes_body_and_partial_metadata(
+    monkeypatch,
+    tmp_path: Path,
+):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    recorder = matrix.DecompressedParserInputCaptureRecorder(
+        tmp_path / "private-captures",
+        worktree,
+        run_id="finish-failure",
+    )
+    recorder.configure_expected([("direct", "chat", "stream-round1")])
+    response = requests.Response()
+    response.status_code = 200
+    response.raw = SimpleNamespace(headers={"Content-Type": "text/event-stream"})
+    response.request = requests.Request(
+        "POST",
+        "http://127.0.0.1:8000/v1/chat/completions",
+        json={"model": "served-model", "stream": True},
+    ).prepare()
+    capture = recorder.begin(
+        base_label="direct",
+        protocol="chat",
+        capture_label="stream-round1",
+        payload={"model": "served-model", "stream": True},
+        response=response,
+        started=time.monotonic(),
+        started_at="2026-07-24T00:00:00+00:00",
+    )
+    capture.write(b"sensitive decompressed parser input")
+    artifact = recorder.current_summary()["routes"][0]["artifacts"][0]
+    body_path = recorder.run_dir / artifact["body_file"]
+    metadata_path = recorder.run_dir / artifact["metadata_file"]
+    real_fdopen = matrix.os.fdopen
+
+    class FailingMetadataFile:
+        def __init__(self, descriptor: int, mode: str) -> None:
+            self._file = real_fdopen(descriptor, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self._file.close()
+
+        def write(self, data: bytes) -> None:
+            self._file.write(data[:8])
+            self._file.flush()
+            raise OSError("metadata write failed")
+
+    monkeypatch.setattr(matrix.os, "fdopen", FailingMetadataFile)
+    with pytest.raises(OSError, match="metadata write failed"):
+        capture.finish(completed_ms=1.0)
+
+    assert not body_path.exists()
+    assert not metadata_path.exists()
+    monkeypatch.setattr(matrix.os, "fdopen", real_fdopen)
+    summary = recorder.finalize()
+    assert summary["started"] == 1
+    assert summary["finished"] == 0
+    assert summary["errors"] == 1
+    assert summary["complete"] is False
+
+
+def _synthetic_terminals(protocol: str, *, expect_tool: bool) -> list[str]:
+    if protocol == "chat":
+        return ["tool_calls" if expect_tool else "stop", "DONE"]
+    if protocol == "responses":
+        return ["response.completed"]
+    if protocol == "anthropic":
+        return ["tool_use" if expect_tool else "end_turn", "message_stop"]
+    return ["tool_calls" if expect_tool else "stop"]
+
+
+def _finish_synthetic_capture(
+    client,
+    protocol: str,
+    capture_label: str,
+    payload: dict,
+    *,
+    omitted_label: str | None,
+) -> None:
+    recorder = client.raw_recorder
+    if recorder is None or capture_label == omitted_label:
+        return
+    response = requests.Response()
+    response.status_code = 200
+    response.raw = SimpleNamespace(headers={"Content-Type": "text/event-stream"})
+    response.request = requests.Request(
+        "POST",
+        client.base_url + client.route(protocol),
+        json=payload,
+    ).prepare()
+    capture = recorder.begin(
+        base_label=client.base_label,
+        protocol=protocol,
+        capture_label=capture_label,
+        payload=payload,
+        response=response,
+        started=time.monotonic(),
+        started_at="2026-07-24T00:00:00+00:00",
+    )
+    capture.write(f"{client.base_label}/{protocol}/{capture_label}\n".encode())
+    capture.finish(completed_ms=1.0)
+
+
+@pytest.mark.parametrize(
+    (
+        "capture_enabled",
+        "omitted_label",
+        "expected_pass",
+        "expected_started",
+    ),
+    [
+        (True, None, True, 40),
+        (True, "stream-flow-round2", False, 32),
+        (False, None, True, 0),
+    ],
+)
+def test_run_matrix_binds_full_stream_capture_manifest_into_pass(
+    monkeypatch,
+    tmp_path: Path,
+    capture_enabled: bool,
+    omitted_label: str | None,
+    expected_pass: bool,
+    expected_started: int,
+):
+    repo_root = tmp_path / "repo"
+    package_json = repo_root / matrix.FILE_INFO_PATH
+    package_json.parent.mkdir(parents=True)
+    package_json.write_text("{}\n")
+    subprocess.run(
+        ["git", "init", "-q", str(repo_root)],
+        check=True,
+        capture_output=True,
+    )
+    raw_root = tmp_path / "private-captures"
+    size_human = matrix._human_size(package_json.stat().st_size)
+
+    def fake_send(
+        client,
+        protocol,
+        payload,
+        stream,
+        *,
+        capture_label="request",
+    ):
+        assert stream is True
+        _finish_synthetic_capture(
+            client,
+            protocol,
+            capture_label,
+            payload,
+            omitted_label=omitted_label,
+        )
+        response_id = f"{client.base_label}-{protocol}-{capture_label}"
+        result = {
+            "status_code": 200,
+            "elapsed_ms": 1.0,
+            "response_id": response_id,
+            "reasoning": "",
+            "content": "",
+            "tool_calls": [],
+            "terminals": [],
+            "errors": [],
+            "events": [],
+        }
+        if capture_label == "stream-flow-round1":
+            result["tool_calls"] = [
+                {
+                    "index": 0,
+                    "id": f"{response_id}-call",
+                    "name": "file_info",
+                    "arguments": {"path": matrix.FILE_INFO_PATH},
+                }
+            ]
+            result["terminals"] = _synthetic_terminals(
+                protocol,
+                expect_tool=True,
+            )
+        elif capture_label == "stream-flow-round2":
+            result["tool_calls"] = [
+                {
+                    "index": 0,
+                    "id": f"{response_id}-call",
+                    "name": "run_command",
+                    "arguments": {"command": matrix.PWD_COMMAND},
+                }
+            ]
+            result["terminals"] = _synthetic_terminals(
+                protocol,
+                expect_tool=True,
+            )
+        elif capture_label == "stream-flow-round3":
+            result["content"] = (
+                f"AGENTIC-{protocol.upper()}-STREAM-DONE "
+                f"SIZE={size_human} PWD={repo_root}"
+            )
+            result["terminals"] = _synthetic_terminals(
+                protocol,
+                expect_tool=False,
+            )
+            result["events"] = [
+                {
+                    "at_ms": 1.0,
+                    "channel": "content",
+                    "kind": "synthetic.delta.1",
+                },
+                {
+                    "at_ms": 2.0,
+                    "channel": "content",
+                    "kind": "synthetic.delta.2",
+                },
+            ]
+        elif capture_label == "stream-recovery":
+            result["content"] = (
+                f"RECOVERY-{client.base_label.upper()}-{protocol.upper()}-STREAM-DONE"
+            )
+            result["terminals"] = _synthetic_terminals(
+                protocol,
+                expect_tool=False,
+            )
+        else:
+            raise AssertionError(f"unexpected capture label: {capture_label}")
+
+        if protocol == "responses" and capture_label in {
+            "stream-flow-round1",
+            "stream-flow-round2",
+        }:
+            result["events"] = [
+                {
+                    "at_ms": 1.0,
+                    "channel": "tool",
+                    "kind": "response.output_item.added",
+                },
+                {
+                    "at_ms": 2.0,
+                    "channel": "tool",
+                    "kind": "response.function_call_arguments.done",
+                },
+                {
+                    "at_ms": 3.0,
+                    "channel": "tool",
+                    "kind": "response.output_item.done",
+                },
+            ]
+        return result
+
+    def fake_abort(
+        client,
+        protocol,
+        payload,
+        *,
+        health_url,
+        minimum_deltas,
+    ):
+        del health_url
+        _finish_synthetic_capture(
+            client,
+            protocol,
+            "stream-abort",
+            payload,
+            omitted_label=omitted_label,
+        )
+        return {
+            "status_code": 200,
+            "closed_at_ms": 1.0,
+            "response_id": f"{client.base_label}-{protocol}-abort",
+            "delta_events_before_abort": minimum_deltas,
+            "cancel_status": (200 if protocol in {"chat", "responses"} else None),
+            "cancel_body_sha256": "",
+            "terminals_before_abort": [],
+            "events": [],
+            "idle_after_abort": {"idle": True},
+        }
+
+    monkeypatch.setattr(matrix.ProtocolClient, "send", fake_send)
+    monkeypatch.setattr(
+        matrix,
+        "abort_stream_after_deltas",
+        fake_abort,
+    )
+    argv = [
+        "--base-url",
+        "direct=http://direct.invalid",
+        "--base-url",
+        "gateway=http://gateway.invalid",
+        "--model",
+        "served-model",
+        "--repo-root",
+        str(repo_root),
+        "--output",
+        str(tmp_path / "result.json"),
+        "--mode",
+        "stream",
+        "--no-enable-thinking",
+    ]
+    if capture_enabled:
+        argv.extend(("--raw-artifact-dir", str(raw_root)))
+    args = matrix.build_parser().parse_args(argv)
+
+    result = matrix.run_matrix(args)
+
+    assert result["checks"]["all_flows_pass"] is True
+    assert result["checks"]["all_abort_recovery_pass"] is True
+    assert result["raw_capture"]["enabled"] is capture_enabled
+    assert result["raw_capture"]["started"] == expected_started
+    assert result["pass"] is expected_pass
+    if not capture_enabled:
+        assert result["raw_capture"]["reason"] == ("--raw-artifact-dir not supplied")
+        assert result["checks"]["raw_capture_complete"] is True
+        return
+
+    assert result["raw_capture"]["expected"] == 40
+    assert result["raw_capture"]["finished"] == expected_started
+    assert result["raw_capture"]["errors"] == 0
+    assert result["checks"]["raw_capture_complete"] is expected_pass
+    manifest_path = next(raw_root.glob("*/manifest.json"))
+    manifest_bytes = manifest_path.read_bytes()
+    assert (
+        hashlib.sha256(manifest_bytes).hexdigest()
+        == (result["raw_capture"]["manifest_sha256"])
+    )
+    manifest = json.loads(manifest_bytes)
+    assert manifest["expected"] == 40
+    assert manifest["started"] == expected_started
+    assert manifest["finished"] == expected_started
+    assert manifest["complete"] is expected_pass
+    if expected_pass:
+        assert len(manifest["routes"]) == 40
+        assert all(row["expected"] == 1 for row in manifest["routes"])
+        assert all(row["started"] == 1 for row in manifest["routes"])
+        assert all(row["finished"] == 1 for row in manifest["routes"])
+        assert {row["capture_label"] for row in manifest["routes"]} == {
+            "stream-flow-round1",
+            "stream-flow-round2",
+            "stream-flow-round3",
+            "stream-abort",
+            "stream-recovery",
+        }
+
+
+def test_run_matrix_rejects_nonstream_only_private_capture_before_creation(
+    tmp_path: Path,
+):
+    repo_root = tmp_path / "repo"
+    package_json = repo_root / matrix.FILE_INFO_PATH
+    package_json.parent.mkdir(parents=True)
+    package_json.write_text("{}\n")
+    subprocess.run(
+        ["git", "init", "-q", str(repo_root)],
+        check=True,
+        capture_output=True,
+    )
+    raw_root = tmp_path / "private-captures"
+    args = matrix.build_parser().parse_args(
+        [
+            "--base-url",
+            "direct=http://direct.invalid",
+            "--base-url",
+            "gateway=http://gateway.invalid",
+            "--model",
+            "served-model",
+            "--repo-root",
+            str(repo_root),
+            "--output",
+            str(tmp_path / "result.json"),
+            "--mode",
+            "nonstream",
+            "--raw-artifact-dir",
+            str(raw_root),
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="captures streaming parser-input bytes and requires --mode stream",
+    ):
+        matrix.run_matrix(args)
+    assert not raw_root.exists()
+    assert "requires --mode stream" in matrix.build_parser().format_help()

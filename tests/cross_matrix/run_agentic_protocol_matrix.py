@@ -9,9 +9,13 @@ and Ollama, in streaming and non-streaming modes:
     reasoning -> file_info -> real result -> reasoning -> pwd -> real result
     -> final visible synthesis
 
-Only two allowlisted read-only tools exist.  Private reasoning and raw wire
-payloads are not written to the output artifact; the artifact retains hashes,
-lengths, timestamps, visible text, tool metadata, and terminal classifications.
+Only two allowlisted read-only tools exist.  Private reasoning and exact
+decompressed parser-input response bodies are not written to the output
+artifact; the artifact retains hashes, lengths, timestamps, visible text, tool
+metadata, and terminal classifications.  Callers may opt into private streaming
+parser-input capture with ``--raw-artifact-dir`` when stream mode is requested.
+That directory must resolve outside every Git worktree, and capture metadata
+retains values only for an explicit safe-header allowlist.
 """
 
 from __future__ import annotations
@@ -25,7 +29,9 @@ import os
 import stat
 import subprocess
 import time
-from collections.abc import Iterable
+from collections import Counter
+from collections.abc import Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -71,6 +77,19 @@ CONTROL_MARKERS = (
     "<|python_tag|>",
     "```tool_code",
 )
+SAFE_CAPTURE_HEADER_NAMES = {
+    "content-encoding",
+    "content-length",
+    "content-type",
+    "transfer-encoding",
+}
+CAPTURE_LAYER = "requests.decompressed_iter_lines_input"
+CAPTURE_SEMANTICS = (
+    "Exact decompressed streaming response-body bytes delivered to "
+    "requests.iter_lines before line splitting, Unicode decoding, or protocol "
+    "parsing; excludes nonstream responses, HTTP transfer framing, and "
+    "compressed transport octets."
+)
 
 TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "file_info": {
@@ -107,9 +126,9 @@ def _canonical_request_payload(value: Any) -> Any:
     result: dict[str, Any] = {}
     object_type = str(value.get("type") or "")
     for key, item in value.items():
-        if key in {"call_id", "tool_call_id", "tool_use_id"}:
-            result[key] = "<tool-call-id>"
-        elif key == "id" and object_type in {"function", "function_call", "tool_use"}:
+        if key in {"call_id", "tool_call_id", "tool_use_id"} or (
+            key == "id" and object_type in {"function", "function_call", "tool_use"}
+        ):
             result[key] = "<tool-call-id>"
         else:
             result[key] = _canonical_request_payload(item)
@@ -133,7 +152,10 @@ def _request_public(stage: int, payload: dict[str, Any]) -> dict[str, Any]:
         "stream": bool(payload.get("stream")),
         "enable_thinking": payload.get("enable_thinking", payload.get("think")),
         "max_output_tokens": payload.get(
-            "max_output_tokens", payload.get("max_tokens", (payload.get("options") or {}).get("num_predict"))
+            "max_output_tokens",
+            payload.get(
+                "max_tokens", (payload.get("options") or {}).get("num_predict")
+            ),
         ),
     }
 
@@ -153,6 +175,626 @@ def _human_size(size: int) -> str:
     if unit == "B":
         return f"{int(value)} B"
     return f"{value:.1f} {unit}"
+
+
+def _nearest_existing_directory(path: Path) -> Path:
+    candidate = path
+    while not candidate.exists():
+        parent = candidate.parent
+        if parent == candidate:
+            return candidate
+        candidate = parent
+    return candidate if candidate.is_dir() else candidate.parent
+
+
+def _is_within_directory(path: Path, parent: Path) -> bool:
+    """Use filesystem identity so APFS case aliases and symlinks cannot escape."""
+    try:
+        guarded_parent = parent.resolve(strict=True)
+    except OSError:
+        guarded_parent = parent.resolve()
+    existing = _nearest_existing_directory(path)
+    for candidate in (existing, *existing.parents):
+        try:
+            if candidate.samefile(guarded_parent):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _is_in_git_context(path: Path) -> bool:
+    """Return whether an existing ancestor is in any worktree or Git metadata."""
+    directory = _nearest_existing_directory(path)
+    environment = dict(os.environ)
+    for name in ("GIT_CEILING_DIRECTORIES", "GIT_DIR", "GIT_WORK_TREE"):
+        environment.pop(name, None)
+    environment["LC_ALL"] = "C"
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(directory),
+                "rev-parse",
+                "--is-inside-work-tree",
+                "--is-inside-git-dir",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+    except OSError as exc:
+        raise ValueError(
+            "cannot safely inspect --raw-artifact-dir for Git containment"
+        ) from exc
+    if proc.returncode != 0:
+        if "not a git repository" in proc.stderr.lower():
+            return False
+        raise ValueError("cannot safely inspect --raw-artifact-dir for Git containment")
+    return any(line.strip().lower() == "true" for line in proc.stdout.splitlines())
+
+
+def _reject_capture_destination(path: Path, guarded_worktree: Path) -> None:
+    if _is_within_directory(path, guarded_worktree) or _is_in_git_context(path):
+        raise ValueError(
+            "--raw-artifact-dir must resolve outside every Git worktree "
+            "and Git metadata directory"
+        )
+
+
+def _git_worktree_root(repo_root: Path) -> Path:
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise ValueError(
+            "cannot enable raw capture without identifying the Git worktree"
+        )
+    return Path(proc.stdout.strip()).resolve()
+
+
+def _sanitized_headers(headers: Any) -> list[dict[str, str]]:
+    if headers is None:
+        return []
+    iterator = getattr(headers, "iteritems", None)
+    pairs = iterator() if callable(iterator) else headers.items()
+    return [
+        {
+            "name": str(name),
+            "value": (
+                str(value)
+                if str(name).strip().lower().replace("_", "-")
+                in SAFE_CAPTURE_HEADER_NAMES
+                else "<redacted>"
+            ),
+        }
+        for name, value in pairs
+    ]
+
+
+def _safe_request_url(value: str) -> str:
+    parsed = urlparse(value)
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return parsed._replace(netloc=netloc, query="", fragment="").geturl()
+
+
+def _prepared_body_bytes(body: Any) -> bytes:
+    if body is None:
+        return b""
+    if isinstance(body, bytes):
+        return body
+    if isinstance(body, bytearray):
+        return bytes(body)
+    return str(body).encode("utf-8", errors="replace")
+
+
+def _safe_capture_label(value: str) -> str:
+    label = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "-"
+        for character in value
+    )
+    return label.strip("-")[:80] or "request"
+
+
+def _capture_route(
+    base_label: str,
+    protocol: str,
+    capture_label: str,
+) -> dict[str, str]:
+    return {
+        "base_label": str(base_label),
+        "protocol": str(protocol),
+        "capture_label": str(capture_label),
+    }
+
+
+def _capture_route_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(row.get("base_label") or ""),
+        str(row.get("protocol") or ""),
+        str(row.get("capture_label") or ""),
+    )
+
+
+class DecompressedParserInputCaptureSession:
+    """Write decompressed bytes before line splitting, decoding, or parsing."""
+
+    def __init__(
+        self,
+        *,
+        body_path: Path,
+        metadata_path: Path,
+        base_label: str,
+        protocol: str,
+        capture_label: str,
+        payload: dict[str, Any],
+        response: requests.Response,
+        started: float,
+        started_at: str,
+        on_finished: Callable[[str | None], None],
+        on_finish_error: Callable[[str], None],
+    ) -> None:
+        descriptor = os.open(
+            body_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        try:
+            body_file = os.fdopen(descriptor, "wb")
+        except BaseException:
+            with suppress(OSError):
+                os.close(descriptor)
+            with suppress(OSError):
+                body_path.unlink(missing_ok=True)
+            raise
+        try:
+            self._body_file = body_file
+            self._body_path = body_path
+            self._metadata_path = metadata_path
+            self._started = started
+            self._digest = hashlib.sha256()
+            self._bytes = 0
+            self._first_byte_ms: float | None = None
+            self._last_byte_ms: float | None = None
+            self._finished = False
+            self._on_finished = on_finished
+            self._on_finish_error = on_finish_error
+
+            prepared = response.request
+            request_body = _prepared_body_bytes(
+                prepared.body if prepared is not None else None
+            )
+            request_public = _request_public(0, payload)
+            request_public.pop("stage", None)
+            response_headers = getattr(response.raw, "headers", None)
+            if response_headers is None:
+                response_headers = response.headers
+            self._metadata: dict[str, Any] = {
+                "schema_version": 1,
+                "capture_layer": CAPTURE_LAYER,
+                "capture_semantics": CAPTURE_SEMANTICS,
+                "base_label": base_label,
+                "protocol": protocol,
+                "capture_label": capture_label,
+                "started_at": started_at,
+                "request": {
+                    "method": str(prepared.method if prepared is not None else "POST"),
+                    "url": _safe_request_url(
+                        str(prepared.url if prepared is not None else "")
+                    ),
+                    "headers": _sanitized_headers(
+                        prepared.headers if prepared is not None else {}
+                    ),
+                    "body_bytes": len(request_body),
+                    "body_sha256": hashlib.sha256(request_body).hexdigest(),
+                    "payload": {
+                        **request_public,
+                        "model": str(payload.get("model") or ""),
+                        "top_level_fields": sorted(str(key) for key in payload),
+                    },
+                },
+                "response": {
+                    "status_code": int(response.status_code),
+                    "headers": _sanitized_headers(response_headers),
+                    "headers_received_ms": _milliseconds(started),
+                    "body_file": body_path.name,
+                },
+            }
+        except BaseException:
+            with suppress(Exception):
+                body_file.close()
+            with suppress(OSError):
+                body_path.unlink(missing_ok=True)
+            raise
+
+    def write(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        now_ms = _milliseconds(self._started)
+        if self._first_byte_ms is None:
+            self._first_byte_ms = now_ms
+        self._last_byte_ms = now_ms
+        self._body_file.write(chunk)
+        self._digest.update(chunk)
+        self._bytes += len(chunk)
+
+    def finish(
+        self,
+        *,
+        completed_ms: float,
+        error_type: str | None = None,
+    ) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        try:
+            try:
+                self._body_file.flush()
+            finally:
+                self._body_file.close()
+            response = self._metadata["response"]
+            response.update(
+                {
+                    "first_byte_ms": self._first_byte_ms,
+                    "last_byte_ms": self._last_byte_ms,
+                    "completed_ms": completed_ms,
+                    "body_bytes": self._bytes,
+                    "body_sha256": self._digest.hexdigest(),
+                }
+            )
+            if error_type:
+                response["capture_error_type"] = error_type
+            metadata_bytes = (
+                json.dumps(self._metadata, indent=2, sort_keys=True) + "\n"
+            ).encode("utf-8")
+            descriptor = os.open(
+                self._metadata_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                stat.S_IRUSR | stat.S_IWUSR,
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as metadata_file:
+                    metadata_file.write(metadata_bytes)
+            except BaseException:
+                self._metadata_path.unlink(missing_ok=True)
+                raise
+        except BaseException as exc:
+            cleanup_error: OSError | None = None
+            for artifact_path in (self._metadata_path, self._body_path):
+                try:
+                    artifact_path.unlink(missing_ok=True)
+                except OSError as cleanup_exc:
+                    if cleanup_error is None:
+                        cleanup_error = cleanup_exc
+            self._on_finish_error(type(exc).__name__)
+            if cleanup_error is not None:
+                raise cleanup_error from exc
+            raise
+        self._on_finished(error_type)
+
+
+class DecompressedParserInputCaptureRecorder:
+    """Allocate private parser-input captures outside every Git worktree."""
+
+    def __init__(
+        self,
+        artifact_root: Path,
+        git_worktree: Path,
+        *,
+        run_id: str | None = None,
+    ) -> None:
+        worktree = git_worktree.resolve(strict=True)
+        root = artifact_root.expanduser().resolve()
+        if root.exists() and not root.is_dir():
+            raise ValueError("--raw-artifact-dir must name a directory")
+        _reject_capture_destination(root, worktree)
+        root_existed = root.exists()
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root = root.resolve(strict=True)
+        try:
+            _reject_capture_destination(root, worktree)
+        except BaseException:
+            if not root_existed:
+                with suppress(OSError):
+                    root.rmdir()
+            raise
+        identifier = run_id or (
+            datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ") + f"-pid{os.getpid()}"
+        )
+        self.run_id = _safe_capture_label(identifier)
+        self.run_dir = root / self.run_id
+        self.run_dir.mkdir(mode=0o700)
+        self.manifest_path = self.run_dir / "manifest.json"
+        self._counter = 0
+        self._expected_configured = False
+        self._expected: list[dict[str, str]] = []
+        self._started: list[dict[str, Any]] = []
+        self._finished: list[dict[str, Any]] = []
+        self._errors: list[dict[str, Any]] = []
+        self._final_summary: dict[str, Any] | None = None
+
+    def configure_expected(
+        self,
+        routes: Iterable[tuple[str, str, str]],
+    ) -> None:
+        if self._expected_configured or self._counter:
+            raise RuntimeError(
+                "capture expectations must be configured once before use"
+            )
+        self._expected = [
+            _capture_route(base_label, protocol, capture_label)
+            for base_label, protocol, capture_label in routes
+        ]
+        keys = [_capture_route_key(row) for row in self._expected]
+        if len(keys) != len(set(keys)):
+            raise ValueError("capture expectations contain duplicate route labels")
+        self._expected_configured = True
+
+    def _record_error(
+        self,
+        route: dict[str, str],
+        *,
+        phase: str,
+        error_type: str,
+        sequence: int | None = None,
+    ) -> None:
+        row: dict[str, Any] = {
+            **route,
+            "phase": phase,
+            "error_type": error_type,
+        }
+        if sequence is not None:
+            row["sequence"] = sequence
+        self._errors.append(row)
+
+    def _record_finished(
+        self,
+        started_row: dict[str, Any],
+        error_type: str | None,
+    ) -> None:
+        self._finished.append(dict(started_row))
+        if error_type:
+            self._record_error(
+                _capture_route(
+                    started_row["base_label"],
+                    started_row["protocol"],
+                    started_row["capture_label"],
+                ),
+                phase="stream_or_parse",
+                error_type=error_type,
+                sequence=int(started_row["sequence"]),
+            )
+
+    def _record_finish_error(
+        self,
+        started_row: dict[str, Any],
+        error_type: str,
+    ) -> None:
+        self._record_error(
+            _capture_route(
+                started_row["base_label"],
+                started_row["protocol"],
+                started_row["capture_label"],
+            ),
+            phase="finish",
+            error_type=error_type,
+            sequence=int(started_row["sequence"]),
+        )
+
+    def begin(
+        self,
+        *,
+        base_label: str,
+        protocol: str,
+        capture_label: str,
+        payload: dict[str, Any],
+        response: requests.Response,
+        started: float,
+        started_at: str,
+    ) -> DecompressedParserInputCaptureSession:
+        if self._final_summary is not None:
+            raise RuntimeError("capture recorder is already finalized")
+        self._counter += 1
+        route = _capture_route(base_label, protocol, capture_label)
+        stem = "-".join(
+            (
+                f"{self._counter:04d}",
+                _safe_capture_label(base_label),
+                _safe_capture_label(protocol),
+                _safe_capture_label(capture_label),
+            )
+        )
+        started_row: dict[str, Any] = {
+            **route,
+            "sequence": self._counter,
+            "body_file": f"{stem}.decompressed-parser-input.bin",
+            "metadata_file": f"{stem}.metadata.json",
+        }
+        self._started.append(started_row)
+        if self._expected_configured:
+            expected = Counter(_capture_route_key(row) for row in self._expected)
+            actual = Counter(_capture_route_key(row) for row in self._started)
+            route_key = _capture_route_key(route)
+            if route_key not in expected or actual[route_key] > expected[route_key]:
+                self._record_error(
+                    route,
+                    phase="setup",
+                    error_type="UnexpectedCaptureRoute",
+                    sequence=self._counter,
+                )
+                raise ValueError(
+                    "capture route was not expected or was started more than once"
+                )
+        try:
+            return DecompressedParserInputCaptureSession(
+                body_path=self.run_dir / started_row["body_file"],
+                metadata_path=self.run_dir / started_row["metadata_file"],
+                base_label=base_label,
+                protocol=protocol,
+                capture_label=capture_label,
+                payload=payload,
+                response=response,
+                started=started,
+                started_at=started_at,
+                on_finished=lambda error_type: self._record_finished(
+                    started_row,
+                    error_type,
+                ),
+                on_finish_error=lambda error_type: self._record_finish_error(
+                    started_row,
+                    error_type,
+                ),
+            )
+        except BaseException as exc:
+            self._record_error(
+                route,
+                phase="setup",
+                error_type=type(exc).__name__,
+                sequence=self._counter,
+            )
+            raise
+
+    def _summary(self) -> dict[str, Any]:
+        expected_counts = Counter(_capture_route_key(row) for row in self._expected)
+        started_counts = Counter(_capture_route_key(row) for row in self._started)
+        finished_counts = Counter(_capture_route_key(row) for row in self._finished)
+        ordered_keys = list(expected_counts)
+        ordered_keys.extend(key for key in started_counts if key not in expected_counts)
+        for error in self._errors:
+            key = _capture_route_key(error)
+            if key not in ordered_keys:
+                ordered_keys.append(key)
+        routes = []
+        for key in ordered_keys:
+            base_label, protocol, capture_label = key
+            route_errors = [
+                {
+                    "phase": row["phase"],
+                    "error_type": row["error_type"],
+                    **({"sequence": row["sequence"]} if "sequence" in row else {}),
+                }
+                for row in self._errors
+                if _capture_route_key(row) == key
+            ]
+            artifacts = [
+                {
+                    "sequence": row["sequence"],
+                    "body_file": row["body_file"],
+                    "metadata_file": row["metadata_file"],
+                }
+                for row in self._started
+                if _capture_route_key(row) == key
+            ]
+            routes.append(
+                {
+                    "base_label": base_label,
+                    "protocol": protocol,
+                    "capture_label": capture_label,
+                    "expected": expected_counts[key],
+                    "started": started_counts[key],
+                    "finished": finished_counts[key],
+                    "errors": route_errors,
+                    "artifacts": artifacts,
+                }
+            )
+        complete = (
+            self._expected_configured
+            and started_counts == expected_counts
+            and finished_counts == expected_counts
+            and not self._errors
+        )
+        return {
+            "schema_version": 1,
+            "enabled": True,
+            "capture_layer": CAPTURE_LAYER,
+            "capture_semantics": CAPTURE_SEMANTICS,
+            "run_id": self.run_id,
+            "expected": len(self._expected),
+            "started": len(self._started),
+            "finished": len(self._finished),
+            "errors": len(self._errors),
+            "complete": complete,
+            "routes": routes,
+        }
+
+    def current_summary(self) -> dict[str, Any]:
+        return self._summary()
+
+    def finalize(self) -> dict[str, Any]:
+        if self._final_summary is not None:
+            return dict(self._final_summary)
+        manifest = self._summary()
+        manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(
+            "utf-8"
+        )
+        try:
+            descriptor = os.open(
+                self.manifest_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                stat.S_IRUSR | stat.S_IWUSR,
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as manifest_file:
+                    manifest_file.write(manifest_bytes)
+            except BaseException:
+                self.manifest_path.unlink(missing_ok=True)
+                raise
+        except BaseException as exc:
+            self.manifest_path.unlink(missing_ok=True)
+            self._record_error(
+                _capture_route("", "", ""),
+                phase="manifest",
+                error_type=type(exc).__name__,
+            )
+            raise
+        self._final_summary = {
+            **manifest,
+            "manifest_file": self.manifest_path.name,
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        }
+        return dict(self._final_summary)
+
+
+class _CapturingDecompressedStream:
+    """Tee decompressed bytes before requests splits them into logical lines."""
+
+    def __init__(
+        self,
+        raw: Any,
+        capture: DecompressedParserInputCaptureSession,
+    ) -> None:
+        self._raw = raw
+        self._capture = capture
+
+    def stream(
+        self,
+        amount: int | None = None,
+        decode_content: bool | None = None,
+    ) -> Iterable[bytes]:
+        for chunk in self._raw.stream(
+            amount,
+            decode_content=decode_content,
+        ):
+            capture_bytes = (
+                chunk.encode("utf-8", errors="replace")
+                if isinstance(chunk, str)
+                else bytes(chunk)
+            )
+            self._capture.write(capture_bytes)
+            yield chunk
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw, name)
 
 
 def _parse_arguments(value: Any) -> dict[str, Any]:
@@ -195,7 +837,8 @@ class FragmentedToolAssembler:
         complete: bool = False,
     ) -> None:
         target = self._parts.setdefault(
-            int(index), {"id": "", "name": "", "arguments_text": "", "arguments_object": None}
+            int(index),
+            {"id": "", "name": "", "arguments_text": "", "arguments_object": None},
         )
         if call_id:
             target["id"] = call_id
@@ -250,7 +893,9 @@ class EventCollector:
     response_id: str = ""
     tools: FragmentedToolAssembler = field(default_factory=FragmentedToolAssembler)
 
-    def text(self, channel: str, text: str, kind: str, at_ms: float | None = None) -> None:
+    def text(
+        self, channel: str, text: str, kind: str, at_ms: float | None = None
+    ) -> None:
         if not text:
             return
         if channel == "reasoning":
@@ -287,7 +932,13 @@ class EventCollector:
             arguments=arguments,
             complete=complete,
         )
-        argument_text = "" if arguments is None else json.dumps(arguments, sort_keys=True) if isinstance(arguments, dict) else str(arguments)
+        argument_text = (
+            ""
+            if arguments is None
+            else json.dumps(arguments, sort_keys=True)
+            if isinstance(arguments, dict)
+            else str(arguments)
+        )
         self.events.append(
             {
                 "at_ms": _milliseconds(self.started) if at_ms is None else at_ms,
@@ -401,7 +1052,9 @@ def tool_choice(
     return {"type": "any"} if protocol == "anthropic" else "required"
 
 
-def validate_allowlisted_call(call: dict[str, Any], expected_name: str) -> tuple[bool, str]:
+def validate_allowlisted_call(
+    call: dict[str, Any], expected_name: str
+) -> tuple[bool, str]:
     if call.get("arguments_parse_error"):
         return False, "arguments were not valid JSON"
     if call.get("name") != expected_name:
@@ -437,9 +1090,7 @@ def execute_allowlisted_tool(repo_root: Path, call: dict[str, Any]) -> dict[str,
             "type": "file",
             "size_bytes": info.st_size,
             "size_human": _human_size(info.st_size),
-            "modified_utc": datetime.fromtimestamp(
-                info.st_mtime, tz=UTC
-            ).isoformat(),
+            "modified_utc": datetime.fromtimestamp(info.st_mtime, tz=UTC).isoformat(),
             "permissions": f"{stat.S_IMODE(info.st_mode):04o}",
         }
     elif name == "run_command":
@@ -482,7 +1133,9 @@ def assistant_message(protocol: str, round_result: dict[str, Any]) -> dict[str, 
                     "type": "function",
                     "function": {
                         "name": call["name"],
-                        "arguments": json.dumps(call["arguments"], separators=(",", ":")),
+                        "arguments": json.dumps(
+                            call["arguments"], separators=(",", ":")
+                        ),
                     },
                 }
                 for call in calls
@@ -531,7 +1184,9 @@ def assistant_message(protocol: str, round_result: dict[str, Any]) -> dict[str, 
         if round_result.get("reasoning"):
             message["thinking"] = round_result["reasoning"]
         return message
-    raise ValueError(f"Responses uses function_call_output, not assistant_message: {protocol}")
+    raise ValueError(
+        f"Responses uses function_call_output, not assistant_message: {protocol}"
+    )
 
 
 def history_after_tool(
@@ -615,7 +1270,9 @@ def classify_terminal(
         message_stop = values.count("message_stop")
         semantic = [value for value in values if value != "message_stop"]
         expected = "tool_use" if expect_tool else "end_turn"
-        passed = semantic == [expected] and (message_stop == 1 if stream else message_stop == 0)
+        passed = semantic == [expected] and (
+            message_stop == 1 if stream else message_stop == 0
+        )
     elif protocol == "ollama":
         semantic = values
         expected = "tool_calls" if expect_tool else "stop"
@@ -651,7 +1308,9 @@ def _parse_stream_object(
                 "chat.reasoning.delta",
                 at_ms,
             )
-            collector.text("content", str(delta.get("content") or ""), "chat.content.delta", at_ms)
+            collector.text(
+                "content", str(delta.get("content") or ""), "chat.content.delta", at_ms
+            )
             for fragment in delta.get("tool_calls") or []:
                 function = fragment.get("function") or {}
                 collector.tool_fragment(
@@ -721,7 +1380,9 @@ def _parse_stream_object(
         delta = data.get("delta") or {}
         if kind == "message_start":
             message = data.get("message") or {}
-            collector.response_id = collector.response_id or str(message.get("id") or "")
+            collector.response_id = collector.response_id or str(
+                message.get("id") or ""
+            )
         elif kind == "content_block_start":
             block = data.get("content_block") or {}
             if block.get("type") == "tool_use":
@@ -772,7 +1433,9 @@ def _parse_stream_object(
             "ollama.thinking",
             at_ms,
         )
-        collector.text("content", str(message.get("content") or ""), "ollama.content", at_ms)
+        collector.text(
+            "content", str(message.get("content") or ""), "ollama.content", at_ms
+        )
         for index, call in enumerate(message.get("tool_calls") or []):
             function = call.get("function") or {}
             collector.tool_fragment(
@@ -791,7 +1454,9 @@ def _parse_stream_object(
     raise ValueError(f"unknown protocol: {protocol}")
 
 
-def parse_nonstream(protocol: str, body: dict[str, Any], status_code: int, elapsed_ms: float) -> dict[str, Any]:
+def parse_nonstream(
+    protocol: str, body: dict[str, Any], status_code: int, elapsed_ms: float
+) -> dict[str, Any]:
     started = time.monotonic()
     collector = EventCollector(protocol=protocol, started=started)
     collector.response_id = str(body.get("id") or "")
@@ -804,7 +1469,12 @@ def parse_nonstream(protocol: str, body: dict[str, Any], status_code: int, elaps
             "chat.reasoning.complete",
             elapsed_ms,
         )
-        collector.text("content", str(message.get("content") or ""), "chat.content.complete", elapsed_ms)
+        collector.text(
+            "content",
+            str(message.get("content") or ""),
+            "chat.content.complete",
+            elapsed_ms,
+        )
         for index, call in enumerate(message.get("tool_calls") or []):
             function = call.get("function") or {}
             collector.tool_fragment(
@@ -830,7 +1500,12 @@ def parse_nonstream(protocol: str, body: dict[str, Any], status_code: int, elaps
             elif item.get("type") == "message":
                 for part in item.get("content") or []:
                     if part.get("type") in {"output_text", "text"}:
-                        collector.text("content", str(part.get("text") or ""), "responses.content.complete", elapsed_ms)
+                        collector.text(
+                            "content",
+                            str(part.get("text") or ""),
+                            "responses.content.complete",
+                            elapsed_ms,
+                        )
             elif item.get("type") == "function_call":
                 collector.tool_fragment(
                     item_index,
@@ -847,12 +1522,22 @@ def parse_nonstream(protocol: str, body: dict[str, Any], status_code: int, elaps
             if block.get("type") in {"thinking", "reasoning"}:
                 collector.text(
                     "reasoning",
-                    str(block.get("thinking") or block.get("reasoning") or block.get("text") or ""),
+                    str(
+                        block.get("thinking")
+                        or block.get("reasoning")
+                        or block.get("text")
+                        or ""
+                    ),
                     "anthropic.reasoning.complete",
                     elapsed_ms,
                 )
             elif block.get("type") == "text":
-                collector.text("content", str(block.get("text") or ""), "anthropic.content.complete", elapsed_ms)
+                collector.text(
+                    "content",
+                    str(block.get("text") or ""),
+                    "anthropic.content.complete",
+                    elapsed_ms,
+                )
             elif block.get("type") == "tool_use":
                 collector.tool_fragment(
                     index,
@@ -872,9 +1557,19 @@ def parse_nonstream(protocol: str, body: dict[str, Any], status_code: int, elaps
 
 
 class ProtocolClient:
-    def __init__(self, base_url: str, api_key: str | None, timeout: int) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None,
+        timeout: int,
+        *,
+        base_label: str = "",
+        raw_recorder: DecompressedParserInputCaptureRecorder | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.base_label = base_label
+        self.raw_recorder = raw_recorder
         self.headers = {"content-type": "application/json"}
         if api_key:
             self.headers["authorization"] = f"Bearer {api_key}"
@@ -888,8 +1583,47 @@ class ProtocolClient:
             "ollama": "/api/chat",
         }[protocol]
 
-    def send(self, protocol: str, payload: dict[str, Any], stream: bool) -> dict[str, Any]:
+    def _attach_parser_input_capture(
+        self,
+        *,
+        protocol: str,
+        capture_label: str,
+        payload: dict[str, Any],
+        response: requests.Response,
+        started: float,
+        started_at: str,
+    ) -> DecompressedParserInputCaptureSession | None:
+        if self.raw_recorder is None:
+            return None
+        capture = self.raw_recorder.begin(
+            base_label=self.base_label,
+            protocol=protocol,
+            capture_label=capture_label,
+            payload=payload,
+            response=response,
+            started=started,
+            started_at=started_at,
+        )
+        try:
+            response.raw = _CapturingDecompressedStream(response.raw, capture)
+        except BaseException as exc:
+            capture.finish(
+                completed_ms=_milliseconds(started),
+                error_type=type(exc).__name__,
+            )
+            raise
+        return capture
+
+    def send(
+        self,
+        protocol: str,
+        payload: dict[str, Any],
+        stream: bool,
+        *,
+        capture_label: str = "request",
+    ) -> dict[str, Any]:
         started = time.monotonic()
+        started_at = datetime.now(UTC).isoformat()
         response = requests.post(
             self.base_url + self.route(protocol),
             headers=self.headers,
@@ -907,39 +1641,84 @@ class ProtocolClient:
 
         collector = EventCollector(protocol=protocol, started=started)
         event_name: str | None = None
-        for raw in response.iter_lines(decode_unicode=True, chunk_size=1):
-            if raw is None:
-                continue
-            line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
-            line = line.strip()
-            if not line:
-                event_name = None
-                continue
-            at_ms = _milliseconds(started)
-            if protocol != "ollama" and line.startswith("event: "):
-                event_name = line[7:]
-                continue
-            if protocol != "ollama":
-                if not line.startswith("data: "):
+        capture: DecompressedParserInputCaptureSession | None = None
+        capture_error_type: str | None = None
+        completed_ms = 0.0
+        try:
+            capture = self._attach_parser_input_capture(
+                protocol=protocol,
+                capture_label=capture_label,
+                payload=payload,
+                response=response,
+                started=started,
+                started_at=started_at,
+            )
+            for raw in response.iter_lines(decode_unicode=True, chunk_size=1):
+                if raw is None:
                     continue
-                raw_data = line[6:]
-                if raw_data == "[DONE]":
-                    collector.terminal("DONE", at_ms)
+                line = (
+                    raw.decode("utf-8", errors="replace")
+                    if isinstance(raw, bytes)
+                    else raw
+                )
+                line = line.strip()
+                if not line:
+                    event_name = None
                     continue
-            else:
-                raw_data = line
+                at_ms = _milliseconds(started)
+                if protocol != "ollama" and line.startswith("event: "):
+                    event_name = line[7:]
+                    continue
+                if protocol != "ollama":
+                    if not line.startswith("data: "):
+                        continue
+                    raw_data = line[6:]
+                    if raw_data == "[DONE]":
+                        collector.terminal("DONE", at_ms)
+                        continue
+                else:
+                    raw_data = line
+                try:
+                    data = json.loads(raw_data)
+                except json.JSONDecodeError:
+                    collector.error("json_parse_error", raw_data, at_ms)
+                    continue
+                _parse_stream_object(
+                    protocol,
+                    data,
+                    event_name,
+                    collector,
+                    at_ms,
+                )
+        except BaseException as exc:
+            capture_error_type = type(exc).__name__
+            raise
+        finally:
             try:
-                data = json.loads(raw_data)
-            except json.JSONDecodeError:
-                collector.error("json_parse_error", raw_data, at_ms)
-                continue
-            _parse_stream_object(protocol, data, event_name, collector, at_ms)
-        response.close()
-        return collector.result(response.status_code, _milliseconds(started))
+                response.close()
+            except BaseException as exc:
+                if capture_error_type is None:
+                    capture_error_type = type(exc).__name__
+                raise
+            finally:
+                completed_ms = _milliseconds(started)
+                if capture is not None:
+                    capture.finish(
+                        completed_ms=completed_ms,
+                        error_type=capture_error_type,
+                    )
+        return collector.result(response.status_code, completed_ms)
 
 
-def _request_common(model: str, max_tokens: int, enable_thinking: bool) -> dict[str, Any]:
-    return {"model": model, "temperature": 0, "enable_thinking": enable_thinking, "_max_tokens": max_tokens}
+def _request_common(
+    model: str, max_tokens: int, enable_thinking: bool
+) -> dict[str, Any]:
+    return {
+        "model": model,
+        "temperature": 0,
+        "enable_thinking": enable_thinking,
+        "_max_tokens": max_tokens,
+    }
 
 
 def build_request(
@@ -1018,11 +1797,19 @@ def _sanitized_round(round_result: dict[str, Any]) -> dict[str, Any]:
         "response_id": round_result.get("response_id"),
         "reasoning_chars": len(reasoning),
         "reasoning_sha256": _sha256(reasoning),
-        "reasoning_delta_count": sum(1 for event in round_result.get("events") or [] if event.get("channel") == "reasoning"),
+        "reasoning_delta_count": sum(
+            1
+            for event in round_result.get("events") or []
+            if event.get("channel") == "reasoning"
+        ),
         "content": content,
         "content_chars": len(content),
         "content_sha256": _sha256(content),
-        "content_delta_count": sum(1 for event in round_result.get("events") or [] if event.get("channel") == "content"),
+        "content_delta_count": sum(
+            1
+            for event in round_result.get("events") or []
+            if event.get("channel") == "content"
+        ),
         "tool_calls": round_result.get("tool_calls") or [],
         "terminals": round_result.get("terminals") or [],
         "errors": round_result.get("errors") or [],
@@ -1109,7 +1896,12 @@ def run_flow(
         second_tool_choice=second_tool_choice,
     )
     request_records = [_request_public(1, request1)]
-    round1 = client.send(protocol, request1, mode == "stream")
+    round1 = client.send(
+        protocol,
+        request1,
+        mode == "stream",
+        capture_label=f"{mode}-flow-round1",
+    )
     calls1 = round1.get("tool_calls") or []
     check1 = len(calls1) == 1
     error1 = "expected exactly one tool call"
@@ -1127,7 +1919,9 @@ def run_flow(
     if protocol == "responses":
         history2 = history_after_tool(protocol, [], round1, execution1, second_prompt)
     else:
-        history2 = history_after_tool(protocol, list(initial_history), round1, execution1, second_prompt)
+        history2 = history_after_tool(
+            protocol, list(initial_history), round1, execution1, second_prompt
+        )
     request2 = build_request(
         protocol,
         model,
@@ -1141,7 +1935,12 @@ def run_flow(
         second_tool_choice=second_tool_choice,
     )
     request_records.append(_request_public(2, request2))
-    round2 = client.send(protocol, request2, mode == "stream")
+    round2 = client.send(
+        protocol,
+        request2,
+        mode == "stream",
+        capture_label=f"{mode}-flow-round2",
+    )
     calls2 = round2.get("tool_calls") or []
     check2 = len(calls2) == 1
     error2 = "expected exactly one tool call"
@@ -1164,7 +1963,9 @@ def run_flow(
     if protocol == "responses":
         history3 = history_after_tool(protocol, [], round2, execution2, final_prompt)
     else:
-        history3 = history_after_tool(protocol, history2, round2, execution2, final_prompt)
+        history3 = history_after_tool(
+            protocol, history2, round2, execution2, final_prompt
+        )
     request3 = build_request(
         protocol,
         model,
@@ -1178,18 +1979,31 @@ def run_flow(
         second_tool_choice=second_tool_choice,
     )
     request_records.append(_request_public(3, request3))
-    round3 = client.send(protocol, request3, mode == "stream")
+    round3 = client.send(
+        protocol,
+        request3,
+        mode == "stream",
+        capture_label=f"{mode}-flow-round3",
+    )
 
     stream = mode == "stream"
     terminals = [
-        classify_terminal(protocol, round1.get("terminals") or [], stream=stream, expect_tool=True),
-        classify_terminal(protocol, round2.get("terminals") or [], stream=stream, expect_tool=True),
-        classify_terminal(protocol, round3.get("terminals") or [], stream=stream, expect_tool=False),
+        classify_terminal(
+            protocol, round1.get("terminals") or [], stream=stream, expect_tool=True
+        ),
+        classify_terminal(
+            protocol, round2.get("terminals") or [], stream=stream, expect_tool=True
+        ),
+        classify_terminal(
+            protocol, round3.get("terminals") or [], stream=stream, expect_tool=False
+        ),
     ]
     reasoning1 = str(round1.get("reasoning") or "")
     reasoning2 = str(round2.get("reasoning") or "")
     reasoning3 = str(round3.get("reasoning") or "")
-    reasoning_values = [value for value in (reasoning1, reasoning2, reasoning3) if value]
+    reasoning_values = [
+        value for value in (reasoning1, reasoning2, reasoning3) if value
+    ]
     response_ids = [
         str(row.get("response_id") or "") for row in (round1, round2, round3)
     ]
@@ -1208,8 +2022,7 @@ def run_flow(
             )
     checks = {
         "status_200": all(
-            int(row.get("status_code") or 0) == 200
-            for row in (round1, round2, round3)
+            int(row.get("status_code") or 0) == 200 for row in (round1, round2, round3)
         ),
         "round1_exact_tool": check1,
         "round2_exact_tool": check2,
@@ -1228,7 +2041,12 @@ def run_flow(
         "terminals_truthful": all(item["pass"] for item in terminals),
         "stream_final_progressive": (
             mode != "stream"
-            or sum(1 for event in round3.get("events") or [] if event.get("channel") == "content") > 1
+            or sum(
+                1
+                for event in round3.get("events") or []
+                if event.get("channel") == "content"
+            )
+            > 1
         ),
         "reasoning_present": (
             not enable_thinking
@@ -1258,9 +2076,7 @@ def run_flow(
             )
         ),
         "responses_stream_tool_lifecycle_complete": (
-            protocol != "responses"
-            or not stream
-            or all(response_tool_lifecycles)
+            protocol != "responses" or not stream or all(response_tool_lifecycles)
         ),
         "timestamps_monotonic": all(
             all(
@@ -1276,14 +2092,20 @@ def run_flow(
         "checks": checks,
         "expected_final": final_marker,
         "requests": request_records,
-        "rounds": [_sanitized_round(round1), _sanitized_round(round2), _sanitized_round(round3)],
+        "rounds": [
+            _sanitized_round(round1),
+            _sanitized_round(round2),
+            _sanitized_round(round3),
+        ],
         "executions": [_execution_public(execution1), _execution_public(execution2)],
         "terminal_classification": terminals,
         "_prefinal_payload": request3,
     }
 
 
-def _replace_final_instruction(protocol: str, payload: dict[str, Any], instruction: str) -> dict[str, Any]:
+def _replace_final_instruction(
+    protocol: str, payload: dict[str, Any], instruction: str
+) -> dict[str, Any]:
     body = copy.deepcopy(payload)
     if protocol == "responses":
         body["instructions"] = instruction
@@ -1377,6 +2199,7 @@ def abort_stream_after_deltas(
     )
     body["stream"] = True
     started = time.monotonic()
+    started_at = datetime.now(UTC).isoformat()
     response = requests.post(
         client.base_url + client.route(protocol),
         headers=client.headers,
@@ -1388,11 +2211,24 @@ def abort_stream_after_deltas(
     event_name: str | None = None
     cancel_status: int | None = None
     cancel_body_hash = ""
+    capture: DecompressedParserInputCaptureSession | None = None
+    capture_error_type: str | None = None
+    closed_at_ms = 0.0
     try:
+        capture = client._attach_parser_input_capture(
+            protocol=protocol,
+            capture_label="stream-abort",
+            payload=body,
+            response=response,
+            started=started,
+            started_at=started_at,
+        )
         for raw in response.iter_lines(decode_unicode=True, chunk_size=1):
             if raw is None:
                 continue
-            line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+            line = (
+                raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+            )
             line = line.strip()
             if not line:
                 event_name = None
@@ -1426,13 +2262,29 @@ def abort_stream_after_deltas(
                 cancel_status = cancelled.status_code
                 cancel_body_hash = _sha256(cancelled.text)
             break
+    except BaseException as exc:
+        capture_error_type = type(exc).__name__
+        raise
     finally:
-        response.close()
+        try:
+            response.close()
+        except BaseException as exc:
+            if capture_error_type is None:
+                capture_error_type = type(exc).__name__
+            raise
+        finally:
+            closed_at_ms = _milliseconds(started)
+            if capture is not None:
+                capture.finish(
+                    completed_ms=closed_at_ms,
+                    error_type=capture_error_type,
+                )
     return {
         "status_code": response.status_code,
-        "closed_at_ms": _milliseconds(started),
+        "closed_at_ms": closed_at_ms,
         "response_id": collector.response_id,
-        "delta_events_before_abort": len(collector.reasoning_parts) + len(collector.content_parts),
+        "delta_events_before_abort": len(collector.reasoning_parts)
+        + len(collector.content_parts),
         "cancel_status": cancel_status,
         "cancel_body_sha256": cancel_body_hash,
         "terminals_before_abort": collector.terminals,
@@ -1458,7 +2310,9 @@ def disconnect_nonstream(
     body["stream"] = False
     parsed = urlparse(client.base_url)
     if parsed.scheme != "http" or not parsed.hostname:
-        raise ValueError("non-stream disconnect hook currently requires an http base URL")
+        raise ValueError(
+            "non-stream disconnect hook currently requires an http base URL"
+        )
     connection = http.client.HTTPConnection(
         parsed.hostname,
         parsed.port or 80,
@@ -1467,7 +2321,9 @@ def disconnect_nonstream(
     route = (parsed.path.rstrip("/") if parsed.path else "") + client.route(protocol)
     headers = dict(client.headers)
     started = time.monotonic()
-    connection.request("POST", route, body=json.dumps(body).encode("utf-8"), headers=headers)
+    connection.request(
+        "POST", route, body=json.dumps(body).encode("utf-8"), headers=headers
+    )
     time.sleep(max(delay_ms, 0) / 1000.0)
     connection.close()
     return {
@@ -1477,7 +2333,9 @@ def disconnect_nonstream(
     }
 
 
-def classify_abort(protocol: str, mode: str, aborted: dict[str, Any], minimum_deltas: int) -> dict[str, Any]:
+def classify_abort(
+    protocol: str, mode: str, aborted: dict[str, Any], minimum_deltas: int
+) -> dict[str, Any]:
     """Require a real cancel route when available and never accept a false terminal."""
     idle = bool(
         (
@@ -1495,19 +2353,16 @@ def classify_abort(protocol: str, mode: str, aborted: dict[str, Any], minimum_de
         if protocol in {"chat", "responses"}
         else True
     )
-    passed = (
-        idle
-        and deltas >= minimum_deltas
-        and not terminals
-        and cancel_route_ok
-    )
+    passed = idle and deltas >= minimum_deltas and not terminals and cancel_route_ok
     return {
         "pass": passed,
         "idle": idle,
         "delta_events": deltas,
         "no_terminal_before_abort": not terminals,
         "cancel_route_ok": cancel_route_ok,
-        "kind": "explicit_cancel" if protocol in {"chat", "responses"} else "client_disconnect",
+        "kind": "explicit_cancel"
+        if protocol in {"chat", "responses"}
+        else "client_disconnect",
     }
 
 
@@ -1519,7 +2374,9 @@ def build_recovery_request(
     max_tokens: int,
 ) -> dict[str, Any]:
     prompt = f"Call no tools. Reply exactly {marker} and nothing else."
-    history: list[dict[str, Any]] | str = prompt if protocol == "responses" else [{"role": "user", "content": prompt}]
+    history: list[dict[str, Any]] | str = (
+        prompt if protocol == "responses" else [{"role": "user", "content": prompt}]
+    )
     return build_request(
         protocol,
         model,
@@ -1541,7 +2398,12 @@ def run_recovery(
     max_tokens: int,
 ) -> dict[str, Any]:
     payload = build_recovery_request(protocol, model, mode, marker, max_tokens)
-    result = client.send(protocol, payload, mode == "stream")
+    result = client.send(
+        protocol,
+        payload,
+        mode == "stream",
+        capture_label=f"{mode}-recovery",
+    )
     classification = classify_terminal(
         protocol,
         result.get("terminals") or [],
@@ -1552,7 +2414,9 @@ def run_recovery(
     public["expected"] = marker
     public["exact"] = str(result.get("content") or "").strip() == marker
     public["terminal_classification"] = classification
-    public["pass"] = public["exact"] and classification["pass"] and not result.get("tool_calls")
+    public["pass"] = (
+        public["exact"] and classification["pass"] and not result.get("tool_calls")
+    )
     return public
 
 
@@ -1572,6 +2436,46 @@ def parse_named_urls(values: list[str], option: str) -> dict[str, str]:
     return parsed
 
 
+def expected_parser_input_capture_routes(
+    bases: Iterable[str],
+    protocols: Iterable[str],
+    modes: Iterable[str],
+    *,
+    skip_cancellation: bool,
+) -> list[tuple[str, str, str]]:
+    if "stream" not in set(modes):
+        return []
+    labels = [
+        "stream-flow-round1",
+        "stream-flow-round2",
+        "stream-flow-round3",
+    ]
+    if not skip_cancellation:
+        labels.extend(("stream-abort", "stream-recovery"))
+    return [
+        (base_label, protocol, capture_label)
+        for base_label in bases
+        for protocol in protocols
+        for capture_label in labels
+    ]
+
+
+def _disabled_capture_summary() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "enabled": False,
+        "capture_layer": CAPTURE_LAYER,
+        "capture_semantics": CAPTURE_SEMANTICS,
+        "reason": "--raw-artifact-dir not supplied",
+        "expected": 0,
+        "started": 0,
+        "finished": 0,
+        "errors": 0,
+        "complete": True,
+        "routes": [],
+    }
+
+
 def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
     bases = parse_named_urls(args.base_url, "--base-url")
     required_bases = {"direct", "gateway"}
@@ -1583,6 +2487,25 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(f"repo root does not contain {FILE_INFO_PATH}: {repo_root}")
     protocols = args.protocol or list(PROTOCOLS)
     modes = args.mode or list(MODES)
+    raw_artifact_dir = getattr(args, "raw_artifact_dir", None)
+    if raw_artifact_dir is not None and "stream" not in modes:
+        raise ValueError(
+            "--raw-artifact-dir captures streaming parser-input bytes and "
+            "requires --mode stream"
+        )
+    expected_capture_routes = expected_parser_input_capture_routes(
+        bases,
+        protocols,
+        modes,
+        skip_cancellation=args.skip_cancellation,
+    )
+    raw_recorder: DecompressedParserInputCaptureRecorder | None = None
+    if raw_artifact_dir is not None:
+        raw_recorder = DecompressedParserInputCaptureRecorder(
+            Path(raw_artifact_dir),
+            _git_worktree_root(repo_root),
+        )
+        raw_recorder.configure_expected(expected_capture_routes)
     output: dict[str, Any] = {
         "schema_version": 1,
         "created_at": datetime.now(UTC).isoformat(),
@@ -1593,11 +2516,28 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         "protocols": protocols,
         "modes": modes,
         "second_tool_choice": args.second_tool_choice,
+        "raw_capture": (
+            {
+                **_disabled_capture_summary(),
+                "enabled": True,
+                "reason": "capture active; manifest pending",
+                "expected": len(expected_capture_routes),
+                "complete": False,
+            }
+            if raw_recorder is not None
+            else _disabled_capture_summary()
+        ),
         "flows": {},
         "abort_recovery": {},
     }
     for base_label, base_url in bases.items():
-        client = ProtocolClient(base_url, args.api_key, args.timeout)
+        client = ProtocolClient(
+            base_url,
+            args.api_key,
+            args.timeout,
+            base_label=base_label,
+            raw_recorder=raw_recorder,
+        )
         output["flows"][base_label] = {}
         output["abort_recovery"][base_label] = {}
         health_url = health_urls.get(base_label, base_url + "/health")
@@ -1619,7 +2559,11 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     prefinal = flow.pop("_prefinal_payload", None)
                     output["flows"][base_label][protocol][mode] = flow
-                    if args.skip_cancellation or not flow.get("pass") or prefinal is None:
+                    if (
+                        args.skip_cancellation
+                        or not flow.get("pass")
+                        or prefinal is None
+                    ):
                         continue
                     try:
                         if mode == "stream":
@@ -1644,9 +2588,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
                             aborted,
                             args.minimum_abort_deltas,
                         )
-                        recovery_marker = (
-                            f"RECOVERY-{base_label.upper()}-{protocol.upper()}-{mode.upper()}-DONE"
-                        )
+                        recovery_marker = f"RECOVERY-{base_label.upper()}-{protocol.upper()}-{mode.upper()}-DONE"
                         recovered = run_recovery(
                             client,
                             protocol,
@@ -1687,16 +2629,27 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         for row in protocol.values()
         if row
     ]
+    if raw_recorder is not None:
+        try:
+            output["raw_capture"] = raw_recorder.finalize()
+        except Exception as exc:
+            output["raw_capture"] = {
+                **raw_recorder.current_summary(),
+                "complete": False,
+                "manifest_error_type": type(exc).__name__,
+            }
     output["checks"] = {
         "all_requested_flows_present": len(flow_rows)
         == len(bases) * len(protocols) * len(modes),
-        "all_flows_pass": bool(flow_rows) and all(row.get("pass") is True for row in flow_rows),
+        "all_flows_pass": bool(flow_rows)
+        and all(row.get("pass") is True for row in flow_rows),
         "abort_recovery_skipped": bool(args.skip_cancellation),
         "all_abort_recovery_pass": (
             True
             if args.skip_cancellation
             else bool(abort_rows) and all(row.get("pass") is True for row in abort_rows)
         ),
+        "raw_capture_complete": bool(output["raw_capture"]["complete"]),
     }
     output["pass"] = all(
         value
@@ -1724,6 +2677,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", required=True)
     parser.add_argument("--repo-root", default=os.getcwd())
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--raw-artifact-dir",
+        type=Path,
+        help=(
+            "Optional private root for exact decompressed streaming "
+            "parser-input response bytes and safe-allowlisted metadata; "
+            "requires --mode stream and must resolve outside every Git worktree"
+        ),
+    )
     parser.add_argument("--source-head", default="")
     parser.add_argument("--api-key")
     parser.add_argument("--protocol", action="append", choices=PROTOCOLS)
@@ -1733,7 +2695,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--minimum-abort-deltas", type=int, default=3)
     parser.add_argument("--disconnect-delay-ms", type=int, default=1000)
-    parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--enable-thinking", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument(
         "--second-tool-choice",
         choices=("explicit", "required", "auto"),
@@ -1762,7 +2726,16 @@ def main(argv: list[str] | None = None) -> int:
         }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
-    print(json.dumps({"output": str(args.output), "pass": result.get("pass"), "checks": result.get("checks")}, indent=2))
+    print(
+        json.dumps(
+            {
+                "output": str(args.output),
+                "pass": result.get("pass"),
+                "checks": result.get("checks"),
+            },
+            indent=2,
+        )
+    )
     return 0 if result.get("pass") else 1
 
 

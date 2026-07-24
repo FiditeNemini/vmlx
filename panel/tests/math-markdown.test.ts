@@ -3,6 +3,7 @@ import { marked } from 'marked'
 import {
   prepareMarkdownWithMath,
   prepareStreamingPlainTextMath,
+  prepareUserMarkdownWithMath,
 } from '../src/renderer/src/components/chat/mathMarkdown'
 
 describe('prepareMarkdownWithMath', () => {
@@ -163,5 +164,18 @@ describe('prepareMarkdownWithMath', () => {
     expect(rendered).toContain('47 \\times 2')
     expect(rendered).not.toContain('math-inline')
     expect(rendered).not.toContain('×')
+  })
+
+  it('escapes raw user HTML without corrupting protected TeX or code', () => {
+    const prepared = prepareUserMarkdownWithMath(
+      'SIZE=<human-readable size>; compare \\(893 < 920\\); keep `<tag>` literal.',
+    )
+    const rendered = marked.parse(prepared) as string
+
+    expect(rendered).toContain('SIZE=&lt;human-readable size&gt;')
+    expect(rendered).not.toContain('<human-readable')
+    expect(rendered).toContain('class="katex"')
+    expect(rendered).toContain('893')
+    expect(rendered).toContain('<code>&lt;tag&gt;</code>')
   })
 })

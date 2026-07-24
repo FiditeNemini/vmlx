@@ -40,6 +40,23 @@ describe('interleaved reasoning rendered display', () => {
     expect(html).not.toContain('\\(')
   })
 
+  it('shows angle-bracket placeholders in user prompts instead of parsing them as HTML', () => {
+    const html = renderBubble({
+      message: {
+        id: 'user-placeholder-1',
+        role: 'user',
+        content:
+          'PATH=panel/package.json SIZE=<human-readable size>; MATH: \\(893 < 920\\).',
+        timestamp: Date.now(),
+      },
+      isStreaming: false,
+    })
+
+    expect(html).toContain('SIZE=&lt;human-readable size&gt;')
+    expect(html).not.toContain('<human-readable')
+    expect(html).toContain('class="katex"')
+  })
+
   it('renders multimodal user text as math without rewriting currency or code', () => {
     const html = renderBubble({
       message: {

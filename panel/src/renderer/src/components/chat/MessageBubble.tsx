@@ -9,7 +9,7 @@ import { ToolCallStatus } from './ToolCallStatus'
 import { InlineToolCall, InlineToolGroup } from './InlineToolCall'
 import { TTSPlayer } from './VoiceChat'
 import { formatTimestamp, parseContentArray, getMetricsItems, type MessageMetrics } from './chat-utils'
-import { prepareMarkdownWithMath } from './mathMarkdown'
+import { prepareMarkdownWithMath, prepareUserMarkdownWithMath } from './mathMarkdown'
 import { reasoningSegmentsForDisplay as getReasoningSegmentsForDisplay } from '../../../../shared/interleavedReasoning'
 import { useTranslation } from '../../i18n'
 
@@ -39,7 +39,12 @@ interface MessageBubbleProps {
 }
 
 // Custom renderer: wraps code blocks with a localized header bar.
-function parseMarkdown(markdown: string, defaultLanguage: string, copyLabel: string): string {
+function parseMarkdown(
+  markdown: string,
+  defaultLanguage: string,
+  copyLabel: string,
+  userContent = false,
+): string {
   const renderer = new marked.Renderer()
   renderer.code = (code, lang) => {
   let highlighted: string
@@ -51,7 +56,10 @@ function parseMarkdown(markdown: string, defaultLanguage: string, copyLabel: str
   const headerHtml = `<div class="code-header"><span class="code-lang">${lang || defaultLanguage}</span><button class="code-copy-btn">${copyLabel}</button></div>`
   return `<div class="code-block-wrapper">${headerHtml}<pre><code class="hljs language-${lang || 'plaintext'}">${highlighted}</code></pre></div>`
   }
-  return marked.parse(prepareMarkdownWithMath(markdown), { renderer, breaks: true, gfm: true }) as string
+  const prepared = userContent
+    ? prepareUserMarkdownWithMath(markdown)
+    : prepareMarkdownWithMath(markdown)
+  return marked.parse(prepared, { renderer, breaks: true, gfm: true }) as string
 }
 
 /**
@@ -237,12 +245,13 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
     !hasToolStatus
 
   // Render a DOMPurify-sanitized markdown segment
-  const renderMarkdownSegment = useCallback((text: string, key: string) => {
+  const renderMarkdownSegment = useCallback((text: string, key: string, userContent = false) => {
     if (!text) return null
     const safeHtml = sanitizeHtml(parseMarkdown(
       text,
       t('chat.bubble.codeDefaultLang'),
-      t('chat.bubble.codeCopy')
+      t('chat.bubble.codeCopy'),
+      userContent,
     ))
     return (
       <div
@@ -313,12 +322,12 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
             </div>
           )}
           {textParts.map((p, i) =>
-            renderMarkdownSegment(p.text!, `user-text-${i}`)
+            renderMarkdownSegment(p.text!, `user-text-${i}`, true)
           )}
         </div>
       )
     }
-    return renderMarkdownSegment(message.content, 'user-text')
+    return renderMarkdownSegment(message.content, 'user-text', true)
   }
 
   const renderInlineContent = () => {

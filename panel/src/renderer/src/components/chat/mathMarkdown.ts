@@ -4,6 +4,8 @@ import { renderToString } from 'katex'
 // TeX normalization. Model-generated code frequently uses either spelling;
 // rewriting `\times`, `$...$`, or `*` inside a tilde fence corrupts source.
 const CODE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g
+const USER_LITERAL_PROTECTED_RE =
+  /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`|\\\[[\s\S]*?\\\]|\\\([^\n]*?\\\)|\$\$[\s\S]*?\$\$|\$[^$\n]+\$/g
 
 const KATEX_OPTIONS = {
   output: 'html' as const,
@@ -195,4 +197,28 @@ export function prepareMarkdownWithMath(markdown: string): string {
     const index = Number(indexText)
     return protectedSegments[index] || ''
   })
+}
+
+/**
+ * User prompts are Markdown, not trusted/raw HTML. Marked otherwise treats a
+ * placeholder such as `<human-readable size>` as an HTML tag; DOMPurify then
+ * removes that tag and the user sees `SIZE=` even though SQLite and the API
+ * retained the original bytes. Escape raw HTML before Markdown parsing while
+ * protecting code and TeX spans so code fences stay literal and KaTeX still
+ * receives the original comparison operators.
+ */
+export function prepareUserMarkdownWithMath(markdown: string): string {
+  if (!markdown) return ''
+
+  const protectedSegments: string[] = []
+  const protectedMarkdown = markdown.replace(USER_LITERAL_PROTECTED_RE, (segment) => {
+    const index = protectedSegments.push(segment) - 1
+    return `\u0000USERLITERAL${index}\u0000`
+  })
+  const escapedMarkdown = escapeHtml(protectedMarkdown)
+  const restoredMarkdown = escapedMarkdown.replace(
+    /\u0000USERLITERAL(\d+)\u0000/g,
+    (_match, indexText) => protectedSegments[Number(indexText)] || '',
+  )
+  return prepareMarkdownWithMath(restoredMarkdown)
 }

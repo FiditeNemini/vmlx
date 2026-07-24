@@ -56,10 +56,12 @@ if [ -n "$forbidden" ]; then
   exit 1
 fi
 
+private_volume_pattern='/Volumes/'"Erics"'LLMDrive'
+
 private_strings=$(
   {
     git grep -Il -E \
-      '(test-host([0-9]*)?(\.tail[[:alnum:]]+\.ts\.net|\.local)|/Volumes/ModelDrive)' \
+      "(test-host([0-9]*)?(\.tail[[:alnum:]]+\.ts\.net|\.local)|${private_volume_pattern})" \
       -- . ':(exclude)scripts/check-public-repo-hygiene.sh' 2>/dev/null || true
     git grep -InE '/Users/[A-Za-z0-9._-]+' -- . 2>/dev/null |
       grep -Ev '/Users/(example|u)(/|[^A-Za-z0-9._-])' |

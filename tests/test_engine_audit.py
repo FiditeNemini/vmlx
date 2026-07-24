@@ -6414,6 +6414,43 @@ class TestResponsesStreamingExactToolResult:
             ]
         )
 
+    def test_non_native_tool_result_marker_survives_user_shape_conversion(self):
+        from vmlx_engine.api.models import Message
+        from vmlx_engine.api.utils import extract_multimodal_content
+        from vmlx_engine.server import (
+            _responses_messages_have_tool_result_after_latest_user,
+        )
+
+        converted, _, _ = extract_multimodal_content(
+            [
+                Message(role="user", content="call the tool once"),
+                Message(
+                    role="assistant",
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_invoice",
+                                "arguments": '{"id":"INV-507"}',
+                            },
+                        }
+                    ],
+                ),
+                Message(
+                    role="tool",
+                    tool_call_id="call_1",
+                    content='{"status":"paid"}',
+                ),
+            ],
+            preserve_native_format=False,
+        )
+
+        assert converted[-1]["role"] == "user"
+        assert converted[-1]["type"] == "function_call_output"
+        assert _responses_messages_have_tool_result_after_latest_user(converted)
+
     def test_inline_markdown_does_not_activate_native_tool_buffering(self):
         from vmlx_engine.server import (
             _has_tool_marker_or_partial_suffix,

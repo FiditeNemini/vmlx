@@ -2061,6 +2061,30 @@ class BlockAwarePrefixCache:
             num_cached = 0
         if cached_blocks:
             _disk_store = getattr(self.paged_cache, "_disk_store", None)
+            if self._rotating_l2_chain_missing_terminal_state(
+                cached_blocks,
+                target_tokens=num_cached,
+                disk_store=_disk_store,
+            ):
+                _reject_table = BlockTable(
+                    request_id=request_id,
+                    block_ids=[cb.block_id for cb in cached_blocks],
+                    num_tokens=sum(
+                        getattr(cb, "token_count", 0) for cb in cached_blocks
+                    ),
+                )
+                self.paged_cache.release_request_refs(_reject_table)
+                logger.info(
+                    "Ignoring mixed-SWA paged prefix candidate for %s at %d "
+                    "tokens: the matched boundary has rotating_kv_pending "
+                    "markers instead of an exact RotatingKV checkpoint. "
+                    "Prefilling cleanly before recording any hit credit.",
+                    request_id,
+                    num_cached,
+                )
+                self._misses += 1
+                return None, tokens
+
             if self._dsv4_l2_chain_missing_terminal_state(cached_blocks, _disk_store):
                 _reject_table = BlockTable(
                     request_id=request_id,
@@ -2136,6 +2160,20 @@ class BlockAwarePrefixCache:
             ]
             matched_blocks = [b for b in matched_blocks if b is not None]
             _disk_store = getattr(self.paged_cache, "_disk_store", None)
+            if self._rotating_l2_chain_missing_terminal_state(
+                matched_blocks,
+                target_tokens=len(matched_tokens),
+                disk_store=_disk_store,
+            ):
+                logger.info(
+                    "Ignoring mixed-SWA prefix-index candidate for %s at %d "
+                    "tokens: the matched boundary has no exact RotatingKV "
+                    "checkpoint.",
+                    request_id,
+                    len(matched_tokens),
+                )
+                self._misses += 1
+                return None, tokens
             if self._dsv4_l2_chain_missing_terminal_state(matched_blocks, _disk_store):
                 logger.warning(
                     "Ignoring DSV4 prefix-index hit for %s: matched blocks "
@@ -2253,6 +2291,57 @@ class BlockAwarePrefixCache:
                 if len(entry) > 2 and entry[2] is not None:
                     saw_terminal = True
         return saw_zaya and not saw_terminal
+
+    @staticmethod
+    def _rotating_l2_chain_missing_terminal_state(
+        cached_blocks: List[Any],
+        *,
+        target_tokens: int,
+        disk_store: Optional[Any] = None,
+    ) -> bool:
+        """True when a matched mixed-SWA boundary cannot be reconstructed.
+
+        RotatingKV state is path-dependent: an interior block is durable as a
+        token/hash chain node, but ``rotating_kv_pending`` deliberately carries
+        no ring-buffer payload.  Selecting that boundary as a hit causes an
+        avoidable SSD read and a later 12/48-layer reconstruction failure for
+        Laguna before the scheduler rolls the hit credit back to zero.
+
+        Reject the candidate before crediting it.  A terminal block with exact
+        ``rotating_kv`` entries remains eligible; malformed offsets or window
+        shapes are still rejected by the normal reconstruction validator.
+        """
+        if not cached_blocks or int(target_tokens or 0) <= 0:
+            return False
+
+        terminal_entries = list(
+            BlockAwarePrefixCache._iter_terminal_check_entries(
+                cached_blocks[-1],
+                disk_store,
+            )
+        )
+        rotating_entries = [
+            entry
+            for entry in terminal_entries
+            if isinstance(entry, (tuple, list))
+            and entry
+            and entry[0] == "rotating_kv"
+        ]
+        saw_pending = any(
+            isinstance(entry, (tuple, list))
+            and entry
+            and entry[0] == "rotating_kv_pending"
+            for entry in terminal_entries
+        )
+        if saw_pending:
+            return True
+        if not rotating_entries:
+            return False
+        return not _block_has_complete_rotating_terminal(
+            terminal_entries,
+            target_tokens=int(target_tokens),
+            expected_layers=len(rotating_entries),
+        )
 
     def store_cache(
         self,

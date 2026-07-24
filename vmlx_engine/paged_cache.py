@@ -435,7 +435,14 @@ class BlockHashToBlockMap:
         if isinstance(blocks, CacheBlock):
             return blocks
         if isinstance(blocks, dict):
-            return next(iter(blocks.values()))
+            # A later store may deliberately promote the same token-chain
+            # boundary with richer native state (for example replacing a
+            # mixed-SWA ``rotating_kv_pending`` interior record with an exact
+            # terminal RotatingKV checkpoint). Prefer the most recently
+            # inserted live block so the promoted boundary becomes
+            # discoverable; returning the oldest duplicate made promotion
+            # ineffective and forced every later request to miss again.
+            return next(reversed(blocks.values()))
         return None
 
     def insert(self, block_hash: BlockHash, block: CacheBlock) -> None:

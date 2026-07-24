@@ -1356,7 +1356,7 @@ class TestBlockAwarePrefixCache:
         ).item()
 
     def test_rotating_cache_promotes_interior_block_to_terminal_checkpoint(self):
-        """An exact hit ending on an interior block gains its own SWA state."""
+        """An interior match misses before a clean prefill promotes the boundary."""
         mx = pytest.importorskip("mlx.core")
 
         from vmlx_engine.paged_cache import PagedCacheManager
@@ -1380,13 +1380,17 @@ class TestBlockAwarePrefixCache:
         cache.store_cache("long", long_tokens, snapshot(384))
 
         hit, remaining = cache.fetch_cache("short", short_tokens)
-        assert hit is not None
-        assert hit.num_tokens == 192
-        assert remaining == []
-        # The matched third block was interior in the 384-token store, so it has
-        # no terminal window until the exact shorter prompt completes a clean prefill.
-        assert cache.reconstruct_cache(hit) is None
+        assert hit is None
+        assert remaining == short_tokens
+        stats = cache.get_stats()
+        assert stats["hits"] == 0
+        assert stats["misses"] == 1
+        assert stats["tokens_saved"] == 0
+        assert "short" not in cache._request_tables
 
+        # The clean miss computes a real 192-token state. Storing that state
+        # promotes the formerly interior chain boundary to an exact terminal
+        # RotatingKV checkpoint, after which a changed-tail request may reuse it.
         table = cache.store_cache("short", short_tokens, snapshot(192))
         assert table is not None
         rebuilt = cache.reconstruct_cache(table)
@@ -1397,6 +1401,99 @@ class TestBlockAwarePrefixCache:
             rebuilt[0].keys.reshape(-1),
             mx.arange(64, 192, dtype=mx.float32),
         ).item()
+
+        promoted_hit, promoted_remaining = cache.fetch_cache(
+            "short-changed-tail",
+            short_tokens + [999],
+        )
+        assert promoted_hit is not None
+        assert promoted_hit.num_tokens == 192
+        assert promoted_remaining == [999]
+
+    def test_disk_only_mixed_swa_pending_boundary_is_fetch_time_miss(
+        self,
+        tmp_path,
+    ):
+        """A 12-full/36-SWA L2 chain must not report an unusable partial hit."""
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.block_disk_store import BlockDiskStore
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        def mixed_snapshot(offset):
+            full = mx.arange(offset, dtype=mx.float32).reshape(1, 1, offset, 1)
+            rotating = mx.arange(
+                max(0, offset - 128),
+                offset,
+                dtype=mx.float32,
+            ).reshape(1, 1, min(offset, 128), 1)
+            return [
+                {
+                    "class_name": "KVCache",
+                    "state": (full, full + 1000),
+                    "meta_state": (),
+                }
+                for _ in range(12)
+            ] + [
+                {
+                    "class_name": "RotatingKVCache",
+                    "state": (rotating, rotating + 1000),
+                    "meta_state": (0, 128, offset, min(offset, 128)),
+                }
+                for _ in range(36)
+            ]
+
+        cache_dir = tmp_path / "disk-only-mixed-swa-pending-boundary"
+        long_tokens = list(range(384))
+        short_tokens = long_tokens[:192]
+        store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.05,
+            expected_num_layers=48,
+        )
+        manager = PagedCacheManager(
+            block_size=64,
+            max_blocks=16,
+            disk_store=store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        writer = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        assert writer.store_cache(
+            "writer",
+            long_tokens,
+            mixed_snapshot(len(long_tokens)),
+        ) is not None
+        store.shutdown()
+
+        restarted_store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.05,
+            expected_num_layers=48,
+        )
+        restarted_manager = PagedCacheManager(
+            block_size=64,
+            max_blocks=16,
+            disk_store=restarted_store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        restarted = BlockAwarePrefixCache(
+            model=None,
+            paged_cache_manager=restarted_manager,
+        )
+        try:
+            hit, remaining = restarted.fetch_cache("reader", short_tokens)
+            assert hit is None
+            assert remaining == short_tokens
+            stats = restarted.get_stats()
+            assert stats["hits"] == 0
+            assert stats["misses"] == 1
+            assert stats["tokens_saved"] == 0
+            assert stats["active_requests"] == 0
+        finally:
+            restarted_store.shutdown()
 
     def test_extending_partial_prefix_realigns_durable_block_chain(self):
         """An extended partial tail must be replaced at block boundaries."""

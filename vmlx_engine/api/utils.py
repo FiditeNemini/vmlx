@@ -924,6 +924,12 @@ def extract_multimodal_content(
                 processed_messages.append(
                     {
                         "role": "user",
+                        # Preserve the semantic origin even though the model's
+                        # template needs a user-shaped text turn.  Streaming
+                        # tool-loop policy inspects this marker to distinguish
+                        # a completed tool result from a new user request.
+                        "type": "function_call_output",
+                        "tool_call_id": tool_call_id,
                         "content": f"[Tool Result ({tool_call_id})]: {tool_content}",
                     }
                 )

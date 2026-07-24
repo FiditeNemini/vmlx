@@ -436,6 +436,8 @@ class TestExtractMultimodalContent:
         ]
         processed, images, videos = extract_multimodal_content(messages)
         assert processed[0]["role"] == "user"
+        assert processed[0]["type"] == "function_call_output"
+        assert processed[0]["tool_call_id"] == "call_1"
         assert "Tool Result" in processed[0]["content"]
         assert "call_1" in processed[0]["content"]
 

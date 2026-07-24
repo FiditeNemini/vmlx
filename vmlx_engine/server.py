@@ -1108,11 +1108,16 @@ def _responses_messages_have_tool_result_after_latest_user(messages: list[dict])
     for message in reversed(messages or []):
         if not isinstance(message, dict):
             continue
+        # Non-native tool templates receive a user-shaped text turn from
+        # extract_multimodal_content(), but it retains this Responses-style
+        # semantic marker.  Check it before the generic user boundary or the
+        # exact-once tool gate mistakes a continuation for a fresh selection
+        # turn and buffers the visible answer to an empty terminal.
+        if message.get("type") == "function_call_output":
+            return True
         if message.get("role") == "user":
             return False
         if message.get("role") == "tool":
-            return True
-        if message.get("type") == "function_call_output":
             return True
     return False
 

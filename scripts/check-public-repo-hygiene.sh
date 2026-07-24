@@ -119,11 +119,7 @@ private_message_commits=$(
           }
           line = substr(line, RSTART + RLENGTH)
         }
-        if (
-          $0 ~ private_host_pattern ||
-          $0 ~ private_volume_pattern ||
-          $0 ~ private_cache_pattern
-        ) {
+        if (($0 ~ private_host_pattern) || ($0 ~ private_volume_pattern) || ($0 ~ private_cache_pattern)) {
           bad[commit] = 1
         }
       }

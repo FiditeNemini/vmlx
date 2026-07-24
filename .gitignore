@@ -140,25 +140,71 @@ mise.toml
 .pre-commit-config.yaml
 panel/.env.signing
 .agent/
-.github/
 nohup.out
 
-# Internal audit docs
+# Private/internal material must never enter the public repository
+AGENTS.md
+CLAUDE.md
+CODEX.md
+.agents/
+.agent/
+.claude/
+.codex/
+.sisyphus/
+notes/
+panel/docs/plans/
+tests/e2e/results/
+tests/e2e/AUDIT-REPORT.md
+tests/e2e/MATRIX.md
+tests/e2e/UI-SUITE.md
+docs/internal/
+docs/audit/
+docs/Handoffs/
+docs/plans/
+docs/runtime/
+docs/*.md
+!docs/ARCHITECTURE.md
+!docs/index.md
+!docs/mlxstudio-releases-readme.md
 docs/audit-*
+docs/AUDIT-*
 docs/final-*
 docs/GITHUB-ISSUES-*
 docs/CROSS-CHECK-*
 docs/cross-check-*
+docs/*CAMPAIGN*
+docs/*MATRIX*
+docs/*ROADMAP*
+docs/*PLAN*
+docs/*STATUS*
+docs/*PROGRESS*
+docs/*HANDOFF*
+docs/*LEDGER*
+docs/*EVIDENCE*
+docs/*PROOF*
+docs/*RELEASE-GATE*
+AUDIT_FIXES.md
+BENCHMARK_RESULTS.md
+FIXES_SUMMARY.md
+PACKAGE_RELEASE_NOTES.md
+PRODUCTION_READY.md
+TEST_PLAN.md
+VERIFICATION.md
+NO-REGRESSION-CHECKLIST.md
+AUDIT-*.md
+HANDOFF-*.md
+TEST-MATRIX-*.md
+BENCHMARK-*.md
+/*.md
+!/README.md
+!/CHANGELOG.md
+!/CONTRIBUTING.md
+!/SECURITY.md
+!/CODE_OF_CONDUCT.md
 
 # Smelt / JANG MoE artifacts
 *.smt
 .smelt/
-# Internal implementation guides (for agents, not for release)
-docs/internal/
-
-# Private agentic workspaces
-.sisyphus/
-.agents/
 
 # TypeScript build info / incremental cache
 *.tsbuildinfo
@@ -168,11 +214,4 @@ docs/internal/
 /test_*.py
 /test_build_args.ts
 
-# Internal regression audit + notes (not committed)
-NO-REGRESSION-CHECKLIST.md
-AUDIT-*.md
-!docs/AUDIT-*.md
-HANDOFF-*.md
-TEST-MATRIX-*.md
-BENCHMARK-*.md
 panel/build_dmg.sh

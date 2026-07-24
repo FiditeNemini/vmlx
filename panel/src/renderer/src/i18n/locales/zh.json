@@ -370,7 +370,7 @@
       "maxTokensHelp": "此聊天每次响应可生成的新 token 上限。留空时，若模型包声明了 generation_config/jang_config 值则使用该值，否则使用引擎回退值；也可以在这里设置，或在 API 请求中发送 max_tokens/max_output_tokens 来覆盖。",
       "maxThinkingTokens": "最大思考 Tokens",
       "maxThinkingTokensPlaceholder": "自动 / 模型默认值",
-      "maxThinkingTokensHelp": "此聊天的推理阶段预算。留空时使用模型默认值；如果 Qwen 3.5/3.6 未提供默认值，本地 vMLX 自动模式最多使用 1,024 个推理 token，并为可见答案至少保留 256 个 token（输出上限较小时保留一半）。显式值或 API 的 max_thinking_tokens 会覆盖自动模式。",
+      "maxThinkingTokensHelp": "留空可保留模型/运行时的原生默认行为和请求的完整输出预算。只有在此界面中输入显式值或在 API 中设置 max_thinking_tokens，才会设置单独的推理上限。不支持思考预算的模型可能会忽略它。",
       "topK": "Top K",
       "topKHelp": "将候选 tokens 限制为前 K 个。0 = 关闭 (仅使用 Top P)。",
       "minP": "Min P",

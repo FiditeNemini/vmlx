@@ -370,7 +370,7 @@
       "maxTokensHelp": "このチャットの応答で生成する新規トークンの上限です。空欄の場合は、宣言されていればバンドルの generation_config/jang_config 値を、なければエンジンのフォールバック値を使用します。ここで値を設定するか、API の max_tokens/max_output_tokens で上書きできます。",
       "maxThinkingTokens": "最大思考トークン",
       "maxThinkingTokensPlaceholder": "自動 / モデル既定値",
-      "maxThinkingTokensHelp": "このチャットの推論フェーズの予算です。空欄ではモデル既定値を使用します。Qwen 3.5/3.6 に既定値がない場合、ローカル vMLX の自動設定は推論を最大 1,024 トークンに制限し、表示回答用に少なくとも 256 トークン（出力上限が小さい場合はその半分）を確保します。明示値または API の max_thinking_tokens は自動設定を上書きします。",
+      "maxThinkingTokensHelp": "空欄のままにすると、モデル/ランタイムのネイティブ既定値とリクエストの全出力予算が維持されます。この UI で明示的な値を入力するか、API で max_thinking_tokens を指定した場合にのみ、別個の推論上限が設定されます。思考予算に対応していないモデルでは無視される場合があります。",
       "topK": "Top K",
       "topKHelp": "上位 K 候補にトークンを制限します。0 = 無効(Top P のみ使用)。",
       "minP": "Min P",

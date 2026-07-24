@@ -370,7 +370,7 @@
       "maxTokensHelp": "Tokens nuevos máximos para las respuestas de este chat. Déjelo vacío para usar generation_config/jang_config del paquete cuando exista o, de lo contrario, el valor de respaldo del motor; escriba un valor aquí o envíe max_tokens/max_output_tokens en la API para anularlo.",
       "maxThinkingTokens": "Tokens de pensamiento máximos",
       "maxThinkingTokensPlaceholder": "Auto / valor del modelo",
-      "maxThinkingTokensHelp": "Presupuesto de la fase de razonamiento para este chat. Déjelo vacío para usar el valor del modelo; si Qwen 3.5/3.6 no define uno, Auto de vMLX local usa como máximo 1024 tokens de razonamiento y reserva al menos 256 tokens (o la mitad de un límite de salida menor) para la respuesta visible. Un valor explícito o max_thinking_tokens en la API anula Auto.",
+      "maxThinkingTokensHelp": "Déjelo vacío para conservar el valor nativo predeterminado del modelo/runtime y el presupuesto de salida completo de la solicitud. Solo un valor explícito en esta interfaz o max_thinking_tokens en la API establece un límite de razonamiento independiente. Los modelos que no admiten un presupuesto de pensamiento pueden ignorarlo.",
       "topK": "Top K",
       "topKHelp": "Limita los tokens a los K principales. 0 = desactivado (usa solo Top P).",
       "minP": "Min P",

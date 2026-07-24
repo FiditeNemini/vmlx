@@ -21,6 +21,13 @@ import { resolve } from 'path'
 
 const LOCALES = ['en', 'zh', 'ko', 'ja', 'es'] as const
 type LocaleKey = (typeof LOCALES)[number]
+const EXPECTED_MAX_THINKING_TOKENS_HELP: Record<LocaleKey, string> = {
+  en: "Leave blank to preserve the model/runtime native default and the request's full output budget. Only an explicit value in this UI or API max_thinking_tokens sets a separate reasoning cap. Models without thinking-budget support may ignore it.",
+  zh: '留空可保留模型/运行时的原生默认行为和请求的完整输出预算。只有在此界面中输入显式值或在 API 中设置 max_thinking_tokens，才会设置单独的推理上限。不支持思考预算的模型可能会忽略它。',
+  ko: '비워 두면 모델/런타임의 기본 동작과 요청의 전체 출력 예산이 유지됩니다. 이 UI에 명시적 값을 입력하거나 API에서 max_thinking_tokens를 설정한 경우에만 별도의 추론 한도가 적용됩니다. 사고 예산을 지원하지 않는 모델은 이를 무시할 수 있습니다.',
+  ja: '空欄のままにすると、モデル/ランタイムのネイティブ既定値とリクエストの全出力予算が維持されます。この UI で明示的な値を入力するか、API で max_thinking_tokens を指定した場合にのみ、別個の推論上限が設定されます。思考予算に対応していないモデルでは無視される場合があります。',
+  es: 'Déjelo vacío para conservar el valor nativo predeterminado del modelo/runtime y el presupuesto de salida completo de la solicitud. Solo un valor explícito en esta interfaz o max_thinking_tokens en la API establece un límite de razonamiento independiente. Los modelos que no admiten un presupuesto de pensamiento pueden ignorarlo.',
+}
 const LOCALE_DIR = resolve(
   __dirname,
   '..',
@@ -121,6 +128,17 @@ describe('i18n locale consistency', () => {
           `Locale '${l}' has empty / whitespace-only value at key '${key}'`,
         ).toBeGreaterThan(0)
       }
+    }
+  })
+
+  it('describes Max Thinking Tokens as an explicit cap without an implicit Auto partition', () => {
+    for (const l of LOCALES) {
+      expect(locales[l].chat.settings.maxThinkingTokensHelp).toBe(
+        EXPECTED_MAX_THINKING_TOKENS_HELP[l],
+      )
+      expect(locales[l].chat.settings.maxThinkingTokensHelp).not.toMatch(
+        /Qwen|3[.]5|3[.]6|1,?024|256/,
+      )
     }
   })
 

@@ -370,7 +370,7 @@
       "maxTokensHelp": "Maximum new tokens for responses in this chat. Leave blank to use the bundle's generation_config/jang_config value when declared, otherwise the engine fallback; set a value here or send max_tokens/max_output_tokens in the API request to override it.",
       "maxThinkingTokens": "Max Thinking Tokens",
       "maxThinkingTokensPlaceholder": "Auto / model default",
-      "maxThinkingTokensHelp": "Reasoning-phase budget for this chat. Leave blank for the model default; when Qwen 3.5/3.6 has none, local vMLX Auto uses at most 1,024 reasoning tokens and keeps at least 256 tokens (or half of a smaller output cap) for the visible answer. An explicit value or API max_thinking_tokens overrides Auto. Models without thinking-budget support may ignore it.",
+      "maxThinkingTokensHelp": "Leave blank to preserve the model/runtime native default and the request's full output budget. Only an explicit value in this UI or API max_thinking_tokens sets a separate reasoning cap. Models without thinking-budget support may ignore it.",
       "topK": "Top K",
       "topKHelp": "Limits tokens to top K candidates. 0 = disabled (uses Top P only).",
       "minP": "Min P",

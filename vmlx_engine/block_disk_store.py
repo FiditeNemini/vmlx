@@ -54,6 +54,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -243,6 +244,16 @@ class BlockDiskStore:
         self.disk_evictions = 0
         self.tq_native_writes = 0
         self.tq_native_hits = 0
+        # Non-blocking, request-correlated write-fence telemetry.  A fence is
+        # complete only after every queued block preceding its sentinel has
+        # finished its SQLite transaction *and* the drained batch's LRU
+        # eviction has settled.  Exact block hashes stay private; /health gets
+        # only bounded counts and opaque fence IDs.
+        self._write_fence_seq = 0
+        self._write_completion_generation = 0
+        self._write_inflight = 0
+        self._write_fences: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+        self._max_recent_write_fences = 64
 
         # Per-thread read connections (thread-local storage).
         # MLLM batch generator runs fetch_cache on a worker thread — SQLite
@@ -605,11 +616,190 @@ class BlockDiskStore:
     # Write (async)
     # =========================================================================
 
+    def begin_write_fence(self, request_id: str) -> str:
+        """Create an opaque, request-correlated asynchronous write fence."""
+        normalized_request_id = str(request_id or "").strip()
+        if not normalized_request_id:
+            raise ValueError("request_id is required for a block-disk write fence")
+        with self._stats_lock:
+            self._prune_write_fences_locked(
+                max_count=self._max_recent_write_fences - 1
+            )
+            if len(self._write_fences) >= self._max_recent_write_fences:
+                raise RuntimeError(
+                    "too many unfinished block-disk write fences"
+                )
+            self._write_fence_seq += 1
+            fence_id = f"block-write-{self._write_fence_seq:016x}"
+            self._write_fences[fence_id] = {
+                "fence_id": fence_id,
+                "request_id": normalized_request_id,
+                "expected": 0,
+                "queued": 0,
+                "completed": 0,
+                "failed": 0,
+                "dropped": 0,
+                "retained": 0,
+                "sealed": False,
+                "seal_enqueued": False,
+                "seal_failed": False,
+                "producer_aborted": False,
+                "post_eviction_complete": False,
+                "completion_generation": None,
+                "_queued_hashes": [],
+                "_active": 0,
+            }
+        return fence_id
+
+    def _prune_write_fences_locked(
+        self,
+        *,
+        max_count: Optional[int] = None,
+    ) -> None:
+        """Bound retained telemetry without discarding unfinished fences."""
+        limit = (
+            self._max_recent_write_fences
+            if max_count is None
+            else max(0, int(max_count))
+        )
+        while len(self._write_fences) > limit:
+            removable = next(
+                (
+                    fence_id
+                    for fence_id, state in self._write_fences.items()
+                    if state.get("post_eviction_complete")
+                    or state.get("seal_failed")
+                ),
+                None,
+            )
+            if removable is None:
+                break
+            self._write_fences.pop(removable, None)
+
+    def _write_fence_expected(self, fence_id: Optional[str]) -> bool:
+        if not fence_id:
+            return False
+        with self._stats_lock:
+            state = self._write_fences.get(fence_id)
+            if (
+                state is None
+                or state.get("sealed")
+                or state.get("post_eviction_complete")
+                or state.get("seal_failed")
+            ):
+                return False
+            state["expected"] += 1
+            state["_active"] = int(state.get("_active") or 0) + 1
+            return True
+
+    def _write_fence_ready_locked(self, state: Dict[str, Any]) -> bool:
+        accounted = (
+            int(state.get("queued") or 0)
+            + int(state.get("failed") or 0)
+            + int(state.get("dropped") or 0)
+        )
+        return (
+            int(state.get("_active") or 0) <= 0
+            and accounted >= int(state.get("expected") or 0)
+        )
+
+    def _write_fence_queue_result(
+        self,
+        fence_id: Optional[str],
+        *,
+        block_hash: Optional[bytes] = None,
+        failed: bool = False,
+        dropped: bool = False,
+    ) -> None:
+        if not fence_id:
+            return
+        should_enqueue_fence = False
+        with self._stats_lock:
+            state = self._write_fences.get(fence_id)
+            if state is None or state.get("post_eviction_complete"):
+                return
+            if dropped:
+                state["dropped"] += 1
+            elif failed:
+                state["failed"] += 1
+            else:
+                state["queued"] += 1
+                if block_hash:
+                    state["_queued_hashes"].append(bytes(block_hash))
+            if int(state.get("_active") or 0) > 0:
+                state["_active"] = int(state.get("_active") or 0) - 1
+            should_enqueue_fence = (
+                bool(state.get("sealed"))
+                and not state.get("seal_enqueued")
+                and not state.get("seal_failed")
+                and self._write_fence_ready_locked(state)
+            )
+        if should_enqueue_fence:
+            self._enqueue_write_fence_sentinel(str(fence_id))
+
+    def _write_fence_completion(
+        self,
+        fence_id: Optional[str],
+        *,
+        failed: bool,
+    ) -> None:
+        if not fence_id:
+            return
+        with self._stats_lock:
+            state = self._write_fences.get(fence_id)
+            if state is None:
+                return
+            if failed:
+                state["failed"] += 1
+            else:
+                state["completed"] += 1
+
+    def seal_write_fence(
+        self,
+        fence_id: str,
+        *,
+        producer_aborted: bool = False,
+    ) -> bool:
+        """Queue a non-blocking post-eviction completion sentinel."""
+        should_enqueue = False
+        with self._stats_lock:
+            state = self._write_fences.get(fence_id)
+            if state is None or state.get("sealed"):
+                return False
+            state["sealed"] = True
+            state["producer_aborted"] = bool(producer_aborted)
+            should_enqueue = self._write_fence_ready_locked(state)
+        if not should_enqueue:
+            return True
+        return self._enqueue_write_fence_sentinel(fence_id)
+
+    def _enqueue_write_fence_sentinel(self, fence_id: str) -> bool:
+        try:
+            self._write_queue.put_nowait(("__fence__", fence_id, 0))
+        except queue.Full:
+            with self._stats_lock:
+                state = self._write_fences.get(fence_id)
+                if state is not None:
+                    state["seal_failed"] = True
+            logger.warning(
+                "BlockDiskStore write queue full; request fence %s was not queued",
+                fence_id,
+            )
+            return False
+        with self._stats_lock:
+            state = self._write_fences.get(fence_id)
+            if state is not None:
+                state["seal_enqueued"] = True
+        return True
+
     def write_block_async(
         self,
         block_hash: bytes,
         cache_data: List[Tuple],
         token_count: int,
+        *,
+        request_id: Optional[str] = None,
+        fence_id: Optional[str] = None,
     ) -> bool:
         """
         Queue a block for background writing to disk. Non-blocking.
@@ -627,12 +817,35 @@ class BlockDiskStore:
             block_hash: Chain hash (BlockHash bytes)
             cache_data: CacheBlock.cache_data — list of typed tuples per layer
             token_count: Number of tokens in this block
+            request_id: Scheduler request ID associated with ``fence_id``.
+            fence_id: Opaque ID returned by :meth:`begin_write_fence`.
         """
+        tracked = self._write_fence_expected(fence_id)
+        if fence_id and not tracked:
+            logger.warning(
+                "Rejecting block write for unknown or sealed fence %s",
+                fence_id,
+            )
+            return False
+        if tracked:
+            with self._stats_lock:
+                state = self._write_fences.get(str(fence_id))
+                if state is None or state.get("request_id") != str(request_id or ""):
+                    if state is not None:
+                        state["failed"] += 1
+                    logger.warning(
+                        "Rejecting block write whose request ID does not match "
+                        "fence %s",
+                        fence_id,
+                    )
+                    return False
         if not HAS_MLX:
+            self._write_fence_queue_result(fence_id, failed=True)
             return False
 
         if _cache_data_has_tq(cache_data) and not self._allow_tq_native:
             logger.debug("Skipping TQ-native block write because persisted TQ is disabled")
+            self._write_fence_queue_result(fence_id, failed=True)
             return False
 
         if not self._allow_tq_native:
@@ -653,6 +866,7 @@ class BlockDiskStore:
         try:
             tensors, dtype, num_layers = _serialize_block(cache_data)
             if num_layers == 0:
+                self._write_fence_queue_result(fence_id, failed=True)
                 return False
 
             # Normalize all tensors to MLX arrays that mx.save_safetensors
@@ -687,14 +901,23 @@ class BlockDiskStore:
             mx.save_safetensors(str(tmp_path), tensors)
         except Exception as e:
             logger.debug(f"Pre-serialize/write failed for block {hash_hex[:12]}: {e}")
+            self._write_fence_queue_result(fence_id, failed=True)
             return False
 
         # Queue only the rename + DB update for the background thread.
         # No MLX operations happen after this point.
         try:
             self._write_queue.put_nowait(
-                (block_hash, str(tmp_path), dtype, num_layers, token_count)
+                (
+                    block_hash,
+                    str(tmp_path),
+                    dtype,
+                    num_layers,
+                    token_count,
+                    fence_id,
+                )
             )
+            self._write_fence_queue_result(fence_id, block_hash=block_hash)
             if _cache_data_has_tq(cache_data):
                 with self._stats_lock:
                     self.tq_native_writes += 1
@@ -705,6 +928,7 @@ class BlockDiskStore:
                 Path(tmp_path).unlink(missing_ok=True)
             except Exception:
                 pass
+            self._write_fence_queue_result(fence_id, dropped=True)
             logger.warning("BlockDiskStore write queue full (1000), dropping block write")
             return False
 
@@ -790,27 +1014,144 @@ class BlockDiskStore:
                     except queue.Empty:
                         break
 
-                for item in batch:
-                    try:
-                        if item[0] == "__access__":
-                            _, hash_hex, ts = item
-                            self._update_access(write_conn, hash_hex, ts)
-                        elif item[0] == "__cleanup__":
-                            _, hash_hex, _ = item
-                            self._cleanup_entry(write_conn, hash_hex)
-                        else:
-                            block_hash, tmp_path_str, dtype, num_layers, token_count = item
-                            self._write_block(write_conn, block_hash, tmp_path_str, dtype, num_layers, token_count)
-                    except Exception as e:
-                        h = item[0] if isinstance(item[0], str) else (
-                            item[0].hex()[:12] if isinstance(item[0], bytes) else "?"
-                        )
-                        logger.warning(f"Background writer error ({h}): {e}")
-
-                # Evict if over budget
-                self._maybe_evict(write_conn)
+                self._process_write_batch(write_conn, batch)
         finally:
             write_conn.close()
+
+    def _process_write_batch(
+        self,
+        write_conn: sqlite3.Connection,
+        batch: List[Tuple[Any, ...]],
+    ) -> None:
+        """Persist one drained batch and settle request fences after eviction."""
+        block_items = [
+            item
+            for item in batch
+            if item
+            and not isinstance(item[0], str)
+        ]
+        with self._stats_lock:
+            self._write_inflight += len(block_items)
+
+        fences_to_finalize: List[str] = []
+        try:
+            for item in batch:
+                fence_id: Optional[str] = None
+                try:
+                    if item[0] == "__access__":
+                        _, hash_hex, ts = item
+                        self._update_access(write_conn, hash_hex, ts)
+                    elif item[0] == "__cleanup__":
+                        _, hash_hex, _ = item
+                        self._cleanup_entry(write_conn, hash_hex)
+                    elif item[0] == "__fence__":
+                        _, fence_id, _ = item
+                        fences_to_finalize.append(str(fence_id))
+                    else:
+                        (
+                            block_hash,
+                            tmp_path_str,
+                            dtype,
+                            num_layers,
+                            token_count,
+                            *metadata,
+                        ) = item
+                        fence_id = (
+                            str(metadata[0])
+                            if metadata and metadata[0] is not None
+                            else None
+                        )
+                        self._write_block(
+                            write_conn,
+                            block_hash,
+                            tmp_path_str,
+                            dtype,
+                            num_layers,
+                            token_count,
+                        )
+                        self._write_fence_completion(fence_id, failed=False)
+                except Exception as e:
+                    if item and not isinstance(item[0], str):
+                        self._write_fence_completion(fence_id, failed=True)
+                    h = item[0] if isinstance(item[0], str) else (
+                        item[0].hex()[:12] if isinstance(item[0], bytes) else "?"
+                    )
+                    logger.warning(f"Background writer error ({h}): {e}")
+
+            try:
+                # Request fences are intentionally finalized only after this
+                # batch-wide eviction.  This prevents a capacity replacement
+                # from reporting a write as retained before the LRU trim.
+                self._maybe_evict(write_conn)
+            except Exception as exc:
+                logger.warning("Background writer eviction error: %s", exc)
+                for fence_id in fences_to_finalize:
+                    self._fail_write_fence(fence_id, str(exc))
+                return
+
+            for fence_id in fences_to_finalize:
+                try:
+                    self._finalize_write_fence(write_conn, fence_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Background writer fence finalization error (%s): %s",
+                        fence_id,
+                        exc,
+                    )
+                    self._fail_write_fence(fence_id, str(exc))
+        finally:
+            with self._stats_lock:
+                self._write_inflight = max(
+                    0,
+                    self._write_inflight - len(block_items),
+                )
+
+    def _finalize_write_fence(
+        self,
+        write_conn: sqlite3.Connection,
+        fence_id: str,
+    ) -> None:
+        """Record exact-hash retention after the containing batch's eviction."""
+        with self._stats_lock:
+            state = self._write_fences.get(fence_id)
+            if state is None:
+                return
+            if not self._write_fence_ready_locked(state):
+                state["seal_enqueued"] = False
+                return
+            queued_hashes = list(state.get("_queued_hashes") or ())
+
+        retained = 0
+        for block_hash in queued_hashes:
+            hash_hex = block_hash.hex()
+            row = write_conn.execute(
+                "SELECT file_name FROM blocks WHERE block_hash = ?",
+                (hash_hex,),
+            ).fetchone()
+            if row is not None and (self.cache_dir / row[0]).is_file():
+                retained += 1
+
+        with self._stats_lock:
+            state = self._write_fences.get(fence_id)
+            if state is None:
+                return
+            self._write_completion_generation += 1
+            state["retained"] = retained
+            state["post_eviction_complete"] = True
+            state["completion_generation"] = self._write_completion_generation
+            self._prune_write_fences_locked()
+
+    def _fail_write_fence(self, fence_id: str, reason: str) -> None:
+        """Make a fence terminal when the writer cannot certify retention."""
+        with self._stats_lock:
+            state = self._write_fences.get(fence_id)
+            if state is None or state.get("post_eviction_complete"):
+                return
+            self._write_completion_generation += 1
+            state["post_eviction_error"] = str(reason)
+            state["post_eviction_complete"] = True
+            state["completion_generation"] = self._write_completion_generation
+            self._prune_write_fences_locked()
 
     def _update_access(self, conn: sqlite3.Connection, hash_hex: str, ts: float) -> None:
         """Update last_accessed time in the index (background thread only)."""
@@ -960,6 +1301,15 @@ class BlockDiskStore:
         finally:
             conn.close()
         with self._stats_lock:
+            recent_write_fences = []
+            for state in self._write_fences.values():
+                recent_write_fences.append(
+                    {
+                        key: value
+                        for key, value in state.items()
+                        if not key.startswith("_")
+                    }
+                )
             return {
                 "blocks_on_disk": row[0],
                 "disk_size_bytes": row[1],
@@ -974,6 +1324,13 @@ class BlockDiskStore:
                 "tq_native_writes": self.tq_native_writes,
                 "tq_native_hits": self.tq_native_hits,
                 "tq_native_enabled": self._allow_tq_native,
+                "write_pipeline": {
+                    "queue_depth": self._write_queue.qsize(),
+                    "inflight": self._write_inflight,
+                    "writer_alive": self._writer_thread.is_alive(),
+                    "completion_generation": self._write_completion_generation,
+                    "recent_fences": recent_write_fences,
+                },
             }
 
     def partial_token_counts(self, block_size: int) -> List[int]:
@@ -1001,11 +1358,18 @@ class BlockDiskStore:
         import shutil
         # Drain the write queue so the background writer doesn't write
         # blocks we're about to delete
+        drained_fences: set[str] = set()
         while not self._write_queue.empty():
             try:
-                self._write_queue.get_nowait()
+                item = self._write_queue.get_nowait()
             except queue.Empty:
                 break
+            if not item:
+                continue
+            if item[0] == "__fence__" and len(item) > 1:
+                drained_fences.add(str(item[1]))
+            elif not isinstance(item[0], str) and len(item) > 5 and item[5] is not None:
+                drained_fences.add(str(item[5]))
         if self.blocks_dir.exists():
             shutil.rmtree(self.blocks_dir)
             self.blocks_dir.mkdir(parents=True)
@@ -1018,6 +1382,11 @@ class BlockDiskStore:
         with self._stats_lock:
             self.tq_native_writes = 0
             self.tq_native_hits = 0
+            for fence_id, state in self._write_fences.items():
+                if state.get("sealed") and not state.get("post_eviction_complete"):
+                    drained_fences.add(fence_id)
+        for fence_id in drained_fences:
+            self._fail_write_fence(fence_id, "disk cache cleared before fence settled")
         logger.info("Disk cache cleared")
 
     def shutdown(self) -> None:
@@ -1038,16 +1407,7 @@ class BlockDiskStore:
             flush_conn = sqlite3.connect(str(self._db_path), timeout=5.0)
             flush_conn.execute("PRAGMA journal_mode=WAL")
             try:
-                for item in remaining:
-                    try:
-                        if item[0] == "__access__":
-                            self._update_access(flush_conn, item[1], item[2])
-                        elif item[0] == "__cleanup__":
-                            self._cleanup_entry(flush_conn, item[1])
-                        elif isinstance(item[0], bytes):
-                            self._write_block(flush_conn, item[0], item[1], item[2], item[3], item[4])
-                    except Exception:
-                        pass
+                self._process_write_batch(flush_conn, remaining)
             finally:
                 flush_conn.close()
         # Close thread-local read connection (current thread only)

@@ -6,8 +6,11 @@ and last_request_time fields by patching server globals directly.
 """
 
 import asyncio
+import hashlib
+import json
 import platform
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -31,6 +34,218 @@ class TestHealthEndpoint:
         from vmlx_engine.server import app
 
         assert "/health.mtp" in {route.path for route in app.routes}
+
+    def test_health_runtime_provenance_is_path_free_and_same_process(self):
+        """Private gates can bind the listener without exposing absolute paths."""
+        import os
+
+        from vmlx_engine import server
+
+        with (
+            patch.object(server, "_engine", None),
+            patch.object(server, "_model_name", None),
+            patch.object(server, "_model_load_error", None),
+            patch.object(server, "_mcp_manager", None),
+            patch.object(server, "_jang_metadata", None),
+            patch.object(server, "_last_request_time", 0.0),
+        ):
+            result = _run(server.health())
+
+        provenance = result["runtime_provenance"]
+        assert provenance["pid"] == os.getpid()
+        assert provenance["server_module_relpath"] == "vmlx_engine/server.py"
+        assert provenance["package_init_relpath"] == "vmlx_engine/__init__.py"
+        assert provenance["python_source_file_count"] > 0
+        assert provenance["python_source_read_error_count"] == 0
+        assert len(provenance["python_source_tree_sha256"]) == 64
+        assert len(provenance["server_module_sha256"]) == 64
+        assert (
+            provenance["model_bundle_provenance"]["directory_state"]
+            == "model_not_loaded"
+        )
+        cache_attestation = provenance["cache_topology_provenance"]
+        assert cache_attestation["canonical_sha256"] == (
+            server._canonical_attestation_sha256(cache_attestation["configuration"])
+        )
+        assert all("/Users/" not in str(value) for value in provenance.values())
+
+    def test_health_bundle_attestation_hashes_observed_loaded_config_files(
+        self,
+        tmp_path,
+    ):
+        """The listener hashes the loaded bundle, not a harness-declared id."""
+        from vmlx_engine import server
+
+        config = tmp_path / "config.json"
+        generation = tmp_path / "generation_config.json"
+        config.write_text('{"model_type":"laguna"}\n')
+        generation.write_text('{"temperature":0.6}\n')
+
+        mock_engine = MagicMock()
+        mock_engine.get_stats.return_value = {"engine_type": "simple"}
+        mock_engine.is_mllm = False
+        common_patches = (
+            patch.object(server, "_engine", mock_engine),
+            patch.object(server, "_model_name", "test-model"),
+            patch.object(server, "_model_path", str(tmp_path)),
+            patch.object(server, "_model_load_error", None),
+            patch.object(server, "_mcp_manager", None),
+            patch.object(server, "_jang_metadata", None),
+            patch.object(server, "_last_request_time", 0.0),
+            patch.object(server, "_get_scheduler", return_value=None),
+            patch.object(server, "_model_quantization_status", return_value={}),
+            patch.object(server, "_model_acceleration_status", return_value={}),
+            patch.object(
+                server,
+                "_model_mtp_status_with_loaded_runtime",
+                return_value={},
+            ),
+            patch.object(
+                server,
+                "_model_effective_defaults_status",
+                return_value={
+                    "sampling_defaults": {},
+                    "effective_defaults": {},
+                },
+            ),
+            patch.object(server, "_model_routing_status", return_value={}),
+            patch.object(
+                server,
+                "_turboquant_kv_cache_status",
+                return_value={"enabled": False},
+            ),
+            patch.object(server, "_current_model_config", return_value=None),
+            patch.object(server, "_native_cache_status", return_value={}),
+        )
+        for context in common_patches:
+            context.start()
+        try:
+            first = _run(server.health())["runtime_provenance"][
+                "model_bundle_provenance"
+            ]
+            config.write_text('{"model_type":"laguna","revision":2}\n')
+            second = _run(server.health())["runtime_provenance"][
+                "model_bundle_provenance"
+            ]
+        finally:
+            for context in reversed(common_patches):
+                context.stop()
+
+        assert first["directory_state"] == "available"
+        assert set(first["files"]) == set(server._BUNDLE_ATTESTATION_FILENAMES)
+        assert first["files"]["config.json"] == {
+            "state": "present",
+            "size_bytes": len(b'{"model_type":"laguna"}\n'),
+            "sha256": hashlib.sha256(b'{"model_type":"laguna"}\n').hexdigest(),
+        }
+        assert first["files"]["generation_config.json"]["state"] == "present"
+        assert first["files"]["jang_config.json"] == {"state": "missing"}
+        assert first["aggregate_sha256"] != second["aggregate_sha256"]
+        assert (
+            first["files"]["config.json"]["sha256"]
+            != (second["files"]["config.json"]["sha256"])
+        )
+        assert str(tmp_path) not in json.dumps(first, sort_keys=True)
+
+    def test_cache_topology_attestation_is_canonical_and_change_sensitive(self):
+        """Mapping order is irrelevant while an effective topology change is not."""
+        from vmlx_engine import server
+
+        first_configuration = {
+            "schema": "vmlx-cache-topology-v1",
+            "configured": {
+                "use_paged_cache": True,
+                "kv_cache_quantization": "q4",
+            },
+            "instantiated": {
+                "block_disk_l2": True,
+                "paged_ram_enabled": True,
+            },
+        }
+        reordered_configuration = {
+            "instantiated": {
+                "paged_ram_enabled": True,
+                "block_disk_l2": True,
+            },
+            "configured": {
+                "kv_cache_quantization": "q4",
+                "use_paged_cache": True,
+            },
+            "schema": "vmlx-cache-topology-v1",
+        }
+        changed_configuration = {
+            **first_configuration,
+            "instantiated": {
+                **first_configuration["instantiated"],
+                "paged_ram_enabled": False,
+            },
+        }
+
+        first = server._cache_topology_attestation(first_configuration)
+        reordered = server._cache_topology_attestation(reordered_configuration)
+        changed = server._cache_topology_attestation(changed_configuration)
+
+        assert first["canonical_sha256"] == reordered["canonical_sha256"]
+        assert first["canonical_sha256"] != changed["canonical_sha256"]
+
+    def test_effective_cache_topology_reads_instantiated_scheduler_state(self):
+        """The attestation changes with real manager state, not a caller label."""
+        from vmlx_engine import server
+
+        disk_store = SimpleNamespace(max_size_bytes=10 * 1024**3)
+        paged = SimpleNamespace(
+            _disk_store=disk_store,
+            block_size=64,
+            max_blocks=1000,
+            max_resident_bytes=4 * 1024**3,
+            disk_only=False,
+            paged_frugal=False,
+            ram_mirror_policy="resident",
+        )
+        scheduler = SimpleNamespace(
+            config=SimpleNamespace(
+                enable_prefix_cache=True,
+                use_paged_cache=True,
+                enable_block_disk_cache=True,
+                block_disk_cache_max_gb=10.0,
+                kv_cache_quantization="q4",
+                kv_cache_group_size=64,
+            ),
+            block_aware_cache=object(),
+            memory_aware_cache=None,
+            prefix_cache=None,
+            paged_cache_manager=paged,
+            disk_cache=None,
+            _ssm_companion_disk_store=None,
+        )
+        health_status = {
+            "kv_cache_quantization": {"enabled": True, "mode": "live", "bits": 4},
+            "turboquant_kv_cache": {
+                "enabled": True,
+                "storage_encode_enabled": True,
+                "storage_key_bits": 4,
+            },
+            "native_cache": {
+                "schema": "plain_kv_v1",
+                "cache_type": "paged_kv",
+                "prefix": True,
+                "paged": True,
+                "block_disk_l2": True,
+            },
+        }
+
+        first = server._cache_topology_attestation(
+            server._cache_topology_configuration(scheduler, health_status)
+        )
+        paged.disk_only = True
+        paged.ram_mirror_policy = "disk_only"
+        second = server._cache_topology_attestation(
+            server._cache_topology_configuration(scheduler, health_status)
+        )
+
+        assert first["configuration"]["instantiated"]["paged_ram_enabled"] is True
+        assert second["configuration"]["instantiated"]["paged_ram_enabled"] is False
+        assert first["canonical_sha256"] != second["canonical_sha256"]
 
     def test_health_no_model_loaded(self):
         """When _engine is None, health returns status='no_model'."""

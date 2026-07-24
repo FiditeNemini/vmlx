@@ -44,6 +44,7 @@ import asyncio
 import contextvars
 import base64
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -61,6 +62,7 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +149,388 @@ from .tool_parsers.abstract_tool_parser import generate_tool_id
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _sha256_file(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _python_source_tree_digest(root: Path) -> tuple[str, int, int]:
+    digest = hashlib.sha256()
+    paths = sorted(root.rglob("*.py"))
+    count = 0
+    read_errors = 0
+    for path in paths:
+        relative = path.relative_to(root.parent).as_posix().encode()
+        try:
+            content = path.read_bytes()
+        except OSError:
+            digest.update(relative)
+            digest.update(b"\0UNREADABLE\0")
+            read_errors += 1
+            continue
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+        count += 1
+    return digest.hexdigest(), count, read_errors
+
+
+_SERVER_MODULE_PATH = Path(__file__).resolve()
+_PACKAGE_INIT_PATH = _SERVER_MODULE_PATH.with_name("__init__.py")
+(
+    _PYTHON_SOURCE_TREE_SHA256,
+    _PYTHON_SOURCE_FILE_COUNT,
+    _PYTHON_SOURCE_READ_ERROR_COUNT,
+) = _python_source_tree_digest(_SERVER_MODULE_PATH.parent)
+_RUNTIME_PROVENANCE = {
+    # Deliberately expose only relative names and fingerprints.  This lets a
+    # private live gate bind /health to the code serving the request without
+    # leaking user/home/model paths on a LAN-enabled endpoint.
+    "server_module_relpath": "vmlx_engine/server.py",
+    "server_module_sha256": _sha256_file(_SERVER_MODULE_PATH),
+    "package_init_relpath": "vmlx_engine/__init__.py",
+    "package_init_sha256": _sha256_file(_PACKAGE_INIT_PATH),
+    "python_source_tree_sha256": _PYTHON_SOURCE_TREE_SHA256,
+    "python_source_file_count": _PYTHON_SOURCE_FILE_COUNT,
+    "python_source_read_error_count": _PYTHON_SOURCE_READ_ERROR_COUNT,
+    "python_executable_fingerprint_sha256": hashlib.sha256(
+        str(Path(sys.executable).absolute()).encode()
+    ).hexdigest(),
+}
+
+_BUNDLE_ATTESTATION_FILENAMES = (
+    "config.json",
+    "generation_config.json",
+    "jang_config.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+)
+
+_CACHE_SCHEDULER_CONFIG_ATTESTATION_FIELDS = (
+    "max_num_seqs",
+    "max_num_batched_tokens",
+    "prefill_batch_size",
+    "completion_batch_size",
+    "prefill_step_size",
+    "enable_prefix_cache",
+    "prefix_cache_size",
+    "prefix_cache_max_bytes",
+    "prefix_cache_default_type",
+    "use_memory_aware_cache",
+    "cache_memory_mb",
+    "cache_memory_percent",
+    "cache_ttl_minutes",
+    "use_paged_cache",
+    "paged_cache_block_size",
+    "max_cache_blocks",
+    "kv_cache_quantization",
+    "kv_cache_group_size",
+    "kv_cache_quantization_explicit",
+    "enable_disk_cache",
+    "disk_cache_max_gb",
+    "smelt_enabled",
+    "smelt_pct",
+    "enable_block_disk_cache",
+    "block_disk_cache_max_gb",
+    "ssm_state_cache_size",
+    "ssm_state_cache_max_mb",
+)
+
+_TURBOQUANT_ATTESTATION_FIELDS = (
+    "enabled",
+    "objects_active",
+    "live_encode_enabled",
+    "compress_after",
+    "stored_prefix_quantization",
+    "storage_encode_enabled",
+    "storage_key_bits",
+    "storage_value_bits",
+    "key_bits_values",
+    "value_bits_values",
+    "auto_policy",
+    "default_bits",
+    "critical_bits",
+    "critical_layers",
+    "batch_api",
+    "single_sequence_only",
+    "effective_max_num_seqs",
+    "effective_prefill_batch_size",
+    "effective_completion_batch_size",
+)
+
+_KV_QUANTIZATION_ATTESTATION_FIELDS = (
+    "enabled",
+    "mode",
+    "bits",
+    "group_size",
+    "stored_prefix_quantization",
+    "key_bits",
+    "value_bits",
+    "auto_policy",
+    "live_encode_enabled",
+)
+
+_NATIVE_CACHE_ATTESTATION_FIELDS = (
+    "family",
+    "schema",
+    "cache_type",
+    "cache_subtype",
+    "components",
+    "generic_turboquant_kv",
+    "pool_quant",
+    "layer_cache_roles",
+    "cache_store_policy",
+    "decode_activation_order",
+    "prefix_configured",
+    "prefix",
+    "paged",
+    "block_disk_only",
+    "prompt_disk_l2_configured",
+    "block_disk_l2_configured",
+    "prompt_disk_l2",
+    "block_disk_l2",
+    "layers",
+    "compress_ratios",
+    "compress_ratio_counts",
+    "sliding_window",
+    "sliding_windows",
+    "sparse_msa_layers",
+    "dense_kv_layers",
+    "storage_quantization",
+    "live_attention_tq_kv",
+    "attention_kv_storage_quantization",
+    "kv_layer_indices",
+)
+
+
+def _canonical_attestation_sha256(value: Any) -> str:
+    """Hash a deterministic JSON representation of path-free runtime facts."""
+    payload = json.dumps(
+        _attestation_json_value(value),
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _attestation_json_value(value: Any) -> Any:
+    """Normalize diagnostics without serializing paths or arbitrary objects."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return "<absolute-path-redacted>" if os.path.isabs(value) else value
+    if isinstance(value, Enum):
+        return _attestation_json_value(value.value)
+    if isinstance(value, dict):
+        return {
+            str(key): _attestation_json_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_attestation_json_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        normalized = [_attestation_json_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(
+                item,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    return {"unsupported_type": type(value).__name__}
+
+
+def _bundle_configuration_attestation(
+    bundle_path: str | None,
+    *,
+    model_loaded: bool,
+) -> dict[str, Any]:
+    """Fingerprint the configuration files used by the loaded local bundle.
+
+    The loader-owned ``_model_path`` is the same value passed into the engine at
+    load time.  Hashing its files at the health boundary observes the active
+    bundle instead of trusting a release harness's caller-declared identity.
+    Only fixed basenames, sizes, and digests are returned; filesystem paths and
+    file contents never leave the process.
+    """
+    files: dict[str, dict[str, Any]] = {
+        name: {"state": "missing"} for name in _BUNDLE_ATTESTATION_FILENAMES
+    }
+    directory_state = "model_not_loaded"
+    bundle_root: Path | None = None
+    if model_loaded and bundle_path:
+        try:
+            candidate = Path(bundle_path).expanduser().resolve(strict=True)
+            if candidate.is_dir():
+                bundle_root = candidate
+                directory_state = "available"
+            else:
+                directory_state = "not_local_directory"
+        except OSError:
+            directory_state = "not_local_directory"
+
+    if bundle_root is not None:
+        for name in _BUNDLE_ATTESTATION_FILENAMES:
+            candidate = bundle_root / name
+            try:
+                if not candidate.is_file():
+                    continue
+                data = candidate.read_bytes()
+            except OSError:
+                files[name] = {"state": "unreadable"}
+                continue
+            files[name] = {
+                "state": "present",
+                "size_bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+
+    observed = {
+        "schema": "vmlx-bundle-config-v1",
+        "directory_state": directory_state,
+        "files": files,
+    }
+    aggregate_sha256 = _canonical_attestation_sha256(observed)
+    return {
+        **observed,
+        "aggregate_sha256": aggregate_sha256,
+        "fingerprint_sha256": aggregate_sha256,
+    }
+
+
+def _attestation_mapping_subset(
+    value: Any,
+    fields: tuple[str, ...],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        field: _attestation_json_value(value[field])
+        for field in fields
+        if field in value
+    }
+
+
+def _cache_topology_configuration(
+    scheduler: Any | None,
+    health_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Collect path-free configured and instantiated cache topology facts."""
+    scheduler_config = getattr(scheduler, "config", None)
+    configured: dict[str, Any] = {}
+    if scheduler_config is not None:
+        for field in _CACHE_SCHEDULER_CONFIG_ATTESTATION_FIELDS:
+            if not hasattr(scheduler_config, field):
+                continue
+            value = getattr(scheduler_config, field)
+            if isinstance(value, Enum):
+                value = value.value
+            if value is None or isinstance(value, (bool, int, float, str)):
+                configured[field] = value
+
+    paged = getattr(scheduler, "paged_cache_manager", None)
+    block_disk = getattr(paged, "_disk_store", None) if paged is not None else None
+    prompt_disk = getattr(scheduler, "disk_cache", None)
+    ssm_disk = getattr(scheduler, "_ssm_companion_disk_store", None)
+    instantiated = {
+        "scheduler_present": scheduler is not None,
+        "scheduler_class": type(scheduler).__name__ if scheduler is not None else None,
+        "block_aware_prefix": bool(
+            scheduler is not None
+            and getattr(scheduler, "block_aware_cache", None) is not None
+        ),
+        "memory_aware_prefix": bool(
+            scheduler is not None
+            and getattr(scheduler, "memory_aware_cache", None) is not None
+        ),
+        "legacy_prefix": bool(
+            scheduler is not None
+            and getattr(scheduler, "prefix_cache", None) is not None
+        ),
+        "paged_manager": paged is not None,
+        "paged_ram_enabled": bool(
+            paged is not None and not bool(getattr(paged, "disk_only", False))
+        ),
+        "block_disk_only": bool(
+            paged is not None and getattr(paged, "disk_only", False)
+        ),
+        "paged_frugal": bool(
+            paged is not None and getattr(paged, "paged_frugal", False)
+        ),
+        "ram_mirror_policy": (
+            str(getattr(paged, "ram_mirror_policy", "resident"))
+            if paged is not None
+            else None
+        ),
+        "block_disk_l2": block_disk is not None,
+        "prompt_disk_l2": prompt_disk is not None,
+        "ssm_companion_l2": ssm_disk is not None,
+        "paged_block_size": (
+            int(getattr(paged, "block_size", 0) or 0)
+            if paged is not None
+            else None
+        ),
+        "paged_max_blocks": (
+            int(getattr(paged, "max_blocks", 0) or 0)
+            if paged is not None
+            else None
+        ),
+        "paged_max_resident_bytes": (
+            int(getattr(paged, "max_resident_bytes", 0) or 0)
+            if paged is not None
+            else None
+        ),
+        "block_disk_max_size_bytes": (
+            int(getattr(block_disk, "max_size_bytes", 0) or 0)
+            if block_disk is not None
+            else None
+        ),
+        "prompt_disk_max_size_bytes": (
+            int(getattr(prompt_disk, "max_size_bytes", 0) or 0)
+            if prompt_disk is not None
+            else None
+        ),
+    }
+    return {
+        "schema": "vmlx-cache-topology-v1",
+        "configured": configured,
+        "instantiated": instantiated,
+        "kv_cache_quantization": _attestation_mapping_subset(
+            health_result.get("kv_cache_quantization"),
+            _KV_QUANTIZATION_ATTESTATION_FIELDS,
+        ),
+        "turboquant_kv_cache": _attestation_mapping_subset(
+            health_result.get("turboquant_kv_cache"),
+            _TURBOQUANT_ATTESTATION_FIELDS,
+        ),
+        "native_cache": _attestation_mapping_subset(
+            health_result.get("native_cache"),
+            _NATIVE_CACHE_ATTESTATION_FIELDS,
+        ),
+    }
+
+
+def _cache_topology_attestation(
+    configuration: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a self-verifying canonical hash for a path-free topology record."""
+    normalized = _attestation_json_value(configuration)
+    canonical_sha256 = _canonical_attestation_sha256(normalized)
+    return {
+        "schema": "vmlx-cache-topology-attestation-v1",
+        "configuration": normalized,
+        "canonical_sha256": canonical_sha256,
+        "fingerprint_sha256": canonical_sha256,
+    }
 
 # Global engine instance
 _engine: BaseEngine | None = None
@@ -9579,6 +9963,18 @@ async def health():
         if native_cache:
             result["native_cache"] = native_cache
 
+    model_loaded = bool(result.get("model_loaded"))
+    result["runtime_provenance"] = {
+        **_RUNTIME_PROVENANCE,
+        "pid": os.getpid(),
+        "model_bundle_provenance": _bundle_configuration_attestation(
+            _model_path,
+            model_loaded=model_loaded,
+        ),
+        "cache_topology_provenance": _cache_topology_attestation(
+            _cache_topology_configuration(scheduler, result)
+        ),
+    }
     return result
 
 

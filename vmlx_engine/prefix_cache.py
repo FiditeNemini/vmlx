@@ -2352,6 +2352,58 @@ class BlockAwarePrefixCache:
         cache_extra_keys: Optional[Any] = None,
         store_cumulative_state: bool = True,
     ) -> Optional[BlockTable]:
+        """Store cache data and deterministically terminate any begun L2 fence."""
+        write_fence: Dict[str, Any] = {}
+        producer_aborted = False
+        try:
+            return self._store_cache_impl(
+                request_id,
+                tokens,
+                cache_data,
+                cache_type=cache_type,
+                cache_extra_keys=cache_extra_keys,
+                store_cumulative_state=store_cumulative_state,
+                _write_fence=write_fence,
+            )
+        except BaseException:
+            producer_aborted = True
+            raise
+        finally:
+            disk_store = write_fence.get("disk_store")
+            fence_id = write_fence.get("fence_id")
+            if disk_store is not None and fence_id is not None:
+                try:
+                    sealed = disk_store.seal_write_fence(
+                        fence_id,
+                        producer_aborted=producer_aborted,
+                    )
+                except Exception as fence_error:
+                    sealed = False
+                    logger.warning(
+                        "Block disk: could not terminate request write fence %s "
+                        "for %s: %s",
+                        fence_id,
+                        request_id,
+                        fence_error,
+                    )
+                if not sealed:
+                    logger.warning(
+                        "Block disk: could not seal request write fence %s for %s",
+                        fence_id,
+                        request_id,
+                    )
+
+    def _store_cache_impl(
+        self,
+        request_id: str,
+        tokens: List[int],
+        cache_data: List[Any],
+        cache_type: str = "assistant",
+        cache_extra_keys: Optional[Any] = None,
+        store_cumulative_state: bool = True,
+        *,
+        _write_fence: Dict[str, Any],
+    ) -> Optional[BlockTable]:
         """
         Store computed cache for future reuse.
 
@@ -2505,6 +2557,43 @@ class BlockAwarePrefixCache:
                 )
 
         disk_store = self.paged_cache._disk_store  # May be None
+        disk_write_fence_id: Optional[str] = None
+        if disk_store is not None:
+            begin_write_fence = getattr(disk_store, "begin_write_fence", None)
+            if callable(begin_write_fence):
+                try:
+                    disk_write_fence_id = str(begin_write_fence(request_id))
+                    _write_fence["disk_store"] = disk_store
+                    _write_fence["fence_id"] = disk_write_fence_id
+                except Exception as fence_error:
+                    logger.warning(
+                        "Block disk: could not begin request write fence for %s: %s",
+                        request_id,
+                        fence_error,
+                    )
+
+        def _write_block_to_disk(
+            block_hash: bytes,
+            block_data: List[Tuple[Any, ...]],
+            token_count: int,
+        ) -> bool:
+            if disk_store is None:
+                return False
+            fence_kwargs: Dict[str, Any] = {}
+            if disk_write_fence_id is not None:
+                fence_kwargs = {
+                    "request_id": request_id,
+                    "fence_id": disk_write_fence_id,
+                }
+            return bool(
+                disk_store.write_block_async(
+                    block_hash,
+                    block_data,
+                    token_count,
+                    **fence_kwargs,
+                )
+            )
+
         _disk_only = bool(getattr(self.paged_cache, "disk_only", False))
         # Paged RAM and block-disk L2 are separate cache tiers.  The manager
         # defaults ordinary Paged On sessions to a resident L1 write-through
@@ -2977,7 +3066,7 @@ class BlockAwarePrefixCache:
                                     f"{block.block_id} ({_layer_summary}, "
                                     f"{len(block_tokens)} tokens)"
                                 )
-                                if disk_store.write_block_async(
+                                if _write_block_to_disk(
                                     block_chain_hash,
                                     np_block,
                                     len(block_tokens),
@@ -3031,7 +3120,7 @@ class BlockAwarePrefixCache:
             )
             for block_hash, block_data, tok_count in pending_disk_writes:
                 try:
-                    if disk_store.write_block_async(block_hash, block_data, tok_count):
+                    if _write_block_to_disk(block_hash, block_data, tok_count):
                         disk_only_queued_hashes.add(block_hash)
                 except Exception as _wbe:
                     logger.warning(
@@ -3146,6 +3235,10 @@ class BlockAwarePrefixCache:
             self.paged_cache.enforce_byte_budget()
 
         return block_table
+
+    # Preserve source-introspection guards that validate the bounded M3/TQ
+    # implementation rather than this lifecycle wrapper.
+    store_cache.__wrapped__ = _store_cache_impl
 
     @staticmethod
     def _is_positional_cache(state_tuple, class_name: str = "") -> bool:
@@ -4195,7 +4288,6 @@ class BlockAwarePrefixCache:
                     sub_qkv_meta = None
                     terminal_cca_state = None
                     terminal_cca_meta = ""
-                    terminal_cache_meta = {}
                     for zentry in zaya_cca_entries:
                         if len(zentry) < 2:
                             continue
@@ -4212,11 +4304,6 @@ class BlockAwarePrefixCache:
                         if len(zentry) > 2 and zentry[2] is not None:
                             terminal_cca_state = _copy_mlx_tree(zentry[2])
                             terminal_cca_meta = zentry[3] if len(zentry) > 3 else ""
-                            terminal_cache_meta = (
-                                zentry[4]
-                                if len(zentry) > 4 and isinstance(zentry[4], dict)
-                                else {}
-                            )
 
                     if terminal_cca_state is None:
                         logger.warning(

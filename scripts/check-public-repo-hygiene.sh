@@ -27,11 +27,13 @@ forbidden=$(
           next
         }
       /^notes\// ||
+      /^PLANS\// ||
       /^build\// ||
       /(^|\/)node_modules\// ||
       /^panel\/docs\/plans\// ||
       /^tests\/e2e\/results\// ||
       /^tests\/e2e\/panel-driver\/node_modules\// ||
+      /^tests\/benchmark\/outputs\// ||
       /^tests\/e2e\/(AUDIT-REPORT|MATRIX|UI-SUITE)\.md$/ ||
       /^nohup\.out$/ ||
       /^trace_err2?\.txt$/ ||
@@ -43,6 +45,7 @@ forbidden=$(
       /^\.claude\// ||
       /^\.codex\// ||
       /^\.sisyphus\// ||
+      /^\.factory\// ||
       /(^|\/)(screenshots?|screen-recordings?|cdp-captures?|raw-sse|runtime-logs?)(\/|$)/ {
         print
       }

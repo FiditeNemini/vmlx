@@ -153,10 +153,13 @@ CODEX.md
 .claude/
 .codex/
 .sisyphus/
+.factory/
 notes/
+PLANS/
 panel/docs/plans/
 tests/e2e/results/
 tests/e2e/panel-driver/node_modules/
+tests/benchmark/outputs/
 tests/e2e/AUDIT-REPORT.md
 tests/e2e/MATRIX.md
 tests/e2e/UI-SUITE.md

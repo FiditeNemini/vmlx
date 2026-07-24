@@ -80,4 +80,16 @@ if [ -n "$private_strings" ]; then
   exit 1
 fi
 
+invalid_commit_emails=$(
+  git log --all --format='%ae%n%ce' |
+    awk '$0 !~ /^[^[:space:]<>@]+@[^[:space:]<>@]+$/ {print}' |
+    sort -u
+)
+
+if [ -n "$invalid_commit_emails" ]; then
+  printf '%s\n' \
+    'ERROR: public repository history contains malformed author or committer email metadata.' >&2
+  exit 1
+fi
+
 printf '%s\n' 'Public repository hygiene check passed.'

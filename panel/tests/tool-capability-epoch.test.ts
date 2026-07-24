@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  historicalUnavailableToolNames,
   toolCapabilityEpochInstruction,
   toolCapabilityFingerprint,
   toolCapabilityNames,
@@ -61,34 +62,58 @@ describe("tool capability epochs", () => {
   it("marks tools OFF to ON and names the current authoritative catalog", () => {
     const current = toolCapabilityFingerprint([fileInfo]);
     expect(
-      toolCapabilityEpochInstruction(["tools:none"], current, ["file_info"]),
-    ).toContain("Current callable functions: file_info.");
+      toolCapabilityEpochInstruction(
+        ["tools:none"],
+        current,
+        ["file_info"],
+        ["file_info"],
+      ),
+    ).toBe(
+      "The earlier statement that file_info was unavailable is outdated; the attached file_info function is available for this request.",
+    );
   });
 
   it("repairs a legacy unknown epoch only when tools are now attached", () => {
     const current = toolCapabilityFingerprint([fileInfo]);
     expect(
-      toolCapabilityEpochInstruction([undefined], current, ["file_info"]),
-    ).toContain("authoritative tool catalog");
+      toolCapabilityEpochInstruction(
+        [undefined],
+        current,
+        ["file_info"],
+        ["file_info"],
+      ),
+    ).toContain("file_info function is available");
     expect(
-      toolCapabilityEpochInstruction([undefined], "tools:none", []),
+      toolCapabilityEpochInstruction([undefined], "tools:none", [], []),
     ).toBeUndefined();
   });
 
   it("does not inject a boundary when every known assistant used this catalog", () => {
     const current = toolCapabilityFingerprint([fileInfo]);
     expect(
-      toolCapabilityEpochInstruction([current, current], current, [
-        "file_info",
-      ]),
+      toolCapabilityEpochInstruction(
+        [current, current],
+        current,
+        ["file_info"],
+        [],
+      ),
     ).toBeUndefined();
   });
 
   it("marks tools ON to OFF without granting stale capabilities", () => {
     const previous = toolCapabilityFingerprint([fileInfo]);
     expect(
-      toolCapabilityEpochInstruction([previous], "tools:none", []),
+      toolCapabilityEpochInstruction([previous], "tools:none", [], []),
     ).toContain("No callable function schemas");
+    expect(
+      toolCapabilityEpochInstruction(
+        [previous],
+        "tools:none",
+        [],
+        [],
+        true,
+      ),
+    ).toBeUndefined();
   });
 
   it("keeps the tools-OFF instruction stable after the transition turn", () => {
@@ -97,10 +122,12 @@ describe("tool capability epochs", () => {
       [priorTools],
       "tools:none",
       [],
+      [],
     );
     const laterSameEpoch = toolCapabilityEpochInstruction(
       [priorTools, "tools:none", "tools:none"],
       "tools:none",
+      [],
       [],
     );
     expect(laterSameEpoch).toBe(transition);
@@ -108,12 +135,16 @@ describe("tool capability epochs", () => {
 
   it("keeps the tools-ON instruction stable after an older OFF epoch", () => {
     const current = toolCapabilityFingerprint([fileInfo]);
-    const transition = toolCapabilityEpochInstruction(["tools:none"], current, [
-      "file_info",
-    ]);
+    const transition = toolCapabilityEpochInstruction(
+      ["tools:none"],
+      current,
+      ["file_info"],
+      ["file_info"],
+    );
     const laterSameEpoch = toolCapabilityEpochInstruction(
       ["tools:none", current, current],
       current,
+      ["file_info"],
       ["file_info"],
     );
     expect(laterSameEpoch).toBe(transition);
@@ -121,14 +152,246 @@ describe("tool capability epochs", () => {
 
   it("does not add instructions to a fresh or uniformly no-tools chat", () => {
     expect(
-      toolCapabilityEpochInstruction([], "tools:none", []),
+      toolCapabilityEpochInstruction([], "tools:none", [], []),
     ).toBeUndefined();
     expect(
       toolCapabilityEpochInstruction(
         ["tools:none", "tools:none"],
         "tools:none",
         [],
+        [],
       ),
     ).toBeUndefined();
+  });
+
+  it("does not inject tools-ON prose after an unrelated no-tool turn", () => {
+    const current = toolCapabilityFingerprint([fileInfo]);
+    expect(
+      toolCapabilityEpochInstruction(
+        ["tools:none"],
+        current,
+        ["file_info"],
+        [],
+      ),
+    ).toBeUndefined();
+  });
+
+  it("detects stale unavailable-tool history without matching unrelated turns", () => {
+    const current = toolCapabilityFingerprint([fileInfo]);
+    expect(
+      historicalUnavailableToolNames(
+        [
+          {
+            role: "user",
+            content: "Call the built-in file_info tool on panel/package.json.",
+          },
+          {
+            role: "assistant",
+            content:
+              "I cannot complete this request. The file_info tool is not available in this conversation.",
+            toolCapabilityFingerprint: "tools:none",
+          },
+        ],
+        current,
+        ["file_info"],
+      ),
+    ).toEqual(["file_info"]);
+    expect(
+      historicalUnavailableToolNames(
+        [
+          {
+            role: "user",
+            content: "Privately compare 73 times 16 with 72 times 17.",
+          },
+          {
+            role: "assistant",
+            content: "72 times 17 is larger.",
+            toolCapabilityFingerprint: "tools:none",
+          },
+        ],
+        current,
+        ["file_info"],
+      ),
+    ).toEqual([]);
+    expect(
+      historicalUnavailableToolNames(
+        [
+          {
+            role: "user",
+            content: "Do not call file_info; answer from the prompt only.",
+          },
+          {
+            role: "assistant",
+            content: "No tool was called.",
+            toolCapabilityFingerprint: "tools:none",
+          },
+        ],
+        current,
+        ["file_info"],
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not treat successful use under another catalog as unavailable", () => {
+    const current = toolCapabilityFingerprint([fileInfo]);
+    const priorCatalog = toolCapabilityFingerprint([fileInfo, readFile]);
+    expect(
+      historicalUnavailableToolNames(
+        [
+          {
+            role: "user",
+            content: "Call file_info on panel/package.json.",
+          },
+          {
+            role: "assistant",
+            content: "The file is 5.2 KB.",
+            toolCapabilityFingerprint: priorCatalog,
+          },
+        ],
+        current,
+        ["file_info"],
+      ),
+    ).toEqual([]);
+    expect(
+      historicalUnavailableToolNames(
+        [
+          {
+            role: "user",
+            content: "Call file_info on panel/package.json.",
+          },
+          {
+            role: "assistant",
+            content:
+              "file_info returned 5.2 KB, but read_file is not available.",
+            toolCallsOaiJson: JSON.stringify([
+              {
+                type: "function",
+                function: {
+                  name: "file_info",
+                  arguments: '{"path":"panel/package.json"}',
+                },
+              },
+            ]),
+            toolCapabilityFingerprint: priorCatalog,
+          },
+        ],
+        current,
+        ["file_info"],
+      ),
+    ).toEqual([]);
+  });
+
+  it("repairs a legacy denial but excludes broader no-tool directives", () => {
+    const current = toolCapabilityFingerprint([fileInfo]);
+    expect(
+      historicalUnavailableToolNames(
+        [
+          {
+            role: "user",
+            content: "Call file_info on panel/package.json.",
+          },
+          {
+            role: "assistant",
+            content:
+              "I cannot complete this request because file_info is not available.",
+          },
+        ],
+        current,
+        ["file_info"],
+      ),
+    ).toEqual(["file_info"]);
+
+    for (const content of [
+      "You must not call file_info.",
+      "Don't ever call file_info.",
+      "Don’t ever call file_info.",
+      "Dont call file_info.",
+      "There is no need to call file_info.",
+      "Can you not call file_info?",
+      "Please avoid use of file_info.",
+      "Explain how to call file_info when it is unavailable.",
+    ]) {
+      expect(
+        historicalUnavailableToolNames(
+          [
+            { role: "user", content },
+            {
+              role: "assistant",
+              content: "The file_info function is not available.",
+              toolCapabilityFingerprint: "tools:none",
+            },
+          ],
+          current,
+          ["file_info"],
+        ),
+      ).toEqual([]);
+    }
+
+    for (const denial of [
+      "I cannot call file_info.",
+      "I can't use file_info.",
+      "I can’t invoke `file_info`.",
+      "`file_info` is unavailable.",
+      "The `file_info` tool cannot be used.",
+      "file_info isn't available.",
+      "file_info is disabled.",
+    ]) {
+      expect(
+        historicalUnavailableToolNames(
+          [
+            { role: "user", content: "Please call file_info." },
+            {
+              role: "assistant",
+              content: denial,
+              toolCapabilityFingerprint: "tools:none",
+            },
+          ],
+          current,
+          ["file_info"],
+        ),
+      ).toEqual(["file_info"]);
+    }
+  });
+
+  it("recognizes common polite tool requests with exact name boundaries", () => {
+    const current = toolCapabilityFingerprint([fileInfo]);
+    for (const content of [
+      "Could you please call file_info?",
+      "Would you please use file_info on panel/package.json?",
+      "I need you to invoke file_info.",
+      "I would like you to run file_info.",
+      "You need to use file_info.",
+      "You have to execute file_info.",
+    ]) {
+      expect(
+        historicalUnavailableToolNames(
+          [
+            { role: "user", content },
+            {
+              role: "assistant",
+              content: "`file_info` is unavailable.",
+              toolCapabilityFingerprint: "tools:none",
+            },
+          ],
+          current,
+          ["file_info"],
+        ),
+      ).toEqual(["file_info"]);
+    }
+
+    expect(
+      historicalUnavailableToolNames(
+        [
+          { role: "user", content: "Please call file_info." },
+          {
+            role: "assistant",
+            content: "file_info_extra is unavailable.",
+            toolCapabilityFingerprint: "tools:none",
+          },
+        ],
+        current,
+        ["file_info"],
+      ),
+    ).toEqual([]);
   });
 });

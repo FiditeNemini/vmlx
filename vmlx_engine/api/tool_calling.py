@@ -27,6 +27,52 @@ logger = logging.getLogger(__name__)
 _LLGUIDANCE_TOKENIZER_CACHE: Dict[Tuple[int, int], Any] = {}
 
 
+def _normalize_lfm2_tool_result_messages(
+    messages: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Return an LFM2-native copy of tool-result history.
+
+    Liquid's native conversation format expects JSON in ``tool`` messages.
+    Responses final-synthesis turns intentionally have no current tool schemas
+    after ``tool_choice=none`` is applied, but their prior real tool result must
+    still be normalized before the chat template renders that history.
+    """
+
+    normalized_messages = [dict(message) for message in messages]
+    changed = False
+    for message in normalized_messages:
+        if message.get("role") != "tool":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        try:
+            json.loads(content)
+            continue
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+        shell_result = re.fullmatch(
+            r"\$ (?P<command>[^\n]*)\n\nExit code: "
+            r"(?P<exit_code>-?\d+)(?:\n\n(?P<stdout>[\s\S]*))?",
+            content.strip(),
+        )
+        if shell_result:
+            structured_result: dict[str, Any] = {
+                "exit_code": int(shell_result.group("exit_code")),
+            }
+            stdout = (shell_result.group("stdout") or "").rstrip()
+            if stdout:
+                structured_result["stdout"] = stdout
+            normalized_result = [structured_result]
+        else:
+            normalized_result = [{"result": content}]
+        message["content"] = json.dumps(normalized_result, ensure_ascii=False)
+        changed = True
+
+    return normalized_messages, changed
+
+
 def _tool_instruction_scope(prompt: str) -> str:
     """Return the template instruction block, excluding prior chat history."""
     if not prompt:
@@ -66,7 +112,35 @@ def check_and_inject_fallback_tools(
     chat template to completely ignore the tools kwarg, as well as generic models
     without tool-aware templates.
     """
-    if not template_tools or prompt is None:
+    if prompt is None:
+        return prompt
+    parser_id = (tool_parser_id or "").strip().lower()
+    is_lfm2_native_tool_prompt = parser_id in {"lfm2", "liquid"}
+    if is_lfm2_native_tool_prompt:
+        normalized_messages, normalized_tool_result = (
+            _normalize_lfm2_tool_result_messages(messages)
+        )
+        if normalized_tool_result:
+            messages = normalized_messages
+            if not template_tools:
+                # This must run even when the current Responses pass correctly
+                # has no schemas because tool_choice=none. Re-render only the
+                # real normalized history; do not synthesize or re-enable any
+                # tool, even if an inconsistent caller left stale schemas in
+                # the template kwargs.
+                normalized_kwargs = dict(template_kwargs)
+                normalized_kwargs.pop("tools", None)
+                try:
+                    prompt = tokenizer.apply_chat_template(
+                        messages,
+                        **normalized_kwargs,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to render LFM2 normalized tool-result history; "
+                        "retaining the original prompt"
+                    )
+    if not template_tools:
         return prompt
     tool_choice = template_kwargs.get("tool_choice") if isinstance(template_kwargs, dict) else None
     tool_choice_required = tool_choice == "required" or (
@@ -180,7 +254,6 @@ def check_and_inject_fallback_tools(
     # but the <tools> block itself contains the real JSON schemas. Preserve
     # that trained native scaffold for normal auto-tool turns; it has the
     # model's own tool/result transcript framing and thinking contract.
-    parser_id = (tool_parser_id or "").strip().lower()
     is_dsv4_prompt = "<｜User｜>" in prompt or "<｜Assistant｜>" in prompt
     if is_dsv4_prompt:
         # The canonical DSV4 encoder scopes a broad API tool catalog to the
@@ -227,7 +300,6 @@ def check_and_inject_fallback_tools(
         and not any(_request_mentions_tool_name(name) for name in tool_names)
     ):
         return prompt
-    is_lfm2_native_tool_prompt = parser_id in {"lfm2", "liquid"}
     is_openpangu_native_tool_prompt = (
         parser_id in {"openpangu", "openpangu_v2"}
         or (
@@ -326,6 +398,68 @@ def check_and_inject_fallback_tools(
         and "<|tool_call_end|>" in instruction_prompt
         and all(f"{name}(" in instruction_prompt for name in tool_names)
     )
+
+    def _normalized_function_schema(tool: Any) -> Optional[dict]:
+        """Normalize nested Chat and flat Responses function-tool shapes."""
+        func = _tool_func(tool)
+        if not isinstance(func, dict):
+            return None
+        name = func.get("name")
+        parameters = func.get("parameters")
+        if not isinstance(name, str) or not name or not isinstance(parameters, dict):
+            return None
+        normalized = dict(func)
+        # Flat Responses tools carry the wrapper discriminator alongside the
+        # function fields; nested Chat tools carry it outside ``function``.
+        normalized.pop("type", None)
+        return normalized
+
+    def _lfm2_has_exact_native_tool_schema() -> bool:
+        """Validate Liquid's bounded native JSON catalog against this request."""
+        if not is_lfm2_native_tool_prompt:
+            return False
+
+        expected_by_name: dict[str, dict] = {}
+        for tool in template_tools:
+            normalized = _normalized_function_schema(tool)
+            if normalized is None:
+                return False
+            name = normalized["name"]
+            if name in expected_by_name:
+                return False
+            expected_by_name[name] = normalized
+
+        marker = "List of tools:"
+        decoder = json.JSONDecoder()
+        search_from = 0
+        while True:
+            marker_at = instruction_prompt.find(marker, search_from)
+            if marker_at < 0:
+                return False
+            payload_start = marker_at + len(marker)
+            payload_text = instruction_prompt[payload_start:].lstrip()
+            try:
+                payload, _payload_end = decoder.raw_decode(payload_text)
+            except (json.JSONDecodeError, TypeError):
+                search_from = payload_start
+                continue
+            if not isinstance(payload, list):
+                search_from = payload_start
+                continue
+
+            rendered_by_name: dict[str, dict] = {}
+            valid_payload = True
+            for tool in payload:
+                normalized = _normalized_function_schema(tool)
+                if normalized is None or normalized["name"] in rendered_by_name:
+                    valid_payload = False
+                    break
+                rendered_by_name[normalized["name"]] = normalized
+            if valid_payload and rendered_by_name == expected_by_name:
+                return True
+            search_from = payload_start
+
+    _lfm2_has_native_tool_schema = _lfm2_has_exact_native_tool_schema()
     _openpangu_has_concrete_tool_examples = (
         is_openpangu_native_tool_prompt
         and not explicit_tool_requested
@@ -369,7 +503,14 @@ def check_and_inject_fallback_tools(
             )
         )
         and (not is_zaya_native_tool_prompt or _zaya_has_concrete_tool_examples)
-        and (not is_lfm2_native_tool_prompt or _lfm2_has_concrete_tool_examples)
+        and (
+            not is_lfm2_native_tool_prompt
+            or (
+                _lfm2_has_native_tool_schema
+                and not tool_choice_required
+            )
+            or _lfm2_has_concrete_tool_examples
+        )
         and (not is_openpangu_native_tool_prompt or _openpangu_has_concrete_tool_examples)
         and (not is_minimax_native_tool_prompt or _minimax_has_concrete_tool_examples)
         and (not is_xml_function_native_tool_prompt or _xml_function_has_native_tool_schema)
@@ -1489,6 +1630,18 @@ def check_and_inject_fallback_tools(
                 "call it instead of explaining what you would do.",
                 "",
             ]
+            if tool_choice_required:
+                lfm2_lines.extend(
+                    [
+                        "The current API request requires a tool call.",
+                        "Your next assistant output must be exactly one native "
+                        "Liquid LFM2 tool call before any prose.",
+                        "Do not answer from memory, summarize first, or invent a "
+                        "tool result. The real result will arrive in a later "
+                        "continuation.",
+                        "",
+                    ]
+                )
             for tool in lfm2_prompt_tools:
                 func = _tool_func(tool)
                 name = func.get("name", "") or "unknown_tool"
@@ -1781,34 +1934,7 @@ def check_and_inject_fallback_tools(
         # human-readable shell transcript; wrap that real transcript rather
         # than feeding unframed `$ command\n\noutput` text that makes LFM2.5
         # terminate its final-answer pass at the first token.
-        for message in messages_copy:
-            if message.get("role") != "tool":
-                continue
-            content = message.get("content")
-            if not isinstance(content, str) or not content.strip():
-                continue
-            try:
-                json.loads(content)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                shell_result = re.fullmatch(
-                    r"\$ (?P<command>[^\n]*)\n\nExit code: "
-                    r"(?P<exit_code>-?\d+)(?:\n\n(?P<stdout>[\s\S]*))?",
-                    content.strip(),
-                )
-                if shell_result:
-                    structured_result: dict[str, Any] = {
-                        "exit_code": int(shell_result.group("exit_code")),
-                    }
-                    stdout = (shell_result.group("stdout") or "").rstrip()
-                    if stdout:
-                        structured_result["stdout"] = stdout
-                    normalized_result = [structured_result]
-                else:
-                    normalized_result = [{"result": content}]
-                message["content"] = json.dumps(
-                    normalized_result,
-                    ensure_ascii=False,
-                )
+        messages_copy, _ = _normalize_lfm2_tool_result_messages(messages_copy)
     # LFM2.5 continuation already has the native assistant/tool transcript;
     # normalization below is the only injection it needs.
     injected = lfm2_tool_result_continuation

@@ -6402,9 +6402,16 @@ class TestV4bToolChoiceRequired:
             "Chat Completions required-tool 400 must preserve raw_preview so "
             "parser/model failures are classifiable from smoke artifacts"
         )
-        assert '_ct_kwargs.setdefault("tool_choice", _tool_choice)' in source, (
-            "Chat Completions must forward tool_choice to chat-template kwargs "
-            "so fallback prompt injection sees the same contract the API enforces"
+        required_copy = source.index(
+            'if _is_required_tool_choice(_tool_choice):'
+        )
+        template_snapshot = source.index(
+            'chat_kwargs["chat_template_kwargs"] = extra_ct'
+        )
+        assert '_ct_kwargs["tool_choice"] = _tool_choice' in source
+        assert required_copy < template_snapshot, (
+            "Chat Completions must copy required/specific tool_choice before "
+            "snapshotting chat-template kwargs"
         )
 
     def test_responses_nonstreaming(self):
@@ -6414,9 +6421,16 @@ class TestV4bToolChoiceRequired:
         assert "required" in source, (
             "Responses API must check tool_choice='required'"
         )
-        assert '_ct_kwargs.setdefault("tool_choice", _tool_choice)' in source, (
-            "Responses API must forward tool_choice to chat-template kwargs "
-            "so fallback prompt injection sees the same contract the API enforces"
+        required_copy = source.index(
+            'if _is_required_tool_choice(_tool_choice):'
+        )
+        template_snapshot = source.index(
+            'chat_kwargs["chat_template_kwargs"] = extra_ct'
+        )
+        assert '_ct_kwargs["tool_choice"] = _tool_choice' in source
+        assert required_copy < template_snapshot, (
+            "Responses API must copy required/specific tool_choice before "
+            "snapshotting chat-template kwargs"
         )
         assert "raw_preview" in source, (
             "Responses required-tool 400 must preserve raw_preview so "

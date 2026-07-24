@@ -30,14 +30,16 @@ import {
   visibleReasoningSegments,
 } from "../../shared/interleavedReasoning";
 import {
+  isToolAuthorizedForCurrentTurn,
   requestedExactFinalToolNames,
   requestedOnceToolNames,
-  requestsDirectAnswerAfterSingleTool,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
   requestsPrivateReasoningWithoutToolUse,
+  scopeToolDefinitionsByName,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
+  toolChoiceForCurrentTurn,
 } from "../../shared/toolAutoContinue";
 import { buildToolMediaFollowupContent } from "../../shared/toolMediaFollowup";
 import { dsv4OutputBudget } from "../../shared/dsv4RequestBudget";
@@ -65,6 +67,7 @@ import {
   resolveEffectiveReasoningParser,
 } from "../../shared/reasoningParserAliases";
 import {
+  historicalUnavailableToolNames,
   toolCapabilityFingerprint,
   toolCapabilityEpochInstruction,
   toolCapabilityNames,
@@ -1469,27 +1472,20 @@ export function registerChatHandlers(
         // the final-response instruction and made Nemotron emit the requested
         // marker twice after a correct tool result.
         /\breply exactly\b/i.test(latestUserText);
-      const userForbidsToolCalls =
-        overrides?.builtinToolsEnabled === true &&
-        requestsNoToolCalls(latestUserText);
+      // These are current-user authorization constraints, not built-in-tool
+      // preferences. The local engine auto-merges MCP schemas even when the
+      // Electron built-in catalog is disabled, so recognize a no-tools turn
+      // independently of the persistent built-in-tools toggle.
+      const userForbidsToolCalls = requestsNoToolCalls(latestUserText);
       const exactTextOnlyNoToolTurn =
-        overrides?.builtinToolsEnabled === true &&
         requestsExactTextOnlyWithoutToolUse(latestUserText);
       const privateReasoningNoToolTurn =
-        overrides?.builtinToolsEnabled === true &&
         requestsPrivateReasoningWithoutToolUse(latestUserText);
       const attachBuiltinToolsForCurrentTurn =
         overrides?.builtinToolsEnabled === true &&
         !userForbidsToolCalls &&
         !exactTextOnlyNoToolTurn &&
         !privateReasoningNoToolTurn;
-      const directAnswerAfterSingleTool =
-        overrides?.builtinToolsEnabled === true &&
-        requestsDirectAnswerAfterSingleTool(latestUserText);
-      const exactFinalToolNames =
-        overrides?.builtinToolsEnabled === true
-          ? requestedExactFinalToolNames(latestUserText)
-          : [];
       const exactlyOnceToolNames =
         overrides?.builtinToolsEnabled === true
           ? requestedOnceToolNames(latestUserText)
@@ -1506,17 +1502,29 @@ export function registerChatHandlers(
         hasMediaAttachments && attachBuiltinToolsForCurrentTurn
           ? DIRECT_MEDIA_ATTACHMENT_TOOL_RULE
           : "";
+      const unscopedCurrentTurnToolDefinitions =
+        attachBuiltinToolsForCurrentTurn
+          ? filterTools(overrides || {}, {
+              hasDirectMediaAttachments: hasMediaAttachments,
+              zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
+            })
+          : [];
+      const exactFinalToolNames =
+        overrides?.builtinToolsEnabled === true
+          ? requestedExactFinalToolNames(
+              latestUserText,
+              toolCapabilityNames(unscopedCurrentTurnToolDefinitions),
+            )
+          : [];
+      const exactFinalBuiltinToolNames =
+        exactFinalToolNames.filter((name) => isBuiltinTool(name));
+      const directAnswerAfterSingleTool =
+        exactFinalBuiltinToolNames.length === 1;
       const currentTurnToolDefinitions = attachBuiltinToolsForCurrentTurn
-        ? filterTools(overrides || {}, {
-            hasDirectMediaAttachments: hasMediaAttachments,
-            zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
-          }).filter((tool) => {
-            const name = tool.function.name.toLowerCase();
-            return (
-              exactFinalToolNames.length === 0 ||
-              exactFinalToolNames.includes(name)
-            );
-          })
+        ? scopeToolDefinitionsByName(
+            unscopedCurrentTurnToolDefinitions,
+            exactFinalToolNames,
+          )
         : [];
       const currentToolCapabilityFingerprint = toolCapabilityFingerprint(
         currentTurnToolDefinitions,
@@ -1524,10 +1532,24 @@ export function registerChatHandlers(
       const priorAssistantToolFingerprints = messages
         .filter((message) => message.role === "assistant")
         .map((message) => message.toolCapabilityFingerprint);
+      const currentToolNames = toolCapabilityNames(currentTurnToolDefinitions);
+      const historicallyUnavailableTools = historicalUnavailableToolNames(
+        messages,
+        currentToolCapabilityFingerprint,
+        currentToolNames,
+      );
+      // Only an explicit current-user prohibition is a hard authorization
+      // boundary. Exact-output and private-reasoning heuristics may omit the
+      // Electron built-in catalog to avoid prompt contamination, but the local
+      // engine can still expose MCP tools that the request genuinely needs
+      // (for example, "check weather and reply exactly RAIN or DRY").
+      const currentPromptAlreadyForbidsTools = userForbidsToolCalls;
       const toolCapabilityEpoch = toolCapabilityEpochInstruction(
         priorAssistantToolFingerprints,
         currentToolCapabilityFingerprint,
-        toolCapabilityNames(currentTurnToolDefinitions),
+        currentToolNames,
+        historicallyUnavailableTools,
+        currentPromptAlreadyForbidsTools,
       );
       if (hasSystemPrompt && overrides?.builtinToolsEnabled) {
         const toolRule =
@@ -1580,6 +1602,24 @@ export function registerChatHandlers(
       const wireApi =
         overrides?.wireApi || (isRemote ? "completions" : "responses");
       const useResponsesApi = wireApi === "responses";
+      // Local vmlx-engine merges MCP schemas behind the public request. An
+      // explicit no-tools turn therefore needs tool_choice=none, while a
+      // singular exact built-in contract needs a specific function choice so
+      // the engine filters its MCP catalog to that same name. Open-ended turns
+      // intentionally leave tool_choice omitted so legitimate MCP use remains
+      // available. Remote providers only see the already-scoped request.tools
+      // catalog and do not participate in the local MCP merge.
+      const currentTurnToolChoice = () => {
+        if (isRemote) return undefined;
+        const remainingExactBuiltinTools = exactFinalBuiltinToolNames.filter(
+          (name) => !completedExactFinalTools.has(name),
+        );
+        return toolChoiceForCurrentTurn(
+          currentPromptAlreadyForbidsTools,
+          remainingExactBuiltinTools,
+          useResponsesApi ? "responses" : "chat",
+        );
+      };
 
       // Add conversation messages (skip any existing system messages to avoid duplicates)
       // Messages with JSON content arrays (multimodal) are parsed back to content parts for the API
@@ -1963,6 +2003,9 @@ export function registerChatHandlers(
           const applyPostToolAnswerPolicy = (obj: Record<string, any>) => {
             if (!(finalAnswerRecovery || plannedDirectAnswerPass)) return;
             delete obj.tools;
+            // Retiring a completed exact tool must also retire the local
+            // engine's automatically merged MCP catalog for this follow-up.
+            obj.tool_choice = "none";
             // A normal exact-final follow-up is still part of the user's
             // requested reasoning mode. Retiring the completed tool prevents
             // a duplicate call; it must not silently turn an explicit On (or
@@ -2040,6 +2083,10 @@ export function registerChatHandlers(
                 parameters: t.function.parameters,
               }));
             }
+            const requestToolChoice = currentTurnToolChoice();
+            if (requestToolChoice !== undefined) {
+              obj.tool_choice = requestToolChoice;
+            }
             // Only explicit On/Off is serialized. Auto stays omitted so the
             // concrete bundle/family owns its native default (for example,
             // Laguna S2.1's stamped default-on, MiniMax M3 adaptive, and DSV4's
@@ -2113,6 +2160,10 @@ export function registerChatHandlers(
               // Chat Completions API: tools must be in OpenAI format with "function" wrapper
               // e.g. {"type": "function", "function": {"name": ..., "parameters": ...}}
               obj.tools = availableToolDefinitions();
+            }
+            const requestToolChoice = currentTurnToolChoice();
+            if (requestToolChoice !== undefined) {
+              obj.tool_choice = requestToolChoice;
             }
             // Only explicit On/Off is serialized. Auto stays omitted so the
             // provider or local engine can apply the model's native policy.
@@ -3479,11 +3530,6 @@ export function registerChatHandlers(
               );
               continue;
             }
-            if (isExactlyOnceTool) {
-              // Mark before execution so two calls emitted in one model pass
-              // cannot both reach the executor.
-              completedExactlyOnceTools.add(normalizedToolName);
-            }
             try {
               let toolArgs: Record<string, any>;
               try {
@@ -3512,16 +3558,54 @@ export function registerChatHandlers(
                 );
                 continue;
               }
-              emitToolStatus(
-                "executing",
-                tc.function.name,
-                undefined,
-                toolIteration,
-                tc.id,
+              const toolAuthorized = isToolAuthorizedForCurrentTurn(
+                normalizedToolName,
+                // Authorize against the immutable catalog provided for this
+                // user turn. The filtered follow-up catalog intentionally
+                // drops a just-completed exactly-once tool; consulting it
+                // here would reject that tool's first real execution.
+                currentToolNames,
+                currentPromptAlreadyForbidsTools,
+                exactFinalBuiltinToolNames,
               );
-              await flushToolStatusToRenderer();
+              if (toolAuthorized) {
+                if (isExactlyOnceTool) {
+                  // Mark only after schema-valid arguments and current-turn
+                  // authorization. A malformed first emission may retry on the
+                  // follow-up; once one valid call reaches execution, any
+                  // second call in the same model pass is rejected at the loop
+                  // head.
+                  completedExactlyOnceTools.add(normalizedToolName);
+                }
+                // Do not display or persist an "executing" phase for a call
+                // rejected by current-turn authorization.
+                emitToolStatus(
+                  "executing",
+                  tc.function.name,
+                  undefined,
+                  toolIteration,
+                  tc.id,
+                );
+                await flushToolStatusToRenderer();
+              }
 
-              if (tc.function.name === "ask_user") {
+              if (!toolAuthorized) {
+                // A model may emit a built-in or MCP name from training or
+                // history even when that schema was not authorized for this
+                // request. A scoped "file_info exactly once" turn must not
+                // execute write_file or an unrelated MCP function, and a
+                // no-tools turn must execute nothing. Preserve the rejected
+                // call/result in the transcript, but never perform the side
+                // effect.
+                resultText = `Tool "${tc.function.name}" was not provided for this request and was not executed.`;
+                emitToolStatus(
+                  "error",
+                  tc.function.name,
+                  resultText,
+                  toolIteration,
+                  tc.id,
+                );
+              } else if (tc.function.name === "ask_user") {
                 // Special handling: ask_user needs IPC to renderer, not executor
                 const question =
                   toolArgs.question || "What would you like to do?";

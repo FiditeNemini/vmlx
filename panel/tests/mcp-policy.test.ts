@@ -163,6 +163,23 @@ describe('MCP policy shared helpers', () => {
     expect(chatSource).toContain('filterTools(overrides || {}, {')
     expect(chatSource).toContain('obj.tools = availableToolDefinitions().map((t) => ({')
     expect(chatSource).toContain('obj.tools = availableToolDefinitions();')
+    expect(chatSource).toContain(
+      'const toolAuthorized = isToolAuthorizedForCurrentTurn(',
+    )
+    expect(chatSource).toContain(
+      'was not provided for this request and was not executed.',
+    )
+    expect(chatSource).toContain(
+      'const userForbidsToolCalls = requestsNoToolCalls(latestUserText);',
+    )
+    expect(chatSource).toContain(
+      'toolChoiceForCurrentTurn(',
+    )
+    expect(chatSource).toContain(
+      'const remainingExactBuiltinTools = exactFinalBuiltinToolNames.filter(',
+    )
+    expect(chatSource).toContain('obj.tool_choice = requestToolChoice;')
+    expect(chatSource).toContain('obj.tool_choice = "none";')
     expect(builtinBranch).toBeGreaterThan(-1)
     expect(remoteMcpBranch).toBeGreaterThan(builtinBranch)
     expect(mcpExecuteBranch).toBeGreaterThan(remoteMcpBranch)

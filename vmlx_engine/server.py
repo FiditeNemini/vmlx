@@ -14221,6 +14221,20 @@ async def create_chat_completion(
         _ct_kwargs, request, _model_path or _model_name or request.model)
     _normalize_openpangu_thinking(
         _ct_kwargs, request, _model_path or _model_name or request.model)
+    # Resolve the render-relevant tool_choice before snapshotting
+    # chat_template_kwargs. Native fallback renderers (notably LFM2) need a
+    # required/specific current-request contract, while `none`/`auto` remain
+    # scheduler controls and must not perturb arbitrary model templates.
+    _tool_choice = request.tool_choice
+    if _tool_choice is not None:
+        chat_kwargs["tool_choice"] = _tool_choice
+    if _is_required_tool_choice(_tool_choice):
+        # The official top-level API contract overrides any conflicting nested
+        # template value.
+        _ct_kwargs["tool_choice"] = _tool_choice
+    else:
+        _ct_kwargs.pop("tool_choice", None)
+
     # Forward the resolved template kwargs to the engine.  Keep the resolved
     # enable_thinking value mirrored here as well as the top-level engine kwarg:
     # build_chat_template_kwargs() treats the top-level flag as authoritative,
@@ -14250,12 +14264,6 @@ async def create_chat_completion(
     if request.video_max_frames:
         chat_kwargs["video_max_frames"] = request.video_max_frames
 
-    # Handle tool_choice: "none" suppresses tools entirely, "auto"/None is default,
-    # "required" or specific tool dict are handled post-generation.
-    _tool_choice = request.tool_choice
-    if _tool_choice is not None:
-        chat_kwargs["tool_choice"] = _tool_choice
-        _ct_kwargs.setdefault("tool_choice", _tool_choice)
     _suppress_tools = _tool_choice == "none"
 
     # response_format = json_object / json_schema implies the output IS the
@@ -17124,6 +17132,20 @@ async def create_response(
         _ct_kwargs, request, _model_path or _model_name or request.model)
     _normalize_openpangu_thinking(
         _ct_kwargs, request, _model_path or _model_name or request.model)
+    # Resolve the render-relevant tool_choice before snapshotting
+    # chat_template_kwargs. Native fallback renderers (notably LFM2) need a
+    # required/specific current-request contract, while `none`/`auto` remain
+    # scheduler controls and must not perturb arbitrary model templates.
+    _tool_choice = request.tool_choice
+    if _tool_choice is not None:
+        chat_kwargs["tool_choice"] = _tool_choice
+    if _is_required_tool_choice(_tool_choice):
+        # The official top-level API contract overrides any conflicting nested
+        # template value.
+        _ct_kwargs["tool_choice"] = _tool_choice
+    else:
+        _ct_kwargs.pop("tool_choice", None)
+
     # Forward the resolved template kwargs to the engine.  Keep the resolved
     # enable_thinking value mirrored here as well as the top-level engine kwarg:
     # build_chat_template_kwargs() treats the top-level flag as authoritative,
@@ -17148,12 +17170,6 @@ async def create_response(
     if request.video_max_frames:
         chat_kwargs["video_max_frames"] = request.video_max_frames
 
-    # Handle tool_choice: "none" suppresses tools entirely, "auto"/None is default,
-    # "required" or specific tool dict are handled post-generation.
-    _tool_choice = request.tool_choice
-    if _tool_choice is not None:
-        chat_kwargs["tool_choice"] = _tool_choice
-        _ct_kwargs.setdefault("tool_choice", _tool_choice)
     _suppress_tools = _tool_choice == "none"
 
     # response_format = json_object / json_schema implies the output IS the

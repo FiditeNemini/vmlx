@@ -9,6 +9,8 @@ mixed built-in/MCP tool calls on DSV4.
 
 import json
 
+import pytest
+
 from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
 from vmlx_engine.loaders.dsv4_chat_encoder import select_tools_for_explicit_request
 
@@ -1097,6 +1099,253 @@ def test_lfm2_direct_file_info_binds_explicit_path_without_placeholder():
     assert "file_info(path='VALUE_HERE')" not in injected
 
 
+def test_lfm2_native_tool_schema_is_not_replaced_by_synthetic_fallback():
+    """Liquid's trained native schema must remain the sole tool instruction."""
+    tools = _file_info_tool()
+    user_request = (
+        "Call the built-in file_info tool exactly once with path "
+        "panel/package.json."
+    )
+    prompt = (
+        "<|im_start|>system\n"
+        f"Today's date: 2026-07-24\n\nList of tools: {json.dumps(tools)}"
+        "<|im_end|>\n"
+        f"<|im_start|>user\n{user_request}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+    rendered = check_and_inject_fallback_tools(
+        prompt,
+        [{"role": "user", "content": user_request}],
+        tools,
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="lfm2",
+    )
+
+    assert rendered == prompt
+    assert "Liquid LFM2 native tools" not in rendered
+    assert "<|tool_call_start|>" not in rendered
+
+
+def test_lfm2_native_tool_schema_honors_required_tool_choice():
+    """A native schema alone does not encode the API's required-call contract."""
+    tools = _file_info_tool()
+    user_request = "Call file_info with path panel/package.json before answering."
+    prompt = (
+        "<|im_start|>system\n"
+        f"List of tools: {json.dumps(tools)}"
+        "<|im_end|>\n"
+        f"<|im_start|>user\n{user_request}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+    rendered = check_and_inject_fallback_tools(
+        prompt,
+        [{"role": "user", "content": user_request}],
+        tools,
+        PlainTokenizer(),
+        {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "tools": tools,
+            "tool_choice": "required",
+        },
+        tool_parser_id="lfm2",
+    )
+
+    assert rendered != prompt
+    assert "The current API request requires a tool call." in rendered
+    assert "exactly one native Liquid LFM2 tool call" in rendered
+    assert "file_info(path='panel/package.json')" in rendered
+
+
+def test_lfm2_native_tool_schema_honors_specific_function_choice():
+    """A specific-function choice uses the same required native-call boundary."""
+    tools = _file_info_tool()
+    user_request = "Call file_info with path panel/package.json before answering."
+    prompt = (
+        "<|im_start|>system\n"
+        f"List of tools: {json.dumps(tools)}"
+        "<|im_end|>\n"
+        f"<|im_start|>user\n{user_request}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+    rendered = check_and_inject_fallback_tools(
+        prompt,
+        [{"role": "user", "content": user_request}],
+        tools,
+        PlainTokenizer(),
+        {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "tools": tools,
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "file_info"},
+            },
+        },
+        tool_parser_id="lfm2",
+    )
+
+    assert rendered != prompt
+    assert "The current API request requires a tool call." in rendered
+    assert "file_info(path='panel/package.json')" in rendered
+
+
+def test_lfm2_native_tool_schema_accepts_nested_and_flat_function_shapes():
+    """Chat and Responses shapes normalize to the same native tool schema."""
+    nested_tools = _file_info_tool()
+    flat_tools = [
+        {
+            "type": "function",
+            **nested_tools[0]["function"],
+        }
+    ]
+    user_request = "Call file_info on panel/package.json."
+
+    for request_tools, rendered_tools in (
+        (nested_tools, flat_tools),
+        (flat_tools, nested_tools),
+    ):
+        prompt = (
+            "<|im_start|>system\n"
+            f"List of tools: {json.dumps(rendered_tools)}"
+            "<|im_end|>\n"
+            f"<|im_start|>user\n{user_request}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        rendered = check_and_inject_fallback_tools(
+            prompt,
+            [{"role": "user", "content": user_request}],
+            request_tools,
+            PlainTokenizer(),
+            {
+                "tokenize": False,
+                "add_generation_prompt": True,
+                "tools": request_tools,
+            },
+            tool_parser_id="lfm2",
+        )
+        assert rendered == prompt
+
+
+def test_lfm2_native_tool_schema_rejects_incomplete_or_spoofed_catalogs():
+    """Only an exact bounded JSON catalog may bypass fallback injection."""
+    tools = _file_info_tool()
+    current_function = tools[0]["function"]
+    user_request = "Call file_info on panel/package.json."
+    invalid_catalogs = [
+        # A name-only entry is not the current schema.
+        [{"type": "function", "function": {"name": "file_info"}}],
+        # Required arguments must not disappear from an otherwise valid schema.
+        [
+            {
+                "type": "function",
+                "function": {
+                    **current_function,
+                    "parameters": {
+                        **current_function["parameters"],
+                        "required": [],
+                    },
+                },
+            }
+        ],
+        # Exact name matching must reject substring collisions.
+        [
+            {
+                "type": "function",
+                "function": {
+                    **current_function,
+                    "name": "file_info_extra",
+                },
+            }
+        ],
+    ]
+
+    for catalog in invalid_catalogs:
+        prompt = (
+            "<|im_start|>system\n"
+            f"List of tools: {json.dumps(catalog)}"
+            "<|im_end|>\n"
+            f"<|im_start|>user\n{user_request}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        rendered = check_and_inject_fallback_tools(
+            prompt,
+            [{"role": "user", "content": user_request}],
+            tools,
+            PlainTokenizer(),
+            {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+            tool_parser_id="lfm2",
+        )
+        assert rendered != prompt
+        assert "Liquid LFM2 native tools" in rendered
+
+    prose_spoof = (
+        "<|im_start|>system\n"
+        "The user wrote: List of tools: file_info"
+        "<|im_end|>\n"
+        f"<|im_start|>user\n{user_request}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    rendered = check_and_inject_fallback_tools(
+        prose_spoof,
+        [
+            {
+                "role": "system",
+                "content": "The user wrote: List of tools: file_info",
+            },
+            {"role": "user", "content": user_request},
+        ],
+        tools,
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="lfm2",
+    )
+    assert rendered != prose_spoof
+    assert "Liquid LFM2 native tools" in rendered
+
+
+def test_lfm2_native_tool_schema_rejects_partial_multi_tool_catalog():
+    """Every current tool schema must be present exactly once."""
+    tools = _file_info_tool() + [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a UTF-8 text file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    user_request = "Call file_info on panel/package.json."
+    prompt = (
+        "<|im_start|>system\n"
+        f"List of tools: {json.dumps([tools[0]])}"
+        "<|im_end|>\n"
+        f"<|im_start|>user\n{user_request}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+    rendered = check_and_inject_fallback_tools(
+        prompt,
+        [{"role": "user", "content": user_request}],
+        tools,
+        PlainTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="lfm2",
+    )
+
+    assert rendered != prompt
+    assert "Liquid LFM2 native tools" in rendered
+
+
 def test_lfm2_natural_file_info_request_binds_path_without_path_keyword():
     """A natural inspect request must not leave the live LFM2 placeholder."""
     tools = [
@@ -1307,3 +1556,364 @@ def test_lfm2_shell_tool_result_continuation_uses_structured_json():
     )
     assert expected in rendered
     assert tokenizer.last_messages[-1]["content"] == expected
+
+
+def test_lfm2_responses_final_pass_normalizes_tool_result_without_current_tools():
+    """tool_choice=none must not bypass prior LFM2 tool-result normalization."""
+
+    class CaptureTokenizer:
+        last_kwargs = None
+        last_messages = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.last_kwargs = kwargs
+            self.last_messages = messages
+            return "\n".join(
+                f"{message.get('role')}: {message.get('content', '')}"
+                for message in messages
+            )
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "After the tool result, reply exactly two lines: "
+                "LFM-FINAL-DONE and FILE=panel/package.json SIZE=5.2 KB."
+            ),
+        },
+        {"role": "user", "content": "Inspect panel/package.json with file_info."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_lfm_file_info",
+                    "function": {
+                        "name": "file_info",
+                        "arguments": {"path": "panel/package.json"},
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_lfm_file_info",
+            "content": (
+                "Path: panel/package.json\n"
+                "Type: file\n"
+                "Size: 5.2 KB\n"
+                "Permissions: 0644"
+            ),
+        },
+    ]
+    tokenizer = CaptureTokenizer()
+
+    rendered = check_and_inject_fallback_tools(
+        "ORIGINAL RAW TOOL RESULT PROMPT",
+        messages,
+        None,
+        tokenizer,
+        {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        },
+        tool_parser_id="lfm2",
+    )
+
+    expected = (
+        '[{"result": "Path: panel/package.json\\nType: file\\n'
+        'Size: 5.2 KB\\nPermissions: 0644"}]'
+    )
+    assert expected in rendered
+    assert tokenizer.last_messages[-1]["content"] == expected
+    assert "tools" not in tokenizer.last_kwargs
+    assert "List of tools:" not in rendered
+    assert "tool_choice=required" not in rendered
+
+
+def test_lfm2_no_schema_final_pass_cannot_reintroduce_stale_template_tools():
+    """An inconsistent caller must not re-enable stale schemas during rerender."""
+
+    class CaptureTokenizer:
+        last_kwargs = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.last_kwargs = kwargs
+            return "\n".join(str(message.get("content", "")) for message in messages)
+
+    stale_tools = [
+        {
+            "type": "function",
+            "name": "file_info",
+            "parameters": {"type": "object"},
+        }
+    ]
+    tokenizer = CaptureTokenizer()
+
+    rendered = check_and_inject_fallback_tools(
+        "ORIGINAL",
+        [
+            {"role": "user", "content": "Use file_info."},
+            {
+                "role": "tool",
+                "tool_call_id": "call_lfm",
+                "content": "Path: panel/package.json\nSize: 5.2 KB",
+            },
+        ],
+        None,
+        tokenizer,
+        {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "tools": stale_tools,
+        },
+        tool_parser_id="lfm2",
+    )
+
+    assert '[{"result": "Path: panel/package.json\\nSize: 5.2 KB"}]' in rendered
+    assert "tools" not in tokenizer.last_kwargs
+
+
+def test_non_lfm_no_schema_tool_history_is_not_normalized_or_rerendered():
+    """The no-schema early normalization path is strictly Liquid-scoped."""
+
+    class RejectRerenderTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            raise AssertionError("non-LFM history must not be re-rendered")
+
+    prompt = "QWEN ORIGINAL RAW TOOL RESULT PROMPT"
+    rendered = check_and_inject_fallback_tools(
+        prompt,
+        [
+            {"role": "user", "content": "Use file_info."},
+            {
+                "role": "tool",
+                "tool_call_id": "call_qwen",
+                "content": "Path: panel/package.json\nSize: 5.2 KB",
+            },
+        ],
+        None,
+        RejectRerenderTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True},
+        tool_parser_id="qwen3",
+    )
+
+    assert rendered == prompt
+
+
+def test_lfm2_responses_final_pass_preserves_existing_json_without_rerender():
+    """An already-native LFM2 tool result should remain byte-stable."""
+
+    class RejectRerenderTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            raise AssertionError("already-normalized history must not be re-rendered")
+
+    prompt = (
+        "<|im_start|>tool\n"
+        '[{"result":"already native"}]'
+        "<|im_end|>\n<|im_start|>assistant\n"
+    )
+    messages = [
+        {"role": "user", "content": "Use file_info."},
+        {
+            "role": "tool",
+            "tool_call_id": "call_lfm",
+            "content": '[{"result":"already native"}]',
+        },
+    ]
+
+    rendered = check_and_inject_fallback_tools(
+        prompt,
+        messages,
+        [],
+        RejectRerenderTokenizer(),
+        {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "tool_choice": "none",
+        },
+        tool_parser_id="liquid",
+    )
+
+    assert rendered == prompt
+
+
+@pytest.mark.asyncio
+async def test_chat_and_responses_tool_choice_template_contracts(monkeypatch):
+    """Endpoint kwargs must mirror only required/specific tool choices to templates."""
+
+    import copy
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    import vmlx_engine.server as server
+    from vmlx_engine.api.models import (
+        ChatCompletionRequest,
+        Message,
+        ResponsesRequest,
+    )
+    from vmlx_engine.engine.base import GenerationOutput
+
+    model_name = "liquid-ai/LFM2.5-8B-A1B"
+
+    class FakeEngine:
+        is_mllm = False
+        preserve_native_tool_format = False
+        tokenizer = SimpleNamespace(has_thinking=False)
+
+    captures: list[dict] = []
+
+    async def fake_await_chat(*_args, **kwargs):
+        captures.append(copy.deepcopy(kwargs["chat_kwargs"]))
+        return GenerationOutput(
+            text="plain answer",
+            raw_text="plain answer",
+            prompt_tokens=3,
+            completion_tokens=2,
+            finish_reason="stop",
+        )
+
+    monkeypatch.setattr(server, "_engine", FakeEngine())
+    monkeypatch.setattr(server, "_model_path", None)
+    monkeypatch.setattr(server, "_model_name", model_name)
+    monkeypatch.setattr(server, "_served_model_name", model_name)
+    monkeypatch.setattr(server, "_model_type", "llm")
+    monkeypatch.setattr(server, "_reasoning_parser", None)
+    monkeypatch.setattr(server, "_tool_call_parser", "lfm2")
+    monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+    monkeypatch.setattr(server, "_mcp_manager", None)
+    monkeypatch.setattr(server, "_default_timeout", 5.0)
+    monkeypatch.setattr(
+        server,
+        "_await_chat_with_disconnect_abort",
+        fake_await_chat,
+    )
+
+    chat_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "file_info",
+                "description": "Inspect a file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    response_tools = [
+        {
+            "type": "function",
+            "name": "file_info",
+            "description": "Inspect a file.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        }
+    ]
+
+    with pytest.raises(HTTPException):
+        await server.create_chat_completion(
+            ChatCompletionRequest(
+                model=model_name,
+                messages=[Message(role="user", content="Inspect the file.")],
+                tools=chat_tools,
+                tool_choice="required",
+                chat_template_kwargs={
+                    "sentinel": "chat-required",
+                    "tool_choice": "none",
+                },
+            ),
+            fastapi_request=None,
+        )
+    chat_required = captures[-1]
+    assert chat_required["tool_choice"] == "required"
+    assert chat_required["chat_template_kwargs"] == {
+        "sentinel": "chat-required",
+        "tool_choice": "required",
+    }
+    assert len(chat_required["tools"]) == 1
+
+    await server.create_chat_completion(
+        ChatCompletionRequest(
+            model=model_name,
+            messages=[Message(role="user", content="Answer directly.")],
+            tools=chat_tools,
+            tool_choice="none",
+            chat_template_kwargs={
+                "sentinel": "chat-none",
+                "tool_choice": "required",
+            },
+        ),
+        fastapi_request=None,
+    )
+    chat_none = captures[-1]
+    assert chat_none["tool_choice"] == "none"
+    assert chat_none["chat_template_kwargs"] == {"sentinel": "chat-none"}
+    assert not chat_none.get("tools")
+
+    await server.create_chat_completion(
+        ChatCompletionRequest(
+            model=model_name,
+            messages=[Message(role="user", content="Use a tool if needed.")],
+            tools=chat_tools,
+            tool_choice="auto",
+            chat_template_kwargs={
+                "sentinel": "chat-auto",
+                "tool_choice": "required",
+            },
+        ),
+        fastapi_request=None,
+    )
+    chat_auto = captures[-1]
+    assert chat_auto["tool_choice"] == "auto"
+    assert chat_auto["chat_template_kwargs"] == {"sentinel": "chat-auto"}
+    assert len(chat_auto["tools"]) == 1
+
+    specific_choice = {"type": "function", "name": "file_info"}
+    with pytest.raises(HTTPException):
+        await server.create_response(
+            ResponsesRequest(
+                model=model_name,
+                input="Inspect the file.",
+                tools=response_tools,
+                tool_choice=specific_choice,
+                chat_template_kwargs={
+                    "sentinel": "responses-specific",
+                    "tool_choice": "none",
+                },
+            ),
+            fastapi_request=None,
+        )
+    responses_specific = captures[-1]
+    assert responses_specific["tool_choice"] == specific_choice
+    assert responses_specific["chat_template_kwargs"] == {
+        "sentinel": "responses-specific",
+        "tool_choice": specific_choice,
+    }
+    assert len(responses_specific["tools"]) == 1
+
+    await server.create_response(
+        ResponsesRequest(
+            model=model_name,
+            input="Answer directly.",
+            tools=response_tools,
+            tool_choice="none",
+            chat_template_kwargs={
+                "sentinel": "responses-none",
+                "tool_choice": "required",
+            },
+        ),
+        fastapi_request=None,
+    )
+    responses_none = captures[-1]
+    assert responses_none["tool_choice"] == "none"
+    assert responses_none["chat_template_kwargs"] == {
+        "sentinel": "responses-none"
+    }
+    assert not responses_none.get("tools")

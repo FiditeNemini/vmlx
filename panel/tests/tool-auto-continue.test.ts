@@ -1,14 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
+  isToolAuthorizedForCurrentTurn,
+  isToolNameProvidedForCurrentTurn,
   requestedExactFinalToolNames,
   requestedOnceToolNames,
   requestsDirectAnswerAfterSingleTool,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
   requestsPrivateReasoningWithoutToolUse,
+  scopeToolDefinitionsByName,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
+  toolChoiceForCurrentTurn,
 } from '../src/shared/toolAutoContinue'
 
 describe('tool auto-continue policy', () => {
@@ -74,6 +78,21 @@ describe('tool auto-continue policy', () => {
         'Call the built-in file_info tool exactly once with path panel/package.json. After its result, reply exactly B1-ELECTRON-TOOL-TEMPLATE1-DONE and nothing else.',
       ),
     ).toBe(true)
+    const liveLfmContract =
+      'Call the built-in file_info tool exactly once with path panel/package.json. Use the real tool. Then reply exactly two visible lines: R18-LFM-EPOCH-ACCEPT-1-DONE and FILE=panel/package.json SIZE=<human-readable tool size>. Do not add other visible text.'
+    expect(requestedExactFinalToolNames(liveLfmContract)).toEqual(['file_info'])
+    expect(requestsDirectAnswerAfterSingleTool(liveLfmContract)).toBe(true)
+    const scoped = scopeToolDefinitionsByName(
+      [
+        { function: { name: 'file_info' } },
+        { function: { name: 'write_file' } },
+      ],
+      requestedExactFinalToolNames(liveLfmContract),
+    )
+    const scopedNames = scoped.map(tool => tool.function.name)
+    expect(scopedNames).toEqual(['file_info'])
+    expect(isToolNameProvidedForCurrentTurn('file_info', scopedNames)).toBe(true)
+    expect(isToolNameProvidedForCurrentTurn('write_file', scopedNames)).toBe(false)
     expect(
       requestsDirectAnswerAfterSingleTool(
         'First call file_info exactly once with path panel/package.json. After that result, call run_command exactly once with command pwd. Use exactly those two tools in that order. After both tool results, reply exactly B1-CURRENT-MULTI3-DONE.',
@@ -100,6 +119,22 @@ describe('tool auto-continue policy', () => {
       ),
     ).toBe(false)
     expect(
+      requestedExactFinalToolNames(
+        'Call file_info exactly once. Use tools as needed, then reply exactly DONE.',
+      ),
+    ).toEqual([])
+    expect(
+      requestedExactFinalToolNames(
+        'Call file_info exactly once. You may call other tools, then reply exactly DONE.',
+      ),
+    ).toEqual([])
+    expect(
+      requestedExactFinalToolNames(
+        'Call file_info exactly once with path panel/package.json. Call read_file with path AGENTS.md. Then reply exactly DONE.',
+        ['write_file', 'read_file', 'file_info'],
+      ),
+    ).toEqual(['file_info', 'read_file'])
+    expect(
       requestsDirectAnswerAfterSingleTool(
         'Call file_info exactly once. After checking prerequisites. The tool result may be long; reply exactly DONE.',
       ),
@@ -122,6 +157,82 @@ describe('tool auto-continue policy', () => {
         'First call file_info exactly once. Then call run_command exactly once.',
       ),
     ).toEqual(['file_info', 'run_command'])
+    expect(
+      requestedOnceToolNames(
+        'Call the built-in `file_info` tool exactly once with path panel/package.json.',
+      ),
+    ).toEqual(['file_info'])
+    expect(
+      requestedOnceToolNames(
+        'Call the built in `file_info` function exactly once with path panel/package.json.',
+      ),
+    ).toEqual(['file_info'])
+    expect(
+      requestedExactFinalToolNames(
+        'Call the built-in `file_info` tool exactly once. Then reply exactly DONE.',
+        ['file_info', 'write_file'],
+      ),
+    ).toEqual(['file_info'])
+  })
+
+  it('keeps an open-ended catalog and matches provided names case-insensitively', () => {
+    const tools = [
+      { function: { name: 'file_info' } },
+      { function: { name: 'write_file' } },
+    ]
+    expect(scopeToolDefinitionsByName(tools, [])).toEqual(tools)
+    expect(isToolNameProvidedForCurrentTurn('FILE_INFO', ['file_info'])).toBe(true)
+    expect(isToolNameProvidedForCurrentTurn('write_file', ['file_info'])).toBe(false)
+  })
+
+  it('maps local no-tool and singular exact-tool authorization onto the wire API', () => {
+    expect(toolChoiceForCurrentTurn(true, [], 'responses')).toBe('none')
+    expect(toolChoiceForCurrentTurn(true, ['file_info'], 'chat')).toBe('none')
+    expect(toolChoiceForCurrentTurn(false, ['file_info'], 'responses')).toEqual({
+      type: 'function',
+      name: 'file_info',
+    })
+    expect(toolChoiceForCurrentTurn(false, ['file_info'], 'chat')).toEqual({
+      type: 'function',
+      function: { name: 'file_info' },
+    })
+    expect(toolChoiceForCurrentTurn(false, [], 'responses')).toBeUndefined()
+    expect(
+      toolChoiceForCurrentTurn(false, ['file_info', 'run_command'], 'chat'),
+    ).toEqual({
+      type: 'function',
+      function: { name: 'file_info' },
+    })
+  })
+
+  it('authorizes no MCP execution on forbidden or exact built-in turns', () => {
+    expect(
+      isToolAuthorizedForCurrentTurn('filesystem__read_file', [], true, []),
+    ).toBe(false)
+    expect(
+      isToolAuthorizedForCurrentTurn(
+        'file_info',
+        ['file_info'],
+        false,
+        ['file_info'],
+      ),
+    ).toBe(true)
+    expect(
+      isToolAuthorizedForCurrentTurn(
+        'filesystem__read_file',
+        ['file_info'],
+        false,
+        ['file_info'],
+      ),
+    ).toBe(false)
+    expect(
+      isToolAuthorizedForCurrentTurn(
+        'filesystem__read_file',
+        ['file_info'],
+        false,
+        [],
+      ),
+    ).toBe(true)
   })
 
   it('maps an explicit current-turn no-tool directive to the API contract', () => {
@@ -176,6 +287,11 @@ describe('tool auto-continue policy', () => {
     ).toBe(false)
     expect(
       requestsExactTextOnlyWithoutToolUse(
+        'Call the built-in `file_info` tool exactly once with path panel/package.json. After the tool result, reply exactly DONE.',
+      ),
+    ).toBe(false)
+    expect(
+      requestsExactTextOnlyWithoutToolUse(
         'You must use the tool. After its function result, reply exactly DONE.',
       ),
     ).toBe(false)
@@ -221,8 +337,17 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('const attachBuiltinToolsForCurrentTurn =')
     expect(source).toContain('!exactTextOnlyNoToolTurn')
     expect(source).toContain('!privateReasoningNoToolTurn')
+    expect(source).toContain(
+      'const currentPromptAlreadyForbidsTools = userForbidsToolCalls',
+    )
+    expect(source).not.toContain(
+      'const currentPromptAlreadyForbidsTools =\n        userForbidsToolCalls ||',
+    )
     expect(source.match(/if \(attachBuiltinToolsForCurrentTurn\)/g) || []).toHaveLength(2)
-    expect(source).not.toContain('obj.tool_choice = "none"')
+    expect(source).toContain('toolChoiceForCurrentTurn(')
+    expect(source).toContain('const requestToolChoice = currentTurnToolChoice()')
+    expect(source).toContain('obj.tool_choice = requestToolChoice')
+    expect(source).toContain('obj.tool_choice = "none"')
   })
 
   it('checks the terminal AppleScript round before sending a follow-up', () => {
@@ -266,15 +391,25 @@ describe('tool auto-continue policy', () => {
     const policyStart = source.indexOf('const applyPostToolAnswerPolicy =')
     const policyEnd = source.indexOf('if (useResponsesApi)', policyStart)
     const policy = source.slice(policyStart, policyEnd)
+    const authorizationStart = source.indexOf(
+      'const toolAuthorized = isToolAuthorizedForCurrentTurn(',
+    )
+    const authorization = source.slice(
+      authorizationStart,
+      source.indexOf(');', authorizationStart) + 2,
+    )
 
-    expect(source).toContain('requestsDirectAnswerAfterSingleTool(latestUserText)')
-    expect(source).toContain('requestedExactFinalToolNames(latestUserText)')
+    expect(source).toContain('exactFinalBuiltinToolNames.length === 1')
+    expect(source).toContain('requestedExactFinalToolNames(')
+    expect(source).toContain('unscopedCurrentTurnToolDefinitions')
     expect(source).toContain('requestedOnceToolNames(latestUserText)')
     expect(source).toContain('completedExactlyOnceTools.has(name)')
     expect(source).toContain('Duplicate ${tc.function.name} call was not executed')
     expect(source).toContain('const availableToolDefinitions = () =>')
     expect(source).toContain('completedExactFinalTools.add(normalizedToolName)')
     expect(source).toContain('exactFinalToolNames.every((name) =>')
+    expect(authorization).toContain('currentToolNames')
+    expect(authorization).not.toContain('availableToolDefinitions()')
     expect(source).toContain('if (!(finalAnswerRecovery || plannedDirectAnswerPass)) return')
     expect(policy).toContain('delete obj.tools')
     expect(policy).toContain('if (!finalAnswerRecovery) return')
@@ -283,6 +418,39 @@ describe('tool auto-continue policy', () => {
     )
     expect(planned).toBeGreaterThan(-1)
     expect(followUp).toBeGreaterThan(planned)
+  })
+
+  it('marks exactly-once completion only after valid authorized arguments', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+    const loopStart = source.indexOf('for (const tc of receivedToolCalls)')
+    const loopEnd = source.indexOf(
+      'if (exactFinalToolNames.includes(normalizedToolName))',
+      loopStart,
+    )
+    const loop = source.slice(loopStart, loopEnd)
+    const parse = loop.indexOf('toolArgs = JSON.parse(')
+    const authorize = loop.indexOf(
+      'const toolAuthorized = isToolAuthorizedForCurrentTurn(',
+    )
+    const authorizedBranch = loop.indexOf('if (toolAuthorized) {', authorize)
+    const mark = loop.indexOf(
+      'completedExactlyOnceTools.add(normalizedToolName)',
+      authorizedBranch,
+    )
+    const executing = loop.indexOf('emitToolStatus(\n                  "executing"', authorizedBranch)
+    const rejectedBranch = loop.indexOf('if (!toolAuthorized) {', authorize)
+
+    expect(loopStart).toBeGreaterThan(-1)
+    expect(loopEnd).toBeGreaterThan(loopStart)
+    expect(parse).toBeGreaterThan(-1)
+    expect(authorize).toBeGreaterThan(parse)
+    expect(authorizedBranch).toBeGreaterThan(authorize)
+    expect(mark).toBeGreaterThan(authorizedBranch)
+    expect(executing).toBeGreaterThan(mark)
+    expect(rejectedBranch).toBeGreaterThan(executing)
+    expect(loop.slice(0, parse)).not.toContain(
+      'completedExactlyOnceTools.add(normalizedToolName)',
+    )
   })
 
   it('resets token timing at follow-up stream boundaries and counts long in-stream gaps', () => {

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  toolCapabilityEpochInstruction,
   toolCapabilityFingerprint,
   toolCapabilityNames,
-  toolCapabilityTransitionInstruction,
 } from "../src/main/tool-capability-epoch";
 
 const fileInfo = {
@@ -61,35 +61,74 @@ describe("tool capability epochs", () => {
   it("marks tools OFF to ON and names the current authoritative catalog", () => {
     const current = toolCapabilityFingerprint([fileInfo]);
     expect(
-      toolCapabilityTransitionInstruction(
-        "tools:none",
-        current,
-        ["file_info"],
-      ),
+      toolCapabilityEpochInstruction(["tools:none"], current, ["file_info"]),
     ).toContain("Current callable functions: file_info.");
   });
 
   it("repairs a legacy unknown epoch only when tools are now attached", () => {
     const current = toolCapabilityFingerprint([fileInfo]);
     expect(
-      toolCapabilityTransitionInstruction(undefined, current, ["file_info"]),
+      toolCapabilityEpochInstruction([undefined], current, ["file_info"]),
     ).toContain("authoritative tool catalog");
     expect(
-      toolCapabilityTransitionInstruction(undefined, "tools:none", []),
+      toolCapabilityEpochInstruction([undefined], "tools:none", []),
     ).toBeUndefined();
   });
 
-  it("does not inject a boundary when the latest assistant used this catalog", () => {
+  it("does not inject a boundary when every known assistant used this catalog", () => {
     const current = toolCapabilityFingerprint([fileInfo]);
     expect(
-      toolCapabilityTransitionInstruction(current, current, ["file_info"]),
+      toolCapabilityEpochInstruction([current, current], current, [
+        "file_info",
+      ]),
     ).toBeUndefined();
   });
 
   it("marks tools ON to OFF without granting stale capabilities", () => {
     const previous = toolCapabilityFingerprint([fileInfo]);
     expect(
-      toolCapabilityTransitionInstruction(previous, "tools:none", []),
+      toolCapabilityEpochInstruction([previous], "tools:none", []),
     ).toContain("No callable function schemas");
+  });
+
+  it("keeps the tools-OFF instruction stable after the transition turn", () => {
+    const priorTools = toolCapabilityFingerprint([fileInfo]);
+    const transition = toolCapabilityEpochInstruction(
+      [priorTools],
+      "tools:none",
+      [],
+    );
+    const laterSameEpoch = toolCapabilityEpochInstruction(
+      [priorTools, "tools:none", "tools:none"],
+      "tools:none",
+      [],
+    );
+    expect(laterSameEpoch).toBe(transition);
+  });
+
+  it("keeps the tools-ON instruction stable after an older OFF epoch", () => {
+    const current = toolCapabilityFingerprint([fileInfo]);
+    const transition = toolCapabilityEpochInstruction(["tools:none"], current, [
+      "file_info",
+    ]);
+    const laterSameEpoch = toolCapabilityEpochInstruction(
+      ["tools:none", current, current],
+      current,
+      ["file_info"],
+    );
+    expect(laterSameEpoch).toBe(transition);
+  });
+
+  it("does not add instructions to a fresh or uniformly no-tools chat", () => {
+    expect(
+      toolCapabilityEpochInstruction([], "tools:none", []),
+    ).toBeUndefined();
+    expect(
+      toolCapabilityEpochInstruction(
+        ["tools:none", "tools:none"],
+        "tools:none",
+        [],
+      ),
+    ).toBeUndefined();
   });
 });

@@ -52,19 +52,27 @@ export function toolCapabilityNames(
     .sort();
 }
 
-export function toolCapabilityTransitionInstruction(
-  previousFingerprint: string | undefined,
+export function toolCapabilityEpochInstruction(
+  previousFingerprints: Array<string | undefined>,
   currentFingerprint: string,
   currentToolNames: string[],
 ): string | undefined {
+  // Keep the current capability instruction stable after a chat has crossed
+  // tool epochs. Emitting it only on the first changed turn shifts the entire
+  // rendered prompt on the next turn (Responses `instructions` are a leading
+  // system message), which destroys otherwise reusable RAM/L2 prefix blocks.
+  //
   // Legacy assistant rows have no fingerprint. Avoid injecting anything into
-  // ordinary no-tools chats, while still repairing a legacy tools-OFF -> ON
-  // transition the first time the current catalog is attached.
-  const changed =
-    previousFingerprint !== undefined
-      ? previousFingerprint !== currentFingerprint
-      : currentToolNames.length > 0;
-  if (!changed) return undefined;
+  // ordinary no-tools chats, while still repairing an unknown -> tools-ON
+  // transition whenever the current catalog is attached.
+  const crossedKnownEpoch = previousFingerprints.some(
+    (fingerprint) =>
+      fingerprint !== undefined && fingerprint !== currentFingerprint,
+  );
+  const hasUnknownLegacyEpoch =
+    currentToolNames.length > 0 &&
+    previousFingerprints.some((fingerprint) => fingerprint === undefined);
+  if (!crossedKnownEpoch && !hasUnknownLegacyEpoch) return undefined;
 
   if (currentToolNames.length === 0) {
     return [
@@ -81,4 +89,3 @@ export function toolCapabilityTransitionInstruction(
     "Ignore earlier assistant statements about tool availability when they conflict with this current catalog.",
   ].join(" ");
 }
-

@@ -66,8 +66,8 @@ import {
 } from "../../shared/reasoningParserAliases";
 import {
   toolCapabilityFingerprint,
+  toolCapabilityEpochInstruction,
   toolCapabilityNames,
-  toolCapabilityTransitionInstruction,
 } from "../tool-capability-epoch";
 
 // Default connection config (fallback values)
@@ -1521,16 +1521,14 @@ export function registerChatHandlers(
       const currentToolCapabilityFingerprint = toolCapabilityFingerprint(
         currentTurnToolDefinitions,
       );
-      const latestPriorAssistant = [...messages]
-        .reverse()
-        .find((message) => message.role === "assistant");
-      const toolCapabilityTransition =
-        latestPriorAssistant &&
-        toolCapabilityTransitionInstruction(
-          latestPriorAssistant.toolCapabilityFingerprint,
-          currentToolCapabilityFingerprint,
-          toolCapabilityNames(currentTurnToolDefinitions),
-        );
+      const priorAssistantToolFingerprints = messages
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.toolCapabilityFingerprint);
+      const toolCapabilityEpoch = toolCapabilityEpochInstruction(
+        priorAssistantToolFingerprints,
+        currentToolCapabilityFingerprint,
+        toolCapabilityNames(currentTurnToolDefinitions),
+      );
       if (hasSystemPrompt && overrides?.builtinToolsEnabled) {
         const toolRule =
           "\n\nIMPORTANT: After using any tools, provide a final response. If the user explicitly requested exact final wording or a strict output format, follow that format exactly; otherwise provide a substantive response explaining what you found or did. Never stop after just executing tools.";
@@ -1566,10 +1564,10 @@ export function registerChatHandlers(
           content: directMediaAttachmentRule.trim(),
         });
       }
-      if (toolCapabilityTransition) {
+      if (toolCapabilityEpoch) {
         requestMessages.push({
           role: "system",
-          content: toolCapabilityTransition,
+          content: toolCapabilityEpoch,
         });
       }
       // No default system prompt injected — let the model's native template handle defaults.

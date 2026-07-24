@@ -155,30 +155,69 @@ describe('i18n locale consistency', () => {
     }
   })
 
-  it('LOCALES array in i18n/index.tsx stays in sync with locale files', () => {
+  it('LOCALES array in i18n/catalog.ts stays in sync with locale files', () => {
     // If you add a new JSON locale file, also add it to the Locale type
-    // and LOCALES / LOCALE_NAMES / LOCALE_FLAGS in i18n/index.tsx.
-    const indexSrc = readFileSync(
-      resolve(__dirname, '..', 'src', 'renderer', 'src', 'i18n', 'index.tsx'),
+    // and LOCALES / LOCALE_NAMES / LOCALE_FLAGS in i18n/catalog.ts.
+    const catalogSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'i18n', 'catalog.ts'),
       'utf-8',
     )
     for (const l of LOCALES) {
       expect(
-        indexSrc.includes(`'${l}'`) || indexSrc.includes(`"${l}"`),
-        `Locale '${l}' JSON exists but is not registered in i18n/index.tsx`,
+        catalogSrc.includes(`'${l}'`) || catalogSrc.includes(`"${l}"`),
+        `Locale '${l}' JSON exists but is not registered in i18n/catalog.ts`,
       ).toBe(true)
     }
   })
 
   it('language switcher persists to localStorage key vmlx-locale', () => {
     // Verifies the persistence contract both language pickers depend on.
-    const indexSrc = readFileSync(
-      resolve(__dirname, '..', 'src', 'renderer', 'src', 'i18n', 'index.tsx'),
+    const providerSrc = readFileSync(
+      resolve(
+        __dirname,
+        '..',
+        'src',
+        'renderer',
+        'src',
+        'i18n',
+        'I18nProvider.tsx',
+      ),
       'utf-8',
     )
-    expect(indexSrc).toContain("'vmlx-locale'")
-    expect(indexSrc).toContain('localStorage.setItem')
-    expect(indexSrc).toContain('localStorage.getItem')
+    expect(providerSrc).toMatch(/["']vmlx-locale["']/)
+    expect(providerSrc).toContain('localStorage.setItem')
+    expect(providerSrc).toContain('localStorage.getItem')
+  })
+
+  it('keeps the React context stable across HMR and isolates non-component exports', () => {
+    const contextSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'i18n', 'context.ts'),
+      'utf-8',
+    )
+    const providerSrc = readFileSync(
+      resolve(
+        __dirname,
+        '..',
+        'src',
+        'renderer',
+        'src',
+        'i18n',
+        'I18nProvider.tsx',
+      ),
+      'utf-8',
+    )
+    const catalogSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'i18n', 'catalog.ts'),
+      'utf-8',
+    )
+
+    expect(contextSrc).toMatch(
+      /Symbol[.]for[(]["']net[.]vmlx[.]renderer[.]i18n-context["'][)]/,
+    )
+    expect(contextSrc).toContain('registry[I18N_CONTEXT_GLOBAL] = I18nContext')
+    expect(providerSrc).not.toContain('LOCALE_FLAGS')
+    expect(providerSrc).not.toContain('LOCALE_NAMES')
+    expect(catalogSrc).not.toContain('createContext')
   })
 
   it('session creation and narrow session drawers use the shared locale catalog', () => {

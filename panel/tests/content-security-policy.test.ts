@@ -18,4 +18,11 @@ describe('main-process content security policy', () => {
     expect(policy).toContain("https://hf-mirror.com https://*.hf-mirror.com")
     expect(policy).toContain("https://modelscope.cn https://*.modelscope.cn")
   })
+
+  it('allows persisted local audio and video without opening remote media', () => {
+    const policy = buildContentSecurityPolicy({ devRenderer: false })
+
+    expect(policy).toContain("media-src 'self' data: blob:;")
+    expect(policy).not.toMatch(/media-src[^;]*https?:/)
+  })
 })

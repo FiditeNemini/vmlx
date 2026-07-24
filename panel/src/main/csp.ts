@@ -13,6 +13,9 @@ export function buildContentSecurityPolicy(options: { devRenderer?: boolean } = 
     // points at a mirror.
     " img-src 'self' data: blob: http://127.0.0.1:* http://localhost:* https://huggingface.co https://*.huggingface.co https://raw.githubusercontent.com https://mlx.studio https://*.mlx.studio https://hf-mirror.com https://*.hf-mirror.com https://modelscope.cn https://*.modelscope.cn;" +
     " connect-src 'self' http://127.0.0.1:* http://localhost:* https://huggingface.co https://*.huggingface.co https://hf-mirror.com https://*.hf-mirror.com https://modelscope.cn https://*.modelscope.cn;" +
-    " media-src 'self' blob:;"
+    // Chat audio/video attachments are persisted and rendered as local data
+    // URLs. Keep remote media blocked while allowing those local payloads and
+    // object URLs created by the renderer.
+    " media-src 'self' data: blob:;"
   )
 }

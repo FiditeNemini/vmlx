@@ -1762,6 +1762,17 @@ export class ApiGateway extends EventEmitter {
     return converted.length > 0 ? converted : undefined;
   }
 
+  private openAIStreamErrorToOllama(payload: any): string | undefined {
+    const error = payload?.error;
+    const message =
+      typeof error === "string"
+        ? error
+        : error?.message || error?.detail || error?.type;
+    if (message == null) return undefined;
+    const text = String(message).trim();
+    return text || "the model failed to generate a response";
+  }
+
   // ── /api/chat ──
 
   private async handleOllamaChat(
@@ -1978,6 +1989,21 @@ export class ApiGateway extends EventEmitter {
 
             try {
               const parsed = JSON.parse(payload);
+              const streamError = this.openAIStreamErrorToOllama(parsed);
+              if (streamError) {
+                // The upstream HTTP status is already 200 once an SSE stream
+                // begins. Preserve its structured terminal failure using
+                // Ollama's native NDJSON error row and suppress the later
+                // [DONE] marker; emitting done:true/stop here would falsely
+                // report a failed reasoning-only turn as successful.
+                done = true;
+                if (!this.writeJsonLine(res, { error: streamError })) {
+                  proxyRes.destroy();
+                  return;
+                }
+                this.endResponse(res);
+                return;
+              }
               const delta = parsed.choices?.[0]?.delta;
               const finishReason = parsed.choices?.[0]?.finish_reason;
               const reasoningDelta =
@@ -2246,7 +2272,9 @@ export class ApiGateway extends EventEmitter {
         }
 
         let buffer = "";
+        let streamDone = false;
         proxyRes.on("data", (chunk: Buffer) => {
+          if (streamDone) return;
           buffer += chunk.toString();
           const lines = buffer.split("\n");
           buffer = lines.pop() || "";
@@ -2257,6 +2285,7 @@ export class ApiGateway extends EventEmitter {
             const payload = trimmed.slice(6);
 
             if (payload === "[DONE]") {
+              streamDone = true;
               if (
                 !this.writeJsonLine(res, {
                   model: modelForResponse,
@@ -2275,6 +2304,16 @@ export class ApiGateway extends EventEmitter {
 
             try {
               const chunk = JSON.parse(payload);
+              const streamError = this.openAIStreamErrorToOllama(chunk);
+              if (streamError) {
+                streamDone = true;
+                if (!this.writeJsonLine(res, { error: streamError })) {
+                  proxyRes.destroy();
+                  return;
+                }
+                this.endResponse(res);
+                return;
+              }
               const choice = chunk.choices?.[0];
               const text = useRawCompletion
                 ? choice?.text || ""
@@ -2284,6 +2323,7 @@ export class ApiGateway extends EventEmitter {
                 : choice?.delta?.reasoning_content || choice?.delta?.reasoning || "";
               const finishReason = choice?.finish_reason;
               const done = finishReason != null;
+              if (!text && !thinking && !done) continue;
 
               const ollamaChunk: any = {
                 model: modelForResponse,
@@ -2305,6 +2345,7 @@ export class ApiGateway extends EventEmitter {
                 return;
               }
               if (done) {
+                streamDone = true;
                 this.endResponse(res);
                 return;
               }
@@ -2315,7 +2356,8 @@ export class ApiGateway extends EventEmitter {
         });
 
         proxyRes.on("end", () => {
-          if (this.responseWritable(res)) {
+          if (!streamDone && this.responseWritable(res)) {
+            streamDone = true;
             if (
               !this.writeJsonLine(res, {
                 model: modelForResponse,

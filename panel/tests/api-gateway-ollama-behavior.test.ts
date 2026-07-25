@@ -170,6 +170,36 @@ async function startStreamingThinkingBackend(): Promise<BackendHandle> {
   return { server, port: await listen(server), bodies, paths };
 }
 
+async function startReasoningOnlyErrorBackend(): Promise<BackendHandle> {
+  const bodies: any[] = [];
+  const paths: string[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => {
+      paths.push(req.url || "");
+      const raw = Buffer.concat(chunks).toString("utf8");
+      bodies.push(raw ? JSON.parse(raw) : {});
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+      });
+      res.write(
+        'data: {"choices":[{"delta":{"reasoning_content":"private plan"},"finish_reason":null}]}\n\n',
+      );
+      res.write(
+        'data: {"choices":[],"warnings":["The model ended normally while still in its reasoning phase."]}\n\n',
+      );
+      res.write(
+        'data: {"error":{"message":"The model produced reasoning_content but no visible answer and no tool call.","type":"invalid_response_error","code":"reasoning_only_no_content"}}\n\n',
+      );
+      res.write("data: [DONE]\n\n");
+      res.end();
+    });
+  });
+  return { server, port: await listen(server), bodies, paths };
+}
+
 async function startEmbeddingBackend(): Promise<BackendHandle> {
   const bodies: any[] = [];
   const paths: string[] = [];
@@ -1009,6 +1039,88 @@ describe("Ollama gateway request translation behavior", () => {
       prompt_eval_count: 3,
     });
     expect(chunks.at(-1).message).not.toHaveProperty("thinking");
+  });
+
+  it("maps a reasoning-only Chat stream failure to one native Ollama error row", async () => {
+    backend = await startReasoningOnlyErrorBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    const response = await fetch(`http://127.0.0.1:${started.port}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "hy3-model",
+        stream: true,
+        think: true,
+        messages: [{ role: "user", content: "reason without an answer" }],
+      }),
+    });
+    const chunks = (await response.text())
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+
+    expect(response.status).toBe(200);
+    expect(chunks).toEqual([
+      {
+        model: "hy3-model",
+        created_at: expect.any(String),
+        message: {
+          role: "assistant",
+          content: "",
+          thinking: "private plan",
+        },
+        done: false,
+      },
+      {
+        error:
+          "The model produced reasoning_content but no visible answer and no tool call.",
+      },
+    ]);
+    expect(chunks.some((chunk) => chunk.done === true)).toBe(false);
+  });
+
+  it("maps a reasoning-only Generate stream failure to one native Ollama error row", async () => {
+    backend = await startReasoningOnlyErrorBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    const response = await fetch(
+      `http://127.0.0.1:${started.port}/api/generate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "hy3-model",
+          stream: true,
+          think: true,
+          prompt: "reason without an answer",
+        }),
+      },
+    );
+    const chunks = (await response.text())
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+
+    expect(response.status).toBe(200);
+    expect(chunks).toEqual([
+      {
+        model: "hy3-model",
+        created_at: expect.any(String),
+        response: "",
+        thinking: "private plan",
+        done: false,
+      },
+      {
+        error:
+          "The model produced reasoning_content but no visible answer and no tool call.",
+      },
+    ]);
+    expect(chunks.some((chunk) => chunk.done === true)).toBe(false);
   });
 
   it("auto-switches single-model Ollama generate while emitting incremental response chunks", async () => {

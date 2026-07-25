@@ -485,11 +485,6 @@ def _cache_topology_configuration(
             if paged is not None
             else None
         ),
-        "paged_max_resident_bytes": (
-            int(getattr(paged, "max_resident_bytes", 0) or 0)
-            if paged is not None
-            else None
-        ),
         "block_disk_max_size_bytes": (
             int(getattr(block_disk, "max_size_bytes", 0) or 0)
             if block_disk is not None

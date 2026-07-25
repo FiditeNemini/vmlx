@@ -409,6 +409,59 @@ class TestHealthEndpoint:
         assert second["configuration"]["instantiated"]["paged_ram_enabled"] is False
         assert first["canonical_sha256"] != second["canonical_sha256"]
 
+    def test_cache_topology_fingerprint_ignores_volatile_resident_budget(self):
+        """Restart-varying resident byte budgets must not change cache identity."""
+        from vmlx_engine import server
+
+        disk_store = SimpleNamespace(max_size_bytes=10 * 1024**3)
+        paged = SimpleNamespace(
+            _disk_store=disk_store,
+            block_size=64,
+            max_blocks=1000,
+            max_resident_bytes=4 * 1024**3,
+            disk_only=False,
+            paged_frugal=False,
+            ram_mirror_policy="resident",
+        )
+        scheduler = SimpleNamespace(
+            config=SimpleNamespace(
+                enable_prefix_cache=True,
+                use_paged_cache=True,
+                enable_block_disk_cache=True,
+                block_disk_cache_max_gb=10.0,
+                kv_cache_quantization="q4",
+                kv_cache_group_size=64,
+            ),
+            block_aware_cache=object(),
+            memory_aware_cache=None,
+            prefix_cache=None,
+            paged_cache_manager=paged,
+            disk_cache=None,
+            _ssm_companion_disk_store=None,
+        )
+        health_status = {
+            "kv_cache_quantization": {"enabled": True, "mode": "live", "bits": 4},
+            "turboquant_kv_cache": {"enabled": True},
+            "native_cache": {
+                "schema": "plain_kv_v1",
+                "cache_type": "paged_kv",
+                "prefix": True,
+                "paged": True,
+                "block_disk_l2": True,
+            },
+        }
+
+        first = server._cache_topology_attestation(
+            server._cache_topology_configuration(scheduler, health_status)
+        )
+        paged.max_resident_bytes = 6 * 1024**3
+        second = server._cache_topology_attestation(
+            server._cache_topology_configuration(scheduler, health_status)
+        )
+
+        assert "paged_max_resident_bytes" not in first["configuration"]["instantiated"]
+        assert first["canonical_sha256"] == second["canonical_sha256"]
+
     def test_health_no_model_loaded(self):
         """When _engine is None, health returns status='no_model'."""
         from vmlx_engine import server

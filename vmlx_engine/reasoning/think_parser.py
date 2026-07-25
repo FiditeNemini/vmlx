@@ -89,6 +89,65 @@ class BaseThinkingReasoningParser(ReasoningParser):
         super().__init__(tokenizer)
         self._think_in_prompt = False  # Set via reset_state() when <think> is in the prompt
 
+    @property
+    def alternate_reasoning_marker_pairs(self) -> tuple[tuple[str, str], ...]:
+        """Additional private-rail spellings accepted by this parser.
+
+        Several reasoning-capable models occasionally emit the more verbose
+        ``<thinking>...</thinking>`` dialect after a canonical ``<think>`` rail
+        has already closed.  That is still model-private planning, not visible
+        assistant content.  Treating it as an alias here keeps the API
+        reasoning/content split truthful across Chat, Responses, and the
+        Electron renderer without adding a UI-only sanitizer.
+        """
+
+        return (("<thinking>", "</thinking>"),)
+
+    @property
+    def reasoning_marker_pairs(self) -> tuple[tuple[str, str], ...]:
+        """All start/end marker pairs this parser treats as reasoning rails."""
+
+        pairs: list[tuple[str, str]] = [(self.start_token, self.end_token)]
+        for pair in self.alternate_reasoning_marker_pairs:
+            if pair not in pairs:
+                pairs.append(pair)
+        return tuple(pairs)
+
+    @property
+    def reasoning_markers(self) -> tuple[str, ...]:
+        return tuple(marker for pair in self.reasoning_marker_pairs for marker in pair)
+
+    def _normalize_reasoning_markers(self, text: str) -> str:
+        """Map accepted alias markers to this parser's canonical marker pair."""
+
+        normalized = text
+        for start, end in self.reasoning_marker_pairs:
+            if start != self.start_token:
+                normalized = normalized.replace(start, self.start_token)
+            if end != self.end_token:
+                normalized = normalized.replace(end, self.end_token)
+        return normalized
+
+    def _safe_normalized_marker_view(
+        self,
+        previous_text: str,
+        current_text: str,
+    ) -> tuple[str, str, str]:
+        """Return delta-safe previous/current/delta after alias normalization."""
+
+        safe_previous_raw, safe_current_raw, _ = delta_safe_reasoning_marker_view(
+            previous_text,
+            current_text,
+            self.reasoning_markers,
+        )
+        safe_previous = self._normalize_reasoning_markers(safe_previous_raw)
+        safe_current = self._normalize_reasoning_markers(safe_current_raw)
+        if safe_current.startswith(safe_previous):
+            safe_delta = safe_current[len(safe_previous) :]
+        else:
+            safe_delta = ""
+        return safe_previous, safe_current, safe_delta
+
     def reset_state(self, think_in_prompt: bool = False, **kwargs):
         """Reset state for a new streaming request.
 
@@ -102,8 +161,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
     def reasoning_tag_token_seqs(self, tokenizer) -> dict:
         """Return token sequences for the reasoning start/end tags.
 
-        Encodes ``self.start_token`` and ``self.end_token`` (text strings
-        defined by each subclass) using the model tokenizer. Used by the
+        Encodes all accepted start/end marker pairs (text strings defined by
+        each subclass plus safe aliases) using the model tokenizer. Used by the
         scheduler to build a `SequenceStateMachine` for token-level
         reasoning-boundary detection.
 
@@ -119,12 +178,17 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 encode = getattr(tokenizer.tokenizer, "encode", None)
             if encode is None:
                 return {"start": [], "end": []}
-            start_ids = encode(self.start_token, add_special_tokens=False)
-            end_ids = encode(self.end_token, add_special_tokens=False)
+            start_seqs = []
+            end_seqs = []
+            for start_marker, end_marker in self.reasoning_marker_pairs:
+                start_ids = encode(start_marker, add_special_tokens=False)
+                end_ids = encode(end_marker, add_special_tokens=False)
+                if start_ids:
+                    start_seqs.append(list(start_ids))
+                if end_ids:
+                    end_seqs.append(list(end_ids))
         except Exception:
             return {"start": [], "end": []}
-        start_seqs = [list(start_ids)] if start_ids else []
-        end_seqs = [list(end_ids)] if end_ids else []
         return {"start": start_seqs, "end": end_seqs}
 
     def extract_reasoning(
@@ -154,7 +218,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         Returns:
             (reasoning, content) tuple. Either may be None.
         """
-        text = model_output
+        text = self._normalize_reasoning_markers(model_output)
 
         # Case 1: Both tags present (normal case)
         if self.start_token in text and self.end_token in text:
@@ -225,10 +289,9 @@ class BaseThinkingReasoningParser(ReasoningParser):
         Returns:
             DeltaMessage with reasoning/content, or None to skip.
         """
-        previous_text, current_text, delta_text = delta_safe_reasoning_marker_view(
+        previous_text, current_text, delta_text = self._safe_normalized_marker_view(
             previous_text,
             current_text,
-            (self.start_token, self.end_token),
         )
         if not delta_text:
             return None

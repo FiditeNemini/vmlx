@@ -50,6 +50,26 @@ def _stream_one_character_at_a_time(parser, text: str) -> tuple[str, str]:
             "private plan",
             "prefixVISIBLE",
         ),
+        (
+            Qwen3ReasoningParser(),
+            (
+                "<think>first rail</think>"
+                "<thinking>secondary private plan</thinking>"
+                "VISIBLE"
+            ),
+            "first railsecondary private plan",
+            "VISIBLE",
+        ),
+        (
+            ThinkXmlReasoningParser(),
+            (
+                "<think>first rail</think>"
+                "<thinking>secondary private plan</thinking>"
+                "VISIBLE"
+            ),
+            "first railsecondary private plan",
+            "VISIBLE",
+        ),
     ],
 )
 def test_explicit_reasoning_markers_are_safe_at_every_character_boundary(
@@ -66,6 +86,8 @@ def test_explicit_reasoning_markers_are_safe_at_every_character_boundary(
     assert content == expected_content
     assert "<think" not in reasoning + content
     assert "</think" not in reasoning + content
+    assert "<thinking" not in reasoning + content
+    assert "</thinking" not in reasoning + content
     assert "<mm:think" not in reasoning + content
     assert "</mm:think" not in reasoning + content
 
@@ -95,3 +117,18 @@ def test_marker_like_literal_is_released_once_it_cannot_become_a_marker():
 
     assert reasoning == ""
     assert content == "math: 2 < three"
+
+
+def test_qwen_complete_extraction_routes_secondary_thinking_alias_to_reasoning():
+    parser = Qwen3ReasoningParser()
+    parser.reset_state(think_in_prompt=False)
+
+    reasoning, content = parser.extract_reasoning(
+        "<think>canonical private</think>"
+        "<thinking>secondary private</thinking>"
+        "R18-Q27-UI-1-DONE"
+    )
+
+    assert reasoning == "canonical private\nsecondary private"
+    assert content == "R18-Q27-UI-1-DONE"
+    assert "<thinking" not in content

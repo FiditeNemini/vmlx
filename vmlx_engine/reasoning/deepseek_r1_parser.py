@@ -8,10 +8,7 @@ The model may sometimes start outputting reasoning without the explicit
 """
 
 from .base import DeltaMessage
-from .think_parser import (
-    BaseThinkingReasoningParser,
-    delta_safe_reasoning_marker_view,
-)
+from .think_parser import BaseThinkingReasoningParser
 
 
 class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
@@ -115,10 +112,9 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
         Returns:
             DeltaMessage with reasoning/content, or None to skip.
         """
-        previous_text, current_text, delta_text = delta_safe_reasoning_marker_view(
+        previous_text, current_text, delta_text = self._safe_normalized_marker_view(
             previous_text,
             current_text,
-            (self.start_token, self.end_token),
         )
         if not delta_text:
             return None

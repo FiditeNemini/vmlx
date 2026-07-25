@@ -19895,6 +19895,11 @@ async def stream_chat_completion(
         yield f"data: {json.dumps(error_data)}\n\n"
         yield "data: [DONE]\n\n"
         return
+    except asyncio.CancelledError:
+        logger.info("Chat Completions stream cancelled, aborting %s", response_id)
+        if hasattr(engine, "abort_request"):
+            await engine.abort_request(response_id)
+        raise
     except Exception as e:
         # On any error, abort the request and emit an error SSE event
         # so the client knows what happened instead of a silent EOF.
@@ -20481,6 +20486,16 @@ async def stream_chat_completion(
                     ],
                 )
                 yield f"data: {_dump_chat_chunk(answer_finish_chunk)}\n\n"
+        except asyncio.CancelledError:
+            logger.info(
+                "%s Chat Completions visible answer pass cancelled, aborting %s",
+                _answer_family,
+                response_id,
+            )
+            if hasattr(engine, "abort_request"):
+                await engine.abort_request(f"{response_id}:visible-answer")
+                await engine.abort_request(response_id)
+            raise
         except Exception as e:
             logger.error(
                 "%s Chat Completions visible answer pass failed for %s: %s",
@@ -21702,6 +21717,11 @@ async def stream_responses_api(
                 },
             },
         )
+    except asyncio.CancelledError:
+        logger.info("Responses stream cancelled, aborting %s", response_id)
+        if hasattr(engine, "abort_request"):
+            await engine.abort_request(response_id)
+        raise
     except Exception as e:
         # On any error, abort the request and emit an error SSE event
         # so the client knows what happened instead of a silent EOF.
@@ -22413,6 +22433,16 @@ async def stream_responses_api(
                             cancelled=_response_was_cancelled,
                         )
                         _response_output_status = _response_terminal.item_status
+            except asyncio.CancelledError:
+                logger.info(
+                    "%s Responses visible answer pass cancelled, aborting %s",
+                    _answer_family,
+                    response_id,
+                )
+                if hasattr(engine, "abort_request"):
+                    await engine.abort_request(f"{response_id}:visible-answer")
+                    await engine.abort_request(response_id)
+                raise
             except Exception as e:
                 logger.error(
                     "%s visible answer pass failed for %s: %s",

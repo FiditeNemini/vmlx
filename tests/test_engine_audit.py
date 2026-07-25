@@ -7663,7 +7663,7 @@ class TestStartupCompatibilityGuards:
 
         assert '${VMLX_ALLOW_PYPI_JANG:-${VMLINUX_ALLOW_PYPI_JANG:-0}}' in bundle_script
         assert "RELEASE BLOCKED — local jang-tools source missing" in bundle_script
-        assert 'pip install --no-deps "jang>=2.5.33"' in bundle_script
+        assert 'pip install --no-deps "jang>=2.5.34"' in bundle_script
         assert '${VMLX_ALLOW_MISSING_JANG_SOURCE_HASH:-${VMLINUX_ALLOW_MISSING_JANG_SOURCE_HASH:-0}}' in verify_script
         assert "RELEASE BLOCKED — local jang_tools source unavailable for hash parity" in verify_script
 
@@ -7694,7 +7694,7 @@ class TestStartupCompatibilityGuards:
         assert "bundled-Python provenance manifest is missing" in verify_script
         assert "bundled JANG distribution version drift" in verify_script
         assert "bundled JANG provenance mismatch" in verify_script
-        assert 'JANG_MIN_VERSION="2.5.33"' in verify_script
+        assert 'JANG_MIN_VERSION="2.5.34"' in verify_script
 
     def test_release_scripts_accept_documented_jang_tools_env_names_with_legacy_fallback(self):
         bundle_script = Path("./panel/scripts/bundle-python.sh").read_text()
@@ -9029,7 +9029,7 @@ class TestStartupCompatibilityGuards:
             lambda: (_ for _ in ()).throw(ImportError("missing bailing patch")),
         )
 
-        with pytest.raises(RuntimeError, match="jang>=2.5.33"):
+        with pytest.raises(RuntimeError, match="jang>=2.5.34"):
             jang_loader._ensure_jang_family_runtime_supported(
                 Path("/models/Hy3-preview-JANGTQ2"), {"model_type": "hy_v3"}
             )

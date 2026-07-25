@@ -1287,7 +1287,7 @@ def _write_r18_runtime_fixture(
             {
                 "schema_version": 1,
                 "vmlx": {"commit": source_commit, "version": "1.6.18"},
-                "jang": {"commit": "f" * 40, "version": "2.5.33"},
+                "jang": {"commit": "f" * 40, "version": "2.5.34"},
                 "mlx_wheel_platform": contract["mlx_wheel_platform"],
             },
             indent=2,

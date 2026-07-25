@@ -34,7 +34,7 @@ def test_laguna_mixed_affine_runtime_contract_rejects_stale_wheel():
     cfg = _mixed_affine_config()
     assert _uses_mixed_affine_modules(cfg) is True
 
-    with pytest.raises(RuntimeError, match=r"jang>=2\.5\.33") as exc:
+    with pytest.raises(RuntimeError, match=r"jang>=2\.5\.34") as exc:
         _require_mixed_affine_runtime(
             Path("/models/Laguna-S-2.1-JANG_4M"),
             cfg,

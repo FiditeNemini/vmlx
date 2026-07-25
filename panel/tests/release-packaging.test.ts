@@ -107,7 +107,7 @@ function writeR18RuntimeFixture(
       {
         schema_version: 1,
         vmlx: { commit: sourceCommit, version: "1.6.18" },
-        jang: { commit: "f".repeat(40), version: "2.5.33" },
+        jang: { commit: "f".repeat(40), version: "2.5.34" },
         mlx_wheel_platform: contract.mlx_wheel_platform,
       },
       null,

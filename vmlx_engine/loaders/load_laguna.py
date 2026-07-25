@@ -72,7 +72,7 @@ def _require_mixed_affine_runtime(
     raise RuntimeError(
         "This Laguna bundle uses mixed affine bit widths, but the imported "
         "JANG runtime predates the per-module loader contract. Upgrade with "
-        "`pip install -U 'jang>=2.5.33'` and restart vMLX. "
+        "`pip install -U 'jang>=2.5.34'` and restart vMLX. "
         f"Imported runtime: {runtime_path}; model: {path}"
     )
 
@@ -115,7 +115,7 @@ def load_laguna_model(model_path: str | Path) -> Tuple[Any, Any]:
     except ImportError as e:
         raise ImportError(
             "Laguna bundle detected (model_type=laguna) but `jang_tools.laguna` "
-            "is missing. Install with `pip install -U 'jang>=2.5.33'` "
+            "is missing. Install with `pip install -U 'jang>=2.5.34'` "
             "(must include the laguna/ submodule). Original error: " + str(e)
         )
 

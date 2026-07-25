@@ -637,6 +637,7 @@ def test_packaged_bundled_hash_gate_covers_critical_jang_tools_files():
         "hy3/__init__.py",
         "hy3/model.py",
         "hy3/runtime.py",
+        "laguna/runtime.py",
         "kimi_prune/generate_vl.py",
         "kimi_prune/runtime_patch.py",
         "mimo_v2/mlx_model.py",
@@ -754,6 +755,18 @@ def test_electron_builder_runs_bundled_python_gate_before_packaging():
     assert "require.main === module" in hook_src
 
 
+def test_electron_builder_dmg_contains_only_current_electron_app():
+    pkg = json.loads(Path("panel/package.json").read_text())
+    contents = pkg["build"]["dmg"]["contents"]
+
+    assert contents == [
+        {"x": 160, "y": 220, "name": "vMLX.app"},
+        {"x": 600, "y": 220, "type": "link", "path": "/Applications"},
+    ]
+    assert "vMLX 2 (beta).app" not in json.dumps(pkg)
+    assert "build/extra" not in json.dumps(pkg)
+
+
 def test_verify_bundled_python_blocks_removed_dsv4_force_flags():
     verifier = Path("panel/scripts/verify-bundled-python.sh").read_text()
 
@@ -804,6 +817,7 @@ def test_verify_bundled_python_hash_gate_covers_release_runtime_files():
         "hy3/__init__.py",
         "hy3/model.py",
         "hy3/runtime.py",
+        "laguna/runtime.py",
         "kimi_prune/generate_vl.py",
         "kimi_prune/runtime_patch.py",
         "step37/__init__.py",
@@ -836,6 +850,18 @@ def test_verify_bundled_python_import_gate_covers_hy3_jangtq_runtime_modules():
     ):
         assert f'("{mod}",' in verifier
     assert '("mlx_lm.models.mimo_v2",' in verifier
+
+
+def test_verify_bundled_python_checks_laguna_mixed_affine_runtime_contract():
+    verifier = Path("panel/scripts/verify-bundled-python.sh").read_text()
+
+    assert '"laguna/runtime.py"' in verifier
+    assert '("jang_tools.laguna.runtime",' in verifier
+    assert "LAGUNA_MIXED_AFFINE_RUNTIME_VERSION" in verifier
+    assert "infer_affine_bits_from_shapes" in verifier
+    assert "(100352, 384)" in verifier
+    assert "(100352, 32)" in verifier
+    assert "_laguna_bits != 6" in verifier
 
 
 def test_verify_bundled_python_import_gate_covers_step37_source_runtime():

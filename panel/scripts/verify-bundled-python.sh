@@ -186,6 +186,7 @@ HASH_GATED_JANG_TOOLS_FILES=(
   "hy3/__init__.py"
   "hy3/model.py"
   "hy3/runtime.py"
+  "laguna/runtime.py"
   "kimi_prune/generate_vl.py"
   "kimi_prune/runtime_patch.py"
   "mimo_v2/mlx_model.py"
@@ -318,6 +319,7 @@ REQUIRED = [
     ("mlx_lm.models.hy_v3", "mlx_lm.models.hy_v3", "Hy3 model-family mlx-lm registration missing after importing jang_tools.hy3"),
     ("mlx_lm.models.bailing_hybrid", "mlx_lm.models.bailing_hybrid", "Ling/Bailing hybrid mlx-lm runtime missing — bundle-python.sh must install bailing_hybrid.patched.py"),
     ("jang_tools.hy3.runtime", "jang_tools.hy3.runtime", "Hy3 runtime loader missing from bundled jang-tools"),
+    ("jang_tools.laguna.runtime", "jang_tools.laguna.runtime", "Laguna mixed-affine runtime missing from bundled jang-tools"),
     ("jang_tools.mimo_v2.mlx_register", "jang_tools.mimo_v2.mlx_register", "MiMo-V2.5 runtime registration missing from bundled jang-tools"),
     ("mlx_lm.models.mimo_v2", "mlx_lm.models.mimo_v2", "MiMo-V2.5 mlx-lm registration missing after importing jang_tools.mimo_v2.mlx_register"),
     ("jang_tools.step37.step3p7_mlx", "jang_tools.step37.step3p7_mlx", "Step3p7 source VLM runtime missing from bundled jang-tools"),
@@ -359,6 +361,36 @@ if failures:
     print("RELEASE BLOCKED — bundled-python is missing critical modules:")
     for mod, label, hint, e in failures:
         print(f"  - {label}: {hint}")
+    sys.exit(1)
+
+# Laguna XS 2.1 JANG_6M has 6-bit per-module weights inside an artifact whose
+# top-level affine fallback is 8-bit. Import-only verification cannot catch an
+# old runtime that applies the fallback globally and then fails in MLX
+# dequantization. Pin the exact packed embedding shape contract used by the
+# shipped artifact.
+try:
+    from jang_tools.laguna.runtime import (
+        LAGUNA_MIXED_AFFINE_RUNTIME_VERSION,
+        infer_affine_bits_from_shapes,
+    )
+
+    if LAGUNA_MIXED_AFFINE_RUNTIME_VERSION < 1:
+        raise RuntimeError(
+            "LAGUNA_MIXED_AFFINE_RUNTIME_VERSION must be at least 1"
+        )
+    _laguna_bits = infer_affine_bits_from_shapes(
+        (100352, 384),
+        (100352, 32),
+        group_size=64,
+        fallback_bits=8,
+    )
+    if _laguna_bits != 6:
+        raise RuntimeError(
+            f"XS 2.1 JANG_6M embedding must derive 6 bits, got {_laguna_bits}"
+        )
+    print("  ok   Laguna mixed-affine 6-bit runtime contract")
+except Exception as e:
+    print(f"  FAIL Laguna mixed-affine runtime contract: {type(e).__name__}: {e}")
     sys.exit(1)
 
 # Step-3.7 VLM registration is source-owned until mlx-vlm ships native support.

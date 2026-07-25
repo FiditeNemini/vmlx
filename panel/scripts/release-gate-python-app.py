@@ -493,6 +493,7 @@ JANG_TOOLS_SOURCE_HASH_PATHS = (
     "hy3/__init__.py",
     "hy3/model.py",
     "hy3/runtime.py",
+    "laguna/runtime.py",
     "kimi_prune/generate_vl.py",
     "kimi_prune/runtime_patch.py",
     "mimo_v2/mlx_model.py",

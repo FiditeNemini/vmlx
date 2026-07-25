@@ -120,12 +120,6 @@
           "name": "vMLX.app"
         },
         {
-          "x": 380,
-          "y": 220,
-          "name": "vMLX 2 (beta).app",
-          "path": "build/extra/vMLX 2 (beta).app"
-        },
-        {
           "x": 600,
           "y": 220,
           "type": "link",

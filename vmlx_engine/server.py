@@ -9721,6 +9721,9 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
 @app.get("/health")
 async def health():
     """Health check endpoint."""
+    if _standby_state == "deep" and _engine is None:
+        await _post_async_engine_teardown_mlx_cleanup("health_standby_deep")
+
     mcp_info = None
     if _mcp_manager is not None:
         connected = sum(
@@ -10003,6 +10006,34 @@ def _get_scheduler():
     return None
 
 
+async def _post_async_engine_teardown_mlx_cleanup(reason: str) -> None:
+    """Run MLX cleanup after awaited engine-teardown frames can release.
+
+    The deep-sleep path awaits nested async stop coroutines. CPython can keep a
+    completed coroutine frame/traceback alive until the event loop advances once;
+    for BatchedEngine that frame contains ``EngineCore.self`` which owns the
+    Scheduler -> wrapper -> model chain. Clearing MLX memory before that tick
+    leaves a model-sized active allocation that the next wake can duplicate.
+    """
+    try:
+        await asyncio.sleep(0)
+    except Exception:
+        pass
+    try:
+        import gc as _gc
+        import mlx.core as _mx
+
+        _gc.collect()
+        clear_mlx_memory_cache(log=logger)
+        sync = getattr(_mx, "synchronize", None)
+        if callable(sync):
+            sync()
+        _gc.collect()
+        clear_mlx_memory_cache(log=logger)
+    except Exception as exc:
+        logger.debug("Post-teardown MLX cleanup failed after %s: %s", reason, exc)
+
+
 # ── Admin: Sleep / Wake ──
 
 
@@ -10093,6 +10124,7 @@ async def admin_deep_sleep():
                         pass
                 _engine = None
                 _reset_mllm_generation_streams()
+                await _post_async_engine_teardown_mlx_cleanup("admin_deep_sleep_engine_stop")
 
             # Clear stale Flash MoE loader — the FlashMoEExpertLoader holds
             # references to the now-freed model's ExpertIndex and thread pool.
@@ -10133,6 +10165,12 @@ async def admin_deep_sleep():
             clear_mlx_memory_cache(log=logger)
 
             _standby_state = "deep"
+            try:
+                asyncio.create_task(
+                    _post_async_engine_teardown_mlx_cleanup("admin_deep_sleep_deferred")
+                )
+            except Exception:
+                pass
             logger.info("Entered deep sleep — model unloaded, process alive")
             return {"status": "deep_sleep"}
 
@@ -10194,6 +10232,7 @@ async def admin_wake():
                 )
                 return {"status": "active"}
             elif _model_path or _model_name:
+                await _post_async_engine_teardown_mlx_cleanup("admin_wake_before_deep_reload")
                 # Reload text model — run in thread to avoid blocking event loop
                 # (loading large models takes 10-60s; _wake_lock prevents concurrent
                 # access to the globals that load_model modifies)

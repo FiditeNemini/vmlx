@@ -103,3 +103,39 @@ def test_admin_sleep_paths_use_shared_mlx_memory_cache_helper():
     assert "mx.clear_cache()" not in deep_source
     assert "mx.metal.clear_cache()" not in soft_source
     assert "mx.metal.clear_cache()" not in deep_source
+
+
+def test_deep_sleep_yields_before_post_teardown_mlx_cleanup():
+    repo_root = Path(__file__).resolve().parents[1]
+    source = (repo_root / "vmlx_engine" / "server.py").read_text(encoding="utf-8")
+
+    helper_start = source.index("async def _post_async_engine_teardown_mlx_cleanup")
+    soft_start = source.index("async def admin_soft_sleep")
+    helper_source = source[helper_start:soft_start]
+    deep_start = source.index("async def admin_deep_sleep")
+    wake_start = source.index("async def admin_wake")
+    deep_source = source[deep_start:wake_start]
+
+    assert "await asyncio.sleep(0)" in helper_source
+    assert 'getattr(_mx, "synchronize", None)' in helper_source
+    assert "clear_mlx_memory_cache(log=logger)" in helper_source
+    assert (
+        'await _post_async_engine_teardown_mlx_cleanup("admin_deep_sleep_engine_stop")'
+        in deep_source
+    )
+    assert deep_source.index("_engine = None") < deep_source.index(
+        "await _post_async_engine_teardown_mlx_cleanup"
+    )
+    assert (
+        'await _post_async_engine_teardown_mlx_cleanup("admin_wake_before_deep_reload")'
+        in source[source.index("async def admin_wake"):]
+    )
+    assert (
+        '_post_async_engine_teardown_mlx_cleanup("admin_deep_sleep_deferred")'
+        in deep_source
+    )
+    health_source = source[
+        source.index("async def health"):
+        source.index("@app.get(\"/health.mtp\")")
+    ]
+    assert '_post_async_engine_teardown_mlx_cleanup("health_standby_deep")' in health_source

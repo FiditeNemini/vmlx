@@ -802,20 +802,21 @@ function qwenNativeMtpVlArtifactReady(
   }
 }
 
-function configuredNativeMtpLayers(parsedConfig: any, jangCfg: any): number {
+function configuredNativeMtpLayers(parsedConfig: any, jangCfg: any): { layers: number; source: string } {
   const candidates = [
-    parsedConfig?.num_nextn_predict_layers,
-    parsedConfig?.mtp_num_hidden_layers,
-    parsedConfig?.text_config?.num_nextn_predict_layers,
-    parsedConfig?.text_config?.mtp_num_hidden_layers,
-    jangCfg?.runtime?.mtp_layers,
-    jangCfg?.mtp?.num_layers,
-  ]
-  for (const value of candidates) {
+    [jangCfg?.runtime?.mtp_layers, 'jang_config.runtime.mtp_layers'],
+    [jangCfg?.mtp?.num_layers, 'jang_config.mtp.num_layers'],
+    [jangCfg?.mtp_layers, 'jang_config.mtp_layers'],
+    [parsedConfig?.num_nextn_predict_layers, 'config.num_nextn_predict_layers'],
+    [parsedConfig?.mtp_num_hidden_layers, 'config.mtp_num_hidden_layers'],
+    [parsedConfig?.text_config?.num_nextn_predict_layers, 'config.text_config.num_nextn_predict_layers'],
+    [parsedConfig?.text_config?.mtp_num_hidden_layers, 'config.text_config.mtp_num_hidden_layers'],
+  ] as const
+  for (const [value, source] of candidates) {
     const n = Number(value)
-    if (Number.isFinite(n) && n > 0) return Math.floor(n)
+    if (Number.isFinite(n) && n > 0) return { layers: Math.floor(n), source }
   }
-  return 0
+  return { layers: 0, source: 'missing' }
 }
 
 function coerceNativeMtpDepth(raw: unknown): number | undefined {
@@ -932,7 +933,8 @@ function detectNativeMtpCapability(
     (!hy3 && nativeMtpBlockedByProfile(jangCfg) && !tuningDepth)
   ) return undefined
 
-  if (configuredNativeMtpLayers(parsedConfig, jangCfg) <= 0) return undefined
+  const configuredMtp = configuredNativeMtpLayers(parsedConfig, jangCfg)
+  if (configuredMtp.layers <= 0) return undefined
 
   try {
     const raw = readFileSync(join(modelPath, 'model.safetensors.index.json'), 'utf-8')
@@ -959,8 +961,8 @@ function detectNativeMtpCapability(
     }
     return {
       supported: true,
-      depth: tuningDepth?.depth ?? 3,
-      depthSource: tuningDepth?.source ?? 'default',
+      depth: tuningDepth?.depth ?? coerceNativeMtpDepth(configuredMtp.layers) ?? 3,
+      depthSource: tuningDepth?.source ?? configuredMtp.source,
       runtimeScope: configDeclaresMedia(parsedConfig) && hasVisionWeights ? 'text+vl' : 'text',
       // Match the runtime schema string reported by /v1/capabilities
       // (cache.native.schema): hy3 is plain attention (plain_kv_v1); the

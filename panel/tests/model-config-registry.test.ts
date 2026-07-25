@@ -175,8 +175,8 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.isMultimodal).toBe(true)
     expect(detected.nativeMtp).toMatchObject({
       supported: true,
-      depth: 3,
-      depthSource: 'default',
+      depth: 1,
+      depthSource: 'jang_config.runtime.mtp_layers',
       runtimeScope: 'text+vl',
       requiresDeterministicSampling: true,
     })

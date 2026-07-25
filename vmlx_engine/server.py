@@ -9968,16 +9968,22 @@ async def health():
             result["native_cache"] = native_cache
 
     model_loaded = bool(result.get("model_loaded"))
+    model_bundle_provenance = _bundle_configuration_attestation(
+        _model_path,
+        model_loaded=model_loaded,
+    )
+    cache_topology_provenance = _cache_topology_attestation(
+        _cache_topology_configuration(scheduler, result)
+    )
+    # Keep top-level path-free attestations for live gate harnesses while
+    # retaining the nested copies in runtime_provenance for existing clients.
+    result["model_bundle_provenance"] = model_bundle_provenance
+    result["cache_topology_provenance"] = cache_topology_provenance
     result["runtime_provenance"] = {
         **_RUNTIME_PROVENANCE,
         "pid": os.getpid(),
-        "model_bundle_provenance": _bundle_configuration_attestation(
-            _model_path,
-            model_loaded=model_loaded,
-        ),
-        "cache_topology_provenance": _cache_topology_attestation(
-            _cache_topology_configuration(scheduler, result)
-        ),
+        "model_bundle_provenance": model_bundle_provenance,
+        "cache_topology_provenance": cache_topology_provenance,
     }
     return result
 
@@ -10656,6 +10662,292 @@ async def cache_warm(request: dict):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(_warm_executor, _do_warm)
     return await asyncio.to_thread(_do_warm)
+
+
+def _cache_token_contract_request_sha256(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+
+
+def _cache_contract_lcp(left: list[int], right: list[int]) -> int:
+    count = 0
+    for a_token, b_token in zip(left, right, strict=False):
+        if a_token != b_token:
+            break
+        count += 1
+    return count
+
+
+def _cache_contract_tokenizer(engine: Any):
+    scheduler = _get_scheduler()
+    candidates = (
+        getattr(engine, "_tokenizer", None),
+        getattr(engine, "tokenizer", None),
+        getattr(scheduler, "_actual_tokenizer", None),
+        getattr(scheduler, "tokenizer", None),
+        getattr(getattr(engine, "tokenizer", None), "tokenizer", None),
+        getattr(getattr(engine, "_processor", None), "tokenizer", None),
+        getattr(engine, "_processor", None),
+    )
+    seen: set[int] = set()
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        ident = id(candidate)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if hasattr(candidate, "encode"):
+            return candidate
+    return None
+
+
+def _cache_contract_encode(tokenizer: Any, prompt: str) -> list[int]:
+    try:
+        return list(tokenizer.encode(prompt, add_special_tokens=False))
+    except TypeError:
+        return list(tokenizer.encode(prompt))
+
+
+def _cache_contract_render_and_tokenize(
+    *,
+    engine: Any,
+    prompt: str,
+    model: str,
+    request_controls: dict[str, Any],
+) -> tuple[dict[str, Any], list[int]]:
+    """Dry-render one Responses prompt through the loaded engine cache path.
+
+    This endpoint is intentionally no-generation and no-cache-lookup.  It is
+    used by the live cache hierarchy gate to independently bind observed
+    prompt/cache telemetry to the model's final Responses render path.  It
+    returns only path-free counts and digests, never prompt text or token IDs.
+    """
+    if not isinstance(prompt, str):
+        raise HTTPException(status_code=400, detail="inputs values must be strings")
+
+    enable_thinking = request_controls.get("enable_thinking")
+    if enable_thinking is not None and not isinstance(enable_thinking, bool):
+        raise HTTPException(
+            status_code=400,
+            detail="request_controls.enable_thinking must be true, false, or null",
+        )
+    instructions = request_controls.get("instructions")
+    if instructions is not None and not isinstance(instructions, str):
+        raise HTTPException(
+            status_code=400,
+            detail="request_controls.instructions must be a string or null",
+        )
+    tools = request_controls.get("tools") or []
+    if tools:
+        raise HTTPException(
+            status_code=400,
+            detail="token-contract currently supports request_controls.tools=[] only",
+        )
+    raw_ct_kwargs = request_controls.get("chat_template_kwargs")
+    if raw_ct_kwargs is not None and not isinstance(raw_ct_kwargs, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="request_controls.chat_template_kwargs must be an object or null",
+        )
+
+    dry_request = ResponsesRequest(
+        model=model,
+        input=prompt,
+        instructions=instructions,
+        enable_thinking=enable_thinking,
+        chat_template_kwargs=raw_ct_kwargs,
+    )
+    messages = _responses_input_to_messages(
+        dry_request.input,
+        dry_request.instructions,
+        preserve_multimodal=False,
+    )
+    messages = _normalize_leading_system_messages(messages)
+    ct_kwargs = _merge_ct_kwargs(dry_request.chat_template_kwargs)
+    resolved_thinking = _resolve_enable_thinking(
+        request_value=dry_request.enable_thinking,
+        ct_kwargs=ct_kwargs,
+        tools_present=False,
+        model_key=_model_path or _model_name or model,
+        engine=engine,
+        auto_detect=True,
+        reasoning_effort=dry_request.reasoning_effort,
+    )
+    if resolved_thinking is not None:
+        dry_request.enable_thinking = resolved_thinking
+        ct_kwargs["enable_thinking"] = resolved_thinking
+    if dry_request.max_thinking_tokens is not None and dry_request.enable_thinking is not False:
+        ct_kwargs["thinking_budget"] = int(dry_request.max_thinking_tokens)
+
+    _normalize_minimax_m3_thinking_mode(
+        ct_kwargs,
+        dry_request,
+        _model_path or _model_name or model,
+    )
+    _normalize_openpangu_thinking(
+        ct_kwargs,
+        dry_request,
+        _model_path or _model_name or model,
+    )
+
+    thinking_enabled = True if dry_request.enable_thinking is None else bool(
+        dry_request.enable_thinking
+    )
+    renderer = getattr(engine, "_apply_chat_template", None)
+    if not callable(renderer):
+        raise HTTPException(
+            status_code=501,
+            detail="loaded engine does not expose dry chat-template rendering",
+        )
+    rendered = renderer(
+        messages,
+        None,
+        num_images=0,
+        num_videos=0,
+        num_audio=0,
+        enable_thinking=thinking_enabled,
+        extra_template_kwargs=ct_kwargs,
+        skip_generation_prompt=False,
+    )
+
+    tokenizer = _cache_contract_tokenizer(engine)
+    if tokenizer is None:
+        raise HTTPException(
+            status_code=501,
+            detail="loaded engine does not expose a prompt tokenizer",
+        )
+    token_ids = _cache_contract_encode(tokenizer, rendered)
+    gen_prompt_len = 0
+    compute_gen_prompt = getattr(engine, "_compute_gen_prompt_cache_context", None)
+    if callable(compute_gen_prompt):
+        try:
+            computed_len, _ = compute_gen_prompt(
+                messages,
+                None,
+                0,
+                thinking_enabled,
+                ct_kwargs,
+                rendered,
+                num_videos=0,
+                num_audio=0,
+            )
+            gen_prompt_len = max(0, min(int(computed_len or 0), len(token_ids)))
+        except Exception as exc:
+            logger.debug("cache token-contract gen-prompt derivation failed: %s", exc)
+            gen_prompt_len = 0
+    cache_prompt_token_ids = (
+        token_ids[:-gen_prompt_len] if gen_prompt_len > 0 else token_ids
+    )
+    token_digest = hashlib.sha256(
+        json.dumps(
+            cache_prompt_token_ids,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+    return {
+        "input_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+        "cache_prompt_token_count": len(cache_prompt_token_ids),
+        "cache_prompt_token_ids_sha256": token_digest,
+        "generation_prompt_suffix_tokens": gen_prompt_len,
+    }, cache_prompt_token_ids
+
+
+@app.post("/v1/cache/token-contract", dependencies=[Depends(verify_api_key)])
+async def cache_token_contract(request: dict):
+    """Return path-free final-render token/LCP attestations for cache gates."""
+    if _engine is None:
+        raise HTTPException(status_code=409, detail="model is not loaded")
+    if not isinstance(request, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    if request.get("contract_version") != 1:
+        raise HTTPException(status_code=400, detail="contract_version must be 1")
+    if request.get("surface") != "responses":
+        raise HTTPException(status_code=400, detail="surface must be responses")
+    inputs = request.get("inputs")
+    if not isinstance(inputs, dict) or not inputs:
+        raise HTTPException(status_code=400, detail="inputs must be a non-empty object")
+    model = str(request.get("model") or _model_name or "")
+    if not model:
+        raise HTTPException(status_code=400, detail="model is required")
+    request_controls = request.get("request_controls") or {}
+    if not isinstance(request_controls, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="request_controls must be an object when provided",
+        )
+
+    health_snapshot = await health()
+    model_bundle_provenance = health_snapshot.get("model_bundle_provenance")
+    if not isinstance(model_bundle_provenance, dict):
+        model_bundle_provenance = (
+            health_snapshot.get("runtime_provenance", {}) or {}
+        ).get("model_bundle_provenance")
+    cache_topology_provenance = health_snapshot.get("cache_topology_provenance")
+    if not isinstance(cache_topology_provenance, dict):
+        cache_topology_provenance = (
+            health_snapshot.get("runtime_provenance", {}) or {}
+        ).get("cache_topology_provenance")
+    if not isinstance(model_bundle_provenance, dict) or not isinstance(
+        cache_topology_provenance,
+        dict,
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="health provenance attestations are unavailable",
+        )
+
+    def _build_contract():
+        prompt_rows: dict[str, dict[str, Any]] = {}
+        prompt_token_vectors: dict[str, list[int]] = {}
+        for label in sorted(inputs):
+            prompt = inputs[label]
+            row, token_vector = _cache_contract_render_and_tokenize(
+                engine=_engine,
+                prompt=prompt,
+                model=model,
+                request_controls=request_controls,
+            )
+            prompt_rows[str(label)] = row
+            prompt_token_vectors[str(label)] = token_vector
+        lcp_rows: dict[str, int] = {}
+        for left in sorted(prompt_token_vectors):
+            for right in sorted(prompt_token_vectors):
+                lcp_rows[f"{left}:{right}"] = _cache_contract_lcp(
+                    prompt_token_vectors[left],
+                    prompt_token_vectors[right],
+                )
+        return prompt_rows, lcp_rows
+
+    prompt_rows, lcp_rows = await _run_on_model_executor(_build_contract)
+    bundle_fingerprint = str(
+        model_bundle_provenance.get("fingerprint_sha256")
+        or model_bundle_provenance.get("aggregate_sha256")
+        or ""
+    )
+    cache_fingerprint = str(
+        cache_topology_provenance.get("fingerprint_sha256")
+        or cache_topology_provenance.get("canonical_sha256")
+        or ""
+    )
+    return {
+        "contract_version": 1,
+        "method": "final-render-tokenize-no-cache",
+        "surface": "responses",
+        "cache_lookup_bypassed": True,
+        "request_sha256": _cache_token_contract_request_sha256(request),
+        "model_bundle_fingerprint_sha256": bundle_fingerprint,
+        "cache_topology_fingerprint_sha256": cache_fingerprint,
+        "prompts": prompt_rows,
+        "longest_common_prefix_tokens": lcp_rows,
+    }
 
 
 @app.delete("/v1/cache", dependencies=[Depends(verify_api_key)])

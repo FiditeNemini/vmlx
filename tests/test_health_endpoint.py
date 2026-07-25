@@ -63,6 +63,14 @@ class TestHealthEndpoint:
             provenance["model_bundle_provenance"]["directory_state"]
             == "model_not_loaded"
         )
+        assert (
+            result["model_bundle_provenance"]
+            == provenance["model_bundle_provenance"]
+        )
+        assert (
+            result["cache_topology_provenance"]
+            == provenance["cache_topology_provenance"]
+        )
         cache_attestation = provenance["cache_topology_provenance"]
         assert cache_attestation["canonical_sha256"] == (
             server._canonical_attestation_sha256(cache_attestation["configuration"])
@@ -146,6 +154,160 @@ class TestHealthEndpoint:
             != (second["files"]["config.json"]["sha256"])
         )
         assert str(tmp_path) not in json.dumps(first, sort_keys=True)
+
+    def test_cache_token_contract_route_is_registered(self):
+        """Cache live gate needs a stable dry-render token contract route."""
+        from vmlx_engine.server import app
+
+        assert "/v1/cache/token-contract" in {route.path for route in app.routes}
+
+    def test_cache_token_contract_uses_loaded_engine_dry_render_and_hashes(
+        self,
+        tmp_path,
+    ):
+        """The token contract returns path-free counts/digests and pairwise LCP."""
+        from vmlx_engine import server
+
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return [ord(ch) for ch in text]
+
+        class FakeEngine:
+            is_mllm = False
+            tokenizer = FakeTokenizer()
+            _tokenizer = tokenizer
+
+            def get_stats(self):
+                return {"engine_type": "fake"}
+
+            def _apply_chat_template(
+                self,
+                messages,
+                tools=None,
+                num_images=0,
+                num_videos=0,
+                num_audio=0,
+                enable_thinking=True,
+                extra_template_kwargs=None,
+                skip_generation_prompt=False,
+            ):
+                text = "\n".join(
+                    f"{message['role']}:{message['content']}"
+                    for message in messages
+                )
+                if (
+                    extra_template_kwargs
+                    and extra_template_kwargs.get("enable_thinking") is False
+                ):
+                    text += "\n</think>"
+                if not skip_generation_prompt:
+                    text += "\nassistant:"
+                return text
+
+            def _compute_gen_prompt_cache_context(
+                self,
+                messages,
+                tools,
+                num_images,
+                enable_thinking,
+                extra_template_kwargs,
+                prompt_with_gen,
+                num_videos=0,
+                num_audio=0,
+            ):
+                prompt_without_gen = self._apply_chat_template(
+                    messages,
+                    tools,
+                    num_images=num_images,
+                    num_videos=num_videos,
+                    num_audio=num_audio,
+                    enable_thinking=enable_thinking,
+                    extra_template_kwargs=extra_template_kwargs,
+                    skip_generation_prompt=True,
+                )
+                return len(self.tokenizer.encode(prompt_with_gen)) - len(
+                    self.tokenizer.encode(prompt_without_gen)
+                ), None
+
+        config = tmp_path / "config.json"
+        config.write_text('{"model_type":"fake"}\n')
+        fake_engine = FakeEngine()
+        patches = (
+            patch.object(server, "_engine", fake_engine),
+            patch.object(server, "_model_name", "fake/model"),
+            patch.object(server, "_model_path", str(tmp_path)),
+            patch.object(server, "_model_load_error", None),
+            patch.object(server, "_mcp_manager", None),
+            patch.object(server, "_jang_metadata", None),
+            patch.object(server, "_last_request_time", 0.0),
+            patch.object(server, "_get_scheduler", return_value=None),
+            patch.object(server, "_model_quantization_status", return_value={}),
+            patch.object(server, "_model_acceleration_status", return_value={}),
+            patch.object(
+                server,
+                "_model_mtp_status_with_loaded_runtime",
+                return_value={},
+            ),
+            patch.object(
+                server,
+                "_model_effective_defaults_status",
+                return_value={
+                    "sampling_defaults": {},
+                    "effective_defaults": {},
+                },
+            ),
+            patch.object(server, "_model_routing_status", return_value={}),
+            patch.object(
+                server,
+                "_turboquant_kv_cache_status",
+                return_value={"enabled": False},
+            ),
+            patch.object(server, "_current_model_config", return_value=None),
+            patch.object(server, "_native_cache_status", return_value={}),
+        )
+        for context in patches:
+            context.start()
+        try:
+            body = {
+                "contract_version": 1,
+                "surface": "responses",
+                "model": "fake/model",
+                "inputs": {
+                    "A": "shared prefix alpha",
+                    "B": "shared prefix beta",
+                },
+                "request_controls": {
+                    "enable_thinking": False,
+                    "instructions": None,
+                    "tools": [],
+                },
+            }
+            contract = _run(server.cache_token_contract(body))
+        finally:
+            for context in reversed(patches):
+                context.stop()
+
+        assert contract["contract_version"] == 1
+        assert contract["method"] == "final-render-tokenize-no-cache"
+        assert contract["surface"] == "responses"
+        assert contract["cache_lookup_bypassed"] is True
+        assert len(contract["request_sha256"]) == 64
+        assert len(contract["model_bundle_fingerprint_sha256"]) == 64
+        assert len(contract["cache_topology_fingerprint_sha256"]) == 64
+        assert set(contract["prompts"]) == {"A", "B"}
+        serialized = json.dumps(contract, sort_keys=True)
+        assert '"cache_prompt_token_ids":' not in serialized
+        assert '"token_ids":' not in serialized
+        assert str(tmp_path) not in serialized
+        assert contract["prompts"]["A"]["cache_prompt_token_count"] > 1
+        assert (
+            contract["longest_common_prefix_tokens"]["A:A"]
+            == contract["prompts"]["A"]["cache_prompt_token_count"]
+        )
+        assert 1 < contract["longest_common_prefix_tokens"]["A:B"] < min(
+            contract["prompts"]["A"]["cache_prompt_token_count"],
+            contract["prompts"]["B"]["cache_prompt_token_count"],
+        )
 
     def test_cache_topology_attestation_is_canonical_and_change_sensitive(self):
         """Mapping order is irrelevant while an effective topology change is not."""

@@ -31,8 +31,6 @@ CLI_ARGS = [
     ("--kv-cache-quantization", "memory.kv_cache.quantization", str),
     ("--kv-cache-memory-limit-mb", "memory.kv_cache.memory_limit_mb", int),
     ("--codebook-memory-limit-mb", "memory.codebook_cache.memory_limit_mb", int),
-    ("--codebook-disk-cache-dir", "memory.codebook_cache.disk_cache_dir", str),
-    ("--codebook-disk-max-gb", "memory.codebook_cache.disk_max_gb", int),
     ("--prefix-cache-enabled", "memory.prefix_cache.enabled", bool),
     ("--prefix-cache-memory-limit-mb", "memory.prefix_cache.memory_limit_mb", int),
     ("--paged-cache-enabled", "memory.paged_cache.enabled", bool),
@@ -215,13 +213,6 @@ Examples:
         type=int,
         help="Codebook cache memory limit in MB (0 = unlimited)",
     )
-    mem_group.add_argument(
-        "--codebook-disk-cache-dir", type=str, help="Codebook disk cache directory"
-    )
-    mem_group.add_argument(
-        "--codebook-disk-max-gb", type=int, help="Codebook disk cache max size in GB"
-    )
-
     # TurboQuant settings group
     tq_group = parser.add_argument_group("TurboQuant Settings")
     tq_group.add_argument(

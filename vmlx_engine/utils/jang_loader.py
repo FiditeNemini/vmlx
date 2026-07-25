@@ -4877,7 +4877,11 @@ def load_jang_model(
     # Codebook VQ: check before v2 to ensure it routes correctly
     if _is_codebook_vq_model(path):
         logger.info(f"Codebook VQ model detected — loading with codebook support")
-        return _load_codebook_vq_model(path, jang_cfg, config_manager=None)
+        if config_manager is None:
+            from vmlx_engine.config.manager import ConfigManager
+
+            config_manager = ConfigManager(model_name=path.name)
+        return _load_codebook_vq_model(path, jang_cfg, config_manager=config_manager)
 
     # v2: instant load via mmap
     if _is_v2_model(path):

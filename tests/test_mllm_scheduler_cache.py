@@ -38,6 +38,29 @@ def test_mllm_scheduler_does_not_shadow_hashlib_in_init():
     assert "hashlib.sha256" in source
 
 
+def test_mllm_stop_releases_owned_block_disk_store_lease():
+    import asyncio
+
+    disk_store = MagicMock()
+    manager = SimpleNamespace(_disk_store=disk_store)
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler._processing_task = None
+    scheduler._terminal_cleanup_complete = asyncio.Event()
+    scheduler._terminal_cleanup_complete.set()
+    scheduler._running = False
+    scheduler.batch_generator = None
+    scheduler.paged_cache_manager = manager
+    scheduler._ssm_companion_disk_store = MagicMock()
+    scheduler._block_disk_l2_enabled = True
+
+    asyncio.run(scheduler.stop())
+
+    disk_store.shutdown.assert_called_once_with()
+    assert manager._disk_store is None
+    assert scheduler._ssm_companion_disk_store is None
+    assert scheduler._block_disk_l2_enabled is False
+
+
 def test_mllm_worker_reconstruct_promotes_lazy_l2_source_to_request_detail():
     """An indexed paged hit whose payload refaults from L2 is a disk hit."""
     cache = SimpleNamespace(_last_reconstruct_disk_blocks=3)
@@ -1391,6 +1414,59 @@ class TestHybridSSMBlockDiskWiring:
         assert "ssm_companion" in source_init
         assert "ssm_state_disk_store" in source_ensure
         assert config.enable_block_disk_cache is True
+
+    def test_custom_root_runtime_wiring_shares_one_aggregate_budget(
+        self,
+        tmp_path,
+    ):
+        """VLM custom roots must budget hashed KV and typed SSM as one tree."""
+        import asyncio
+
+        class KVCache:
+            pass
+
+        class MambaCache:
+            pass
+
+        class LanguageModel:
+            config = SimpleNamespace(model_type="test-hybrid-vlm")
+
+            def make_cache(self):
+                return [KVCache(), MambaCache()]
+
+        root = tmp_path / "custom-block-root"
+        model = SimpleNamespace(
+            language_model=LanguageModel(),
+            config=SimpleNamespace(model_type="test-hybrid-vlm"),
+        )
+        processor = SimpleNamespace(
+            tokenizer=SimpleNamespace(eos_token_id=0, eos_token_ids={0})
+        )
+        scheduler = MLLMScheduler(
+            model=model,
+            processor=processor,
+            config=MLLMSchedulerConfig(
+                model_path="example/hybrid-vlm",
+                enable_prefix_cache=True,
+                use_paged_cache=False,
+                use_memory_aware_cache=True,
+                enable_block_disk_cache=True,
+                block_disk_cache_dir=str(root),
+                block_disk_cache_max_gb=0.001,
+                max_cache_blocks=8,
+                kv_cache_quantization="q4",
+            ),
+        )
+        try:
+            block_store = scheduler.paged_cache_manager._disk_store
+            companion = scheduler._ssm_companion_disk_store
+            assert block_store.cache_dir.parent == root
+            assert len(block_store.cache_dir.name) == 12
+            assert block_store.global_cache_root == root
+            assert companion.directory == block_store.cache_dir / "ssm_companion"
+            assert companion._global_budget is block_store.global_budget
+        finally:
+            asyncio.run(scheduler.stop())
 
     def test_scheduler_allows_authoritative_block_l2_with_paged_ram_off(self):
         """Hybrid VLMs may use SSD blocks plus typed SSM state without RAM pages."""

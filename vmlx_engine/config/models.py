@@ -78,12 +78,10 @@ class KVCacheConfig(BaseModel):
 
 
 class CodebookCacheConfig(BaseModel):
-    """Codebook weight cache (LRU with disk spillover) configuration."""
+    """RAM LRU for experimental codebook-VQ model weights."""
 
     enabled: bool = True
-    memory_limit_mb: Optional[int] = None  # null = unlimited (LRU to disk)
-    disk_cache_dir: Optional[str] = "~/.cache/vmlx-engine/codebook-cache"
-    disk_max_gb: int = 1000
+    memory_limit_mb: Optional[int] = 4096  # 0/null explicitly opts out of the bound
     eviction_batch_size: int = 4
 
 

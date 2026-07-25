@@ -11,7 +11,6 @@ import { SetupScreen } from './components/setup/SetupScreen'
 import { ToastProvider } from './components/Toast'
 import { DownloadStatusBar } from './components/DownloadStatusBar'
 import { UpdateBanner } from './components/UpdateBanner'
-import { UpdateNotice } from './components/UpdateNotice'
 import { useAppState } from './contexts/AppStateContext'
 import { useSessionsContext } from './contexts/SessionsContext'
 import { ChatModeToolbar } from './components/layout/ChatModeToolbar'
@@ -193,7 +192,6 @@ function App() {
         <TitleBar />
         <UpdateBanner />
         <DownloadStatusBar />
-        <UpdateNotice />
 
         <div className="flex flex-1 overflow-hidden">
           {/* Sidebar — chat mode only */}

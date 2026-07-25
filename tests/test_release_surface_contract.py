@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -37,6 +38,41 @@ def _write_release_root(tmp_path: Path, version: str = "1.5.48") -> dict[str, st
     }
     (tmp_path / "latest.json").write_text(json.dumps(latest), encoding="utf-8")
     return latest
+
+
+def _write_live_release_inputs(
+    tmp_path: Path,
+    latest: dict,
+    *,
+    source_commit: str = "c" * 40,
+    source_tree: str = "d" * 40,
+) -> tuple[Path, Path, str]:
+    public_manifest = tmp_path / "canonical-public-latest.json"
+    public_manifest.write_text(json.dumps(latest), encoding="utf-8")
+    downloads = latest["downloads"]
+    final_notary_manifest = tmp_path / "private-final-notary.json"
+    final_notary_manifest.write_text(
+        json.dumps(
+            {
+                "stage": "post_notary",
+                "version": latest["version"],
+                "source": {
+                    "root": "/private/release-source",
+                    "commit": source_commit,
+                    "tree": source_tree,
+                },
+                "artifacts": {
+                    flavor: {
+                        "dmg_post_notary_sha256": downloads[flavor]["sha256"]
+                    }
+                    for flavor in ("sequoia", "tahoe")
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    final_notary_sha256 = hashlib.sha256(final_notary_manifest.read_bytes()).hexdigest()
+    return public_manifest, final_notary_manifest, final_notary_sha256
 
 
 def test_release_surface_contract_allows_source_ahead_of_local_updater(tmp_path):
@@ -227,10 +263,41 @@ def test_release_surface_contract_rejects_missing_tahoe_download_for_public_upda
     assert artifact["checks"]["local_updater_platform_downloads_valid"] is False
 
 
+def test_release_surface_live_public_rejects_final_notary_manifest_digest_drift(
+    tmp_path,
+):
+    from tests.cross_matrix import run_release_surface_contract as gate
+
+    latest = _write_release_root(tmp_path)
+    public_manifest, final_notary_manifest, final_notary_sha256 = (
+        _write_live_release_inputs(tmp_path, latest)
+    )
+    final_notary_manifest.write_text(
+        final_notary_manifest.read_text(encoding="utf-8") + "\n",
+        encoding="utf-8",
+    )
+
+    artifact = gate.build_artifact(
+        tmp_path,
+        live_public=True,
+        public_manifest_path=public_manifest,
+        final_notary_manifest_path=final_notary_manifest,
+        final_notary_manifest_sha256=final_notary_sha256,
+        fetch_json=lambda _url: {},
+        fetch_headers=lambda _url: {},
+    )
+
+    assert artifact["status"] == "fail"
+    assert artifact["checks"]["final_notary_manifest_sha256_valid"] is False
+
+
 def test_release_surface_live_public_checks_detect_stale_site_updater(tmp_path):
     from tests.cross_matrix import run_release_surface_contract as gate
 
     latest = _write_release_root(tmp_path)
+    public_manifest, final_notary_manifest, final_notary_sha256 = _write_live_release_inputs(
+        tmp_path, latest
+    )
 
     def fetch_json(url: str):
         if "raw.githubusercontent.com" in url:
@@ -258,17 +325,27 @@ def test_release_surface_live_public_checks_detect_stale_site_updater(tmp_path):
             }
         raise AssertionError(url)
 
-    artifact = gate.build_artifact(tmp_path, live_public=True, fetch_json=fetch_json)
+    artifact = gate.build_artifact(
+        tmp_path,
+        live_public=True,
+        public_manifest_path=public_manifest,
+        final_notary_manifest_path=final_notary_manifest,
+        final_notary_manifest_sha256=final_notary_sha256,
+        fetch_json=fetch_json,
+    )
 
     assert artifact["status"] == "fail"
-    assert artifact["checks"]["public_raw_updater_matches_local"] is True
-    assert artifact["checks"]["public_site_updater_matches_local"] is False
+    assert artifact["checks"]["public_raw_updater_matches_manifest"] is True
+    assert artifact["checks"]["public_site_updater_matches_manifest"] is False
 
 
 def test_release_surface_live_public_checks_require_site_updater_no_store_headers(tmp_path):
     from tests.cross_matrix import run_release_surface_contract as gate
 
     latest = _write_release_root(tmp_path)
+    public_manifest, final_notary_manifest, final_notary_sha256 = _write_live_release_inputs(
+        tmp_path, latest
+    )
 
     def fetch_json(url: str):
         if "raw.githubusercontent.com" in url or "mlx.studio/update/latest.json" in url:
@@ -301,6 +378,9 @@ def test_release_surface_live_public_checks_require_site_updater_no_store_header
     artifact = gate.build_artifact(
         tmp_path,
         live_public=True,
+        public_manifest_path=public_manifest,
+        final_notary_manifest_path=final_notary_manifest,
+        final_notary_manifest_sha256=final_notary_sha256,
         fetch_json=fetch_json,
         fetch_headers=lambda url: {"cache-control": "public, max-age=31536000"},
     )
@@ -313,6 +393,9 @@ def test_release_surface_live_public_checks_require_pypi_files(tmp_path):
     from tests.cross_matrix import run_release_surface_contract as gate
 
     latest = _write_release_root(tmp_path)
+    public_manifest, final_notary_manifest, final_notary_sha256 = _write_live_release_inputs(
+        tmp_path, latest
+    )
 
     def fetch_json(url: str):
         if "raw.githubusercontent.com" in url or "mlx.studio/update/latest.json" in url:
@@ -335,19 +418,22 @@ def test_release_surface_live_public_checks_require_pypi_files(tmp_path):
                 ],
             }
         if "git/ref/tags" in url:
-            return {"object": {"sha": "current-source-head"}}
+            return {"object": {"sha": "c" * 40, "type": "commit"}}
         raise AssertionError(url)
 
     artifact = gate.build_artifact(
         tmp_path,
         live_public=True,
+        public_manifest_path=public_manifest,
+        final_notary_manifest_path=final_notary_manifest,
+        final_notary_manifest_sha256=final_notary_sha256,
         fetch_json=fetch_json,
         fetch_headers=lambda url: {
             "cache-control": "no-cache, no-store, must-revalidate",
             "pragma": "no-cache",
             "expires": "0",
         },
-        current_revision="current-source-head",
+        current_revision="e" * 40,
     )
 
     assert artifact["status"] == "fail"
@@ -367,6 +453,9 @@ def test_release_surface_live_public_checks_require_github_release_asset(tmp_pat
     from tests.cross_matrix import run_release_surface_contract as gate
 
     latest = _write_release_root(tmp_path)
+    public_manifest, final_notary_manifest, final_notary_sha256 = _write_live_release_inputs(
+        tmp_path, latest
+    )
 
     def fetch_json(url: str):
         if "raw.githubusercontent.com" in url or "mlx.studio/update/latest.json" in url:
@@ -383,7 +472,14 @@ def test_release_surface_live_public_checks_require_github_release_asset(tmp_pat
             return {"draft": False, "prerelease": False, "assets": []}
         raise AssertionError(url)
 
-    artifact = gate.build_artifact(tmp_path, live_public=True, fetch_json=fetch_json)
+    artifact = gate.build_artifact(
+        tmp_path,
+        live_public=True,
+        public_manifest_path=public_manifest,
+        final_notary_manifest_path=final_notary_manifest,
+        final_notary_manifest_sha256=final_notary_sha256,
+        fetch_json=fetch_json,
+    )
 
     assert artifact["status"] == "fail"
     assert artifact["checks"]["public_github_release_has_updater_asset"] is False
@@ -393,6 +489,9 @@ def test_release_surface_live_public_checks_require_all_manifest_download_assets
     from tests.cross_matrix import run_release_surface_contract as gate
 
     latest = _write_release_root(tmp_path)
+    public_manifest, final_notary_manifest, final_notary_sha256 = _write_live_release_inputs(
+        tmp_path, latest
+    )
 
     def fetch_json(url: str):
         if "raw.githubusercontent.com" in url or "mlx.studio/update/latest.json" in url:
@@ -418,16 +517,29 @@ def test_release_surface_live_public_checks_require_all_manifest_download_assets
             }
         raise AssertionError(url)
 
-    artifact = gate.build_artifact(tmp_path, live_public=True, fetch_json=fetch_json)
+    artifact = gate.build_artifact(
+        tmp_path,
+        live_public=True,
+        public_manifest_path=public_manifest,
+        final_notary_manifest_path=final_notary_manifest,
+        final_notary_manifest_sha256=final_notary_sha256,
+        fetch_json=fetch_json,
+    )
 
     assert artifact["status"] == "fail"
     assert artifact["checks"]["public_github_release_has_all_manifest_download_assets"] is False
 
 
-def test_release_surface_live_public_checks_require_release_tag_to_match_source_head(tmp_path):
+def test_release_surface_live_public_checks_require_release_tag_to_match_notarized_source(
+    tmp_path,
+):
     from tests.cross_matrix import run_release_surface_contract as gate
 
     latest = _write_release_root(tmp_path)
+    notarized_commit = "c" * 40
+    public_manifest, final_notary_manifest, final_notary_sha256 = _write_live_release_inputs(
+        tmp_path, latest, source_commit=notarized_commit
+    )
 
     def fetch_json(url: str):
         if "raw.githubusercontent.com" in url or "mlx.studio/update/latest.json" in url:
@@ -456,25 +568,52 @@ def test_release_surface_live_public_checks_require_release_tag_to_match_source_
                 ],
             }
         if "git/ref/tags" in url:
-            return {"object": {"sha": "old-release-commit"}}
+            return {"object": {"sha": "a" * 40, "type": "commit"}}
         raise AssertionError(url)
 
     artifact = gate.build_artifact(
         tmp_path,
         live_public=True,
+        public_manifest_path=public_manifest,
+        final_notary_manifest_path=final_notary_manifest,
+        final_notary_manifest_sha256=final_notary_sha256,
         fetch_json=fetch_json,
-        current_revision="current-source-head",
+        current_revision="a" * 40,
     )
 
     assert artifact["status"] == "fail"
-    assert artifact["checks"]["public_github_source_release_tag_matches_source_head"] is False
-    assert artifact["public_surfaces"]["github_source_release_tag"]["sha"] == "old-release-commit"
+    assert (
+        artifact["checks"][
+            "public_github_source_release_tag_matches_notarized_source"
+        ]
+        is False
+    )
+    assert artifact["public_surfaces"]["github_source_release_tag"]["sha"] == "a" * 40
+    assert artifact["final_notary_identity"]["source_commit"] == notarized_commit
 
 
-def test_release_surface_live_public_checks_accept_annotated_release_tag(tmp_path):
+def test_release_surface_live_public_uses_public_manifest_and_notarized_commit(
+    tmp_path,
+):
     from tests.cross_matrix import run_release_surface_contract as gate
 
     latest = _write_release_root(tmp_path)
+    notarized_commit = "c" * 40
+    public_manifest, final_notary_manifest, final_notary_sha256 = _write_live_release_inputs(
+        tmp_path, latest, source_commit=notarized_commit
+    )
+    # A post-release source checkout may intentionally retain older local updater
+    # metadata and may have advanced beyond the artifact-producing commit. Neither
+    # is authoritative for postpublication surface verification.
+    local_latest = {
+        **latest,
+        "version": "1.5.47",
+        "url": latest["url"].replace("1.5.48", "1.5.47"),
+        "notes": "vMLX 1.5.47",
+    }
+    (tmp_path / "latest.json").write_text(
+        json.dumps(local_latest), encoding="utf-8"
+    )
 
     def fetch_json(url: str):
         if "raw.githubusercontent.com" in url or "mlx.studio/update/latest.json" in url:
@@ -505,24 +644,36 @@ def test_release_surface_live_public_checks_accept_annotated_release_tag(tmp_pat
         if "git/ref/tags" in url:
             return {"object": {"sha": "annotated-tag-object", "type": "tag"}}
         if "git/tags/annotated-tag-object" in url:
-            return {"object": {"sha": "current-source-head", "type": "commit"}}
+            return {"object": {"sha": notarized_commit, "type": "commit"}}
         raise AssertionError(url)
 
     artifact = gate.build_artifact(
         tmp_path,
         live_public=True,
+        public_manifest_path=public_manifest,
+        final_notary_manifest_path=final_notary_manifest,
+        final_notary_manifest_sha256=final_notary_sha256,
         fetch_json=fetch_json,
         fetch_headers=lambda url: {
             "cache-control": "no-cache, no-store, must-revalidate",
             "pragma": "no-cache",
             "expires": "0",
         },
-        current_revision="current-source-head",
+        current_revision="e" * 40,
     )
 
     assert artifact["status"] == "pass"
-    assert artifact["checks"]["public_github_source_release_tag_matches_source_head"] is True
+    assert (
+        artifact["checks"][
+            "public_github_source_release_tag_matches_notarized_source"
+        ]
+        is True
+    )
     tag = artifact["public_surfaces"]["github_source_release_tag"]
     assert tag["type"] == "tag"
-    assert tag["resolved_sha"] == "current-source-head"
+    assert tag["resolved_sha"] == notarized_commit
     assert tag["resolved_type"] == "commit"
+    assert tag["expected_notarized_source_commit"] == notarized_commit
+    assert artifact["current_revision"] == "e" * 40
+    assert artifact["local_latest"]["version"] == "1.5.47"
+    assert artifact["public_manifest"]["version"] == "1.5.48"

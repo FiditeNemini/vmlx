@@ -96,7 +96,10 @@ export function ReasoningBox({ content, isStreaming, isDone }: ReasoningBoxProps
   const label = isStreaming && !isDone ? t('chat.reasoning.thinking') : t('chat.reasoning.reasoning')
 
   return (
-    <div className={`mb-3 rounded border overflow-hidden transition-all duration-200 ${
+    <div
+      data-vmlx-proof-reasoning-rail="true"
+      data-vmlx-proof-reasoning-state={isStreaming && !isDone ? 'streaming' : 'complete'}
+      className={`mb-3 rounded border overflow-hidden transition-all duration-200 ${
       isStreaming && !isDone
         ? 'border-primary/40 border-l-primary border-l-2'
         : 'border-border'
@@ -131,6 +134,7 @@ export function ReasoningBox({ content, isStreaming, isDone }: ReasoningBoxProps
 
       {!isCollapsed && (
         <div
+          data-vmlx-proof-reasoning-content="true"
           ref={scrollRef}
           onScroll={handleScroll}
           className={`px-3 py-2 border-t border-border text-xs text-muted-foreground overflow-y-auto ${isMaximized ? '' : 'max-h-[300px]'}`}

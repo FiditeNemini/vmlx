@@ -6,13 +6,20 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
+import { resolvePrivateProofDirectory } from './private-proof-output.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const panelDir = path.resolve(__dirname, '..')
 const repoDir = path.resolve(panelDir, '..')
 const startedAt = new Date()
 const stamp = startedAt.toISOString().replace(/[:.]/g, '-')
-const proofDir = path.resolve(process.env.VMLX_METAL_UI_PROOF_DIR || path.join(repoDir, 'build', `live-metal-headroom-ui-${stamp}`))
+const proofDir = resolvePrivateProofDirectory({
+  repoDir,
+  overrideEnv: 'VMLX_METAL_UI_PROOF_DIR',
+  proofName: 'live-metal-headroom-ui',
+  family: 'metal-headroom',
+  now: startedAt,
+})
 const outJson = path.join(proofDir, 'metal-headroom-ui-proof.json')
 const shotPath = path.join(proofDir, 'metal-headroom-ui-proof.png')
 const settingsShotPath = path.join(proofDir, 'metal-headroom-settings-proof.png')
@@ -70,14 +77,6 @@ async function waitForWindowApi(page) {
     }
     throw new Error('window.api.sessions not ready')
   })
-}
-
-async function suppressUpdateNotice(page) {
-  await page.evaluate(async () => {
-    try {
-      await window.api?.settings?.set?.('notice_dismissed_version', '1.5.45')
-    } catch {}
-  }).catch(() => {})
 }
 
 function startApp(userDataDir, debugPort) {
@@ -361,7 +360,6 @@ async function main() {
     if (!page) throw new Error('No Electron renderer page found')
     await page.waitForLoadState('domcontentloaded').catch(() => {})
     await waitForWindowApi(page)
-    await suppressUpdateNotice(page)
     await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {})
     await waitForWindowApi(page)
     const minimaxM3SettingsUi = await collectMinimaxM3SettingsUi(page, fakeM3ModelDir)

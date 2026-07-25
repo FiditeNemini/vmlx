@@ -563,6 +563,71 @@ def test_nested_cache_list_tq_block_roundtrip_preserves_seed():
     assert values.shape[-2] == 8
 
 
+def test_nested_cache_list_quantized_kv_roundtrip_preserves_metadata():
+    from vmlx_engine.block_disk_store import _deserialize_block, _serialize_block
+    from vmlx_engine.cache_record_validator import validate_cache_record
+
+    keys = (
+        mx.arange(16, dtype=mx.uint32).reshape(1, 1, 4, 4),
+        mx.ones((1, 1, 4, 1), dtype=mx.float16),
+        mx.zeros((1, 1, 4, 1), dtype=mx.float16),
+    )
+    values = (
+        mx.arange(16, dtype=mx.uint32).reshape(1, 1, 4, 4) + 11,
+        mx.ones((1, 1, 4, 1), dtype=mx.float16) * 2,
+        mx.zeros((1, 1, 4, 1), dtype=mx.float16) + 3,
+    )
+    quant_meta = ("4", "64", "8")
+
+    tensors, dtype, layers = _serialize_block(
+        [("cache_list", [("quantized_kv", keys, values, quant_meta)])]
+    )
+
+    assert dtype == "cache_list"
+    assert layers == 1
+    restored = _deserialize_block(dict(tensors), dtype)
+    ok, reason, _ = validate_cache_record(
+        restored,
+        expected_num_layers=1,
+        source="unit-cache-list-quantized-kv",
+    )
+    assert ok, reason
+    nested = restored[0][1][0]
+    assert nested[0] == "quantized_kv"
+    assert tuple(nested[3]) == quant_meta
+    for actual, expected in zip(nested[1], keys):
+        assert mx.array_equal(actual, expected).item()
+    for actual, expected in zip(nested[2], values):
+        assert mx.array_equal(actual, expected).item()
+
+
+def test_nested_cache_list_unknown_subcache_fails_closed():
+    from vmlx_engine.block_disk_store import _serialize_block
+
+    try:
+        _serialize_block([("cache_list", [("unknown_native_cache",)])])
+    except ValueError as exc:
+        assert "unsupported CacheList sub-cache tag" in str(exc)
+    else:
+        raise AssertionError("unknown CacheList state must not be silently omitted")
+
+
+def test_nested_cache_list_incomplete_quantized_kv_fails_closed():
+    from vmlx_engine.block_disk_store import _deserialize_block, _serialize_block
+
+    component = mx.ones((1, 1, 4, 1), dtype=mx.float16)
+    quantized = (
+        "quantized_kv",
+        (component, component, component),
+        (component, component, component),
+        ("4", "64", "8"),
+    )
+    tensors, dtype, _ = _serialize_block([("cache_list", [quantized])])
+    del tensors["layer_0_sub_0_values_zeros"]
+
+    assert _deserialize_block(dict(tensors), dtype) == []
+
+
 def test_tq_paged_numpy_disk_path_keeps_native_entries(tmp_path):
     from vmlx_engine.block_disk_store import BlockDiskStore
     from vmlx_engine.prefix_cache import BlockAwarePrefixCache, PagedCacheManager
@@ -679,6 +744,11 @@ def test_tq_paged_disk_none_mode_skips_existing_native_blocks(tmp_path):
         assert stats["tq_native_enabled"] is False
         assert stats["tq_native_hits"] == 0
         assert stats["disk_misses"] == 1
+        for _ in range(50):
+            if disabled.get_stats()["blocks_on_disk"] == 0:
+                break
+            time.sleep(0.01)
+        stats = disabled.get_stats()
         assert stats["blocks_on_disk"] == 0
     finally:
         disabled.shutdown()

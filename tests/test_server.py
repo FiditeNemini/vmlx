@@ -4842,7 +4842,7 @@ class TestOpenAILogprobsFormatting:
     async def test_nonstream_responses_minimax_tools_available_no_call_runs_answer_pass(
         self, monkeypatch
     ):
-        """Tools being available must not suppress M3's no-call answer pass."""
+        """An explicit M3 thinking budget keeps its no-call answer pass."""
         from types import SimpleNamespace
 
         import vmlx_engine.server as server
@@ -4889,6 +4889,7 @@ class TestOpenAILogprobsFormatting:
                 model="jangq-ai/MiniMax-M3-Coder-Small",
                 input="answer without a tool",
                 max_output_tokens=64,
+                max_thinking_tokens=8,
                 enable_thinking=True,
                 tools=[
                     {
@@ -4967,10 +4968,10 @@ class TestOpenAILogprobsFormatting:
         )
 
     @pytest.mark.asyncio
-    async def test_streaming_responses_step_invalid_auto_tool_runs_native_retry(
+    async def test_streaming_responses_step_invalid_auto_tool_stays_fail_closed(
         self, monkeypatch
     ):
-        """Step keeps its think rail, drops only tools, and streams the real answer."""
+        """Step Auto never fabricates a second tools-free sample after bad XML."""
         import json
         from types import SimpleNamespace
 
@@ -5083,10 +5084,10 @@ class TestOpenAILogprobsFormatting:
             if event.get("type") == "response.output_text.delta"
         ]
         visible = "".join(content_deltas)
-        completed = next(
+        incomplete = next(
             event["response"]
             for event in events
-            if event.get("type") == "response.completed"
+            if event.get("type") == "response.incomplete"
         )
         function_items = [
             event["item"]
@@ -5095,21 +5096,21 @@ class TestOpenAILogprobsFormatting:
             and event.get("item", {}).get("type") == "function_call"
         ]
 
-        assert visible == "3861 STEP-RECOVERY-DONE"
-        assert len(content_deltas) >= 2
-        assert completed["output_text"] == visible
+        assert visible == ""
+        assert incomplete["output_text"] == ""
+        assert incomplete["incomplete_details"] == {
+            "reason": "reasoning_only_no_content"
+        }
         assert function_items == []
-        assert "<tool_call>" not in json.dumps(completed)
-        assert len(engine.calls) == 2
+        assert "<tool_call>" not in json.dumps(incomplete)
+        assert len(engine.calls) == 1
         assert "tools" in engine.calls[0]["kwargs"]
-        assert "tools" not in engine.calls[1]["kwargs"]
-        assert engine.calls[1]["kwargs"].get("enable_thinking") is not False
 
     @pytest.mark.asyncio
-    async def test_streaming_chat_step_invalid_auto_tool_runs_native_retry(
+    async def test_streaming_chat_step_invalid_auto_tool_stays_fail_closed(
         self, monkeypatch
     ):
-        """Chat Completions shares Step's progressive native retry contract."""
+        """Chat likewise reports invalid Step output without a second sample."""
         import json
         from types import SimpleNamespace
 
@@ -5232,19 +5233,20 @@ class TestOpenAILogprobsFormatting:
             for choice in chunk.get("choices", [])
             if choice.get("finish_reason") is not None
         ]
+        errors = [chunk["error"] for chunk in chunks if chunk.get("error")]
 
-        assert visible == "3861 STEP-CHAT-RECOVERY-DONE"
-        assert len([delta for delta in content_deltas if delta]) >= 2
-        assert finish_reasons[-1] == "stop"
-        assert len(engine.calls) == 2
-        assert "tools" not in engine.calls[1]["kwargs"]
-        assert engine.calls[1]["kwargs"].get("enable_thinking") is not False
+        assert visible == ""
+        assert finish_reasons == []
+        assert len(errors) == 1
+        assert errors[0]["code"] == "reasoning_only_no_content"
+        assert "<tool_call>" not in json.dumps(chunks)
+        assert len(engine.calls) == 1
 
     @pytest.mark.asyncio
     async def test_nonstream_responses_suppressed_repeat_tool_runs_answer_pass(
         self, monkeypatch
     ):
-        """tool_choice=none must not finalize empty after hidden native markup."""
+        """An explicit cap may recover after tool_choice=none hides native markup."""
         from types import SimpleNamespace
 
         import vmlx_engine.model_config_registry as registry
@@ -5309,6 +5311,7 @@ class TestOpenAILogprobsFormatting:
                 model="qwen3-policy-test",
                 input="use the prior tool result",
                 max_output_tokens=112,
+                max_thinking_tokens=8,
                 enable_thinking=True,
                 tool_choice="none",
                 tools=[
@@ -5336,7 +5339,7 @@ class TestOpenAILogprobsFormatting:
     async def test_nonstream_chat_minimax_tools_available_no_call_runs_answer_pass(
         self, monkeypatch
     ):
-        """Chat Completions must share the M3 no-call non-stream fallback."""
+        """Chat shares the explicit-budget M3 no-call answer pass."""
         from types import SimpleNamespace
 
         import vmlx_engine.server as server
@@ -5383,6 +5386,7 @@ class TestOpenAILogprobsFormatting:
                 model="jangq-ai/MiniMax-M3-Coder-Small",
                 messages=[Message(role="user", content="answer without a tool")],
                 max_tokens=64,
+                max_thinking_tokens=8,
                 enable_thinking=True,
                 tools=[
                     {

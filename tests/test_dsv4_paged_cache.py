@@ -697,7 +697,11 @@ def test_dsv4_block_disk_log_summarizes_native_composite_tags(caplog):
         def write_block_async(self, *_args, **_kwargs):
             return None
 
-    caplog.set_level("INFO", logger="vmlx_engine.prefix_cache")
+    # Per-block cache bookkeeping is intentionally DEBUG-only: INFO logging on
+    # high-cardinality/eval workloads used to spend more time formatting one
+    # line per miss/write than reporting actionable runtime state.  Keep the
+    # native-composite tag contract pinned without re-promoting hot-path noise.
+    caplog.set_level("DEBUG", logger="vmlx_engine.prefix_cache")
     paged = PagedCacheManager(block_size=4, max_blocks=8, disk_store=_DummyDisk())
     pc = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
     c = _make_dsv4_state_cache()

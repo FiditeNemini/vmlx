@@ -3631,10 +3631,30 @@ describe('JIT Toggle', () => {
         )
 
         expect(cachePanel).toContain('Block Disk Cache (SSD / L2)')
+        expect(cachePanel).toContain('Managed Root Size')
+        expect(cachePanel).toContain('Managed Root Limit')
+        expect(cachePanel).toContain('Namespace Size')
+        expect(cachePanel).toContain('global_budget')
+        expect(cachePanel).toContain('every block-cache namespace and typed companion')
+        expect(cachePanel).toContain("globalBlockDiskBudget.accounted === true")
+        expect(cachePanel).toContain('Reconciliation pending')
         expect(performancePanel).toContain("health.native_cache.paged ? 'RAM paged'")
         expect(performancePanel).toContain('Block Disk L2 (SSD)')
         expect(cachePanel).not.toContain('L2 Paged')
         expect(performancePanel).not.toContain('Paged L2')
+    })
+
+    it('describes the block-cache maximum as one aggregate managed-root budget', () => {
+        const form = readFileSync(
+            'src/renderer/src/components/sessions/SessionConfigForm.tsx',
+            'utf-8',
+        )
+
+        expect(form).toContain('Maximum physical disk space for the managed block-cache root')
+        expect(form).toContain('shared across model/config namespaces and typed companion state')
+        expect(form).toContain('the smallest finite limit is enforced')
+        expect(form).toContain('Set to 0 for unlimited only when no live session supplies a finite limit')
+        expect(form).toContain('the size limit applies across all managed subdirectories and typed companions in this root')
     })
 
     it('settings form disables generic stored KV codec controls for MiniMax-M3 native MSA cache', () => {

@@ -124,7 +124,8 @@ payload = {
     "raw_clear_memory_cache_offenders": offenders,
     "promoted_disk_block_markers": {
         "paged_has_disk_marker": "cache_data_from_disk" in paged_source,
-        "prefix_drops_cache_data": "block.cache_data = None" in prefix_source,
+        "prefix_drops_request_entry_parent": "entry_cache_data = None if is_tensor_data else cache_data" in prefix_source,
+        "prefix_releases_store_parent": "if is_tensor_data:\n            cache_data = None" in prefix_source,
         "prefix_drops_disk_marker": "block.cache_data_from_disk = False" in prefix_source,
         "block_disk_store_has_readable_probe": "def has_block" in Path(__import__("vmlx_engine.block_disk_store", fromlist=["__file__"]).__file__).read_text(encoding="utf-8"),
         "prefix_tracks_l2_readable_blocks": "l2_readable_block_ids" in prefix_source,
@@ -200,7 +201,8 @@ print(json.dumps(payload, sort_keys=True))
             disk_markers.get(name) is True
             for name in (
                 "paged_has_disk_marker",
-                "prefix_drops_cache_data",
+                "prefix_drops_request_entry_parent",
+                "prefix_releases_store_parent",
                 "prefix_drops_disk_marker",
             )
         ),
@@ -210,7 +212,8 @@ print(json.dumps(payload, sort_keys=True))
                 "block_disk_store_has_readable_probe",
                 "prefix_tracks_l2_readable_blocks",
                 "prefix_checks_disk_has_block",
-                "prefix_drops_cache_data",
+                "prefix_drops_request_entry_parent",
+                "prefix_releases_store_parent",
                 "prefix_drops_disk_marker",
             )
         ),

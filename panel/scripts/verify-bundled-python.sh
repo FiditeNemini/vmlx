@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Release-time sanity check: bundled-python must have all critical model
 # modules that vMLX depends on. Runs before electron-builder packages the
 # .app so we never ship a DMG that instantly ModuleNotFoundErrors on a
@@ -9,10 +9,18 @@
 # had the gemma4 dir cherry-picked in at some point and we want to make
 # sure we never regress the cherry-pick on a future rebuild.
 set -euo pipefail
+R18_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$R18_FIXED_PATH"
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-PANEL="$(dirname "$HERE")"
+HERE="$(cd -P "$(dirname "$0")" && pwd -P)"
+PANEL="$(cd -P "$HERE/.." && pwd -P)"
 PY="$PANEL/bundled-python/python/bin/python3"
+RELEASE_SCOPE="${VMLX_RELEASE_SCOPE:-${VMLINUX_RELEASE_SCOPE:-}}"
+NODE_BIN="${VMLX_R18_TOOL_NODE_REALPATH:-/opt/homebrew/bin/node}"
+GIT_BIN="${VMLX_R18_TOOL_GIT_REALPATH:-/usr/bin/git}"
+SHASUM_BIN="${VMLX_R18_TOOL_SHASUM_REALPATH:-/usr/bin/shasum}"
+AWK_BIN="${VMLX_R18_TOOL_AWK_REALPATH:-/usr/bin/awk}"
+FIND_BIN="${VMLX_R18_TOOL_FIND_REALPATH:-/usr/bin/find}"
 
 if [ ! -x "$PY" ]; then
   echo "❌ bundled python missing: $PY"
@@ -24,11 +32,48 @@ run_bundled_python() {
   PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH= "$PY" -B -s "$@"
 }
 
+assert_r18_pinned_tool() {
+  local name="$1"
+  local path="$2"
+  local expected_sha_var="VMLX_R18_TOOL_${name}_SHA256"
+  local expected_sha256="${!expected_sha_var:-}"
+  if [ "$RELEASE_SCOPE" != "r18_production" ]; then
+    return 0
+  fi
+  if [ -z "$expected_sha256" ]; then
+    echo "❌ RELEASE BLOCKED — missing pinned $name SHA-256"
+    exit 1
+  fi
+  run_bundled_python - "$path" "$expected_sha256" "$name" <<'PYEOF'
+import hashlib
+import os
+import pathlib
+import stat
+import sys
+
+path = pathlib.Path(sys.argv[1]).resolve(strict=True)
+expected = sys.argv[2]
+name = sys.argv[3]
+metadata = path.stat()
+if not stat.S_ISREG(metadata.st_mode) or not os.access(path, os.X_OK):
+    raise SystemExit(f"pinned {name} is not an executable regular file")
+digest = hashlib.sha256(path.read_bytes()).hexdigest()
+if digest != expected:
+    raise SystemExit(f"pinned {name} SHA-256 changed")
+PYEOF
+}
+
 # Hard guard against the 1.5.9→1.5.12 ship-stale-engine class of bug:
 # if package.json bumps but bundle-python.sh wasn't re-run, the bundled
 # vmlx_engine still reports the old version. Refuse to package the .app
 # in that case so no DMG ever ships an installer/runtime version mismatch.
-PKG_VERSION="$(node -p "require('$PANEL/package.json').version")"
+assert_r18_pinned_tool NODE "$NODE_BIN"
+assert_r18_pinned_tool GIT "$GIT_BIN"
+assert_r18_pinned_tool SHASUM "$SHASUM_BIN"
+assert_r18_pinned_tool AWK "$AWK_BIN"
+assert_r18_pinned_tool FIND "$FIND_BIN"
+assert_r18_pinned_tool NODE "$NODE_BIN"
+PKG_VERSION="$("$NODE_BIN" -p "require('$PANEL/package.json').version")"
 BUNDLED_VERSION="$(run_bundled_python -c 'import vmlx_engine; print(vmlx_engine.__version__)' 2>/dev/null || echo "MISSING")"
 if [ "$PKG_VERSION" != "$BUNDLED_VERSION" ]; then
   echo "❌ RELEASE BLOCKED — bundled-python vmlx_engine version drift"
@@ -71,7 +116,7 @@ check_console_script_shebangs() {
   fi
   local leaks
   leaks=$(
-    find "$bin_dir" -maxdepth 1 -type f -perm -111 -print 2>/dev/null \
+    "$FIND_BIN" "$bin_dir" -maxdepth 1 -type f -perm -111 -print 2>/dev/null \
       | while read -r script; do
           first_line="$(LC_ALL=C head -n 1 "$script" 2>/dev/null || true)"
           if [[ "$first_line" == '#!'*python* ]] \
@@ -154,8 +199,8 @@ for rel in "${HASH_GATED_ENGINE_FILES[@]}"; do
     echo "   bundled: $BUNDLED_ENGINE_DIR/$rel"
     exit 1
   fi
-  SOURCE_SHA="$(shasum -a 256 "$SOURCE_ENGINE_DIR/$rel" | awk '{print $1}')"
-  BUNDLED_SHA="$(shasum -a 256 "$BUNDLED_ENGINE_DIR/$rel" | awk '{print $1}')"
+  SOURCE_SHA="$("$SHASUM_BIN" -a 256 "$SOURCE_ENGINE_DIR/$rel" | "$AWK_BIN" '{print $1}')"
+  BUNDLED_SHA="$("$SHASUM_BIN" -a 256 "$BUNDLED_ENGINE_DIR/$rel" | "$AWK_BIN" '{print $1}')"
   if [ "$SOURCE_SHA" != "$BUNDLED_SHA" ]; then
     echo "❌ RELEASE BLOCKED — bundled vmlx_engine/$rel content drift"
     echo "   source sha256 : $SOURCE_SHA"
@@ -210,6 +255,59 @@ if [ ! -f "$PROVENANCE_FILE" ]; then
   echo "   expected: $PROVENANCE_FILE"
   exit 1
 fi
+EXPECTED_MLX_WHEEL_PLATFORM="${VMLX_EXPECTED_MLX_WHEEL_PLATFORM:-${VMLINUX_EXPECTED_MLX_WHEEL_PLATFORM:-}}"
+if [ "$RELEASE_SCOPE" = "r18_production" ] && [ -z "$EXPECTED_MLX_WHEEL_PLATFORM" ]; then
+  echo "❌ RELEASE BLOCKED — production bundle verification requires the exact MLX wheel platform"
+  exit 1
+fi
+run_bundled_python - "$PROVENANCE_FILE" "$EXPECTED_MLX_WHEEL_PLATFORM" <<'PYEOF'
+import importlib.metadata
+import json
+import pathlib
+import sys
+
+provenance = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = sys.argv[2] or provenance.get("mlx_wheel_platform", "")
+if expected not in {"macosx_14_0_arm64", "macosx_26_0_arm64"}:
+    raise SystemExit(f"invalid expected MLX wheel platform: {expected!r}")
+if provenance.get("mlx_wheel_platform") != expected:
+    raise SystemExit(
+        "bundle provenance MLX wheel platform differs from the requested release flavor"
+    )
+records = {}
+for distribution_name in ("mlx", "mlx-metal"):
+    distribution = importlib.metadata.distribution(distribution_name)
+    wheel_path = pathlib.Path(distribution._path) / "WHEEL"
+    tags = sorted(
+        {
+            line.split(":", 1)[1].strip()
+            for line in wheel_path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("Tag:")
+        }
+    )
+    platforms = {tag.rsplit("-", 1)[-1] for tag in tags}
+    if (
+        not tags
+        or any(tag.count("-") < 2 for tag in tags)
+        or platforms != {expected}
+    ):
+        raise SystemExit(
+            f"installed {distribution_name} wheel tags do not exactly target "
+            f"{expected}: {tags}"
+        )
+    records[distribution_name] = {
+        "version": distribution.version,
+        "tags": tags,
+    }
+if records["mlx"]["version"] != records["mlx-metal"]["version"]:
+    raise SystemExit(
+        "installed mlx and mlx-metal distribution versions do not match"
+    )
+print(
+    "  ok   bundled MLX wheel contract "
+    f"{records['mlx']['version']} @ {expected}"
+)
+PYEOF
 SOURCE_JANG_VERSION="$(
   sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
     "$JANG_TOOLS_SOURCE_ROOT/pyproject.toml" 2>/dev/null | head -1
@@ -233,7 +331,7 @@ if installed < minimum:
         f"RELEASE BLOCKED — bundled JANG {installed} is below required {minimum}"
     )
 PYEOF
-EXPECTED_JANG_COMMIT="$(git -C "$JANG_TOOLS_SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+EXPECTED_JANG_COMMIT="$("$GIT_BIN" -C "$JANG_TOOLS_SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
 PROVENANCE_JANG_COMMIT="$(
   run_bundled_python - "$PROVENANCE_FILE" <<'PYEOF'
 import json
@@ -280,8 +378,8 @@ else
       echo "   bundled: $BUNDLED_JANG_TOOLS_DIR/$rel"
       exit 1
     fi
-    SOURCE_SHA="$(shasum -a 256 "$JANG_TOOLS_SOURCE_DIR/$rel" | awk '{print $1}')"
-    BUNDLED_SHA="$(shasum -a 256 "$BUNDLED_JANG_TOOLS_DIR/$rel" | awk '{print $1}')"
+    SOURCE_SHA="$("$SHASUM_BIN" -a 256 "$JANG_TOOLS_SOURCE_DIR/$rel" | "$AWK_BIN" '{print $1}')"
+    BUNDLED_SHA="$("$SHASUM_BIN" -a 256 "$BUNDLED_JANG_TOOLS_DIR/$rel" | "$AWK_BIN" '{print $1}')"
     if [ "$SOURCE_SHA" != "$BUNDLED_SHA" ]; then
       echo "❌ RELEASE BLOCKED — bundled jang_tools/$rel content drift"
       echo "   source sha256 : $SOURCE_SHA"

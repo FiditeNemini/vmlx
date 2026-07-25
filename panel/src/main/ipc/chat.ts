@@ -2734,7 +2734,12 @@ export function registerChatHandlers(
               const respId = parsed.response?.id || parsed.id;
               if (responsesEventType === "response.created" && respId) {
                 const entry = activeRequests.get(chatId);
-                if (entry && !entry.responseId) {
+                if (entry) {
+                  // A single visible UI turn can issue more than one HTTP
+                  // response (for example, after a tool result). Always retain
+                  // the newest response identity so cancellation and terminal
+                  // telemetry bind to the request whose final metrics are
+                  // displayed.
                   entry.responseId = respId;
                   entry.endpoint = { host: resolved.host, port: resolved.port };
                 }
@@ -3016,7 +3021,10 @@ export function registerChatHandlers(
               // Track response ID for server-side cancel
               if (parsed.id) {
                 const entry = activeRequests.get(chatId);
-                if (entry && !entry.responseId) {
+                if (entry) {
+                  // Tool/result continuation requests receive a new response
+                  // ID. Keeping only the first ID makes Stop target a completed
+                  // request and misattributes final cache/usage telemetry.
                   entry.responseId = parsed.id;
                   entry.endpoint = { host: resolved.host, port: resolved.port };
                 }
@@ -4496,6 +4504,7 @@ export function registerChatHandlers(
             win.webContents.send("chat:complete", {
               chatId,
               messageId: assistantMessage.id,
+              responseId: activeRequests.get(chatId)?.responseId,
               content: fullContent,
               reasoningContent: finalReasoningContent || undefined,
               reasoningSegments:
@@ -4713,6 +4722,7 @@ export function registerChatHandlers(
               win.webContents.send("chat:complete", {
                 chatId,
                 messageId: assistantMessage.id,
+                responseId: activeRequests.get(chatId)?.responseId,
                 content: assistantMessage.content,
                 reasoningContent: abortReasoningContent || undefined,
                 reasoningSegments:

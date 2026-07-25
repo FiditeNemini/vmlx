@@ -13,15 +13,60 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from collections import Counter
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+ARTIFACT_SCHEMA = "vmlx-cache-hierarchy-live-gate-v2"
+PREFIX_ATTESTATION_METHOD = (
+    "final-render-tokenize-cache-prefix-identity-readonly"
+)
+PRIVATE_ATTESTATION_TOKEN_ENV = "VMLINUX_PRIVATE_CACHE_ATTESTATION_TOKEN"
+PRIVATE_ATTESTATION_PROOF_HEADER = "vmlx-cache-prefix-attestation-v1"
+L2_SIZE_EVICTION_SCHEMA = "vmlx-cache-l2-size-eviction-observation-v1"
+L2_RESTART_RESTORE_SCHEMA = "vmlx-cache-l2-restart-restore-observation-v1"
+CACHE_SCENARIOS = (
+    "standard",
+    "store-evict-refault",
+    "restart-restore",
+)
+CACHE_SCENARIO_INSTRUCTIONS = (
+    "This is a cache transport measurement. Do not call tools. "
+    "Follow the final user reply instruction exactly."
+)
+CACHE_SCENARIO_TOOLS = (
+    {
+        "type": "function",
+        "name": "cache_contract_unused",
+        "description": (
+            "Stable schema rendered only to prove cache identity includes tools."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "value": {"type": "string"},
+            },
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+    },
+)
+
+
+def _cache_scenario_request_controls() -> dict[str, Any]:
+    return {
+        "enable_thinking": False,
+        "instructions": CACHE_SCENARIO_INSTRUCTIONS,
+        "tools": [dict(tool) for tool in CACHE_SCENARIO_TOOLS],
+    }
 
 
 def _json_get(url: str, timeout: int) -> dict[str, Any]:
@@ -33,16 +78,31 @@ def _json_post(
     url: str,
     payload: dict[str, Any],
     timeout: int,
+    *,
+    private_attestation: bool = False,
 ) -> dict[str, Any]:
     body = json.dumps(
         payload,
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
+    headers = {"Content-Type": "application/json"}
+    if private_attestation:
+        token = os.environ.get(PRIVATE_ATTESTATION_TOKEN_ENV, "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32,512}", token):
+            raise ValueError(
+                f"{PRIVATE_ATTESTATION_TOKEN_ENV} is required for private attestation"
+            )
+        headers.update(
+            {
+                "Authorization": f"Bearer {token}",
+                "X-vMLX-Private-Proof": PRIVATE_ATTESTATION_PROOF_HEADER,
+            }
+        )
     request = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -182,6 +242,9 @@ def _health_cache_counters(health: dict[str, Any]) -> dict[str, int]:
     block_disk_cache = cache.get("block_disk_cache")
     if not isinstance(block_disk_cache, dict):
         block_disk_cache = {}
+    global_budget = block_disk_cache.get("global_budget")
+    if not isinstance(global_budget, dict):
+        global_budget = {}
     return {
         "scheduler.cache_hit_requests": _integer(scheduler.get("cache_hit_requests")),
         "scheduler.cache_hit_tokens": _integer(scheduler.get("cache_hit_tokens")),
@@ -205,6 +268,9 @@ def _health_cache_counters(health: dict[str, Any]) -> dict[str, int]:
         ),
         "block_disk_cache.total_tokens_on_disk": _integer(
             block_disk_cache.get("total_tokens_on_disk")
+        ),
+        "block_disk_cache.global_reconciliation_generation": _integer(
+            global_budget.get("reconciliation_generation")
         ),
     }
 
@@ -230,6 +296,8 @@ def _canonical_sha256(value: Any) -> str:
 def _token_contract_request(
     model: str,
     prompts: dict[str, str],
+    *,
+    request_controls: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe the exact Responses prompt shape without performing generation."""
     return {
@@ -237,11 +305,11 @@ def _token_contract_request(
         "surface": "responses",
         "model": model,
         "inputs": prompts,
-        "request_controls": {
-            "enable_thinking": False,
-            "instructions": None,
-            "tools": [],
-        },
+        "request_controls": (
+            _cache_scenario_request_controls()
+            if request_controls is None
+            else request_controls
+        ),
     }
 
 
@@ -329,6 +397,27 @@ def _validate_tokenizer_lcp_contract(
             failures.append(
                 f"token contract: prompt {label} token-ID digest is invalid"
             )
+        discriminator_present = row.get(
+            "generation_prompt_discriminator_present"
+        )
+        discriminator_sha = row.get(
+            "generation_prompt_discriminator_sha256"
+        )
+        if not isinstance(discriminator_present, bool):
+            failures.append(
+                f"token contract: prompt {label} generation-prompt "
+                "discriminator presence is missing"
+            )
+        elif discriminator_present and not _valid_sha256(discriminator_sha):
+            failures.append(
+                f"token contract: prompt {label} generation-prompt "
+                "discriminator digest is invalid"
+            )
+        elif not discriminator_present and discriminator_sha is not None:
+            failures.append(
+                f"token contract: prompt {label} has a discriminator digest "
+                "without a discriminator"
+            )
 
     lcp = contract.get("longest_common_prefix_tokens")
     if not isinstance(lcp, dict):
@@ -382,6 +471,7 @@ def _fetch_tokenizer_lcp_contract(
             f"{base_url}/v1/cache/token-contract",
             request_payload,
             timeout,
+            private_attestation=True,
         )
     except (OSError, ValueError, urllib.error.URLError) as exc:
         return {}, [
@@ -397,6 +487,464 @@ def _fetch_tokenizer_lcp_contract(
         health_attestation=health_attestation,
     )
     return contract, failures
+
+
+def _prefix_attestation_request(
+    model: str,
+    prompts: dict[str, str],
+    pairs: dict[str, tuple[str, str] | list[str]],
+    *,
+    request_controls: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "contract_version": 1,
+        "surface": "responses",
+        "model": model,
+        "inputs": prompts,
+        "prefix_pairs": {
+            name: list(labels) for name, labels in sorted(pairs.items())
+        },
+        "request_controls": (
+            _cache_scenario_request_controls()
+            if request_controls is None
+            else request_controls
+        ),
+        "touch": False,
+    }
+
+
+def _valid_path_free_sha256(value: Any) -> bool:
+    return _valid_sha256(value)
+
+
+def _prefix_attestation_forbidden_exposure(
+    value: Any,
+    *,
+    prompt_values: tuple[str, ...],
+) -> list[str]:
+    """Reject raw prompt/token/path/host material from source attestations."""
+    failures: list[str] = []
+    forbidden_keys = {
+        "prompt",
+        "prompt_text",
+        "token_ids",
+        "cache_prompt_token_ids",
+        "block_hash",
+        "block_hashes",
+        "file_name",
+        "file_path",
+        "path",
+        "host",
+        "hostname",
+        "cache_dir",
+    }
+
+    def _walk(item: Any, location: str) -> None:
+        if isinstance(item, dict):
+            for key, nested in item.items():
+                normalized = str(key).lower()
+                if normalized in forbidden_keys:
+                    failures.append(
+                        f"prefix attestation: forbidden field {location}.{key}"
+                    )
+                _walk(nested, f"{location}.{key}")
+            return
+        if isinstance(item, list):
+            for index, nested in enumerate(item):
+                _walk(nested, f"{location}[{index}]")
+            return
+        if not isinstance(item, str):
+            return
+        if item.startswith(("/Users/", "/Volumes/", "/private/", "/tmp/")):
+            failures.append(
+                f"prefix attestation: absolute local path leaked at {location}"
+            )
+        if any(prompt and prompt in item for prompt in prompt_values):
+            failures.append(
+                f"prefix attestation: raw prompt text leaked at {location}"
+            )
+
+    _walk(value, "$")
+    return failures
+
+
+def _validate_prefix_attestation_snapshot(
+    snapshot: Any,
+    *,
+    layer: str,
+    expected_blocks: int,
+) -> list[str]:
+    failures: list[str] = []
+    if not isinstance(snapshot, dict):
+        return [f"prefix attestation: {layer} snapshot is missing"]
+    expected_schema = (
+        "vmlx-cache-prefix-l1-snapshot-v1"
+        if layer == "l1"
+        else "vmlx-cache-prefix-l2-snapshot-v1"
+    )
+    if snapshot.get("schema") != expected_schema:
+        failures.append(
+            f"prefix attestation: {layer} schema is not {expected_schema}"
+        )
+    if snapshot.get("access_metadata_mutated") is not False:
+        failures.append(
+            f"prefix attestation: {layer} read probe mutated access metadata"
+        )
+    if _integer(snapshot.get("expected_blocks")) != expected_blocks:
+        failures.append(
+            f"prefix attestation: {layer} expected_blocks mismatch"
+        )
+    if layer == "l1":
+        disk_only = snapshot.get("disk_only")
+        paged_ram_enabled = snapshot.get("paged_ram_enabled")
+        expected_mode = "block_disk_only" if disk_only is True else "paged"
+        if disk_only not in (True, False):
+            failures.append("prefix attestation: L1 disk_only truth is missing")
+        if paged_ram_enabled is not (disk_only is False):
+            failures.append(
+                "prefix attestation: L1 paged-RAM/disk-only truth is inconsistent"
+            )
+        if snapshot.get("backend_mode") != expected_mode:
+            failures.append(
+                "prefix attestation: L1 backend mode is inconsistent"
+            )
+        metadata = _integer(snapshot.get("metadata_blocks_present"))
+        resident = _integer(snapshot.get("resident_payload_blocks_present"))
+        contiguous_metadata = _integer(
+            snapshot.get("contiguous_metadata_blocks")
+        )
+        contiguous_resident = _integer(
+            snapshot.get("contiguous_resident_payload_blocks")
+        )
+        if not 0 <= resident <= metadata <= expected_blocks:
+            failures.append(
+                "prefix attestation: L1 resident/metadata counts are invalid"
+            )
+        if not 0 <= contiguous_resident <= contiguous_metadata <= expected_blocks:
+            failures.append(
+                "prefix attestation: L1 contiguous counts are invalid"
+            )
+        if snapshot.get("terminal_resident_payload_present") is True and (
+            snapshot.get("terminal_metadata_present") is not True
+        ):
+            failures.append(
+                "prefix attestation: L1 terminal payload exists without metadata"
+            )
+    else:
+        indexed = _integer(snapshot.get("indexed_blocks"))
+        readable = _integer(snapshot.get("readable_blocks"))
+        contiguous_indexed = _integer(
+            snapshot.get("contiguous_indexed_blocks")
+        )
+        contiguous_readable = _integer(
+            snapshot.get("contiguous_readable_blocks")
+        )
+        if not 0 <= readable <= indexed <= expected_blocks:
+            failures.append(
+                "prefix attestation: L2 readable/indexed counts are invalid"
+            )
+        if not 0 <= contiguous_readable <= contiguous_indexed <= expected_blocks:
+            failures.append(
+                "prefix attestation: L2 contiguous counts are invalid"
+            )
+        if _integer(snapshot.get("stale_index_blocks")) != indexed - readable:
+            failures.append(
+                "prefix attestation: L2 stale-index count is inconsistent"
+            )
+        if snapshot.get("terminal_readable") is True and (
+            snapshot.get("terminal_indexed") is not True
+        ):
+            failures.append(
+                "prefix attestation: L2 terminal payload exists without index"
+            )
+        max_size = _integer(snapshot.get("store_max_size_bytes"))
+        total_size = _integer(snapshot.get("store_total_size_bytes"))
+        if max_size > 0 and total_size > max_size:
+            failures.append(
+                "prefix attestation: L2 store exceeds configured maximum"
+            )
+    return failures
+
+
+def _validate_prefix_attestation_contract(
+    contract: dict[str, Any],
+    *,
+    request_payload: dict[str, Any],
+    health_attestation: dict[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    if contract.get("contract_version") != 1:
+        failures.append("prefix attestation: contract_version must be 1")
+    if contract.get("method") != PREFIX_ATTESTATION_METHOD:
+        failures.append("prefix attestation: method is not source-owned")
+    if contract.get("surface") != "responses":
+        failures.append("prefix attestation: surface must be responses")
+    if (
+        contract.get("cache_extra_keys_contract")
+        != "generation-prompt-only-text-render-v1"
+    ):
+        failures.append(
+            "prefix attestation: generation-prompt-only text side-key "
+            "contract is missing"
+        )
+    if contract.get("caller_cache_or_media_side_keys") != "rejected":
+        failures.append(
+            "prefix attestation: caller cache/media side keys are not rejected"
+        )
+    if contract.get("cache_lookup_bypassed") is not True:
+        failures.append("prefix attestation: cache lookup was not bypassed")
+    if contract.get("access_metadata_mutated") is not False:
+        failures.append("prefix attestation: read probe mutated access metadata")
+    if contract.get("request_sha256") != _canonical_sha256(request_payload):
+        failures.append(
+            "prefix attestation: request_sha256 does not bind the exact request"
+        )
+    for field, contract_field in (
+        ("model_bundle_provenance", "model_bundle_fingerprint_sha256"),
+        ("cache_topology_provenance", "cache_topology_fingerprint_sha256"),
+    ):
+        attestation = health_attestation.get(field)
+        expected = (
+            str(attestation.get("fingerprint_sha256") or "")
+            if isinstance(attestation, dict)
+            else ""
+        )
+        if not _valid_path_free_sha256(expected):
+            failures.append(
+                f"prefix attestation: /health {field} fingerprint is unavailable"
+            )
+        elif contract.get(contract_field) != expected:
+            failures.append(
+                f"prefix attestation: {contract_field} does not match /health"
+            )
+
+    prompts = request_payload.get("inputs")
+    prompt_rows = contract.get("prompts")
+    pairs = request_payload.get("prefix_pairs")
+    prefix_rows = contract.get("prefixes")
+    block_size = _integer(contract.get("block_size"))
+    if block_size <= 0:
+        failures.append("prefix attestation: block_size is invalid")
+    if not isinstance(prompts, dict) or not isinstance(prompt_rows, dict):
+        return failures + ["prefix attestation: prompt metadata is missing"]
+    if set(prompt_rows) != set(prompts):
+        failures.append("prefix attestation: prompt labels do not match request")
+    for label, prompt in prompts.items():
+        row = prompt_rows.get(label)
+        if not isinstance(row, dict):
+            failures.append(f"prefix attestation: prompt row {label} is missing")
+            continue
+        if row.get("input_sha256") != hashlib.sha256(
+            str(prompt).encode()
+        ).hexdigest():
+            failures.append(
+                f"prefix attestation: prompt {label} input digest is wrong"
+            )
+        if _integer(row.get("cache_prompt_token_count")) <= 1:
+            failures.append(
+                f"prefix attestation: prompt {label} token count is unusable"
+            )
+        if not _valid_path_free_sha256(
+            row.get("cache_prompt_token_ids_sha256")
+        ):
+            failures.append(
+                f"prefix attestation: prompt {label} token-vector digest is invalid"
+            )
+        discriminator_present = row.get(
+            "generation_prompt_discriminator_present"
+        )
+        discriminator_sha = row.get(
+            "generation_prompt_discriminator_sha256"
+        )
+        if not isinstance(discriminator_present, bool):
+            failures.append(
+                f"prefix attestation: prompt {label} generation-prompt "
+                "discriminator presence is missing"
+            )
+        elif discriminator_present and not _valid_path_free_sha256(
+            discriminator_sha
+        ):
+            failures.append(
+                f"prefix attestation: prompt {label} generation-prompt "
+                "discriminator digest is invalid"
+            )
+        elif not discriminator_present and discriminator_sha is not None:
+            failures.append(
+                f"prefix attestation: prompt {label} has a discriminator "
+                "digest without a discriminator"
+            )
+    if not isinstance(pairs, dict) or not isinstance(prefix_rows, dict):
+        return failures + ["prefix attestation: prefix rows are missing"]
+    if set(prefix_rows) != set(pairs):
+        failures.append("prefix attestation: prefix-pair labels do not match")
+    for pair_name, labels in pairs.items():
+        row = prefix_rows.get(pair_name)
+        if not isinstance(row, dict):
+            failures.append(
+                f"prefix attestation: prefix row {pair_name} is missing"
+            )
+            continue
+        if row.get("labels") != list(labels):
+            failures.append(
+                f"prefix attestation: prefix row {pair_name} labels are wrong"
+            )
+        left_prompt = prompt_rows.get(labels[0])
+        right_prompt = prompt_rows.get(labels[1])
+        if isinstance(left_prompt, dict) and isinstance(right_prompt, dict):
+            expected_discriminator_present = left_prompt.get(
+                "generation_prompt_discriminator_present"
+            )
+            expected_discriminator_sha = left_prompt.get(
+                "generation_prompt_discriminator_sha256"
+            )
+            if (
+                right_prompt.get("generation_prompt_discriminator_present")
+                != expected_discriminator_present
+                or right_prompt.get("generation_prompt_discriminator_sha256")
+                != expected_discriminator_sha
+            ):
+                failures.append(
+                    f"prefix attestation: prefix row {pair_name} prompt "
+                    "generation discriminators differ"
+                )
+            if (
+                row.get("generation_prompt_discriminator_present")
+                != expected_discriminator_present
+                or row.get("generation_prompt_discriminator_sha256")
+                != expected_discriminator_sha
+            ):
+                failures.append(
+                    f"prefix attestation: prefix row {pair_name} does not bind "
+                    "the production generation discriminator"
+                )
+        lcp_tokens = _integer(row.get("longest_common_prefix_tokens"))
+        reusable_tokens = _integer(row.get("reusable_prefix_tokens"))
+        expected_blocks = _integer(row.get("expected_blocks"))
+        if (
+            block_size <= 0
+            or lcp_tokens <= block_size
+            or reusable_tokens != (lcp_tokens // block_size) * block_size
+            or expected_blocks != reusable_tokens // block_size
+            or expected_blocks <= 0
+        ):
+            failures.append(
+                f"prefix attestation: prefix row {pair_name} block alignment is invalid"
+            )
+        for field in (
+            "uncached_left_tokens",
+            "uncached_right_tokens",
+        ):
+            if _integer(row.get(field)) <= 0:
+                failures.append(
+                    f"prefix attestation: prefix row {pair_name} {field} "
+                    "does not preserve a suffix"
+                )
+        for field in (
+            "prefix_token_vector_sha256",
+            "block_chain_fingerprint_sha256",
+            "terminal_block_fingerprint_sha256",
+        ):
+            if not _valid_path_free_sha256(row.get(field)):
+                failures.append(
+                    f"prefix attestation: prefix row {pair_name} {field} is invalid"
+                )
+        failures.extend(
+            _validate_prefix_attestation_snapshot(
+                row.get("l1"),
+                layer="l1",
+                expected_blocks=expected_blocks,
+            )
+        )
+        failures.extend(
+            _validate_prefix_attestation_snapshot(
+                row.get("l2"),
+                layer="l2",
+                expected_blocks=expected_blocks,
+            )
+        )
+    failures.extend(
+        _prefix_attestation_forbidden_exposure(
+            contract,
+            prompt_values=tuple(str(prompt) for prompt in prompts.values()),
+        )
+    )
+    return failures
+
+
+def _fetch_prefix_attestation(
+    *,
+    base_url: str,
+    model: str,
+    prompts: dict[str, str],
+    pairs: dict[str, tuple[str, str] | list[str]],
+    timeout: int,
+    health_attestation: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    request_payload = _prefix_attestation_request(model, prompts, pairs)
+    try:
+        contract = _json_post(
+            f"{base_url}/v1/cache/prefix-attestation",
+            request_payload,
+            timeout,
+            private_attestation=True,
+        )
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        return {}, [
+            "prefix attestation: source-owned endpoint is unavailable; "
+            "required interface is POST /v1/cache/prefix-attestation "
+            f"({exc})"
+        ]
+    return contract, _validate_prefix_attestation_contract(
+        contract,
+        request_payload=request_payload,
+        health_attestation=health_attestation,
+    )
+
+
+def _prefix_binding(
+    contract: dict[str, Any],
+    pair_name: str,
+) -> dict[str, Any]:
+    row = (contract.get("prefixes") or {}).get(pair_name)
+    if not isinstance(row, dict):
+        return {}
+    return {
+        "schema": "vmlx-cache-prefix-binding-v1",
+        "attestation_sha256": _canonical_sha256(contract),
+        "request_sha256": contract.get("request_sha256"),
+        "model_bundle_fingerprint_sha256": contract.get(
+            "model_bundle_fingerprint_sha256"
+        ),
+        "cache_topology_fingerprint_sha256": contract.get(
+            "cache_topology_fingerprint_sha256"
+        ),
+        "block_size": contract.get("block_size"),
+        "prefix_token_vector_sha256": row.get(
+            "prefix_token_vector_sha256"
+        ),
+        "block_chain_fingerprint_sha256": row.get(
+            "block_chain_fingerprint_sha256"
+        ),
+        "terminal_block_fingerprint_sha256": row.get(
+            "terminal_block_fingerprint_sha256"
+        ),
+        "generation_prompt_discriminator_present": row.get(
+            "generation_prompt_discriminator_present"
+        ),
+        "generation_prompt_discriminator_sha256": row.get(
+            "generation_prompt_discriminator_sha256"
+        ),
+        "longest_common_prefix_tokens": row.get(
+            "longest_common_prefix_tokens"
+        ),
+        "reusable_prefix_tokens": row.get("reusable_prefix_tokens"),
+        "uncached_left_tokens": row.get("uncached_left_tokens"),
+        "uncached_right_tokens": row.get("uncached_right_tokens"),
+        "expected_blocks": row.get("expected_blocks"),
+        "snapshot_wall_time_ns": contract.get("snapshot_wall_time_ns"),
+        "l1": row.get("l1"),
+        "l2": row.get("l2"),
+    }
 
 
 def _run_text(command: list[str], *, cwd: Path | None = None) -> str:
@@ -586,7 +1134,7 @@ def _observe_local_listener_identity(base_url: str) -> dict[str, Any]:
 
 
 def _observe_source_checkout() -> dict[str, Any]:
-    """Record the checkout containing this harness and its current Git HEAD."""
+    """Record the checkout containing this harness and its exact Git tree."""
     expected_root = Path(__file__).resolve().parents[2]
     git_root = Path(
         _run_text(
@@ -614,6 +1162,17 @@ def _observe_source_checkout() -> dict[str, Any]:
     )
     if len(head) != 40:
         raise RuntimeError(f"Git HEAD is not a full commit SHA: {head!r}")
+    tree = _run_text(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(git_root),
+            "rev-parse",
+            "HEAD^{tree}",
+        ]
+    )
+    if len(tree) != 40:
+        raise RuntimeError(f"Git tree is not a full SHA: {tree!r}")
     status_text = _run_text(
         [
             "/usr/bin/git",
@@ -628,6 +1187,7 @@ def _observe_source_checkout() -> dict[str, Any]:
     return {
         "git_root": str(git_root),
         "head": head,
+        "tree": tree,
         "dirty": bool(status_lines),
         "status_porcelain": status_lines,
         "status_sha256": hashlib.sha256(status_text.encode()).hexdigest(),
@@ -639,7 +1199,7 @@ def _compare_source_checkout_observations(
     after: dict[str, Any],
 ) -> list[str]:
     failures: list[str] = []
-    for field in ("git_root", "head", "dirty", "status_sha256"):
+    for field in ("git_root", "head", "tree", "dirty", "status_sha256"):
         if before.get(field) != after.get(field):
             failures.append(
                 f"provenance: observed source {field} changed during the live gate"
@@ -960,6 +1520,12 @@ def _wait_for_store_durability(
         block_disk = cache.get("block_disk_cache")
         if not isinstance(block_disk, dict):
             block_disk = {}
+        scheduler_cache = cache.get("scheduler_cache")
+        if not isinstance(scheduler_cache, dict):
+            scheduler_cache = {}
+        global_budget = block_disk.get("global_budget")
+        if not isinstance(global_budget, dict):
+            global_budget = {}
         pipeline = block_disk.get("write_pipeline")
         pipeline_snapshot = pipeline if isinstance(pipeline, dict) else {}
         recent_fences = pipeline_snapshot.get("recent_fences")
@@ -979,6 +1545,10 @@ def _wait_for_store_durability(
             scheduler = {}
 
         contract_failures = []
+        if scheduler_cache.get("strict_block_disk_write_fence") is not True:
+            contract_failures.append(
+                "engine was not launched with strict physical block-disk fences"
+            )
         if matching_fence is None:
             contract_failures.append(
                 f"no block-disk write fence matches request_id={request_id}"
@@ -1026,6 +1596,36 @@ def _wait_for_store_durability(
                 contract_failures.append(
                     "request write fence has no completion generation"
                 )
+            baseline_reconciliation_generation = _integer(
+                baseline_counters.get(
+                    "block_disk_cache.global_reconciliation_generation"
+                )
+            )
+            fence_reconciliation_generation = _integer(
+                matching_fence.get("global_reconciliation_generation")
+            )
+            if fence_reconciliation_generation <= baseline_reconciliation_generation:
+                contract_failures.append(
+                    "request write fence did not advance physical reconciliation"
+                )
+            if _integer(
+                global_budget.get("reconciliation_generation")
+            ) < fence_reconciliation_generation:
+                contract_failures.append(
+                    "managed-root telemetry is older than the request fence"
+                )
+        if global_budget.get("accounted") is not True:
+            contract_failures.append("managed-root physical accounting is not settled")
+        if global_budget.get("compliant") is not True:
+            contract_failures.append("managed-root physical bytes are over limit")
+        global_bytes_after = _integer(global_budget.get("bytes_after"))
+        global_max_size_bytes = _integer(global_budget.get("max_size_bytes"))
+        if global_max_size_bytes > 0 and not (
+            0 <= global_bytes_after <= global_max_size_bytes
+        ):
+            contract_failures.append(
+                "managed-root physical bytes exceed the finite configured limit"
+            )
         if _integer(pipeline_snapshot.get("queue_depth")) != 0:
             contract_failures.append("block-disk write queue is not empty")
         if _integer(pipeline_snapshot.get("inflight")) != 0:
@@ -1049,6 +1649,7 @@ def _wait_for_store_durability(
                 "inflight": pipeline_snapshot.get("inflight"),
                 "disk_writes": final_counters.get("block_disk_cache.disk_writes"),
                 "disk_evictions": final_counters.get("block_disk_cache.disk_evictions"),
+                "global_budget": global_budget,
                 "scheduler_num_waiting": scheduler.get("num_waiting"),
                 "scheduler_num_running": scheduler.get("num_running"),
             },
@@ -1483,6 +2084,608 @@ def _prompt_contract(prefix: str, records: int) -> dict[str, Any]:
     }
 
 
+def _validate_prefix_binding(
+    binding: Any,
+    *,
+    expected_fingerprint: str,
+    expected_bundle_fingerprint: str,
+    expected_topology_fingerprint: str,
+    label: str,
+) -> list[str]:
+    failures: list[str] = []
+    if not isinstance(binding, dict):
+        return [f"{label}: source prefix binding is missing"]
+    if binding.get("schema") != "vmlx-cache-prefix-binding-v1":
+        failures.append(f"{label}: source prefix binding schema is invalid")
+    for field in (
+        "attestation_sha256",
+        "request_sha256",
+        "prefix_token_vector_sha256",
+        "block_chain_fingerprint_sha256",
+        "terminal_block_fingerprint_sha256",
+    ):
+        if not _valid_sha256(binding.get(field)):
+            failures.append(f"{label}: {field} is not a SHA-256")
+    discriminator_present = binding.get(
+        "generation_prompt_discriminator_present"
+    )
+    discriminator_sha = binding.get("generation_prompt_discriminator_sha256")
+    if not isinstance(discriminator_present, bool):
+        failures.append(
+            f"{label}: generation-prompt discriminator presence is missing"
+        )
+    elif discriminator_present and not _valid_sha256(discriminator_sha):
+        failures.append(
+            f"{label}: generation-prompt discriminator digest is invalid"
+        )
+    elif not discriminator_present and discriminator_sha is not None:
+        failures.append(
+            f"{label}: generation-prompt discriminator digest is unexpected"
+        )
+    if binding.get("block_chain_fingerprint_sha256") != expected_fingerprint:
+        failures.append(f"{label}: prefix fingerprint does not match")
+    if (
+        binding.get("model_bundle_fingerprint_sha256")
+        != expected_bundle_fingerprint
+    ):
+        failures.append(f"{label}: model-bundle fingerprint does not match")
+    if (
+        binding.get("cache_topology_fingerprint_sha256")
+        != expected_topology_fingerprint
+    ):
+        failures.append(f"{label}: cache-topology fingerprint does not match")
+    block_size = _integer(binding.get("block_size"))
+    reusable_tokens = _integer(binding.get("reusable_prefix_tokens"))
+    expected_blocks = _integer(binding.get("expected_blocks"))
+    if (
+        block_size <= 0
+        or reusable_tokens <= 0
+        or reusable_tokens % block_size != 0
+        or expected_blocks != reusable_tokens // block_size
+        or expected_blocks <= 0
+    ):
+        failures.append(f"{label}: reusable prefix/block count is invalid")
+    if _integer(binding.get("uncached_left_tokens")) <= 0 or _integer(
+        binding.get("uncached_right_tokens")
+    ) <= 0:
+        failures.append(f"{label}: source pair does not retain an uncached suffix")
+    failures.extend(
+        _validate_prefix_attestation_snapshot(
+            binding.get("l1"),
+            layer="l1",
+            expected_blocks=expected_blocks,
+        )
+    )
+    failures.extend(
+        _validate_prefix_attestation_snapshot(
+            binding.get("l2"),
+            layer="l2",
+            expected_blocks=expected_blocks,
+        )
+    )
+    return failures
+
+
+def _validate_disk_refault_execution(
+    execution: Any,
+    *,
+    label: str,
+) -> list[str]:
+    failures: list[str] = []
+    if not isinstance(execution, dict):
+        return [f"{label}: exact request execution is missing"]
+    response_id = str(execution.get("response_id") or "")
+    last = execution.get("last_cache_execution")
+    if not response_id or not isinstance(last, dict):
+        return [f"{label}: request-correlated cache execution is missing"]
+    if str(last.get("request_id") or "") != response_id:
+        failures.append(
+            f"{label}: cache execution request_id does not match Responses id"
+        )
+    if execution.get("response_id_consistent") is not True:
+        failures.append(f"{label}: Responses stream ID is not consistent")
+    if execution.get("terminal_ok") is not True:
+        failures.append(f"{label}: Responses stream did not complete")
+    if execution.get("marker_ok") is not True:
+        failures.append(f"{label}: expected visible marker is missing")
+    if _integer(execution.get("cached_tokens")) <= 0:
+        failures.append(f"{label}: no cached tokens were reported")
+    if last.get("cache_reuse_applied") is not True:
+        failures.append(f"{label}: cache reuse was not applied")
+    if _integer(last.get("disk_blocks")) <= 0:
+        failures.append(f"{label}: no block-disk blocks were loaded")
+    if _integer(last.get("cached_tokens")) <= 0:
+        failures.append(f"{label}: no block-disk tokens were restored")
+    prompt_tokens = _integer(last.get("prompt_tokens"))
+    uncached_tokens = _integer(last.get("uncached_prompt_tokens"))
+    if prompt_tokens <= 0 or uncached_tokens <= 0:
+        failures.append(
+            f"{label}: refault did not retain a tokenizer-visible uncached suffix"
+        )
+    cache_detail = execution.get("cache_detail")
+    if not isinstance(cache_detail, dict):
+        cache_detail = {}
+    origin = str(
+        cache_detail.get("source")
+        or cache_detail.get("origin")
+        or last.get("cache_detail")
+        or ""
+    ).lower()
+    if "disk" not in origin and "l2" not in origin:
+        failures.append(f"{label}: cache origin is not block-disk")
+    return failures
+
+
+def _validate_execution_prefix_bounds(
+    execution: Any,
+    binding: Any,
+    *,
+    label: str,
+) -> list[str]:
+    if not isinstance(execution, dict) or not isinstance(binding, dict):
+        return [f"{label}: execution/prefix binding is missing"]
+    cached_tokens = _integer(execution.get("cached_tokens"))
+    reusable_floor = _integer(binding.get("reusable_prefix_tokens"))
+    lcp_ceiling = _integer(binding.get("longest_common_prefix_tokens"))
+    if not reusable_floor <= cached_tokens <= lcp_ceiling:
+        return [
+            f"{label}: cached_tokens={cached_tokens} is outside the exact "
+            f"block-aligned prefix range [{reusable_floor}, {lcp_ceiling}]"
+        ]
+    return []
+
+
+def _validate_strict_write_fence_proof(
+    proof: Any,
+    *,
+    label: str,
+) -> list[str]:
+    """Require a fence-bound physical managed-root reconciliation."""
+    if not isinstance(proof, dict):
+        return [f"{label}: strict write-fence proof is missing"]
+    failures: list[str] = []
+    baseline_generation = _integer(
+        proof.get("baseline_reconciliation_generation")
+    )
+    reconciliation_generation = _integer(
+        proof.get("global_reconciliation_generation")
+    )
+    if proof.get("strict_physical_reconcile") is not True:
+        failures.append(f"{label}: strict physical reconciliation is not proven")
+    if reconciliation_generation <= baseline_generation:
+        failures.append(f"{label}: reconciliation generation did not advance")
+    if _integer(proof.get("global_accounting_generation")) <= 0:
+        failures.append(f"{label}: global accounting generation is missing")
+    bytes_after = _integer(proof.get("global_bytes_after"))
+    max_size_bytes = _integer(proof.get("global_max_size_bytes"))
+    if bytes_after < 0:
+        failures.append(f"{label}: managed-root byte count is negative")
+    if max_size_bytes > 0 and bytes_after > max_size_bytes:
+        failures.append(f"{label}: managed-root physical bytes exceed the limit")
+    return failures
+
+
+def validate_l2_size_eviction_observation(
+    observation: Any,
+    *,
+    expected_source_head: str,
+    expected_source_tree: str,
+    health_attestation: dict[str, Any],
+    max_filler_requests: int,
+) -> list[str]:
+    """Fail closed unless exact old/recent chain identities prove L2 LRU."""
+    if not isinstance(observation, dict):
+        return ["L2 size eviction: observation is missing"]
+    failures: list[str] = []
+    if observation.get("schema") != L2_SIZE_EVICTION_SCHEMA:
+        failures.append("L2 size eviction: schema is invalid")
+    if observation.get("scenario") != "store-evict-refault":
+        failures.append("L2 size eviction: scenario is invalid")
+    if observation.get("source_head") != expected_source_head:
+        failures.append("L2 size eviction: source HEAD does not match")
+    if observation.get("source_tree") != expected_source_tree:
+        failures.append("L2 size eviction: source tree does not match")
+    bundle = health_attestation.get("model_bundle_provenance")
+    topology = health_attestation.get("cache_topology_provenance")
+    expected_bundle = (
+        str(bundle.get("fingerprint_sha256") or "")
+        if isinstance(bundle, dict)
+        else ""
+    )
+    expected_topology = (
+        str(topology.get("fingerprint_sha256") or "")
+        if isinstance(topology, dict)
+        else ""
+    )
+    if observation.get("model_bundle_fingerprint_sha256") != expected_bundle:
+        failures.append("L2 size eviction: model-bundle fingerprint does not match")
+    if observation.get("cache_topology_fingerprint_sha256") != expected_topology:
+        failures.append("L2 size eviction: topology fingerprint does not match")
+
+    old_fingerprint = str(
+        observation.get("old_prefix_fingerprint_sha256") or ""
+    )
+    recent_fingerprint = str(
+        observation.get("recent_prefix_fingerprint_sha256") or ""
+    )
+    if not _valid_sha256(old_fingerprint) or not _valid_sha256(
+        recent_fingerprint
+    ):
+        failures.append("L2 size eviction: prefix fingerprints are invalid")
+    elif old_fingerprint == recent_fingerprint:
+        failures.append("L2 size eviction: old and recent prefixes are identical")
+
+    saved_max = _integer(observation.get("saved_max_bytes"))
+    peak = _integer(observation.get("peak_observed_bytes"))
+    final = _integer(observation.get("final_observed_bytes"))
+    fillers = _integer(observation.get("bounded_filler_request_count"))
+    if saved_max <= 0:
+        failures.append("L2 size eviction: configured disk bound is not positive")
+    if not 0 <= peak <= saved_max:
+        failures.append("L2 size eviction: peak bytes exceed configured bound")
+    if not 0 <= final <= peak:
+        failures.append("L2 size eviction: final bytes are invalid")
+    if not 1 <= fillers <= min(256, max_filler_requests):
+        failures.append("L2 size eviction: filler request count is unbounded")
+    if observation.get("old_prefix_evicted") is not True:
+        failures.append("L2 size eviction: old prefix was not evicted")
+    if observation.get("recent_prefix_present") is not True:
+        failures.append("L2 size eviction: recent prefix did not survive")
+    if observation.get("recent_prefix_last_access_after_old") is not True:
+        failures.append("L2 size eviction: recent LRU touch was not proven")
+
+    binding_specs = (
+        ("old_before", old_fingerprint),
+        ("recent_before", recent_fingerprint),
+        ("recent_pre_refault", recent_fingerprint),
+        ("recent_post_refault", recent_fingerprint),
+        ("old_after_durable_filler", old_fingerprint),
+        ("recent_after_durable_filler", recent_fingerprint),
+        ("old_final", old_fingerprint),
+        ("recent_final", recent_fingerprint),
+    )
+    for label, fingerprint in binding_specs:
+        failures.extend(
+            _validate_prefix_binding(
+                observation.get(label),
+                expected_fingerprint=fingerprint,
+                expected_bundle_fingerprint=expected_bundle,
+                expected_topology_fingerprint=expected_topology,
+                label=f"L2 size eviction {label}",
+            )
+        )
+
+    old_before = observation.get("old_before")
+    recent_before = observation.get("recent_before")
+    recent_pre = observation.get("recent_pre_refault")
+    recent_post = observation.get("recent_post_refault")
+    old_after_filler = observation.get("old_after_durable_filler")
+    recent_after_filler = observation.get("recent_after_durable_filler")
+    old_final = observation.get("old_final")
+    recent_final = observation.get("recent_final")
+    evicting_filler = observation.get("evicting_filler_fence")
+    if not isinstance(evicting_filler, dict):
+        failures.append(
+            "L2 size eviction: request-correlated evicting filler fence is missing"
+        )
+    else:
+        response_id = str(evicting_filler.get("response_id") or "")
+        request_id = str(evicting_filler.get("request_id") or "")
+        if (
+            not response_id
+            or request_id != response_id
+            or evicting_filler.get("request_correlated") is not True
+        ):
+            failures.append(
+                "L2 size eviction: evicting filler fence is not bound to its "
+                "Responses request_id"
+            )
+        if (
+            evicting_filler.get("ok") is not True
+            or evicting_filler.get("post_eviction_complete") is not True
+            or evicting_filler.get("fence_sealed") is not True
+            or _integer(
+                evicting_filler.get("fence_completion_generation")
+            )
+            <= 0
+        ):
+            failures.append(
+                "L2 size eviction: evicting filler fence was not durably settled"
+            )
+        if _integer(evicting_filler.get("disk_evictions_delta")) <= 0:
+            failures.append(
+                "L2 size eviction: request-correlated disk_evictions delta "
+                "must be positive"
+            )
+        if _integer(evicting_filler.get("disk_writes_delta")) <= 0:
+            failures.append(
+                "L2 size eviction: evicting filler committed no block writes"
+            )
+        failures.extend(
+            _validate_strict_write_fence_proof(
+                evicting_filler,
+                label="L2 size eviction evicting filler",
+            )
+        )
+    write_fences = observation.get("write_fences")
+    if not isinstance(write_fences, list) or not write_fences:
+        failures.append("L2 size eviction: strict write-fence rows are missing")
+    else:
+        for index, write_fence in enumerate(write_fences):
+            failures.extend(
+                _validate_strict_write_fence_proof(
+                    write_fence,
+                    label=f"L2 size eviction write fence {index}",
+                )
+            )
+    if all(
+        isinstance(item, dict)
+        for item in (
+            old_before,
+            recent_before,
+            recent_pre,
+            recent_post,
+            old_after_filler,
+            recent_after_filler,
+            old_final,
+            recent_final,
+        )
+    ):
+        if (old_before.get("l2") or {}).get("terminal_readable") is not True:
+            failures.append("L2 size eviction: old prefix was never stored")
+        if (recent_before.get("l2") or {}).get("terminal_readable") is not True:
+            failures.append("L2 size eviction: recent prefix was never stored")
+        old_access_time = _integer(
+            (old_before.get("l2") or {}).get("terminal_last_accessed_ns")
+        )
+        recent_access_time = _integer(
+            (recent_before.get("l2") or {}).get("terminal_last_accessed_ns")
+        )
+        if old_access_time <= 0 or recent_access_time <= old_access_time:
+            failures.append(
+                "L2 size eviction: old prefix was not strictly older than "
+                "recent before filler"
+            )
+        recent_before_l1 = recent_before.get("l1") or {}
+        disk_only = (
+            recent_before_l1.get("backend_mode") == "block_disk_only"
+            and recent_before_l1.get("disk_only") is True
+            and recent_before_l1.get("paged_ram_enabled") is False
+        )
+        if disk_only:
+            for label, binding in (
+                ("recent_before", recent_before),
+                ("recent_pre_refault", recent_pre),
+                ("recent_post_refault", recent_post),
+                ("recent_after_durable_filler", recent_after_filler),
+                ("recent_final", recent_final),
+            ):
+                l1 = binding.get("l1") or {}
+                if (
+                    l1.get("backend_mode") != "block_disk_only"
+                    or l1.get("disk_only") is not True
+                    or l1.get("paged_ram_enabled") is not False
+                    or _integer(l1.get("resident_payload_blocks_present")) != 0
+                    or _integer(l1.get("resident_payload_bytes")) != 0
+                ):
+                    failures.append(
+                        f"L2 size eviction: {label} does not truthfully "
+                        "represent SSD-only state"
+                    )
+        elif (
+            recent_before_l1.get("terminal_resident_payload_present")
+            is not True
+        ):
+            failures.append(
+                "L2 size eviction: recent prefix was never resident in paged RAM"
+            )
+        if (
+            (recent_pre.get("l1") or {}).get(
+                "terminal_resident_payload_present"
+            )
+            is not False
+        ):
+            failures.append(
+                "L2 size eviction: recent prefix was not evicted from L1 before refault"
+            )
+        if (recent_pre.get("l2") or {}).get("terminal_readable") is not True:
+            failures.append(
+                "L2 size eviction: recent prefix was absent from L2 before refault"
+            )
+        pre_access = _integer(
+            (recent_pre.get("l2") or {}).get("terminal_access_count")
+        )
+        post_access = _integer(
+            (recent_post.get("l2") or {}).get("terminal_access_count")
+        )
+        pre_time = _integer(
+            (recent_pre.get("l2") or {}).get("terminal_last_accessed_ns")
+        )
+        post_time = _integer(
+            (recent_post.get("l2") or {}).get("terminal_last_accessed_ns")
+        )
+        if post_access <= pre_access or post_time <= pre_time:
+            failures.append(
+                "L2 size eviction: real refault did not touch recent LRU metadata"
+            )
+        if (old_after_filler.get("l2") or {}).get(
+            "terminal_readable"
+        ) is not False:
+            failures.append(
+                "L2 size eviction: old prefix did not disappear after the "
+                "durable evicting filler fence"
+            )
+        if (recent_after_filler.get("l2") or {}).get(
+            "terminal_readable"
+        ) is not True:
+            failures.append(
+                "L2 size eviction: recent prefix did not survive the durable "
+                "evicting filler fence"
+            )
+        if (old_final.get("l2") or {}).get("terminal_readable") is not False:
+            failures.append("L2 size eviction: old terminal block still exists")
+        if (recent_final.get("l2") or {}).get("terminal_readable") is not True:
+            failures.append("L2 size eviction: recent terminal block did not survive")
+        for label, binding in (
+            ("old_after_durable_filler", old_after_filler),
+            ("recent_after_durable_filler", recent_after_filler),
+            ("old_final", old_final),
+            ("recent_final", recent_final),
+        ):
+            l2 = binding.get("l2") or {}
+            observed_max = _integer(l2.get("store_max_size_bytes"))
+            observed_size = _integer(l2.get("store_total_size_bytes"))
+            if observed_max != saved_max or not 0 <= observed_size <= saved_max:
+                failures.append(
+                    f"L2 size eviction: {label} does not comply with the "
+                    "configured byte limit"
+                )
+    failures.extend(
+        _validate_disk_refault_execution(
+            observation.get("recent_refault_execution"),
+            label="L2 size eviction recent refault",
+        )
+    )
+    failures.extend(
+        _validate_execution_prefix_bounds(
+            observation.get("recent_refault_execution"),
+            recent_pre,
+            label="L2 size eviction recent refault",
+        )
+    )
+    return failures
+
+
+def validate_l2_restart_restore_observation(
+    observation: Any,
+    *,
+    store_observation: Any,
+    expected_source_head: str,
+    expected_source_tree: str,
+    health_attestation: dict[str, Any],
+) -> list[str]:
+    """Bind restart restore to the exact recent chain that survived eviction."""
+    if not isinstance(observation, dict):
+        return ["L2 restart restore: observation is missing"]
+    failures: list[str] = []
+    if observation.get("schema") != L2_RESTART_RESTORE_SCHEMA:
+        failures.append("L2 restart restore: schema is invalid")
+    if observation.get("scenario") != "restart-restore":
+        failures.append("L2 restart restore: scenario is invalid")
+    if observation.get("source_head") != expected_source_head:
+        failures.append("L2 restart restore: source HEAD does not match")
+    if observation.get("source_tree") != expected_source_tree:
+        failures.append("L2 restart restore: source tree does not match")
+    if not isinstance(store_observation, dict):
+        return failures + ["L2 restart restore: store observation is missing"]
+    recent_fingerprint = str(
+        store_observation.get("recent_prefix_fingerprint_sha256") or ""
+    )
+    restart_fingerprint = str(
+        observation.get("restart_probe_prefix_fingerprint_sha256") or ""
+    )
+    if not _valid_sha256(recent_fingerprint) or (
+        restart_fingerprint != recent_fingerprint
+    ):
+        failures.append(
+            "L2 restart restore: restart prefix is not the stored recent prefix"
+        )
+    bundle = health_attestation.get("model_bundle_provenance")
+    topology = health_attestation.get("cache_topology_provenance")
+    expected_bundle = (
+        str(bundle.get("fingerprint_sha256") or "")
+        if isinstance(bundle, dict)
+        else ""
+    )
+    expected_topology = (
+        str(topology.get("fingerprint_sha256") or "")
+        if isinstance(topology, dict)
+        else ""
+    )
+    for label in ("restart_pre", "restart_post"):
+        failures.extend(
+            _validate_prefix_binding(
+                observation.get(label),
+                expected_fingerprint=recent_fingerprint,
+                expected_bundle_fingerprint=expected_bundle,
+                expected_topology_fingerprint=expected_topology,
+                label=f"L2 restart restore {label}",
+            )
+        )
+    pre = observation.get("restart_pre")
+    post = observation.get("restart_post")
+    if isinstance(pre, dict) and isinstance(post, dict):
+        if (
+            (pre.get("l1") or {}).get("terminal_resident_payload_present")
+            is not False
+        ):
+            failures.append(
+                "L2 restart restore: prefix was already L1-resident before probe"
+            )
+        if (pre.get("l2") or {}).get("terminal_readable") is not True:
+            failures.append(
+                "L2 restart restore: exact prefix was absent from L2 before probe"
+            )
+        pre_access = _integer(
+            (pre.get("l2") or {}).get("terminal_access_count")
+        )
+        post_access = _integer(
+            (post.get("l2") or {}).get("terminal_access_count")
+        )
+        pre_time = _integer(
+            (pre.get("l2") or {}).get("terminal_last_accessed_ns")
+        )
+        post_time = _integer(
+            (post.get("l2") or {}).get("terminal_last_accessed_ns")
+        )
+        if post_access <= pre_access or post_time <= pre_time:
+            failures.append(
+                "L2 restart restore: real probe did not touch exact L2 prefix"
+            )
+    failures.extend(
+        _validate_disk_refault_execution(
+            observation.get("restart_execution"),
+            label="L2 restart restore",
+        )
+    )
+    failures.extend(
+        _validate_execution_prefix_bounds(
+            observation.get("restart_execution"),
+            pre,
+            label="L2 restart restore",
+        )
+    )
+    execution = observation.get("restart_execution")
+    last = (
+        execution.get("last_cache_execution")
+        if isinstance(execution, dict)
+        else {}
+    )
+    if not isinstance(last, dict):
+        last = {}
+    if _integer(observation.get("restart_restored_tokens")) != _integer(
+        last.get("cached_tokens")
+    ):
+        failures.append(
+            "L2 restart restore: restored-token summary is not source-bound"
+        )
+    if _integer(observation.get("restart_disk_blocks")) != _integer(
+        last.get("disk_blocks")
+    ):
+        failures.append(
+            "L2 restart restore: disk-block summary is not source-bound"
+        )
+    if _integer(observation.get("restart_uncached_tokens")) != (
+        _integer(last.get("uncached_prompt_tokens"))
+    ):
+        failures.append(
+            "L2 restart restore: uncached-token summary is not source-bound"
+        )
+    if observation.get("restart_restore_source") != "block-disk":
+        failures.append("L2 restart restore: source is not block-disk")
+    return failures
+
+
 def validate_probe_linkage(
     probe_metadata: dict[str, Any],
     store_summary: dict[str, Any],
@@ -1703,8 +2906,18 @@ def _cache_prompts(prefix: str, nonce: str) -> dict[str, str]:
     return {selector: f"{stem}{selector}" for selector in ("A", "B", "C")}
 
 
-def _payload(model: str, prompt: str) -> dict[str, Any]:
-    return {
+def _payload(
+    model: str,
+    prompt: str,
+    *,
+    request_controls: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    controls = (
+        _cache_scenario_request_controls()
+        if request_controls is None
+        else request_controls
+    )
+    payload = {
         "model": model,
         "input": prompt,
         "stream": True,
@@ -1713,8 +2926,809 @@ def _payload(model: str, prompt: str) -> dict[str, Any]:
         "temperature": 0.0,
         "top_p": 1.0,
         "top_k": 20,
-        "enable_thinking": False,
+        "enable_thinking": controls.get("enable_thinking", False),
     }
+    for field in ("instructions", "tools", "tool_choice", "chat_template_kwargs"):
+        if field in controls:
+            payload[field] = controls[field]
+    return payload
+
+
+def _l2_identity_prompts(
+    nonce: str,
+    records: int,
+) -> dict[str, str]:
+    prompts: dict[str, str] = {}
+    for identity in ("old", "recent"):
+        prefix = _common_prefix(f"{nonce}-l2-{identity}", records)
+        stem = (
+            f"{prefix}\nThe following selector is outside the shared cache "
+            f"prefix. Reply exactly CACHE-HIERARCHY-{nonce}-L2-"
+            f"{identity.upper()}-"
+        )
+        prompts[f"{identity}_store"] = f"{stem}STORE"
+        prompts[f"{identity}_probe"] = f"{stem}PROBE"
+        prompts[f"{identity}_restart"] = f"{stem}RESTART"
+    return prompts
+
+
+def _l2_filler_prompt(
+    nonce: str,
+    records: int,
+    index: int,
+) -> tuple[str, str]:
+    marker = f"CACHE-HIERARCHY-{nonce}-FILLER-{index:03d}"
+    prefix = _common_prefix(f"{nonce}-l2-filler-{index:03d}", records)
+    return f"{prefix}\nReply exactly {marker}", marker
+
+
+def _run_response_observation(
+    *,
+    base_url: str,
+    model: str,
+    tag: str,
+    prompt: str,
+    expected_marker: str,
+    artifact_dir: Path,
+    timeout: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    before = _json_get(f"{base_url}/health", timeout)
+    before_path = artifact_dir / f"{tag}.health-before.json"
+    before_path.write_text(
+        json.dumps(before, indent=2, sort_keys=True) + "\n"
+    )
+    payload = _payload(model, prompt)
+    request_path = artifact_dir / f"{tag}.request.json"
+    raw_path = artifact_dir / f"{tag}.sse"
+    request_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    )
+    code, raw, elapsed = _post_sse(
+        f"{base_url}/v1/responses",
+        payload,
+        timeout,
+    )
+    raw_path.write_text(raw)
+    summary = _summarize(raw, elapsed, code)
+    after = _json_get(f"{base_url}/health", timeout)
+    after_path = artifact_dir / f"{tag}.health.json"
+    after_path.write_text(
+        json.dumps(after, indent=2, sort_keys=True) + "\n"
+    )
+    before_counters = _health_cache_counters(before)
+    after_counters = _health_cache_counters(after)
+    summary.update(
+        {
+            "tag": tag,
+            "expected_marker": expected_marker,
+            "request_path": str(request_path),
+            "raw_path": str(raw_path),
+            "health_before_path": str(before_path),
+            "health_path": str(after_path),
+            "health_counters_before": before_counters,
+            "health_counters_after": after_counters,
+            "health_counter_deltas": _counter_deltas(
+                before_counters,
+                after_counters,
+            ),
+            "last_cache_execution": (after.get("scheduler") or {}).get(
+                "last_cache_execution"
+            ),
+            "scheduler_cache": (
+                (after.get("cache") or {}).get("scheduler_cache") or {}
+            ),
+            "block_disk_cache": (
+                (after.get("cache") or {}).get("block_disk_cache") or {}
+            ),
+        }
+    )
+    summary["marker_ok"] = expected_marker in summary["output_text"]
+    summary["terminal_ok"] = summary["terminal_events"] == [
+        "response.completed"
+    ]
+    print(
+        json.dumps(
+            {
+                "tag": tag,
+                "status": code,
+                "marker_ok": summary["marker_ok"],
+                "cached_tokens": summary["cached_tokens"],
+                "cache_detail": summary["cache_detail"],
+                "last_cache_execution": summary["last_cache_execution"],
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    return summary, after
+
+
+def _path_free_execution(row: dict[str, Any]) -> dict[str, Any]:
+    last = row.get("last_cache_execution")
+    if not isinstance(last, dict):
+        last = {}
+    cache_detail = row.get("cache_detail")
+    if not isinstance(cache_detail, dict):
+        cache_detail = {}
+    return {
+        "response_id": row.get("response_id"),
+        "response_id_consistent": row.get("response_id_consistent"),
+        "status_code": row.get("status_code"),
+        "terminal_ok": row.get("terminal_ok"),
+        "marker_ok": row.get("marker_ok"),
+        "cached_tokens": row.get("cached_tokens"),
+        "cache_detail": {
+            key: cache_detail.get(key)
+            for key in (
+                "source",
+                "origin",
+                "cache_type",
+                "cached_tokens",
+                "disk_blocks",
+            )
+            if key in cache_detail
+        },
+        "last_cache_execution": {
+            key: last.get(key)
+            for key in (
+                "request_id",
+                "cache_reuse_applied",
+                "cache_outcome",
+                "cache_detail",
+                "prompt_tokens",
+                "cached_tokens",
+                "uncached_prompt_tokens",
+                "prefill_tokens",
+                "disk_blocks",
+            )
+            if key in last
+        },
+    }
+
+
+def _wait_for_prefix_access_touch(
+    *,
+    base_url: str,
+    model: str,
+    prompts: dict[str, str],
+    pairs: dict[str, tuple[str, str] | list[str]],
+    pair_name: str,
+    previous_binding: dict[str, Any],
+    timeout: int,
+    health_attestation: dict[str, Any],
+    timeout_s: float,
+    poll_interval_s: float,
+) -> tuple[dict[str, Any], list[str]]:
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    previous_l2 = previous_binding.get("l2")
+    if not isinstance(previous_l2, dict):
+        previous_l2 = {}
+    previous_count = _integer(previous_l2.get("terminal_access_count"))
+    previous_time = _integer(previous_l2.get("terminal_last_accessed_ns"))
+    last_contract: dict[str, Any] = {}
+    last_failures: list[str] = []
+    while True:
+        contract, failures = _fetch_prefix_attestation(
+            base_url=base_url,
+            model=model,
+            prompts=prompts,
+            pairs=pairs,
+            timeout=timeout,
+            health_attestation=health_attestation,
+        )
+        last_contract = contract
+        last_failures = failures
+        binding = _prefix_binding(contract, pair_name)
+        l2 = binding.get("l2")
+        if not isinstance(l2, dict):
+            l2 = {}
+        if (
+            not failures
+            and _integer(l2.get("terminal_access_count")) > previous_count
+            and _integer(l2.get("terminal_last_accessed_ns")) > previous_time
+        ):
+            return contract, []
+        if time.monotonic() >= deadline:
+            if not last_failures:
+                last_failures = [
+                    "prefix attestation: real cache hit did not update L2 "
+                    "access metadata before timeout"
+                ]
+            return last_contract, last_failures
+        time.sleep(poll_interval_s)
+
+
+def _write_path_free_attestation(
+    artifact_dir: Path,
+    tag: str,
+    contract: dict[str, Any],
+) -> None:
+    (artifact_dir / f"{tag}.prefix-attestation.json").write_text(
+        json.dumps(contract, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def _scenario_request_durability(
+    *,
+    row: dict[str, Any],
+    base_url: str,
+    timeout: int,
+    durability_timeout: float,
+    durability_poll_interval: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not (
+        row.get("status_code") == 200
+        and row.get("marker_ok") is True
+        and row.get("terminal_ok") is True
+        and row.get("response_id_consistent") is True
+        and str(row.get("response_id") or "")
+    ):
+        return (
+            {
+                "ok": False,
+                "skipped": True,
+                "reason": "request did not satisfy the Responses contract",
+            },
+            {},
+        )
+    return _wait_for_store_durability(
+        base_url=base_url,
+        request_timeout=timeout,
+        request_id=str(row["response_id"]),
+        baseline_counters=row.get("health_counters_before") or {},
+        timeout_s=durability_timeout,
+        poll_interval_s=durability_poll_interval,
+    )
+
+
+def _path_free_durability_proof(
+    row: dict[str, Any],
+    durability: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep the request/fence/counter facts needed for exact eviction proof."""
+    fence = durability.get("matching_fence")
+    if not isinstance(fence, dict):
+        fence = {}
+    deltas = durability.get("counter_deltas")
+    if not isinstance(deltas, dict):
+        deltas = {}
+    response_id = str(row.get("response_id") or "")
+    request_id = str(durability.get("request_id") or "")
+    return {
+        "tag": row.get("tag"),
+        "response_id": response_id,
+        "request_id": request_id,
+        "request_correlated": bool(
+            response_id
+            and request_id == response_id
+            and durability.get("exact_request_identity_proven") is True
+        ),
+        "ok": durability.get("ok") is True,
+        "post_eviction_complete": fence.get("post_eviction_complete") is True,
+        "fence_sealed": fence.get("sealed") is True,
+        "fence_completion_generation": _integer(
+            fence.get("completion_generation")
+        ),
+        "strict_physical_reconcile": bool(
+            durability.get("ok") is True
+            and _integer(fence.get("global_reconciliation_generation"))
+            > _integer(
+                (durability.get("baseline_counters") or {}).get(
+                    "block_disk_cache.global_reconciliation_generation"
+                )
+            )
+        ),
+        "baseline_reconciliation_generation": _integer(
+            (durability.get("baseline_counters") or {}).get(
+                "block_disk_cache.global_reconciliation_generation"
+            )
+        ),
+        "global_reconciliation_generation": _integer(
+            fence.get("global_reconciliation_generation")
+        ),
+        "global_accounting_generation": _integer(
+            fence.get("global_accounting_generation")
+        ),
+        "global_bytes_after": _integer(fence.get("global_bytes_after")),
+        "global_max_size_bytes": _integer(fence.get("global_max_size_bytes")),
+        "disk_writes_delta": _integer(
+            deltas.get("block_disk_cache.disk_writes")
+        ),
+        "disk_evictions_delta": _integer(
+            deltas.get("block_disk_cache.disk_evictions")
+        ),
+        "attestation_sha256": _canonical_sha256(durability),
+    }
+
+
+def _run_store_evict_refault_scenario(
+    *,
+    base_url: str,
+    model: str,
+    nonce: str,
+    records: int,
+    artifact_dir: Path,
+    timeout: int,
+    durability_timeout: float,
+    durability_poll_interval: float,
+    max_filler_requests: int,
+    health_attestation: dict[str, Any],
+    observed_source: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], dict[str, Any]]:
+    """Prove L1 eviction, exact L2 refault, LRU touch, and bounded L2 eviction."""
+    failures: list[str] = []
+    rows: list[dict[str, Any]] = []
+    durability_rows: list[dict[str, Any]] = []
+    prompts = _l2_identity_prompts(nonce, records)
+    pairs: dict[str, tuple[str, str]] = {
+        "old": ("old_store", "old_probe"),
+        "recent": ("recent_store", "recent_probe"),
+    }
+    health_after: dict[str, Any] = {}
+
+    for identity in ("old", "recent"):
+        marker = (
+            f"CACHE-HIERARCHY-{nonce}-L2-{identity.upper()}-STORE"
+        )
+        row, health_after = _run_response_observation(
+            base_url=base_url,
+            model=model,
+            tag=f"l2_{identity}_store",
+            prompt=prompts[f"{identity}_store"],
+            expected_marker=marker,
+            artifact_dir=artifact_dir,
+            timeout=timeout,
+        )
+        rows.append(row)
+        durability, durable_health = _scenario_request_durability(
+            row=row,
+            base_url=base_url,
+            timeout=timeout,
+            durability_timeout=durability_timeout,
+            durability_poll_interval=durability_poll_interval,
+        )
+        durability_rows.append(_path_free_durability_proof(row, durability))
+        if durable_health:
+            health_after = durable_health
+        if durability.get("ok") is not True:
+            failures.append(
+                f"{row['tag']}: exact write fence did not become durable"
+            )
+
+    before_contract, before_failures = _fetch_prefix_attestation(
+        base_url=base_url,
+        model=model,
+        prompts=prompts,
+        pairs=pairs,
+        timeout=timeout,
+        health_attestation=health_attestation,
+    )
+    failures.extend(before_failures)
+    _write_path_free_attestation(
+        artifact_dir,
+        "l2_before_eviction",
+        before_contract,
+    )
+    old_before = _prefix_binding(before_contract, "old")
+    recent_before = _prefix_binding(before_contract, "recent")
+    old_fingerprint = str(
+        old_before.get("block_chain_fingerprint_sha256") or ""
+    )
+    recent_fingerprint = str(
+        recent_before.get("block_chain_fingerprint_sha256") or ""
+    )
+    peak_bytes = max(
+        _integer((old_before.get("l2") or {}).get("store_total_size_bytes")),
+        _integer(
+            (recent_before.get("l2") or {}).get("store_total_size_bytes")
+        ),
+    )
+    filler_count = 0
+    pre_refault_contract = before_contract
+    recent_pre_refault = recent_before
+    evicting_filler_fence: dict[str, Any] = {}
+    old_after_durable_filler: dict[str, Any] = {}
+    recent_after_durable_filler: dict[str, Any] = {}
+
+    while filler_count < max_filler_requests:
+        recent_l1 = recent_pre_refault.get("l1")
+        recent_l2 = recent_pre_refault.get("l2")
+        if not isinstance(recent_l1, dict):
+            recent_l1 = {}
+        if not isinstance(recent_l2, dict):
+            recent_l2 = {}
+        if (
+            recent_l1.get("terminal_resident_payload_present") is False
+            and recent_l2.get("terminal_readable") is True
+        ):
+            break
+        filler_prompt, marker = _l2_filler_prompt(
+            nonce,
+            records,
+            filler_count,
+        )
+        row, health_after = _run_response_observation(
+            base_url=base_url,
+            model=model,
+            tag=f"l2_filler_{filler_count:03d}",
+            prompt=filler_prompt,
+            expected_marker=marker,
+            artifact_dir=artifact_dir,
+            timeout=timeout,
+        )
+        rows.append(row)
+        durability, durable_health = _scenario_request_durability(
+            row=row,
+            base_url=base_url,
+            timeout=timeout,
+            durability_timeout=durability_timeout,
+            durability_poll_interval=durability_poll_interval,
+        )
+        durability_proof = _path_free_durability_proof(row, durability)
+        durability_rows.append(durability_proof)
+        filler_count += 1
+        if durable_health:
+            health_after = durable_health
+        if durability.get("ok") is not True:
+            failures.append(
+                f"{row['tag']}: exact write fence did not become durable"
+            )
+            break
+        pre_refault_contract, attestation_failures = (
+            _fetch_prefix_attestation(
+                base_url=base_url,
+                model=model,
+                prompts=prompts,
+                pairs=pairs,
+                timeout=timeout,
+                health_attestation=health_attestation,
+            )
+        )
+        failures.extend(attestation_failures)
+        recent_pre_refault = _prefix_binding(
+            pre_refault_contract,
+            "recent",
+        )
+        old_after_filler = _prefix_binding(pre_refault_contract, "old")
+        if (
+            not attestation_failures
+            and durability_proof.get("ok") is True
+            and durability_proof.get("post_eviction_complete") is True
+            and _integer(durability_proof.get("disk_evictions_delta")) > 0
+            and (old_after_filler.get("l2") or {}).get("terminal_readable")
+            is False
+            and (recent_pre_refault.get("l2") or {}).get(
+                "terminal_readable"
+            )
+            is True
+            and not evicting_filler_fence
+        ):
+            evicting_filler_fence = durability_proof
+            old_after_durable_filler = old_after_filler
+            recent_after_durable_filler = recent_pre_refault
+        peak_bytes = max(
+            peak_bytes,
+            _integer(
+                (recent_pre_refault.get("l2") or {}).get(
+                    "store_total_size_bytes"
+                )
+            ),
+        )
+        if attestation_failures:
+            break
+
+    _write_path_free_attestation(
+        artifact_dir,
+        "l2_recent_pre_refault",
+        pre_refault_contract,
+    )
+    recent_l1 = recent_pre_refault.get("l1")
+    recent_l2 = recent_pre_refault.get("l2")
+    if (
+        not isinstance(recent_l1, dict)
+        or recent_l1.get("terminal_resident_payload_present") is not False
+        or not isinstance(recent_l2, dict)
+        or recent_l2.get("terminal_readable") is not True
+    ):
+        failures.append(
+            "store-evict-refault: bounded fillers did not evict the recent "
+            "prefix from L1 while retaining it in L2"
+        )
+
+    refault_row, health_after = _run_response_observation(
+        base_url=base_url,
+        model=model,
+        tag="l2_recent_refault",
+        prompt=prompts["recent_probe"],
+        expected_marker=f"CACHE-HIERARCHY-{nonce}-L2-RECENT-PROBE",
+        artifact_dir=artifact_dir,
+        timeout=timeout,
+    )
+    rows.append(refault_row)
+    post_refault_contract, touch_failures = _wait_for_prefix_access_touch(
+        base_url=base_url,
+        model=model,
+        prompts=prompts,
+        pairs=pairs,
+        pair_name="recent",
+        previous_binding=recent_pre_refault,
+        timeout=timeout,
+        health_attestation=health_attestation,
+        timeout_s=durability_timeout,
+        poll_interval_s=durability_poll_interval,
+    )
+    failures.extend(touch_failures)
+    _write_path_free_attestation(
+        artifact_dir,
+        "l2_recent_post_refault",
+        post_refault_contract,
+    )
+    recent_post_refault = _prefix_binding(
+        post_refault_contract,
+        "recent",
+    )
+
+    final_contract = post_refault_contract
+    old_final = _prefix_binding(final_contract, "old")
+    recent_final = _prefix_binding(final_contract, "recent")
+    while filler_count < max_filler_requests:
+        old_l2 = old_final.get("l2")
+        recent_l2 = recent_final.get("l2")
+        if not isinstance(old_l2, dict):
+            old_l2 = {}
+        if not isinstance(recent_l2, dict):
+            recent_l2 = {}
+        if (
+            old_l2.get("terminal_readable") is False
+            and recent_l2.get("terminal_readable") is True
+        ):
+            break
+        filler_prompt, marker = _l2_filler_prompt(
+            nonce,
+            records,
+            filler_count,
+        )
+        row, health_after = _run_response_observation(
+            base_url=base_url,
+            model=model,
+            tag=f"l2_filler_{filler_count:03d}",
+            prompt=filler_prompt,
+            expected_marker=marker,
+            artifact_dir=artifact_dir,
+            timeout=timeout,
+        )
+        rows.append(row)
+        durability, durable_health = _scenario_request_durability(
+            row=row,
+            base_url=base_url,
+            timeout=timeout,
+            durability_timeout=durability_timeout,
+            durability_poll_interval=durability_poll_interval,
+        )
+        durability_proof = _path_free_durability_proof(row, durability)
+        durability_rows.append(durability_proof)
+        filler_count += 1
+        if durable_health:
+            health_after = durable_health
+        if durability.get("ok") is not True:
+            failures.append(
+                f"{row['tag']}: exact write fence did not become durable"
+            )
+            break
+        final_contract, attestation_failures = _fetch_prefix_attestation(
+            base_url=base_url,
+            model=model,
+            prompts=prompts,
+            pairs=pairs,
+            timeout=timeout,
+            health_attestation=health_attestation,
+        )
+        failures.extend(attestation_failures)
+        old_final = _prefix_binding(final_contract, "old")
+        recent_final = _prefix_binding(final_contract, "recent")
+        if (
+            not attestation_failures
+            and durability_proof.get("ok") is True
+            and durability_proof.get("post_eviction_complete") is True
+            and _integer(durability_proof.get("disk_evictions_delta")) > 0
+            and (old_final.get("l2") or {}).get("terminal_readable") is False
+            and (recent_final.get("l2") or {}).get("terminal_readable") is True
+            and not evicting_filler_fence
+        ):
+            evicting_filler_fence = durability_proof
+            old_after_durable_filler = old_final
+            recent_after_durable_filler = recent_final
+        peak_bytes = max(
+            peak_bytes,
+            _integer(
+                (recent_final.get("l2") or {}).get("store_total_size_bytes")
+            ),
+        )
+        if attestation_failures:
+            break
+
+    _write_path_free_attestation(
+        artifact_dir,
+        "l2_final_eviction",
+        final_contract,
+    )
+    old_final = _prefix_binding(final_contract, "old")
+    recent_final = _prefix_binding(final_contract, "recent")
+    old_l2 = old_final.get("l2")
+    recent_l2 = recent_final.get("l2")
+    if not isinstance(old_l2, dict):
+        old_l2 = {}
+    if not isinstance(recent_l2, dict):
+        recent_l2 = {}
+    saved_max = _integer(recent_l2.get("store_max_size_bytes"))
+    final_bytes = _integer(recent_l2.get("store_total_size_bytes"))
+    recent_post_l2 = recent_post_refault.get("l2")
+    if not isinstance(recent_post_l2, dict):
+        recent_post_l2 = {}
+    old_before_l2 = old_before.get("l2")
+    if not isinstance(old_before_l2, dict):
+        old_before_l2 = {}
+    observation = {
+        "schema": L2_SIZE_EVICTION_SCHEMA,
+        "scenario": "store-evict-refault",
+        "source_head": observed_source.get("head"),
+        "source_tree": observed_source.get("tree"),
+        "model_bundle_fingerprint_sha256": (
+            (health_attestation.get("model_bundle_provenance") or {}).get(
+                "fingerprint_sha256"
+            )
+        ),
+        "cache_topology_fingerprint_sha256": (
+            (health_attestation.get("cache_topology_provenance") or {}).get(
+                "fingerprint_sha256"
+            )
+        ),
+        "saved_max_bytes": saved_max,
+        "peak_observed_bytes": peak_bytes,
+        "final_observed_bytes": final_bytes,
+        "bounded_filler_request_count": filler_count,
+        "old_prefix_fingerprint_sha256": old_fingerprint,
+        "recent_prefix_fingerprint_sha256": recent_fingerprint,
+        "old_prefix_evicted": old_l2.get("terminal_readable") is False,
+        "recent_prefix_present": recent_l2.get("terminal_readable") is True,
+        "recent_prefix_last_access_after_old": (
+            _integer((recent_before.get("l2") or {}).get(
+                "terminal_last_accessed_ns"
+            ))
+            > _integer(old_before_l2.get("terminal_last_accessed_ns"))
+        ),
+        "old_before": old_before,
+        "recent_before": recent_before,
+        "recent_pre_refault": recent_pre_refault,
+        "recent_post_refault": recent_post_refault,
+        "evicting_filler_fence": evicting_filler_fence,
+        "old_after_durable_filler": old_after_durable_filler,
+        "recent_after_durable_filler": recent_after_durable_filler,
+        "old_final": old_final,
+        "recent_final": recent_final,
+        "recent_refault_execution": _path_free_execution(refault_row),
+        "write_fences": durability_rows,
+    }
+    failures.extend(
+        validate_l2_size_eviction_observation(
+            observation,
+            expected_source_head=str(observed_source.get("head") or ""),
+            expected_source_tree=str(observed_source.get("tree") or ""),
+            health_attestation=health_attestation,
+            max_filler_requests=max_filler_requests,
+        )
+    )
+    return observation, rows, failures, health_after
+
+
+def _run_restart_restore_scenario(
+    *,
+    base_url: str,
+    model: str,
+    nonce: str,
+    records: int,
+    artifact_dir: Path,
+    timeout: int,
+    durability_timeout: float,
+    durability_poll_interval: float,
+    health_attestation: dict[str, Any],
+    observed_source: dict[str, Any],
+    store_observation: Any,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], dict[str, Any]]:
+    failures: list[str] = []
+    prompts_all = _l2_identity_prompts(nonce, records)
+    prompts = {
+        "recent_store": prompts_all["recent_store"],
+        "recent_restart": prompts_all["recent_restart"],
+    }
+    pairs: dict[str, tuple[str, str]] = {
+        "recent": ("recent_store", "recent_restart")
+    }
+    pre_contract, pre_failures = _fetch_prefix_attestation(
+        base_url=base_url,
+        model=model,
+        prompts=prompts,
+        pairs=pairs,
+        timeout=timeout,
+        health_attestation=health_attestation,
+    )
+    failures.extend(pre_failures)
+    _write_path_free_attestation(
+        artifact_dir,
+        "l2_restart_pre",
+        pre_contract,
+    )
+    restart_pre = _prefix_binding(pre_contract, "recent")
+    row, health_after = _run_response_observation(
+        base_url=base_url,
+        model=model,
+        tag="l2_restart_recent",
+        prompt=prompts["recent_restart"],
+        expected_marker=f"CACHE-HIERARCHY-{nonce}-L2-RECENT-RESTART",
+        artifact_dir=artifact_dir,
+        timeout=timeout,
+    )
+    post_contract, touch_failures = _wait_for_prefix_access_touch(
+        base_url=base_url,
+        model=model,
+        prompts=prompts,
+        pairs=pairs,
+        pair_name="recent",
+        previous_binding=restart_pre,
+        timeout=timeout,
+        health_attestation=health_attestation,
+        timeout_s=durability_timeout,
+        poll_interval_s=durability_poll_interval,
+    )
+    failures.extend(touch_failures)
+    _write_path_free_attestation(
+        artifact_dir,
+        "l2_restart_post",
+        post_contract,
+    )
+    restart_post = _prefix_binding(post_contract, "recent")
+    execution = _path_free_execution(row)
+    last = execution.get("last_cache_execution")
+    if not isinstance(last, dict):
+        last = {}
+    observation = {
+        "schema": L2_RESTART_RESTORE_SCHEMA,
+        "scenario": "restart-restore",
+        "source_head": observed_source.get("head"),
+        "source_tree": observed_source.get("tree"),
+        "model_bundle_fingerprint_sha256": (
+            (health_attestation.get("model_bundle_provenance") or {}).get(
+                "fingerprint_sha256"
+            )
+        ),
+        "cache_topology_fingerprint_sha256": (
+            (health_attestation.get("cache_topology_provenance") or {}).get(
+                "fingerprint_sha256"
+            )
+        ),
+        "restart_probe_prefix_fingerprint_sha256": restart_pre.get(
+            "block_chain_fingerprint_sha256"
+        ),
+        "restart_restored_tokens": _integer(last.get("cached_tokens")),
+        "restart_disk_blocks": _integer(last.get("disk_blocks")),
+        "restart_uncached_tokens": _integer(
+            last.get("uncached_prompt_tokens")
+        ),
+        "restart_restore_source": "block-disk",
+        "restart_pre": restart_pre,
+        "restart_post": restart_post,
+        "restart_execution": execution,
+    }
+    failures.extend(
+        validate_l2_restart_restore_observation(
+            observation,
+            store_observation=store_observation,
+            expected_source_head=str(observed_source.get("head") or ""),
+            expected_source_tree=str(observed_source.get("tree") or ""),
+            health_attestation=health_attestation,
+        )
+    )
+    return observation, [row], failures, health_after
 
 
 def main() -> int:
@@ -1739,6 +3753,21 @@ def main() -> int:
     )
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--phase", choices=("store", "probe"), required=True)
+    parser.add_argument(
+        "--cache-scenario",
+        choices=CACHE_SCENARIOS,
+        default="standard",
+        help=(
+            "Run the standard store/probe contract plus an explicit L2 "
+            "eviction or restart-identity scenario."
+        ),
+    )
+    parser.add_argument(
+        "--max-filler-requests",
+        type=int,
+        default=64,
+        help="Hard bound for store-evict-refault filler generations (max 256).",
+    )
     parser.add_argument("--records", type=int, default=320)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--durability-timeout", type=float, default=30.0)
@@ -1754,6 +3783,17 @@ def main() -> int:
         parser.error("--durability-timeout must be non-negative")
     if args.durability_poll_interval <= 0:
         parser.error("--durability-poll-interval must be positive")
+    if not 1 <= args.max_filler_requests <= 256:
+        parser.error("--max-filler-requests must be between 1 and 256")
+    expected_phase = {
+        "store-evict-refault": "store",
+        "restart-restore": "probe",
+    }.get(args.cache_scenario)
+    if expected_phase is not None and args.phase != expected_phase:
+        parser.error(
+            f"--cache-scenario {args.cache_scenario} requires "
+            f"--phase {expected_phase}"
+        )
 
     try:
         args.artifact_dir = _external_artifact_dir(args.artifact_dir)
@@ -1874,7 +3914,11 @@ def main() -> int:
             health_attestation=health_attestation_before,
         )
     metadata = {
+        "schema": ARTIFACT_SCHEMA,
+        "created_at": datetime.now(UTC).isoformat(),
+        "run_id": args.nonce,
         "phase": args.phase,
+        "cache_scenario": args.cache_scenario,
         "nonce": args.nonce,
         "base_url": args.base_url,
         "model": args.model,
@@ -1894,8 +3938,12 @@ def main() -> int:
             "probe_linkage_failures": [],
             "cache_contract_ok": False,
             "cache_contract_failures": prerequisite_failures,
+            "scenario_contract_ok": args.cache_scenario == "standard",
+            "scenario_contract_failures": prerequisite_failures,
             "gate_ok": False,
+            "verdict": "PARTIAL",
             "requests": [],
+            "scenario_requests": [],
         }
         (args.artifact_dir / "summary.json").write_text(
             json.dumps(result, indent=2, sort_keys=True) + "\n"
@@ -1929,8 +3977,12 @@ def main() -> int:
                 "probe_linkage_failures": linkage_failures,
                 "cache_contract_ok": False,
                 "cache_contract_failures": linkage_failures,
+                "scenario_contract_ok": False,
+                "scenario_contract_failures": linkage_failures,
                 "gate_ok": False,
+                "verdict": "PARTIAL",
                 "requests": [],
+                "scenario_requests": [],
             }
             (args.artifact_dir / "summary.json").write_text(
                 json.dumps(result, indent=2, sort_keys=True) + "\n"
@@ -2048,6 +4100,82 @@ def main() -> int:
                     "request or cache contract failed before durability barrier"
                 ),
             }
+    scenario_rows: list[dict[str, Any]] = []
+    scenario_failures: list[str] = []
+    l2_size_eviction_observation: dict[str, Any] | None = None
+    l2_restart_restore_observation: dict[str, Any] | None = None
+    scenario_prerequisites_ok = request_contract_ok and not validation_failures
+    if args.cache_scenario != "standard" and not scenario_prerequisites_ok:
+        scenario_failures.append(
+            f"{args.cache_scenario}: skipped because the standard cache "
+            "contract did not pass"
+        )
+    elif args.cache_scenario == "store-evict-refault":
+        (
+            l2_size_eviction_observation,
+            scenario_rows,
+            scenario_failures,
+            scenario_health_after,
+        ) = _run_store_evict_refault_scenario(
+            base_url=args.base_url,
+            model=args.model,
+            nonce=args.nonce,
+            records=args.records,
+            artifact_dir=args.artifact_dir,
+            timeout=args.timeout,
+            durability_timeout=args.durability_timeout,
+            durability_poll_interval=args.durability_poll_interval,
+            max_filler_requests=args.max_filler_requests,
+            health_attestation=health_attestation_before,
+            observed_source=observed_source,
+        )
+        if scenario_health_after:
+            health_after = scenario_health_after
+    elif args.cache_scenario == "restart-restore":
+        store_observation = (
+            store_summary.get("l2_size_eviction_observation")
+            if isinstance(store_summary, dict)
+            else None
+        )
+        if not isinstance(store_observation, dict):
+            scenario_failures.append(
+                "restart-restore: store summary lacks the exact L2 eviction "
+                "observation"
+            )
+        (
+            l2_restart_restore_observation,
+            scenario_rows,
+            restart_failures,
+            scenario_health_after,
+        ) = _run_restart_restore_scenario(
+            base_url=args.base_url,
+            model=args.model,
+            nonce=args.nonce,
+            records=args.records,
+            artifact_dir=args.artifact_dir,
+            timeout=args.timeout,
+            durability_timeout=args.durability_timeout,
+            durability_poll_interval=args.durability_poll_interval,
+            health_attestation=health_attestation_before,
+            observed_source=observed_source,
+            store_observation=store_observation,
+        )
+        scenario_failures.extend(restart_failures)
+        if scenario_health_after:
+            health_after = scenario_health_after
+    scenario_request_contract_ok = all(
+        row.get("status_code") == 200
+        and row.get("marker_ok") is True
+        and row.get("terminal_ok") is True
+        for row in scenario_rows
+    )
+    if args.cache_scenario != "standard" and not scenario_rows:
+        scenario_request_contract_ok = False
+        no_rows_failure = (
+            f"{args.cache_scenario}: scenario emitted no real Responses rows"
+        )
+        scenario_failures.append(no_rows_failure)
+    validation_failures.extend(scenario_failures)
     observed_engine_after: dict[str, Any] = {}
     observed_source_after: dict[str, Any] = {}
     health_final: dict[str, Any] = {}
@@ -2117,6 +4245,7 @@ def main() -> int:
             json.dumps(health_final, indent=2, sort_keys=True) + "\n"
         )
     validation_failures.extend(provenance_failures)
+    request_contract_ok = request_contract_ok and scenario_request_contract_ok
     gate_ok = request_contract_ok and not validation_failures
     result = {
         **metadata,
@@ -2140,8 +4269,15 @@ def main() -> int:
         "cache_contract_ok": not validation_failures,
         "cache_contract_failures": validation_failures,
         "request_contract_ok": request_contract_ok,
+        "scenario_contract_ok": not scenario_failures
+        and scenario_request_contract_ok,
+        "scenario_contract_failures": scenario_failures,
+        "l2_size_eviction_observation": l2_size_eviction_observation,
+        "l2_restart_restore_observation": l2_restart_restore_observation,
         "gate_ok": gate_ok,
+        "verdict": "PASS" if gate_ok else "PARTIAL",
         "requests": rows,
+        "scenario_requests": scenario_rows,
     }
     (args.artifact_dir / "summary.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n"

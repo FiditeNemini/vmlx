@@ -11,7 +11,7 @@ import {
   realpath,
 } from "fs/promises";
 import { existsSync, readFileSync } from "fs";
-import { join, basename } from "path";
+import { join, basename, isAbsolute, relative, resolve, sep } from "path";
 import { homedir } from "os";
 import { spawn, ChildProcess } from "child_process";
 import { db } from "../database";
@@ -215,6 +215,29 @@ async function readOptionalText(path: string): Promise<string> {
   }
 }
 
+function isPathInsideDirectory(directory: string, candidate: string): boolean {
+  const candidateRelative = relative(directory, candidate);
+  return Boolean(
+    candidateRelative &&
+      !isAbsolute(candidateRelative) &&
+      candidateRelative !== ".." &&
+      !candidateRelative.startsWith(`..${sep}`),
+  );
+}
+
+async function readBundleLocalText(
+  modelPath: string,
+  relativePath: string,
+): Promise<string> {
+  const modelRoot = resolve(modelPath);
+  const candidate = resolve(modelRoot, relativePath);
+  if (!isPathInsideDirectory(modelRoot, candidate)) return "";
+  // Hugging Face snapshots intentionally symlink files into the repository's
+  // blob store. Preserve those logical bundle files while rejecting include
+  // paths whose own lexical path escapes the selected bundle.
+  return readOptionalText(candidate);
+}
+
 function templateThinkingBudgetSupport(templateText: string): boolean | undefined {
   if (THINKING_BUDGET_MARKERS.some((marker) => templateText.includes(marker)))
     return true;
@@ -366,7 +389,7 @@ async function chatTemplateValueHasContent(
       return true;
     }
     for (const match of includes) {
-      if ((await readOptionalText(join(modelPath, match[1]))).trim()) return true;
+      if ((await readBundleLocalText(modelPath, match[1])).trim()) return true;
     }
     return false;
   }
@@ -385,18 +408,18 @@ async function chatTemplateValueHasContent(
 }
 
 /**
- * The March 2026 JANG notice is about bundles that genuinely lack a template.
+ * The renderer warning targets bundles that genuinely lack a usable template.
  * Quantization alone cannot identify those bundles: current JANG/JANGTQ models
- * already ship either a standalone template or tokenizer_config chat_template.
+ * can ship either a standalone template or tokenizer_config chat_template.
  */
 export async function hasUsableChatTemplate(modelPath: string): Promise<boolean> {
   for (const name of ["chat_template.jinja", "chat_template.txt"]) {
-    if ((await readOptionalText(join(modelPath, name))).trim()) return true;
+    if ((await readBundleLocalText(modelPath, name)).trim()) return true;
   }
 
   try {
     const tokenizer = JSON.parse(
-      await readFile(join(modelPath, "tokenizer_config.json"), "utf-8"),
+      await readBundleLocalText(modelPath, "tokenizer_config.json"),
     );
     return chatTemplateValueHasContent(tokenizer?.chat_template, modelPath);
   } catch {

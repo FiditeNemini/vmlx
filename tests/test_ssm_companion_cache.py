@@ -749,6 +749,7 @@ def test_disk_store_round_trips_across_cache_instances(tmp_path):
     source = _FakeSSMLayer(7.0, n_arrays=2)
     source.left_padding = mx.array([3], dtype=mx.int32)
     cache1.store(tokens, 4, [source], is_complete=True)
+    assert disk1.wait_for_pending()
 
     disk2 = SSMCompanionDiskStore(directory=tmp_path, budget_bytes=32 * 1024 * 1024)
     cache2 = SSMCompanionCache(
@@ -773,6 +774,9 @@ def test_disk_store_round_trips_across_cache_instances(tmp_path):
         disk_store=disk3,
     )
     assert cache3.fetch(tokens, 4) is None
+    assert disk1.shutdown()
+    assert disk2.shutdown()
+    assert disk3.shutdown()
 
 
 def test_disk_store_restores_selected_boundary_without_l1_length_index(tmp_path):
@@ -796,6 +800,7 @@ def test_disk_store_restores_selected_boundary_without_l1_length_index(tmp_path)
         disk_store=disk1,
     )
     cache1.store(prefix, 4, [_FakeSSMLayer(11.0, n_arrays=2)], is_complete=True)
+    assert disk1.wait_for_pending()
 
     disk2 = SSMCompanionDiskStore(
         directory=tmp_path, budget_bytes=32 * 1024 * 1024
@@ -823,6 +828,8 @@ def test_disk_store_restores_selected_boundary_without_l1_length_index(tmp_path)
         "source": "exact_boundary_l1_or_l2",
     }
     assert disk2.stats()["hits"] == 1
+    assert disk1.shutdown()
+    assert disk2.shutdown()
 
 
 def test_disk_store_discovers_shorter_partial_boundary_after_restart(tmp_path):
@@ -846,6 +853,7 @@ def test_disk_store_discovers_shorter_partial_boundary_after_restart(tmp_path):
         disk_store=disk1,
     )
     cache1.store(tokens, 3, [_FakeSSMLayer(12.0, n_arrays=2)], is_complete=True)
+    assert disk1.wait_for_pending()
 
     disk2 = SSMCompanionDiskStore(
         directory=tmp_path, budget_bytes=32 * 1024 * 1024
@@ -888,6 +896,9 @@ def test_disk_store_discovers_shorter_partial_boundary_after_restart(tmp_path):
         disk_store=disk3,
     )
     assert cache3.fetch_longest_prefix(tokens, max_len=4) is None
+    assert disk1.shutdown()
+    assert disk2.shutdown()
+    assert disk3.shutdown()
 
 
 def test_disk_store_stats_include_tokens_and_io_counters(tmp_path):
@@ -915,6 +926,7 @@ def test_disk_store_stats_include_tokens_and_io_counters(tmp_path):
     assert stats["stores"] == 1
     assert stats["hits"] == 1
     assert stats["misses"] == 1
+    assert disk.shutdown()
 
 
 def test_disk_store_restore_quarantine_preserves_writes(monkeypatch, tmp_path):
@@ -932,6 +944,7 @@ def test_disk_store_restore_quarantine_preserves_writes(monkeypatch, tmp_path):
     tokens = [1, 2, 3, 4]
     cache.store(tokens, 4, [_FakeSSMLayer(2.0, n_arrays=2)], is_complete=True)
     key = cache._key(tokens, 4)
+    assert disk.wait_for_pending()
 
     monkeypatch.setenv("VMLX_DISABLE_SSM_DISK_RESTORE", "1")
     assert disk.fetch(key) is None
@@ -939,3 +952,4 @@ def test_disk_store_restore_quarantine_preserves_writes(monkeypatch, tmp_path):
     assert stats["entries"] == 1
     assert stats["restore_enabled"] is False
     assert stats["restore_suppressed"] == 1
+    assert disk.shutdown()

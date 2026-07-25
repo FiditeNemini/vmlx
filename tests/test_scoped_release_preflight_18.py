@@ -1,0 +1,4630 @@
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from copy import deepcopy
+from pathlib import Path
+
+if not any(
+    value in {"--v5-fixture-producer", "--v5-fixture-command"}
+    for value in sys.argv
+):
+    import pytest
+else:
+    class _FixtureMark:
+        @staticmethod
+        def parametrize(*_args, **_kwargs):
+            return lambda function: function
+
+    class _FixturePytest:
+        mark = _FixtureMark()
+
+    pytest = _FixturePytest()
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "panel/scripts/scoped-release-preflight-18.py"
+STAMP = "2026-07-25T00:00:00Z"
+
+
+def _fixture_b64(value: bytes) -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+def _fixture_json_b64(value) -> str:
+    return _fixture_b64(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    )
+
+
+def _fixture_jsonl_b64(rows: list[dict]) -> str:
+    return _fixture_b64(
+        b"".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":")).encode()
+            + b"\n"
+            for row in rows
+        )
+    )
+
+
+def _fixture_sse(event: str, value: dict) -> str:
+    return (
+        (f"event: {event}\n" if event else "")
+        + "data: "
+        + json.dumps(value, separators=(",", ":"))
+        + "\n\n"
+    )
+
+
+def _fixture_protocol_response(protocol: str, turn: int) -> bytes:
+    reasoning = f"reason-{turn}"
+    if turn == 1:
+        tool = ("c1", "file_info", {"path": "panel/package.json"})
+        finish = "tool_calls"
+    elif turn == 2:
+        tool = ("c2", "run_command", {"command": "pwd"})
+        finish = "tool_calls"
+    else:
+        tool = None
+        finish = "stop"
+    if protocol == "chat":
+        chunks = [
+            {
+                "choices": [
+                    {
+                        "delta": {"reasoning_content": reasoning},
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        ]
+        if tool:
+            chunks.append(
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": tool[0],
+                                        "function": {
+                                            "name": tool[1],
+                                            "arguments": json.dumps(
+                                                tool[2], separators=(",", ":")
+                                            ),
+                                        },
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ]
+                }
+            )
+        else:
+            chunks.extend(
+                [
+                    {
+                        "choices": [
+                            {
+                                "delta": {"content": "R18-"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "delta": {"content": "V5-DONE"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    },
+                ]
+            )
+        chunks.append(
+            {"choices": [{"delta": {}, "finish_reason": finish}]}
+        )
+        return (
+            "".join(_fixture_sse("", chunk) for chunk in chunks)
+            + "data: [DONE]\n\n"
+        ).encode()
+    if protocol == "responses":
+        events = [
+            (
+                "response.reasoning_text.delta",
+                {
+                    "type": "response.reasoning_text.delta",
+                    "delta": reasoning,
+                },
+            )
+        ]
+        if tool:
+            events.append(
+                (
+                    "response.output_item.done",
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": {
+                            "type": "function_call",
+                            "call_id": tool[0],
+                            "name": tool[1],
+                            "arguments": json.dumps(
+                                tool[2], separators=(",", ":")
+                            ),
+                        },
+                    },
+                )
+            )
+        else:
+            events.extend(
+                [
+                    (
+                        "response.output_text.delta",
+                        {
+                            "type": "response.output_text.delta",
+                            "delta": "R18-",
+                        },
+                    ),
+                    (
+                        "response.output_text.delta",
+                        {
+                            "type": "response.output_text.delta",
+                            "delta": "V5-DONE",
+                        },
+                    ),
+                ]
+            )
+        events.append(
+            (
+                "response.completed",
+                {
+                    "type": "response.completed",
+                    "response": {"status": "completed"},
+                },
+            )
+        )
+        return "".join(_fixture_sse(name, value) for name, value in events).encode()
+    if protocol == "anthropic":
+        events = [
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "thinking_delta",
+                        "thinking": reasoning,
+                    },
+                },
+            )
+        ]
+        if tool:
+            events.extend(
+                [
+                    (
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": 1,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": tool[0],
+                                "name": tool[1],
+                            },
+                        },
+                    ),
+                    (
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": 1,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": json.dumps(
+                                    tool[2], separators=(",", ":")
+                                ),
+                            },
+                        },
+                    ),
+                ]
+            )
+            stop_reason = "tool_use"
+        else:
+            events.extend(
+                [
+                    (
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": 1,
+                            "delta": {"type": "text_delta", "text": "R18-"},
+                        },
+                    ),
+                    (
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": 1,
+                            "delta": {
+                                "type": "text_delta",
+                                "text": "V5-DONE",
+                            },
+                        },
+                    ),
+                ]
+            )
+            stop_reason = "end_turn"
+        events.extend(
+            [
+                (
+                    "message_delta",
+                    {
+                        "type": "message_delta",
+                        "delta": {"stop_reason": stop_reason},
+                    },
+                ),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        )
+        return "".join(_fixture_sse(name, value) for name, value in events).encode()
+    rows = [{"message": {"thinking": reasoning}, "done": False}]
+    if tool:
+        rows.append(
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "id": tool[0],
+                            "function": {
+                                "name": tool[1],
+                                "arguments": tool[2],
+                            },
+                        }
+                    ]
+                },
+                "done": False,
+            }
+        )
+    else:
+        rows.extend(
+            [
+                {"message": {"content": "R18-"}, "done": False},
+                {"message": {"content": "V5-DONE"}, "done": False},
+            ]
+        )
+    rows.append({"message": {}, "done": True, "done_reason": finish})
+    return b"".join(
+        json.dumps(row, separators=(",", ":")).encode() + b"\n" for row in rows
+    )
+
+
+def _fixture_protocol_nonstream_response(protocol: str, turn: int) -> bytes:
+    if protocol == "chat":
+        value = {
+            "choices": [
+                {
+                    "message": {"content": f"answer-{turn}"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"completion_tokens": 10},
+        }
+    elif protocol == "responses":
+        value = {
+            "status": "completed",
+            "output": [{"type": "message"}],
+            "usage": {"output_tokens": 10},
+        }
+    elif protocol == "anthropic":
+        value = {
+            "content": [{"type": "text", "text": f"answer-{turn}"}],
+            "stop_reason": "end_turn",
+            "usage": {"output_tokens": 10},
+        }
+    else:
+        value = {
+            "message": {"content": f"answer-{turn}"},
+            "done": True,
+            "done_reason": "stop",
+            "eval_count": 10,
+        }
+    return json.dumps(value, separators=(",", ":")).encode()
+
+
+def _fixture_api_capture(
+    module,
+    run_id: str,
+    nonce: str,
+    *,
+    phase_index: int = 0,
+    session_id: str = "fixture-held-session",
+) -> dict:
+    phase = module.V5_CACHE_PHASES[phase_index]
+    flows = []
+    endpoints = {
+        "chat": "/v1/chat/completions",
+        "responses": "/v1/responses",
+        "anthropic": "/v1/messages",
+        "ollama": "/api/chat",
+    }
+    requests = [
+        {
+            "stream": True,
+            "max_output_tokens": 64,
+            "messages": [{"role": "user", "content": "Use file_info."}],
+        },
+        {
+            "stream": True,
+            "enable_thinking": True,
+            "max_output_tokens": 64,
+            "messages": [
+                {"role": "tool", "tool_call_id": "c1", "content": "5.2 KB"},
+                {"role": "user", "content": "Now use run_command."},
+            ],
+        },
+        {
+            "stream": True,
+            "enable_thinking": False,
+            "max_output_tokens": 64,
+            "messages": [
+                {"role": "tool", "tool_call_id": "c1", "content": "5.2 KB"},
+                {"role": "tool", "tool_call_id": "c2", "content": str(ROOT)},
+                {"role": "user", "content": "Reply exactly R18-V5-DONE"},
+            ],
+        },
+    ]
+    timing = {
+        "started_ns": 1_000_000_000,
+        "first_byte_ns": 1_100_000_000,
+        "ended_ns": 1_300_000_000,
+        "output_tokens": 10,
+        "displayed_ttft_ms": 100.0,
+        "displayed_tps": 50.0,
+    }
+    full_agentic = phase_index in {0, 5}
+    selected_protocols = endpoints if full_agentic else {"chat": endpoints["chat"]}
+    modes = ("stream", "nonstream") if full_agentic else ("stream",)
+    for protocol, endpoint in selected_protocols.items():
+        for route in ("direct", "gateway"):
+            for mode in modes:
+                for turn, request in enumerate(requests, start=1):
+                    request_body = deepcopy(request)
+                    request_body["stream"] = mode == "stream"
+                    if protocol == "ollama" and "enable_thinking" in request_body:
+                        request_body["think"] = request_body.pop(
+                            "enable_thinking"
+                        )
+                    response = (
+                        _fixture_protocol_response(protocol, turn)
+                        if mode == "stream"
+                        else _fixture_protocol_nonstream_response(
+                            protocol,
+                            turn,
+                        )
+                    )
+                    flows.append(
+                        {
+                            "protocol": protocol,
+                            "route": route,
+                            "endpoint": endpoint,
+                            "mode": mode,
+                            "reasoning_mode": (
+                                "auto",
+                                "on",
+                                "off",
+                            )[turn - 1],
+                            "request_b64": _fixture_json_b64(request_body),
+                            "response_b64": _fixture_b64(response),
+                            "timing_b64": _fixture_json_b64(timing),
+                        }
+                    )
+    return {
+        "schema": module.V5_API_SCHEMA,
+        "run_id": run_id,
+        "nonce": nonce,
+        "phase_index": phase["index"],
+        "phase_name": phase["name"],
+        "representative_id": phase["representative_id"],
+        "api_action_profile": phase["api_action_profile"],
+        "session_id": session_id,
+        "session_binding_sha256": str(phase_index) * 64,
+        "flows": flows,
+        "sampling_b64": _fixture_json_b64(
+            {
+                "default_resolved": {"temperature": 0.6, "top_p": 0.95},
+                "override_request": {"temperature": 0.2},
+                "override_resolved": {"temperature": 0.2, "top_p": 0.95},
+                "after_override_resolved": {
+                    "temperature": 0.6,
+                    "top_p": 0.95,
+                },
+            }
+        ),
+    }
+
+
+def _fixture_ui_capture(
+    module,
+    run_id: str,
+    nonce: str,
+    *,
+    session_id: str = "fixture-session",
+    phase_index: int = 5,
+    evidence_root: Path | None = None,
+) -> tuple[dict, dict]:
+    phase = module.V5_CACHE_PHASES[phase_index]
+    turn_count = phase["ui_turn_count"]
+    if evidence_root is None:
+        evidence_root = Path(
+            tempfile.mkdtemp(prefix="vmlx-r18-ui-health-fixture-")
+        )
+    else:
+        evidence_root.mkdir(parents=True, exist_ok=True)
+    turns = []
+    dom_messages = []
+    source_records = []
+    source_reasoning = []
+    source_ui_turns = []
+    cache_rows = []
+    for turn in range(1, turn_count + 1):
+        response_id = f"resp-ui-{phase_index}-{turn}"
+        reasoning = f"ui-reason-{turn}"
+        content = (
+            f"UI-V5-{turn}"
+            if turn < 3
+            else r"UI-V5-3 $43 \(47 \times 19\)"
+        )
+        events = [
+            {"seq": 0, "type": "reasoning_delta", "text": reasoning},
+        ]
+        if turn < 3:
+            events.extend(
+                [
+                    {
+                        "seq": 1,
+                        "type": "tool_call",
+                        "call_id": f"ui-c{turn}",
+                        "name": "file_info" if turn == 1 else "run_command",
+                        "arguments": (
+                            {"path": "panel/package.json"}
+                            if turn == 1
+                            else {"command": "pwd"}
+                        ),
+                    },
+                    {
+                        "seq": 2,
+                        "type": "tool_result",
+                        "call_id": f"ui-c{turn}",
+                        "content": "ok",
+                    },
+                    {"seq": 3, "type": "content_delta", "text": content},
+                    {
+                        "seq": 4,
+                        "type": "terminal",
+                        "status": "completed",
+                        "response_id": response_id,
+                        "ttft_ms": 100.0,
+                        "decode_tps": 50.0,
+                    },
+                ]
+            )
+        else:
+            events.extend(
+                [
+                    {"seq": 1, "type": "content_delta", "text": content},
+                    {
+                        "seq": 2,
+                        "type": "terminal",
+                        "status": "completed",
+                        "response_id": response_id,
+                        "ttft_ms": 100.0,
+                        "decode_tps": 50.0,
+                    },
+                ]
+            )
+        turns.append(
+            {
+                "request_b64": _fixture_json_b64(
+                    {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Reply exactly {content}"
+                                    if turn < 3
+                                    else (
+                                        "Include UI-V5-3, literal $43, and "
+                                        r"inline \(47 \times 19\)."
+                                    )
+                                ),
+                            }
+                        ],
+                        "message_id": f"m{turn}",
+                    }
+                ),
+                "events_b64": _fixture_jsonl_b64(events),
+            }
+        )
+        dom_messages.append(
+            {
+                "reasoning_text": reasoning,
+                "content_text": (
+                    content
+                    if turn < 3
+                    else "UI-V5-3 $43 47 × 19"
+                ),
+                "terminal_text": "Completed",
+                "ttft_ms": 100.0,
+                "decode_tps": 50.0,
+                "html": (
+                    f"<strong>UI-V5-{turn}</strong>"
+                    + (
+                        ""
+                        if turn < 3
+                        else ' $43 <span class="katex">47 × 19</span>'
+                    )
+                ),
+            }
+        )
+        source_records.append({"id": f"m{turn}", "content": content})
+        source_reasoning.append([{"text": reasoning}])
+        source_ui_turns.append(
+            {
+                "turn": turn,
+                "proofRequestId": f"{run_id}:ui:{turn}",
+                "userMessageId": f"u{turn}",
+                "assistantMessageId": f"m{turn}",
+                "terminalMessageId": f"m{turn}",
+                "terminalResponseId": response_id,
+            }
+        )
+        health = {
+            "scheduler": {
+                "last_cache_execution": {
+                    "request_id": response_id,
+                    "cache_reuse_applied": turn > 1 or turn_count == 1,
+                    "cache_outcome": (
+                        "hit" if turn > 1 or turn_count == 1 else "miss"
+                    ),
+                    "prompt_tokens": 128,
+                    "cached_tokens": 64 if turn > 1 or turn_count == 1 else 0,
+                    "uncached_prompt_tokens": (
+                        64 if turn > 1 or turn_count == 1 else 128
+                    ),
+                    "prefill_tokens": (
+                        64 if turn > 1 or turn_count == 1 else 128
+                    ),
+                }
+            }
+        }
+        artifact_value = {
+            "schema": "vmlx-ui-turn-health-cache-execution-v1",
+            "run_id": run_id,
+            "turn": turn,
+            "proof_request_id": f"{run_id}:ui:{turn}",
+            "user_message_id": f"u{turn}",
+            "assistant_message_id": f"m{turn}",
+            "terminal_response_id": response_id,
+            "correlation_status": "verified",
+            "health": health,
+        }
+        artifact_bytes = json.dumps(
+            artifact_value,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        artifact_path = evidence_root / (
+            f"ui-phase-{phase_index:02d}-turn-{turn}-health.json"
+        )
+        artifact_path.write_bytes(artifact_bytes)
+        artifact_path.chmod(0o600)
+        observation = {
+            **health["scheduler"]["last_cache_execution"],
+            "proof_request_id": f"{run_id}:ui:{turn}",
+            "terminal_response_id": response_id,
+            "message_id": f"m{turn}",
+            "correlation_source": (
+                "chat_complete_response_id_to_scheduler_"
+                "last_cache_execution"
+            ),
+        }
+        cache_rows.append(
+            {
+                "turn": turn,
+                "proofRequestId": f"{run_id}:ui:{turn}",
+                "userMessageId": f"u{turn}",
+                "assistantMessageId": f"m{turn}",
+                "terminalResponseId": response_id,
+                "serverRequestId": response_id,
+                "executionRequestId": response_id,
+                "correlationStatus": "verified",
+                "serverObservation": observation,
+                "healthAfter": health,
+                "healthArtifact": {
+                    "path": str(artifact_path.resolve()),
+                    "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+                    "size_bytes": len(artifact_bytes),
+                },
+            }
+        )
+    capture = {
+        "schema": module.V5_UI_SCHEMA,
+        "run_id": run_id,
+        "nonce": nonce,
+        "phase_index": phase["index"],
+        "phase_name": phase["name"],
+        "representative_id": phase["representative_id"],
+        "ui_action_profile": phase["ui_action_profile"],
+        "ui_turn_count": turn_count,
+        "session_id": session_id,
+        "source_proof_b64": _fixture_json_b64(
+            {
+                "format": module.ELECTRON_PROOF_SCHEMA,
+                "run_id": run_id,
+                "session": {"id": session_id},
+                "uiStartControl": {"clicked": True},
+                "assistantRecords": source_records,
+                "persistedReasoningByMessage": source_reasoning,
+                "uiTurnEvidence": source_ui_turns,
+                "cacheRequestEvidence": cache_rows,
+                "cacheRequestCorrelation": {
+                    "status": "verified",
+                    "source": (
+                        "chat:complete.responseId == health.scheduler."
+                        "last_cache_execution.request_id"
+                    ),
+                },
+            }
+        ),
+        "interaction_b64": _fixture_json_b64(
+            [
+                {
+                    "method": "Input.dispatchMouseEvent",
+                    "selector": "button[data-action='start-session']",
+                    "session_id": session_id,
+                }
+            ]
+        ),
+        "turns": turns,
+    }
+    dom = {
+        "sourceCommit": "",
+        "messages": dom_messages,
+        "text": "Chats Server Tools Image API Today",
+        "locales": ["en", "es", "fr"],
+        "supported_locales": ["en", "es", "fr"],
+        "viewport": {"width": 640, "scroll_width": 640},
+        "settings": {
+            "new_session": {"temperature": 0.6, "top_p": 0.95},
+            "override": {"temperature": 0.2, "top_p": 0.8},
+            "after_restart": {"temperature": 0.2, "top_p": 0.8},
+            "max_context_tokens": 32768,
+            "max_output_tokens": 2048,
+            "preview": {"temperature": 0.2},
+            "argv": {"temperature": 0.2},
+            "health": {"temperature": 0.2},
+        },
+    }
+    return capture, dom
+
+
+def _fixture_cache_capture(
+    module,
+    run_id: str,
+    nonce: str,
+    *,
+    bundle_fingerprint: str = "f" * 64,
+    native_bundle_fingerprint: str = "e" * 64,
+    model: str = "fixture-model",
+    native_model: str = "fixture-native-model",
+    session_id: str = "fixture-held-session",
+    native_session_id: str = "fixture-native-session",
+) -> dict:
+    phases = []
+    store_hashes: dict[tuple[str, bool, str], str] = {}
+    for phase in module.V5_CACHE_PHASES:
+        paged = phase["paged_ram"]
+        operation = phase["operation"]
+        gate_operation = module._v5_cache_gate_operation(phase)
+        cache_policy = phase["cache_policy"]
+        representative_id = phase["representative_id"]
+        is_native = representative_id == module.V5_NATIVE_REPRESENTATIVE_ID
+        phase_model = native_model if is_native else model
+        phase_bundle_fingerprint = (
+            native_bundle_fingerprint if is_native else bundle_fingerprint
+        )
+        phase_session_id = native_session_id if is_native else session_id
+        backend_pid = 9001 + phase["index"]
+        tq_enabled = cache_policy == "q4"
+        topology = {
+            "schema": "vmlx-cache-topology-v1",
+            "configured": {
+                "use_paged_cache": paged,
+                "kv_cache_quantization": "q4" if tq_enabled else "none",
+                "kv_cache_quantization_explicit": cache_policy == "ssd-only",
+            },
+            "instantiated": {
+                "paged_ram_enabled": paged,
+                "block_disk_l2": True,
+                "block_disk_max_size_bytes": 1024,
+            },
+            "turboquant_kv_cache": {
+                "enabled": tq_enabled,
+                "storage_key_bits": 4 if tq_enabled else 0,
+                "storage_value_bits": 4 if tq_enabled else 0,
+                "storage_encode_telemetry": (
+                    {"blocks": 1} if tq_enabled else {}
+                ),
+            },
+            "kv_cache_quantization": {"enabled": tq_enabled},
+            "native_cache": {
+                "family": "minimax_m3_sparse" if is_native else "standard_kv",
+                "generic_turboquant_kv": {"enabled": tq_enabled},
+            },
+        }
+        topology_attestation = {
+            "schema": "vmlx-cache-topology-attestation-v1",
+            "configuration": topology,
+            "canonical_sha256": hashlib.sha256(
+                json.dumps(
+                    topology,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+        }
+        topology_attestation["fingerprint_sha256"] = topology_attestation[
+            "canonical_sha256"
+        ]
+        partial_tag = (
+            "partial_b" if gate_operation == "store" else "restart_partial_c"
+        )
+        partial_selector = "B" if gate_operation == "store" else "C"
+        disk_refault = gate_operation == "probe" or phase["index"] == 2
+        requests = [
+            {
+                "tag": partial_tag,
+                "cache_contract_ok": True,
+                "cached_tokens": 112,
+                "health_counter_deltas": {
+                    "scheduler_cache.evictions": (
+                        1 if phase["index"] == 2 else 0
+                    ),
+                    "block_disk_cache.disk_evictions": (
+                        1 if phase["index"] == 2 else 0
+                    ),
+                },
+                "last_cache_execution": {
+                    "prompt_tokens": 128,
+                    "cached_tokens": 112,
+                    "uncached_prompt_tokens": 16,
+                    "prefill_tokens": 16,
+                    "disk_blocks": 7 if disk_refault else 0,
+                    "cache_detail": (
+                        "paged+tq+disk" if disk_refault else "paged+tq"
+                    ),
+                },
+            }
+        ]
+        if gate_operation == "store":
+            requests.insert(
+                0,
+                {
+                    "tag": "warm_a",
+                    "cache_contract_ok": True,
+                    "cached_tokens": 127,
+                    "health_counter_deltas": {},
+                },
+            )
+        summary = {
+            "schema": module.CACHE_PROOF_SCHEMA,
+            "phase": gate_operation,
+            "nonce": nonce,
+            "base_url": "http://127.0.0.1:8001",
+            "model": phase_model,
+            "gate_ok": True,
+            "probe_linkage_ok": (
+                True if gate_operation == "probe" else None
+            ),
+            "identity": {
+                "observed_engine": {"pid": backend_pid},
+                "model_bundle_provenance": {
+                    "fingerprint_sha256": phase_bundle_fingerprint
+                },
+                "cache_topology_provenance": topology_attestation,
+            },
+            "tokenizer_lcp_contract": {
+                "longest_common_prefix_tokens": {
+                    "A:A": 128,
+                    f"A:{partial_selector}": 127,
+                }
+            },
+            "requests": requests,
+            "health_final": {
+                "cache": {
+                    "block_disk_cache": {
+                        "disk_size_bytes": 512,
+                    }
+                }
+            },
+        }
+        if phase["index"] == 2:
+            summary["l2_size_eviction_observation"] = {
+                "schema": module.V5_L2_EVICTION_OBSERVATION_SCHEMA,
+                "saved_max_bytes": 1024,
+                "peak_observed_bytes": 1024,
+                "final_observed_bytes": 512,
+                "bounded_filler_request_count": 4,
+                "old_prefix_fingerprint_sha256": "1" * 64,
+                "recent_prefix_fingerprint_sha256": "2" * 64,
+                "old_prefix_evicted": True,
+                "recent_prefix_present": True,
+                "recent_prefix_last_access_after_old": True,
+            }
+        if phase["index"] == 3:
+            summary["l2_restart_restore_observation"] = {
+                "schema": module.V5_L2_RESTART_OBSERVATION_SCHEMA,
+                "restart_probe_prefix_fingerprint_sha256": "2" * 64,
+                "restart_restored_tokens": 112,
+                "restart_disk_blocks": 7,
+                "restart_uncached_tokens": 16,
+                "restart_restore_source": "block-disk",
+            }
+        summary_bytes = json.dumps(
+            summary,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        store_key = (representative_id, paged, cache_policy)
+        if gate_operation == "store":
+            store_hashes[store_key] = hashlib.sha256(summary_bytes).hexdigest()
+        phases.append(
+            {
+                "phase_index": phase["index"],
+                "phase_name": phase["name"],
+                "representative_id": representative_id,
+                "bundle_role": phase["bundle_role"],
+                "cache_policy": cache_policy,
+                "kv_cache_quantization": phase["kv_cache_quantization"],
+                "tq_policy": phase["tq_policy"],
+                "session_policy": phase["session_policy"],
+                "operation": operation,
+                "ui_action_profile": phase["ui_action_profile"],
+                "ui_turn_count": phase["ui_turn_count"],
+                "api_action_profile": phase["api_action_profile"],
+                "paged_ram": paged,
+                "model": phase_model,
+                "bundle_fingerprint_sha256": phase_bundle_fingerprint,
+                "session_id": phase_session_id,
+                "backend_pid": backend_pid,
+                "session_binding_sha256": str(phase["index"]) * 64,
+                "summary_b64": _fixture_b64(summary_bytes),
+                "linked_store_summary_sha256": (
+                    store_hashes[store_key]
+                    if gate_operation == "probe"
+                    else None
+                ),
+                "artifact_manifest_b64": _fixture_json_b64(
+                    [
+                        {
+                            "relative_path": "summary.json",
+                            "sha256": hashlib.sha256(summary_bytes).hexdigest(),
+                            "size": len(summary_bytes),
+                        }
+                    ]
+                ),
+            }
+        )
+    phase2_summary = json.loads(base64.b64decode(phases[2]["summary_b64"]))
+    phase3_summary = json.loads(base64.b64decode(phases[3]["summary_b64"]))
+    capture = {
+        "schema": module.V5_CACHE_SCHEMA,
+        "run_id": run_id,
+        "nonce": nonce,
+        "session_id": native_session_id,
+        "phases": phases,
+    }
+    capture["l2_size_eviction_attestation"] = (
+        module._v5_derive_l2_size_eviction_attestation(
+            run_id=run_id,
+            nonce=nonce,
+            phase2_summary=phase2_summary,
+            phase2_summary_sha256=hashlib.sha256(
+                base64.b64decode(phases[2]["summary_b64"])
+            ).hexdigest(),
+            phase3_summary=phase3_summary,
+            phase3_summary_sha256=hashlib.sha256(
+                base64.b64decode(phases[3]["summary_b64"])
+            ).hexdigest(),
+        )
+    )
+    return capture
+
+
+def load_module():
+    spec = importlib.util.spec_from_file_location("scoped_release_preflight_18", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_v5_jang_import_uses_public_distribution_metadata_name(tmp_path: Path):
+    module = load_module()
+    (tmp_path / "run").mkdir()
+    plans = module._v5_default_owned_check_plans(
+        tmp_path / "run",
+        tmp_path / "jang-source",
+    )
+    command = next(
+        row
+        for row in plans["jang_runtime_provenance"]["commands"]
+        if row["command_id"] == "jang_import"
+    )
+    import_script = command["argv"][-1]
+    assert "metadata.version('jang')" in import_script
+    assert "metadata.version('jang-tools')" not in import_script
+
+
+def source_payload() -> dict[str, str]:
+    return {"source_commit": "b" * 40, "source_tree": "c" * 40}
+
+
+def source_block() -> dict[str, object]:
+    source = source_payload()
+    return {
+        "commit": source["source_commit"],
+        "tree": source["source_tree"],
+        "clean": True,
+    }
+
+
+def bundle_attestation(module, root: Path) -> tuple[dict, dict[str, str]]:
+    root.mkdir(parents=True, exist_ok=True)
+    contents = {
+        "config.json": '{"model_type":"laguna","architectures":["LagunaForCausalLM"]}\n',
+        "generation_config.json": '{"temperature":0.6,"top_p":0.95}\n',
+        "jang_config.json": '{"profile":"JANG_2L","quantization":"affine"}\n',
+        "tokenizer_config.json": '{"chat_template":"{{ messages }}"}\n',
+        "chat_template.jinja": "{{ messages }}\n",
+    }
+    for name, content in contents.items():
+        path = root / name
+        path.write_text(content, encoding="utf-8")
+    snapshot = module._read_bundle_directory_snapshot(root.resolve())
+    assert snapshot is not None
+    observed = {
+        key: snapshot[key]
+        for key in (
+            "schema",
+            "model_bundle_path",
+            "directory_identity",
+            "files",
+            "fingerprint_sha256",
+            "derived",
+        )
+    }
+    hashes = {
+        name: row["sha256"] for name, row in snapshot["files"].items()
+    }
+    return observed, hashes
+
+
+def native_bundle_attestation(module, root: Path) -> tuple[dict, dict[str, str]]:
+    root.mkdir(parents=True, exist_ok=True)
+    contents = {
+        "config.json": (
+            '{"model_type":"minimax_m3",'
+            '"architectures":["MiniMaxM3ForCausalLM"]}\n'
+        ),
+        "generation_config.json": '{"temperature":0.7,"top_p":0.9}\n',
+        "jang_config.json": (
+            '{"profile":"JANG_2L","quantization":"affine",'
+            '"model_family":"minimax_m3"}\n'
+        ),
+        "tokenizer_config.json": '{"chat_template":"{{ messages }}"}\n',
+        "chat_template.jinja": "{{ messages }}\n",
+    }
+    for name, content in contents.items():
+        path = root / name
+        path.write_text(content, encoding="utf-8")
+    snapshot = module._read_bundle_directory_snapshot(root.resolve())
+    assert snapshot is not None
+    assert snapshot["derived"]["native_cache"] == "minimax_m3_sparse"
+    observed = {
+        key: snapshot[key]
+        for key in (
+            "schema",
+            "model_bundle_path",
+            "directory_identity",
+            "files",
+            "fingerprint_sha256",
+            "derived",
+        )
+    }
+    hashes = {
+        name: row["sha256"] for name, row in snapshot["files"].items()
+    }
+    return observed, hashes
+
+
+def runtime_binding(module, bundle_fingerprint: str) -> dict:
+    release = module.release_runtime_source_attestation()
+    return {
+        "backend_pid": 1234,
+        "runtime_source_hashes": {
+            key: release[key]
+            for key in (
+                "server_module_sha256",
+                "package_init_sha256",
+                "python_source_tree_sha256",
+            )
+        },
+        "python_source_file_count": release["python_source_file_count"],
+        "python_source_read_error_count": release[
+            "python_source_read_error_count"
+        ],
+        "model_bundle_fingerprint_sha256": bundle_fingerprint,
+        "cache_topology_fingerprint_sha256": "d" * 64,
+    }
+
+
+def validation_context(module) -> dict:
+    source = source_payload()
+    release = module.release_runtime_source_attestation()
+    return {
+        "run_id": "run-v4",
+        "started_at": "2026-07-25T00:00:00Z",
+        "observed_at": "2026-07-25T00:10:00Z",
+        "source_commit": source["source_commit"],
+        "source_tree": source["source_tree"],
+        "runtime_source_hashes": {
+            key: release[key]
+            for key in (
+                "server_module_sha256",
+                "package_init_sha256",
+                "python_source_tree_sha256",
+            )
+        },
+        "python_source_file_count": release["python_source_file_count"],
+        "python_source_read_error_count": release[
+            "python_source_read_error_count"
+        ],
+    }
+
+
+def process_claim(module, executable: Path, pid: int, role: str) -> dict:
+    executable.write_bytes(f"{role} executable".encode())
+    return {
+        "pid": pid,
+        "start_identity": f"start-{pid}",
+        "argv": [str(executable.resolve()), f"--role={role}"],
+        "executable_path": str(executable.resolve()),
+        "executable_sha256": module.sha256_file(executable),
+    }
+
+
+def v4_common_artifact(module, tmp_path: Path, schema: str) -> tuple[dict, dict]:
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    backend = process_claim(module, tmp_path / "vmlx-engine", 4101, "backend")
+    gateway = process_claim(module, tmp_path / "gateway", 4102, "gateway")
+    electron = process_claim(module, tmp_path / "Electron", 4103, "electron")
+    artifact = {
+        "schema": schema,
+        "run_id": "run-v4",
+        "started_at": "2026-07-25T00:01:00Z",
+        "ended_at": "2026-07-25T00:02:00Z",
+        "recorded_at": "2026-07-25T00:03:00Z",
+        "source": {
+            "commit": source_payload()["source_commit"],
+            "tree": source_payload()["source_tree"],
+        },
+        "model_session_id": "session-v4",
+        "model_id": "laguna-v4",
+        "binding": {
+            "bundle_path": str((tmp_path / "model").resolve()),
+            "bundle_fingerprint_sha256": bundle["fingerprint_sha256"],
+            "backend_process": backend,
+            "gateway_process": gateway,
+            "electron_process": electron,
+            "direct_listener": {
+                "host": "127.0.0.1",
+                "port": 8001,
+                "owner_pid": backend["pid"],
+            },
+            "gateway_listener": {
+                "host": "127.0.0.1",
+                "port": 8080,
+                "owner_pid": gateway["pid"],
+            },
+            "renderer": {
+                "url": "file:///renderer/index.html",
+                "build_manifest_sha256": "a" * 64,
+            },
+            "cache_topology_fingerprint_sha256": "d" * 64,
+        },
+        "health": {
+            "status": "healthy",
+            "model_loaded": True,
+            "model_name": "laguna",
+            "model_type": "laguna",
+            "engine_type": "batched",
+            "model_bundle_path": bundle["model_bundle_path"],
+            "bundle_fingerprint_sha256": bundle["fingerprint_sha256"],
+            "quantization_kind": bundle["derived"]["quantization_kind"],
+            "mtp": bundle["derived"]["mtp"],
+            "moe": bundle["derived"]["moe"],
+            "native_cache": bundle["derived"]["native_cache"],
+        },
+    }
+    observations = {
+        "processes": {
+            backend["pid"]: backend,
+            gateway["pid"]: gateway,
+            electron["pid"]: electron,
+        },
+        "listeners": {
+            ("127.0.0.1", 8001): artifact["binding"]["direct_listener"],
+            ("127.0.0.1", 8080): artifact["binding"]["gateway_listener"],
+        },
+    }
+    return artifact, observations
+
+
+def install_runtime_observation_mocks(module, monkeypatch, observations: dict) -> None:
+    monkeypatch.setattr(
+        module,
+        "_observe_process",
+        lambda pid: deepcopy(observations["processes"].get(pid)),
+    )
+    monkeypatch.setattr(
+        module,
+        "_observe_listener",
+        lambda host, port: deepcopy(observations["listeners"].get((host, port))),
+    )
+
+
+def json_capture(value: dict) -> tuple[str, str]:
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return raw, hashlib.sha256(raw.encode()).hexdigest()
+
+
+def write_author_pass_attestation(module, path: Path) -> None:
+    checks = {
+        name: {
+            "status": "pass",
+            "source_commit": source_payload()["source_commit"],
+            "source_tree": source_payload()["source_tree"],
+            "assertions": {
+                assertion: True
+                for assertion in module.REQUIRED_ASSERTIONS[name]
+            },
+            "evidence": [],
+        }
+        for name in module.REQUIRED_CHECKS
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "schema": module.SCHEMA,
+                "scope": module.SCOPE,
+                "version": module.VERSION,
+                "source_commit": source_payload()["source_commit"],
+                "source_tree": source_payload()["source_tree"],
+                "checks": checks,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_r18_has_no_parallel_measured_or_live_feature_self_certification():
+    module = load_module()
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "measured_observation" not in source
+    assert "live_features" not in source
+    assert "OBSERVATION_CAPTURE_SCHEMA" not in source
+    assert "UI_DOM_CAPTURE_SCHEMA" not in source
+    assert "API_RESPONSE_CAPTURE_SCHEMA" not in source
+    assert "COMMAND_PROCESS_CAPTURE_SCHEMA" not in source
+    assert "process_capture_sha256" not in source
+    assert all(
+        "measured_observation" not in kinds
+        for kinds in module.REQUIRED_RECORD_KINDS.values()
+    )
+
+
+@pytest.mark.parametrize(
+    ("protocol", "raw"),
+    [
+        (
+            "chat",
+            b'data: {"choices":[{"delta":{"reasoning_content":"reason "}}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+            b"data: [DONE]\n\n",
+        ),
+        (
+            "responses",
+            b"event: response.reasoning_summary_text.delta\n"
+            b'data: {"type":"response.reasoning_summary_text.delta","delta":"reason "}\n\n'
+            b"event: response.output_text.delta\n"
+            b'data: {"type":"response.output_text.delta","delta":"answer"}\n\n'
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+        ),
+        (
+            "anthropic",
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reason "}}\n\n'
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}\n\n'
+            b"event: message_stop\n"
+            b'data: {"type":"message_stop"}\n\n',
+        ),
+        (
+            "ollama",
+            b'{"message":{"thinking":"reason "},"done":false}\n'
+            b'{"message":{"content":"answer"},"done":false}\n'
+            b'{"message":{},"done":true,"done_reason":"stop"}\n',
+        ),
+    ],
+)
+def test_r18_parses_retained_raw_protocol_bytes(protocol: str, raw: bytes):
+    module = load_module()
+    parsed = module._parse_raw_protocol_stream(protocol, raw)
+    assert parsed is not None
+    assert parsed["reasoning"] == "reason "
+    assert parsed["content"] == "answer"
+    assert parsed["reasoning_delta_count"] == 1
+    assert parsed["content_delta_count"] == 1
+    assert parsed["terminals"] == 1
+    assert parsed["terminal_last"] is True
+    assert parsed["raw_sha256"] == hashlib.sha256(raw).hexdigest()
+
+
+def test_r18_raw_protocol_parser_rejects_malformed_and_missing_terminal():
+    module = load_module()
+    assert module._parse_raw_protocol_stream("chat", b"data: not-json\n") is None
+    assert (
+        module._parse_raw_protocol_stream(
+            "chat",
+            b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n',
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled", "incomplete", ""])
+def test_r18_responses_completed_event_requires_successful_completed_status(
+    status: str,
+):
+    module = load_module()
+    raw = (
+        b"event: response.output_text.delta\n"
+        b'data: {"type":"response.output_text.delta","delta":"answer"}\n\n'
+        b"event: response.completed\n"
+        + json.dumps(
+            {
+                "type": "response.completed",
+                "response": {"status": status},
+            },
+            separators=(",", ":"),
+        ).encode()
+        + b"\n\n"
+    )
+    assert module._parse_raw_protocol_stream("responses", raw) is None
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["response.failed", "response.cancelled", "response.incomplete", "error"],
+)
+def test_r18_rejects_failure_terminal_event_types(event_type: str):
+    module = load_module()
+    raw = (
+        f"event: {event_type}\n"
+        + "data: "
+        + json.dumps({"type": event_type}, separators=(",", ":"))
+        + "\n\n"
+    ).encode()
+    assert module._parse_raw_protocol_stream("responses", raw) is None
+
+
+def test_r18_rejects_multiple_terminals():
+    module = load_module()
+    raw = (
+        b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+        b"data: [DONE]\n\n"
+        b"data: [DONE]\n\n"
+    )
+    assert module._parse_raw_protocol_stream("chat", raw) is None
+
+
+def test_r18_current_ui_summary_and_echo_fixture_fail_closed():
+    module = load_module()
+    source = source_payload()
+    summary = {
+        "format": module.ELECTRON_PROOF_SCHEMA,
+        "status": "pass",
+        "run_id": "synthetic",
+        "script": "panel/scripts/live-real-ui-model-proof.mjs",
+        "gitProvenance": {
+            "before": {
+                "commit": source["source_commit"],
+                "tree": source["source_tree"],
+                "dirty": False,
+            },
+            "after": {
+                "commit": source["source_commit"],
+                "tree": source["source_tree"],
+                "dirty": False,
+            },
+        },
+        "chat": {"turns": [{"role": "assistant", "content": "trust me"}]},
+        "messageEventTrace": [{"events": [{"event": "terminal"}]}],
+    }
+    assert module._semantic_electron_turn(summary, source, [summary]) is None
+    summary["electron"] = {
+        "executable_path": "/bin/echo",
+        "executable_sha256": module.sha256_file(Path("/bin/echo")),
+    }
+    assert module._semantic_electron_turn(summary, source, [summary]) is None
+
+
+def test_r18_api_matrix_summary_and_predecoded_events_cannot_certify():
+    module = load_module()
+    source = source_payload()
+    artifact = {
+        "schema": module.API_MATRIX_SCHEMA,
+        "schema_version": 2,
+        "pass": True,
+        "source": source_block(),
+        "bases": {
+            "direct": "http://127.0.0.1:8001",
+            "gateway": "http://127.0.0.1:8080",
+        },
+        "protocols": ["chat", "responses", "anthropic", "ollama"],
+        "raw_capture": {
+            "enabled": True,
+            "complete": True,
+            "capture_layer": module.API_CAPTURE_LAYER,
+            "capture_semantics": module.API_CAPTURE_SEMANTICS,
+            "errors": 0,
+            "wire_events": [{"data": "[DONE]"}],
+        },
+    }
+    assert module._semantic_api_stream(artifact, source, [artifact]) is None
+
+
+def test_r18_cache_summary_and_synthetic_token_arrays_cannot_certify():
+    module = load_module()
+    source = source_payload()
+    artifact = {
+        "schema": module.CACHE_PROOF_SCHEMA,
+        "source": source_block(),
+        "gate_ok": True,
+        "cache_contract_ok": True,
+        "requests": [{"cached_tokens": 9999}],
+        "source_tokens": [1, 2, 3],
+        "candidate_tokens": [1, 2, 4],
+    }
+    assert module._semantic_cache_observation(artifact, source, [artifact]) is None
+
+
+def test_r18_architecture_matrix_stays_blocked_without_native_state_captures():
+    module = load_module()
+    required = set(module.REQUIRED_ASSERTIONS["cache_architecture_native_matrix"])
+    records = [
+        {
+            "model_id": f"model-{index}",
+            "binding": {"model_bundle_fingerprint_sha256": f"{index + 1:064x}"},
+            "facts": [fact],
+        }
+        for index, fact in enumerate(sorted(required))
+    ]
+    assert (
+        module._derived_assertions_for_check(
+            "cache_architecture_native_matrix",
+            {"cache_observation": records},
+        )
+        == set()
+    )
+    union = deepcopy(records[0])
+    union["facts"] = sorted(required)
+    assert (
+        module._derived_assertions_for_check(
+            "cache_architecture_native_matrix",
+            {"cache_observation": [union]},
+        )
+        == set()
+    )
+
+
+def test_r18_author_written_command_receipt_with_forged_pid_is_blocked():
+    module = load_module()
+    artifact = {
+        "schema": module.COMMAND_RESULT_SCHEMA,
+        "recorded_at": STAMP,
+        "result_kind": "full_python_suite",
+        "command_argv": [
+            "$ROOT/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-s",
+            "-p",
+            "no:cacheprovider",
+        ],
+        "pid": 12345,
+        "exit_code": 0,
+        "complete": True,
+        "source": source_block(),
+        "stdout": "collected 1200 items\n1200 passed",
+    }
+    assert (
+        module._semantic_command_result(artifact, source_payload(), [artifact])
+        is None
+    )
+
+
+def test_r18_focused_suite_cannot_pass_complete_python_gate():
+    module = load_module()
+    artifact = {
+        "schema": module.COMMAND_RESULT_SCHEMA,
+        "result_kind": "full_python_suite",
+        "pid": 1,
+        "exit_code": 0,
+        "complete": True,
+        "source": source_block(),
+        "stdout": "collected 1 item\n1 passed",
+    }
+    assert module._semantic_command_result(artifact, source_payload(), [artifact]) is None
+
+
+def test_r18_owned_runner_captures_child_and_derives_full_suite(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+
+    class FakePopen:
+        pid = 55123
+        returncode = 0
+
+        def __init__(self, argv, **kwargs):
+            self.argv = argv
+            self.kwargs = kwargs
+
+        def communicate(self):
+            return (
+                b"test session starts\ncollected 1200 items\n"
+                b"================ 1200 passed in 60.00s ================\n",
+                b"",
+            )
+
+    monkeypatch.setattr(module.subprocess, "Popen", FakePopen)
+    context = {
+        "run_id": "owned-run",
+        "started_at": "2026-07-25T00:00:00Z",
+    }
+    results = module._execute_owned_checks(
+        {"full_python_suite"},
+        tmp_path,
+        context,
+        {},
+    )
+    result = results["full_python_suite"]
+    assert result["facts"] == set(
+        module.REQUIRED_ASSERTIONS["full_python_suite"]
+    )
+    execution = result["executions"][0]
+    assert execution["pid"] == FakePopen.pid
+    assert execution["argv"][1:3] == ["-m", "pytest"]
+    assert execution["stdout_sha256"] == hashlib.sha256(
+        execution["__stdout_bytes"]
+    ).hexdigest()
+    assert execution["stderr_sha256"] == hashlib.sha256(
+        execution["__stderr_bytes"]
+    ).hexdigest()
+
+
+def test_r18_owned_jang_runner_requires_build_import_and_test(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    jang_root = tmp_path / "jang"
+    jang_root.mkdir()
+    monkeypatch.setenv("VMLX_JANG_TOOLS_SOURCE", str(jang_root))
+    outputs = {
+        "build": b"Successfully built jang.whl\n",
+        "import": (
+            "VMLINUX_IMPORT_JSON="
+            + json.dumps(
+                {
+                    "jang_tools": str((jang_root / "jang_tools/__init__.py").resolve()),
+                    "vmlx_engine": str(
+                        (ROOT / "vmlx_engine/__init__.py").resolve()
+                    ),
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode(),
+        "test": b"test session starts\ncollected 3 items\n3 passed in 1.00s\n",
+    }
+
+    class FakePopen:
+        next_pid = 56000
+
+        def __init__(self, argv, **kwargs):
+            type(self).next_pid += 1
+            self.pid = type(self).next_pid
+            self.argv = argv
+            self.returncode = 0
+
+        def communicate(self):
+            if "-c" in self.argv:
+                return outputs["import"], b""
+            if "build" in self.argv:
+                return outputs["build"], b""
+            return outputs["test"], b""
+
+    monkeypatch.setattr(module.subprocess, "Popen", FakePopen)
+    jang_state = {
+        "commit": module.JANG_COMMIT,
+        "tree": module.JANG_TREE,
+        "version": module.JANG_VERSION,
+    }
+    results = module._execute_owned_checks(
+        {"jang_runtime_provenance"},
+        tmp_path,
+        {"run_id": "owned-jang", "started_at": STAMP},
+        jang_state,
+    )
+    assert results["jang_runtime_provenance"]["facts"] == set(
+        module.REQUIRED_ASSERTIONS["jang_runtime_provenance"]
+    )
+    assert len(results["jang_runtime_provenance"]["executions"]) == 3
+
+
+def test_r18_health_family_contract_requires_actual_bundle_path_and_hashes(
+    tmp_path: Path,
+):
+    module = load_module()
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    health = {
+        "status": "healthy",
+        "model_loaded": True,
+        "model_name": "laguna",
+        "model_type": "llm",
+        "engine_type": "batched",
+        "model_bundle_path": str((tmp_path / "model").resolve()),
+        "model_bundle_provenance": bundle,
+        "quantization": {
+            "codec": "affine_quantized_matmul",
+            "weight_format": "jang",
+            "sidecar": {"jang_config": True, "jangtq_runtime": False},
+        },
+        "mtp": {},
+        "routing": {},
+        "native_cache": {},
+    }
+    contract = module._health_family_contract(health)
+    assert contract is not None
+    assert contract["bundle_config_hashes"]["jang_config.json"]
+    missing_path = deepcopy(health)
+    missing_path.pop("model_bundle_path")
+    assert module._health_family_contract(missing_path) is None
+    changed = deepcopy(health)
+    (tmp_path / "model/config.json").write_text('{"model_type":"changed"}\n')
+    assert module._health_family_contract(changed) is None
+
+
+def test_r18_bundle_attestation_rejects_symlink_and_hardlink_files(
+    tmp_path: Path,
+):
+    module = load_module()
+
+    symlink_root = tmp_path / "symlink-model"
+    symlink_attestation, _ = bundle_attestation(module, symlink_root)
+    external = tmp_path / "external-config.json"
+    external.write_text(
+        '{"model_type":"laguna","architectures":["LagunaForCausalLM"]}\n',
+        encoding="utf-8",
+    )
+    (symlink_root / "config.json").unlink()
+    (symlink_root / "config.json").symlink_to(external)
+    assert (
+        module._validated_bundle_attestation(
+            str(symlink_root.resolve()),
+            symlink_attestation,
+        )
+        is None
+    )
+
+    hardlink_root = tmp_path / "hardlink-model"
+    hardlink_attestation, _ = bundle_attestation(module, hardlink_root)
+    os.link(hardlink_root / "config.json", tmp_path / "config-hardlink.json")
+    assert (
+        module._validated_bundle_attestation(
+            str(hardlink_root.resolve()),
+            hardlink_attestation,
+        )
+        is None
+    )
+
+
+def test_r18_evidence_reader_rejects_links_and_path_replacement(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+
+    regular = evidence_root / "regular.json"
+    regular.write_bytes(b'{"value":1}')
+    assert module._read_regular_file_once(regular, evidence_root) == b'{"value":1}'
+
+    symlink = evidence_root / "symlink.json"
+    symlink.symlink_to(regular)
+    assert module._read_regular_file_once(symlink, evidence_root) is None
+
+    hardlink = evidence_root / "hardlink.json"
+    os.link(regular, hardlink)
+    assert module._read_regular_file_once(regular, evidence_root) is None
+    assert module._read_regular_file_once(hardlink, evidence_root) is None
+
+    replace_target = evidence_root / "replace.json"
+    replacement = evidence_root / "replacement.json"
+    replace_target.write_bytes(b'{"version":1}')
+    replacement.write_bytes(b'{"version":2}')
+    original_read = module._read_fd_bytes
+
+    def replace_after_read(fd: int) -> bytes:
+        raw = original_read(fd)
+        os.replace(replacement, replace_target)
+        return raw
+
+    monkeypatch.setattr(module, "_read_fd_bytes", replace_after_read)
+    assert module._read_regular_file_once(replace_target, evidence_root) is None
+
+
+def test_r18_bundle_snapshot_rejects_directory_swap(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    bundle_attestation(module, tmp_path / "model")
+    bundle_attestation(module, tmp_path / "replacement-model")
+    original_read = module._read_fd_bytes
+    swapped = False
+
+    def swap_directory_after_first_read(fd: int) -> bytes:
+        nonlocal swapped
+        raw = original_read(fd)
+        if not swapped:
+            swapped = True
+            os.replace(tmp_path / "model", tmp_path / "old-model")
+            os.replace(tmp_path / "replacement-model", tmp_path / "model")
+        return raw
+
+    monkeypatch.setattr(module, "_read_fd_bytes", swap_directory_after_first_read)
+    assert module._read_bundle_directory_snapshot(tmp_path / "model") is None
+
+
+def test_r18_source_trace_rejects_fake_electron_and_nonexistent_process(
+    tmp_path: Path,
+):
+    module = load_module()
+    expected = module.release_runtime_source_attestation()
+    bundle, bundle_hashes = bundle_attestation(module, tmp_path / "model")
+    executable = tmp_path / "vMLX"
+    renderer = tmp_path / "index.html"
+    executable.write_bytes(b"electron executable")
+    renderer.write_text("<html></html>", encoding="utf-8")
+    cdp_port = 9335
+    argv = (
+        str(executable.resolve()),
+        f"--remote-debugging-port={cdp_port}",
+    )
+    source = source_payload()
+    artifact = {
+        "schema": module.SOURCE_TRACE_SCHEMA,
+        "recorded_at": STAMP,
+        "command": "git release-source-trace",
+        "source": source_block(),
+        "git": {
+            "head": source["source_commit"],
+            "tree": source["source_tree"],
+            "upstream": source["source_commit"],
+            "remote_main": source["source_commit"],
+            "clean": True,
+        },
+        "head_source_attestation": expected,
+        "python_runtime": runtime_binding(module, bundle["fingerprint_sha256"]),
+        "electron_runtime": {
+            "pid": 987654321,
+            "argv": list(argv),
+            "cdp_url": f"http://127.0.0.1:{cdp_port}",
+            "executable_path": str(executable.resolve()),
+            "executable_sha256": module.sha256_file(executable),
+            "renderer_asset_path": str(renderer.resolve()),
+            "renderer_asset_sha256": module.sha256_file(renderer),
+            "renderer_loaded_url": renderer.resolve().as_uri(),
+            "electron_main_tree_sha256": expected["electron_main_tree_sha256"],
+            "renderer_source_tree_sha256": expected[
+                "renderer_source_tree_sha256"
+            ],
+        },
+        "bundle_path": str((tmp_path / "model").resolve()),
+        "bundle_health_attestation": bundle,
+        "bundle_config_hashes": bundle_hashes,
+    }
+    assert module._semantic_source_trace(artifact, source) is None
+
+    echo = deepcopy(artifact)
+    echo["electron_runtime"]["executable_path"] = "/bin/echo"
+    echo["electron_runtime"]["executable_sha256"] = module.sha256_file(
+        Path("/bin/echo")
+    )
+    echo_argv = ("/bin/echo", f"--remote-debugging-port={cdp_port}")
+    echo["electron_runtime"]["argv"] = list(echo_argv)
+    assert module._semantic_source_trace(echo, source) is None
+
+
+def test_r18_v4_ui_semantic_accepts_raw_bound_dom_and_events(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    artifact, observations = v4_common_artifact(
+        module,
+        tmp_path,
+        module.ELECTRON_RAW_SCHEMA,
+    )
+    install_runtime_observation_mocks(module, monkeypatch, observations)
+    artifact["cdp"] = {
+        "electron_pid": artifact["binding"]["electron_process"]["pid"],
+        "target_url": artifact["binding"]["renderer"]["url"],
+        "websocket_url": "ws://127.0.0.1:9335/devtools/page/1",
+    }
+    artifact["start_button_event"] = {
+        "trusted": True,
+        "model_session_id": artifact["model_session_id"],
+    }
+    turns = []
+    for index in range(3):
+        events = [
+            {"seq": 0, "type": "reasoning_delta", "text": f"reason-{index}"},
+            {"seq": 1, "type": "content_delta", "text": f"answer-{index}"},
+        ]
+        if index == 0:
+            events.extend(
+                [
+                    {"seq": 2, "type": "tool_call", "name": "file_info"},
+                    {"seq": 3, "type": "tool_result", "content": "5.2 KB"},
+                    {"seq": 4, "type": "terminal", "status": "completed"},
+                ]
+            )
+        else:
+            events.append(
+                {"seq": 2, "type": "terminal", "status": "completed"}
+            )
+        request_json, request_sha = json_capture(
+            {"messages": [{"role": "user", "content": f"turn-{index}"}]}
+        )
+        dom_json, dom_sha = json_capture(
+            {
+                "reasoning_text": f"reason-{index}",
+                "content_text": f"answer-{index}",
+                "terminal": "completed",
+                "rendering_ok": True,
+                "coherent": True,
+                "cache_stats": {"cached_tokens": index * 8},
+                "ttft_ms": 25 + index,
+                "decode_tps": 40.0,
+            }
+        )
+        turns.append(
+            {
+                "request_body_json": request_json,
+                "request_sha256": request_sha,
+                "dom_snapshot_json": dom_json,
+                "dom_snapshot_sha256": dom_sha,
+                "events": events,
+            }
+        )
+    artifact["turns"] = turns
+    payload = {"__validation_context": validation_context(module)}
+    semantic = module._semantic_electron_turn(artifact, payload)
+    assert semantic is not None
+    assert semantic["turn_count"] == 3
+    assert {
+        "reasoning_rail",
+        "visible_content",
+        "tool_result_continuation",
+        "rendering",
+        "coherence",
+    } <= set(semantic["facts"])
+    wrong_run = deepcopy(artifact)
+    wrong_run["run_id"] = "different-run"
+    assert (
+        module._semantic_electron_turn(
+            wrong_run,
+            {"__validation_context": validation_context(module)},
+        )
+        is None
+    )
+
+
+def chat_stream(
+    reasoning: str,
+    *,
+    tool_id: str | None = None,
+    tool_name: str | None = None,
+    tool_arguments: dict | None = None,
+    content_parts: tuple[str, ...] = (),
+) -> str:
+    rows = [
+        "data: "
+        + json.dumps(
+            {"choices": [{"delta": {"reasoning_content": reasoning}}]},
+            separators=(",", ":"),
+        )
+    ]
+    if tool_id and tool_name and tool_arguments is not None:
+        rows.append(
+            "data: "
+            + json.dumps(
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": tool_id,
+                                        "function": {
+                                            "name": tool_name,
+                                            "arguments": json.dumps(
+                                                tool_arguments,
+                                                separators=(",", ":"),
+                                            ),
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+                separators=(",", ":"),
+            )
+        )
+    for part in content_parts:
+        rows.append(
+            "data: "
+            + json.dumps(
+                {"choices": [{"delta": {"content": part}}]},
+                separators=(",", ":"),
+            )
+        )
+    rows.append("data: [DONE]")
+    return "\n\n".join(rows) + "\n\n"
+
+
+def test_r18_v4_api_semantic_accepts_raw_requests_and_streams(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    artifact, observations = v4_common_artifact(
+        module,
+        tmp_path,
+        module.API_RAW_SCHEMA,
+    )
+    install_runtime_observation_mocks(module, monkeypatch, observations)
+    requests = [
+        {
+            "stream": True,
+            "enable_thinking": True,
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "call file_info"}],
+        },
+        {
+            "stream": True,
+            "enable_thinking": True,
+            "max_tokens": 256,
+            "messages": [
+                {"role": "tool", "tool_call_id": "c1", "content": "5.2 KB"}
+            ],
+        },
+        {
+            "stream": True,
+            "enable_thinking": True,
+            "max_tokens": 256,
+            "messages": [
+                {"role": "tool", "tool_call_id": "c1", "content": "5.2 KB"},
+                {"role": "tool", "tool_call_id": "c2", "content": str(ROOT)},
+                {"role": "user", "content": "reply exactly FINAL-DONE"},
+            ],
+        },
+    ]
+    streams = [
+        chat_stream(
+            "reason-one",
+            tool_id="c1",
+            tool_name="file_info",
+            tool_arguments={"path": "panel/package.json"},
+        ),
+        chat_stream(
+            "reason-two",
+            tool_id="c2",
+            tool_name="run_command",
+            tool_arguments={"command": "pwd"},
+        ),
+        chat_stream(
+            "reason-three",
+            content_parts=("FINAL-", "DONE"),
+        ),
+    ]
+    flows = []
+    for route in ("direct", "gateway"):
+        for request, stream in zip(requests, streams, strict=True):
+            request_json, request_sha = json_capture(request)
+            flows.append(
+                {
+                    "protocol": "chat",
+                    "route": route,
+                    "endpoint": "/v1/chat/completions",
+                    "request_body_json": request_json,
+                    "request_sha256": request_sha,
+                    "response_stream": stream,
+                    "response_sha256": hashlib.sha256(stream.encode()).hexdigest(),
+                }
+            )
+    artifact["flows"] = flows
+    semantic = module._semantic_api_stream(
+        artifact,
+        {"__validation_context": validation_context(module)},
+    )
+    assert semantic is not None
+    assert semantic["protocols"] == ["chat"]
+    assert {
+        "reasoning_separate",
+        "content_progressive",
+        "tool_result_continuation",
+        "terminal_truthful",
+    } <= set(semantic["facts_by_protocol"]["chat"])
+
+
+def test_r18_v4_cache_semantic_derives_lcp_and_telemetry(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    artifact, observations = v4_common_artifact(
+        module,
+        tmp_path,
+        module.CACHE_RAW_SCHEMA,
+    )
+    install_runtime_observation_mocks(module, monkeypatch, observations)
+    artifact["source_tokens"] = [10, 11, 12, 13]
+    artifact["candidate_tokens"] = [10, 11, 12, 99, 100]
+    artifact["telemetry"] = {
+        "paged_ram": False,
+        "matched_tokens": 3,
+        "suffix_prefill_tokens": 2,
+        "events": [
+            {"type": "ssd_store"},
+            {"type": "ssd_restore", "matched_tokens": 3},
+            {"type": "cross_chat_reuse"},
+            {"type": "cross_session_reuse"},
+            {"type": "restart_restore"},
+        ],
+    }
+    semantic = module._semantic_cache_observation(
+        artifact,
+        {"__validation_context": validation_context(module)},
+    )
+    assert semantic is not None
+    assert {
+        "paged_ram_disabled",
+        "ssd_l2_enabled",
+        "longest_prefix_partial_block_hit",
+        "uncached_suffix_prefilled",
+        "cross_chat_reuse",
+        "cross_session_reuse",
+        "restart_disk_restore",
+        "standard_kv",
+    } <= set(semantic["facts"])
+
+
+def test_r18_jang_receipt_with_forged_pid_is_blocked():
+    module = load_module()
+    artifact = {
+        "schema": module.JANG_RESULT_SCHEMA,
+        "recorded_at": STAMP,
+        "pid": 99,
+        "exit_code": 0,
+        "complete": True,
+        "source": source_block(),
+        "command_argv": [
+            "$ROOT/.venv/bin/python",
+            "-m",
+            "pytest",
+            "tests/test_laguna_loader.py",
+        ],
+        "stdout": "collected 3 items\n3 passed",
+    }
+    assert module._semantic_jang_result(artifact, source_payload(), [artifact]) is None
+
+
+def test_r18_validate_attestation_sanitizes_author_passes(
+    tmp_path: Path,
+):
+    module = load_module()
+    attestation = tmp_path / "attestation.json"
+    write_author_pass_attestation(module, attestation)
+    git_state = {
+        "commit": source_payload()["source_commit"],
+        "tree": source_payload()["source_tree"],
+        "upstream_commit": source_payload()["source_commit"],
+        "remote_main_commit": source_payload()["source_commit"],
+    }
+    failures: list[str] = []
+    owned = {
+        "full_python_suite": {
+            "facts": set(module.REQUIRED_ASSERTIONS["full_python_suite"]),
+            "executions": [],
+        }
+    }
+    checks = module.validate_attestation(
+        attestation,
+        git_state,
+        tmp_path,
+        failures,
+        run_context=validation_context(module),
+        owned_results=owned,
+    )
+    assert checks["full_python_suite"]["status"] == "pass"
+    assert all(checks["full_python_suite"]["assertions"].values())
+    assert checks["electron_visual_multiturn"]["status"] == "blocked"
+    assert not any(checks["electron_visual_multiturn"]["assertions"].values())
+    assert checks["exact_source_provenance"]["status"] == "blocked"
+    assert checks["exact_source_provenance"]["assertions"][
+        "checkout_head_exact"
+    ]
+    assert not checks["exact_source_provenance"]["assertions"][
+        "electron_revision_exact"
+    ]
+    assert failures
+
+
+def test_r18_main_manifest_reports_owned_pass_and_blocked_rows(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    attestation = tmp_path / "attestation.json"
+    output = tmp_path / "manifest.json"
+    write_author_pass_attestation(module, attestation)
+    git_state = {
+        "commit": source_payload()["source_commit"],
+        "tree": source_payload()["source_tree"],
+        "upstream_commit": source_payload()["source_commit"],
+        "remote_main_commit": source_payload()["source_commit"],
+    }
+    monkeypatch.setattr(module, "validate_versions", lambda failures: {"ok": True})
+    monkeypatch.setattr(module, "validate_git_state", lambda failures: git_state)
+    monkeypatch.setattr(module, "validate_jang_source", lambda failures: {})
+    monkeypatch.setattr(
+        module,
+        "validate_private_evidence_root",
+        lambda configured, failures: tmp_path,
+    )
+    monkeypatch.setattr(
+        module,
+        "_execute_owned_checks",
+        lambda requested, private_root, run_context, jang_state: {
+            "full_python_suite": {
+                "facts": set(
+                    module.REQUIRED_ASSERTIONS["full_python_suite"]
+                ),
+                "executions": [
+                    {
+                        "schema": module.OWNED_EXECUTION_SCHEMA,
+                        "run_id": run_context["run_id"],
+                        "pid": 777,
+                        "argv": ["python", "-m", "pytest"],
+                        "cwd": str(ROOT),
+                        "started_at": STAMP,
+                        "ended_at": STAMP,
+                        "exit_code": 0,
+                        "stdout_sha256": "a" * 64,
+                        "stderr_sha256": "b" * 64,
+                        "__stdout_bytes": b"not-public",
+                    }
+                ],
+            }
+        },
+    )
+    release = module.release_runtime_source_attestation()
+    monkeypatch.setattr(
+        module,
+        "release_runtime_source_attestation",
+        lambda: release,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--attestation",
+            str(attestation),
+            "--private-evidence-root",
+            str(tmp_path),
+            "--out",
+            str(output),
+            "--run-id",
+            "main-run",
+            "--run-owned-check",
+            "full_python_suite",
+        ],
+    )
+    assert module._legacy_main_v4() == 1
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    assert manifest["status"] == "fail"
+    assert manifest["checks"]["full_python_suite"]["status"] == "pass"
+    assert manifest["checks"]["electron_visual_multiturn"]["status"] == "blocked"
+    assert not any(
+        manifest["checks"]["electron_visual_multiturn"]["assertions"].values()
+    )
+    assert manifest["run"]["run_id"] == "main-run"
+    assert "__stdout_bytes" not in json.dumps(manifest)
+    assert manifest["owned_executions"]["full_python_suite"][0]["pid"] == 777
+
+
+def test_r18_release_source_attestation_reads_head_blobs(monkeypatch):
+    module = load_module()
+    module.release_runtime_source_attestation.cache_clear()
+    blobs = {
+        "vmlx_engine/server.py": b"committed server",
+        "vmlx_engine/__init__.py": b"committed init",
+        "panel/scripts/live-real-ui-model-proof.mjs": b"committed harness",
+    }
+    monkeypatch.setattr(module, "_git_head_blob", lambda path: blobs[path])
+    monkeypatch.setattr(
+        module,
+        "_git_head_tree_attestation",
+        lambda prefix, suffix=None: {
+            "sha256": hashlib.sha256(prefix.encode()).hexdigest(),
+            "file_count": 7,
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "run_git",
+        lambda *args: "a" * 40 if args[-1] == "HEAD" else "b" * 40,
+    )
+    attestation = module.release_runtime_source_attestation()
+    assert (
+        attestation["server_module_sha256"]
+        == hashlib.sha256(b"committed server").hexdigest()
+    )
+    assert (
+        attestation["package_init_sha256"]
+        == hashlib.sha256(b"committed init").hexdigest()
+    )
+    module.release_runtime_source_attestation.cache_clear()
+
+
+def test_r18_v5_main_owned_children_fail_closed_on_unowned_release_rows(
+    tmp_path: Path,
+):
+    module = load_module()
+    release = module.release_runtime_source_attestation()
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    native_bundle, _ = native_bundle_attestation(
+        module,
+        tmp_path / "native-model",
+    )
+    private_root = tmp_path / "private"
+    private_root.mkdir(mode=0o700)
+    output = tmp_path / "manifest.json"
+    source = {
+        "commit": release["source_commit"],
+        "tree": release["source_tree"],
+        "status_porcelain": "",
+        "upstream_commit": release["source_commit"],
+        "remote_main_commit": release["source_commit"],
+        "main_only": 0,
+        "branch_only": 0,
+        "remote_identity": "jjang-ai/vmlx",
+        "release_diff_bytes": b"M\tpanel/src/main/index.ts\n",
+        "release_diff_sha256": hashlib.sha256(
+            b"M\tpanel/src/main/index.ts\n"
+        ).hexdigest(),
+    }
+    python = str(Path(sys.executable).resolve())
+
+    def fixture_command(command_id: str, kind: str, *extra: str) -> dict:
+        return {
+            "command_id": command_id,
+            "argv": [
+                python,
+                str(Path(__file__).resolve()),
+                "--v5-fixture-command",
+                kind,
+                *extra,
+            ],
+            "cwd": ROOT,
+            "env": {},
+        }
+
+    def owned_plan_provider(run_dir: Path, jang_root: Path) -> dict:
+        del jang_root
+        build_root = run_dir / "fixture-build"
+        build_root.mkdir(mode=0o700)
+        distribution_root = run_dir / "fixture-jang-dist"
+        distribution_root.mkdir(mode=0o700)
+        isolated = run_dir / "fixture-jang-installed"
+        return {
+            "full_python_suite": {
+                "commands": [
+                    fixture_command(
+                        "full_python_suite",
+                        "full_python_suite",
+                    )
+                ]
+            },
+            "full_panel_suite": {
+                "commands": [
+                    fixture_command(
+                        "full_panel_suite",
+                        "full_panel_suite",
+                    )
+                ]
+            },
+            "typecheck": {
+                "commands": [fixture_command("typecheck", "typecheck")]
+            },
+            "production_build": {
+                "commands": [
+                    fixture_command(
+                        "production_build",
+                        "production_build",
+                        "--output-root",
+                        str(build_root),
+                    )
+                ],
+                "output_root": str(build_root),
+                "required_outputs": (
+                    "main/index.js",
+                    "preload/index.js",
+                    "renderer/index.html",
+                ),
+            },
+            "jang_runtime_provenance": {
+                "commands": [
+                    fixture_command(
+                        "jang_build",
+                        "jang_build",
+                        "--distribution-root",
+                        str(distribution_root),
+                    ),
+                    fixture_command(
+                        "jang_venv",
+                        "jang_venv",
+                        "--isolated-venv",
+                        str(isolated),
+                    ),
+                    fixture_command("jang_install", "jang_install"),
+                    fixture_command(
+                        "jang_import",
+                        "jang_import",
+                        "--isolated-venv",
+                        str(isolated),
+                    ),
+                    fixture_command("jang_test", "jang_test"),
+                ],
+                "distribution_root": str(distribution_root),
+                "isolated_venv": str(isolated),
+                "test_manifest": [
+                    "tests/test_laguna_loader.py",
+                    "tests/test_jang_affine_storage.py",
+                    "tests/test_jang_loader.py",
+                ],
+                "minimum_test_count": 3,
+            },
+        }
+
+    def producer_plan_provider(args, run_dir: Path) -> dict:
+        del run_dir
+        return {
+            producer: {
+                "argv": [
+                    python,
+                    str(Path(__file__).resolve()),
+                    "--v5-fixture-producer",
+                    producer,
+                    "--output-fd",
+                    "{OUTPUT_FD}",
+                    "--run-id",
+                    "{RUN_ID}",
+                    "--nonce",
+                    "{NONCE}",
+                    "--v5-session-binding-path",
+                    "{SESSION_BINDING_PATH}",
+                    "--v5-ready-path",
+                    "{READY_PATH}",
+                    "--v5-release-path",
+                    "{RELEASE_PATH}",
+                    "--v5-phase-control-dir",
+                    "{PHASE_CONTROL_DIR}",
+                    "--v5-paired-api-path",
+                    "{PAIRED_API_PATH}",
+                    "--v5-run-intent-path",
+                    "{RUN_INTENT_PATH}",
+                    "--v5-run-intent-sha256",
+                    "{RUN_INTENT_SHA256}",
+                    "--v5-active-phase-index",
+                    "{ACTIVE_PHASE_INDEX}",
+                    "--v5-ui-session-attestation-path",
+                    "{UI_SESSION_ATTESTATION_PATH}",
+                    "--v5-previous-backend-pid",
+                    "{PREVIOUS_BACKEND_PID}",
+                    "--v5-reuse-session-id",
+                    "{REUSE_SESSION_ID}",
+                    "--v5-reuse-session-attestation-path",
+                    "{REUSE_SESSION_ATTESTATION_PATH}",
+                    "--v5-source-commit",
+                    "{SOURCE_COMMIT}",
+                    "--v5-source-tree",
+                    "{SOURCE_TREE}",
+                    "--bundle-root",
+                    str(args.bundle_root),
+                    "--bundle-fingerprint",
+                    bundle["fingerprint_sha256"],
+                    "--native-bundle-root",
+                    str(args.native_bundle_root),
+                    "--native-bundle-fingerprint",
+                    native_bundle["fingerprint_sha256"],
+                    "--model",
+                    args.model,
+                    "--native-model",
+                    args.native_model,
+                    "--direct-base-url",
+                    args.direct_base_url,
+                    "--gateway-base-url",
+                    args.gateway_base_url,
+                    "--health-url",
+                    args.health_url,
+                    "--gateway-health-url",
+                    args.gateway_health_url,
+                    "--cdp-url",
+                    args.cdp_url,
+                    "--backend-pid",
+                    str(args.backend_pid),
+                    "--gateway-pid",
+                    str(args.gateway_pid),
+                    "--electron-pid",
+                    str(args.electron_pid),
+                ],
+                "cwd": ROOT,
+                "env": {},
+                "ready_timeout_seconds": 5,
+                "producer_timeout_seconds": 5,
+            }
+            for producer in module.V5_PRODUCER_NAMES
+        }
+
+    _, dom = _fixture_ui_capture(module, "unused", "0" * 32)
+    dom["sourceCommit"] = release["source_commit"]
+    # The production CDP snapshot does not currently own these facts.  Keep
+    # this end-to-end fixture production-shaped so it cannot self-certify
+    # settings, locale breadth, or minimum-width behavior.
+    for key in ("locales", "supported_locales", "viewport", "settings"):
+        dom.pop(key, None)
+    runtime_package = tmp_path / "runtime/vmlx_engine"
+    runtime_package.mkdir(parents=True)
+    (runtime_package / "__init__.py").write_text(
+        '__version__ = "1.6.18"\n',
+        encoding="utf-8",
+    )
+    (runtime_package / "server.py").write_text(
+        "def fixture_server():\n    return 'owned-v5'\n",
+        encoding="utf-8",
+    )
+    runtime_attestation = module._v5_hash_python_runtime(
+        runtime_package / "__init__.py"
+    )
+    assert runtime_attestation is not None
+    source_attestation = {
+        **runtime_attestation,
+        "source_commit": release["source_commit"],
+        "source_tree": release["source_tree"],
+    }
+    executable = module._v5_pin_regular_file(Path(python), executable=True)
+    current_backend_pid = {"value": 9001}
+
+    def process_observer(pid: int) -> dict:
+        return {
+            "pid": pid,
+            "start_identity": f"fixture-start-{pid}",
+            "argv": [python],
+            "executable_path": executable["path"],
+            "executable_sha256": executable["sha256"],
+        }
+
+    def listener_observer(host: str, port: int) -> dict:
+        owner = current_backend_pid["value"] if port == 8001 else 9002
+        return {"host": host, "port": port, "owner_pid": owner}
+
+    def raw_runtime_observer(args, observed, snapshot) -> dict:
+        del observed
+        current_backend_pid["value"] = args.backend_pid
+        health = {
+            "model_bundle_path": snapshot["model_bundle_path"],
+            "bundle_fingerprint_sha256": snapshot["fingerprint_sha256"],
+            "runtime_provenance": {
+                "package_init_path": str(
+                    (runtime_package / "__init__.py").resolve()
+                )
+            },
+        }
+        return {
+            "health_bytes": json.dumps(health, sort_keys=True).encode(),
+            "dom_bytes": json.dumps(dom, sort_keys=True).encode(),
+            "backend_pid": args.backend_pid,
+            "gateway_pid": args.gateway_pid,
+            "electron_pid": args.electron_pid,
+        }
+
+    hooks = {
+        "raise_exceptions": True,
+        "version_observer": lambda failures: {"version": module.VERSION},
+        "private_root_observer": lambda configured, failures: configured,
+        "source_observer": lambda: deepcopy(source),
+        "source_attestation_observer": lambda: deepcopy(source_attestation),
+        "jang_observer": lambda failures: {
+            "version": module.JANG_VERSION,
+            "commit": module.JANG_COMMIT,
+            "tree": module.JANG_TREE,
+        },
+        "owned_check_plan_provider": owned_plan_provider,
+        "producer_plan_provider": producer_plan_provider,
+        "raw_runtime_observer": raw_runtime_observer,
+        "process_observer": process_observer,
+        "listener_observer": listener_observer,
+    }
+    argv = [
+        "--private-evidence-root",
+        str(private_root),
+        "--out",
+        str(output),
+        "--run-id",
+        "owned-v5",
+        "--bundle-root",
+        str(tmp_path / "model"),
+        "--native-bundle-root",
+        str(tmp_path / "native-model"),
+        "--native-bundle-root",
+        str(tmp_path / "native-model"),
+        "--model",
+        "fixture-laguna",
+        "--native-model",
+        "fixture-minimax-m3",
+        "--direct-base-url",
+        "http://127.0.0.1:8001",
+        "--gateway-base-url",
+        "http://127.0.0.1:8080",
+        "--health-url",
+        "http://127.0.0.1:8001/health",
+        "--gateway-health-url",
+        "http://127.0.0.1:8080/health",
+        "--cdp-url",
+        "http://127.0.0.1:9335",
+        "--backend-pid",
+        "9001",
+        "--gateway-pid",
+        "9002",
+        "--electron-pid",
+        "9003",
+        "--jang-source",
+        str(tmp_path / "jang"),
+    ]
+    assert module.main(argv, _test_hooks=hooks) == 1
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    assert manifest["status"] == "fail"
+    assert set(manifest["checks"]) == set(module.V5_REQUIRED_CHECKS)
+    blocked = {
+        name
+        for name, row in manifest["checks"].items()
+        if row["status"] != "pass"
+    }
+    assert blocked == {
+        "cache_restart_and_size_eviction",
+        "turboquant_policy",
+        "settings_defaults_and_persistence",
+        "i18n_katex_responsive_ui",
+    }
+    assert manifest["checks"]["cache_paged_off_ssd_partial"]["status"] == "pass"
+    assert (
+        manifest["checks"]["cache_paged_on_eviction_refault"]["status"]
+        == "pass"
+    )
+    assert not manifest["checks"]["cache_restart_and_size_eviction"][
+        "assertions"
+    ]["ram_percentage_limit_enforced"]
+    assert not manifest["checks"]["cache_restart_and_size_eviction"][
+        "assertions"
+    ]["ram_oom_warning_checked"]
+    assert manifest["checks"]["turboquant_policy"]["assertions"][
+        "explicit_off_honored"
+    ]
+    assert not manifest["checks"]["turboquant_policy"]["assertions"][
+        "unsupported_architecture_exception_honored"
+    ]
+    assert not manifest["checks"]["settings_defaults_and_persistence"][
+        "assertions"
+    ]["bundle_defaults_in_new_ui_session"]
+    assert not manifest["checks"]["i18n_katex_responsive_ui"]["assertions"][
+        "all_supported_locales_checked"
+    ]
+    assert not manifest["checks"]["i18n_katex_responsive_ui"]["assertions"][
+        "minimum_window_width_checked"
+    ]
+    # The run itself completed; its release verdict remains fail-closed.
+    assert manifest["completion"]["state"] == "complete"
+    assert manifest["completion"]["run_digest"] == module._v5_manifest_digest(
+        manifest
+    )
+    with pytest.raises(ValueError):
+        module.consume_v5_release_manifest(
+            output,
+            expected_run_id="owned-v5",
+            expected_commit=release["source_commit"],
+            expected_tree=release["source_tree"],
+        )
+    with pytest.raises(FileExistsError):
+        module._v5_atomic_write_manifest(
+            output,
+            manifest,
+            manifest["run"]["nonce"],
+        )
+
+
+def test_r18_v5_six_phase_cache_facts_are_raw_and_do_not_invent_cross_surface_policy(
+    tmp_path: Path,
+):
+    module = load_module()
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    native_bundle, _ = native_bundle_attestation(
+        module,
+        tmp_path / "native-model",
+    )
+    representatives = {
+        module.V5_PRIMARY_REPRESENTATIVE_ID: {
+            "model": "fixture-model",
+            "bundle": bundle,
+        },
+        module.V5_NATIVE_REPRESENTATIVE_ID: {
+            "model": "fixture-native-model",
+            "bundle": native_bundle,
+        },
+    }
+    capture = _fixture_cache_capture(
+        module,
+        "cache-facts",
+        "a" * 32,
+        bundle_fingerprint=bundle["fingerprint_sha256"],
+        native_bundle_fingerprint=native_bundle["fingerprint_sha256"],
+    )
+    raw = json.dumps(
+        capture,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    facts, hashes = module._v5_cache_facts(
+        [(capture, raw)],
+        representatives,
+    )
+    assert {
+        "paged_ram_disabled",
+        "paged_ram_enabled",
+        "ssd_l2_enabled",
+        "longest_prefix_partial_block_hit",
+        "uncached_suffix_prefilled",
+        "cross_chat_reuse",
+        "cross_session_reuse",
+        "disk_refault_observed",
+        "restart_disk_restore",
+        "disk_size_limit_enforced",
+        "disk_oldest_unused_evicted",
+        "q4_default_when_supported",
+        "encode_decode_live",
+        "explicit_off_honored",
+        "unsupported_architecture_exception_cache",
+    } <= facts
+    assert {
+        "ram_percentage_limit_enforced",
+        "ram_oom_warning_checked",
+        "unsupported_architecture_exception_honored",
+    }.isdisjoint(facts)
+    assert hashes
+
+    reordered = deepcopy(capture)
+    reordered["phases"][0], reordered["phases"][1] = (
+        reordered["phases"][1],
+        reordered["phases"][0],
+    )
+    reordered_raw = json.dumps(
+        reordered,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    assert module._v5_cache_facts(
+        [(reordered, reordered_raw)],
+        representatives,
+    ) == (set(), [])
+
+    tampered_captures = []
+
+    wrong_model = deepcopy(capture)
+    wrong_model["phases"][0]["model"] = "wrong-model"
+    tampered_captures.append(wrong_model)
+
+    reused_session = deepcopy(capture)
+    reused_session["phases"][-1]["session_id"] = reused_session["phases"][0][
+        "session_id"
+    ]
+    tampered_captures.append(reused_session)
+
+    repeated_pid = deepcopy(capture)
+    repeated_pid["phases"][-1]["backend_pid"] = repeated_pid["phases"][0][
+        "backend_pid"
+    ]
+    native_summary = json.loads(
+        base64.b64decode(repeated_pid["phases"][-1]["summary_b64"])
+    )
+    native_summary["identity"]["observed_engine"]["pid"] = repeated_pid[
+        "phases"
+    ][0]["backend_pid"]
+    repeated_pid["phases"][-1]["summary_b64"] = _fixture_json_b64(
+        native_summary
+    )
+    tampered_captures.append(repeated_pid)
+
+    off_not_explicit = deepcopy(capture)
+    off_summary = json.loads(
+        base64.b64decode(off_not_explicit["phases"][4]["summary_b64"])
+    )
+    off_summary["identity"]["cache_topology_provenance"]["configuration"][
+        "configured"
+    ]["kv_cache_quantization_explicit"] = False
+    off_not_explicit["phases"][4]["summary_b64"] = _fixture_json_b64(
+        off_summary
+    )
+    tampered_captures.append(off_not_explicit)
+
+    native_tq_enabled = deepcopy(capture)
+    native_tq_summary = json.loads(
+        base64.b64decode(native_tq_enabled["phases"][5]["summary_b64"])
+    )
+    native_tq_summary["identity"]["cache_topology_provenance"][
+        "configuration"
+    ]["turboquant_kv_cache"]["enabled"] = True
+    native_tq_enabled["phases"][5]["summary_b64"] = _fixture_json_b64(
+        native_tq_summary
+    )
+    tampered_captures.append(native_tq_enabled)
+
+    for tampered in tampered_captures:
+        tampered_raw = json.dumps(
+            tampered,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        assert module._v5_cache_facts(
+            [(tampered, tampered_raw)],
+            representatives,
+        ) == (set(), [])
+
+
+def test_r18_v5_run_intent_is_canonical_ordered_and_non_circular(
+    tmp_path: Path,
+):
+    module = load_module()
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    native_bundle, _ = native_bundle_attestation(
+        module,
+        tmp_path / "native-model",
+    )
+    common = {
+        "source_commit": "a" * 40,
+        "source_tree": "b" * 40,
+        "direct_base_url": "http://127.0.0.1:8001",
+        "gateway_base_url": "http://127.0.0.1:8080",
+        "health_url": "http://127.0.0.1:8001/health",
+        "direct_health_url": "http://127.0.0.1:8001/health",
+        "gateway_health_url": "http://127.0.0.1:8080/health",
+    }
+    expected = {
+        module.V5_PRIMARY_REPRESENTATIVE_ID: {
+            **common,
+            "model": "fixture-model",
+            "model_bundle_path": bundle["model_bundle_path"],
+            "bundle_fingerprint_sha256": bundle["fingerprint_sha256"],
+            "native_cache_policy": bundle["derived"]["native_cache"],
+        },
+        module.V5_NATIVE_REPRESENTATIVE_ID: {
+            **common,
+            "model": "fixture-native-model",
+            "model_bundle_path": native_bundle["model_bundle_path"],
+            "bundle_fingerprint_sha256": native_bundle[
+                "fingerprint_sha256"
+            ],
+            "native_cache_policy": native_bundle["derived"]["native_cache"],
+        },
+    }
+    run_context = {
+        "run_id": "intent-fixture",
+        "nonce": "c" * 32,
+        "created_at": STAMP,
+    }
+    intent = module._v5_build_run_intent(run_context, expected)
+    module._v5_validate_run_intent(intent, run_context, expected)
+    assert intent["schema"] == module.V5_RUN_INTENT_SCHEMA
+    assert intent["created_at"] == STAMP
+    assert set(intent["harnesses"]) == {"ui", "api", "cache", "semantic"}
+    assert all(
+        set(row) == {"relative_path", "sha256"}
+        for row in intent["harnesses"].values()
+    )
+    assert [
+        row["phase_name"] for row in intent["phase_plan"]
+    ] == [
+        "primary_ssd_only_store",
+        "primary_ssd_only_restart_probe",
+        "primary_paged_on_store",
+        "primary_paged_on_restart_probe",
+        "primary_tq_off",
+        "native_exception",
+    ]
+    assert [
+        row["tq_policy"] for row in intent["phase_plan"]
+    ] == [
+        "q4-required",
+        "q4-required",
+        "q4-required",
+        "q4-required",
+        "explicit-off",
+        "native-suppressed",
+    ]
+    assert [
+        row["operation"] for row in intent["phase_plan"]
+    ] == [
+        "store",
+        "probe",
+        "store-evict-refault",
+        "probe",
+        "store-probe",
+        "switch-validate",
+    ]
+    assert intent["phase_plan"][4]["cache_policy"] == "ssd-only"
+    assert [
+        row["ui_turn_count"] for row in intent["phase_plan"]
+    ] == [1, 1, 1, 1, 1, 3]
+    assert [
+        row["ui_action_profile"] for row in intent["phase_plan"]
+    ] == [
+        "primary-reasoning-render-store",
+        "primary-tool-restart-probe",
+        "primary-history-paged-evict-refault",
+        "primary-restart-followup",
+        "primary-tq-off-probe",
+        "native-three-turn-switch",
+    ]
+    assert [
+        row["api_action_profile"] for row in intent["phase_plan"]
+    ] == [
+        "full-agentic-plus-cache-store",
+        "cache-probe",
+        "cache-evict-refault",
+        "cache-restart-probe",
+        "cache-tq-off-store-probe",
+        "full-agentic-native-cache",
+    ]
+    assert intent["l2_size_eviction_requirements"] == (
+        module.V5_L2_SIZE_EVICTION_REQUIREMENTS
+    )
+    assert intent["phase_plan"][-1]["native_cache_policy"] == (
+        "minimax_m3_sparse"
+    )
+    unsigned = deepcopy(intent)
+    canonical_sha256 = unsigned.pop("canonical_sha256")
+    assert canonical_sha256 == module._canonical_json_sha256(unsigned)
+
+    tampered = deepcopy(intent)
+    tampered["phase_plan"][4]["tq_policy"] = "q4-required"
+    with pytest.raises(RuntimeError, match="canonical plan"):
+        module._v5_validate_run_intent(tampered, run_context, expected)
+
+
+def test_r18_v5_ui_facts_do_not_invent_unobserved_settings_or_layout(
+    tmp_path: Path,
+):
+    module = load_module()
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    captures = []
+    phase_observations = []
+    primary_session = "ui-primary"
+    native_session = "ui-native"
+    dom = {}
+    for phase in module.V5_CACHE_PHASES:
+        capture, phase_dom = _fixture_ui_capture(
+            module,
+            "ui-facts",
+            "b" * 32,
+            session_id=(
+                native_session
+                if phase["index"] == 5
+                else primary_session
+            ),
+            phase_index=phase["index"],
+        )
+        if phase["index"] == 5:
+            dom = phase_dom
+        raw = json.dumps(
+            capture,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        captures.append((capture, raw))
+        phase_dom_bytes = json.dumps(
+            phase_dom,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        phase_observations.append(
+            {
+                "phase_index": phase["index"],
+                "observation": {
+                    "dom": phase_dom,
+                    "dom_bytes_sha256": hashlib.sha256(
+                        phase_dom_bytes
+                    ).hexdigest(),
+                },
+            }
+        )
+    for key in ("locales", "supported_locales", "viewport", "settings"):
+        dom.pop(key, None)
+    dom_bytes = json.dumps(
+        dom,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    facts, hashes = module._v5_ui_facts(
+        captures,
+        {
+            "dom": dom,
+            "dom_bytes_sha256": hashlib.sha256(dom_bytes).hexdigest(),
+            "phase_observations": phase_observations,
+        },
+        bundle,
+    )
+    assert {
+        "real_start_button",
+        "minimum_three_turns",
+        "reasoning_rail",
+        "visible_content",
+        "katex_rendered",
+        "currency_preserved",
+        "markdown_rendered",
+    } <= facts
+    assert {
+        "all_supported_locales_checked",
+        "minimum_window_width_checked",
+        "bundle_defaults_in_new_ui_session",
+        "ui_override_session_scoped",
+        "ui_override_restart_persisted",
+        "max_context_output_distinct",
+        "preview_argv_health_parity",
+    }.isdisjoint(facts)
+    assert hashes
+
+    overwritten = deepcopy(captures)
+    phase_five_capture = overwritten[5][0]
+    source_proof = json.loads(
+        base64.b64decode(
+            phase_five_capture["source_proof_b64"],
+            validate=True,
+        )
+    )
+    source_proof["cacheRequestEvidence"][0]["healthAfter"]["scheduler"][
+        "last_cache_execution"
+    ]["request_id"] = "resp-unrelated-later-request"
+    phase_five_capture["source_proof_b64"] = _fixture_json_b64(source_proof)
+    overwritten[5] = (
+        phase_five_capture,
+        json.dumps(
+            phase_five_capture,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+    )
+    assert module._v5_ui_facts(
+        overwritten,
+        {
+            "dom": dom,
+            "dom_bytes_sha256": hashlib.sha256(dom_bytes).hexdigest(),
+            "phase_observations": phase_observations,
+        },
+        bundle,
+    ) == (set(), [])
+
+
+@pytest.mark.parametrize(
+    ("protocol", "old", "new"),
+    [
+        ("chat", b'"finish_reason":"stop"', b'"finish_reason":"length"'),
+        (
+            "responses",
+            b'"status":"completed"',
+            b'"status":"incomplete"',
+        ),
+        (
+            "anthropic",
+            b'"stop_reason":"end_turn"',
+            b'"stop_reason":"max_tokens"',
+        ),
+        ("ollama", b'"done_reason":"stop"', b'"done_reason":"length"'),
+    ],
+)
+def test_r18_v5_rejects_non_success_protocol_terminals(
+    protocol: str,
+    old: bytes,
+    new: bytes,
+):
+    module = load_module()
+    valid = _fixture_protocol_response(protocol, 3)
+    assert module._parse_raw_protocol_stream_v5(protocol, valid) is not None
+    assert old in valid
+    invalid = valid.replace(old, new, 1)
+    assert module._parse_raw_protocol_stream_v5(protocol, invalid) is None
+
+
+def test_r18_v5_child_environment_is_fixed_and_rejects_injection(
+    tmp_path: Path,
+):
+    module = load_module()
+    env = module._v5_minimal_env(tmp_path, {"VMLINUX_RELEASE_TEST": "1"})
+    assert env["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
+    assert env["VMLINUX_RELEASE_TEST"] == "1"
+    for name in (
+        "PATH",
+        "HOME",
+        "PYTHONPATH",
+        "PYTEST_ADDOPTS",
+        "NODE_OPTIONS",
+        "npm_config_prefix",
+        "DYLD_INSERT_LIBRARIES",
+        "LD_PRELOAD",
+        "BASH_ENV",
+        "ZDOTDIR",
+    ):
+        with pytest.raises(ValueError):
+            module._v5_minimal_env(tmp_path, {name: "unsafe"})
+
+
+def test_r18_v5_owned_producer_rejects_wrong_nonce_and_stale_capture(
+    tmp_path: Path,
+):
+    module = load_module()
+    python = str(Path(sys.executable).resolve())
+    run_context = {
+        "run_id": "nonce-bound",
+        "nonce": "1" * 32,
+    }
+    run_dir = tmp_path / "owned"
+    run_dir.mkdir(mode=0o700)
+    wrong_nonce_spec = {
+        "argv": [
+            python,
+            str(Path(__file__).resolve()),
+            "--v5-fixture-producer",
+            "ui",
+            "--output-fd",
+            "{OUTPUT_FD}",
+            "--run-id",
+            "{RUN_ID}",
+            "--nonce",
+            "2" * 32,
+        ],
+        "cwd": ROOT,
+        "env": {},
+    }
+    with pytest.raises(RuntimeError, match="envelope binding mismatch"):
+        module._v5_run_owned_child(
+            "ui",
+            wrong_nonce_spec,
+            run_context,
+            run_dir,
+        )
+
+    stale_dir = tmp_path / "stale"
+    stale_dir.mkdir(mode=0o700)
+    (stale_dir / "ui.producer.json").write_text(
+        "pre-authored",
+        encoding="utf-8",
+    )
+    with pytest.raises(FileExistsError):
+        module._v5_run_owned_child(
+            "ui",
+            wrong_nonce_spec,
+            run_context,
+            stale_dir,
+        )
+
+
+def _fixture_orchestration(
+    module,
+    tmp_path: Path,
+    *,
+    ui_mode: str = "normal",
+    api_mode: str = "normal",
+    cache_mode: str = "normal",
+):
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    native_bundle, _ = native_bundle_attestation(
+        module,
+        tmp_path / "native-model",
+    )
+    source = source_payload()
+    run_context = {"run_id": "held-fixture", "nonce": "3" * 32}
+    run_dir = tmp_path / "held-run"
+    run_dir.mkdir(mode=0o700)
+    event_log = tmp_path / "events.log"
+    python = str(Path(sys.executable).resolve())
+    modes = {"ui": ui_mode, "api": api_mode, "cache": cache_mode}
+    plans = {
+        producer: {
+            "argv": [
+                python,
+                str(Path(__file__).resolve()),
+                "--v5-fixture-producer",
+                producer,
+                "--output-fd",
+                "{OUTPUT_FD}",
+                "--run-id",
+                "{RUN_ID}",
+                "--nonce",
+                "{NONCE}",
+                "--v5-session-binding-path",
+                "{SESSION_BINDING_PATH}",
+                "--v5-ready-path",
+                "{READY_PATH}",
+                "--v5-release-path",
+                "{RELEASE_PATH}",
+                "--v5-phase-control-dir",
+                "{PHASE_CONTROL_DIR}",
+                "--v5-paired-api-path",
+                "{PAIRED_API_PATH}",
+                "--v5-run-intent-path",
+                "{RUN_INTENT_PATH}",
+                "--v5-run-intent-sha256",
+                "{RUN_INTENT_SHA256}",
+                "--v5-active-phase-index",
+                "{ACTIVE_PHASE_INDEX}",
+                "--v5-ui-session-attestation-path",
+                "{UI_SESSION_ATTESTATION_PATH}",
+                "--v5-previous-backend-pid",
+                "{PREVIOUS_BACKEND_PID}",
+                "--v5-reuse-session-id",
+                "{REUSE_SESSION_ID}",
+                "--v5-reuse-session-attestation-path",
+                "{REUSE_SESSION_ATTESTATION_PATH}",
+                "--v5-source-commit",
+                "{SOURCE_COMMIT}",
+                "--v5-source-tree",
+                "{SOURCE_TREE}",
+                "--bundle-root",
+                str(tmp_path / "model"),
+                "--bundle-fingerprint",
+                bundle["fingerprint_sha256"],
+                "--native-bundle-root",
+                str(tmp_path / "native-model"),
+                "--native-bundle-fingerprint",
+                native_bundle["fingerprint_sha256"],
+                "--model",
+                "fixture-model",
+                "--native-model",
+                "fixture-native-model",
+                "--direct-base-url",
+                "http://127.0.0.1:8001",
+                "--gateway-base-url",
+                "http://127.0.0.1:8080",
+                "--health-url",
+                "http://127.0.0.1:8001/health",
+                "--gateway-health-url",
+                "http://127.0.0.1:8080/health",
+                "--cdp-url",
+                "http://127.0.0.1:9335",
+                "--backend-pid",
+                "9001",
+                "--gateway-pid",
+                "9002",
+                "--electron-pid",
+                "9003",
+                "--fixture-mode",
+                modes[producer],
+            ],
+            "cwd": ROOT,
+            "env": {"VMLINUX_FIXTURE_EVENT_LOG": str(event_log)},
+            "ready_timeout_seconds": 0.5,
+            "producer_timeout_seconds": 5,
+        }
+        for producer in module.V5_PRODUCER_NAMES
+    }
+    common_expected = {
+        "source_commit": source["source_commit"],
+        "source_tree": source["source_tree"],
+        "direct_base_url": "http://127.0.0.1:8001",
+        "gateway_base_url": "http://127.0.0.1:8080",
+        "health_url": "http://127.0.0.1:8001/health",
+        "direct_health_url": "http://127.0.0.1:8001/health",
+        "gateway_health_url": "http://127.0.0.1:8080/health",
+        "cdp_url": "http://127.0.0.1:9335",
+        "electron_pid": 9003,
+        "gateway_pid": 9002,
+    }
+    expected = {
+        module.V5_PRIMARY_REPRESENTATIVE_ID: {
+            **common_expected,
+            "model": "fixture-model",
+            "model_bundle_path": bundle["model_bundle_path"],
+            "bundle_fingerprint_sha256": bundle["fingerprint_sha256"],
+            "native_cache_policy": bundle["derived"]["native_cache"],
+        },
+        module.V5_NATIVE_REPRESENTATIVE_ID: {
+            **common_expected,
+            "model": "fixture-native-model",
+            "model_bundle_path": native_bundle["model_bundle_path"],
+            "bundle_fingerprint_sha256": native_bundle["fingerprint_sha256"],
+            "native_cache_policy": native_bundle["derived"]["native_cache"],
+        },
+    }
+    return (
+        plans,
+        run_context,
+        run_dir,
+        expected,
+        event_log,
+    )
+
+
+def test_r18_v5_concurrent_producers_are_held_until_both_children_finish(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    plans, context, run_dir, expected, event_log = _fixture_orchestration(
+        module,
+        tmp_path,
+    )
+    private_token = "private_" + ("z" * 48)
+    observed_token_modes = []
+    monkeypatch.setattr(
+        module.secrets,
+        "token_urlsafe",
+        lambda _bytes: private_token,
+    )
+
+    def observe_hold(binding):
+        token_path = run_dir / "private-cache-attestation.token"
+        observed_token_modes.append(token_path.stat().st_mode & 0o777)
+        return {
+            "session_id": binding["session_id"],
+            "observed_while_held": True,
+        }
+
+    result = module._v5_execute_producers(
+        plans,
+        context,
+        run_dir,
+        expected_binding=expected,
+        hold_observer=observe_hold,
+    )
+    assert set(result) == set(module.V5_PRODUCER_NAMES)
+    assert observed_token_modes == [0o600] * len(module.V5_CACHE_PHASES)
+    assert not (run_dir / "private-cache-attestation.token").exists()
+    assert private_token not in json.dumps(result, sort_keys=True)
+    events = event_log.read_text(encoding="utf-8").splitlines()
+    for phase in module.V5_CACHE_PHASES:
+        ready = events.index(f"ui_ready:{phase['name']}")
+        api_started = events.index(f"api_capture_start:{phase['name']}")
+        api_completed = events.index(
+            f"api_capture_complete:{phase['name']}"
+        )
+        cache_completed = events.index(
+            f"cache_phase_complete:{phase['name']}"
+        )
+        released = events.index(f"ui_release_seen:{phase['name']}")
+        ui_completed = events.index(
+            f"ui_capture_complete:{phase['name']}"
+        )
+        assert ready < api_started < api_completed
+        assert ready < cache_completed < released < ui_completed
+    final_cache_phase = events.index("cache_phase_complete:native_exception")
+    assert final_cache_phase < events.index("cache_capture_complete")
+    assert result["ui"]["capture"]["phase_count"] == 6
+    assert result["api"]["capture"]["phase_count"] == 6
+
+
+@pytest.mark.parametrize(
+    ("ui_mode", "message"),
+    [
+        ("early_exit", "UI producer exited"),
+        ("no_ready", "UI producer timed out"),
+        ("stale_ready", "UI hold did not become valid"),
+        ("mismatched_session", "UI hold did not become valid"),
+        (
+            "same_backend_pid",
+            "UI hold did not become valid|ui owned producer failed",
+        ),
+        ("phase_mismatch", "UI hold did not become valid"),
+        ("stale_release", "UI"),
+    ],
+)
+def test_r18_v5_concurrent_orchestration_rejects_invalid_ui_lifecycle(
+    tmp_path: Path,
+    ui_mode: str,
+    message: str,
+):
+    module = load_module()
+    plans, context, run_dir, expected, _ = _fixture_orchestration(
+        module,
+        tmp_path,
+        ui_mode=ui_mode,
+    )
+    with pytest.raises(RuntimeError, match=message):
+        module._v5_execute_producers(
+            plans,
+            context,
+            run_dir,
+            expected_binding=expected,
+            hold_observer=lambda binding: {"session_id": binding["session_id"]},
+        )
+
+
+def test_r18_v5_concurrent_orchestration_rejects_mismatched_child_session(
+    tmp_path: Path,
+):
+    module = load_module()
+    plans, context, run_dir, expected, _ = _fixture_orchestration(
+        module,
+        tmp_path,
+        api_mode="mismatched_envelope",
+    )
+    with pytest.raises(RuntimeError, match="not bound to the held UI session"):
+        module._v5_execute_producers(
+            plans,
+            context,
+            run_dir,
+            expected_binding=expected,
+            hold_observer=lambda binding: {"session_id": binding["session_id"]},
+        )
+
+
+def test_r18_v5_production_worker_cli_rejects_stale_coordination_path(
+    tmp_path: Path,
+):
+    run_dir = tmp_path / "private-run"
+    run_dir.mkdir(mode=0o700)
+    (run_dir / "ui.phase-00.session.json").write_text(
+        "stale",
+        encoding="utf-8",
+    )
+    output_path = run_dir / "direct-worker-output.json"
+    output_fd = os.open(
+        output_path,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    command = [
+        str(Path(sys.executable).resolve()),
+        str(SCRIPT),
+        "--v5-owned-worker",
+        "ui",
+        "--v5-output-fd",
+        str(output_fd),
+        "--v5-run-id",
+        "direct-worker",
+        "--v5-nonce",
+        "4" * 32,
+        "--v5-session-binding-path",
+        str(run_dir / "ui.phase-00.session.json"),
+        "--v5-ready-path",
+        str(run_dir / "ui.phase-00.ready.json"),
+        "--v5-release-path",
+        str(run_dir / "ui.phase-00.release.json"),
+        "--v5-phase-control-dir",
+        str(run_dir),
+        "--v5-paired-api-path",
+        str(run_dir / "api.phase-00.matrix.json"),
+        "--v5-cache-artifact-root",
+        str(run_dir / "cache-live-artifacts"),
+        "--v5-source-commit",
+        "a" * 40,
+        "--v5-source-tree",
+        "b" * 40,
+        "--v5-run-intent-path",
+        str(run_dir / "run-intent.json"),
+        "--v5-run-intent-sha256",
+        "c" * 64,
+        "--v5-active-phase-index",
+        "0",
+        "--v5-ui-session-attestation-path",
+        str(run_dir / "ui.phase-00.attestation.json"),
+        "--v5-previous-backend-pid",
+        "0",
+        "--v5-reuse-session-id",
+        "",
+        "--v5-reuse-session-attestation-path",
+        "",
+        "--bundle-root",
+        str(tmp_path / "model"),
+        "--native-bundle-root",
+        str(tmp_path / "native-model"),
+        "--direct-base-url",
+        "http://127.0.0.1:8001",
+        "--gateway-base-url",
+        "http://127.0.0.1:8080",
+        "--health-url",
+        "http://127.0.0.1:8001/health",
+        "--gateway-health-url",
+        "http://127.0.0.1:8080/health",
+        "--cdp-url",
+        "http://127.0.0.1:9335",
+        "--gateway-pid",
+        "9002",
+        "--electron-pid",
+        "9003",
+        "--model",
+        "fixture-model",
+        "--native-model",
+        "fixture-native-model",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "TMPDIR": str(run_dir),
+            },
+            pass_fds=(output_fd,),
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    finally:
+        os.close(output_fd)
+    assert completed.returncode != 0
+    assert output_path.read_bytes() == b""
+
+
+def test_r18_v5_ui_adapter_translates_real_harness_terminal_and_tools():
+    module = load_module()
+    run_id = "ui-adapter"
+    nonce = "5" * 32
+    assistant_ids = ["m1", "m2", "m3"]
+    traces = []
+    calls = []
+    results = []
+    for index, message_id in enumerate(assistant_ids, start=1):
+        events = [
+            {
+                "sequence": 1,
+                "event": "stream",
+                "channel": "reasoning",
+                "messageId": message_id,
+                "delta": f"reason-{index}",
+                "payload": {},
+            }
+        ]
+        call_rows = []
+        result_rows = []
+        if index < 3:
+            call_id = f"call-{index}"
+            name = "file_info" if index == 1 else "run_command"
+            arguments = (
+                {"path": "panel/package.json"}
+                if index == 1
+                else {"command": "pwd"}
+            )
+            call_rows.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    },
+                }
+            )
+            result_rows.append(
+                {"tool_call_id": call_id, "content": f"result-{index}"}
+            )
+            events.extend(
+                [
+                    {
+                        "sequence": 2,
+                        "event": "tool",
+                        "channel": "tool",
+                        "messageId": message_id,
+                        "payload": {
+                            "phase": "calling",
+                            "toolCallId": call_id,
+                            "toolName": name,
+                            "detail": "",
+                        },
+                    },
+                    {
+                        "sequence": 3,
+                        "event": "tool",
+                        "channel": "tool",
+                        "messageId": message_id,
+                        "payload": {
+                            "phase": "result",
+                            "toolCallId": call_id,
+                            "toolName": name,
+                            "detail": f"result-{index}",
+                        },
+                    },
+                ]
+            )
+        events.extend(
+            [
+                {
+                    "sequence": 4,
+                    "event": "stream",
+                    "channel": "content",
+                    "messageId": message_id,
+                    "delta": f"answer-{index}",
+                    "payload": {},
+                },
+                {
+                    "sequence": 5,
+                    "event": "terminal",
+                    "channel": "terminal",
+                    "messageId": message_id,
+                    "payload": {
+                        "responseId": f"resp-{index}",
+                        "finishReason": "stop",
+                        "metrics": {
+                            "ttft": "0.25",
+                            "tokensPerSecond": "50.0",
+                        },
+                    },
+                },
+            ]
+        )
+        traces.append({"messageId": message_id, "events": events})
+        calls.append(call_rows)
+        results.append(result_rows)
+    proof = {
+        "format": module.ELECTRON_PROOF_SCHEMA,
+        "run_id": run_id,
+        "session": {"id": "session-1"},
+        "uiStartControl": {
+            "clicked": True,
+            "label": "Start",
+            "sessionStatusBefore": "stopped",
+            "sessionStatusAfter": "running",
+        },
+        "requestContract": {
+            "promptOne": "one",
+            "promptTwo": "two",
+            "promptThree": "three",
+        },
+        "assistantMessageIds": assistant_ids,
+        "messageEventTrace": traces,
+        "persistedOaiCallsByMessage": calls,
+        "persistedOaiResultsByMessage": results,
+    }
+    proof_bytes = json.dumps(
+        proof,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    capture_bytes = module._v5_ui_normalized_capture(
+        argparse.Namespace(
+            v5_run_id=run_id,
+            v5_nonce=nonce,
+            v5_active_phase_index=5,
+        ),
+        proof,
+        proof_bytes,
+        "session-1",
+    )
+    capture = json.loads(capture_bytes)
+    rows, _ = module._v5_jsonl_bytes(capture["turns"][0]["events_b64"])
+    assert rows is not None
+    tool_call = next(row for row in rows if row["type"] == "tool_call")
+    tool_result = next(row for row in rows if row["type"] == "tool_result")
+    terminal = next(row for row in rows if row["type"] == "terminal")
+    assert tool_call["arguments"] == {"path": "panel/package.json"}
+    assert tool_result["content"] == "result-1"
+    assert terminal["ttft_ms"] == 250.0
+    assert terminal["decode_tps"] == 50.0
+    assert terminal["response_id"] == "resp-1"
+
+
+def test_r18_v5_pins_reject_links_and_bundle_identity_comes_from_bundle(
+    tmp_path: Path,
+):
+    module = load_module()
+    executable = tmp_path / "owned-python"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o700)
+    pin = module._v5_pin_regular_file(executable, executable=True)
+    assert module._v5_pin_unchanged(pin, executable=True)
+    alias = tmp_path / "python-alias"
+    alias.symlink_to(executable)
+    with pytest.raises(ValueError):
+        module._v5_pin_regular_file(alias, executable=True)
+
+    model = tmp_path / "mxfp-model"
+    bundle_attestation(module, model)
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "_name_or_path": "bundle-owned-name",
+                "model_type": "gemma4",
+                "architectures": ["Gemma4ForCausalLM"],
+                "quantization": "MXFP8",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (model / "jang_config.json").write_text("{}\n", encoding="utf-8")
+    snapshot = module._read_bundle_directory_snapshot(model.resolve())
+    assert snapshot is not None
+    assert snapshot["derived"]["quantization_kind"] == "mxfp"
+    contract = module._bundle_family_contract(
+        snapshot,
+        {
+            "model_name": "health-lie",
+            "model_type": "wrong",
+            "quantization_kind": "jangtq",
+        },
+    )
+    assert contract["model_name"] == "bundle-owned-name"
+    assert contract["model_type"] == "gemma4"
+    assert contract["quantization"]["weight_format"] == "mxfp"
+
+
+def test_r18_v5_git_drift_invalidates_source_and_scope_facts(tmp_path: Path):
+    module = load_module()
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    before = {
+        "commit": "a" * 40,
+        "tree": "b" * 40,
+        "status_porcelain": "",
+        "upstream_commit": "a" * 40,
+        "remote_main_commit": "a" * 40,
+        "main_only": 0,
+        "branch_only": 0,
+        "remote_identity": "jjang-ai/vmlx",
+        "release_diff_sha256": "c" * 64,
+        "release_diff_bytes": b"M\tpanel/src/main/index.ts\n",
+    }
+    after = deepcopy(before)
+    after["commit"] = "d" * 40
+    source_facts, scope_facts = module._v5_source_and_scope_facts(
+        before,
+        after,
+        {},
+        bundle,
+    )
+    assert source_facts == set()
+    assert scope_facts == set()
+
+
+def test_r18_v5_cli_has_no_author_pass_attestation_option(tmp_path: Path):
+    module = load_module()
+    argv = [
+        "--private-evidence-root",
+        str(tmp_path),
+        "--out",
+        str(tmp_path / "out.json"),
+        "--bundle-root",
+        str(tmp_path / "model"),
+        "--native-bundle-root",
+        str(tmp_path / "native-model"),
+        "--model",
+        "fixture",
+        "--native-model",
+        "fixture-native",
+        "--direct-base-url",
+        "http://127.0.0.1:8001",
+        "--gateway-base-url",
+        "http://127.0.0.1:8080",
+        "--health-url",
+        "http://127.0.0.1:8001/health",
+        "--gateway-health-url",
+        "http://127.0.0.1:8080/health",
+        "--cdp-url",
+        "http://127.0.0.1:9335",
+        "--backend-pid",
+        "1",
+        "--gateway-pid",
+        "2",
+        "--electron-pid",
+        "3",
+        "--jang-source",
+        str(tmp_path / "jang"),
+        "--author-attestation",
+        str(tmp_path / "preauthored.json"),
+    ]
+    with pytest.raises(SystemExit):
+        module._v5_parser().parse_args(argv)
+
+
+def test_r18_v5_packaging_consumer_revalidates_exact_source_and_jang(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    private_root = tmp_path / "private"
+    private_root.mkdir()
+    manifest_path = private_root / "release.json"
+    output = tmp_path / "build" / "preflight.json"
+    versions = {"python": module.VERSION, "panel": module.VERSION}
+    source = {
+        "commit": "a" * 40,
+        "tree": "b" * 40,
+        "upstream_commit": "a" * 40,
+        "remote_main_commit": "a" * 40,
+        "remote_identity": "jjang-ai/vmlx",
+        "main_only": 0,
+        "branch_only": 0,
+        "release_diff_sha256": "c" * 64,
+    }
+    jang = {
+        "version": module.JANG_VERSION,
+        "commit": module.JANG_COMMIT,
+        "tree": module.JANG_TREE,
+        "upstream_commit": module.JANG_COMMIT,
+        "remote_main_commit": module.JANG_COMMIT,
+        "remote_identity": "jjang-ai/jangq",
+    }
+    checks = {
+        name: {
+            "status": "pass",
+            "assertions": {
+                assertion: True
+                for assertion in module.V5_RELEASE_ASSERTIONS[name]
+            },
+            "evidence_sha256": ["d" * 64],
+        }
+        for name in module.V5_REQUIRED_CHECKS
+    }
+    manifest = {
+        "schema": module.V5_MANIFEST_SCHEMA,
+        "scope": module.SCOPE,
+        "version": module.VERSION,
+        "status": "pass",
+        "failures": [],
+        "run": {"run_id": "release-run"},
+        "source": source,
+        "jang": jang,
+        "versions": versions,
+        "checks": checks,
+        "completion": {"state": "complete"},
+    }
+    manifest["completion"]["run_digest"] = module._v5_manifest_digest(manifest)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr(module, "validate_versions", lambda failures: versions)
+    monkeypatch.setattr(
+        module,
+        "validate_private_evidence_root",
+        lambda configured, failures: private_root.resolve(),
+    )
+    monkeypatch.setattr(module, "_v5_git_snapshot", lambda: source)
+    monkeypatch.setattr(module, "validate_jang_source", lambda failures: jang)
+
+    assert (
+        module._v5_consume_manifest_main(
+            [
+                "--expected-version",
+                module.VERSION,
+                "--manifest",
+                str(manifest_path),
+                "--private-evidence-root",
+                str(private_root),
+                "--out",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(output.read_text(encoding="utf-8")) == manifest
+
+
+def _v5_fixture_child(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--v5-fixture-producer", choices=("ui", "api", "cache"))
+    group.add_argument(
+        "--v5-fixture-command",
+        choices=(
+            "full_python_suite",
+            "full_panel_suite",
+            "typecheck",
+            "production_build",
+            "jang_build",
+            "jang_venv",
+            "jang_install",
+            "jang_import",
+            "jang_test",
+        ),
+    )
+    parser.add_argument("--output-fd", type=int)
+    parser.add_argument("--run-id")
+    parser.add_argument("--nonce")
+    parser.add_argument("--v5-session-binding-path", type=Path)
+    parser.add_argument("--v5-ready-path", type=Path)
+    parser.add_argument("--v5-release-path", type=Path)
+    parser.add_argument("--v5-phase-control-dir", type=Path)
+    parser.add_argument("--v5-paired-api-path", type=Path)
+    parser.add_argument("--v5-run-intent-path", type=Path)
+    parser.add_argument("--v5-run-intent-sha256")
+    parser.add_argument("--v5-active-phase-index", type=int)
+    parser.add_argument("--v5-ui-session-attestation-path", type=Path)
+    parser.add_argument("--v5-previous-backend-pid", type=int, default=0)
+    parser.add_argument("--v5-reuse-session-id", default="")
+    parser.add_argument("--v5-reuse-session-attestation-path", default="")
+    parser.add_argument("--v5-source-commit")
+    parser.add_argument("--v5-source-tree")
+    parser.add_argument("--bundle-root", type=Path)
+    parser.add_argument("--bundle-fingerprint")
+    parser.add_argument("--native-bundle-root", type=Path)
+    parser.add_argument("--native-bundle-fingerprint")
+    parser.add_argument("--model")
+    parser.add_argument("--native-model")
+    parser.add_argument("--direct-base-url")
+    parser.add_argument("--gateway-base-url")
+    parser.add_argument("--health-url")
+    parser.add_argument("--gateway-health-url")
+    parser.add_argument("--cdp-url")
+    parser.add_argument("--backend-pid", type=int)
+    parser.add_argument("--gateway-pid", type=int)
+    parser.add_argument("--electron-pid", type=int)
+    parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--distribution-root", type=Path)
+    parser.add_argument("--isolated-venv", type=Path)
+    parser.add_argument(
+        "--fixture-mode",
+        choices=(
+            "normal",
+            "early_exit",
+            "no_ready",
+            "stale_ready",
+            "stale_release",
+            "mismatched_session",
+            "mismatched_envelope",
+            "same_backend_pid",
+            "phase_mismatch",
+        ),
+        default="normal",
+    )
+    parser.add_argument("--event-log", type=Path)
+    args = parser.parse_args(argv)
+
+    def record(event: str) -> None:
+        event_log = args.event_log or (
+            Path(os.environ["VMLINUX_FIXTURE_EVENT_LOG"])
+            if os.environ.get("VMLINUX_FIXTURE_EVENT_LOG")
+            else None
+        )
+        if event_log is None:
+            return
+        descriptor = os.open(
+            event_log,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        try:
+            os.write(descriptor, f"{event}\n".encode())
+        finally:
+            os.close(descriptor)
+
+    time.sleep(0.2)
+    if args.v5_fixture_producer:
+        assert args.output_fd is not None and args.run_id and args.nonce
+        module = load_module()
+        coordinated = all(
+            (
+                args.v5_session_binding_path,
+                args.v5_ready_path,
+                args.v5_release_path,
+                args.v5_phase_control_dir,
+            )
+        )
+        primary_session_id = "fixture-held-session"
+        native_session_id = "fixture-native-session"
+        session_id = primary_session_id
+        phase_releases = None
+        cache_phase_bindings = None
+        if not coordinated:
+            if args.v5_fixture_producer == "ui":
+                capture, _ = _fixture_ui_capture(
+                    module,
+                    args.run_id,
+                    args.nonce,
+                )
+            elif args.v5_fixture_producer == "api":
+                capture = _fixture_api_capture(module, args.run_id, args.nonce)
+            else:
+                capture = _fixture_cache_capture(
+                    module,
+                    args.run_id,
+                    args.nonce,
+                )
+            binding_bytes = b""
+        elif (
+            args.v5_fixture_producer == "ui"
+            and args.v5_active_phase_index is not None
+        ):
+            phase = module.V5_CACHE_PHASES[args.v5_active_phase_index]
+            is_native = (
+                phase["representative_id"]
+                == module.V5_NATIVE_REPRESENTATIVE_ID
+            )
+            session_id = (
+                native_session_id if is_native else primary_session_id
+            )
+            phase_model = args.native_model if is_native else args.model
+            phase_bundle_root = (
+                args.native_bundle_root if is_native else args.bundle_root
+            )
+            phase_bundle_fingerprint = (
+                args.native_bundle_fingerprint
+                if is_native
+                else args.bundle_fingerprint
+            )
+            if args.fixture_mode == "no_ready" and phase["index"] == 0:
+                record("ui_no_ready")
+                time.sleep(2)
+                return 7
+            backend_pid = (
+                int(args.backend_pid)
+                if args.fixture_mode == "same_backend_pid"
+                else int(args.backend_pid) + phase["index"]
+            )
+            binding = {
+                "schema": module.V5_SESSION_BINDING_SCHEMA,
+                "run_id": args.run_id,
+                "nonce": args.nonce,
+                "ui_producer_pid": os.getpid(),
+                "source_commit": args.v5_source_commit,
+                "source_tree": args.v5_source_tree,
+                "model": phase_model,
+                "model_bundle_path": str(phase_bundle_root.resolve()),
+                "bundle_fingerprint_sha256": phase_bundle_fingerprint,
+                "session_id": session_id,
+                "direct_base_url": args.direct_base_url,
+                "gateway_base_url": args.gateway_base_url,
+                "health_url": args.health_url,
+                "direct_health_url": args.health_url,
+                "gateway_health_url": args.gateway_health_url,
+                "cdp_url": args.cdp_url,
+                "backend_pid": backend_pid,
+                "previous_backend_pid": (
+                    args.v5_previous_backend_pid or None
+                ),
+                "session_start_ordinal": phase["index"] + 1,
+                "gateway_pid": args.gateway_pid,
+                "electron_pid": args.electron_pid,
+                "harness_binding_sha256": "d" * 64,
+                "phase_index": phase["index"],
+                "phase_name": (
+                    "wrong-phase"
+                    if (
+                        args.fixture_mode == "phase_mismatch"
+                        and phase["index"] == 1
+                    )
+                    else phase["name"]
+                ),
+                "representative_id": phase["representative_id"],
+                "bundle_role": phase["bundle_role"],
+                "cache_policy": phase["cache_policy"],
+                "kv_cache_quantization": phase[
+                    "kv_cache_quantization"
+                ],
+                "tq_policy": phase["tq_policy"],
+                "session_policy": phase["session_policy"],
+                "ui_action_profile": phase["ui_action_profile"],
+                "ui_turn_count": phase["ui_turn_count"],
+                "api_action_profile": phase["api_action_profile"],
+                "paged_ram": phase["paged_ram"],
+            }
+            binding_bytes = json.dumps(
+                binding,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            args.v5_session_binding_path.write_bytes(binding_bytes)
+            args.v5_session_binding_path.chmod(0o600)
+            ready = {
+                "schema": module.V5_UI_READY_SCHEMA,
+                "run_id": args.run_id,
+                "nonce": args.nonce,
+                "ui_producer_pid": os.getpid(),
+                "session_id": (
+                    "wrong-ready-session"
+                    if (
+                        args.fixture_mode == "mismatched_session"
+                        and phase["index"] == 0
+                    )
+                    else session_id
+                ),
+                "binding_sha256": hashlib.sha256(binding_bytes).hexdigest(),
+                "held": True,
+                "phase_index": phase["index"],
+                "phase_name": phase["name"],
+                "representative_id": phase["representative_id"],
+                "bundle_role": phase["bundle_role"],
+                "cache_policy": phase["cache_policy"],
+                "kv_cache_quantization": phase[
+                    "kv_cache_quantization"
+                ],
+                "tq_policy": phase["tq_policy"],
+                "session_policy": phase["session_policy"],
+                "ui_action_profile": phase["ui_action_profile"],
+                "ui_turn_count": phase["ui_turn_count"],
+                "api_action_profile": phase["api_action_profile"],
+                "paged_ram": phase["paged_ram"],
+                "ready_at": (
+                    "2020-01-01T00:00:00Z"
+                    if (
+                        args.fixture_mode == "stale_ready"
+                        and phase["index"] == 0
+                    )
+                    else module._iso_now()
+                ),
+            }
+            args.v5_ready_path.write_text(
+                json.dumps(ready, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            args.v5_ready_path.chmod(0o600)
+            attestation = {
+                "schema": module.V5_UI_SESSION_ATTESTATION_SCHEMA,
+                "run_id": args.run_id,
+                "nonce": args.nonce,
+                "run_intent_sha256": args.v5_run_intent_sha256,
+                "phase_index": phase["index"],
+                "phase_name": phase["name"],
+                "representative_id": phase["representative_id"],
+                "bundle_role": phase["bundle_role"],
+                "cache_policy": phase["cache_policy"],
+                "paged_ram": phase["paged_ram"],
+                "ui_action_profile": phase["ui_action_profile"],
+                "ui_turn_count": phase["ui_turn_count"],
+                "api_action_profile": phase["api_action_profile"],
+                "ui_producer_pid": os.getpid(),
+                "session_id": session_id,
+                "model": phase_model,
+                "model_bundle_path": str(phase_bundle_root.resolve()),
+                "bundle_fingerprint_sha256": phase_bundle_fingerprint,
+                "backend_pid": backend_pid,
+                "gateway_pid": args.gateway_pid,
+                "direct_base_url": args.direct_base_url,
+                "gateway_base_url": args.gateway_base_url,
+                "electron_pid": args.electron_pid,
+                "cdp_origin": args.cdp_url,
+                "lifecycle_owner": "parent",
+                "source_commit": args.v5_source_commit,
+                "source_tree": args.v5_source_tree,
+                "renderer_source_sha256": "e" * 64,
+                "session_binding_sha256": "d" * 64,
+                "created_at": module._iso_now(),
+            }
+            args.v5_ui_session_attestation_path.write_text(
+                json.dumps(
+                    attestation,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            args.v5_ui_session_attestation_path.chmod(0o600)
+            record(f"ui_ready:{phase['name']}")
+            if args.fixture_mode == "early_exit" and phase["index"] == 0:
+                record("ui_early_exit")
+                return 6
+            if args.fixture_mode == "stale_release" and phase["index"] == 0:
+                args.v5_release_path.write_text(
+                    '{"stale":true}',
+                    encoding="utf-8",
+                )
+                args.v5_release_path.chmod(0o600)
+                record("ui_stale_release")
+            deadline = time.monotonic() + 8
+            while not args.v5_release_path.exists():
+                if time.monotonic() >= deadline:
+                    return 9
+                time.sleep(0.01)
+            release_bytes = args.v5_release_path.read_bytes()
+            release = json.loads(release_bytes)
+            assert release["schema"] == module.V5_UI_RELEASE_SCHEMA
+            assert release["run_id"] == args.run_id
+            assert release["nonce"] == args.nonce
+            assert release["session_id"] == session_id
+            assert release["phase_index"] == phase["index"]
+            record(f"ui_release_seen:{phase['name']}")
+            capture, _ = _fixture_ui_capture(
+                module,
+                args.run_id,
+                args.nonce,
+                session_id=session_id,
+                phase_index=phase["index"],
+            )
+        elif args.v5_fixture_producer == "ui":
+            assert args.v5_session_binding_path
+            assert args.v5_ready_path
+            assert args.v5_release_path
+            assert args.v5_phase_control_dir
+            if args.fixture_mode == "no_ready":
+                record("ui_no_ready")
+                time.sleep(2)
+                return 7
+            phase_releases = []
+            previous_backend_pid = None
+            for phase in module.V5_CACHE_PHASES:
+                is_native = (
+                    phase["representative_id"]
+                    == module.V5_NATIVE_REPRESENTATIVE_ID
+                )
+                phase_session_id = (
+                    native_session_id if is_native else primary_session_id
+                )
+                phase_model = args.native_model if is_native else args.model
+                phase_bundle_root = (
+                    args.native_bundle_root if is_native else args.bundle_root
+                )
+                phase_bundle_fingerprint = (
+                    args.native_bundle_fingerprint
+                    if is_native
+                    else args.bundle_fingerprint
+                )
+                paths = module._v5_existing_phase_paths(
+                    args.v5_phase_control_dir,
+                    phase,
+                )
+                backend_pid = (
+                    int(args.backend_pid)
+                    if args.fixture_mode == "same_backend_pid"
+                    else int(args.backend_pid) + phase["index"]
+                )
+                binding = {
+                    "schema": module.V5_SESSION_BINDING_SCHEMA,
+                    "run_id": args.run_id,
+                    "nonce": args.nonce,
+                    "ui_producer_pid": os.getpid(),
+                    "source_commit": args.v5_source_commit,
+                    "source_tree": args.v5_source_tree,
+                    "model": phase_model,
+                    "model_bundle_path": str(phase_bundle_root.resolve()),
+                    "bundle_fingerprint_sha256": phase_bundle_fingerprint,
+                    "session_id": phase_session_id,
+                    "direct_base_url": args.direct_base_url,
+                    "gateway_base_url": args.gateway_base_url,
+                    "health_url": args.health_url,
+                    "direct_health_url": args.health_url,
+                    "gateway_health_url": args.gateway_health_url,
+                    "cdp_url": args.cdp_url,
+                    "backend_pid": backend_pid,
+                    "previous_backend_pid": previous_backend_pid,
+                    "session_start_ordinal": phase["index"] + 1,
+                    "gateway_pid": args.gateway_pid,
+                    "electron_pid": args.electron_pid,
+                    "phase_index": phase["index"],
+                    "phase_name": (
+                        "wrong-phase"
+                        if (
+                            args.fixture_mode == "phase_mismatch"
+                            and phase["index"] == 1
+                        )
+                        else phase["name"]
+                    ),
+                    "representative_id": phase["representative_id"],
+                    "bundle_role": phase["bundle_role"],
+                    "cache_policy": phase["cache_policy"],
+                    "kv_cache_quantization": phase[
+                        "kv_cache_quantization"
+                    ],
+                    "tq_policy": phase["tq_policy"],
+                    "session_policy": phase["session_policy"],
+                    "ui_action_profile": phase["ui_action_profile"],
+                    "ui_turn_count": phase["ui_turn_count"],
+                    "api_action_profile": phase["api_action_profile"],
+                    "paged_ram": phase["paged_ram"],
+                }
+                binding_bytes = json.dumps(
+                    binding,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+                binding_fd = os.open(
+                    paths["binding"],
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                try:
+                    os.write(binding_fd, binding_bytes)
+                    os.fsync(binding_fd)
+                finally:
+                    os.close(binding_fd)
+                ready = {
+                    "schema": module.V5_UI_READY_SCHEMA,
+                    "run_id": args.run_id,
+                    "nonce": args.nonce,
+                    "ui_producer_pid": os.getpid(),
+                    "session_id": (
+                        "wrong-ready-session"
+                        if (
+                            args.fixture_mode == "mismatched_session"
+                            and phase["index"] == 0
+                        )
+                        else phase_session_id
+                    ),
+                    "binding_sha256": hashlib.sha256(binding_bytes).hexdigest(),
+                    "held": True,
+                    "phase_index": phase["index"],
+                    "phase_name": phase["name"],
+                    "representative_id": phase["representative_id"],
+                    "bundle_role": phase["bundle_role"],
+                    "cache_policy": phase["cache_policy"],
+                    "kv_cache_quantization": phase[
+                        "kv_cache_quantization"
+                    ],
+                    "tq_policy": phase["tq_policy"],
+                    "session_policy": phase["session_policy"],
+                    "ui_action_profile": phase["ui_action_profile"],
+                    "ui_turn_count": phase["ui_turn_count"],
+                    "api_action_profile": phase["api_action_profile"],
+                    "paged_ram": phase["paged_ram"],
+                    "ready_at": (
+                        "2020-01-01T00:00:00Z"
+                        if (
+                            args.fixture_mode == "stale_ready"
+                            and phase["index"] == 0
+                        )
+                        else module._iso_now()
+                    ),
+                }
+                ready_fd = os.open(
+                    paths["ready"],
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                try:
+                    os.write(
+                        ready_fd,
+                        json.dumps(
+                            ready,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode(),
+                    )
+                    os.fsync(ready_fd)
+                finally:
+                    os.close(ready_fd)
+                record(f"ui_ready:{phase['name']}")
+                if args.fixture_mode == "early_exit" and phase["index"] == 0:
+                    record("ui_early_exit")
+                    return 6
+                if args.fixture_mode == "stale_release" and phase["index"] == 0:
+                    release_fd = os.open(
+                        paths["release"],
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                    try:
+                        os.write(release_fd, b'{"stale":true}')
+                        os.fsync(release_fd)
+                    finally:
+                        os.close(release_fd)
+                    record("ui_stale_release")
+                deadline = time.monotonic() + 8
+                while not paths["release"].exists():
+                    if time.monotonic() >= deadline:
+                        return 9
+                    time.sleep(0.01)
+                release_bytes = paths["release"].read_bytes()
+                release = json.loads(release_bytes)
+                assert release["schema"] == module.V5_UI_RELEASE_SCHEMA
+                assert release["run_id"] == args.run_id
+                assert release["nonce"] == args.nonce
+                assert release["session_id"] == phase_session_id
+                assert release["phase_index"] == phase["index"]
+                phase_releases.append(
+                    {
+                        "phase_index": phase["index"],
+                        "phase_name": phase["name"],
+                        "representative_id": phase["representative_id"],
+                        "cache_policy": phase["cache_policy"],
+                        "kv_cache_quantization": phase[
+                            "kv_cache_quantization"
+                        ],
+                        "tq_policy": phase["tq_policy"],
+                        "session_policy": phase["session_policy"],
+                        "ui_action_profile": phase["ui_action_profile"],
+                        "ui_turn_count": phase["ui_turn_count"],
+                        "api_action_profile": phase["api_action_profile"],
+                        "release_sha256": hashlib.sha256(
+                            release_bytes
+                        ).hexdigest(),
+                    }
+                )
+                record(f"ui_release_seen:{phase['name']}")
+                previous_backend_pid = backend_pid
+                session_id = phase_session_id
+            capture, _ = _fixture_ui_capture(
+                module,
+                args.run_id,
+                args.nonce,
+                session_id=primary_session_id,
+            )
+        else:
+            assert args.v5_session_binding_path
+            deadline = time.monotonic() + 8
+            while not args.v5_session_binding_path.exists():
+                if time.monotonic() >= deadline:
+                    return 8
+                time.sleep(0.01)
+            binding_bytes = args.v5_session_binding_path.read_bytes()
+            binding = json.loads(binding_bytes)
+            assert binding["run_id"] == args.run_id
+            assert binding["nonce"] == args.nonce
+            session_id = str(binding["session_id"])
+            record(f"{args.v5_fixture_producer}_capture_start")
+            if args.v5_fixture_producer == "api":
+                phase_index = int(args.v5_active_phase_index or 0)
+                phase = module.V5_CACHE_PHASES[phase_index]
+                record(f"api_capture_start:{phase['name']}")
+                capture = _fixture_api_capture(
+                    module,
+                    args.run_id,
+                    args.nonce,
+                    phase_index=phase_index,
+                    session_id=binding["session_id"],
+                )
+                capture["session_binding_sha256"] = hashlib.sha256(
+                    binding_bytes
+                ).hexdigest()
+                assert args.v5_paired_api_path
+                args.v5_paired_api_path.write_text(
+                    json.dumps(
+                        {
+                            "schema": "fixture-phase-api-matrix",
+                            "run_id": args.run_id,
+                            "phase_index": phase_index,
+                            "session_id": binding["session_id"],
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    encoding="utf-8",
+                )
+                args.v5_paired_api_path.chmod(0o600)
+            else:
+                assert args.v5_phase_control_dir
+                capture = _fixture_cache_capture(
+                    module,
+                    args.run_id,
+                    args.nonce,
+                    bundle_fingerprint=args.bundle_fingerprint,
+                    native_bundle_fingerprint=args.native_bundle_fingerprint,
+                    model=args.model,
+                    native_model=args.native_model,
+                    session_id=primary_session_id,
+                    native_session_id=native_session_id,
+                )
+                cache_phase_bindings = []
+                for phase, scenario in zip(
+                    module.V5_CACHE_PHASES,
+                    capture["phases"],
+                    strict=True,
+                ):
+                    gate_operation = module._v5_cache_gate_operation(phase)
+                    paths = module._v5_existing_phase_paths(
+                        args.v5_phase_control_dir,
+                        phase,
+                    )
+                    phase_deadline = time.monotonic() + 8
+                    while not (
+                        paths["binding"].exists() and paths["ready"].exists()
+                    ):
+                        if time.monotonic() >= phase_deadline:
+                            return 8
+                        time.sleep(0.01)
+                    phase_binding_bytes = paths["binding"].read_bytes()
+                    phase_binding = json.loads(phase_binding_bytes)
+                    binding_digest = hashlib.sha256(
+                        phase_binding_bytes
+                    ).hexdigest()
+                    scenario["backend_pid"] = phase_binding["backend_pid"]
+                    scenario["session_binding_sha256"] = binding_digest
+                    summary = json.loads(
+                        base64.b64decode(scenario["summary_b64"])
+                    )
+                    summary["identity"]["observed_engine"]["pid"] = phase_binding[
+                        "backend_pid"
+                    ]
+                    summary_bytes = json.dumps(
+                        summary,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                    scenario["summary_b64"] = _fixture_b64(summary_bytes)
+                    manifest = [
+                        {
+                            "relative_path": "summary.json",
+                            "sha256": hashlib.sha256(summary_bytes).hexdigest(),
+                            "size": len(summary_bytes),
+                        }
+                    ]
+                    scenario["artifact_manifest_b64"] = _fixture_json_b64(
+                        manifest
+                    )
+                    if gate_operation == "store":
+                        store_sha = hashlib.sha256(summary_bytes).hexdigest()
+                    else:
+                        scenario["linked_store_summary_sha256"] = store_sha
+                    done = {
+                        "schema": module.V5_CACHE_PHASE_DONE_SCHEMA,
+                        "run_id": args.run_id,
+                        "nonce": args.nonce,
+                        "phase_index": phase["index"],
+                        "phase_name": phase["name"],
+                        "representative_id": phase["representative_id"],
+                        "bundle_role": phase["bundle_role"],
+                        "cache_policy": phase["cache_policy"],
+                        "kv_cache_quantization": phase[
+                            "kv_cache_quantization"
+                        ],
+                        "tq_policy": phase["tq_policy"],
+                        "session_policy": phase["session_policy"],
+                        "operation": phase["operation"],
+                        "ui_action_profile": phase["ui_action_profile"],
+                        "ui_turn_count": phase["ui_turn_count"],
+                        "api_action_profile": phase["api_action_profile"],
+                        "paged_ram": phase["paged_ram"],
+                        "session_id": phase_binding["session_id"],
+                        "backend_pid": phase_binding["backend_pid"],
+                        "session_binding_sha256": binding_digest,
+                        "summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
+                        "completed_at": module._iso_now(),
+                    }
+                    done_bytes = json.dumps(
+                        done,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                    done_fd = os.open(
+                        paths["cache_done"],
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                    try:
+                        os.write(done_fd, done_bytes)
+                        os.fsync(done_fd)
+                    finally:
+                        os.close(done_fd)
+                    cache_phase_bindings.append(
+                        {
+                            "phase_index": phase["index"],
+                            "phase_name": phase["name"],
+                            "representative_id": phase["representative_id"],
+                            "cache_policy": phase["cache_policy"],
+                            "kv_cache_quantization": phase[
+                                "kv_cache_quantization"
+                            ],
+                            "tq_policy": phase["tq_policy"],
+                            "session_policy": phase["session_policy"],
+                            "ui_action_profile": phase["ui_action_profile"],
+                            "ui_turn_count": phase["ui_turn_count"],
+                            "api_action_profile": phase["api_action_profile"],
+                            "session_id": phase_binding["session_id"],
+                            "model": phase_binding["model"],
+                            "bundle_fingerprint_sha256": phase_binding[
+                                "bundle_fingerprint_sha256"
+                            ],
+                            "backend_pid": phase_binding["backend_pid"],
+                            "session_binding_sha256": binding_digest,
+                        }
+                    )
+                    record(f"cache_phase_complete:{phase['name']}")
+                    phase_deadline = time.monotonic() + 8
+                    while not paths["release"].exists():
+                        if time.monotonic() >= phase_deadline:
+                            return 9
+                        time.sleep(0.01)
+                phase2_summary_bytes = base64.b64decode(
+                    capture["phases"][2]["summary_b64"]
+                )
+                phase3_summary_bytes = base64.b64decode(
+                    capture["phases"][3]["summary_b64"]
+                )
+                capture["l2_size_eviction_attestation"] = (
+                    module._v5_derive_l2_size_eviction_attestation(
+                        run_id=args.run_id,
+                        nonce=args.nonce,
+                        phase2_summary=json.loads(phase2_summary_bytes),
+                        phase2_summary_sha256=hashlib.sha256(
+                            phase2_summary_bytes
+                        ).hexdigest(),
+                        phase3_summary=json.loads(phase3_summary_bytes),
+                        phase3_summary_sha256=hashlib.sha256(
+                            phase3_summary_bytes
+                        ).hexdigest(),
+                    )
+                )
+                binding_bytes = phase_binding_bytes
+                binding = phase_binding
+        envelope = {
+            "schema": module.V5_PRODUCER_ENVELOPE_SCHEMA,
+            "producer": args.v5_fixture_producer,
+            "run_id": args.run_id,
+            "nonce": args.nonce,
+            "captures": [
+                _fixture_b64(
+                    json.dumps(
+                        capture,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                )
+            ],
+        }
+        if coordinated:
+            envelope.update(
+                {
+                    "session_id": (
+                        "wrong-envelope-session"
+                        if args.fixture_mode == "mismatched_envelope"
+                        else session_id
+                    ),
+                    "session_binding_sha256": hashlib.sha256(
+                        binding_bytes
+                    ).hexdigest(),
+                    "captured_during_ui_hold": True,
+                }
+            )
+        if (
+            coordinated
+            and args.v5_fixture_producer in {"ui", "api"}
+            and args.v5_active_phase_index is not None
+        ):
+            active_phase = module.V5_CACHE_PHASES[
+                args.v5_active_phase_index
+            ]
+            envelope.update(
+                {
+                    "phase_index": active_phase["index"],
+                    "phase_name": active_phase["name"],
+                    "representative_id": active_phase[
+                        "representative_id"
+                    ],
+                    "ui_action_profile": active_phase[
+                        "ui_action_profile"
+                    ],
+                    "ui_turn_count": active_phase["ui_turn_count"],
+                    "api_action_profile": active_phase[
+                        "api_action_profile"
+                    ],
+                }
+            )
+        if coordinated and args.v5_fixture_producer == "ui":
+            envelope["release_sha256"] = hashlib.sha256(release_bytes).hexdigest()
+            if phase_releases is not None:
+                envelope["phase_releases"] = phase_releases
+        if coordinated and args.v5_fixture_producer == "cache":
+            envelope["phase_bindings"] = cache_phase_bindings
+        os.write(
+            args.output_fd,
+            json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode(),
+        )
+        record(f"{args.v5_fixture_producer}_capture_complete")
+        if (
+            args.v5_fixture_producer in {"ui", "api"}
+            and args.v5_active_phase_index is not None
+        ):
+            active_phase = module.V5_CACHE_PHASES[
+                args.v5_active_phase_index
+            ]
+            record(
+                f"{args.v5_fixture_producer}_capture_complete:"
+                f"{active_phase['name']}"
+            )
+        sys.stdin.buffer.readline()
+        return 0
+    command = args.v5_fixture_command
+    if command == "full_python_suite":
+        print("collected 1000 items")
+        print("1000 passed")
+    elif command == "full_panel_suite":
+        print("Test Files 5 passed")
+        print("Tests 50 passed")
+    elif command == "typecheck":
+        print("typecheck complete")
+    elif command == "production_build":
+        assert args.output_root
+        for relative in (
+            "main/index.js",
+            "preload/index.js",
+            "renderer/index.html",
+        ):
+            path = args.output_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"fixture {relative}\n", encoding="utf-8")
+        print("build the electron main process successfully")
+        print("build the preload scripts successfully")
+        print("build the renderer process successfully")
+    elif command == "jang_build":
+        assert args.distribution_root
+        args.distribution_root.mkdir(parents=True, exist_ok=True)
+        (args.distribution_root / "jang_tools-2.5.34-py3-none-any.whl").write_bytes(
+            b"fixture-wheel"
+        )
+        (args.distribution_root / "jang_tools-2.5.34.tar.gz").write_bytes(
+            b"fixture-sdist"
+        )
+    elif command == "jang_venv":
+        assert args.isolated_venv
+        package = (
+            args.isolated_venv
+            / "lib/python3.13/site-packages/jang_tools/__init__.py"
+        )
+        package.parent.mkdir(parents=True, exist_ok=True)
+        package.write_text('__version__ = "2.5.34"\n', encoding="utf-8")
+    elif command == "jang_import":
+        assert args.isolated_venv
+        package = (
+            args.isolated_venv
+            / "lib/python3.13/site-packages/jang_tools/__init__.py"
+        )
+        print(
+            "VMLINUX_INSTALLED_IMPORT="
+            + json.dumps(
+                {"file": str(package), "version": "2.5.34"},
+                sort_keys=True,
+            )
+        )
+    elif command == "jang_test":
+        print("collected 3 items")
+        print("3 passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_v5_fixture_child(sys.argv[1:]))

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import plistlib
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -248,12 +249,20 @@ def _issue169_checks(root: Path) -> dict[str, bool]:
     release = _read(root / "panel/scripts/build-release-dmgs.sh")
     pkg = _load_json(root / "panel/package.json")
     engine_tests = _read(root / "tests/test_engine_audit.py")
+    sequoia_wheel_bound = re.search(
+        r'(?m)^\s*sequoia\)\s*wheel_tag="macosx_14_0_arm64"\s*$',
+        release,
+    )
+    tahoe_wheel_bound = re.search(
+        r'(?m)^\s*tahoe\)\s*wheel_tag="macosx_26_0_arm64"\s*$',
+        release,
+    )
     return {
         "dual_public_dmg_flavors": (
             'build_one "sequoia" "compat"' in release
             and 'build_one "tahoe" "native"' in release
-            and 'sequoia) wheel_tag="macosx_14_0_arm64"' in release
-            and 'tahoe) wheel_tag="macosx_26_0_arm64"' in release
+            and sequoia_wheel_bound is not None
+            and tahoe_wheel_bound is not None
         ),
         "compat_wheel_default": (
             'auto|compat|sonoma|sequoia|"")' in bundle

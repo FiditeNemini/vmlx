@@ -738,8 +738,8 @@
       "connecting": "연결 중...",
       "starting": "시작 중...",
       "cancel": "취소",
-      "jangNoticeHeader": "JANG 모델 업데이트 필요:",
-      "jangNoticeBody": "2026년 3월 19일부터 모든 JANG 모델은 올바른 채팅 템플릿을 포함하기 위해 HuggingFace (JANGQ-AI)에서 다시 다운로드해야 합니다. 업데이트된 모델이 없으면 사고 켜기/끄기가 올바르게 작동하지 않을 수 있으며 일부 모델은 반복될 수 있습니다.",
+      "missingChatTemplateHeader": "채팅 템플릿 누락:",
+      "missingChatTemplateBody": "이 모델 번들에는 사용할 수 있는 채팅 템플릿이 없습니다. 채팅 형식, 추론 제어 및 도구 사용이 올바르게 작동하지 않을 수 있습니다. 이 특정 번들의 수정된 사본을 설치한 후 사용하세요.",
       "imageEditHeader": "이미지 편집 서버",
       "imageGenHeader": "이미지 생성 서버",
       "imageEditBadge": "이미지 편집",
@@ -977,24 +977,11 @@
   },
   "update": {
     "banner": {
+      "versionLabel": "vMLX {version}",
+      "available": "사용할 수 있습니다",
+      "download": "다운로드",
+      "starOnGitHub": "GitHub에서 별표 주기",
       "dismissTitle": "닫기"
-    },
-    "notice": {
-      "title": "MLX Studio의 새로운 기능",
-      "section1Heading": "MCP tools 및 API gateway",
-      "section1BodyA": "MCP config discovery는 이제 시작 플래그 없이 mcp.json 또는 mcp.yaml에서 동작하며, 서버별/도구별 정책이 세션과 gateway에 전달됩니다.",
-      "section1BodyB": "Built-in tools와 MCP tools는 structured tool calls, multi-round continuation, 더 안전한 parser cleanup으로 raw marker leak 없이 함께 사용할 수 있습니다.",
-      "section2Heading": "Model settings 및 generation defaults",
-      "section2BodyA": "Chat Settings는 temperature, top_p, top_k, repetition penalty, thinking mode, tool parser, reasoning parser 적용 상태를 표시합니다.",
-      "section2BodyB": "max_tokens를 생략하면 이제 이전 32768 fallback 대신 bounded model/default budget으로 해석되며, request logs에 resolved value가 표시됩니다.",
-      "section3Heading": "MTP, cache, JANG runtime hardening",
-      "section3BodyA": "Qwen3.6 native MTP detection, JANG/JANGTQ group-size recognition, MX matmul dispatch checks, Hunyuan/ZAYA/Gemma/MiniMax routing gate가 더 엄격해졌습니다.",
-      "section3BodyB": "Prefix cache, in-memory paged cache, L2 disk cache, TurboQuant KV 경로는 cache reuse를 추측이 아니라 확인할 수 있도록 health counters를 더 명확히 노출합니다.",
-      "section4Heading": "Release integrity 및 updater safety",
-      "section4BodyA": "Release 전에 packaged app의 Developer ID signing, notarization, bundled source hashes, critical imports, GUI launch, latest.json/update manifest compatibility를 확인합니다.",
-      "section4BodyB": "DeepSeek V4 Flash는 이제 native composite cache path를 기본으로 사용하고 generic KV q4/q8은 계속 억제합니다. exact long-code output은 identifier gate가 통과될 때까지 follow-up으로 남습니다.",
-      "footer": "MLX Studio와 JANG을 사용해 주셔서 감사합니다. — Jinho Jang",
-      "dismiss": "확인 — 다음 업데이트까지 보지 않기"
     }
   },
   "ui": {

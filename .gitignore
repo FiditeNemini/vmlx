@@ -62,12 +62,48 @@ cover/
 
 # Environments
 .env
+.env.*
+!.env.example
+!.env.*.example
+!**/.env.example
+!**/.env.*.example
+**/.env.signing
+**/.env.signing.*
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Release credentials, signing identities, and private notarization material
+.pypirc
+.npmrc
+.netrc
+*.p8
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+*.der
+*.mobileprovision
+*.provisionprofile
+*.notary-result.json
+*.notary-results.json
+*.notary-info.json
+*.notary-log.json
+*.notary-submit.json
+notary-results/
+notary-records/
+private-release/
+release-private/
+release-credentials/
+signing-secrets/
+**/*notar*.local.*
+**/*sign*.local.*
+**/*release*.private.*
+**/*credential*.local.*
 
 # IDE
 .idea/
@@ -140,7 +176,6 @@ gsm8k_*.json
 mcp.example.json
 mise.toml
 .pre-commit-config.yaml
-panel/.env.signing
 .agent/
 nohup.out
 

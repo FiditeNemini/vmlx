@@ -1728,6 +1728,10 @@ class BlockAwarePrefixCache:
         )
         self.paged_cache = paged_cache_manager
         self.block_size = paged_cache_manager.block_size
+        self._strict_block_disk_write_fence = os.environ.get(
+            "VMLX_STRICT_BLOCK_DISK_WRITE_FENCE",
+            "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
         # Hash table for quick prefix lookup
         # Maps hash(tokens[:block_size*n]) -> (tokens, block_ids)
@@ -2562,7 +2566,12 @@ class BlockAwarePrefixCache:
             begin_write_fence = getattr(disk_store, "begin_write_fence", None)
             if callable(begin_write_fence):
                 try:
-                    disk_write_fence_id = str(begin_write_fence(request_id))
+                    disk_write_fence_id = str(
+                        begin_write_fence(
+                            request_id,
+                            strict_reconcile=self._strict_block_disk_write_fence,
+                        )
+                    )
                     _write_fence["disk_store"] = disk_store
                     _write_fence["fence_id"] = disk_write_fence_id
                 except Exception as fence_error:
@@ -2602,7 +2611,7 @@ class BlockAwarePrefixCache:
         _paged_frugal = bool(
             getattr(self.paged_cache, "paged_frugal", _disk_only)
         )
-        logger.info(
+        logger.debug(
             f"Block disk write-through: disk_store={'present' if disk_store else 'None'}, "
             f"is_tensor_data={is_tensor_data}, new_tokens={len(new_tokens)}, "
             f"num_new_blocks={num_new_blocks}, frugal={_paged_frugal}, "
@@ -2745,7 +2754,7 @@ class BlockAwarePrefixCache:
                         logger.debug(f"np_sources skip layer {idx}: {_npe}")
 
         if disk_store is not None:
-            logger.info(
+            logger.debug(
                 f"Block disk: np_sources has {len(np_sources)} positional layers "
                 f"(out of {len(cache_data)} total)"
             )
@@ -3045,7 +3054,11 @@ class BlockAwarePrefixCache:
                                 for _tag, _count in sorted(_tag_counts.items())
                                 if _tag != "kv"
                             )
-                            _layer_summary = f"{_kv_count} kv layers"
+                            _typed_layer_count = sum(_tag_counts.values())
+                            _layer_summary = (
+                                f"total_typed={_typed_layer_count}, "
+                                f"standard_kv={_kv_count}"
+                            )
                             if _extra_tags:
                                 _layer_summary += f", {_extra_tags}"
                             _has_native_tq = any(
@@ -3060,7 +3073,7 @@ class BlockAwarePrefixCache:
                                 # prefixes. Serialize/evaluate one complete packed
                                 # page now; the disk store still queues only the
                                 # rename/index update on its background thread.
-                                logger.info(
+                                logger.debug(
                                     f"Block disk: writing bounded "
                                     f"{'MiniMax-M3' if has_minimax_m3_cache_data else 'TQ'} block "
                                     f"{block.block_id} ({_layer_summary}, "
@@ -3073,7 +3086,7 @@ class BlockAwarePrefixCache:
                                 ):
                                     disk_only_queued_hashes.add(block_chain_hash)
                             else:
-                                logger.info(
+                                logger.debug(
                                     f"Block disk: queuing write for block "
                                     f"{block.block_id} ({_layer_summary}, "
                                     f"{len(block_tokens)} tokens)"
@@ -3115,7 +3128,7 @@ class BlockAwarePrefixCache:
 
         # Write deferred disk blocks (all numpy — no MLX/Metal ops).
         if pending_disk_writes and disk_store is not None:
-            logger.info(
+            logger.debug(
                 f"Block disk: writing {len(pending_disk_writes)} blocks to SSD"
             )
             for block_hash, block_data, tok_count in pending_disk_writes:
@@ -5235,6 +5248,9 @@ class BlockAwarePrefixCache:
             ),
             "tokens_saved": self._tokens_saved,
             "active_requests": len(self._request_tables),
+            "strict_block_disk_write_fence": bool(
+                getattr(self, "_strict_block_disk_write_fence", False)
+            ),
             "entries_by_type": {
                 t: len(self._entries_by_type[t]) for t in _CACHE_TYPE_PRIORITY
             },

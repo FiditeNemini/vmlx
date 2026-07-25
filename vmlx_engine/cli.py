@@ -818,6 +818,32 @@ def serve_command(args):
         sys.exit(1)
 
     server._api_key = args.api_key or os.environ.get("VLLM_API_KEY")
+    server._private_cache_attestation_enabled = False
+    server._private_cache_attestation_token = None
+    _private_attestation_enabled = bool(
+        getattr(args, "enable_private_cache_attestation", False)
+    )
+    _private_attestation_token_file = getattr(
+        args,
+        "private_cache_attestation_token_file",
+        None,
+    )
+    if _private_attestation_enabled != bool(_private_attestation_token_file):
+        logger.error(
+            "Private cache attestation requires both its enable flag and token file"
+        )
+        sys.exit(1)
+    if _private_attestation_enabled:
+        try:
+            server._private_cache_attestation_token = (
+                server._load_private_cache_attestation_token_file(
+                    _private_attestation_token_file
+                )
+            )
+        except (OSError, ValueError) as exc:
+            logger.error("Invalid private cache attestation token file: %s", exc)
+            sys.exit(1)
+        server._private_cache_attestation_enabled = True
     if args.timeout <= 0:
         logger.error(f"--timeout must be positive, got {args.timeout}")
         sys.exit(1)
@@ -2931,6 +2957,17 @@ Examples:
         help="Require this API key for all requests. Clients must send it as "
              "'Authorization: Bearer <key>'. Without this, anyone with network access "
              "can use your model. Example: --api-key sk-my-secret-key",
+    )
+    serve_parser.add_argument(
+        "--enable-private-cache-attestation",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    serve_parser.add_argument(
+        "--private-cache-attestation-token-file",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     serve_parser.add_argument(
         "--rate-limit",

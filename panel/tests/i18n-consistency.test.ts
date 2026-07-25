@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { resolve } from 'path'
 
 const LOCALES = ['en', 'zh', 'ko', 'ja', 'es'] as const
@@ -416,54 +416,146 @@ describe('i18n locale consistency', () => {
     }
   })
 
-  it('release update notice is localized and covers v1.5.45 release-critical items', () => {
-    const updateNoticeSrc = readFileSync(
-      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'UpdateNotice.tsx'),
+  it('removes the obsolete release modal and localizes the active update banner', () => {
+    const appSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'App.tsx'),
       'utf-8',
     )
-    expect(updateNoticeSrc).toContain("CURRENT_NOTICE_VERSION = '1.5.45'")
-    expect(updateNoticeSrc).toContain('useTranslation')
-    expect(updateNoticeSrc).not.toContain('JIT Sleep & Auto-Wake')
-    expect(updateNoticeSrc).not.toContain('JANG v2 Quantization')
+    const updateNoticePath = resolve(
+      __dirname,
+      '..',
+      'src',
+      'renderer',
+      'src',
+      'components',
+      'UpdateNotice.tsx',
+    )
+    const updateBannerSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'components', 'UpdateBanner.tsx'),
+      'utf-8',
+    )
 
-    const notice = locales.en.update.notice
-    const combined = Object.values(notice).join('\n')
-    for (const term of ['MCP', 'MTP', 'latest.json', 'Developer ID', 'L2 disk cache', 'max_tokens']) {
-      expect(combined, `update notice must mention ${term}`).toContain(term)
+    expect(existsSync(updateNoticePath)).toBe(false)
+    expect(appSrc).not.toContain('UpdateNotice')
+    expect(appSrc).toMatch(
+      /import\s+\{\s*UpdateBanner\s*\}\s+from\s+['"][^'"]*components\/UpdateBanner['"]/,
+    )
+    expect(appSrc).toMatch(/<UpdateBanner\s*\/>/)
+    expect(updateBannerSrc).toContain('useTranslation')
+    expect(updateBannerSrc).toContain('window.api.app.onUpdateAvailable')
+    expect(updateBannerSrc).toContain('return unsub')
+    expect(updateBannerSrc).toContain(
+      "localStorage.getItem('vmlx-dismissed-update')",
+    )
+    expect(updateBannerSrc).toContain('prev !== data.latestVersion')
+    expect(updateBannerSrc).toContain(
+      "localStorage.setItem('vmlx-dismissed-update', update.latestVersion)",
+    )
+    for (const key of [
+      'update.banner.versionLabel',
+      'update.banner.available',
+      'update.banner.download',
+      'update.banner.starOnGitHub',
+      'update.banner.dismissTitle',
+    ]) {
+      expect(updateBannerSrc).toContain(`t('${key}'`)
+    }
+    for (const staleLiteral of [
+      "CURRENT_NOTICE_VERSION = '1.5.45'",
+      '>Download<',
+      '>Star on GitHub<',
+      'title="Dismiss"',
+    ]) {
+      expect(updateBannerSrc).not.toContain(staleLiteral)
     }
 
     for (const l of LOCALES) {
-      const localeNotice = locales[l].update.notice
-      expect(localeNotice.section1Heading).toContain('MCP')
-      expect(localeNotice.section3Heading).toContain('MTP')
-      expect(localeNotice.section4BodyA).toContain('latest.json')
+      const banner = locales[l].update.banner
+      expect(banner.versionLabel).toContain('{version}')
+      expect(banner.available.trim()).not.toBe('')
+      expect(banner.download.trim()).not.toBe('')
+      expect(banner.starOnGitHub.trim()).not.toBe('')
+      expect(locales[l].update.notice).toBeUndefined()
     }
   })
 
-  it('technical model/cache/parser proper nouns stay literal across localized release copy', () => {
-    const requiredTerms = [
-      'MCP',
-      'MTP',
-      'JANG',
-      'JANGTQ',
-      'Gemma',
-      'MiniMax',
-      'TurboQuant KV',
-      'Prefix cache',
-      'paged cache',
-      'L2 disk cache',
-      'tool parser',
-      'reasoning parser',
-    ]
+  it('keeps the bundle-specific missing-template warning current and localized', () => {
+    const sessionViewSrc = readFileSync(
+      resolve(
+        __dirname,
+        '..',
+        'src',
+        'renderer',
+        'src',
+        'components',
+        'sessions',
+        'SessionView.tsx',
+      ),
+      'utf-8',
+    )
+    const modelsSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'main', 'ipc', 'models.ts'),
+      'utf-8',
+    )
+
+    expect(sessionViewSrc).toContain(
+      'setMissingChatTemplate(match?.hasChatTemplate === false)',
+    )
+    expect(sessionViewSrc).toContain(
+      'const [missingTemplateNoticeDismissed, setMissingTemplateNoticeDismissed] = useState(false)',
+    )
+    expect(sessionViewSrc).toContain('setMissingTemplateNoticeDismissed(false)')
+    expect(sessionViewSrc).toContain(
+      'missingChatTemplate && !missingTemplateNoticeDismissed',
+    )
+    expect(sessionViewSrc).toContain(
+      'onClick={() => setMissingTemplateNoticeDismissed(true)}',
+    )
+    expect(modelsSrc).toContain('export async function hasUsableChatTemplate')
+    expect(sessionViewSrc).not.toContain('jang_redownload_dismissed')
+    expect(sessionViewSrc).not.toContain('2026-03-19')
 
     for (const l of LOCALES) {
-      const combined = Object.values(locales[l].update.notice).join('\n')
-      for (const term of requiredTerms) {
-        expect(
-          combined,
-          `Locale '${l}' must keep technical term '${term}' literal in release-critical copy`,
-        ).toContain(term)
-      }
+      const copy = [
+        locales[l].sessions.view.missingChatTemplateHeader,
+        locales[l].sessions.view.missingChatTemplateBody,
+      ].join('\n')
+      expect(copy).not.toContain('2026')
+      expect(copy).not.toContain('HuggingFace')
+      expect(copy.trim()).not.toBe('')
+    }
+  })
+
+  it('keeps retired Swift migration UI and stale release-notice proof suppression removed', () => {
+    const appSrc = readFileSync(
+      resolve(__dirname, '..', 'src', 'renderer', 'src', 'App.tsx'),
+      'utf-8',
+    )
+    const swiftMigrationBannerPath = resolve(
+      __dirname,
+      '..',
+      'src',
+      'renderer',
+      'src',
+      'components',
+      'layout',
+      'SwiftMigrationBanner.tsx',
+    )
+    const proofScriptPaths = [
+      'live-cache-restore-proof.mjs',
+      'live-gemma4-media-stress-proof.mjs',
+      'live-metal-headroom-ui-proof.mjs',
+      'live-mm3-stress-proof.mjs',
+    ].map((name) => resolve(__dirname, '..', 'scripts', name))
+
+    expect(existsSync(swiftMigrationBannerPath)).toBe(false)
+    expect(appSrc).not.toContain('SwiftMigrationBanner')
+
+    for (const scriptPath of proofScriptPaths) {
+      const scriptSrc = readFileSync(scriptPath, 'utf-8')
+      expect(scriptSrc).not.toContain('notice_dismissed_version')
+      expect(scriptSrc).not.toContain('suppressUpdateNotice')
+      expect(scriptSrc).not.toContain('noticeDismissed')
     }
   })
 })

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
+import { resolvePrivateProofDirectory } from './private-proof-output.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const panelDir = path.resolve(__dirname, '..')
@@ -22,7 +23,13 @@ const minCachedTokens = Number(process.env.VMLX_RESTORE_MIN_CACHED_TOKENS || 128
 const restoreFactCount = Math.max(8, Number(process.env.VMLX_RESTORE_FACT_COUNT || 36))
 const startedAt = new Date()
 const stamp = startedAt.toISOString().replace(/[:.]/g, '-')
-const proofDir = path.resolve(process.env.VMLX_RESTORE_PROOF_DIR || path.join(repoDir, 'build', `live-cache-restore-${rowName}-${stamp}`))
+const proofDir = resolvePrivateProofDirectory({
+  repoDir,
+  overrideEnv: 'VMLX_RESTORE_PROOF_DIR',
+  proofName: 'live-cache-restore',
+  family: rowName,
+  now: startedAt,
+})
 const outJson = path.join(proofDir, 'cache-restore-proof.json')
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -238,20 +245,6 @@ function buildPromptPair(nonce) {
 
 async function captureSettingsVisibility(page, sessionId, expectedFamily) {
   const navigation = await page.evaluate(async ({ sessionId }) => {
-    const bounded = async (promise, ms = 1000) => {
-      try {
-        return await Promise.race([
-          Promise.resolve(promise),
-          new Promise((resolve) => setTimeout(() => resolve(null), ms)),
-        ])
-      } catch {
-        return null
-      }
-    }
-    await bounded(window.api?.settings?.set?.('notice_dismissed_version', '1.5.45'))
-    for (const button of Array.from(document.querySelectorAll('button'))) {
-      if ((button.textContent || '').includes('Got it')) button.click()
-    }
     window.dispatchEvent(new CustomEvent('vmlx:navigate', {
       detail: { mode: 'server', panel: 'settings', sessionId },
     }))

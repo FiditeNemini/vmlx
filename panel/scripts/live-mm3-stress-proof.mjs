@@ -7,6 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { deflateSync } from 'node:zlib'
 import { chromium } from 'playwright-core'
+import { resolvePrivateProofDirectory } from './private-proof-output.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const panelDir = path.resolve(__dirname, '..')
@@ -18,7 +19,13 @@ const appPath = process.env.VMLX_APP_PATH || '/Applications/vMLX.app'
 const appExe = path.join(appPath, 'Contents', 'MacOS', 'vMLX')
 const startedAt = new Date()
 const stamp = startedAt.toISOString().replace(/[:.]/g, '-')
-const proofDir = path.resolve(process.env.VMLX_MM3_PROOF_DIR || path.join(repoDir, 'build', `live-mm3-stress-${stamp}`))
+const proofDir = resolvePrivateProofDirectory({
+  repoDir,
+  overrideEnv: 'VMLX_MM3_PROOF_DIR',
+  proofName: 'live-mm3-stress',
+  family: 'minimax-m3',
+  now: startedAt,
+})
 const outJson = path.join(proofDir, 'mm3-stress-proof.json')
 const shotPath = path.join(proofDir, 'mm3-stress-final.png')
 const apiKey = process.env.VMLX_MM3_API_KEY || `vmlx-mm3-live-${stamp}`
@@ -245,25 +252,8 @@ function defaultsMatch(modelValue, sessionValue, key) {
 async function captureGenerationDefaults(page, modelPath, sessionConfig) {
   const model = modelGenerationDefaults(modelPath)
   const session = sessionGenerationDefaults(sessionConfig)
-  const uiSteps = { noticeDismissed: false, navigated: false, panelClicked: false, error: null }
+  const uiSteps = { navigated: false, panelClicked: false, error: null }
   await page.evaluate(async ({ sessionId }) => {
-    const bounded = async (promise, ms = 750) => {
-      try {
-        return await Promise.race([
-          Promise.resolve(promise),
-          new Promise((resolve) => setTimeout(() => resolve(null), ms)),
-        ])
-      } catch {
-        return null
-      }
-    }
-    await bounded(window.api?.settings?.set?.('notice_dismissed_version', '1.5.45'))
-    for (const button of Array.from(document.querySelectorAll('button'))) {
-      if ((button.textContent || '').includes("Got it")) {
-        button.click()
-        break
-      }
-    }
     window.dispatchEvent(new CustomEvent('vmlx:navigate', {
       detail: { mode: 'server', panel: 'settings', sessionId },
     }))
@@ -277,7 +267,7 @@ async function captureGenerationDefaults(page, modelPath, sessionConfig) {
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 800))
-    return { noticeDismissed: true, navigated: true, panelClicked: clicked }
+    return { navigated: true, panelClicked: clicked }
   }, { sessionId: sessionConfig?.id || null }).catch(() => null)
     .then((value) => {
       if (value && typeof value === 'object') Object.assign(uiSteps, value)

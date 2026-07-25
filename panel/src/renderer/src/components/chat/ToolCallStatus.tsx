@@ -122,7 +122,9 @@ export function ToolCallStatus({ statuses, isStreaming }: ToolCallStatusProps) {
   const toolNames = [...new Set(toolCallGroups.map(g => g.name))].filter(Boolean)
 
   return (
-    <div className={`my-2 rounded-lg border overflow-hidden transition-all duration-200 ${
+    <div
+      data-vmlx-proof-tool-container="legacy"
+      className={`my-2 rounded-lg border overflow-hidden transition-all duration-200 ${
       isActive ? 'border-warning/40 border-l-warning border-l-2' : 'border-border'
     } bg-popover`}>
       {/* Compact header — always visible */}
@@ -204,7 +206,14 @@ export function ToolCallStatus({ statuses, isStreaming }: ToolCallStatusProps) {
             const resultStatus = group.statuses.find(s => s.phase === 'result' || s.phase === 'error')
 
             return (
-              <div key={gi} className="py-1">
+              <div
+                key={gi}
+                className="py-1"
+                data-vmlx-proof-tool-card="legacy"
+                data-vmlx-proof-tool-name={group.name}
+                data-vmlx-proof-tool-call-id={callingStatus?.toolCallId || ''}
+                data-vmlx-proof-tool-phase={lastPhase.phase}
+              >
                 <button
                   onClick={() => setExpanded(prev => ({ ...prev, [gi]: !prev[gi] }))}
                   className="flex items-center gap-2 w-full text-left hover:text-foreground transition-colors"

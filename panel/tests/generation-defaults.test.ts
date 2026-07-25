@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
@@ -73,6 +73,76 @@ describe('hasUsableChatTemplate', () => {
     }, 'vmlx-chat-template-missing-include-')
 
     await expect(hasUsableChatTemplate(dir)).resolves.toBe(false)
+  })
+
+  it('accepts an include-only tokenizer stub when its referenced template exists', async () => {
+    const dir = makeModelDir({
+      'tokenizer_config.json': {
+        chat_template: "{% include 'chat_template.jinja' %}",
+      },
+    }, 'vmlx-chat-template-resolved-include-')
+    writeFileSync(
+      join(dir, 'chat_template.jinja'),
+      '{% for message in messages %}{{ message.content }}{% endfor %}',
+    )
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(true)
+  })
+
+  it('rejects an include-only tokenizer stub that traverses outside the bundle', async () => {
+    const outside = makeModelDir({}, 'vmlx-chat-template-outside-')
+    writeFileSync(join(outside, 'outside-template.jinja'), '{{ messages }}')
+    const dir = makeModelDir({
+      'tokenizer_config.json': {
+        chat_template: `{% include '../${basename(outside)}/outside-template.jinja' %}`,
+      },
+    }, 'vmlx-chat-template-traversal-')
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(false)
+  })
+
+  it('rejects an include-only tokenizer stub with an absolute external path', async () => {
+    const outside = makeModelDir({}, 'vmlx-chat-template-absolute-target-')
+    const outsideTemplate = join(outside, 'outside-template.jinja')
+    writeFileSync(outsideTemplate, '{{ messages }}')
+    const dir = makeModelDir({
+      'tokenizer_config.json': {
+        chat_template: `{% include '${outsideTemplate}' %}`,
+      },
+    }, 'vmlx-chat-template-absolute-')
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(false)
+  })
+
+  it('accepts an include-only tokenizer stub backed by a bundle symlink', async () => {
+    const outside = makeModelDir({}, 'vmlx-chat-template-symlink-target-')
+    writeFileSync(join(outside, 'outside-template.jinja'), '{{ messages }}')
+    const dir = makeModelDir({
+      'tokenizer_config.json': {
+        chat_template: "{% include 'chat_template.jinja' %}",
+      },
+    }, 'vmlx-chat-template-symlink-')
+    symlinkSync(
+      join(outside, 'outside-template.jinja'),
+      join(dir, 'chat_template.jinja'),
+    )
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(true)
+  })
+
+  it('accepts a tokenizer config symlink used by Hugging Face snapshots', async () => {
+    const outside = makeModelDir({
+      'outside-tokenizer.json': {
+        chat_template: '{{ messages }}',
+      },
+    }, 'vmlx-chat-template-tokenizer-target-')
+    const dir = makeModelDir({}, 'vmlx-chat-template-tokenizer-symlink-')
+    symlinkSync(
+      join(outside, 'outside-tokenizer.json'),
+      join(dir, 'tokenizer_config.json'),
+    )
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(true)
   })
 })
 

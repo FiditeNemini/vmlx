@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -417,9 +418,11 @@ def test_release_dmg_final_sign_preserves_hardened_runtime_entitlements():
 
 def test_release_dmg_staging_uses_recursive_signer_before_final_audit():
     script = Path("panel/scripts/build-release-dmgs.sh").read_text()
-    build_one = script[script.index("build_one()") : script.index('case "${1:-all}"')]
+    build_one = script[
+        script.index("build_one()") : script.index('case "$REQUESTED_FLAVOR"')
+    ]
 
-    stage_idx = build_one.index("npx electron-builder --mac --dir")
+    stage_idx = build_one.index("run_electron_builder_action --mac --dir")
     final_sign_idx = build_one.index(
         'finalize_release_app_signature "$app_path" "$RELEASE_CODESIGN_IDENTITY"'
     )
@@ -918,6 +921,10 @@ def test_electron_builder_before_pack_hook_runs_verifier_in_direct_smoke(tmp_pat
 def test_electron_builder_before_pack_hook_rejects_skip_vite_in_pack_context(tmp_path):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
+    (tmp_path / "package.json").write_text(
+        json.dumps({"version": "1.6.17"}),
+        encoding="utf-8",
+    )
     verifier = scripts / "verify-bundled-python.sh"
     verifier.write_text("#!/usr/bin/env bash\nset -euo pipefail\necho ok > \"$PWD/verify-ran\"\n")
     verifier.chmod(0o755)
@@ -941,3 +948,210 @@ def test_electron_builder_before_pack_hook_rejects_skip_vite_in_pack_context(tmp
     assert proc.returncode == 3
     assert (tmp_path / "verify-ran").read_text() == "ok\n"
     assert "only allowed for direct hook smoke tests" in proc.stderr
+
+
+def test_electron_builder_before_pack_rejects_direct_r18_packaging_before_verifier(
+    tmp_path,
+):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "version": "1.6.18",
+                "build": {
+                    "mac": {
+                        "notarize": {
+                            "teamId": "55KGF2S5AY",
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    verifier = scripts / "verify-bundled-python.sh"
+    verifier.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\necho ran > \"$PWD/verify-ran\"\n",
+        encoding="utf-8",
+    )
+    verifier.chmod(0o755)
+
+    hook_path = Path("panel/scripts/electron-builder-before-pack.cjs").resolve()
+    js = (
+        f"const hook = require({json.dumps(str(hook_path))});"
+        f"hook({{packager: {{projectDir: {json.dumps(str(tmp_path))}}}}})"
+        ".then(() => process.exit(0))"
+        ".catch((err) => { console.error(err.message); process.exit(3); });"
+    )
+    env = dict(os.environ)
+    for name in (
+        "VMLX_RELEASE_SCOPE",
+        "VMLX_R18_OFFICIAL_PACKAGING",
+        "VMLX_R18_EXPECTED_TEAM_ID",
+        "VMLX_R18_EXPECTED_CODESIGN_IDENTITY",
+        "CSC_NAME",
+    ):
+        env.pop(name, None)
+    proc = subprocess.run(
+        ["node", "-e", js],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 3
+    assert "requires VMLX_RELEASE_SCOPE=r18_production" in proc.stderr
+    assert not (tmp_path / "verify-ran").exists()
+
+
+def test_r18_release_builder_rejects_single_flavor_python_override_and_wrong_team(
+    tmp_path,
+):
+    panel = tmp_path / "panel"
+    scripts = panel / "scripts"
+    node_modules = panel / "node_modules"
+    venv_bin = tmp_path / ".venv" / "bin"
+    scripts.mkdir(parents=True)
+    node_modules.mkdir()
+    venv_bin.mkdir(parents=True)
+    builder = scripts / "build-release-dmgs.sh"
+    builder.write_text(
+        Path("panel/scripts/build-release-dmgs.sh").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    builder.chmod(0o755)
+    (scripts / "release-python-action.cjs").write_text(
+        Path("panel/scripts/release-python-action.cjs").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    release_python = venv_bin / "python"
+    release_python.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    release_python.chmod(0o755)
+    (panel / "package.json").write_text(
+        json.dumps(
+            {
+                "version": "1.6.18",
+                "build": {
+                    "mac": {
+                        "notarize": {
+                            "teamId": "55KGF2S5AY",
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    base_env = dict(os.environ)
+    for name in (
+        "PYTHON",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "VIRTUAL_ENV",
+        "VMLX_RELEASE_CODESIGN_IDENTITY",
+        "VMLINUX_RELEASE_CODESIGN_IDENTITY",
+        "CSC_NAME",
+    ):
+        base_env.pop(name, None)
+    base_env["VMLX_RELEASE_SCOPE"] = "r18_production"
+
+    single = subprocess.run(
+        [str(builder), "sequoia"],
+        cwd=panel,
+        env=base_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert single.returncode == 1
+    assert "must build both Sequoia and Tahoe via flavor=all" in single.stderr
+
+    generic_scope_env = dict(base_env)
+    generic_scope_env["VMLX_RELEASE_SCOPE"] = "production"
+    generic_single = subprocess.run(
+        [str(builder), "sequoia"],
+        cwd=panel,
+        env=generic_scope_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert generic_single.returncode == 1
+    assert "must build both Sequoia and Tahoe via flavor=all" in generic_single.stderr
+
+    python_override_env = dict(base_env)
+    python_override_env["PYTHON"] = "/usr/bin/python3"
+    python_override = subprocess.run(
+        [str(builder), "all"],
+        cwd=panel,
+        env=python_override_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert python_override.returncode == 1
+    assert "cannot be overridden by PYTHON" in python_override.stderr
+
+    wrong_team_env = dict(base_env)
+    wrong_team_env["VMLX_RELEASE_CODESIGN_IDENTITY"] = (
+        "Developer ID Application: Other Team (AAAAAAAAAA)"
+    )
+    wrong_team = subprocess.run(
+        [str(builder), "all"],
+        cwd=panel,
+        env=wrong_team_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert wrong_team.returncode == 1
+    assert "requires Developer ID Application: ShieldStack LLC" in wrong_team.stderr
+
+    package = json.loads((panel / "package.json").read_text(encoding="utf-8"))
+    package["version"] = "1.6.17"
+    (panel / "package.json").write_text(json.dumps(package), encoding="utf-8")
+    wrong_version = subprocess.run(
+        [str(builder), "all"],
+        cwd=panel,
+        env=base_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert wrong_version.returncode == 1
+    assert (
+        "VMLX_RELEASE_SCOPE=r18_production requires package version 1.6.18"
+        in wrong_version.stderr
+    )
+    generic_wrong_version = subprocess.run(
+        [str(builder), "all"],
+        cwd=panel,
+        env=generic_scope_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert generic_wrong_version.returncode == 1
+    assert (
+        "public production packaging is not implemented for package version 1.6.17"
+        in generic_wrong_version.stderr
+    )
+
+    package["version"] = "1.6.18"
+    (panel / "package.json").write_text(json.dumps(package), encoding="utf-8")
+    release_python.unlink()
+    release_python.symlink_to(sys._base_executable)
+    foreign_venv = subprocess.run(
+        [str(builder), "all"],
+        cwd=panel,
+        env=base_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert foreign_venv.returncode == 1
+    assert "pyvenv.cfg" in foreign_venv.stderr

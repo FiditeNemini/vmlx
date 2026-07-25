@@ -256,7 +256,7 @@ def test_internal_reasoning_pass_terminal_is_held_until_visible_answer_finishes(
     ) is None
 
 
-def test_genuine_main_pass_terminal_reasons_are_preserved():
+def test_reasoning_only_main_pass_terminal_waits_for_structured_diagnostic():
     assert _main_pass_finish_reason(
         "stop",
         finished=True,
@@ -264,13 +264,15 @@ def test_genuine_main_pass_terminal_reasons_are_preserved():
         accumulated_reasoning="private planning",
         answer_pass_pending=True,
     ) == "stop"
+    # A reasoning-only native terminal is emitted only after its warning so a
+    # strict stream consumer cannot stop before seeing the structured failure.
     assert _main_pass_finish_reason(
         "length",
         finished=True,
         content_was_emitted=False,
         accumulated_reasoning="private planning",
         answer_pass_pending=False,
-    ) == "length"
+    ) is None
     assert _main_pass_finish_reason(
         "stop",
         finished=False,

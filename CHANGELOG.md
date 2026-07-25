@@ -2,6 +2,75 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.18] - 2026-07-25
+
+### Changed
+
+- Reasoning Auto mode preserves each bundle's native policy unless a request
+  supplies an explicit supported thinking budget. Reasoning-marker aliases
+  remain on the reasoning rail instead of appearing in visible content.
+- Tool capabilities are scoped to the current turn. Tool availability changes,
+  exact authorization, multi-tool result continuations, cancellation identity,
+  and final-pass usage remain tied to the correct request.
+- Fresh-session controls derive sampling, output, template, parser, and native
+  MTP settings from the selected bundle without turning inherited values into
+  hidden saved overrides.
+- The block-disk cache uses one process-safe physical size budget across
+  model/config namespaces and typed companion state. Disk publication is
+  bounded and moved off the request-completion path, with coordinated LRU
+  eviction, clear, shutdown, and restart accounting.
+- Cache telemetry distinguishes the attempted prefix, applied reuse, RAM or
+  SSD blocks, uncached suffix, reconstruction work, fallback prefill, and
+  aggregate SSD usage.
+- Experimental codebook-VQ weights use a bounded RAM LRU and reload their
+  original compressed model shards after eviction instead of creating a
+  second unbounded SSD spill cache.
+- The Electron renderer uses KaTeX for supported math while preserving
+  currency, literal Markdown/HTML, code fences, assistant XML, and readable
+  in-progress reasoning text.
+- The update banner and bundle-specific missing-template warning are localized
+  across the shipped locales. Obsolete release and Swift-migration notices were
+  removed.
+- The Python package and Electron app advance to 1.6.18 and require JANG
+  2.5.34.
+
+### Fixed
+
+- Laguna tool-result history, incomplete terminals, mixed-SWA cache safety,
+  and affine-JANG JIT exclusions no longer reuse incompatible state or discard
+  the model's first-pass terminal.
+- Responses retains attached media across tool-result continuations, and
+  Electron permits playback of local attachment media.
+- Ollama gateway streams preserve backend failures instead of converting them
+  into successful terminal events.
+- Deep sleep and wake release stale executors and clear MLX residency before
+  the engine resumes.
+- Include-based chat templates are accepted only when their referenced
+  template exists inside the selected bundle; missing or escaping references
+  produce a current bundle-specific warning.
+- Cache construction failures and model unloads drain asynchronous SSD writers
+  and release shared budget ownership instead of leaving stale workers or
+  capacity leases.
+- Public-repository hygiene rejects private evidence, generated captures,
+  malformed metadata, and machine-specific release material.
+
+### Distribution hardening
+
+- The Sequoia and Tahoe packaging path now requires both DMGs, bundled Python,
+  JANG dependency, signing identity, and release metadata to bind to one exact
+  source revision.
+- Direct or cross-checkout packaging paths fail closed when source, tools,
+  dependencies, artifacts, or version metadata drift.
+
+### Checkpoint boundary
+
+- This checkpoint does not promote deferred exhaustive family-by-family
+  long-context/performance coverage, every modality/restart combination,
+  architecture-wide cache eviction/refault soaks, extended gateway/LAN failure
+  recovery, or general JANG conversion certification.
+- Thanks to GitHub `@Hornsan1` for reporting many of the runtime, model, UI,
+  and API issues addressed in this checkpoint.
+
 ## [1.6.14] - 2026-07-20
 
 ### Changed

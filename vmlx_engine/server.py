@@ -51,6 +51,7 @@ import os
 import platform
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -4040,6 +4041,21 @@ _embedding_lock: asyncio.Lock | None = (
 _api_key: str | None = None
 _auth_warning_logged: bool = False
 
+# Private cache-proof surface.  This is deliberately independent from the
+# product API key: release proofs opt in with a short-lived, mode-0600 token
+# file, while ordinary local/LAN sessions keep the route disabled.
+_private_cache_attestation_enabled: bool = False
+_private_cache_attestation_token: str | None = None
+_PRIVATE_CACHE_ATTESTATION_PROOF_HEADER = "vmlx-cache-prefix-attestation-v1"
+_PRIVATE_CACHE_ATTESTATION_MAX_INPUTS = 16
+_PRIVATE_CACHE_ATTESTATION_MAX_PAIRS = 16
+_PRIVATE_CACHE_ATTESTATION_MAX_PROMPT_BYTES = 128 * 1024
+_PRIVATE_CACHE_ATTESTATION_MAX_TOTAL_PROMPT_BYTES = 384 * 1024
+_PRIVATE_CACHE_ATTESTATION_MAX_REQUEST_CONTROLS_BYTES = 64 * 1024
+_PRIVATE_CACHE_ATTESTATION_MAX_TOKENS_PER_PROMPT = 65_536
+_PRIVATE_CACHE_ATTESTATION_MAX_TOTAL_TOKENS = 131_072
+_PRIVATE_CACHE_ATTESTATION_MAX_PAIR_PREFIX_TOKENS = 262_144
+
 # Reasoning parser (for models like Qwen3, DeepSeek-R1)
 _reasoning_parser = None  # ReasoningParser instance when enabled
 
@@ -5709,6 +5725,81 @@ async def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(sec
     # Use constant-time comparison to prevent timing attacks
     if not secrets.compare_digest(credentials.credentials, _api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
+    return True
+
+
+def _load_private_cache_attestation_token_file(path_value: str) -> str:
+    """Read one owner-only proof token without following or racing a symlink."""
+    path = Path(path_value)
+    if not path.is_absolute():
+        raise ValueError("private cache attestation token file must be absolute")
+    before = path.lstat()
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) & 0o077
+        or not 32 <= before.st_size <= 512
+    ):
+        raise ValueError(
+            "private cache attestation token file must be an owner-only regular file"
+        )
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            (opened.st_dev, opened.st_ino, opened.st_size)
+            != (before.st_dev, before.st_ino, before.st_size)
+        ):
+            raise ValueError("private cache attestation token file changed while opening")
+        payload = b""
+        while len(payload) <= 512:
+            chunk = os.read(descriptor, min(513 - len(payload), 513))
+            if not chunk:
+                break
+            payload += chunk
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = path.lstat()
+    if (
+        (opened.st_dev, opened.st_ino, opened.st_size)
+        != (after.st_dev, after.st_ino, after.st_size)
+        or (after.st_dev, after.st_ino, after.st_size)
+        != (current.st_dev, current.st_ino, current.st_size)
+        or len(payload) > 512
+    ):
+        raise ValueError("private cache attestation token file changed while reading")
+    try:
+        token = payload.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("private cache attestation token must be ASCII") from exc
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,512}", token):
+        raise ValueError("private cache attestation token has an invalid format")
+    return token
+
+
+async def verify_private_cache_attestation(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> bool:
+    """Fail closed unless an explicitly enabled proof client authenticates."""
+    token = _private_cache_attestation_token
+    if not _private_cache_attestation_enabled or not token:
+        # Keep this private route indistinguishable from an absent route during
+        # ordinary product operation.
+        raise HTTPException(status_code=404, detail="Not Found")
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Proof credential required")
+    if not secrets.compare_digest(credentials.credentials, token):
+        raise HTTPException(status_code=401, detail="Invalid proof credential")
+    proof_header = request.headers.get("x-vmlx-private-proof", "")
+    if not secrets.compare_digest(
+        proof_header,
+        _PRIVATE_CACHE_ATTESTATION_PROOF_HEADER,
+    ):
+        raise HTTPException(status_code=403, detail="Private proof intent required")
     return True
 
 
@@ -10710,13 +10801,56 @@ def _cache_contract_encode(tokenizer: Any, prompt: str) -> list[int]:
         return list(tokenizer.encode(prompt))
 
 
+_CACHE_CONTRACT_FORBIDDEN_SIDE_KEY_FIELDS = frozenset(
+    {
+        "_cache_extra_keys",
+        "cache_extra_keys",
+        "cache_salt",
+        "media_salt",
+        "request_salt",
+        "skip_prefix_cache",
+        "images",
+        "videos",
+        "audio",
+        "audios",
+        "input_image",
+        "input_video",
+        "input_audio",
+    }
+)
+
+
+def _cache_contract_reject_side_keys(
+    payload: dict[str, Any],
+    request_controls: dict[str, Any],
+) -> None:
+    """Reject caller-supplied cache/media identity on the text-only contract."""
+    for scope, values in (
+        ("request", payload),
+        ("request_controls", request_controls),
+    ):
+        forbidden = sorted(
+            key
+            for key in _CACHE_CONTRACT_FORBIDDEN_SIDE_KEY_FIELDS
+            if key in values
+        )
+        if forbidden:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{scope} cannot supply cache/media side keys to the "
+                    f"text-only contract: {', '.join(forbidden)}"
+                ),
+            )
+
+
 def _cache_contract_render_and_tokenize(
     *,
     engine: Any,
     prompt: str,
     model: str,
     request_controls: dict[str, Any],
-) -> tuple[dict[str, Any], list[int]]:
+) -> tuple[dict[str, Any], list[int], dict[str, str] | None]:
     """Dry-render one Responses prompt through the loaded engine cache path.
 
     This endpoint is intentionally no-generation and no-cache-lookup.  It is
@@ -10739,11 +10873,26 @@ def _cache_contract_render_and_tokenize(
             status_code=400,
             detail="request_controls.instructions must be a string or null",
         )
-    tools = request_controls.get("tools") or []
-    if tools:
+    tools = request_controls.get("tools")
+    if tools is None:
+        tools = []
+    if not isinstance(tools, list) or any(
+        not isinstance(tool, dict) for tool in tools
+    ):
         raise HTTPException(
             status_code=400,
-            detail="token-contract currently supports request_controls.tools=[] only",
+            detail="request_controls.tools must be an array of tool objects",
+        )
+    if len(tools) > 64:
+        raise HTTPException(
+            status_code=400,
+            detail="request_controls.tools exceeds the bounded limit of 64",
+        )
+    tool_choice = request_controls.get("tool_choice")
+    if tool_choice is not None and not isinstance(tool_choice, (str, dict)):
+        raise HTTPException(
+            status_code=400,
+            detail="request_controls.tool_choice must be a string, object, or null",
         )
     raw_ct_kwargs = request_controls.get("chat_template_kwargs")
     if raw_ct_kwargs is not None and not isinstance(raw_ct_kwargs, dict):
@@ -10758,7 +10907,11 @@ def _cache_contract_render_and_tokenize(
         instructions=instructions,
         enable_thinking=enable_thinking,
         chat_template_kwargs=raw_ct_kwargs,
+        tools=tools,
+        tool_choice=tool_choice,
     )
+    effective_tools = _request_tools_for_generation_prompt(dry_request)
+    template_tools = convert_tools_for_template(effective_tools) or []
     messages = _responses_input_to_messages(
         dry_request.input,
         dry_request.instructions,
@@ -10769,7 +10922,7 @@ def _cache_contract_render_and_tokenize(
     resolved_thinking = _resolve_enable_thinking(
         request_value=dry_request.enable_thinking,
         ct_kwargs=ct_kwargs,
-        tools_present=False,
+        tools_present=bool(template_tools),
         model_key=_model_path or _model_name or model,
         engine=engine,
         auto_detect=True,
@@ -10803,7 +10956,7 @@ def _cache_contract_render_and_tokenize(
         )
     rendered = renderer(
         messages,
-        None,
+        template_tools,
         num_images=0,
         num_videos=0,
         num_audio=0,
@@ -10820,12 +10973,13 @@ def _cache_contract_render_and_tokenize(
         )
     token_ids = _cache_contract_encode(tokenizer, rendered)
     gen_prompt_len = 0
+    cache_extra_keys: dict[str, str] | None = None
     compute_gen_prompt = getattr(engine, "_compute_gen_prompt_cache_context", None)
     if callable(compute_gen_prompt):
         try:
-            computed_len, _ = compute_gen_prompt(
+            computed_len, computed_extra_keys = compute_gen_prompt(
                 messages,
-                None,
+                template_tools,
                 0,
                 thinking_enabled,
                 ct_kwargs,
@@ -10834,9 +10988,40 @@ def _cache_contract_render_and_tokenize(
                 num_audio=0,
             )
             gen_prompt_len = max(0, min(int(computed_len or 0), len(token_ids)))
+            if computed_extra_keys is not None:
+                if (
+                    not isinstance(computed_extra_keys, dict)
+                    or set(computed_extra_keys) != {"generation_prompt"}
+                    or not isinstance(
+                        computed_extra_keys.get("generation_prompt"),
+                        str,
+                    )
+                    or not computed_extra_keys["generation_prompt"]
+                ):
+                    raise ValueError(
+                        "text-only cache contract received non-generation "
+                        "cache side keys"
+                    )
+                cache_extra_keys = {
+                    "generation_prompt": computed_extra_keys["generation_prompt"]
+                }
         except Exception as exc:
             logger.debug("cache token-contract gen-prompt derivation failed: %s", exc)
-            gen_prompt_len = 0
+            raise RuntimeError(
+                "cache generation-prompt discriminator is unavailable"
+            ) from exc
+    elif rendered:
+        raise RuntimeError(
+            "loaded engine does not expose generation-prompt cache context"
+        )
+    if gen_prompt_len <= 0 and cache_extra_keys is not None:
+        raise RuntimeError(
+            "generation-prompt discriminator exists without a stripped suffix"
+        )
+    if gen_prompt_len > 0 and cache_extra_keys is None:
+        raise RuntimeError(
+            "stripped generation prompt has no production cache discriminator"
+        )
     cache_prompt_token_ids = (
         token_ids[:-gen_prompt_len] if gen_prompt_len > 0 else token_ids
     )
@@ -10852,31 +11037,715 @@ def _cache_contract_render_and_tokenize(
         "cache_prompt_token_count": len(cache_prompt_token_ids),
         "cache_prompt_token_ids_sha256": token_digest,
         "generation_prompt_suffix_tokens": gen_prompt_len,
-    }, cache_prompt_token_ids
+        "generation_prompt_discriminator_present": cache_extra_keys is not None,
+        "generation_prompt_discriminator_sha256": (
+            hashlib.sha256(
+                cache_extra_keys["generation_prompt"].encode(
+                    "utf-8",
+                    "surrogatepass",
+                )
+            ).hexdigest()
+            if cache_extra_keys is not None
+            else None
+        ),
+    }, cache_prompt_token_ids, cache_extra_keys
 
 
-@app.post("/v1/cache/token-contract", dependencies=[Depends(verify_api_key)])
+def _cache_prefix_chain_hashes(
+    token_ids: list[int],
+    block_size: int,
+    cache_extra_keys: Any = None,
+) -> list[bytes]:
+    """Derive the production PagedCache chain for one rendered text prefix."""
+    if block_size <= 0:
+        raise ValueError("block_size must be positive")
+    from .paged_cache import compute_block_hash
+
+    hashes: list[bytes] = []
+    parent_hash = None
+    reusable_tokens = (len(token_ids) // block_size) * block_size
+    for start in range(0, reusable_tokens, block_size):
+        parent_hash = compute_block_hash(
+            parent_hash,
+            token_ids[start : start + block_size],
+            extra_keys=cache_extra_keys,
+        )
+        hashes.append(bytes(parent_hash))
+    return hashes
+
+
+def _cache_prefix_chain_fingerprint(block_hashes: list[bytes]) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(b"vmlx-cache-prefix-chain-v1\0")
+    for block_hash in block_hashes:
+        hasher.update(len(block_hash).to_bytes(2, "big"))
+        hasher.update(block_hash)
+    return hasher.hexdigest()
+
+
+def _cache_prefix_terminal_fingerprint(block_hashes: list[bytes]) -> str:
+    if not block_hashes:
+        return ""
+    return hashlib.sha256(
+        b"vmlx-cache-prefix-terminal-v1\0" + block_hashes[-1]
+    ).hexdigest()
+
+
+class _CachePrefixAttestationBudgetExceeded(ValueError):
+    """Raised inside the model executor when a rendered proof exceeds bounds."""
+
+
+def _cache_prefix_safe_label(value: Any) -> str:
+    label = str(value)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", label):
+        raise HTTPException(
+            status_code=400,
+            detail="cache prefix labels must be 1-64 safe identifier characters",
+        )
+    return label
+
+
+def _cache_prefix_l1_snapshot(
+    paged_manager: Any,
+    block_hashes: list[bytes],
+) -> dict[str, Any]:
+    """Read path-free L1 metadata/payload state without touching its LRU."""
+    rows: list[dict[str, Any]] = []
+    lock = getattr(paged_manager, "_lock", None)
+    if lock is None:
+        raise RuntimeError("paged cache manager has no synchronization lock")
+    hash_map = getattr(paged_manager, "cached_block_hash_to_block", None)
+    if hash_map is None or not hasattr(hash_map, "get_block"):
+        raise RuntimeError("paged cache manager has no chain-hash index")
+    with lock:
+        for ordinal, block_hash in enumerate(block_hashes):
+            block = hash_map.get_block(block_hash)
+            metadata_present = bool(
+                block is not None
+                and bytes(getattr(block, "block_hash", b"") or b"")
+                == block_hash
+            )
+            payload_present = bool(
+                metadata_present and getattr(block, "cache_data", None) is not None
+            )
+            rows.append(
+                {
+                    "ordinal": ordinal,
+                    "metadata_present": metadata_present,
+                    "resident_payload_present": payload_present,
+                    "resident_bytes": (
+                        max(0, int(getattr(block, "resident_bytes", 0) or 0))
+                        if payload_present
+                        else 0
+                    ),
+                    "payload_from_disk": bool(
+                        payload_present
+                        and getattr(block, "cache_data_from_disk", False)
+                    ),
+                }
+            )
+
+    def _contiguous(field: str) -> int:
+        count = 0
+        for row in rows:
+            if row[field] is not True:
+                break
+            count += 1
+        return count
+
+    terminal = rows[-1] if rows else {}
+    disk_only = bool(getattr(paged_manager, "disk_only", False))
+    return {
+        "schema": "vmlx-cache-prefix-l1-snapshot-v1",
+        "access_metadata_mutated": False,
+        "backend_mode": "block_disk_only" if disk_only else "paged",
+        "paged_ram_enabled": not disk_only,
+        "disk_only": disk_only,
+        "expected_blocks": len(rows),
+        "metadata_blocks_present": sum(
+            1 for row in rows if row["metadata_present"]
+        ),
+        "contiguous_metadata_blocks": _contiguous("metadata_present"),
+        "resident_payload_blocks_present": sum(
+            1 for row in rows if row["resident_payload_present"]
+        ),
+        "contiguous_resident_payload_blocks": _contiguous(
+            "resident_payload_present"
+        ),
+        "metadata_only_blocks": sum(
+            1
+            for row in rows
+            if row["metadata_present"] and not row["resident_payload_present"]
+        ),
+        "resident_payload_bytes": sum(
+            int(row["resident_bytes"]) for row in rows
+        ),
+        "payloads_promoted_from_disk": sum(
+            1 for row in rows if row["payload_from_disk"]
+        ),
+        "terminal_metadata_present": bool(
+            terminal.get("metadata_present", False)
+        ),
+        "terminal_resident_payload_present": bool(
+            terminal.get("resident_payload_present", False)
+        ),
+        "terminal_payload_from_disk": bool(
+            terminal.get("payload_from_disk", False)
+        ),
+    }
+
+
+def _cache_prefix_l2_snapshot(
+    disk_store: Any,
+    block_hashes: list[bytes],
+) -> dict[str, Any]:
+    """Aggregate a BlockDiskStore no-touch inspection without exposing hashes."""
+    inspect = getattr(disk_store, "inspect_block_chain", None)
+    if not callable(inspect):
+        raise RuntimeError("block disk store has no read-only chain inspector")
+    observed = inspect(block_hashes)
+    if (
+        not isinstance(observed, dict)
+        or observed.get("schema") != "vmlx-block-disk-chain-inspection-v1"
+        or observed.get("access_metadata_mutated") is not False
+    ):
+        raise RuntimeError("block disk store returned an invalid chain inspection")
+    rows = observed.get("blocks")
+    if not isinstance(rows, list) or len(rows) != len(block_hashes):
+        raise RuntimeError("block disk chain inspection is incomplete")
+    for ordinal, row in enumerate(rows):
+        if not isinstance(row, dict) or row.get("ordinal") != ordinal:
+            raise RuntimeError("block disk chain inspection order is invalid")
+
+    def _contiguous(field: str) -> int:
+        count = 0
+        for row in rows:
+            if row.get(field) is not True:
+                break
+            count += 1
+        return count
+
+    indexed_rows = [row for row in rows if row.get("indexed") is True]
+    readable_rows = [row for row in rows if row.get("readable") is True]
+    access_times = [
+        max(0, int(row.get("last_accessed_ns") or 0))
+        for row in readable_rows
+        if int(row.get("last_accessed_ns") or 0) > 0
+    ]
+    terminal = rows[-1] if rows else {}
+    return {
+        "schema": "vmlx-cache-prefix-l2-snapshot-v1",
+        "access_metadata_mutated": False,
+        "expected_blocks": len(rows),
+        "indexed_blocks": len(indexed_rows),
+        "readable_blocks": len(readable_rows),
+        "contiguous_indexed_blocks": _contiguous("indexed"),
+        "contiguous_readable_blocks": _contiguous("readable"),
+        "stale_index_blocks": sum(
+            1
+            for row in rows
+            if row.get("indexed") is True and row.get("readable") is not True
+        ),
+        "matched_file_size_bytes": sum(
+            max(0, int(row.get("file_size_bytes") or 0))
+            for row in readable_rows
+        ),
+        "total_access_count": sum(
+            max(0, int(row.get("access_count") or 0))
+            for row in readable_rows
+        ),
+        "oldest_last_accessed_ns": min(access_times) if access_times else 0,
+        "newest_last_accessed_ns": max(access_times) if access_times else 0,
+        "terminal_indexed": bool(terminal.get("indexed", False)),
+        "terminal_readable": bool(terminal.get("readable", False)),
+        "terminal_num_tokens": max(
+            0,
+            int(terminal.get("num_tokens") or 0),
+        ),
+        "terminal_last_accessed_ns": max(
+            0,
+            int(terminal.get("last_accessed_ns") or 0),
+        ),
+        "terminal_access_count": max(
+            0,
+            int(terminal.get("access_count") or 0),
+        ),
+        "store_total_entries": max(
+            0,
+            int(observed.get("store_total_entries") or 0),
+        ),
+        "store_total_size_bytes": max(
+            0,
+            int(observed.get("store_total_size_bytes") or 0),
+        ),
+        "store_max_size_bytes": max(
+            0,
+            int(observed.get("store_max_size_bytes") or 0),
+        ),
+    }
+
+
+@app.post(
+    "/v1/cache/prefix-attestation",
+    dependencies=[Depends(verify_private_cache_attestation)],
+    include_in_schema=False,
+)
+async def cache_prefix_attestation(request: dict):
+    """Return a read-only, path-free identity/state attestation for prompt pairs.
+
+    Each named pair is dry-rendered through the loaded Responses path.  Only
+    the longest block-aligned shared prefix is inspected, matching the paged
+    chain-hash lookup contract.  Raw prompts and token IDs remain request-local;
+    the response contains only SHA-256 fingerprints, counts, and timestamps.
+    """
+    if _engine is None:
+        raise HTTPException(status_code=409, detail="model is not loaded")
+    if not isinstance(request, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    initial_controls = request.get("request_controls")
+    _cache_contract_reject_side_keys(
+        request,
+        initial_controls if isinstance(initial_controls, dict) else {},
+    )
+    allowed_request_fields = {
+        "contract_version",
+        "surface",
+        "model",
+        "inputs",
+        "prefix_pairs",
+        "request_controls",
+        "touch",
+    }
+    unknown_request_fields = sorted(set(request) - allowed_request_fields)
+    if unknown_request_fields:
+        raise HTTPException(
+            status_code=400,
+            detail="prefix attestation request contains unsupported fields",
+        )
+    if request.get("contract_version") != 1:
+        raise HTTPException(status_code=400, detail="contract_version must be 1")
+    if request.get("surface") != "responses":
+        raise HTTPException(status_code=400, detail="surface must be responses")
+    if request.get("touch") not in (None, False):
+        raise HTTPException(
+            status_code=400,
+            detail="prefix attestation is read-only; use a real cache hit to touch LRU",
+        )
+    inputs = request.get("inputs")
+    if (
+        not isinstance(inputs, dict)
+        or not 2 <= len(inputs) <= _PRIVATE_CACHE_ATTESTATION_MAX_INPUTS
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "inputs must contain between 2 and "
+                f"{_PRIVATE_CACHE_ATTESTATION_MAX_INPUTS} named prompts"
+            ),
+        )
+    normalized_inputs: dict[str, str] = {}
+    total_prompt_bytes = 0
+    for raw_label, prompt in inputs.items():
+        label = _cache_prefix_safe_label(raw_label)
+        if label in normalized_inputs:
+            raise HTTPException(
+                status_code=400,
+                detail="input labels must be unique after normalization",
+            )
+        if not isinstance(prompt, str):
+            raise HTTPException(
+                status_code=400,
+                detail="inputs values must be strings",
+            )
+        prompt_bytes = len(prompt.encode("utf-8", "surrogatepass"))
+        if prompt_bytes > _PRIVATE_CACHE_ATTESTATION_MAX_PROMPT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="one prefix attestation prompt exceeds the byte budget",
+            )
+        total_prompt_bytes += prompt_bytes
+        if total_prompt_bytes > _PRIVATE_CACHE_ATTESTATION_MAX_TOTAL_PROMPT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="prefix attestation prompts exceed the aggregate byte budget",
+            )
+        normalized_inputs[label] = prompt
+    inputs = normalized_inputs
+    prefix_pairs = request.get("prefix_pairs")
+    if (
+        not isinstance(prefix_pairs, dict)
+        or not 1 <= len(prefix_pairs) <= _PRIVATE_CACHE_ATTESTATION_MAX_PAIRS
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "prefix_pairs must contain between 1 and "
+                f"{_PRIVATE_CACHE_ATTESTATION_MAX_PAIRS} pairs"
+            ),
+        )
+    normalized_pairs: dict[str, tuple[str, str]] = {}
+    for pair_name, labels in prefix_pairs.items():
+        normalized_name = _cache_prefix_safe_label(pair_name)
+        if normalized_name in normalized_pairs:
+            raise HTTPException(
+                status_code=400,
+                detail="prefix pair names must be unique after normalization",
+            )
+        if (
+            not normalized_name
+            or not isinstance(labels, list)
+            or len(labels) != 2
+            or any(not isinstance(label, str) for label in labels)
+            or labels[0] == labels[1]
+            or any(label not in inputs for label in labels)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"prefix pair {normalized_name!r} is invalid",
+            )
+        normalized_pairs[normalized_name] = (labels[0], labels[1])
+    model = str(request.get("model") or _model_name or "")
+    if not model:
+        raise HTTPException(status_code=400, detail="model is required")
+    if len(model.encode("utf-8", "surrogatepass")) > 1024:
+        raise HTTPException(status_code=413, detail="model identifier is too large")
+    request_controls = request.get("request_controls") or {}
+    if not isinstance(request_controls, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="request_controls must be an object when provided",
+        )
+    allowed_control_fields = {
+        "enable_thinking",
+        "instructions",
+        "tools",
+        "tool_choice",
+        "chat_template_kwargs",
+    }
+    if set(request_controls) - allowed_control_fields:
+        raise HTTPException(
+            status_code=400,
+            detail="request_controls contains unsupported fields",
+        )
+    _cache_contract_reject_side_keys(request, request_controls)
+    try:
+        request_controls_bytes = len(
+            json.dumps(
+                request_controls,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="request_controls must contain JSON-compatible values",
+        ) from exc
+    if (
+        request_controls_bytes
+        > _PRIVATE_CACHE_ATTESTATION_MAX_REQUEST_CONTROLS_BYTES
+    ):
+        raise HTTPException(
+            status_code=413,
+            detail="request_controls exceeds the private proof byte budget",
+        )
+
+    scheduler = _get_scheduler()
+    paged_manager = (
+        getattr(scheduler, "paged_cache_manager", None)
+        if scheduler is not None
+        else None
+    )
+    disk_store = (
+        getattr(paged_manager, "_disk_store", None)
+        if paged_manager is not None
+        else None
+    )
+    block_size = (
+        int(getattr(paged_manager, "block_size", 0) or 0)
+        if paged_manager is not None
+        else 0
+    )
+    if paged_manager is None or disk_store is None or block_size <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail="paged prefix metadata and block-disk L2 must be active",
+        )
+
+    health_snapshot = await health()
+    model_bundle_provenance = health_snapshot.get("model_bundle_provenance")
+    if not isinstance(model_bundle_provenance, dict):
+        model_bundle_provenance = (
+            health_snapshot.get("runtime_provenance", {}) or {}
+        ).get("model_bundle_provenance")
+    cache_topology_provenance = health_snapshot.get("cache_topology_provenance")
+    if not isinstance(cache_topology_provenance, dict):
+        cache_topology_provenance = (
+            health_snapshot.get("runtime_provenance", {}) or {}
+        ).get("cache_topology_provenance")
+    if not isinstance(model_bundle_provenance, dict) or not isinstance(
+        cache_topology_provenance,
+        dict,
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="health provenance attestations are unavailable",
+        )
+
+    def _build_attestation():
+        prompt_rows: dict[str, dict[str, Any]] = {}
+        prompt_vectors: dict[str, list[int]] = {}
+        prompt_cache_extra_keys: dict[str, dict[str, str] | None] = {}
+        total_rendered_tokens = 0
+        for label in sorted(inputs):
+            row, token_vector, cache_extra_keys = _cache_contract_render_and_tokenize(
+                engine=_engine,
+                prompt=inputs[label],
+                model=model,
+                request_controls=request_controls,
+            )
+            rendered_tokens = len(token_vector) + max(
+                0,
+                int(row.get("generation_prompt_suffix_tokens") or 0),
+            )
+            if rendered_tokens > _PRIVATE_CACHE_ATTESTATION_MAX_TOKENS_PER_PROMPT:
+                raise _CachePrefixAttestationBudgetExceeded(
+                    "one rendered prefix attestation prompt exceeds its token budget"
+                )
+            total_rendered_tokens += rendered_tokens
+            if total_rendered_tokens > _PRIVATE_CACHE_ATTESTATION_MAX_TOTAL_TOKENS:
+                raise _CachePrefixAttestationBudgetExceeded(
+                    "rendered prefix attestation prompts exceed the token budget"
+                )
+            prompt_rows[str(label)] = row
+            prompt_vectors[str(label)] = token_vector
+            prompt_cache_extra_keys[str(label)] = cache_extra_keys
+
+        prefix_rows: dict[str, dict[str, Any]] = {}
+        total_pair_prefix_tokens = 0
+        for pair_name in sorted(normalized_pairs):
+            left_label, right_label = normalized_pairs[pair_name]
+            left = prompt_vectors[left_label]
+            right = prompt_vectors[right_label]
+            left_cache_extra_keys = prompt_cache_extra_keys[left_label]
+            right_cache_extra_keys = prompt_cache_extra_keys[right_label]
+            if left_cache_extra_keys != right_cache_extra_keys:
+                raise ValueError(
+                    f"prefix pair {pair_name!r} has different production "
+                    "generation-prompt discriminators"
+                )
+            lcp_tokens = _cache_contract_lcp(left, right)
+            reusable_tokens = (lcp_tokens // block_size) * block_size
+            total_pair_prefix_tokens += reusable_tokens
+            if (
+                total_pair_prefix_tokens
+                > _PRIVATE_CACHE_ATTESTATION_MAX_PAIR_PREFIX_TOKENS
+            ):
+                raise _CachePrefixAttestationBudgetExceeded(
+                    "prefix attestation pairs exceed the comparison token budget"
+                )
+            prefix_vector = left[:reusable_tokens]
+            block_hashes = _cache_prefix_chain_hashes(
+                prefix_vector,
+                block_size,
+                cache_extra_keys=left_cache_extra_keys,
+            )
+            prefix_rows[pair_name] = {
+                "labels": [left_label, right_label],
+                "longest_common_prefix_tokens": lcp_tokens,
+                "reusable_prefix_tokens": reusable_tokens,
+                "uncached_left_tokens": len(left) - reusable_tokens,
+                "uncached_right_tokens": len(right) - reusable_tokens,
+                "expected_blocks": len(block_hashes),
+                "prefix_token_vector_sha256": hashlib.sha256(
+                    json.dumps(
+                        prefix_vector,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    ).encode()
+                ).hexdigest(),
+                "block_chain_fingerprint_sha256": (
+                    _cache_prefix_chain_fingerprint(block_hashes)
+                ),
+                "terminal_block_fingerprint_sha256": (
+                    _cache_prefix_terminal_fingerprint(block_hashes)
+                ),
+                "generation_prompt_discriminator_present": (
+                    left_cache_extra_keys is not None
+                ),
+                "generation_prompt_discriminator_sha256": prompt_rows[
+                    left_label
+                ].get("generation_prompt_discriminator_sha256"),
+                "l1": _cache_prefix_l1_snapshot(
+                    paged_manager,
+                    block_hashes,
+                ),
+                "l2": _cache_prefix_l2_snapshot(
+                    disk_store,
+                    block_hashes,
+                ),
+            }
+        return prompt_rows, prefix_rows
+
+    try:
+        prompt_rows, prefix_rows = await _run_on_model_executor(
+            _build_attestation
+        )
+    except _CachePrefixAttestationBudgetExceeded as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except (RuntimeError, TypeError, ValueError) as exc:
+        logger.warning("Cache prefix attestation failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="cache prefix attestation unavailable",
+        ) from exc
+
+    return {
+        "contract_version": 1,
+        "method": "final-render-tokenize-cache-prefix-identity-readonly",
+        "surface": "responses",
+        "cache_extra_keys_contract": "generation-prompt-only-text-render-v1",
+        "caller_cache_or_media_side_keys": "rejected",
+        "cache_lookup_bypassed": True,
+        "access_metadata_mutated": False,
+        "request_sha256": _cache_token_contract_request_sha256(request),
+        "model_bundle_fingerprint_sha256": str(
+            model_bundle_provenance.get("fingerprint_sha256")
+            or model_bundle_provenance.get("aggregate_sha256")
+            or ""
+        ),
+        "cache_topology_fingerprint_sha256": str(
+            cache_topology_provenance.get("fingerprint_sha256")
+            or cache_topology_provenance.get("canonical_sha256")
+            or ""
+        ),
+        "block_size": block_size,
+        "snapshot_wall_time_ns": time.time_ns(),
+        "prompts": prompt_rows,
+        "prefixes": prefix_rows,
+    }
+
+
+@app.post(
+    "/v1/cache/token-contract",
+    dependencies=[Depends(verify_private_cache_attestation)],
+    include_in_schema=False,
+)
 async def cache_token_contract(request: dict):
     """Return path-free final-render token/LCP attestations for cache gates."""
     if _engine is None:
         raise HTTPException(status_code=409, detail="model is not loaded")
     if not isinstance(request, dict):
         raise HTTPException(status_code=400, detail="request body must be an object")
+    initial_controls = request.get("request_controls")
+    _cache_contract_reject_side_keys(
+        request,
+        initial_controls if isinstance(initial_controls, dict) else {},
+    )
+    allowed_request_fields = {
+        "contract_version",
+        "surface",
+        "model",
+        "inputs",
+        "request_controls",
+    }
+    if set(request) - allowed_request_fields:
+        raise HTTPException(
+            status_code=400,
+            detail="cache token contract contains unsupported fields",
+        )
     if request.get("contract_version") != 1:
         raise HTTPException(status_code=400, detail="contract_version must be 1")
     if request.get("surface") != "responses":
         raise HTTPException(status_code=400, detail="surface must be responses")
     inputs = request.get("inputs")
-    if not isinstance(inputs, dict) or not inputs:
-        raise HTTPException(status_code=400, detail="inputs must be a non-empty object")
+    if (
+        not isinstance(inputs, dict)
+        or not 1 <= len(inputs) <= _PRIVATE_CACHE_ATTESTATION_MAX_INPUTS
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "inputs must contain between 1 and "
+                f"{_PRIVATE_CACHE_ATTESTATION_MAX_INPUTS} named prompts"
+            ),
+        )
+    normalized_inputs: dict[str, str] = {}
+    total_prompt_bytes = 0
+    for raw_label, prompt in inputs.items():
+        label = _cache_prefix_safe_label(raw_label)
+        if label in normalized_inputs:
+            raise HTTPException(
+                status_code=400,
+                detail="input labels must be unique after normalization",
+            )
+        if not isinstance(prompt, str):
+            raise HTTPException(
+                status_code=400,
+                detail="inputs values must be strings",
+            )
+        prompt_bytes = len(prompt.encode("utf-8", "surrogatepass"))
+        if prompt_bytes > _PRIVATE_CACHE_ATTESTATION_MAX_PROMPT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="one cache token-contract prompt exceeds the byte budget",
+            )
+        total_prompt_bytes += prompt_bytes
+        if total_prompt_bytes > _PRIVATE_CACHE_ATTESTATION_MAX_TOTAL_PROMPT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="cache token-contract prompts exceed the byte budget",
+            )
+        normalized_inputs[label] = prompt
+    inputs = normalized_inputs
     model = str(request.get("model") or _model_name or "")
     if not model:
         raise HTTPException(status_code=400, detail="model is required")
+    if len(model.encode("utf-8", "surrogatepass")) > 1024:
+        raise HTTPException(status_code=413, detail="model identifier is too large")
     request_controls = request.get("request_controls") or {}
     if not isinstance(request_controls, dict):
         raise HTTPException(
             status_code=400,
             detail="request_controls must be an object when provided",
+        )
+    allowed_control_fields = {
+        "enable_thinking",
+        "instructions",
+        "tools",
+        "tool_choice",
+        "chat_template_kwargs",
+    }
+    if set(request_controls) - allowed_control_fields:
+        raise HTTPException(
+            status_code=400,
+            detail="request_controls contains unsupported fields",
+        )
+    _cache_contract_reject_side_keys(request, request_controls)
+    try:
+        request_controls_bytes = len(
+            json.dumps(
+                request_controls,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="request_controls must contain JSON-compatible values",
+        ) from exc
+    if (
+        request_controls_bytes
+        > _PRIVATE_CACHE_ATTESTATION_MAX_REQUEST_CONTROLS_BYTES
+    ):
+        raise HTTPException(
+            status_code=413,
+            detail="request_controls exceeds the private proof byte budget",
         )
 
     health_snapshot = await health()
@@ -10902,26 +11771,55 @@ async def cache_token_contract(request: dict):
     def _build_contract():
         prompt_rows: dict[str, dict[str, Any]] = {}
         prompt_token_vectors: dict[str, list[int]] = {}
+        total_rendered_tokens = 0
         for label in sorted(inputs):
             prompt = inputs[label]
-            row, token_vector = _cache_contract_render_and_tokenize(
-                engine=_engine,
-                prompt=prompt,
-                model=model,
-                request_controls=request_controls,
+            row, token_vector, _cache_extra_keys = (
+                _cache_contract_render_and_tokenize(
+                    engine=_engine,
+                    prompt=prompt,
+                    model=model,
+                    request_controls=request_controls,
+                )
             )
+            rendered_tokens = len(token_vector) + max(
+                0,
+                int(row.get("generation_prompt_suffix_tokens") or 0),
+            )
+            if rendered_tokens > _PRIVATE_CACHE_ATTESTATION_MAX_TOKENS_PER_PROMPT:
+                raise _CachePrefixAttestationBudgetExceeded(
+                    "one rendered cache token-contract prompt exceeds its token budget"
+                )
+            total_rendered_tokens += rendered_tokens
+            if total_rendered_tokens > _PRIVATE_CACHE_ATTESTATION_MAX_TOTAL_TOKENS:
+                raise _CachePrefixAttestationBudgetExceeded(
+                    "rendered cache token-contract prompts exceed the token budget"
+                )
             prompt_rows[str(label)] = row
             prompt_token_vectors[str(label)] = token_vector
         lcp_rows: dict[str, int] = {}
+        total_pair_prefix_tokens = 0
         for left in sorted(prompt_token_vectors):
             for right in sorted(prompt_token_vectors):
-                lcp_rows[f"{left}:{right}"] = _cache_contract_lcp(
+                lcp_tokens = _cache_contract_lcp(
                     prompt_token_vectors[left],
                     prompt_token_vectors[right],
                 )
+                total_pair_prefix_tokens += lcp_tokens
+                if (
+                    total_pair_prefix_tokens
+                    > _PRIVATE_CACHE_ATTESTATION_MAX_PAIR_PREFIX_TOKENS
+                ):
+                    raise _CachePrefixAttestationBudgetExceeded(
+                        "cache token-contract comparisons exceed the token budget"
+                    )
+                lcp_rows[f"{left}:{right}"] = lcp_tokens
         return prompt_rows, lcp_rows
 
-    prompt_rows, lcp_rows = await _run_on_model_executor(_build_contract)
+    try:
+        prompt_rows, lcp_rows = await _run_on_model_executor(_build_contract)
+    except _CachePrefixAttestationBudgetExceeded as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     bundle_fingerprint = str(
         model_bundle_provenance.get("fingerprint_sha256")
         or model_bundle_provenance.get("aggregate_sha256")
@@ -13050,57 +13948,16 @@ async def ollama_pull():
 
 
 @app.post("/api/delete", dependencies=[Depends(verify_api_key)])
-async def ollama_delete(request: Request):
-    """vmlx#57 — actually remove the model directory; returns {"status": "success"}.
+async def ollama_delete():
+    """Acknowledge Ollama delete without mutating the filesystem.
 
-    Ollama-compatible body: `{"name": "<model>"}` or `{"model": "<path>"}`.
-    Successful and already-absent deletes return `{"status": "success"}` for
-    Ollama client compatibility.
-    Resolves to a local path via the same logic the loader uses, then walks
-    upward to confirm we're inside the configured model_directories before
-    deleting. Refuses any path outside those roots.
+    The standalone engine has no authoritative, user-configured model-root
+    owner.  Model deletion belongs to the Electron main-process IPC path,
+    which can validate registered roots, active sessions, and symlinks before
+    removing anything.  Keep this endpoint as an authenticated compatibility
+    no-op, matching the gateway and the other unsupported Ollama CRUD routes.
     """
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    target = body.get("name") or body.get("model") or ""
-    if not target:
-        raise HTTPException(status_code=400, detail="Provide 'name' or 'model' in body")
-
-    from pathlib import Path
-    import shutil
-    from .api.utils import resolve_to_local_path
-
-    local = resolve_to_local_path(target)
-    p = Path(local).resolve()
-
-    # Enforce the path is inside one of the configured model directories.
-    allowed_roots: list[Path] = []
-    md = getattr(_app_state, "model_directories", None) if "_app_state" in dir() else None
-    if md is None:
-        # Fallbacks: HF cache + ~/.mlxstudio
-        allowed_roots.append(Path.home() / ".cache" / "huggingface" / "hub")
-        allowed_roots.append(Path.home() / ".mlxstudio")
-    else:
-        allowed_roots = [Path(d).resolve() for d in (md or [])]
-
-    inside = any(str(p).startswith(str(root.resolve()) + "/") for root in allowed_roots)
-    if not inside:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Refusing to delete path outside allowed model directories: {p}",
-        )
-    if not p.exists():
-        return {"status": "success", "deleted": str(p), "note": "already absent"}
-    try:
-        if p.is_dir():
-            shutil.rmtree(p)
-        else:
-            p.unlink()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
-    return {"status": "success", "deleted": str(p)}
+    return {"status": "success"}
 
 
 @app.post("/api/copy", dependencies=[Depends(verify_api_key)])
@@ -14975,6 +15832,10 @@ async def create_chat_completion(
         _ns_pre_cap_family = (
             _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
+            # A served alias is not necessarily a readable bundle path. The
+            # configured native parser is still source-owned runtime evidence
+            # for MiniMax-M3, matching the post-parse family fallback below.
+            or _tool_call_parser == "minimax_m3"
         )
         if _ns_pre_cap_family:
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
@@ -18083,6 +18944,7 @@ async def create_response(
         _ns_pre_cap_family = (
             _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
+            or _tool_call_parser == "minimax_m3"
         )
         if _ns_pre_cap_family:
             _ns_pre_orig = int(chat_kwargs.get("max_tokens") or 256)
@@ -23235,6 +24097,17 @@ Examples:
         help="API key for authentication (if not set, no auth required)",
     )
     parser.add_argument(
+        "--enable-private-cache-attestation",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--private-cache-attestation-token-file",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=300.0,
@@ -23361,12 +24234,31 @@ Examples:
 
     # Set global configuration
     global _api_key, _default_timeout, _rate_limiter
+    global _private_cache_attestation_enabled, _private_cache_attestation_token
     global _default_temperature, _default_top_p, _default_top_k, _default_min_p, _default_repetition_penalty, _default_enable_thinking
     global _native_mtp_sampling_policy
     global _inference_endpoints, _wake_timeout
     global _smelt_enabled, _smelt_experts
 
     _api_key = args.api_key or os.environ.get("VLLM_API_KEY")
+    _private_cache_attestation_enabled = False
+    _private_cache_attestation_token = None
+    private_attestation_enabled = bool(args.enable_private_cache_attestation)
+    private_attestation_token_file = args.private_cache_attestation_token_file
+    if private_attestation_enabled != bool(private_attestation_token_file):
+        parser.error(
+            "private cache attestation requires both its enable flag and token file"
+        )
+    if private_attestation_enabled:
+        try:
+            _private_cache_attestation_token = (
+                _load_private_cache_attestation_token_file(
+                    private_attestation_token_file
+                )
+            )
+        except (OSError, ValueError) as exc:
+            parser.error(f"invalid private cache attestation token file: {exc}")
+        _private_cache_attestation_enabled = True
     _default_timeout = args.timeout
     if getattr(args, "inference_endpoints", None):
         _inference_endpoints = [

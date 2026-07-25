@@ -741,6 +741,8 @@ class TestServerForwarding:
         )
         disk2 = SSMCompanionDiskStore(directory=tmp_path, budget_bytes=32 * 1024 * 1024)
         assert disk2.fetch("ssm-runtime-fingerprint") is None
+        assert disk1.shutdown()
+        assert disk2.shutdown()
 
 
 # ---------------------------------------------------------------------------

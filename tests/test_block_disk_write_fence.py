@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import os
+import queue
+import sqlite3
+import subprocess
+import sys
+import threading
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +23,7 @@ except ImportError:
     HAS_MLX = False
 
 from vmlx_engine.block_disk_store import BlockDiskStore
+from vmlx_engine.global_disk_cache_budget import GlobalDiskCacheBudget
 
 pytestmark = pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
 
@@ -21,6 +31,13 @@ pytestmark = pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
 def _cache_data(value: float) -> list[tuple]:
     keys = mx.full((1, 1, 8, 16), value, dtype=mx.float16)
     values = mx.full((1, 1, 8, 16), value + 1, dtype=mx.float16)
+    mx.eval(keys, values)  # noqa: S307 - MLX tensor materialization
+    return [("kv", keys, values)]
+
+
+def _large_cache_data(value: float) -> list[tuple]:
+    keys = mx.full((1, 1, 8, 4096), value, dtype=mx.float16)
+    values = mx.full((1, 1, 8, 4096), value + 1, dtype=mx.float16)
     mx.eval(keys, values)  # noqa: S307 - MLX tensor materialization
     return [("kv", keys, values)]
 
@@ -60,11 +77,12 @@ def _write_request(
     request_id: str,
     block_hash: bytes,
     value: float,
+    cache_data: list[tuple] | None = None,
 ) -> tuple[dict, dict]:
     fence_id = store.begin_write_fence(request_id)
     assert store.write_block_async(
         block_hash,
-        _cache_data(value),
+        cache_data if cache_data is not None else _cache_data(value),
         8,
         request_id=request_id,
         fence_id=fence_id,
@@ -100,29 +118,149 @@ def test_write_fence_correlates_request_without_exposing_hashes(tmp_path):
         "producer_aborted": False,
         "post_eviction_complete": True,
         "completion_generation": 1,
+        "global_accounting_generation": fence["global_accounting_generation"],
+        "global_reconciliation_generation": fence[
+            "global_reconciliation_generation"
+        ],
+        "global_bytes_after": fence["global_bytes_after"],
+        "global_max_size_bytes": 0,
     }
     assert stats["write_pipeline"]["writer_alive"] is True
     assert not any("hash" in key for key in fence)
 
 
-def test_write_fence_settles_after_full_capacity_replacement(tmp_path):
+def test_read_only_chain_inspection_is_path_free_and_does_not_touch_lru(
+    tmp_path,
+):
     store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    block_hash = b"i" * 32
+    try:
+        _write_request(
+            store,
+            request_id="resp-inspect",
+            block_hash=block_hash,
+            value=9,
+        )
+        with sqlite3.connect(str(store._db_path)) as connection:
+            before = connection.execute(
+                "SELECT last_accessed, access_count FROM blocks "
+                "WHERE block_hash = ?",
+                (block_hash.hex(),),
+            ).fetchone()
+
+        observed = store.inspect_block_chain([block_hash])
+
+        with sqlite3.connect(str(store._db_path)) as connection:
+            after = connection.execute(
+                "SELECT last_accessed, access_count FROM blocks "
+                "WHERE block_hash = ?",
+                (block_hash.hex(),),
+            ).fetchone()
+    finally:
+        store.shutdown()
+
+    assert before == after
+    assert observed["schema"] == "vmlx-block-disk-chain-inspection-v1"
+    assert observed["access_metadata_mutated"] is False
+    assert observed["expected_blocks"] == 1
+    assert observed["blocks"][0]["indexed"] is True
+    assert observed["blocks"][0]["readable"] is True
+    serialized = json.dumps(observed, sort_keys=True)
+    assert block_hash.hex() not in serialized
+    assert str(tmp_path) not in serialized
+    assert "file_name" not in serialized
+
+
+def test_read_only_chain_inspection_distinguishes_stale_and_missing_entries(
+    tmp_path,
+):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    stale_hash = b"s" * 32
+    missing_hash = b"m" * 32
+    try:
+        now = time.time()
+        with sqlite3.connect(str(store._db_path)) as connection:
+            connection.execute(
+                "INSERT INTO blocks "
+                "(block_hash, file_name, num_tokens, num_layers, dtype, "
+                "file_size, created_at, last_accessed, access_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    stale_hash.hex(),
+                    "blocks/no-longer-present.safetensors",
+                    16,
+                    1,
+                    "float16",
+                    128,
+                    now,
+                    now,
+                    3,
+                ),
+            )
+            connection.commit()
+        observed = store.inspect_block_chain([stale_hash, missing_hash])
+    finally:
+        store.shutdown()
+
+    assert observed["blocks"][0]["indexed"] is True
+    assert observed["blocks"][0]["readable"] is False
+    assert observed["blocks"][0]["access_count"] == 3
+    assert observed["blocks"][1]["indexed"] is False
+    assert observed["blocks"][1]["readable"] is False
+
+
+def test_read_only_chain_inspection_rejects_indexed_size_mismatch(tmp_path):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    block_hash = b"z" * 32
+    try:
+        _write_request(
+            store,
+            request_id="resp-size-mismatch",
+            block_hash=block_hash,
+            value=11,
+        )
+        with sqlite3.connect(str(store._db_path)) as connection:
+            indexed_size = connection.execute(
+                "SELECT file_size FROM blocks WHERE block_hash = ?",
+                (block_hash.hex(),),
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE blocks SET file_size = ? WHERE block_hash = ?",
+                (indexed_size + 1, block_hash.hex()),
+            )
+            connection.commit()
+        observed = store.inspect_block_chain([block_hash])
+    finally:
+        store.shutdown()
+
+    assert observed["blocks"][0]["indexed"] is True
+    assert observed["blocks"][0]["readable"] is False
+
+
+def test_write_fence_settles_after_full_capacity_replacement(tmp_path):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=1)
     try:
         first_stats, first_fence = _write_request(
             store,
             request_id="resp-old",
             block_hash=b"a" * 32,
             value=1,
+            cache_data=_large_cache_data(1),
         )
         first_size = first_stats["disk_size_bytes"]
         assert first_size > 0
-        store.max_size_bytes = int(first_size * 1.5)
+        first_global_bytes = first_stats["global_budget"]["bytes_after"]
+        assert first_global_bytes >= first_size
+        store.max_size_bytes = int(first_global_bytes + first_size * 0.5)
+        store.global_budget._requested_max_size_bytes = store.max_size_bytes
+        store.global_budget._publish_budget(store.max_size_bytes)
 
         second_stats, second_fence = _write_request(
             store,
             request_id="resp-new",
             block_hash=b"b" * 32,
             value=2,
+            cache_data=_large_cache_data(2),
         )
     finally:
         store.shutdown()
@@ -188,30 +326,148 @@ def test_store_cache_exception_terminates_begun_write_fence(
     assert all(item["sealed"] for item in stats["write_pipeline"]["recent_fences"])
 
 
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [(None, False), ("1", True)],
+)
+def test_prefix_cache_passes_explicit_strict_fence_mode_from_startup_env(
+    tmp_path,
+    monkeypatch,
+    env_value,
+    expected,
+):
+    import vmlx_engine.prefix_cache as prefix_cache_module
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    if env_value is None:
+        monkeypatch.delenv("VMLX_STRICT_BLOCK_DISK_WRITE_FENCE", raising=False)
+    else:
+        monkeypatch.setenv("VMLX_STRICT_BLOCK_DISK_WRITE_FENCE", env_value)
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    manager = PagedCacheManager(block_size=4, max_blocks=16, disk_store=store)
+    cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+    observed: list[bool] = []
+    original_begin = store.begin_write_fence
+
+    def record_begin(request_id, *, strict_reconcile=False):
+        observed.append(bool(strict_reconcile))
+        return original_begin(
+            request_id,
+            strict_reconcile=strict_reconcile,
+        )
+
+    def stop_after_fence_begin():
+        raise RuntimeError("stop after fence begin")
+
+    monkeypatch.setattr(store, "begin_write_fence", record_begin)
+    monkeypatch.setattr(
+        prefix_cache_module.mx,
+        "synchronize",
+        stop_after_fence_begin,
+    )
+    cache_data = [
+        {
+            "state": (
+                mx.ones((1, 1, 4, 8), dtype=mx.float16),
+                mx.ones((1, 1, 4, 8), dtype=mx.float16),
+            ),
+            "meta_state": (4,),
+            "class_name": "KVCache",
+        }
+    ]
+    try:
+        with pytest.raises(RuntimeError, match="stop after fence begin"):
+            cache.store_cache("strict-env", [1, 2, 3, 4], cache_data)
+    finally:
+        store.shutdown()
+
+    assert observed == [expected]
+    assert cache.get_stats()["strict_block_disk_write_fence"] is expected
+
+
+def test_prefix_cache_stats_default_strict_fence_for_legacy_fixture():
+    from vmlx_engine.prefix_cache import (
+        _CACHE_TYPE_PRIORITY,
+        BlockAwarePrefixCache,
+    )
+
+    cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
+    cache.paged_cache = SimpleNamespace(get_memory_usage=lambda: {})
+    cache._hits = 0
+    cache._misses = 0
+    cache._tokens_saved = 0
+    cache._request_tables = {}
+    cache._entries_by_type = {key: [] for key in _CACHE_TYPE_PRIORITY}
+
+    assert cache.get_stats()["strict_block_disk_write_fence"] is False
+
+
+def test_constructor_failure_after_budget_publish_releases_owner_lease(
+    tmp_path,
+    monkeypatch,
+):
+    from vmlx_engine.global_disk_cache_budget import GlobalDiskCacheBudget
+
+    def fail_startup_reconcile(*_args, **_kwargs):
+        raise RuntimeError("forced startup reconcile failure")
+
+    monkeypatch.setattr(
+        GlobalDiskCacheBudget,
+        "enforce",
+        fail_startup_reconcile,
+    )
+    with pytest.raises(RuntimeError, match="forced startup reconcile failure"):
+        BlockDiskStore(str(tmp_path), max_size_gb=1)
+
+    lease_dir = tmp_path / ".vmlx-global-cache-budget-leases"
+    assert list(lease_dir.glob("*.json")) == []
+
+
 def test_write_fence_eviction_failure_is_terminal_and_prunable(
     tmp_path,
     monkeypatch,
 ):
     store = BlockDiskStore(str(tmp_path), max_size_gb=0)
 
-    def fail_eviction(_conn):
+    def fail_eviction(*_args, **_kwargs):
         raise RuntimeError("forced eviction failure")
 
-    monkeypatch.setattr(store, "_maybe_evict", fail_eviction)
+    original_account = store.global_budget.account_finalized_write_locked
+    monkeypatch.setattr(
+        store.global_budget,
+        "account_finalized_write_locked",
+        fail_eviction,
+    )
     try:
-        for index in range(70):
-            fence_id = store.begin_write_fence(f"resp-evict-{index}")
-            assert store.write_block_async(
-                bytes([index % 256]) * 32,
-                _cache_data(float(index + 1)),
-                8,
-                request_id=f"resp-evict-{index}",
-                fence_id=fence_id,
-            )
-            assert store.seal_write_fence(fence_id)
-            _stats, fence = _wait_for_fence(store, fence_id)
-            assert fence["post_eviction_complete"] is True
-            assert "forced eviction failure" in fence["post_eviction_error"]
+        fence_id = store.begin_write_fence("resp-evict")
+        assert store.write_block_async(
+            b"e" * 32,
+            _cache_data(1),
+            8,
+            request_id="resp-evict",
+            fence_id=fence_id,
+        )
+        assert store.seal_write_fence(fence_id)
+        stats, fence = _wait_for_fence(store, fence_id)
+        assert fence["post_eviction_complete"] is True
+        assert "forced eviction failure" in fence["post_eviction_error"]
+        assert stats["blocks_on_disk"] == 0
+
+        # Once aggregate accounting cannot certify a write, future writes fail
+        # closed and cannot grow the physical store until a new owner/session
+        # performs a healthy startup reconciliation.
+        monkeypatch.setattr(
+            store.global_budget,
+            "account_finalized_write_locked",
+            original_account,
+        )
+        assert store.write_block_async(
+            b"r" * 32,
+            _cache_data(2),
+            8,
+        ) is False
+        assert list(store.blocks_dir.rglob("*.safetensors")) == []
     finally:
         store.shutdown()
 
@@ -262,10 +518,280 @@ def test_write_fence_waits_for_active_producer_before_finalizing(tmp_path):
     finally:
         store.shutdown()
 
+
+def test_request_mismatch_balances_active_producer_and_terminalizes(tmp_path):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    try:
+        fence_id = store.begin_write_fence("expected-request")
+        assert store.write_block_async(
+            b"m" * 32,
+            _cache_data(1),
+            8,
+            request_id="wrong-request",
+            fence_id=fence_id,
+        ) is False
+        assert store.seal_write_fence(fence_id)
+        _stats, fence = _wait_for_fence(store, fence_id)
+    finally:
+        store.shutdown()
+
     assert fence["expected"] == 1
-    assert fence["queued"] == 1
-    assert fence["retained"] == 0
+    assert fence["failed"] == 1
     assert fence["post_eviction_complete"] is True
+
+
+def test_normal_fence_uses_accounting_without_full_root_scan(
+    tmp_path,
+    monkeypatch,
+):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=1)
+    calls = 0
+    original = store.global_budget._scan_locked
+
+    def counted_scan(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store.global_budget, "_scan_locked", counted_scan)
+    try:
+        _stats, fence = _write_request(
+            store,
+            request_id="resp-normal-accounted",
+            block_hash=b"n" * 32,
+            value=1,
+        )
+        assert fence["post_eviction_complete"] is True
+        assert calls == 0
+    finally:
+        store.shutdown()
+
+
+def test_explicit_strict_fence_forces_physical_reconciliation(
+    tmp_path,
+    monkeypatch,
+):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=1)
+    calls = 0
+    original = store.global_budget._scan_locked
+
+    def counted_scan(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store.global_budget, "_scan_locked", counted_scan)
+    try:
+        startup_generation = (
+            store.global_budget.last_result.reconciliation_generation
+        )
+        fence_id = store.begin_write_fence(
+            "resp-strict",
+            strict_reconcile=True,
+        )
+        assert store.write_block_async(
+            b"s" * 32,
+            _cache_data(1),
+            8,
+            request_id="resp-strict",
+            fence_id=fence_id,
+        )
+        assert store.seal_write_fence(fence_id)
+        _stats, fence = _wait_for_fence(store, fence_id)
+        assert fence["post_eviction_complete"] is True
+        assert calls >= 2
+        assert (
+            fence["global_reconciliation_generation"]
+            > startup_generation
+        )
+    finally:
+        store.shutdown()
+
+
+def test_full_write_queue_skips_metal_serialization(
+    tmp_path,
+    monkeypatch,
+):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    called = False
+
+    def unexpected_save(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("save must not run when queue is already full")
+
+    monkeypatch.setattr(store._write_queue, "full", lambda: True)
+    monkeypatch.setattr(mx, "save_safetensors", unexpected_save)
+    try:
+        assert store.write_block_async(
+            b"q" * 32,
+            _cache_data(1),
+            8,
+        ) is False
+        assert called is False
+    finally:
+        store.shutdown()
+
+
+def test_noncompliant_startup_budget_rejects_unfenced_growth(
+    tmp_path,
+    monkeypatch,
+):
+    blocks = tmp_path / "blocks"
+    blocks.mkdir()
+    protected = blocks / "recent.tmp.safetensors"
+    protected.write_bytes(b"p" * 64_000)
+    store = BlockDiskStore(
+        str(tmp_path),
+        max_size_gb=1 / 1024**3,
+    )
+    called = False
+
+    def unexpected_save(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("disabled aggregate writer must not serialize")
+
+    monkeypatch.setattr(mx, "save_safetensors", unexpected_save)
+    try:
+        assert store._global_budget_write_enabled is False
+        assert store.write_block_async(
+            b"g" * 32,
+            _cache_data(1),
+            8,
+        ) is False
+        assert called is False
+        assert protected.exists()
+    finally:
+        store.shutdown()
+
+
+def test_noncompliant_startup_budget_terminalizes_fenced_failure(tmp_path):
+    blocks = tmp_path / "blocks"
+    blocks.mkdir()
+    (blocks / "recent.tmp.safetensors").write_bytes(b"p" * 64_000)
+    store = BlockDiskStore(
+        str(tmp_path),
+        max_size_gb=1 / 1024**3,
+    )
+    try:
+        assert store._global_budget_write_enabled is False
+        fence_id = store.begin_write_fence("over-budget")
+        assert not store.write_block_async(
+            b"o" * 32,
+            _cache_data(1),
+            8,
+            request_id="over-budget",
+            fence_id=fence_id,
+        )
+        assert store.seal_write_fence(fence_id)
+        _stats, fence = _wait_for_fence(store, fence_id)
+    finally:
+        store.shutdown()
+
+    assert fence["expected"] == 1
+    assert fence["failed"] == 1
+    assert fence["post_eviction_complete"] is True
+
+
+def test_unlimited_owner_cannot_bypass_unhealthy_finite_root_budget(
+    tmp_path,
+    monkeypatch,
+):
+    from vmlx_engine.global_disk_cache_budget import GlobalDiskCacheBudget
+
+    root = tmp_path / "root"
+    finite_owner = GlobalDiskCacheBudget(root, 1)
+
+    def unhealthy_startup(_self, **_kwargs):
+        return SimpleNamespace(
+            accounted=False,
+            compliant=False,
+            bytes_after=2,
+            max_size_bytes=1,
+            error="forced aggregate reconciliation failure",
+        )
+
+    monkeypatch.setattr(GlobalDiskCacheBudget, "enforce", unhealthy_startup)
+    store = BlockDiskStore(
+        str(root / "aaaaaaaaaaaa"),
+        max_size_gb=0,
+        global_cache_root=str(root),
+    )
+    try:
+        assert store.max_size_bytes == 0
+        assert store._global_budget_write_enabled is False
+        fence_id = store.begin_write_fence("unlimited-owner")
+        assert not store.write_block_async(
+            b"u" * 32,
+            _cache_data(1),
+            8,
+            request_id="unlimited-owner",
+            fence_id=fence_id,
+        )
+        assert store.seal_write_fence(fence_id)
+        _stats, fence = _wait_for_fence(store, fence_id)
+    finally:
+        store.shutdown()
+        finite_owner.close()
+
+    assert fence["expected"] == 1
+    assert fence["failed"] == 1
+    assert fence["post_eviction_complete"] is True
+
+
+def test_unlimited_owner_clear_does_not_reenable_unhealthy_finite_root(
+    tmp_path,
+    monkeypatch,
+):
+    from vmlx_engine.global_disk_cache_budget import GlobalDiskCacheBudget
+
+    root = tmp_path / "root"
+    finite_owner = GlobalDiskCacheBudget(root, 10_000_000)
+    store = BlockDiskStore(
+        str(root / "aaaaaaaaaaaa"),
+        max_size_gb=0,
+        global_cache_root=str(root),
+    )
+    unhealthy = SimpleNamespace(accounted=False, compliant=False)
+    monkeypatch.setattr(
+        store.global_budget,
+        "account_finalized_write_locked",
+        lambda *_args, **_kwargs: unhealthy,
+    )
+    try:
+        assert store._global_budget_write_enabled is True
+        store.clear()
+        assert store._global_budget_write_enabled is False
+    finally:
+        store.shutdown()
+        finite_owner.close()
+
+
+def test_full_write_queue_terminalizes_unqueued_fence_sentinel(
+    tmp_path,
+    monkeypatch,
+):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+
+    def queue_is_full(_item):
+        raise queue.Full
+
+    try:
+        fence_id = store.begin_write_fence("resp-sentinel-full")
+        monkeypatch.setattr(store._write_queue, "put_nowait", queue_is_full)
+        assert store.seal_write_fence(fence_id) is False
+        fence = next(
+            item
+            for item in store.get_stats()["write_pipeline"]["recent_fences"]
+            if item["fence_id"] == fence_id
+        )
+    finally:
+        store.shutdown()
+
+    assert fence["seal_failed"] is True
+    assert fence["post_eviction_complete"] is True
+    assert "queue full" in fence["post_eviction_error"]
 
 
 def test_clear_terminalizes_unsettled_write_fences(tmp_path):
@@ -286,3 +812,387 @@ def test_clear_terminalizes_unsettled_write_fences(tmp_path):
     assert fence["sealed"] is True
     assert fence["post_eviction_complete"] is True
     assert "disk cache cleared" in fence["post_eviction_error"]
+
+
+def test_clear_waits_for_cross_process_shared_cache_operation(tmp_path):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    code = "\n".join(
+        (
+            "import sys",
+            "from vmlx_engine.global_disk_cache_budget import GlobalDiskCacheBudget",
+            "budget = GlobalDiskCacheBudget(sys.argv[1], 0)",
+            "with budget.mutation_guard() as locked:",
+            "    assert locked",
+            "    print('LOCKED', flush=True)",
+            "    input()",
+            "budget.close()",
+        )
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    complete = threading.Event()
+    errors: list[BaseException] = []
+
+    def run_clear() -> None:
+        try:
+            store.clear()
+        except BaseException as exc:  # pragma: no cover - assertion reports it
+            errors.append(exc)
+        finally:
+            complete.set()
+
+    thread = threading.Thread(target=run_clear)
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "LOCKED"
+        thread.start()
+        assert complete.wait(0.2) is False
+        assert child.stdin is not None
+        child.stdin.write("\n")
+        child.stdin.flush()
+        child.wait(timeout=10)
+        thread.join(timeout=10)
+        assert child.returncode == 0, child.stderr.read() if child.stderr else ""
+        assert complete.is_set()
+        assert errors == []
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        thread.join(timeout=5)
+        store.shutdown()
+
+
+def test_shutdown_releases_only_its_aggregate_budget_lease(tmp_path):
+    root = tmp_path / "root"
+    low = BlockDiskStore(
+        str(root / "low"),
+        max_size_gb=1,
+        global_cache_root=str(root),
+    )
+    high = BlockDiskStore(
+        str(root / "high"),
+        max_size_gb=2,
+        global_cache_root=str(root),
+    )
+    lease_dir = root / ".vmlx-global-cache-budget-leases"
+    try:
+        assert len(list(lease_dir.glob("*.json"))) == 2
+        assert high.global_budget.enforce(force=True).max_size_bytes == 1024**3
+
+        low.shutdown()
+
+        assert len(list(lease_dir.glob("*.json"))) == 1
+        assert high.global_budget.enforce(force=True).max_size_bytes == 2 * 1024**3
+    finally:
+        low.shutdown()
+        high.shutdown()
+
+    assert list(lease_dir.glob("*.json")) == []
+
+
+def test_shutdown_timeout_defers_lease_release_until_writer_stops(
+    tmp_path,
+    monkeypatch,
+):
+    release_writer = threading.Event()
+    original_writer = BlockDiskStore._background_writer
+
+    def delayed_writer(_self):
+        release_writer.wait(timeout=5.0)
+
+    monkeypatch.setattr(BlockDiskStore, "_background_writer", delayed_writer)
+    first = BlockDiskStore(str(tmp_path), max_size_gb=1)
+    monkeypatch.setattr(BlockDiskStore, "_background_writer", original_writer)
+    first._writer_shutdown_timeout_seconds = 0.01
+    first_lease = first.global_budget._lease_path()
+    second = None
+    try:
+        first.shutdown()
+        assert first_lease.exists()
+        assert first._delayed_shutdown_thread is not None
+
+        second = BlockDiskStore(str(tmp_path), max_size_gb=1)
+        second_lease = second.global_budget._lease_path()
+        assert second_lease.exists()
+
+        release_writer.set()
+        deadline = time.monotonic() + 5.0
+        while first_lease.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert first._shutdown_finalized is True
+        assert not first_lease.exists()
+        assert second_lease.exists()
+    finally:
+        release_writer.set()
+        if first._delayed_shutdown_thread is not None:
+            first._delayed_shutdown_thread.join(timeout=5.0)
+        if second is not None:
+            second.shutdown()
+
+
+def test_transient_budget_failure_recovers_at_bounded_retry(tmp_path, monkeypatch):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=1)
+    healthy = SimpleNamespace(accounted=True, compliant=True)
+    monkeypatch.setattr(
+        store.global_budget,
+        "enforce",
+        lambda **_kwargs: healthy,
+    )
+    try:
+        store._disable_global_budget_writes()
+        store._budget_recovery_interval_ns = 0
+        assert store.write_block_async(b"h" * 32, _cache_data(1), 8)
+        assert store.wait_for_blocks([b"h" * 32], timeout=5.0) == {b"h" * 32}
+        assert store._global_budget_write_enabled is True
+    finally:
+        store.shutdown()
+
+
+def test_block_disk_namespace_must_be_inside_aggregate_budget_root(tmp_path):
+    budget_root = tmp_path / "managed-root"
+    outside_namespace = tmp_path / "outside-root" / "namespace"
+
+    with pytest.raises(
+        ValueError,
+        match="namespace must be contained by its aggregate budget root",
+    ):
+        BlockDiskStore(
+            str(outside_namespace),
+            max_size_gb=1,
+            global_cache_root=str(budget_root),
+        )
+
+    # Reject before claiming or creating the out-of-budget namespace.  Leaving
+    # payloads there would make the user-visible aggregate max unenforceable.
+    assert not outside_namespace.exists()
+
+
+def test_successful_block_read_refreshes_cross_namespace_global_lru(tmp_path):
+    root = tmp_path / "root"
+    first = BlockDiskStore(
+        str(root / "aaaaaaaaaaaa"),
+        max_size_gb=0,
+        global_cache_root=str(root),
+    )
+    second = BlockDiskStore(
+        str(root / "bbbbbbbbbbbb"),
+        max_size_gb=0,
+        global_cache_root=str(root),
+    )
+    first_hash = b"a" * 32
+    second_hash = b"b" * 32
+    trim_budget = None
+    try:
+        _write_request(
+            first,
+            request_id="touch-first",
+            block_hash=first_hash,
+            value=1,
+            cache_data=_large_cache_data(1),
+        )
+        _write_request(
+            second,
+            request_id="touch-second",
+            block_hash=second_hash,
+            value=2,
+            cache_data=_large_cache_data(2),
+        )
+
+        def indexed_path(store, block_hash):
+            with sqlite3.connect(str(store._db_path)) as connection:
+                row = connection.execute(
+                    "SELECT file_name FROM blocks WHERE block_hash = ?",
+                    (block_hash.hex(),),
+                ).fetchone()
+            assert row is not None
+            return store.cache_dir / row[0]
+
+        first_path = indexed_path(first, first_hash)
+        second_path = indexed_path(second, second_hash)
+        now = time.time()
+        for store, block_hash, path, accessed in (
+            (first, first_hash, first_path, now - 200),
+            (second, second_hash, second_path, now - 100),
+        ):
+            os.utime(path, (accessed, accessed))
+            with sqlite3.connect(str(store._db_path)) as connection:
+                connection.execute(
+                    "UPDATE blocks SET last_accessed = ? WHERE block_hash = ?",
+                    (accessed, block_hash.hex()),
+                )
+                connection.commit()
+
+        # A successful real deserialize updates the physical mtime immediately,
+        # so even a saturated async metadata queue cannot evict the fresh hit.
+        assert first.read_block(first_hash) is not None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            pipeline = first.get_stats()["write_pipeline"]
+            if pipeline["queue_depth"] == 0 and pipeline["inflight"] == 0:
+                break
+            time.sleep(0.01)
+
+        total = first.global_budget.enforce(force=True).bytes_after
+        second_size = second_path.stat().st_size
+        remaining_after_oldest = total - second_size
+        cap = ((remaining_after_oldest * 10 + 8) // 9) + 1024
+        assert cap < total
+        trim_budget = GlobalDiskCacheBudget(root, cap, orphan_grace_seconds=0)
+        result = trim_budget.enforce(force=True)
+
+        assert result.compliant is True
+        assert result.bytes_after <= result.max_size_bytes
+        assert first_path.exists()
+        assert not second_path.exists()
+        with sqlite3.connect(str(second._db_path)) as connection:
+            assert connection.execute(
+                "SELECT 1 FROM blocks WHERE block_hash = ?",
+                (second_hash.hex(),),
+            ).fetchone() is None
+    finally:
+        if trim_budget is not None:
+            trim_budget.close()
+        first.shutdown()
+        second.shutdown()
+
+
+def test_cross_process_writers_share_one_cap_and_trim_oldest_namespace(tmp_path):
+    root = tmp_path / "root"
+    child_code = "\n".join(
+        (
+            "import sys, time",
+            "import mlx.core as mx",
+            "from vmlx_engine.block_disk_store import BlockDiskStore",
+            "root, namespace, byte_text = sys.argv[1:4]",
+            "store = BlockDiskStore(namespace, max_size_gb=0, global_cache_root=root)",
+            "print('READY', flush=True)",
+            "assert input().strip() == 'GO'",
+            "value = float(int(byte_text))",
+            "keys = mx.full((1, 1, 8, 4096), value, dtype=mx.float16)",
+            "values = mx.full((1, 1, 8, 4096), value + 1, dtype=mx.float16)",
+            "mx.eval(keys, values)",
+            "block_hash = bytes([int(byte_text)]) * 32",
+            "assert store.write_block_async(block_hash, [('kv', keys, values)], 8)",
+            "assert store.wait_for_blocks([block_hash], timeout=15.0) == {block_hash}",
+            "print('DONE', flush=True)",
+            "assert input().strip() == 'STOP'",
+            "store.shutdown()",
+        )
+    )
+    children = []
+    trim_budget = None
+    try:
+        for name, byte_value in (("aaaaaaaaaaaa", 97), ("bbbbbbbbbbbb", 98)):
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    child_code,
+                    str(root),
+                    str(root / name),
+                    str(byte_value),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            children.append(child)
+        for child in children:
+            assert child.stdout is not None
+            assert child.stdout.readline().strip() == "READY"
+        for child in children:
+            assert child.stdin is not None
+            child.stdin.write("GO\n")
+            child.stdin.flush()
+        for child in children:
+            assert child.stdout is not None
+            assert child.stdout.readline().strip() == "DONE"
+
+        indexed = []
+        now = time.time()
+        for index, (name, byte_value) in enumerate(
+            (("aaaaaaaaaaaa", 97), ("bbbbbbbbbbbb", 98))
+        ):
+            namespace = root / name
+            block_hash = (bytes([byte_value]) * 32).hex()
+            with sqlite3.connect(str(namespace / "block_index.db")) as connection:
+                row = connection.execute(
+                    "SELECT file_name FROM blocks WHERE block_hash = ?",
+                    (block_hash,),
+                ).fetchone()
+                assert row is not None
+                accessed = now - 200 + (index * 100)
+                connection.execute(
+                    "UPDATE blocks SET last_accessed = ? WHERE block_hash = ?",
+                    (accessed, block_hash),
+                )
+                connection.commit()
+            path = namespace / row[0]
+            os.utime(path, (accessed, accessed))
+            indexed.append((namespace, block_hash, path))
+
+        probe = GlobalDiskCacheBudget(root, 0, orphan_grace_seconds=0)
+        try:
+            total = probe.enforce(force=True).bytes_after
+        finally:
+            probe.close()
+        oldest_size = indexed[0][2].stat().st_size
+        remaining_after_oldest = total - oldest_size
+        cap = ((remaining_after_oldest * 10 + 8) // 9) + 1024
+        assert cap < total
+        trim_budget = GlobalDiskCacheBudget(root, cap, orphan_grace_seconds=0)
+        result = trim_budget.enforce(force=True)
+
+        assert result.accounted and result.compliant
+        assert result.bytes_after <= result.max_size_bytes
+        assert not indexed[0][2].exists()
+        assert indexed[1][2].exists()
+        with sqlite3.connect(str(indexed[0][0] / "block_index.db")) as connection:
+            assert connection.execute(
+                "SELECT 1 FROM blocks WHERE block_hash = ?",
+                (indexed[0][1],),
+            ).fetchone() is None
+        with sqlite3.connect(str(indexed[1][0] / "block_index.db")) as connection:
+            assert connection.execute(
+                "SELECT 1 FROM blocks WHERE block_hash = ?",
+                (indexed[1][1],),
+            ).fetchone() == (1,)
+        assert not [
+            path
+            for path in root.rglob("*")
+            if path.is_file()
+            and (
+                ".tmp." in path.name
+                or path.name.endswith((".tmp", ".tmp.safetensors", ".tmp.json"))
+            )
+        ]
+    finally:
+        if trim_budget is not None:
+            trim_budget.close()
+        for child in children:
+            if child.poll() is None and child.stdin is not None:
+                try:
+                    child.stdin.write("STOP\n")
+                    child.stdin.flush()
+                except BrokenPipeError:
+                    pass
+            try:
+                child.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+            assert child.returncode == 0, (
+                child.stderr.read() if child.stderr is not None else ""
+            )
+
+    lease_dir = root / ".vmlx-global-cache-budget-leases"
+    assert list(lease_dir.glob("*.json")) == []

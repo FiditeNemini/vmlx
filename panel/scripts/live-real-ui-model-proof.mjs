@@ -3,20 +3,38 @@ import { execFile, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import { createServer } from 'node:http'
 import net from 'node:net'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 const panelDir = path.resolve(new URL('..', import.meta.url).pathname)
 const repoDir = path.resolve(panelDir, '..')
+const proofFormat = 'vmlx-electron-ui-proof-v2'
+const proofDirInput = process.env.VMLINUX_REAL_UI_PROOF_DIR
+  || process.env.VMLX_REAL_UI_PROOF_DIR
+  || process.env.VMLX_PRIVATE_EVIDENCE_ROOT
+  || ''
+const runId = process.env.VMLINUX_REAL_UI_RUN_ID
+  || process.env.VMLX_REAL_UI_RUN_ID
+  || `vmlx-ui-${new Date().toISOString().replace(/[^0-9TZ]/g, '')}-${crypto.randomUUID()}`
 const modelPath = process.env.VMLINUX_REAL_UI_MODEL_PATH || process.env.VMLX_REAL_UI_MODEL_PATH
-const proofBasename = process.env.VMLINUX_REAL_UI_PROOF_BASENAME
-  || process.env.VMLX_REAL_UI_PROOF_BASENAME
-  || 'current-real-ui-live-model-zaya-text-20260526'
-const python = process.env.VMLINUX_REAL_UI_PYTHON
-  || process.env.VMLX_REAL_UI_PYTHON
-  || path.join(repoDir, '.venv', 'bin', 'python')
 const installedAppPath = process.env.VMLINUX_REAL_UI_APP_PATH
   || process.env.VMLX_REAL_UI_APP_PATH
   || ''
@@ -24,6 +42,122 @@ const servedModel = process.env.VMLINUX_REAL_UI_SERVED_MODEL
   || process.env.VMLX_REAL_UI_SERVED_MODEL
   || path.basename(modelPath || 'real-ui-model').replace(/[^A-Za-z0-9_.-]+/g, '-')
 const modelName = path.basename(modelPath || servedModel)
+const requestedProofBasename = process.env.VMLINUX_REAL_UI_PROOF_BASENAME
+  || process.env.VMLX_REAL_UI_PROOF_BASENAME
+  || ''
+const releaseSentinelPath = process.env.VMLINUX_REAL_UI_RELEASE_SENTINEL
+  || process.env.VMLX_REAL_UI_RELEASE_SENTINEL
+  || ''
+const releaseSentinelNonce = process.env.VMLINUX_REAL_UI_NONCE
+  || process.env.VMLX_REAL_UI_NONCE
+  || ''
+const releaseRunIntentPath = (
+  process.env.VMLINUX_REAL_UI_RUN_INTENT_PATH
+  || process.env.VMLX_REAL_UI_RUN_INTENT_PATH
+  || ''
+).trim()
+const releaseRunIntentSha256 = (
+  process.env.VMLINUX_REAL_UI_RUN_INTENT_SHA256
+  || process.env.VMLX_REAL_UI_RUN_INTENT_SHA256
+  || ''
+).trim()
+const releaseActivePhaseIndexRaw = (
+  process.env.VMLINUX_REAL_UI_ACTIVE_PHASE_INDEX
+  || process.env.VMLX_REAL_UI_ACTIVE_PHASE_INDEX
+  || ''
+).trim()
+const releaseActivePhaseIndex = releaseActivePhaseIndexRaw === ''
+  ? null
+  : Number(releaseActivePhaseIndexRaw)
+const releaseSessionAttestationPath = (
+  process.env.VMLINUX_REAL_UI_SESSION_ATTESTATION_PATH
+  || process.env.VMLX_REAL_UI_SESSION_ATTESTATION_PATH
+  || ''
+).trim()
+const releaseGatewayPidRaw = (
+  process.env.VMLINUX_REAL_UI_GATEWAY_PID
+  || process.env.VMLX_REAL_UI_GATEWAY_PID
+  || ''
+).trim()
+const releaseGatewayPid = releaseGatewayPidRaw === ''
+  ? null
+  : Number(releaseGatewayPidRaw)
+const releaseGatewayBaseUrl = (
+  process.env.VMLINUX_REAL_UI_GATEWAY_BASE_URL
+  || process.env.VMLX_REAL_UI_GATEWAY_BASE_URL
+  || ''
+).trim()
+const attachCdpUrl = (
+  process.env.VMLINUX_REAL_UI_ATTACH_CDP_URL
+  || process.env.VMLX_REAL_UI_ATTACH_CDP_URL
+  || ''
+).trim()
+const expectedElectronPidRaw = (
+  process.env.VMLINUX_REAL_UI_EXPECTED_ELECTRON_PID
+  || process.env.VMLX_REAL_UI_EXPECTED_ELECTRON_PID
+  || ''
+).trim()
+const expectedElectronPid = expectedElectronPidRaw === ''
+  ? null
+  : Number(expectedElectronPidRaw)
+const lifecycleOwner = (
+  process.env.VMLINUX_REAL_UI_LIFECYCLE_OWNER
+  || process.env.VMLX_REAL_UI_LIFECYCLE_OWNER
+  || ''
+).trim()
+const allowTeardown = envBool('VMLINUX_REAL_UI_ALLOW_TEARDOWN', true)
+const pairedCacheArtifactPath = (
+  process.env.VMLINUX_REAL_UI_PAIRED_CACHE_ARTIFACT
+  || process.env.VMLX_REAL_UI_PAIRED_CACHE_ARTIFACT
+  || ''
+).trim()
+const reuseSessionId = (
+  process.env.VMLINUX_REAL_UI_REUSE_SESSION_ID
+  || process.env.VMLX_REAL_UI_REUSE_SESSION_ID
+  || ''
+).trim()
+const reuseSessionAttestationPath = (
+  process.env.VMLINUX_REAL_UI_REUSE_SESSION_ATTESTATION_PATH
+  || process.env.VMLX_REAL_UI_REUSE_SESSION_ATTESTATION_PATH
+  || ''
+).trim()
+const privateCacheAttestationTokenFile = (
+  process.env.VMLINUX_PRIVATE_CACHE_ATTESTATION_TOKEN_FILE
+  || process.env.VMLX_PRIVATE_CACHE_ATTESTATION_TOKEN_FILE
+  || ''
+).trim()
+
+function safeArtifactComponent(value, fallback) {
+  const safe = String(value || '')
+    .trim()
+    .replace(/[^A-Za-z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return (safe || fallback).slice(0, 120)
+}
+
+export function uniqueProofBasename({
+  requested = '',
+  model = 'real-ui-model',
+  run = 'run',
+} = {}) {
+  const tuple = {
+    requested: String(requested),
+    model: String(model),
+    run: String(run),
+  }
+  const suffix = sha256Text(canonicalJson(tuple)).slice(0, 20)
+  const root = safeArtifactComponent(requested, 'real-ui-proof')
+  const modelComponent = safeArtifactComponent(model, 'model')
+  const runComponent = safeArtifactComponent(run, 'run')
+  const prefix = `${root}-${modelComponent}-${runComponent}`
+  return `${prefix.slice(0, 240 - suffix.length - 1)}-${suffix}`
+}
+
+const proofBasename = uniqueProofBasename({
+  requested: requestedProofBasename,
+  model: servedModel,
+  run: runId,
+})
 const wireApi = process.env.VMLINUX_REAL_UI_WIRE_API
   || process.env.VMLX_REAL_UI_WIRE_API
   || 'chat'
@@ -31,7 +165,14 @@ const promptOneOverride = process.env.VMLINUX_REAL_UI_PROMPT_1
   || process.env.VMLX_REAL_UI_PROMPT_1
 const promptTwoOverride = process.env.VMLINUX_REAL_UI_PROMPT_2
   || process.env.VMLX_REAL_UI_PROMPT_2
-const requestMaxTokens = Number(process.env.VMLINUX_REAL_UI_MAX_TOKENS || process.env.VMLX_REAL_UI_MAX_TOKENS || '96')
+const promptThreeOverride = process.env.VMLINUX_REAL_UI_PROMPT_3
+  || process.env.VMLX_REAL_UI_PROMPT_3
+const requestMaxTokensRaw = process.env.VMLINUX_REAL_UI_MAX_TOKENS
+  || process.env.VMLX_REAL_UI_MAX_TOKENS
+  || ''
+const requestMaxTokens = requestMaxTokensRaw
+  ? Number(requestMaxTokensRaw)
+  : undefined
 const requestMaxPromptTokensRaw = process.env.VMLINUX_REAL_UI_MAX_PROMPT_TOKENS
   || process.env.VMLX_REAL_UI_MAX_PROMPT_TOKENS
   || process.env.VMLINUX_REAL_UI_MAX_CONTEXT_TOKENS
@@ -77,8 +218,20 @@ const defaultPromptTwo = builtinToolsEnabled
       'After the tool result is returned, reply briefly in English with REAL_UI_LIVE_TOOL_TWO once and mention this is the second UI turn.',
     ].join(' ')
   : 'Repeat the phrase REAL_UI_LIVE once and mention that this is the second UI turn.'
+const defaultPromptThree = builtinToolsEnabled
+  ? [
+      'Do not call another tool.',
+      'Using the prior tool results, reply briefly in English and include REAL_UI_LIVE_TOOL_ONE and REAL_UI_LIVE_TOOL_TWO once each.',
+      'Mention that this is the third UI turn.',
+      'Also include the literal currency string $43 and this exact inline TeX expression: \\(47 \\times 19 = 893 < 920 = 46 \\times 20\\).',
+    ].join(' ')
+  : [
+      'Repeat the phrase REAL_UI_LIVE once and mention that this is the third UI turn.',
+      'Also include the literal currency string $43 and this exact inline TeX expression: \\(47 \\times 19 = 893 < 920 = 46 \\times 20\\).',
+    ].join(' ')
 const promptOne = promptOneOverride || defaultPromptOne
 const promptTwo = promptTwoOverride || defaultPromptTwo
+const promptThree = promptThreeOverride || defaultPromptThree
 const checkServerCacheControls = envBool('VMLINUX_REAL_UI_CHECK_SERVER_CACHE_CONTROLS', false)
 const checkMedia = envBool('VMLINUX_REAL_UI_CHECK_MEDIA', false)
 const checkVideo = envBool('VMLINUX_REAL_UI_CHECK_VIDEO', false)
@@ -90,8 +243,17 @@ const enableThinkingOverride = (
 )
   ? envBool('VMLINUX_REAL_UI_ENABLE_THINKING', false)
   : undefined
+const reasoningExpectation = (
+  process.env.VMLINUX_REAL_UI_REASONING_EXPECTATION
+  || process.env.VMLX_REAL_UI_REASONING_EXPECTATION
+  || (enableThinkingOverride === true
+    ? 'required'
+    : enableThinkingOverride === false
+      ? 'none'
+      : 'optional')
+).toLowerCase()
 const maxToolIterations = Number(process.env.VMLINUX_REAL_UI_MAX_TOOL_ITERATIONS || process.env.VMLX_REAL_UI_MAX_TOOL_ITERATIONS || '4')
-const toolResultMaxChars = Number(process.env.VMLINUX_REAL_UI_TOOL_RESULT_MAX_CHARS || process.env.VMLX_REAL_UI_TOOL_RESULT_MAX_CHARS || '12345')
+const toolResultMaxChars = Number(process.env.VMLINUX_REAL_UI_TOOL_RESULT_MAX_CHARS || process.env.VMLX_REAL_UI_TOOL_RESULT_MAX_CHARS || '12500')
 const imageDataUrl = process.env.VMLINUX_REAL_UI_IMAGE_DATA_URL
   || process.env.VMLX_REAL_UI_IMAGE_DATA_URL
   || 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
@@ -107,14 +269,1584 @@ const videoExpectRegex = process.env.VMLINUX_REAL_UI_VIDEO_EXPECT_REGEX
 const cacheExpectRegex = process.env.VMLINUX_REAL_UI_CACHE_EXPECT_REGEX
   || process.env.VMLX_REAL_UI_CACHE_EXPECT_REGEX
   || ''
-
-if (!modelPath) {
-  console.error('Set VMLINUX_REAL_UI_MODEL_PATH or VMLX_REAL_UI_MODEL_PATH')
-  process.exit(2)
-}
+const pairedApiHoldSeconds = Math.max(
+  0,
+  envNumber('VMLINUX_REAL_UI_PAIRED_API_HOLD_SECONDS') ?? 0,
+)
+const releaseSentinelTimeoutSeconds = Math.max(
+  1,
+  envNumber('VMLINUX_REAL_UI_RELEASE_TIMEOUT_SECONDS')
+    ?? Math.max(pairedApiHoldSeconds, 900),
+)
+const installedReleaseManifestPath = (
+  process.env.VMLINUX_REAL_UI_RELEASE_MANIFEST
+  || process.env.VMLX_REAL_UI_RELEASE_MANIFEST
+  || ''
+).trim()
+const pairedApiArtifactPath = (
+  process.env.VMLINUX_REAL_UI_PAIRED_API_ARTIFACT
+  || process.env.VMLX_REAL_UI_PAIRED_API_ARTIFACT
+  || ''
+).trim()
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const execFileAsync = promisify(execFile)
+
+function sha256Text(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex')
+}
+
+function sha256Json(value) {
+  return sha256Text(JSON.stringify(value))
+}
+
+function canonicalJson(value) {
+  const normalize = (node) => {
+    if (Array.isArray(node)) return node.map(normalize)
+    if (!node || typeof node !== 'object') return node
+    return Object.fromEntries(
+      Object.keys(node)
+        .sort()
+        .map((key) => [key, normalize(node[key])]),
+    )
+  }
+  // Match Python json.dumps(..., sort_keys=True, separators=(',', ':'),
+  // ensure_ascii=True), which owns the API-v2 backend identity contract.
+  return JSON.stringify(normalize(value)).replace(
+    /[^\x20-\x7e]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  )
+}
+
+function canonicalSha256(value) {
+  return sha256Text(canonicalJson(value))
+}
+
+function validSha256(value) {
+  return /^[0-9a-f]{64}$/i.test(String(value || ''))
+}
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(readFileSync(filePath)).digest('hex')
+}
+
+function pythonSourceTreeDigest(root, relativeBase = repoDir) {
+  const files = []
+  const walk = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const fullPath = path.join(directory, entry.name)
+      if (entry.isDirectory()) {
+        walk(fullPath)
+      } else if (entry.isFile() && entry.name.endsWith('.py')) {
+        files.push(fullPath)
+      }
+    }
+  }
+  walk(root)
+  files.sort()
+  const digest = crypto.createHash('sha256')
+  let fileCount = 0
+  let readErrorCount = 0
+  for (const filePath of files) {
+    const relative = path.relative(relativeBase, filePath).split(path.sep).join('/')
+    try {
+      const contents = readFileSync(filePath)
+      digest.update(relative)
+      digest.update('\0')
+      digest.update(contents)
+      digest.update('\0')
+      fileCount += 1
+    } catch {
+      digest.update(relative)
+      digest.update('\0UNREADABLE\0')
+      readErrorCount += 1
+    }
+  }
+  return {
+    python_source_tree_sha256: digest.digest('hex'),
+    python_source_file_count: fileCount,
+    python_source_read_error_count: readErrorCount,
+  }
+}
+
+function sourceFilesDigest(roots) {
+  const files = []
+  const allowed = /\.(?:[cm]?[jt]sx?|json|css|html)$/
+  const walk = (candidate) => {
+    if (!existsSync(candidate)) return
+    const stat = readdirSync(candidate, { withFileTypes: true })
+    for (const entry of stat) {
+      if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'out') continue
+      const fullPath = path.join(candidate, entry.name)
+      if (entry.isDirectory()) walk(fullPath)
+      else if (entry.isFile() && allowed.test(entry.name)) files.push(fullPath)
+    }
+  }
+  for (const root of roots) {
+    if (!existsSync(root)) continue
+    if (path.extname(root)) files.push(root)
+    else walk(root)
+  }
+  files.sort()
+  const digest = crypto.createHash('sha256')
+  for (const filePath of files) {
+    const relative = path.relative(repoDir, filePath).split(path.sep).join('/')
+    digest.update(relative)
+    digest.update('\0')
+    digest.update(readFileSync(filePath))
+    digest.update('\0')
+  }
+  return {
+    renderer_source_tree_sha256: digest.digest('hex'),
+    renderer_source_file_count: files.length,
+  }
+}
+
+function objectRecord(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : undefined
+}
+
+function finiteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function positiveInteger(value) {
+  const number = finiteNumber(value)
+  return number != null && number > 0 ? Math.floor(number) : undefined
+}
+
+export function resolveIndependentBundleGenerationDefaults(
+  generationConfig,
+  jangConfig,
+  modelConfig,
+) {
+  const defaults = {}
+  const generation = objectRecord(generationConfig)
+  if (generation) {
+    const samplingDisabled = generation.do_sample === false
+    if (typeof generation.do_sample === 'boolean') defaults.doSample = generation.do_sample
+    const temperature = finiteNumber(generation.temperature)
+    if (temperature != null) defaults.temperature = samplingDisabled ? 0 : temperature
+    const topP = finiteNumber(generation.top_p)
+    if (topP != null) defaults.topP = samplingDisabled ? 1 : topP
+    const topK = finiteNumber(generation.top_k)
+    if (topK != null) defaults.topK = samplingDisabled ? 0 : Math.max(0, Math.round(topK))
+    const minP = finiteNumber(generation.min_p)
+    if (minP != null) defaults.minP = minP
+    const repeatPenalty = finiteNumber(generation.repetition_penalty)
+    if (repeatPenalty != null) defaults.repeatPenalty = repeatPenalty
+    const maxNewTokens = positiveInteger(generation.max_new_tokens)
+    if (maxNewTokens != null) defaults.maxNewTokens = maxNewTokens
+    if (Object.keys(defaults).length) defaults.source = 'generation_config'
+  }
+
+  const jang = objectRecord(jangConfig)
+  const sampling = objectRecord(jang?.chat?.sampling_defaults)
+  if (sampling) {
+    delete defaults.doSample
+    for (const [sourceKey, targetKey] of [
+      ['temperature', 'temperature'],
+      ['top_p', 'topP'],
+      ['min_p', 'minP'],
+    ]) {
+      const value = finiteNumber(sampling[sourceKey])
+      if (value != null) defaults[targetKey] = value
+    }
+    const topK = finiteNumber(sampling.top_k)
+    if (topK != null) defaults.topK = Math.max(0, Math.round(topK))
+    const defaultMode = jang?.chat?.reasoning?.default_mode
+    const repThinking = finiteNumber(sampling.repetition_penalty_thinking)
+    const repChat = finiteNumber(sampling.repetition_penalty_chat)
+    const repScalar = finiteNumber(sampling.repetition_penalty)
+    const modelType = objectRecord(modelConfig)?.model_type
+    const repeatPenalty = modelType === 'deepseek_v4'
+      ? (defaultMode === 'thinking'
+        ? (repThinking ?? repScalar ?? repChat)
+        : (repScalar ?? repChat ?? repThinking))
+      : defaultMode === 'thinking'
+        ? (repThinking ?? repChat ?? repScalar)
+        : (repChat ?? repThinking ?? repScalar)
+    if (repeatPenalty != null) defaults.repeatPenalty = repeatPenalty
+    const maxNewTokens = positiveInteger(sampling.max_new_tokens)
+    if (maxNewTokens != null) defaults.maxNewTokens = maxNewTokens
+    defaults.source = 'jang_config'
+  }
+  return Object.keys(defaults).some((key) => key !== 'source') ? defaults : null
+}
+
+function readOptionalJson(bundlePath, name) {
+  const filePath = path.join(bundlePath, name)
+  if (!existsSync(filePath)) {
+    return {
+      name,
+      present: false,
+      value: undefined,
+      sha256: null,
+      sizeBytes: null,
+    }
+  }
+  const raw = readFileSync(filePath, 'utf8')
+  return {
+    name,
+    present: true,
+    value: JSON.parse(raw),
+    sha256: sha256Text(raw),
+    sizeBytes: Buffer.byteLength(raw),
+  }
+}
+
+export function captureBundleGenerationContract(bundlePath) {
+  const files = Object.fromEntries(
+    ['config.json', 'generation_config.json', 'jang_config.json', 'tokenizer_config.json']
+      .map((name) => {
+        const record = readOptionalJson(bundlePath, name)
+        return [name, record]
+      }),
+  )
+  const templatePath = path.join(bundlePath, 'chat_template.jinja')
+  const templateText = existsSync(templatePath) ? readFileSync(templatePath, 'utf8') : ''
+  const tokenizerTemplate = files['tokenizer_config.json']?.value?.chat_template
+  const includeStub = (
+    typeof tokenizerTemplate === 'string'
+    && /{%\s*include\s+['"][^'"]+['"]\s*%}/.test(tokenizerTemplate)
+  )
+  const usableTemplate = (
+    (typeof tokenizerTemplate === 'string' && tokenizerTemplate.trim() && !includeStub)
+    || (includeStub && templateText.trim())
+    || templateText.trim()
+  )
+  const attestedFiles = {}
+  for (const name of [
+    'config.json',
+    'generation_config.json',
+    'jang_config.json',
+    'tokenizer_config.json',
+    'chat_template.jinja',
+  ]) {
+    if (name === 'chat_template.jinja') {
+      const data = existsSync(templatePath) ? readFileSync(templatePath) : null
+      attestedFiles[name] = data
+        ? {
+            state: 'present',
+            size_bytes: data.length,
+            sha256: crypto.createHash('sha256').update(data).digest('hex'),
+          }
+        : { state: 'missing' }
+      continue
+    }
+    const record = files[name]
+    attestedFiles[name] = record?.present
+      ? {
+          state: 'present',
+          size_bytes: record.sizeBytes,
+          sha256: record.sha256,
+        }
+      : { state: 'missing' }
+  }
+  const healthObserved = {
+    schema: 'vmlx-bundle-config-v1',
+    directory_state: 'available',
+    files: attestedFiles,
+  }
+  const aggregateSha256 = canonicalSha256(healthObserved)
+  return {
+    bundle_path: realpathSync(bundlePath),
+    files: Object.fromEntries(
+      Object.entries(files).map(([name, record]) => [
+        name,
+        { present: record.present, sha256: record.sha256 },
+      ]),
+    ),
+    defaults: resolveIndependentBundleGenerationDefaults(
+      files['generation_config.json']?.value,
+      files['jang_config.json']?.value,
+      files['config.json']?.value,
+    ),
+    template: {
+      tokenizer_chat_template_present:
+        typeof tokenizerTemplate === 'string' && Boolean(tokenizerTemplate.trim()),
+      tokenizer_chat_template_include_stub: includeStub,
+      sidecar_present: Boolean(templateText.trim()),
+      sidecar_sha256: templateText ? sha256Text(templateText) : null,
+      usable: Boolean(usableTemplate),
+      warning: usableTemplate
+        ? null
+        : 'Bundle exposes no usable chat template in tokenizer_config.json or chat_template.jinja',
+    },
+    health_attestation: {
+      ...healthObserved,
+      aggregate_sha256: aggregateSha256,
+      fingerprint_sha256: aggregateSha256,
+    },
+  }
+}
+
+export function writePrivateArtifactFile(filePath, data) {
+  writeFileSync(filePath, data, { flag: 'wx', mode: 0o600 })
+  chmodSync(filePath, 0o600)
+  return filePath
+}
+
+function readExternalFileBytes(
+  filePath,
+  label,
+  {
+    maxBytes = 64 * 1024 * 1024,
+    requirePrivate = false,
+    requireSingleLink = false,
+    allowInsideRepo = true,
+  } = {},
+) {
+  const absolute = path.resolve(filePath)
+  const pathStat = lstatSync(absolute)
+  if (!pathStat.isFile() || pathStat.isSymbolicLink()) {
+    throw new Error(`${label} must be a regular, non-symlink file`)
+  }
+  if (requirePrivate && (pathStat.mode & 0o077) !== 0) {
+    throw new Error(`${label} must not be group/world accessible (expected mode 0600)`)
+  }
+  if (requireSingleLink && pathStat.nlink !== 1) {
+    throw new Error(`${label} must have exactly one filesystem link`)
+  }
+  if (pathStat.size > maxBytes) {
+    throw new Error(`${label} exceeds the ${maxBytes}-byte safety limit`)
+  }
+  const canonical = realpathSync(absolute)
+  if (!allowInsideRepo && isPathInside(canonical, realpathSync(repoDir))) {
+    throw new Error(`${label} must stay outside the public Git worktree`)
+  }
+  const noFollow = Number(fsConstants.O_NOFOLLOW || 0)
+  let fd
+  let openedStat
+  let raw
+  try {
+    fd = openSync(canonical, fsConstants.O_RDONLY | noFollow)
+    openedStat = fstatSync(fd)
+    if (!openedStat.isFile()) {
+      throw new Error(`${label} opened object is not a regular file`)
+    }
+    if (requireSingleLink && openedStat.nlink !== 1) {
+      throw new Error(`${label} opened object must have exactly one filesystem link`)
+    }
+    if (requirePrivate && (openedStat.mode & 0o077) !== 0) {
+      throw new Error(`${label} opened object is group/world accessible`)
+    }
+    if (
+      openedStat.dev !== pathStat.dev
+      || openedStat.ino !== pathStat.ino
+      || openedStat.size !== pathStat.size
+    ) {
+      throw new Error(`${label} changed identity between path validation and open`)
+    }
+    if (openedStat.size > maxBytes) {
+      throw new Error(`${label} exceeds the ${maxBytes}-byte safety limit`)
+    }
+    raw = readFileSync(fd)
+  } finally {
+    if (fd != null) closeSync(fd)
+  }
+  const sha256 = crypto.createHash('sha256').update(raw).digest('hex')
+  return {
+    path: canonical,
+    sha256,
+    bytes: raw.length,
+    mode: openedStat.mode & 0o777,
+    nlink: openedStat.nlink,
+    opened_nofollow: true,
+    raw,
+  }
+}
+
+function readPrivateExternalBytes(filePath, label, maxBytes = 64 * 1024 * 1024) {
+  return readExternalFileBytes(filePath, label, {
+    maxBytes,
+    requirePrivate: true,
+    requireSingleLink: true,
+    allowInsideRepo: false,
+  })
+}
+
+export function privateCacheAttestationSessionArgs(tokenFilePath) {
+  const rawPath = String(tokenFilePath || '').trim()
+  if (!rawPath) return ''
+  if (!path.isAbsolute(rawPath)) {
+    throw new Error('Private cache attestation token file must be absolute')
+  }
+  const opened = readPrivateExternalBytes(
+    rawPath,
+    'Private cache attestation token file',
+    512,
+  )
+  if (opened.bytes < 32) {
+    throw new Error('Private cache attestation token file is too small')
+  }
+  if (
+    typeof process.getuid === 'function'
+    && lstatSync(opened.path).uid !== process.getuid()
+  ) {
+    throw new Error('Private cache attestation token file has the wrong owner')
+  }
+  if ([...opened.raw].some((byte) => byte > 0x7f)) {
+    throw new Error('Private cache attestation token file must contain ASCII')
+  }
+  const token = opened.raw.toString('ascii').trim()
+  if (!/^[A-Za-z0-9_-]{32,512}$/.test(token)) {
+    throw new Error('Private cache attestation token file has an invalid token')
+  }
+  if (!/^\/[A-Za-z0-9_./-]+$/.test(opened.path)) {
+    throw new Error(
+      'Private cache attestation token path contains characters unsupported '
+      + 'by the Electron additional-argument transport',
+    )
+  }
+  return '--enable-private-cache-attestation '
+    + `--private-cache-attestation-token-file=${opened.path}`
+}
+
+export function readPrivateExternalJson(filePath, label) {
+  const opened = readPrivateExternalBytes(filePath, label)
+  return {
+    path: opened.path,
+    sha256: opened.sha256,
+    bytes: opened.bytes,
+    mode: opened.mode,
+    nlink: opened.nlink,
+    opened_nofollow: opened.opened_nofollow,
+    value: JSON.parse(opened.raw.toString('utf8')),
+  }
+}
+
+const ownedRunIntentTopLevelFields = [
+  'canonical_sha256',
+  'created_at',
+  'direct_base_url',
+  'direct_health_url',
+  'gateway_base_url',
+  'gateway_health_url',
+  'harnesses',
+  'l2_size_eviction_requirements',
+  'nonce',
+  'phase_plan',
+  'run_id',
+  'schema',
+  'source_commit',
+  'source_tree',
+]
+const ownedRunIntentHarnessNames = ['api', 'cache', 'semantic', 'ui']
+const ownedRunIntentHarnessFields = ['relative_path', 'sha256']
+const ownedRunIntentL2RequirementFields = [
+  'counter_only_evidence_allowed',
+  'disk_bytes_within_saved_limit',
+  'older_unused_prefix_eviction_required',
+  'recent_target_survival_required',
+  'restart_restore_required',
+]
+const ownedRunIntentPhaseFields = [
+  'api_action_profile',
+  'bundle_fingerprint_sha256',
+  'bundle_role',
+  'cache_policy',
+  'kv_cache_quantization',
+  'model',
+  'model_bundle_path',
+  'native_cache_policy',
+  'operation',
+  'paged_ram',
+  'phase_index',
+  'phase_name',
+  'representative_id',
+  'restart_required',
+  'session_policy',
+  'tq_policy',
+  'ui_action_profile',
+  'ui_turn_count',
+]
+const ownedRunIntentPhaseContract = [
+  {
+    phase_index: 0,
+    phase_name: 'primary_ssd_only_store',
+    representative_id: 'primary_tq_supported',
+    bundle_role: 'primary',
+    cache_policy: 'q4',
+    paged_ram: false,
+    operation: 'store',
+    restart_required: false,
+    session_policy: 'primary_stable_session',
+    kv_cache_quantization: 'q4',
+    tq_policy: 'q4-required',
+    ui_action_profile: 'primary-reasoning-render-store',
+    ui_turn_count: 1,
+    api_action_profile: 'full-agentic-plus-cache-store',
+  },
+  {
+    phase_index: 1,
+    phase_name: 'primary_ssd_only_restart_probe',
+    representative_id: 'primary_tq_supported',
+    bundle_role: 'primary',
+    cache_policy: 'q4',
+    paged_ram: false,
+    operation: 'probe',
+    restart_required: true,
+    session_policy: 'primary_stable_session',
+    kv_cache_quantization: 'q4',
+    tq_policy: 'q4-required',
+    ui_action_profile: 'primary-tool-restart-probe',
+    ui_turn_count: 1,
+    api_action_profile: 'cache-probe',
+  },
+  {
+    phase_index: 2,
+    phase_name: 'primary_paged_on_store',
+    representative_id: 'primary_tq_supported',
+    bundle_role: 'primary',
+    cache_policy: 'q4',
+    paged_ram: true,
+    operation: 'store-evict-refault',
+    restart_required: true,
+    session_policy: 'primary_stable_session',
+    kv_cache_quantization: 'q4',
+    tq_policy: 'q4-required',
+    ui_action_profile: 'primary-history-paged-evict-refault',
+    ui_turn_count: 1,
+    api_action_profile: 'cache-evict-refault',
+  },
+  {
+    phase_index: 3,
+    phase_name: 'primary_paged_on_restart_probe',
+    representative_id: 'primary_tq_supported',
+    bundle_role: 'primary',
+    cache_policy: 'q4',
+    paged_ram: true,
+    operation: 'probe',
+    restart_required: true,
+    session_policy: 'primary_stable_session',
+    kv_cache_quantization: 'q4',
+    tq_policy: 'q4-required',
+    ui_action_profile: 'primary-restart-followup',
+    ui_turn_count: 1,
+    api_action_profile: 'cache-restart-probe',
+  },
+  {
+    phase_index: 4,
+    phase_name: 'primary_tq_off',
+    representative_id: 'primary_tq_supported',
+    bundle_role: 'primary',
+    cache_policy: 'ssd-only',
+    paged_ram: false,
+    operation: 'store-probe',
+    restart_required: true,
+    session_policy: 'primary_stable_session',
+    kv_cache_quantization: 'none',
+    tq_policy: 'explicit-off',
+    ui_action_profile: 'primary-tq-off-probe',
+    ui_turn_count: 1,
+    api_action_profile: 'cache-tq-off-store-probe',
+  },
+  {
+    phase_index: 5,
+    phase_name: 'native_exception',
+    representative_id: 'secondary_native_exception',
+    bundle_role: 'native',
+    cache_policy: 'native',
+    paged_ram: false,
+    operation: 'switch-validate',
+    restart_required: true,
+    session_policy: 'distinct_native_session',
+    kv_cache_quantization: 'none',
+    tq_policy: 'native-suppressed',
+    ui_action_profile: 'native-three-turn-switch',
+    ui_turn_count: 3,
+    api_action_profile: 'full-agentic-native-cache',
+  },
+]
+
+function exactObjectFields(value, expected) {
+  return value != null
+    && !Array.isArray(value)
+    && typeof value === 'object'
+    && exactStringSet(Object.keys(value), expected)
+}
+
+function strictHttpUrl(value) {
+  try {
+    const parsed = new URL(String(value))
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+export function validateAttachOnlyLifecycle({
+  cdpUrl,
+  electronPid,
+  owner,
+  teardownAllowed,
+} = {}) {
+  const failures = []
+  const parsed = strictHttpUrl(cdpUrl)
+  if (
+    !parsed
+    || !['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)
+    || !parsed.port
+    || parsed.pathname !== '/'
+    || cdpUrl !== parsed.origin
+  ) {
+    failures.push('attach-only CDP URL is not an exact loopback origin')
+  }
+  if (!Number.isInteger(electronPid) || electronPid <= 0) {
+    failures.push('attach-only Electron PID is invalid')
+  }
+  if (owner !== 'parent') {
+    failures.push('attach-only Electron lifecycle is not parent-owned')
+  }
+  if (teardownAllowed !== false) {
+    failures.push('attach-only child is allowed to tear down the parent lifecycle')
+  }
+  return failures
+}
+
+function canonicalSha256WithoutField(value, omittedField) {
+  const copy = { ...value }
+  delete copy[omittedField]
+  return canonicalSha256(copy)
+}
+
+export function validateOwnedRunIntent(
+  opened,
+  {
+    runId: expectedRunId,
+    nonce,
+    expectedSha256,
+    expectedSourceCommit,
+    expectedSourceTree,
+    expectedUiHarnessSha256,
+    harnessRoot = repoDir,
+    activePhaseIndex,
+    activeModel,
+    activeModelBundlePath,
+    expectedDirectBaseUrl,
+    expectedGatewayBaseUrl,
+  } = {},
+) {
+  const failures = []
+  const value = opened?.value
+  if (
+    opened?.opened_nofollow !== true
+    || opened?.nlink !== 1
+    || opened?.mode !== 0o600
+  ) {
+    failures.push('owned run intent was not safely opened as a private single-link file')
+  }
+  if (!validSha256(expectedSha256) || opened?.sha256 !== expectedSha256) {
+    failures.push('owned run intent exact file hash does not match launch contract')
+  }
+  if (!exactObjectFields(value, ownedRunIntentTopLevelFields)) {
+    failures.push('owned run intent top-level fields are missing or unexpected')
+    return failures
+  }
+  if (
+    value.schema !== 'vmlx-r18-owned-run-intent-v5'
+    || value.run_id !== expectedRunId
+    || value.nonce !== nonce
+  ) {
+    failures.push('owned run intent schema/run/nonce does not match')
+  }
+  if (
+    !validSha256(value.canonical_sha256)
+    || value.canonical_sha256
+      !== canonicalSha256WithoutField(value, 'canonical_sha256')
+  ) {
+    failures.push('owned run intent canonical_sha256 is invalid')
+  }
+  if (
+    !/^[0-9a-f]{40,64}$/i.test(String(value.source_commit || ''))
+    || !/^[0-9a-f]{40,64}$/i.test(String(value.source_tree || ''))
+    || (
+      expectedSourceCommit
+      && value.source_commit !== expectedSourceCommit
+    )
+    || (
+      expectedSourceTree
+      && value.source_tree !== expectedSourceTree
+    )
+  ) {
+    failures.push('owned run intent source commit/tree does not match')
+  }
+  const createdAtMs = Date.parse(String(value.created_at || ''))
+  if (!Number.isFinite(createdAtMs)) {
+    failures.push('owned run intent created_at is invalid')
+  }
+  if (
+    !exactObjectFields(
+      value.l2_size_eviction_requirements,
+      ownedRunIntentL2RequirementFields,
+    )
+    || value.l2_size_eviction_requirements.disk_bytes_within_saved_limit !== true
+    || value.l2_size_eviction_requirements
+      .older_unused_prefix_eviction_required !== true
+    || value.l2_size_eviction_requirements
+      .recent_target_survival_required !== true
+    || value.l2_size_eviction_requirements.restart_restore_required !== true
+    || value.l2_size_eviction_requirements.counter_only_evidence_allowed !== false
+  ) {
+    failures.push('owned run intent L2 size-eviction requirements are invalid')
+  }
+
+  if (!exactObjectFields(value.harnesses, ownedRunIntentHarnessNames)) {
+    failures.push('owned run intent harness set is incomplete or unexpected')
+  } else {
+    for (const harnessName of ownedRunIntentHarnessNames) {
+      const harness = value.harnesses[harnessName]
+      if (
+        !exactObjectFields(harness, ownedRunIntentHarnessFields)
+        || !validSha256(harness?.sha256)
+        || typeof harness?.relative_path !== 'string'
+        || !harness.relative_path
+        || path.isAbsolute(harness.relative_path)
+        || harness.relative_path.split(/[\\/]/).includes('..')
+      ) {
+        failures.push(`owned run intent ${harnessName} harness binding is invalid`)
+        continue
+      }
+      try {
+        const canonicalRoot = realpathSync(harnessRoot)
+        const lexicalPath = path.resolve(canonicalRoot, harness.relative_path)
+        const pathStat = lstatSync(lexicalPath)
+        const canonicalPath = realpathSync(lexicalPath)
+        if (
+          !isPathInside(lexicalPath, canonicalRoot)
+          || !isPathInside(canonicalPath, canonicalRoot)
+          || !pathStat.isFile()
+          || pathStat.isSymbolicLink()
+          || sha256File(canonicalPath) !== harness.sha256
+        ) {
+          failures.push(
+            `owned run intent ${harnessName} harness bytes/path do not match`,
+          )
+        }
+      } catch {
+        failures.push(
+          `owned run intent ${harnessName} harness bytes/path cannot be verified`,
+        )
+      }
+    }
+    if (
+      expectedUiHarnessSha256
+      && value.harnesses?.ui?.sha256 !== expectedUiHarnessSha256
+    ) {
+      failures.push('owned run intent UI harness hash does not match executing source')
+    }
+  }
+
+  const directBase = strictHttpUrl(value.direct_base_url)
+  const gatewayBase = strictHttpUrl(value.gateway_base_url)
+  const directHealth = strictHttpUrl(value.direct_health_url)
+  const gatewayHealth = strictHttpUrl(value.gateway_health_url)
+  if (
+    !directBase
+    || !gatewayBase
+    || !directHealth
+    || !gatewayHealth
+    || value.direct_base_url !== directBase.origin
+    || value.gateway_base_url !== gatewayBase.origin
+    || directHealth.origin !== directBase.origin
+    || gatewayHealth.origin !== gatewayBase.origin
+    || directBase.origin === gatewayBase.origin
+    || (
+      expectedDirectBaseUrl
+      && directBase.origin !== strictHttpUrl(expectedDirectBaseUrl)?.origin
+    )
+    || (
+      expectedGatewayBaseUrl
+      && gatewayBase.origin !== strictHttpUrl(expectedGatewayBaseUrl)?.origin
+    )
+  ) {
+    failures.push('owned run intent direct/gateway origin binding is invalid')
+  }
+
+  if (
+    !Array.isArray(value.phase_plan)
+    || value.phase_plan.length !== ownedRunIntentPhaseContract.length
+  ) {
+    failures.push('owned run intent must contain the exact six ordered phases')
+  } else {
+    for (let index = 0; index < ownedRunIntentPhaseContract.length; index += 1) {
+      const phase = value.phase_plan[index]
+      const expected = ownedRunIntentPhaseContract[index]
+      if (!exactObjectFields(phase, ownedRunIntentPhaseFields)) {
+        failures.push(`owned run intent phase ${index} fields are missing or unexpected`)
+        continue
+      }
+      if (
+        Object.entries(expected).some(([field, expectedValue]) => (
+          phase[field] !== expectedValue
+        ))
+      ) {
+        failures.push(`owned run intent phase ${index} policy/order does not match`)
+      }
+      if (
+        typeof phase.model !== 'string'
+        || !phase.model
+        || typeof phase.model_bundle_path !== 'string'
+        || !path.isAbsolute(phase.model_bundle_path)
+        || !validSha256(phase.bundle_fingerprint_sha256)
+        || typeof phase.native_cache_policy !== 'string'
+        || !phase.native_cache_policy
+      ) {
+        failures.push(`owned run intent phase ${index} model/bundle policy is invalid`)
+      }
+      if (
+        index < 5
+        && phase.native_cache_policy !== 'generic-kv-tq'
+      ) {
+        failures.push(`owned run intent phase ${index} primary native cache policy is invalid`)
+      }
+      if (
+        index === 5
+        && phase.native_cache_policy === 'generic-kv-tq'
+      ) {
+        failures.push('owned run intent native-exception phase is not bundle-grounded')
+      }
+    }
+    const primary = value.phase_plan[0]
+    for (let index = 1; index < 5; index += 1) {
+      const phase = value.phase_plan[index]
+      if (
+        phase.model !== primary.model
+        || phase.model_bundle_path !== primary.model_bundle_path
+        || phase.bundle_fingerprint_sha256 !== primary.bundle_fingerprint_sha256
+        || phase.native_cache_policy !== primary.native_cache_policy
+      ) {
+        failures.push('owned run intent primary phases do not bind one stable bundle')
+        break
+      }
+    }
+    const native = value.phase_plan[5]
+    if (
+      native.model_bundle_path === primary.model_bundle_path
+      || native.bundle_fingerprint_sha256 === primary.bundle_fingerprint_sha256
+    ) {
+      failures.push('owned run intent native-exception representative is not distinct')
+    }
+  }
+
+  if (
+    !Number.isInteger(activePhaseIndex)
+    || activePhaseIndex < 0
+    || activePhaseIndex >= ownedRunIntentPhaseContract.length
+  ) {
+    failures.push('owned run intent active phase index is invalid')
+  } else if (Array.isArray(value.phase_plan)) {
+    const active = value.phase_plan[activePhaseIndex]
+    let canonicalActiveBundle = null
+    let canonicalRequestedBundle = null
+    try {
+      canonicalActiveBundle = realpathSync(active?.model_bundle_path || '')
+      canonicalRequestedBundle = realpathSync(activeModelBundlePath || '')
+    } catch {
+      failures.push('owned run intent active model bundle cannot be resolved')
+    }
+    if (
+      active?.model !== activeModel
+      || (
+        canonicalActiveBundle
+        && canonicalRequestedBundle
+        && canonicalActiveBundle !== canonicalRequestedBundle
+      )
+    ) {
+      failures.push('owned run intent active model/bundle does not match UI launch')
+    }
+  }
+  return failures
+}
+
+export function validateOwnedUiReleaseSentinel(
+  opened,
+  {
+    runId: expectedRunId,
+    nonce,
+    sessionId,
+    runIntentSha256,
+    uiSessionAttestationSha256,
+    activePhase,
+    orchestrated = false,
+    notBeforeMs,
+  },
+) {
+  const failures = []
+  const value = opened?.value || {}
+  const expectedFields = [
+    'api_capture_sha256',
+    'api_action_profile',
+    'cache_capture_sha256',
+    'bundle_fingerprint_sha256',
+    'bundle_role',
+    'cache_policy',
+    'model',
+    'nonce',
+    'paged_ram',
+    'phase_index',
+    'phase_name',
+    'released_at',
+    'representative_id',
+    'run_id',
+    'run_intent_sha256',
+    'schema',
+    'session_id',
+    'ui_session_attestation_sha256',
+    'ui_action_profile',
+    'ui_turn_count',
+  ]
+  if (
+    opened?.opened_nofollow !== true
+    || opened?.nlink !== 1
+    || opened?.mode !== 0o600
+  ) {
+    failures.push('owned UI release sentinel was not safely opened as a private single-link file')
+  }
+  if (
+    !exactObjectFields(value, expectedFields)
+    ||
+    value.schema !== 'vmlx-r18-owned-ui-release-v5'
+    || value.run_id !== expectedRunId
+    || value.nonce !== nonce
+    || String(value.session_id || '') !== String(sessionId || '')
+  ) {
+    failures.push('owned UI release sentinel fields/run/nonce/session do not match')
+  }
+  if (
+    orchestrated
+    && (
+      !activePhase
+      || value.phase_index !== activePhase.phase_index
+      || value.phase_name !== activePhase.phase_name
+      || value.representative_id !== activePhase.representative_id
+      || value.bundle_role !== activePhase.bundle_role
+      || value.cache_policy !== activePhase.cache_policy
+      || value.paged_ram !== activePhase.paged_ram
+      || value.model !== activePhase.model
+      || value.bundle_fingerprint_sha256
+        !== activePhase.bundle_fingerprint_sha256
+      || value.ui_action_profile !== activePhase.ui_action_profile
+      || value.ui_turn_count !== activePhase.ui_turn_count
+      || value.api_action_profile !== activePhase.api_action_profile
+    )
+  ) {
+    failures.push('owned UI release sentinel active phase does not match run intent')
+  }
+  if (!validSha256(value.bundle_fingerprint_sha256)) {
+    failures.push('owned UI release sentinel bundle_fingerprint_sha256 is invalid')
+  }
+  for (const field of [
+    'run_intent_sha256',
+    'ui_session_attestation_sha256',
+    'api_capture_sha256',
+    'cache_capture_sha256',
+  ]) {
+    if (!validSha256(value[field])) {
+      failures.push(`owned UI release sentinel ${field} is invalid`)
+    }
+  }
+  if (orchestrated) {
+    if (!validSha256(runIntentSha256)) {
+      failures.push(
+        'owned UI release expected run-intent fingerprint is invalid',
+      )
+    }
+    if (
+      value.run_intent_sha256 !== runIntentSha256
+    ) {
+      failures.push(
+        'owned UI release sentinel run_intent_sha256 is missing or unbound',
+      )
+    }
+    if (
+      !validSha256(uiSessionAttestationSha256)
+      || value.ui_session_attestation_sha256
+        !== uiSessionAttestationSha256
+    ) {
+      failures.push(
+        'owned UI release sentinel ui_session_attestation_sha256 is missing or unbound',
+      )
+    }
+  }
+  const releasedAtMs = Date.parse(String(value.released_at || ''))
+  if (!Number.isFinite(releasedAtMs) || releasedAtMs < Number(notBeforeMs || 0)) {
+    failures.push('owned UI release sentinel is stale or predates the bound UI session')
+  }
+  return failures
+}
+
+export function validateOwnedReuseSessionAttestation(
+  opened,
+  {
+    runId: expectedRunId,
+    nonce,
+    runIntentSha256,
+    sessionId,
+    activePhase,
+    model,
+    modelBundlePath,
+    electronPid,
+    cdpOrigin,
+    gatewayPid,
+    gatewayBaseUrl,
+    sourceCommit,
+    sourceTree,
+  },
+) {
+  const failures = []
+  const value = opened?.value || {}
+  if (
+    opened?.opened_nofollow !== true
+    || opened?.nlink !== 1
+    || opened?.mode !== 0o600
+  ) {
+    failures.push('reused UI session attestation was not safely opened')
+  }
+  if (
+    !activePhase
+    || ![1, 2, 3, 4].includes(activePhase.phase_index)
+    || value.schema !== 'vmlx-r18-owned-ui-session-attestation-v5'
+    || value.run_id !== expectedRunId
+    || value.nonce !== nonce
+    || value.run_intent_sha256 !== runIntentSha256
+    || value.phase_index !== activePhase.phase_index - 1
+    || value.representative_id !== activePhase.representative_id
+    || value.session_id !== sessionId
+    || value.model !== model
+    || value.bundle_fingerprint_sha256
+      !== activePhase.bundle_fingerprint_sha256
+    || value.electron_pid !== electronPid
+    || value.cdp_origin !== cdpOrigin
+    || value.gateway_pid !== gatewayPid
+    || value.gateway_base_url !== gatewayBaseUrl
+    || value.lifecycle_owner !== 'parent'
+    || value.source_commit !== sourceCommit
+    || value.source_tree !== sourceTree
+  ) {
+    failures.push(
+      'reused UI session attestation is stale, wrong-phase, wrong-model, '
+      + 'or not owned by this parent lifecycle',
+    )
+  }
+  try {
+    if (
+      realpathSync(value.model_bundle_path || '')
+      !== realpathSync(modelBundlePath || '')
+    ) {
+      failures.push('reused UI session attestation model path does not match')
+    }
+  } catch {
+    failures.push('reused UI session attestation model path is not resolvable')
+  }
+  if (!Number.isFinite(Date.parse(String(value.created_at || '')))) {
+    failures.push('reused UI session attestation timestamp is invalid')
+  }
+  return failures
+}
+
+export async function waitForOwnedUiReleaseSentinel({
+  filePath,
+  runId: expectedRunId,
+  nonce,
+  sessionId,
+  orchestrated = true,
+  runIntentPath,
+  runIntentSha256,
+  uiSessionAttestationPath,
+  uiSessionAttestationSha256,
+  activePhase,
+  apiArtifactPath,
+  cacheArtifactPath,
+  notBeforeMs,
+  timeoutMs,
+  pollMs = 100,
+}) {
+  if (!filePath || !nonce) {
+    throw new Error('owned UI release sentinel requires both path and nonce')
+  }
+  if (
+    orchestrated
+    && (
+      !runIntentPath
+      || !validSha256(runIntentSha256)
+      || !uiSessionAttestationPath
+      || !validSha256(uiSessionAttestationSha256)
+      || !apiArtifactPath
+      || !cacheArtifactPath
+    )
+  ) {
+    throw new Error(
+      'orchestrated owned UI release requires exact run-intent and UI-session '
+      + 'attestation path/hash bindings plus paired API/cache artifact paths',
+    )
+  }
+  const absolute = path.resolve(filePath)
+  if (existsSync(absolute)) {
+    throw new Error('owned UI release sentinel existed before the UI hold became ready')
+  }
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!existsSync(absolute)) {
+      await sleep(pollMs)
+      continue
+    }
+    const opened = readPrivateExternalJson(absolute, 'Owned UI release sentinel')
+    const failures = validateOwnedUiReleaseSentinel(opened, {
+      runId: expectedRunId,
+      nonce,
+      sessionId,
+      orchestrated,
+      runIntentSha256,
+      uiSessionAttestationSha256,
+      activePhase,
+      notBeforeMs,
+    })
+    if (failures.length) {
+      throw new Error(failures.join('; '))
+    }
+    let apiCapture = null
+    let cacheCapture = null
+    let runIntent = null
+    let uiSessionAttestation = null
+    if (orchestrated) {
+      runIntent = readPrivateExternalBytes(
+        runIntentPath,
+        'Owned UI run intent',
+      )
+      uiSessionAttestation = readPrivateExternalBytes(
+        uiSessionAttestationPath,
+        'Owned UI session attestation',
+      )
+      apiCapture = readPrivateExternalBytes(
+        apiArtifactPath,
+        'Owned UI paired API artifact',
+      )
+      cacheCapture = readPrivateExternalBytes(
+        cacheArtifactPath,
+        'Owned UI paired cache artifact',
+      )
+      if (
+        runIntent.path === uiSessionAttestation.path
+        || runIntent.path === apiCapture.path
+        || runIntent.path === cacheCapture.path
+        || runIntent.path === opened.path
+        || uiSessionAttestation.path === apiCapture.path
+        || uiSessionAttestation.path === cacheCapture.path
+        || uiSessionAttestation.path === opened.path
+        ||
+        apiCapture.path === cacheCapture.path
+        || apiCapture.path === opened.path
+        || cacheCapture.path === opened.path
+      ) {
+        throw new Error(
+          'owned UI release sentinel and paired artifacts are not distinct files',
+        )
+      }
+      if (
+        runIntent.sha256 !== opened.value.run_intent_sha256
+        || uiSessionAttestation.sha256
+          !== opened.value.ui_session_attestation_sha256
+        ||
+        apiCapture.sha256 !== opened.value.api_capture_sha256
+        || cacheCapture.sha256 !== opened.value.cache_capture_sha256
+      ) {
+        throw new Error(
+          'owned UI release sentinel run-intent/UI-session/API/cache hashes '
+          + 'do not match safely reopened exact artifacts',
+        )
+      }
+    }
+    return {
+      path: opened.path,
+      sha256: opened.sha256,
+      schema: opened.value.schema,
+      run_id: opened.value.run_id,
+      nonce: opened.value.nonce,
+      session_id: opened.value.session_id,
+      phase_index: opened.value.phase_index,
+      phase_name: opened.value.phase_name,
+      representative_id: opened.value.representative_id,
+      bundle_role: opened.value.bundle_role,
+      cache_policy: opened.value.cache_policy,
+      paged_ram: opened.value.paged_ram,
+      model: opened.value.model,
+      bundle_fingerprint_sha256:
+        opened.value.bundle_fingerprint_sha256,
+      ui_action_profile: opened.value.ui_action_profile,
+      ui_turn_count: opened.value.ui_turn_count,
+      api_action_profile: opened.value.api_action_profile,
+      run_intent_sha256: opened.value.run_intent_sha256,
+      ui_session_attestation_sha256:
+        opened.value.ui_session_attestation_sha256,
+      api_capture_sha256: opened.value.api_capture_sha256,
+      cache_capture_sha256: opened.value.cache_capture_sha256,
+      run_intent_path: runIntent?.path || null,
+      run_intent_bytes: runIntent?.bytes || null,
+      ui_session_attestation_path: uiSessionAttestation?.path || null,
+      ui_session_attestation_bytes: uiSessionAttestation?.bytes || null,
+      api_capture_path: apiCapture?.path || null,
+      api_capture_bytes: apiCapture?.bytes || null,
+      cache_capture_path: cacheCapture?.path || null,
+      cache_capture_bytes: cacheCapture?.bytes || null,
+      released_at: opened.value.released_at,
+    }
+  }
+  throw new Error('timed out waiting for owned UI release sentinel')
+}
+
+function isPathInside(candidate, parent) {
+  const relative = path.relative(parent, candidate)
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
+}
+
+function nearestExistingDirectory(candidate) {
+  let current = path.resolve(candidate)
+  while (!existsSync(current)) {
+    const parent = path.dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return current
+}
+
+async function resolvePrivateProofDir() {
+  if (!proofDirInput.trim()) {
+    throw new Error(
+      'Set VMLINUX_REAL_UI_PROOF_DIR, VMLX_REAL_UI_PROOF_DIR, or VMLX_PRIVATE_EVIDENCE_ROOT '
+      + 'to a private directory outside every Git worktree',
+    )
+  }
+  if (!proofBasename || path.basename(proofBasename) !== proofBasename || ['.', '..'].includes(proofBasename)) {
+    throw new Error('VMLINUX_REAL_UI_PROOF_BASENAME must be a single safe file basename')
+  }
+
+  const requested = path.resolve(proofDirInput)
+  const canonicalRepo = realpathSync(repoDir)
+  const existingAncestor = realpathSync(nearestExistingDirectory(requested))
+  if (isPathInside(requested, canonicalRepo) || isPathInside(existingAncestor, canonicalRepo)) {
+    throw new Error('Real UI proof output must stay outside the public vMLX Git worktree')
+  }
+
+  mkdirSync(requested, { recursive: true })
+  const canonical = realpathSync(requested)
+  chmodSync(canonical, 0o700)
+  if (isPathInside(canonical, canonicalRepo)) {
+    throw new Error('Real UI proof output resolved inside the public vMLX Git worktree')
+  }
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', canonical, 'rev-parse', '--show-toplevel'],
+      { encoding: 'utf8' },
+    )
+    const gitRoot = stdout.trim()
+    if (gitRoot) {
+      throw new Error(`Real UI proof output must stay outside Git; resolved Git root: ${gitRoot}`)
+    }
+  } catch (error) {
+    if (String(error?.message || '').startsWith('Real UI proof output must stay outside Git;')) {
+      throw error
+    }
+    // git exits nonzero when the path is correctly outside every worktree.
+  }
+  return canonical
+}
+
+async function captureGitProvenance() {
+  const runGit = async (args, fallback = '') => {
+    try {
+      const { stdout } = await execFileAsync('git', ['-C', repoDir, ...args], { encoding: 'utf8' })
+      return stdout.trim()
+    } catch {
+      return fallback
+    }
+  }
+  const [commit, tree, branch, upstream, status] = await Promise.all([
+    runGit(['rev-parse', 'HEAD']),
+    runGit(['rev-parse', 'HEAD^{tree}']),
+    runGit(['branch', '--show-current']),
+    runGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']),
+    runGit(['status', '--porcelain=v1', '--untracked-files=all']),
+  ])
+  const sourceTree = pythonSourceTreeDigest(path.join(repoDir, 'vmlx_engine'))
+  const rendererTree = sourceFilesDigest([
+    path.join(panelDir, 'src'),
+    path.join(panelDir, 'package.json'),
+    path.join(panelDir, 'package-lock.json'),
+    path.join(panelDir, 'electron.vite.config.ts'),
+  ])
+  return {
+    observed_at: new Date().toISOString(),
+    git_root: realpathSync(repoDir),
+    branch,
+    upstream: upstream || null,
+    commit,
+    tree,
+    dirty: Boolean(status),
+    status_porcelain: status ? status.split(/\r?\n/) : [],
+    ...sourceTree,
+    ...rendererTree,
+    server_module_sha256: sha256File(path.join(repoDir, 'vmlx_engine', 'server.py')),
+    package_init_sha256: sha256File(path.join(repoDir, 'vmlx_engine', '__init__.py')),
+    harness_sha256: sha256Text(readFileSync(new URL(import.meta.url), 'utf8')),
+  }
+}
+
+function readExternalReleaseManifest(manifestPath) {
+  if (!manifestPath) return null
+  const absolute = path.resolve(manifestPath)
+  const stat = lstatSync(absolute)
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error('Installed release manifest must be a regular, non-symlink file')
+  }
+  const canonical = realpathSync(absolute)
+  if (isPathInside(canonical, realpathSync(repoDir))) {
+    throw new Error('Installed release manifest must be independent of the source checkout')
+  }
+  const raw = readFileSync(canonical)
+  return {
+    path: canonical,
+    sha256: crypto.createHash('sha256').update(raw).digest('hex'),
+    value: JSON.parse(raw.toString('utf8')),
+  }
+}
+
+async function listenerPidForPort(port) {
+  const { stdout } = await execFileAsync(
+    'lsof',
+    ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fp'],
+    { encoding: 'utf8' },
+  )
+  const pids = [...new Set(
+    String(stdout)
+      .split(/\r?\n/)
+      .filter((line) => /^p\d+$/.test(line))
+      .map((line) => Number(line.slice(1)))
+      .filter((pid) => Number.isInteger(pid) && pid > 0),
+  )]
+  if (pids.length !== 1) {
+    throw new Error(`expected exactly one TCP listener on ${port}, got ${pids.join(',') || 'none'}`)
+  }
+  return pids[0]
+}
+
+async function executablePathForPid(pid) {
+  try {
+    const { stdout: commandLine } = await execFileAsync(
+      'ps',
+      ['-ww', '-p', String(pid), '-o', 'command='],
+      { encoding: 'utf8' },
+    )
+    const match = String(commandLine).trim().match(/^(?:"([^"]+)"|'([^']+)'|(\S+))/)
+    const invokedPath = match?.[1] || match?.[2] || match?.[3] || ''
+    if (path.isAbsolute(invokedPath) && existsSync(invokedPath)) {
+      return path.resolve(invokedPath)
+    }
+  } catch {}
+  const { stdout } = await execFileAsync(
+    'lsof',
+    ['-a', '-p', String(pid), '-d', 'txt', '-Fn'],
+    { encoding: 'utf8' },
+  )
+  const candidates = String(stdout)
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('n/'))
+    .map((line) => line.slice(1))
+    .filter((candidate) => existsSync(candidate))
+  if (!candidates.length) {
+    throw new Error(`could not resolve executable text mapping for PID ${pid}`)
+  }
+  return path.resolve(candidates[0])
+}
+
+async function captureListenerProcessBinding({
+  port,
+  expectedRootPid,
+  expectedHealthPid,
+  kind,
+}) {
+  const listenerPid = await listenerPidForPort(port)
+  const descendants = expectedRootPid ? await childProcessTree(expectedRootPid) : []
+  const belongsToRoot = !expectedRootPid
+    || listenerPid === expectedRootPid
+    || descendants.includes(listenerPid)
+  if (!belongsToRoot) {
+    throw new Error(
+      `${kind} listener PID ${listenerPid} is not the launched PID ${expectedRootPid} or its descendant`,
+    )
+  }
+  if (expectedHealthPid && listenerPid !== Number(expectedHealthPid)) {
+    throw new Error(
+      `${kind} listener PID ${listenerPid} does not match /health PID ${expectedHealthPid}`,
+    )
+  }
+  const executablePath = await executablePathForPid(listenerPid)
+  return {
+    kind,
+    port,
+    launched_root_pid: expectedRootPid || null,
+    process_tree_pids: expectedRootPid
+      ? [expectedRootPid, ...descendants]
+      : [listenerPid],
+    listener_pid: listenerPid,
+    health_pid: expectedHealthPid || null,
+    belongs_to_launched_process_tree: belongsToRoot,
+    executable_path: executablePath,
+    executable_sha256: sha256File(executablePath),
+    executable_path_fingerprint_sha256: sha256Text(path.resolve(executablePath)),
+  }
+}
+
+function captureUiRuntimeProvenance(
+  app,
+  rendererResources,
+  git,
+  {
+    cdpProcessBinding = null,
+    backendProcessBinding = null,
+    releaseManifest = null,
+  } = {},
+) {
+  const mode = app?.uiLaunchMode || ''
+  const executable = mode === 'installed-app'
+    ? path.join(app.appPath, 'Contents', 'MacOS', 'vMLX')
+    : path.join(
+      panelDir,
+      'node_modules',
+      'electron',
+      'dist',
+      'Electron.app',
+      'Contents',
+      'MacOS',
+      'Electron',
+    )
+  const asarPath = mode === 'installed-app'
+    ? path.join(app.appPath, 'Contents', 'Resources', 'app.asar')
+    : ''
+  const resourcesRoot = mode === 'installed-app'
+    ? path.join(app.appPath, 'Contents', 'Resources')
+    : ''
+  const bundledSourceRoot = resourcesRoot
+    ? path.join(resourcesRoot, 'vmlx-engine-source', 'vmlx_engine')
+    : ''
+  const bundledProvenancePath = resourcesRoot
+    ? path.join(resourcesRoot, 'bundled-python', 'vmlx-bundle-provenance.json')
+    : ''
+  let bundledProvenance = null
+  let bundledProvenanceError = null
+  if (bundledProvenancePath && existsSync(bundledProvenancePath)) {
+    try {
+      bundledProvenance = JSON.parse(readFileSync(bundledProvenancePath, 'utf8'))
+    } catch (error) {
+      bundledProvenanceError = error?.message || String(error)
+    }
+  }
+  const bundledSource = (
+    bundledSourceRoot
+    && existsSync(path.join(bundledSourceRoot, 'server.py'))
+    && existsSync(path.join(bundledSourceRoot, '__init__.py'))
+  )
+    ? {
+        ...pythonSourceTreeDigest(
+          bundledSourceRoot,
+          path.dirname(bundledSourceRoot),
+        ),
+        server_module_sha256: sha256File(
+          path.join(bundledSourceRoot, 'server.py'),
+        ),
+        package_init_sha256: sha256File(
+          path.join(bundledSourceRoot, '__init__.py'),
+        ),
+      }
+    : null
+  const resources = Array.isArray(rendererResources?.resources)
+    ? rendererResources.resources.map(String)
+    : []
+  const scripts = Array.isArray(rendererResources?.scripts)
+    ? rendererResources.scripts.map(String)
+    : []
+  const allResources = [...resources, ...scripts]
+  return {
+    mode,
+    source_commit: git?.commit || null,
+    source_tree: git?.tree || null,
+    renderer_source_tree_sha256: git?.renderer_source_tree_sha256 || null,
+    renderer_source_file_count: git?.renderer_source_file_count ?? null,
+    page_url: rendererResources?.pageUrl || null,
+    renderer_resources: allResources,
+    vite_client_seen: allResources.some((url) => /(?:@vite\/client|@vite\/client)/.test(url)),
+    vite_renderer_source_seen: allResources.some(
+      (url) => /\/src\/renderer\/src\/(?:main|App)\.tsx(?:\?|$)/.test(url),
+    ),
+    electron_executable: executable,
+    electron_executable_sha256:
+      existsSync(executable) ? sha256File(executable) : null,
+    cdp_process_binding: cdpProcessBinding,
+    backend_python_process_binding: backendProcessBinding,
+    served_renderer_modules: rendererResources?.servedModules || [],
+    served_renderer_source_sha256:
+      rendererResources?.servedRendererSourceSha256 || null,
+    app_asar: asarPath || null,
+    app_asar_sha256:
+      asarPath && existsSync(asarPath) ? sha256File(asarPath) : null,
+    external_release_manifest_path: releaseManifest?.path || null,
+    external_release_manifest_sha256: releaseManifest?.sha256 || null,
+    external_release_manifest: releaseManifest?.value || null,
+    bundled_provenance_path: bundledProvenancePath || null,
+    bundled_provenance_sha256:
+      bundledProvenancePath && existsSync(bundledProvenancePath)
+        ? sha256File(bundledProvenancePath)
+        : null,
+    bundled_provenance: bundledProvenance,
+    bundled_provenance_error: bundledProvenanceError,
+    bundled_source_root: bundledSourceRoot || null,
+    bundled_source: bundledSource,
+  }
+}
+
+function runtimeBindingFromHealth(health) {
+  const runtime = health?.runtime_provenance || {}
+  const modelBundle = health?.model_bundle_provenance || {}
+  const cacheTopology = health?.cache_topology_provenance || {}
+  const identity = {
+    backend_pid: Number(runtime.pid || 0) || null,
+    runtime_source_hashes: {
+      server_module_sha256: String(runtime.server_module_sha256 || ''),
+      package_init_sha256: String(runtime.package_init_sha256 || ''),
+      python_source_tree_sha256: String(runtime.python_source_tree_sha256 || ''),
+      python_executable_fingerprint_sha256:
+        String(runtime.python_executable_fingerprint_sha256 || ''),
+    },
+    python_source_file_count: runtime.python_source_file_count ?? null,
+    python_source_read_error_count: runtime.python_source_read_error_count ?? null,
+    model_name: String(health?.model_name || ''),
+    model_bundle_fingerprint_sha256:
+      String(modelBundle.fingerprint_sha256 || ''),
+    cache_topology_fingerprint_sha256:
+      String(cacheTopology.fingerprint_sha256 || ''),
+  }
+  return {
+    ...identity,
+    // Compatibility alias for the typed Electron artifact reader. It is not
+    // part of the canonical API-v2 identity fingerprint below.
+    pid: identity.backend_pid,
+    fingerprint_sha256: canonicalSha256(identity),
+  }
+}
+
+function createHealthSnapshot(url, health) {
+  return {
+    observed_at: new Date().toISOString(),
+    url,
+    sha256: sha256Json(health),
+    binding: runtimeBindingFromHealth(health),
+    raw: health,
+  }
+}
 
 async function removeTemporaryTree(target, { maxRetries = 8 } = {}) {
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
@@ -371,29 +2103,6 @@ async function waitForTarget(debugPort, appLogs) {
   throw new Error(`Timed out waiting for DevTools target on ${debugPort}`)
 }
 
-async function waitForServer(baseUrl, server) {
-  const serverLogs = server.logs
-  const started = Date.now()
-  while (Date.now() - started < 900_000) {
-    try {
-      const models = await requestJson(`${baseUrl}/v1/models`, 2000)
-      return models
-    } catch {}
-    if (server.proc.exitCode != null || server.proc.signalCode != null) {
-      const tail = server.logs.slice(-80).join('\n')
-      throw new Error(
-        `server process exited before health: code=${server.proc.exitCode} signal=${server.proc.signalCode}\n${tail}`,
-      )
-    }
-    if (serverLogs.some((line) => /Traceback|ERROR|Exception/.test(line))) {
-      const tail = serverLogs.slice(-80).join('\n')
-      if (/Address already in use/.test(tail)) throw new Error(tail)
-    }
-    await sleep(1000)
-  }
-  throw new Error(`Timed out waiting for real model server at ${baseUrl}`)
-}
-
 async function evaluate(cdp, expression, timeoutMs = 120_000) {
   const result = await cdp.send('Runtime.evaluate', {
     expression,
@@ -412,91 +2121,29 @@ async function capturePng(cdp, filePath) {
     format: 'png',
     captureBeyondViewport: true,
   })
-  writeFileSync(filePath, Buffer.from(shot.data, 'base64'))
+  writePrivateArtifactFile(filePath, Buffer.from(shot.data, 'base64'))
   return filePath
 }
 
-function startRealServer(port, outDir) {
-  const conservativeRuntime = envBool('VMLINUX_REAL_UI_CONSERVATIVE_RUNTIME', false)
-  const runtimeArgs = conservativeRuntime
-    ? [
-        '--no-continuous-batching',
-        '--disable-prefix-cache',
-        '--kv-cache-quantization',
-        'none',
-        '--disable-native-mtp',
-      ]
-    : [
-        '--continuous-batching',
-        '--use-paged-cache',
-        '--paged-cache-block-size',
-        '64',
-        '--max-cache-blocks',
-        '1000',
-        '--enable-block-disk-cache',
-        '--block-disk-cache-dir',
-        path.join(outDir, 'block-cache'),
-        '--block-disk-cache-max-gb',
-        '2',
-      ]
-  const args = [
-    '-B',
-    '-s',
-    '-m',
-    'vmlx_engine.cli',
-    'serve',
-    modelPath,
-    '--host',
-    '127.0.0.1',
-    '--port',
-    String(port),
-    '--served-model-name',
-    servedModel,
-    '--timeout',
-    '240',
-    '--max-num-seqs',
-    '1',
-    '--prefill-batch-size',
-    '512',
-    '--prefill-step-size',
-    '1024',
-    '--completion-batch-size',
-    '128',
-    ...runtimeArgs,
-    '--ssm-state-cache-mb',
-    '512',
-    '--max-tokens',
-    process.env.VMLINUX_REAL_UI_MAX_TOKENS || '96',
-    '--log-level',
-    'INFO',
-    '--default-enable-thinking',
-    'false',
-  ]
-  if (Number.isFinite(requestMaxPromptTokens) && requestMaxPromptTokens > 0) {
-    args.push('--max-prompt-tokens', String(Math.floor(requestMaxPromptTokens)))
-  }
-  if (builtinToolsEnabled) {
-    args.push('--enable-auto-tool-choice', '--tool-call-parser', 'auto')
-  }
-  if (process.env.VMLINUX_REAL_UI_IS_MLLM === '1' || process.env.VMLX_REAL_UI_IS_MLLM === '1') {
-    args.push('--is-mllm')
-  }
-  const logs = []
-  const proc = spawn(python, args, {
-    cwd: repoDir,
-    env: {
-      ...process.env,
-      PYTHONUNBUFFERED: '1',
-      PYTHONPATH: repoDir,
-    },
-    detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
+const rendererProofModulePaths = [
+  'src/renderer/src/main.tsx',
+  'src/renderer/src/App.tsx',
+  'src/renderer/src/components/chat/MessageBubble.tsx',
+  'src/renderer/src/components/chat/ReasoningBox.tsx',
+  'src/renderer/src/components/chat/InlineToolCall.tsx',
+  'src/renderer/src/components/chat/ToolCallStatus.tsx',
+]
+
+export function localRendererModuleEvidence() {
+  return rendererProofModulePaths.map((relativePath) => {
+    const absolutePath = path.join(panelDir, relativePath)
+    const data = readFileSync(absolutePath)
+    return {
+      relative_path: relativePath,
+      size_bytes: data.length,
+      sha256: crypto.createHash('sha256').update(data).digest('hex'),
+    }
   })
-  proc.stdout.on('data', (d) => logs.push(...d.toString().split(/\r?\n/).filter(Boolean)))
-  proc.stderr.on('data', (d) => logs.push(...d.toString().split(/\r?\n/).filter(Boolean)))
-  attachChildProcessStreamErrorGuard(proc.stdout, logs)
-  attachChildProcessStreamErrorGuard(proc.stderr, logs)
-  return { proc, logs, command: [python, ...args] }
 }
 
 function startUiApp(userDataDir, debugPort) {
@@ -631,16 +2278,2746 @@ function visibleAssistantAfterEachUser(turns) {
   return sawUser
 }
 
+function approximatelyEqual(left, right, tolerance = 1e-6) {
+  return typeof left === 'number'
+    && typeof right === 'number'
+    && Number.isFinite(left)
+    && Number.isFinite(right)
+    && Math.abs(left - right) <= tolerance
+}
+
+function numericField(value, ...keys) {
+  for (const key of keys) {
+    const candidate = value?.[key]
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate
+  }
+  return undefined
+}
+
+function parseJsonObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return null
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function extractToolCommand(detail) {
+  const parsed = parseJsonObject(detail)
+  if (!parsed) return ''
+  for (const key of ['command', 'cmd', 'script']) {
+    if (typeof parsed[key] === 'string') return parsed[key]
+  }
+  const nested = parseJsonObject(parsed.arguments)
+  if (nested) return extractToolCommand(nested)
+  return ''
+}
+
+export function validateModelBundleBinding(result) {
+  const failures = []
+  const requestedPath = String(
+    result?.bundleGenerationContract?.bundle_path
+    || result?.modelPath
+    || '',
+  )
+  const requestedModel = String(result?.servedModel || '')
+  const expectedAttestation = result?.bundleGenerationContract?.health_attestation
+  const healthSnapshots = [
+    result?.healthProvenance?.before?.raw,
+    result?.healthProvenance?.after?.raw,
+  ]
+  const listedIds = (result?.server?.models?.data || [])
+    .map((entry) => String(entry?.id || ''))
+    .filter(Boolean)
+  if (!requestedPath) failures.push('requested local bundle path is missing')
+  if (!requestedModel) failures.push('requested served model name is missing')
+  if (
+    listedIds.length !== 1
+    || listedIds[0] !== requestedModel
+  ) {
+    failures.push(
+      `/v1/models is not exactly bound to requested served model ${requestedModel || 'missing'}`,
+    )
+  }
+  for (const [index, health] of healthSnapshots.entries()) {
+    const phase = index === 0 ? 'before' : 'after'
+    const healthModel = String(health?.model_name || '')
+    if (!health || health?.model_loaded !== true) {
+      failures.push(`${phase} /health did not report a loaded model`)
+      continue
+    }
+    if (
+      requestedPath
+      && healthModel !== requestedPath
+      && healthModel !== String(result?.modelPath || '')
+    ) {
+      failures.push(
+        `${phase} /health model ${healthModel || 'missing'} does not match requested bundle ${requestedPath}`,
+      )
+    }
+    const attestation = health?.model_bundle_provenance
+    if (!expectedAttestation || canonicalJson(attestation) !== canonicalJson(expectedAttestation)) {
+      failures.push(`${phase} /health bundle attestation does not match requested bundle bytes`)
+    }
+    if (
+      health?.runtime_provenance?.model_bundle_provenance
+      && canonicalJson(health.runtime_provenance.model_bundle_provenance)
+        !== canonicalJson(attestation)
+    ) {
+      failures.push(`${phase} nested /health bundle attestation disagrees with top-level attestation`)
+    }
+  }
+  return failures
+}
+
+function normalizeProofText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim()
+}
+
+function normalizeVisibleLinkText(value) {
+  return normalizeProofText(value)
+    .replace(/\\?\(|\\?\)|\\?\[|\\?\]/g, '')
+    .replace(/\\times\b/g, '×')
+    .replace(/\\div\b/g, '÷')
+    .replace(/\\approx\b/g, '≈')
+    .replace(/\[([^\]]+)]\(([^)]+)\)/g, '$1')
+    .replace(/[*_`#>~]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+const rawProtocolMarkerRegex =
+  /<think>|<\/think>|<tool_call>|<\/tool_call>|<function>|<invoke>|<minimax:tool_call>|<zyphra_tool_call>|<\|point_start\|>|<\|point_end\|>|<\|box_start\|>|<\|box_end\|>|<\|tool_call_start\|>|<\|tool_call_end\|>|\[THINK\]|\[\/THINK\]|<mm:think>|<\/mm:think>/i
+
+const protocolMarkers = [
+  '<think>',
+  '</think>',
+  '<tool_call>',
+  '</tool_call>',
+  '<function>',
+  '<invoke>',
+  '<minimax:tool_call>',
+  '<zyphra_tool_call>',
+  '<|point_start|>',
+  '<|point_end|>',
+  '<|box_start|>',
+  '<|box_end|>',
+  '<|tool_call_start|>',
+  '<|tool_call_end|>',
+  '[THINK]',
+  '[/THINK]',
+  '<mm:think>',
+  '</mm:think>',
+]
+
+function containsTransientProtocolMarker(value) {
+  const text = String(value || '')
+  if (rawProtocolMarkerRegex.test(text)) return true
+  return protocolMarkers.some((marker) => {
+    for (let length = 3; length < marker.length; length += 1) {
+      if (text.includes(marker.slice(0, length))) return true
+    }
+    return false
+  })
+}
+
+function expectedUiTurnCount(result) {
+  const configured = Number(result?.requestContract?.uiTurnCount)
+  return Number.isInteger(configured) && configured >= 1 && configured <= 3
+    ? configured
+    : 3
+}
+
+function expectedUiToolCallCount(result) {
+  const profile = String(result?.requestContract?.uiActionProfile || '')
+  if (profile === 'primary-tool-restart-probe') return 1
+  if (profile === 'native-three-turn-switch') return 2
+  if (profile) return 0
+  return result?.requestedBuiltinTools === true ? 2 : 0
+}
+
+function uiProfileRequiresPositiveCacheReuse(result) {
+  return new Set([
+    'primary-tool-restart-probe',
+    'primary-history-paged-evict-refault',
+    'primary-restart-followup',
+    'native-three-turn-switch',
+  ]).has(String(result?.requestContract?.uiActionProfile || ''))
+}
+
+export function validateRenderedDomEvidence(result) {
+  const failures = []
+  const expectedTurns = expectedUiTurnCount(result)
+  const dom = result?.renderedDom || {}
+  const messages = Array.isArray(dom.messages) ? dom.messages : []
+  const assistantIds = Array.isArray(result?.assistantMessageIds)
+    ? result.assistantMessageIds.slice(0, expectedTurns)
+    : []
+  const traceIds = new Set(
+    (result?.messageEventTrace || [])
+      .filter((row) => row?.events?.some((event) => event?.event === 'terminal'))
+      .map((row) => String(row.messageId || '')),
+  )
+  const traceById = new Map(
+    (result?.messageEventTrace || []).map((row) => [
+      String(row?.messageId || ''),
+      row,
+    ]),
+  )
+  const persistedById = new Map(
+    (result?.assistantRecords || []).map((message) => [
+      String(message?.id || ''),
+      String(message?.content || ''),
+    ]),
+  )
+  if (assistantIds.length !== expectedTurns) {
+    failures.push(`expected exactly ${expectedTurns} primary assistant message IDs, got ${assistantIds.length}`)
+  }
+  for (const [assistantIndex, messageId] of assistantIds.entries()) {
+    const rendered = messages.find((row) => String(row?.messageId || '') === String(messageId))
+    if (!rendered) {
+      failures.push(`assistant message ${messageId} has no rendered DOM evidence`)
+      continue
+    }
+    if (rendered.role !== 'assistant') {
+      failures.push(`message ${messageId} rendered with role ${rendered.role || 'missing'}`)
+    }
+    if (!String(rendered.answerText || '').trim()) {
+      failures.push(`assistant message ${messageId} has empty rendered answer text`)
+    }
+    if (!String(persistedById.get(String(messageId)) || '').trim()) {
+      failures.push(`assistant message ${messageId} has no matching persisted content record`)
+    }
+    const persisted = String(persistedById.get(String(messageId)) || '')
+    if (
+      assistantIndex < 2
+      && normalizeVisibleLinkText(rendered.answerText)
+        !== normalizeVisibleLinkText(persisted)
+    ) {
+      failures.push(
+        `assistant message ${messageId} normalized visible answer is not linked to persisted content`,
+      )
+    }
+    const finalContentEvent = (traceById.get(String(messageId))?.events || [])
+      .filter((event) => event?.event === 'stream' && event?.channel === 'content')
+      .at(-1)
+    if (String(finalContentEvent?.payload?.fullContent || '') !== persisted) {
+      failures.push(`assistant message ${messageId} final stream does not equal persisted content`)
+    }
+    if (!traceIds.has(String(messageId))) {
+      failures.push(`assistant message ${messageId} is not linked to a terminal event trace`)
+    }
+    if (rendered.visible !== true) {
+      failures.push(`assistant message ${messageId} was not visibly rendered`)
+    }
+    if ((rendered.toolCards || []).some((card) => card?.visible !== true)) {
+      failures.push(`assistant message ${messageId} contains a non-visible tool card`)
+    }
+  }
+  if (Array.isArray(dom.rawI18nKeys) && dom.rawI18nKeys.length) {
+    failures.push(`raw i18n keys are visible: ${dom.rawI18nKeys.join(', ')}`)
+  }
+  if (Array.isArray(dom.visibleErrors) && dom.visibleErrors.length) {
+    failures.push(`visible UI errors were observed: ${dom.visibleErrors.join(' | ')}`)
+  }
+  if (Array.isArray(dom.transientAlerts) && dom.transientAlerts.length) {
+    failures.push(`transient UI alerts were observed: ${dom.transientAlerts.join(' | ')}`)
+  }
+  const configuredPrompts = [
+    result?.requestContract?.promptOne,
+    result?.requestContract?.promptTwo,
+    result?.requestContract?.promptThree,
+  ].slice(0, expectedTurns).map(String)
+  const renderingPromptIndex = configuredPrompts.findIndex(
+    (prompt) => prompt.includes('$43') || prompt.includes('\\times'),
+  )
+  if (renderingPromptIndex >= 0) {
+    const renderedMathMessage = messages.find(
+      (row) => String(row?.messageId || '')
+        === String(assistantIds[renderingPromptIndex] || ''),
+    )
+    if (!String(renderedMathMessage?.answerText || '').includes('$43')) {
+      failures.push('rendered answer did not preserve literal currency $43')
+    }
+    const currencyOccurrences = Array.isArray(renderedMathMessage?.currencyOccurrences)
+      ? renderedMathMessage.currencyOccurrences
+      : []
+    if (
+      currencyOccurrences.length !== 1
+      || currencyOccurrences[0]?.insideKatex === true
+    ) {
+      failures.push('literal currency $43 was not preserved exactly once outside KaTeX')
+    }
+    if ((renderedMathMessage?.katexCount || 0) < 1) {
+      failures.push('rendered answer did not contain a KaTeX-rendered expression')
+    }
+    if ((renderedMathMessage?.katexErrorCount || 0) > 0) {
+      failures.push('rendered answer contains a KaTeX error')
+    }
+    if (
+      (
+        /\\(?:\(|\[)/.test(String(renderedMathMessage?.answerText || ''))
+        || /\\(?:times|frac|div|approx)\b/.test(
+          String(renderedMathMessage?.answerText || ''),
+        )
+      )
+      || String(renderedMathMessage?.html || '').includes('katex-error')
+    ) {
+      failures.push('rendered answer exposed raw TeX/parser syntax')
+    }
+    const expectedTex = '47 \\times 19 = 893 < 920 = 46 \\times 20'
+    const annotations = Array.isArray(renderedMathMessage?.katexAnnotations)
+      ? renderedMathMessage.katexAnnotations.map((value) => normalizeProofText(value))
+      : []
+    if (
+      annotations.length !== 1
+      || annotations[0] !== expectedTex
+    ) {
+      failures.push('rendered answer KaTeX source does not exactly match the requested expression')
+    }
+  }
+  return failures
+}
+
+export function validateReasoningEvidence(result, expectation = 'optional') {
+  const failures = []
+  const expectedTurns = expectedUiTurnCount(result)
+  const assistantIds = new Set(
+    (Array.isArray(result?.assistantMessageIds)
+      ? result.assistantMessageIds.slice(0, expectedTurns)
+      : [])
+      .map((messageId) => String(messageId || '')),
+  )
+  const traces = (Array.isArray(result?.messageEventTrace)
+    ? result.messageEventTrace
+    : [])
+    .filter((row) => assistantIds.has(String(row?.messageId || '')))
+  const domMessages = Array.isArray(result?.renderedDom?.messages)
+    ? result.renderedDom.messages
+    : []
+  const domSamples = Array.isArray(result?.renderedDom?.samples)
+    ? result.renderedDom.samples
+    : []
+  let reasoningMessageCount = 0
+  if (assistantIds.size !== expectedTurns || traces.length !== expectedTurns) {
+    failures.push(
+      `expected reasoning/content traces for exactly ${expectedTurns} primary assistant turns, got ${traces.length}`,
+    )
+  }
+  for (const row of traces) {
+    const events = Array.isArray(row?.events) ? row.events : []
+    const reasoningEvents = events.filter(
+      (event) => event?.event === 'stream' && event?.channel === 'reasoning',
+    )
+    const contentEvents = events.filter(
+      (event) => event?.event === 'stream' && event?.channel === 'content',
+    )
+    const contentStates = new Set(
+      contentEvents
+        .map((event) => String(event?.payload?.fullContent || ''))
+        .filter(Boolean),
+    )
+    const messageDomSamples = domSamples.filter(
+      (sample) => String(sample?.messageId || '') === String(row?.messageId || ''),
+    )
+    const renderedAnswerStates = new Set(
+      messageDomSamples.map((sample) => String(sample?.answerText || '')).filter(Boolean),
+    )
+    const orderedSequences = events.map((event) => Number(event?.sequence))
+    if (
+      orderedSequences.some((sequence) => !Number.isFinite(sequence))
+      || orderedSequences.some((sequence, index) => index > 0 && sequence <= orderedSequences[index - 1])
+    ) {
+      failures.push(`message ${row?.messageId || 'unknown'} event sequence is not strictly monotonic`)
+    }
+    for (const channel of ['reasoning', 'content']) {
+      let previous = ''
+      const channelEvents = events.filter(
+        (event) => event?.event === 'stream' && event?.channel === channel,
+      )
+      for (const event of channelEvents) {
+        const full = String(event?.payload?.fullContent || '')
+        if (event?.cumulativeReset === true || (previous && !full.startsWith(previous))) {
+          failures.push(`message ${row?.messageId || 'unknown'} ${channel} stream reset or shrank`)
+          break
+        }
+        if (
+          containsTransientProtocolMarker(full)
+          || containsTransientProtocolMarker(event?.delta)
+        ) {
+          failures.push(`message ${row?.messageId || 'unknown'} leaked parser markers in transient ${channel} stream`)
+          break
+        }
+        previous = full
+      }
+    }
+    if (contentStates.size < 2) {
+      failures.push(`message ${row?.messageId || 'unknown'} content was not progressively streamed`)
+    }
+    if (renderedAnswerStates.size < 2) {
+      failures.push(`message ${row?.messageId || 'unknown'} visible answer DOM was not progressively updated`)
+    }
+    const terminalIndexes = events
+      .map((event, index) => event?.event === 'terminal' ? index : -1)
+      .filter((index) => index >= 0)
+    const terminalIndex = terminalIndexes[0] ?? -1
+    if (terminalIndexes.length !== 1) {
+      failures.push(
+        `message ${row?.messageId || 'unknown'} expected exactly one terminal event, got ${terminalIndexes.length}`,
+      )
+    }
+    if (terminalIndex < 0) {
+      failures.push(`message ${row?.messageId || 'unknown'} has no terminal event`)
+      continue
+    }
+    if (terminalIndex !== events.length - 1) {
+      failures.push(`message ${row?.messageId || 'unknown'} terminal event was not final`)
+    }
+    const assistantIndex = (result?.assistantMessageIds || [])
+      .map(String)
+      .indexOf(String(row?.messageId || ''))
+    const persistedContent = String(result?.assistantRecords?.[assistantIndex]?.content || '')
+    const finalContent = String(contentEvents.at(-1)?.payload?.fullContent || '')
+    if (finalContent !== persistedContent) {
+      failures.push(`message ${row?.messageId || 'unknown'} final content stream does not equal persisted final`)
+    }
+    if (!reasoningEvents.length) continue
+    reasoningMessageCount += 1
+    const reasoningStates = new Set(
+      reasoningEvents
+        .map((event) => String(event?.payload?.fullContent || ''))
+        .filter(Boolean),
+    )
+    if (reasoningStates.size < 2) {
+      failures.push(`message ${row.messageId} reasoning was not progressively streamed`)
+    }
+    if (contentStates.size < 2) {
+      failures.push(`message ${row.messageId} visible content was not progressively streamed`)
+    }
+    if (reasoningEvents.some((event) => event?.payload?.isReasoning !== true)) {
+      failures.push(`message ${row.messageId} reasoning delta was not labeled separately`)
+    }
+    if (contentEvents.some((event) => event?.payload?.isReasoning === true)) {
+      failures.push(`message ${row.messageId} content delta was mislabeled as reasoning`)
+    }
+    const rendered = domMessages.find(
+      (message) => String(message?.messageId || '') === String(row.messageId || ''),
+    )
+    if (!String(rendered?.reasoningText || '').trim()) {
+      failures.push(`message ${row.messageId} reasoning streamed but no visible reasoning rail was rendered`)
+    }
+    const renderedReasoningStates = new Set(
+      messageDomSamples.map((sample) => String(sample?.reasoningText || '')).filter(Boolean),
+    )
+    if (renderedReasoningStates.size < 2) {
+      failures.push(`message ${row.messageId} visible reasoning rail was not progressively updated`)
+    }
+    const persistedReasoning = (result?.persistedReasoningByMessage?.[assistantIndex] || [])
+      .map((segment) => String(segment?.text || ''))
+      .filter(Boolean)
+      .join('\n')
+    const finalReasoning = String(reasoningEvents.at(-1)?.payload?.fullContent || '')
+    if (finalReasoning !== persistedReasoning) {
+      failures.push(`message ${row.messageId} final reasoning stream does not equal persisted reasoning`)
+    }
+    if (
+      normalizeVisibleLinkText(rendered?.reasoningText)
+      !== normalizeVisibleLinkText(persistedReasoning)
+    ) {
+      failures.push(`message ${row.messageId} normalized visible reasoning rail is not linked to persisted reasoning`)
+    }
+  }
+  if (expectation === 'required' && reasoningMessageCount !== assistantIds.size) {
+    failures.push(
+      `reasoning was required on all ${expectedTurns} turns but separate reasoning appeared on ${reasoningMessageCount}`,
+    )
+  }
+  if (expectation === 'none' && reasoningMessageCount > 0) {
+    failures.push('reasoning was disabled but reasoning deltas were observed')
+  }
+  if (expectation === 'none' && domMessages.some((message) => String(message?.reasoningText || '').trim())) {
+    failures.push('reasoning was disabled but a visible reasoning rail was rendered')
+  }
+  return failures
+}
+
+function flattenedPersistedTools(result) {
+  return (Array.isArray(result?.persistedToolsByMessage)
+    ? result.persistedToolsByMessage
+    : [])
+    .flatMap((group, messageIndex) => (
+      Array.isArray(group)
+        ? group.map((item) => ({ ...item, messageIndex }))
+        : []
+    ))
+}
+
+export function validateExactToolLoopEvidence(result) {
+  const failures = []
+  const expectedToolCalls = expectedUiToolCallCount(result)
+  const statuses = flattenedPersistedTools(result)
+  const statusCalls = statuses.filter((item) => item?.phase === 'calling')
+  const errors = statuses.filter((item) => item?.phase === 'error')
+  const calls = (result?.persistedOaiCallsByMessage || [])
+    .flatMap((group, messageIndex) => (
+      Array.isArray(group)
+        ? group.map((item) => ({ ...item, messageIndex }))
+        : []
+    ))
+  const results = (result?.persistedOaiResultsByMessage || [])
+    .flatMap((group, messageIndex) => (
+      Array.isArray(group)
+        ? group.map((item) => ({ ...item, messageIndex }))
+        : []
+    ))
+  const domCards = (result?.renderedDom?.messages || [])
+    .flatMap((message) => message?.toolCards || [])
+  if (expectedToolCalls === 0) {
+    if (calls.length || statusCalls.length || domCards.length) {
+      failures.push('tool calls were observed in a no-tool UI proof')
+    }
+    return failures
+  }
+  if (calls.length !== expectedToolCalls) {
+    failures.push(`expected exactly ${expectedToolCalls} tool calls, got ${calls.length}`)
+  }
+  if (results.length !== expectedToolCalls) {
+    failures.push(`expected exactly ${expectedToolCalls} tool results, got ${results.length}`)
+  }
+  if (statusCalls.length !== expectedToolCalls) {
+    failures.push(`expected exactly ${expectedToolCalls} visible calling statuses, got ${statusCalls.length}`)
+  }
+  statusCalls.slice(0, expectedToolCalls).forEach((status, index) => {
+    const call = calls[index]
+    if (!call) return
+    if (String(status.toolCallId || '') !== String(call.id || '')) {
+      failures.push(`visible tool status ${index + 1} call ID/order does not match persisted call`)
+    }
+    if (String(status.toolName || '') !== String(call?.function?.name || '')) {
+      failures.push(`visible tool status ${index + 1} name/order does not match persisted call`)
+    }
+  })
+  if (errors.length) failures.push(`tool loop contains ${errors.length} error status entries`)
+  const expected = [
+    {
+      file: 'real_ui_tool_probe_1.txt',
+      token: 'REAL_UI_LIVE_TOOL_ONE',
+      forbidden: 'real_ui_tool_probe_2.txt',
+    },
+    {
+      file: 'real_ui_tool_probe_2.txt',
+      token: 'REAL_UI_LIVE_TOOL_TWO',
+      requiredAlso: 'real_ui_tool_probe_1.txt',
+    },
+  ]
+  const expectedExecuted = expected.slice(0, expectedToolCalls)
+  const probeFiles = result?.toolProbeFiles || {}
+  for (const spec of expectedExecuted) {
+    if (String(probeFiles?.[spec.file] || '') !== spec.token) {
+      failures.push(`tool probe ${spec.file} did not contain exactly ${spec.token}`)
+    }
+  }
+  calls.slice(0, expectedToolCalls).forEach((call, index) => {
+    const name = String(call?.function?.name || call.toolName || call.name || '')
+    if (name !== 'run_command') failures.push(`tool call ${index + 1} used ${name || 'missing name'}`)
+    if ((call.messageIndex ?? -1) !== index) {
+      failures.push(`tool call ${index + 1} was not persisted on assistant turn ${index + 1}`)
+    }
+    const callId = String(call.id || call.toolCallId || call.callId || '')
+    if (!callId) failures.push(`tool call ${index + 1} has no call ID`)
+    const command = extractToolCommand(
+      call?.function?.arguments || call.detail || call.arguments,
+    )
+    const spec = expected[index]
+    if (!command.includes(spec.file) || !command.includes(spec.token)) {
+      failures.push(`tool call ${index + 1} arguments do not contain its exact probe file/token`)
+    }
+    if (spec.forbidden && command.includes(spec.forbidden)) {
+      failures.push(`tool call ${index + 1} referenced the second-turn probe prematurely`)
+    }
+    if (spec.requiredAlso && !command.includes(spec.requiredAlso)) {
+      failures.push(`tool call ${index + 1} did not read the first-turn probe`)
+    }
+    const matchingResults = results.filter(
+      (item) => String(item.tool_call_id || item.toolCallId || item.callId || '') === callId,
+    )
+    if (matchingResults.length !== 1) {
+      failures.push(`tool call ${index + 1} expected exactly one matching result, got ${matchingResults.length}`)
+    } else {
+      const matchingResult = matchingResults[0]
+      if ((matchingResult.messageIndex ?? -1) !== (call.messageIndex ?? -1)) {
+        failures.push(`tool call ${index + 1} result was not persisted on the same assistant turn`)
+      } else if (!JSON.stringify(matchingResult).includes(spec.token)) {
+        failures.push(`tool call ${index + 1} result did not preserve ${spec.token}`)
+      }
+    }
+    const callStatuses = statuses.filter(
+      (status) => String(status?.toolCallId || '') === callId,
+    )
+    if (callStatuses.filter((status) => status?.phase === 'calling').length !== 1) {
+      failures.push(`tool call ${index + 1} did not have exactly one calling status`)
+    }
+    if (callStatuses.filter((status) => status?.phase === 'result').length !== 1) {
+      failures.push(`tool call ${index + 1} did not have exactly one successful result status`)
+    }
+    if (callStatuses.some((status) => status?.phase === 'error')) {
+      failures.push(`tool call ${index + 1} contains an error status`)
+    }
+    const trace = (result?.messageEventTrace || []).find(
+      (row) => String(row?.messageId || '') === String(result?.assistantMessageIds?.[index] || ''),
+    )
+    const toolEvents = (trace?.events || []).filter(
+      (event) => (
+        event?.event === 'tool'
+        && String(event?.payload?.toolCallId || '') === callId
+      ),
+    )
+    const callingIndex = toolEvents.findIndex((event) => event?.payload?.phase === 'calling')
+    const resultIndex = toolEvents.findIndex((event) => event?.payload?.phase === 'result')
+    if (callingIndex < 0 || resultIndex <= callingIndex) {
+      failures.push(`tool call ${index + 1} live status order was not calling then result`)
+    }
+    const continuation = String(result?.assistantRecords?.[index]?.content || '')
+    if (!continuation.includes(spec.token)) {
+      failures.push(`tool call ${index + 1} had no visible result continuation containing ${spec.token}`)
+    }
+  })
+  const callIds = calls.map(
+    (call) => String(call.id || call.toolCallId || call.callId || ''),
+  ).filter(Boolean)
+  if (new Set(callIds).size !== callIds.length) failures.push('tool call IDs are not unique')
+  const resultIds = results.map(
+    (item) => String(item.tool_call_id || item.toolCallId || item.callId || ''),
+  ).filter(Boolean)
+  if (new Set(resultIds).size !== resultIds.length) failures.push('tool result IDs are not unique')
+  if (resultIds.some((callId) => !callIds.includes(callId))) {
+    failures.push('tool result exists without its exact persisted call')
+  }
+  if (domCards.length !== expectedToolCalls) {
+    failures.push(`expected exactly ${expectedToolCalls} rendered tool cards, got ${domCards.length}`)
+  }
+  for (const callId of callIds) {
+    const matchingCards = domCards.filter((card) => String(card?.callId || '') === callId)
+    if (matchingCards.length !== 1) {
+      failures.push(`tool call ${callId} has no matching rendered tool card`)
+      continue
+    }
+    const card = matchingCards[0]
+    if (card.visible !== true) {
+      failures.push(`tool call ${callId} rendered card was not visible`)
+    }
+    if (!['result', 'done', 'complete'].includes(String(card.phase || ''))) {
+      failures.push(`tool call ${callId} rendered card did not show successful completion`)
+    }
+    const result = results.find(
+      (item) => String(item.tool_call_id || item.toolCallId || item.callId || '') === callId,
+    )
+    const call = calls.find(
+      (item) => String(item.id || item.toolCallId || item.callId || '') === callId,
+    )
+    const callName = String(call?.function?.name || call?.toolName || call?.name || '')
+    if (!result || String(card.name || '') !== callName) {
+      failures.push(`tool call ${callId} rendered card ID/name is not linked to its persisted result`)
+    }
+  }
+  if (result?.toolProbeCleanup?.removed !== true) {
+    failures.push('tool probe files were not cleaned after evidence capture')
+  }
+  const cleanupPaths = Array.isArray(result?.toolProbeCleanup?.paths)
+    ? result.toolProbeCleanup.paths.map((item) => path.resolve(String(item)))
+    : []
+  const expectedCleanupPaths = expected.map((spec) =>
+    path.resolve(String(result?.workingDirectory || ''), spec.file),
+  )
+  if (
+    cleanupPaths.length !== expectedCleanupPaths.length
+    || canonicalJson(cleanupPaths.sort()) !== canonicalJson(expectedCleanupPaths.sort())
+  ) {
+    failures.push('tool probe cleanup paths are not bound to the exact configured working directory')
+  }
+  const thirdTools = Array.isArray(result?.persistedToolsByMessage?.[2])
+    ? result.persistedToolsByMessage[2]
+    : []
+  if (expectedUiTurnCount(result) >= 3 && thirdTools.some((item) => item?.phase === 'calling')) {
+    failures.push('third assistant turn emitted an unexpected tool call')
+  }
+  const thirdOaiCalls = Array.isArray(result?.persistedOaiCallsByMessage?.[2])
+    ? result.persistedOaiCallsByMessage[2]
+    : []
+  if (expectedUiTurnCount(result) >= 3 && thirdOaiCalls.length) {
+    failures.push('third assistant turn persisted an unexpected tool call')
+  }
+  return failures
+}
+
+export function validateGenerationDefaultsEvidence(result) {
+  const failures = []
+  const expectedTurns = expectedUiTurnCount(result)
+  const defaults = result?.bundleGenerationContract?.defaults
+  const rendererDefaults = result?.rendererGenerationDefaults
+  const dom = result?.chatSettingsDom || {}
+  const effective = result?.server?.health?.effective_defaults || {}
+  const resolved = result?.resolvedSamplingKwargs || {}
+  const resolvedRecords = (Array.isArray(result?.resolvedSamplingRecords)
+    ? result.resolvedSamplingRecords
+    : [])
+    .filter((record) => record?.values && typeof record.values === 'object')
+  const explicit = result?.requestContract?.samplingOverrides || {}
+  const explicitFields = Object.entries(explicit).filter(([, value]) => value != null)
+  const turnEvidence = Array.isArray(result?.uiTurnEvidence)
+    ? result.uiTurnEvidence.slice(0, expectedTurns)
+    : []
+  const settingsInteraction = result?.chatSettingsInteraction || {}
+  const requestCorrelationVerified = isServerRequestCorrelationVerified(result)
+  const mapping = [
+    ['temperature', 'temperature', 'temperature', 'temperature'],
+    ['topP', 'top_p', 'topP', 'top_p'],
+    ['topK', 'top_k', 'topK', 'top_k'],
+    ['minP', 'min_p', 'minP', 'min_p'],
+    ['repeatPenalty', 'repetition_penalty', 'repeatPenalty', 'repetition_penalty'],
+    ['maxNewTokens', 'max_output_tokens', 'maxTokens', 'max_tokens'],
+  ]
+  if (!defaults) {
+    failures.push('bundle has no independently resolved generation defaults')
+    return failures
+  }
+  if (settingsInteraction.openedVisibly !== true) {
+    failures.push('Chat Settings was not opened through its visible control')
+  }
+  if (
+    (explicitFields.length
+      || result?.requestContract?.requestMaxTokens != null
+      || result?.requestedBuiltinTools === true
+      || result?.requestedWireApi)
+    && (
+      settingsInteraction.savedViaVisibleControl !== true
+      || settingsInteraction.reopenedAfterSave !== true
+      || settingsInteraction.persistedAfterReopen !== true
+    )
+  ) {
+    failures.push('requested Chat Settings were not visibly changed, saved, reopened, and persisted')
+  }
+  if (requestCorrelationVerified && resolvedRecords.length < expectedTurns) {
+    failures.push(
+      `expected resolved sampling kwargs for at least ${expectedTurns} UI requests, got ${resolvedRecords.length}`,
+    )
+  }
+  if (turnEvidence.length !== expectedTurns) {
+    failures.push(`expected exactly ${expectedTurns} bound UI turn records, got ${turnEvidence.length}`)
+  }
+  const expectedRoute = result?.requestedWireApi === 'responses'
+    ? '/v1/responses'
+    : '/v1/chat/completions'
+  const expectedModel = String(result?.server?.health?.model_name || '')
+  const expectedWire = result?.requestedWireApi === 'responses'
+    ? 'responses'
+    : 'completions'
+  const acceptableReasoningLabels = result?.requestedEnableThinking === true
+    ? ['On', 'Reasoning']
+    : result?.requestedEnableThinking === false
+      ? ['Off', 'Instruct']
+      : ['Auto']
+  if (String(dom?.wireApi || '') !== expectedWire) {
+    failures.push(`reopened visible wire format ${dom?.wireApi || 'missing'} does not match ${expectedWire}`)
+  }
+  if (!acceptableReasoningLabels.includes(String(dom?.reasoningMode || ''))) {
+    failures.push('reopened visible reasoning mode does not match the requested mode')
+  }
+  if (dom?.builtinToolsEnabled !== (result?.requestedBuiltinTools === true)) {
+    failures.push('reopened visible built-in tools state does not match the requested state')
+  }
+  if (result?.requestedBuiltinTools === true) {
+    const toolExpectations = [
+      [dom?.workingDirectory, result?.workingDirectory, 'working directory'],
+      [
+        Number(dom?.maxToolIterations),
+        Number(result?.requestContract?.maxToolIterations),
+        'max tool iterations',
+      ],
+      [
+        Number(dom?.toolResultMaxChars),
+        Number(result?.requestContract?.toolResultMaxChars),
+        'tool result limit',
+      ],
+    ]
+    for (const [observed, expected, label] of toolExpectations) {
+      if (observed !== expected) {
+        failures.push(`reopened visible ${label} does not match the requested value`)
+      }
+    }
+    const categoryExpected = {
+      file: true,
+      search: false,
+      shell: true,
+      webSearch: false,
+      urlFetch: false,
+      git: false,
+      utilities: true,
+    }
+    for (const [key, expected] of Object.entries(categoryExpected)) {
+      if (dom?.toolCategories?.[key] !== expected) {
+        failures.push(`reopened visible tool category ${key} does not match the requested value`)
+      }
+    }
+  }
+  for (let turn = 1; turn <= expectedTurns; turn += 1) {
+    const evidence = turnEvidence.find((row) => Number(row?.turn) === turn)
+    if (
+      !evidence?.userMessageId
+      || !evidence?.assistantMessageId
+      || String(evidence?.prompt || '') !== String(result?.requestContract?.[`prompt${['', 'One', 'Two', 'Three'][turn]}`] || '')
+    ) {
+      failures.push(`UI turn ${turn} is not bound to its prompt, user message, and assistant message`)
+    }
+    if (requestCorrelationVerified) {
+      const records = resolvedRecords.filter(
+        (record) => String(record?.proof_request_id || '') === String(evidence?.proofRequestId || ''),
+      )
+      if (!records.length) {
+        failures.push(`UI turn ${turn} has no server-correlated resolved sampling record`)
+        continue
+      }
+      for (const record of records) {
+        if (
+          String(record?.route || '') !== expectedRoute
+          || String(record?.model || '') !== expectedModel
+        ) {
+          failures.push(`UI turn ${turn} resolved log route/model is not bound to the requested session`)
+        }
+        if (
+          String(record?.proof_request_id || '') !== String(evidence?.proofRequestId || '')
+          || String(record?.message_id || '') !== String(evidence?.assistantMessageId || '')
+          || !String(record?.request_id || '')
+        ) {
+          failures.push(`UI turn ${turn} resolved log lacks exact server-emitted request/message correlation`)
+        }
+      }
+    }
+  }
+  for (const [bundleKey, engineKey, uiKey, resolvedKey] of mapping) {
+    const expected = defaults[bundleKey]
+    if (expected == null) continue
+    const overrideEntry = explicitFields.find(([key]) => key === uiKey)
+    const maxTokensOverride = bundleKey === 'maxNewTokens'
+      ? result?.requestContract?.requestMaxTokens
+      : undefined
+    const requestOverride = maxTokensOverride ?? (overrideEntry ? overrideEntry[1] : undefined)
+    const uiExpected = requestOverride ?? expected
+    const rendererValue = rendererDefaults?.[bundleKey]
+    if (!approximatelyEqual(Number(rendererValue), Number(expected))) {
+      failures.push(`renderer default ${bundleKey}=${rendererValue} does not match bundle ${expected}`)
+    }
+    const uiValue = dom?.values?.[uiKey]
+    if (bundleKey === 'maxNewTokens') {
+      if (requestOverride == null) {
+        if (String(dom?.maxTokens?.value || '') !== '') {
+          failures.push('default run saved maxTokens instead of inheriting the model default')
+        }
+        if (!String(dom?.maxTokens?.placeholder || '').includes(String(expected))) {
+          failures.push(`maxTokens placeholder does not expose model default ${expected}`)
+        }
+      } else if (!approximatelyEqual(Number(dom?.maxTokens?.value), Number(uiExpected))) {
+        failures.push(`visible UI maxTokens=${dom?.maxTokens?.value} does not match override ${uiExpected}`)
+      }
+    } else if (!approximatelyEqual(Number(uiValue), Number(uiExpected))) {
+      failures.push(
+        `visible UI ${uiKey}=${uiValue} does not match ${requestOverride == null ? 'bundle' : 'override'} ${uiExpected}`,
+      )
+    }
+    const healthValue = numericField(effective, engineKey)
+    if (!approximatelyEqual(Number(healthValue), Number(expected))) {
+      failures.push(`health effective ${engineKey}=${healthValue} does not match bundle ${expected}`)
+    }
+    if (requestCorrelationVerified) {
+      const resolvedExpected = requestOverride ?? expected
+      const resolvedValue = numericField(resolved, resolvedKey, engineKey, bundleKey, uiKey)
+      if (!approximatelyEqual(Number(resolvedValue), Number(resolvedExpected))) {
+        failures.push(`resolved request ${engineKey}=${resolvedValue} does not match ${resolvedExpected}`)
+      }
+      resolvedRecords.forEach((record, index) => {
+        const turnValue = numericField(
+          record.values,
+          resolvedKey,
+          engineKey,
+          bundleKey,
+          uiKey,
+        )
+        if (!approximatelyEqual(Number(turnValue), Number(resolvedExpected))) {
+          failures.push(
+            `resolved request record ${index + 1} ${engineKey}=${turnValue} does not match ${resolvedExpected}`,
+          )
+        }
+      })
+    }
+  }
+  const stored = result?.chatOverrides || {}
+  if (stored.wireApi !== expectedWire) {
+    failures.push(`persisted wire format ${stored.wireApi || 'missing'} does not match ${expectedWire}`)
+  }
+  if (Boolean(stored.builtinToolsEnabled) !== (result?.requestedBuiltinTools === true)) {
+    failures.push('persisted built-in tools state does not match the requested state')
+  }
+  if (
+    result?.requestedEnableThinking === undefined
+      ? stored.enableThinking != null
+      : stored.enableThinking !== result.requestedEnableThinking
+  ) {
+    failures.push('persisted reasoning mode does not match the requested mode')
+  }
+  if (result?.requestedBuiltinTools === true) {
+    const storedToolExpectations = [
+      [stored.workingDirectory, result?.workingDirectory, 'working directory'],
+      [
+        Number(stored.maxToolIterations),
+        Number(result?.requestContract?.maxToolIterations),
+        'max tool iterations',
+      ],
+      [
+        Number(stored.toolResultMaxChars),
+        Number(result?.requestContract?.toolResultMaxChars),
+        'tool result limit',
+      ],
+    ]
+    for (const [observed, expected, label] of storedToolExpectations) {
+      if (observed !== expected) {
+        failures.push(`persisted ${label} does not match the requested value`)
+      }
+    }
+  }
+  const hasMaxTokensOverride = result?.requestContract?.requestMaxTokens != null
+  if (!explicitFields.length && !hasMaxTokensOverride) {
+    for (const field of ['temperature', 'topP', 'topK', 'minP', 'repeatPenalty', 'maxTokens']) {
+      if (stored[field] != null) failures.push(`default run persisted synthetic ${field} override`)
+    }
+  } else {
+    for (const [field, value] of explicitFields) {
+      if (!approximatelyEqual(Number(stored[field]), Number(value))) {
+        failures.push(`explicit ${field} override=${value} was not persisted exactly`)
+      }
+    }
+    if (
+      hasMaxTokensOverride
+      && !approximatelyEqual(
+        Number(stored.maxTokens),
+        Number(result.requestContract.requestMaxTokens),
+      )
+    ) {
+      failures.push(
+        `explicit maxTokens override=${result.requestContract.requestMaxTokens} was not persisted exactly`,
+      )
+    }
+  }
+  return failures
+}
+
+export function validateServerCacheEvidence(result) {
+  const failures = []
+  if (result?.requestedServerCacheControls !== true) return failures
+  const evidence = result?.serverCacheControls || {}
+  const config = result?.session?.effective_config || {}
+  const health = result?.server?.health || {}
+  const argv = Array.isArray(evidence.argv) ? evidence.argv.map(String) : []
+  const visible = evidence.initialCacheControls || {}
+  const nativeCache = health?.native_cache || {}
+  if (evidence.runningSessionDrawer !== true) failures.push('cache controls were not inspected on the running session')
+  for (const field of ['enablePrefixCache', 'usePagedCache', 'enableBlockDiskCache']) {
+    if (typeof visible[field] !== 'boolean') {
+      failures.push(`running-session visible cache control ${field} is missing`)
+    }
+  }
+  if (visible.enableBlockDiskCache !== true) failures.push('running-session SSD/L2 control was not visibly enabled')
+  if (visible.enablePrefixCache !== config.enablePrefixCache) {
+    failures.push('visible prefix-cache state does not match persisted session config')
+  }
+  if (visible.usePagedCache !== config.usePagedCache) {
+    failures.push('visible paged-cache state does not match persisted session config')
+  }
+  if (visible.enableBlockDiskCache !== config.enableBlockDiskCache) {
+    failures.push('visible SSD/L2 state does not match persisted session config')
+  }
+  if (config.enableBlockDiskCache !== true) failures.push('persisted session config did not enable block disk cache')
+  if (!argv.includes('--enable-block-disk-cache')) failures.push('engine argv omitted --enable-block-disk-cache')
+  if (health?.native_cache?.block_disk_l2 !== true) failures.push('/health did not report native_cache.block_disk_l2=true')
+  if (typeof config.enablePrefixCache !== 'boolean') {
+    failures.push('persisted session config omitted enablePrefixCache')
+  } else {
+    if (config.enablePrefixCache) {
+      if (argv.includes('--disable-prefix-cache')) {
+        failures.push('engine argv contradicted enabled prefix cache with --disable-prefix-cache')
+      }
+    } else if (!argv.includes('--disable-prefix-cache')) {
+      failures.push('engine argv omitted --disable-prefix-cache')
+    }
+    if (Boolean(nativeCache.prefix) !== config.enablePrefixCache) {
+      failures.push('/health native prefix state does not match persisted session config')
+    }
+  }
+  if (typeof config.usePagedCache !== 'boolean') {
+    failures.push('persisted session config omitted usePagedCache')
+  } else {
+    const expectedFlag = config.usePagedCache ? '--use-paged-cache' : '--no-paged-cache'
+    const contradictoryFlag = config.usePagedCache ? '--no-paged-cache' : '--use-paged-cache'
+    if (!argv.includes(expectedFlag)) failures.push(`engine argv omitted ${expectedFlag}`)
+    if (argv.includes(contradictoryFlag)) failures.push(`engine argv contains contradictory ${contradictoryFlag}`)
+    if (Boolean(nativeCache.paged) !== config.usePagedCache) {
+      failures.push('/health native paged state does not match persisted session config')
+    }
+    if (Boolean(nativeCache.block_disk_only) !== !config.usePagedCache) {
+      failures.push('/health block-disk-only state does not match persisted paged-cache state')
+    }
+  }
+  failures.push(...validateRequestCorrelatedCacheEvidence(result))
+  return failures
+}
+
+function explicitCacheCounters(snapshot) {
+  const stats = snapshot?.scheduler_stats || {}
+  return {
+    processed: Number(stats.num_requests_processed || 0),
+    hitRequests: Number(stats.cache_hit_requests || 0),
+    hitTokens: Number(stats.cache_hit_tokens || 0),
+    partialTokens: Number(stats.cache_reuse_partial_tokens || 0),
+    skippedTokens: Number(stats.cache_reuse_skip_tokens || 0),
+  }
+}
+
+export function correlateTerminalResponseToCacheExecution({
+  terminal,
+  cacheSnapshot,
+  turn,
+  proofRequestId,
+  userMessageId,
+  assistantMessageId,
+} = {}) {
+  const schedulerStats = cacheSnapshot?.scheduler
+    || cacheSnapshot?.scheduler_stats
+    || {}
+  const execution = schedulerStats.last_cache_execution
+    || schedulerStats.batch_generator?.last_cache_execution
+    || null
+  const terminalResponseId = String(terminal?.responseId || '')
+  const executionRequestId = String(execution?.request_id || '')
+  const messageId = String(terminal?.messageId || '')
+  const expectedAssistantMessageId = String(assistantMessageId || '')
+  const exact = Boolean(
+    terminalResponseId
+    && executionRequestId
+    && terminalResponseId === executionRequestId
+    && messageId
+    && messageId === expectedAssistantMessageId
+  )
+  const observation = execution && typeof execution === 'object'
+    ? {
+        ...execution,
+        proof_request_id: String(proofRequestId || ''),
+        request_id: executionRequestId,
+        terminal_response_id: terminalResponseId,
+        message_id: expectedAssistantMessageId,
+        correlation_source:
+          'chat_complete_response_id_to_scheduler_last_cache_execution',
+      }
+    : null
+  return {
+    turn: Number(turn),
+    proofRequestId: String(proofRequestId || ''),
+    userMessageId: String(userMessageId || ''),
+    assistantMessageId: expectedAssistantMessageId,
+    terminalResponseId: terminalResponseId || null,
+    serverRequestId: terminalResponseId || null,
+    executionRequestId: executionRequestId || null,
+    correlationStatus: exact
+      ? 'verified'
+      : terminalResponseId && executionRequestId
+        ? 'partial_request_identity_mismatch'
+        : 'partial_product_support_missing',
+    serverObservation: observation,
+  }
+}
+
+export function isCacheRequestCorrelationVerified(result) {
+  if (result?.requestedServerCacheControls !== true) return false
+  const expectedTurns = expectedUiTurnCount(result)
+  const turns = Array.isArray(result?.cacheRequestEvidence)
+    ? result.cacheRequestEvidence.slice(0, expectedTurns)
+    : []
+  const uiTurns = Array.isArray(result?.uiTurnEvidence)
+    ? result.uiTurnEvidence.slice(0, expectedTurns)
+    : []
+  if (turns.length !== expectedTurns || uiTurns.length !== expectedTurns) {
+    return false
+  }
+  return uiTurns.every((uiTurn) => {
+    const row = turns.find((item) => Number(item?.turn) === Number(uiTurn?.turn))
+    const observation = row?.serverObservation || {}
+    return Boolean(
+      row
+      && row.correlationStatus === 'verified'
+      && row.serverRequestId
+      && String(row.serverRequestId) === String(row.terminalResponseId || '')
+      && String(row.serverRequestId) === String(row.executionRequestId || '')
+      && String(row.serverRequestId) === String(observation.request_id || '')
+      && String(row.serverRequestId) === String(observation.terminal_response_id || '')
+      && String(row.assistantMessageId || '') === String(uiTurn.assistantMessageId || '')
+      && String(row.userMessageId || '') === String(uiTurn.userMessageId || '')
+      && String(observation.message_id || '') === String(uiTurn.assistantMessageId || '')
+      && String(observation.proof_request_id || '') === String(uiTurn.proofRequestId || '')
+      && observation.correlation_source
+        === 'chat_complete_response_id_to_scheduler_last_cache_execution'
+    )
+  })
+}
+
+export function validateRequestCorrelatedCacheEvidence(result) {
+  const failures = []
+  if (result?.requestedServerCacheControls !== true) return failures
+  const expectedTurns = expectedUiTurnCount(result)
+  const turns = Array.isArray(result?.cacheRequestEvidence)
+    ? result.cacheRequestEvidence.slice(0, expectedTurns)
+    : []
+  if (turns.length !== expectedTurns) {
+    return [`expected exactly ${expectedTurns} request-correlated cache snapshots, got ${turns.length}`]
+  }
+  if (!isCacheRequestCorrelationVerified(result)) {
+    failures.push(
+      'UI terminal response IDs do not exactly match scheduler.last_cache_execution.request_id for every turn',
+    )
+  }
+  let positiveReuseTurns = 0
+  for (let turn = 1; turn <= expectedTurns; turn += 1) {
+    const evidence = turns.find((row) => Number(row?.turn) === turn)
+    const uiTurn = (result?.uiTurnEvidence || []).find(
+      (row) => Number(row?.turn) === turn,
+    )
+    const observation = evidence?.serverObservation || {}
+    if (
+      !evidence?.assistantMessageId
+      || String(evidence.assistantMessageId)
+        !== String(result?.assistantMessageIds?.[turn - 1] || '')
+      || String(evidence?.assistantMessageId || '')
+        !== String(uiTurn?.assistantMessageId || '')
+      || String(evidence?.userMessageId || '')
+        !== String(uiTurn?.userMessageId || '')
+    ) {
+      failures.push(`cache snapshot for UI turn ${turn} is not bound to its user/assistant messages`)
+    }
+    if (
+      String(observation.proof_request_id || '') !== String(uiTurn?.proofRequestId || '')
+      || String(observation.request_id || '') !== String(evidence?.serverRequestId || '')
+      || String(observation.terminal_response_id || '')
+        !== String(evidence?.serverRequestId || '')
+      || String(observation.message_id || '') !== String(evidence?.assistantMessageId || '')
+    ) {
+      failures.push(`cache snapshot for UI turn ${turn} lacks exact server-emitted request correlation`)
+    }
+    const cachedTokens = Number(
+      observation.cached_tokens ?? observation.cache_hit_tokens ?? 0,
+    )
+    const promptTokens = Number(observation.prompt_tokens || 0)
+    const prefillTokens = Number(observation.prefill_tokens || 0)
+    const cacheReuseApplied = observation.cache_reuse_applied === true
+      || observation.cache_outcome === 'hit'
+      || cachedTokens > 0
+    if (
+      cacheReuseApplied
+      && cachedTokens > 0
+      && promptTokens > cachedTokens
+      && prefillTokens > 0
+    ) {
+      positiveReuseTurns += 1
+    }
+    if (
+      cachedTokens < 0
+      || promptTokens < 0
+      || prefillTokens < 0
+      || (promptTokens > 0 && cachedTokens > promptTokens)
+    ) {
+      failures.push(`cache counters regressed during UI turn ${turn}`)
+    }
+  }
+  if (uiProfileRequiresPositiveCacheReuse(result) && positiveReuseTurns < 1) {
+    failures.push('no UI turn had request-correlated cache-hit and reused-token deltas')
+  }
+  return failures
+}
+
+export function isServerRequestCorrelationVerified(result) {
+  const correlation = result?.requestCorrelation || {}
+  const expectedTurns = expectedUiTurnCount(result)
+  const turns = Array.isArray(correlation.turns)
+    ? correlation.turns.slice(0, expectedTurns)
+    : []
+  const uiTurns = Array.isArray(result?.uiTurnEvidence)
+    ? result.uiTurnEvidence.slice(0, expectedTurns)
+    : []
+  const records = Array.isArray(result?.resolvedSamplingRecords)
+    ? result.resolvedSamplingRecords
+    : []
+  if (
+    correlation.status !== 'verified'
+    || turns.length !== expectedTurns
+    || uiTurns.length !== expectedTurns
+  ) {
+    return false
+  }
+  return uiTurns.every((uiTurn) => {
+    const row = turns.find((item) => Number(item?.turn) === Number(uiTurn?.turn))
+    if (
+      !row
+      || !uiTurn?.proofRequestId
+      || String(row.proofRequestId || '') !== String(uiTurn.proofRequestId)
+      || String(row.userMessageId || '') !== String(uiTurn.userMessageId || '')
+      || String(row.assistantMessageId || '') !== String(uiTurn.assistantMessageId || '')
+      || String(row.serverProofRequestId || '') !== String(uiTurn.proofRequestId)
+      || !String(row.serverRequestId || '')
+      || String(row.serverMessageId || '') !== String(uiTurn.assistantMessageId || '')
+    ) {
+      return false
+    }
+    return records.some((record) => (
+      String(record?.proof_request_id || '') === String(uiTurn.proofRequestId)
+      && String(record?.request_id || '') === String(row.serverRequestId)
+      && String(record?.message_id || '') === String(uiTurn.assistantMessageId)
+    ))
+  })
+}
+
+export function validateUiRuntimeProvenance(result) {
+  const failures = []
+  const provenance = result?.uiRuntimeProvenance || {}
+  const healthBinding = result?.healthProvenance?.after?.binding || {}
+  const cdp = provenance.cdp_process_binding || {}
+  const backend = provenance.backend_python_process_binding || {}
+  try {
+    const electron = readExternalFileBytes(
+      provenance.electron_executable,
+      'Electron runtime executable',
+    )
+    if (
+      electron.path !== path.resolve(cdp.executable_path || '')
+      || electron.sha256 !== provenance.electron_executable_sha256
+      || electron.sha256 !== cdp.executable_sha256
+      || sha256Text(electron.path) !== cdp.executable_path_fingerprint_sha256
+    ) {
+      failures.push('Electron executable path/bytes are not independently bound to the CDP listener')
+    }
+  } catch (error) {
+    failures.push(String(error?.message || error))
+  }
+  try {
+    const python = readExternalFileBytes(
+      backend.executable_path,
+      'Python backend runtime executable',
+    )
+    if (
+      python.sha256 !== backend.executable_sha256
+      || sha256Text(python.path) !== backend.executable_path_fingerprint_sha256
+    ) {
+      failures.push('Python backend executable path/bytes are not independently bound to its listener')
+    }
+  } catch (error) {
+    failures.push(String(error?.message || error))
+  }
+  if (!validSha256(provenance.renderer_source_tree_sha256)) {
+    failures.push('renderer source-tree fingerprint is missing')
+  }
+  if (
+    provenance.renderer_source_tree_sha256 !== result?.gitProvenance?.before?.renderer_source_tree_sha256
+    || provenance.renderer_source_tree_sha256 !== result?.gitProvenance?.after?.renderer_source_tree_sha256
+  ) {
+    failures.push('live renderer fingerprint does not match the source checkout before/after the proof')
+  }
+  if (provenance.source_commit !== result?.gitProvenance?.after?.commit) {
+    failures.push('renderer source commit is not bound to the proof HEAD')
+  }
+  if (provenance.source_tree !== result?.gitProvenance?.after?.tree) {
+    failures.push('renderer source tree is not bound to the proof tree')
+  }
+  if (
+    !Number.isInteger(cdp.launched_root_pid)
+    || cdp.launched_root_pid <= 0
+    || !Array.isArray(cdp.process_tree_pids)
+    || !cdp.process_tree_pids.includes(cdp.launched_root_pid)
+    || !cdp.process_tree_pids.includes(cdp.listener_pid)
+    || !Number.isInteger(cdp.listener_pid)
+    || cdp.listener_pid <= 0
+    || cdp.belongs_to_launched_process_tree !== true
+    || !validSha256(cdp.executable_sha256)
+    || cdp.executable_sha256 !== provenance.electron_executable_sha256
+  ) {
+    failures.push('CDP listener PID is not bound to the launched Electron executable bytes')
+  }
+  if (
+    !Number.isInteger(backend.listener_pid)
+    || backend.listener_pid !== healthBinding.backend_pid
+    || backend.health_pid !== healthBinding.backend_pid
+    || !validSha256(backend.executable_sha256)
+    || !validSha256(backend.executable_path_fingerprint_sha256)
+    || backend.executable_path_fingerprint_sha256
+      !== healthBinding.runtime_source_hashes?.python_executable_fingerprint_sha256
+  ) {
+    failures.push('backend TCP listener is not bound to /health PID and imported Python executable')
+  }
+  if (provenance.mode === 'electron-dev') {
+    if (!validSha256(provenance.electron_executable_sha256)) {
+      failures.push('dev Electron executable fingerprint is missing')
+    }
+    const served = Array.isArray(provenance.served_renderer_modules)
+      ? provenance.served_renderer_modules
+      : []
+    const local = localRendererModuleEvidence()
+    if (
+      served.length !== local.length
+      || canonicalJson(served) !== canonicalJson(local)
+      || !validSha256(provenance.served_renderer_source_sha256)
+      || provenance.served_renderer_source_sha256 !== canonicalSha256(local)
+    ) {
+      failures.push('dev renderer bytes served through CDP do not exactly match the source checkout')
+    }
+    if (provenance.vite_renderer_source_seen !== true || provenance.vite_client_seen !== true) {
+      failures.push('dev renderer resources do not include the live Vite renderer')
+    }
+  } else if (provenance.mode === 'installed-app') {
+    const manifest = provenance.external_release_manifest || {}
+    if (
+      !validSha256(provenance.external_release_manifest_sha256)
+      || manifest.schema !== 'vmlx-installed-release-manifest-v1'
+      || manifest.source_commit !== result?.gitProvenance?.after?.commit
+      || manifest.source_tree !== result?.gitProvenance?.after?.tree
+    ) {
+      failures.push('installed app lacks an independent release manifest bound to the proof HEAD')
+    }
+    if (
+      !validSha256(provenance.app_asar_sha256)
+      || provenance.app_asar_sha256 !== manifest.app_asar_sha256
+    ) {
+      failures.push('installed renderer ASAR is not bound to the external release manifest')
+    }
+    if (!validSha256(provenance.electron_executable_sha256)) {
+      failures.push('installed Electron executable fingerprint is missing')
+    }
+    if (
+      provenance.electron_executable_sha256 !== manifest.electron_executable_sha256
+      || provenance.electron_executable_sha256 !== cdp.executable_sha256
+    ) {
+      failures.push('installed Electron executable does not match the external release manifest')
+    }
+    if (!validSha256(provenance.bundled_provenance_sha256)) {
+      failures.push('installed app bundled provenance fingerprint is missing')
+    }
+    if (provenance.bundled_provenance_sha256 !== manifest.bundled_provenance_sha256) {
+      failures.push('bundled-Python provenance does not match the external release manifest')
+    }
+    if (
+      provenance.bundled_provenance?.vmlx?.commit
+      !== result?.gitProvenance?.after?.commit
+    ) {
+      failures.push('installed app bundled provenance commit does not match proof HEAD')
+    }
+    const bundledSource = provenance.bundled_source || {}
+    const gitSource = result?.gitProvenance?.after || {}
+    const runtimeBinding = result?.healthProvenance?.after?.binding || {}
+    const runtimeSource = runtimeBinding.runtime_source_hashes || {}
+    for (const field of [
+      'server_module_sha256',
+      'package_init_sha256',
+      'python_source_tree_sha256',
+    ]) {
+      if (
+        !validSha256(bundledSource[field])
+        || bundledSource[field] !== gitSource[field]
+        || bundledSource[field] !== runtimeSource[field]
+      ) {
+        failures.push(`installed bundled/runtime/source identity does not match: ${field}`)
+      }
+    }
+    for (const field of [
+      'python_source_file_count',
+      'python_source_read_error_count',
+    ]) {
+      if (
+        bundledSource[field] !== gitSource[field]
+        || bundledSource[field] !== runtimeBinding[field]
+      ) {
+        failures.push(`installed bundled/runtime/source count does not match: ${field}`)
+      }
+    }
+    if (
+      manifest.bundled_python_executable_fingerprint_sha256
+        !== runtimeSource.python_executable_fingerprint_sha256
+      || manifest.bundled_python_executable_fingerprint_sha256
+        !== backend.executable_path_fingerprint_sha256
+    ) {
+      failures.push('installed backend did not import from the manifest-attested bundled Python')
+    }
+  } else {
+    failures.push(`unknown UI launch mode ${provenance.mode || 'missing'}`)
+  }
+  return failures
+}
+
+const pairedApiProtocolRoutes = {
+  chat: '/v1/chat/completions',
+  responses: '/v1/responses',
+  anthropic: '/v1/messages',
+  ollama: '/api/chat',
+}
+const pairedCaptureLayer = 'requests.decompressed_response_parser_input'
+const pairedCaptureSemantics = [
+  'Exact decompressed response-body bytes delivered to protocol parsers: ',
+  'streaming bytes before requests.iter_lines line splitting or Unicode ',
+  'decoding, and Responses nonstream bytes before JSON decoding; excludes ',
+  'HTTP transfer framing and compressed transport octets.',
+].join('')
+const pairedSafeCaptureHeaderNames = new Set([
+  'content-encoding',
+  'content-length',
+  'content-type',
+  'transfer-encoding',
+])
+
+function parseSseObjects(raw, label) {
+  const objects = []
+  const frames = []
+  let doneSeen = false
+  let postDoneFrames = 0
+  for (const block of raw.toString('utf8').split(/\r?\n\r?\n/)) {
+    const data = block
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+      .trim()
+    if (!data) continue
+    if (data === '[DONE]') {
+      if (doneSeen) postDoneFrames += 1
+      doneSeen = true
+      frames.push({ kind: 'done' })
+      continue
+    }
+    try {
+      const object = JSON.parse(data)
+      if (doneSeen) postDoneFrames += 1
+      objects.push(object)
+      frames.push({ kind: 'data', object })
+    } catch {
+      throw new Error(`${label} contains malformed SSE JSON`)
+    }
+  }
+  return { objects, frames, doneSeen, postDoneFrames }
+}
+
+function mergeToolNameFragment(existing, fragment) {
+  const prior = String(existing || '')
+  const next = String(fragment || '')
+  if (!next) return prior
+  if (!prior || next.startsWith(prior)) return next
+  if (prior.endsWith(next)) return prior
+  return `${prior}${next}`
+}
+
+function collectOpenAiChatStream(raw, label) {
+  const { frames, doneSeen, postDoneFrames } = parseSseObjects(raw, label)
+  const reasoning = []
+  const content = []
+  const toolCalls = new Map()
+  const terminals = []
+  const orderedChannels = []
+  let semanticTerminalSeen = false
+  let postTerminalEvents = postDoneFrames
+  for (const frame of frames) {
+    if (frame.kind === 'done') {
+      orderedChannels.push('terminal:DONE')
+      continue
+    }
+    const object = frame.object
+    for (const choice of Array.isArray(object?.choices) ? object.choices : []) {
+      const delta = choice?.delta || {}
+      const reasoningDelta = delta.reasoning_content ?? delta.reasoning
+      if (typeof reasoningDelta === 'string' && reasoningDelta) {
+        if (semanticTerminalSeen) postTerminalEvents += 1
+        reasoning.push(reasoningDelta)
+        orderedChannels.push('reasoning')
+      }
+      if (typeof delta.content === 'string' && delta.content) {
+        if (semanticTerminalSeen) postTerminalEvents += 1
+        content.push(delta.content)
+        orderedChannels.push('content')
+      }
+      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+        if (semanticTerminalSeen) postTerminalEvents += 1
+        const key = String(call?.index ?? call?.id ?? toolCalls.size)
+        const prior = toolCalls.get(key) || { id: '', name: '', arguments: '' }
+        toolCalls.set(key, {
+          id: String(call?.id || prior.id || ''),
+          name: mergeToolNameFragment(prior.name, call?.function?.name),
+          arguments: `${prior.arguments}${call?.function?.arguments || ''}`,
+        })
+        orderedChannels.push('tool')
+      }
+      if (choice?.finish_reason) {
+        terminals.push(String(choice.finish_reason))
+        semanticTerminalSeen = true
+        orderedChannels.push(`terminal:${choice.finish_reason}`)
+      }
+    }
+  }
+  return {
+    reasoning: reasoning.join(''),
+    content: content.join(''),
+    toolCalls: [...toolCalls.values()],
+    terminal: doneSeen && terminals.length > 0,
+    terminalReasons: [...terminals, ...(doneSeen ? ['DONE'] : [])],
+    orderedChannels,
+    postTerminalEvents,
+  }
+}
+
+function collectResponsesStream(raw, label) {
+  const { frames, postDoneFrames } = parseSseObjects(raw, label)
+  const reasoning = []
+  const content = []
+  const toolCalls = new Map()
+  let terminal = false
+  const orderedChannels = []
+  let postTerminalEvents = postDoneFrames
+  for (const frame of frames) {
+    if (frame.kind !== 'data') continue
+    const object = frame.object
+    if (terminal) postTerminalEvents += 1
+    const type = String(object?.type || '')
+    if (
+      type === 'response.reasoning_summary_text.delta'
+      || type === 'response.reasoning_text.delta'
+    ) {
+      reasoning.push(String(object?.delta || ''))
+      orderedChannels.push('reasoning')
+    } else if (type === 'response.output_text.delta') {
+      content.push(String(object?.delta || ''))
+      orderedChannels.push('content')
+    }
+    const item = object?.item || object?.output_item
+    if (
+      item?.type === 'function_call'
+      || type === 'response.function_call_arguments.delta'
+      || type === 'response.function_call_arguments.done'
+    ) {
+      const key = String(item?.id || item?.call_id || object?.item_id || object?.call_id || 'call')
+      const prior = toolCalls.get(key) || { id: '', name: '', arguments: '' }
+      const argumentValue = type === 'response.function_call_arguments.done'
+        ? String(object?.arguments ?? item?.arguments ?? prior.arguments ?? '')
+        : type === 'response.function_call_arguments.delta'
+          ? `${prior.arguments}${object?.delta || ''}`
+          : String(item?.arguments ?? prior.arguments ?? '')
+      toolCalls.set(key, {
+        id: String(item?.call_id || item?.id || object?.call_id || prior.id || ''),
+        name: String(item?.name || object?.name || prior.name || ''),
+        arguments: argumentValue,
+      })
+      orderedChannels.push('tool')
+    }
+    if (type === 'response.completed' && object?.response?.status === 'completed') {
+      terminal = true
+      orderedChannels.push('terminal:response.completed')
+    }
+  }
+  return {
+    reasoning: reasoning.join(''),
+    content: content.join(''),
+    toolCalls: [...toolCalls.values()],
+    terminal,
+    terminalReasons: terminal ? ['response.completed'] : [],
+    orderedChannels,
+    postTerminalEvents,
+  }
+}
+
+function collectResponsesNonstream(raw, label) {
+  let body
+  try {
+    body = JSON.parse(raw.toString('utf8'))
+  } catch {
+    throw new Error(`${label} contains malformed Responses nonstream JSON`)
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new Error(`${label} Responses nonstream JSON is not an object`)
+  }
+  const reasoning = []
+  const content = []
+  const toolCalls = []
+  const orderedChannels = []
+  for (const item of Array.isArray(body.output) ? body.output : []) {
+    if (item?.type === 'reasoning') {
+      for (const summary of Array.isArray(item.summary) ? item.summary : []) {
+        const text = String(summary?.text || '')
+        if (text) {
+          reasoning.push(text)
+          orderedChannels.push('reasoning')
+        }
+      }
+    } else if (item?.type === 'message') {
+      for (const part of Array.isArray(item.content) ? item.content : []) {
+        if (['output_text', 'text'].includes(String(part?.type || ''))) {
+          const text = String(part?.text || '')
+          if (text) {
+            content.push(text)
+            orderedChannels.push('content')
+          }
+        }
+      }
+    } else if (item?.type === 'function_call') {
+      toolCalls.push({
+        id: String(item.call_id || item.id || ''),
+        name: String(item.name || ''),
+        arguments: item.arguments ?? '',
+      })
+      orderedChannels.push('tool')
+    }
+  }
+  const status = typeof body.status === 'string' && body.status
+    ? body.status
+    : ''
+  if (status) orderedChannels.push(`terminal:response.${status}`)
+  return {
+    reasoning: reasoning.join(''),
+    content: content.join(''),
+    toolCalls,
+    terminal: status === 'completed',
+    terminalReasons: status ? [`response.${status}`] : [],
+    orderedChannels,
+    postTerminalEvents: 0,
+  }
+}
+
+function collectAnthropicStream(raw, label) {
+  const { frames, postDoneFrames } = parseSseObjects(raw, label)
+  const reasoning = []
+  const content = []
+  const toolCalls = new Map()
+  const terminals = []
+  let terminal = false
+  let semanticTerminalSeen = false
+  const orderedChannels = []
+  let postTerminalEvents = postDoneFrames
+  for (const frame of frames) {
+    if (frame.kind !== 'data') continue
+    const object = frame.object
+    const type = String(object?.type || '')
+    if (
+      terminal
+      || (semanticTerminalSeen && type !== 'message_stop')
+    ) {
+      postTerminalEvents += 1
+    }
+    const block = object?.content_block
+    const delta = object?.delta || {}
+    if (type === 'content_block_start' && block?.type === 'tool_use') {
+      const key = String(object?.index ?? toolCalls.size)
+      toolCalls.set(key, {
+        id: String(block.id || ''),
+        name: String(block.name || ''),
+        arguments: canonicalJson(block.input || {}),
+      })
+      orderedChannels.push('tool')
+    }
+    if (type === 'content_block_start' && block?.type === 'thinking') {
+      reasoning.push(String(block.thinking || ''))
+      orderedChannels.push('reasoning')
+    }
+    if (type === 'content_block_start' && block?.type === 'text') {
+      content.push(String(block.text || ''))
+      orderedChannels.push('content')
+    }
+    if (delta?.type === 'thinking_delta') {
+      reasoning.push(String(delta.thinking || ''))
+      orderedChannels.push('reasoning')
+    }
+    if (delta?.type === 'text_delta') {
+      content.push(String(delta.text || ''))
+      orderedChannels.push('content')
+    }
+    if (delta?.type === 'input_json_delta') {
+      const key = String(object?.index ?? 0)
+      const prior = toolCalls.get(key) || { id: '', name: '', arguments: '' }
+      toolCalls.set(key, {
+        ...prior,
+        arguments: `${prior.arguments === '{}' ? '' : prior.arguments}${delta.partial_json || ''}`,
+      })
+      orderedChannels.push('tool')
+    }
+    if (type === 'message_delta' && delta?.stop_reason) {
+      terminals.push(String(delta.stop_reason))
+      semanticTerminalSeen = true
+      orderedChannels.push(`terminal:${delta.stop_reason}`)
+    }
+    if (type === 'message_stop') {
+      terminal = true
+      orderedChannels.push('terminal:message_stop')
+    }
+  }
+  return {
+    reasoning: reasoning.join(''),
+    content: content.join(''),
+    toolCalls: [...toolCalls.values()],
+    terminal: terminal && terminals.length > 0,
+    terminalReasons: [...terminals, ...(terminal ? ['message_stop'] : [])],
+    orderedChannels,
+    postTerminalEvents,
+  }
+}
+
+function collectOllamaStream(raw, label) {
+  const reasoning = []
+  const content = []
+  const toolCalls = []
+  const terminals = []
+  const orderedChannels = []
+  let terminalSeen = false
+  let postTerminalEvents = 0
+  for (const line of raw.toString('utf8').split(/\r?\n/).filter(Boolean)) {
+    let object
+    try {
+      object = JSON.parse(line)
+    } catch {
+      throw new Error(`${label} contains malformed Ollama NDJSON`)
+    }
+    if (terminalSeen) postTerminalEvents += 1
+    const message = object?.message || {}
+    const reasoningDelta = message.thinking ?? message.reasoning
+    if (typeof reasoningDelta === 'string' && reasoningDelta) {
+      reasoning.push(reasoningDelta)
+      orderedChannels.push('reasoning')
+    }
+    if (typeof message.content === 'string' && message.content) {
+      content.push(message.content)
+      orderedChannels.push('content')
+    }
+    for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+      toolCalls.push({
+        id: String(call?.id || ''),
+        name: String(call?.function?.name || ''),
+        arguments: canonicalJson(call?.function?.arguments || {}),
+      })
+      orderedChannels.push('tool')
+    }
+    if (object?.done === true) {
+      terminals.push(String(object?.done_reason || 'stop'))
+      terminalSeen = true
+      orderedChannels.push(`terminal:${object?.done_reason || 'stop'}`)
+    }
+  }
+  return {
+    reasoning: reasoning.join(''),
+    content: content.join(''),
+    toolCalls,
+    terminal: terminals.length > 0,
+    terminalReasons: terminals,
+    orderedChannels,
+    postTerminalEvents,
+  }
+}
+
+function collectProtocolStream(protocol, raw, label) {
+  if (protocol === 'chat') return collectOpenAiChatStream(raw, label)
+  if (protocol === 'responses') return collectResponsesStream(raw, label)
+  if (protocol === 'anthropic') return collectAnthropicStream(raw, label)
+  if (protocol === 'ollama') return collectOllamaStream(raw, label)
+  throw new Error(`${label} has unsupported protocol ${protocol}`)
+}
+
+const expectedPairedApiProtocols = Object.keys(pairedApiProtocolRoutes)
+const expectedPairedApiModes = ['stream', 'nonstream']
+const pairedToolParameters = {
+  file_info: {
+    type: 'object',
+    properties: { path: { type: 'string' } },
+    required: ['path'],
+    additionalProperties: false,
+  },
+  run_command: {
+    type: 'object',
+    properties: { command: { type: 'string' } },
+    required: ['command'],
+    additionalProperties: false,
+  },
+}
+
+function exactStringSet(value, expected) {
+  return Array.isArray(value)
+    && value.length === expected.length
+    && canonicalJson([...value].sort()) === canonicalJson([...expected].sort())
+}
+
+function expectedFlowTerminals(protocol, mode, roundIndex) {
+  const toolRound = roundIndex < 2
+  if (protocol === 'chat') {
+    return [
+      toolRound ? 'tool_calls' : 'stop',
+      ...(mode === 'stream' ? ['DONE'] : []),
+    ]
+  }
+  if (protocol === 'responses') return ['response.completed']
+  if (protocol === 'anthropic') {
+    return [
+      toolRound ? 'tool_use' : 'end_turn',
+      ...(mode === 'stream' ? ['message_stop'] : []),
+    ]
+  }
+  return [toolRound ? 'tool_calls' : 'stop']
+}
+
+function expectedContractNames(protocol, stage) {
+  if (protocol === 'ollama') {
+    if (stage === 1) return ['file_info']
+    if (stage === 2) return ['run_command']
+    return []
+  }
+  return ['file_info', 'run_command']
+}
+
+function expectedToolChoice(protocol, mode, stage) {
+  if (protocol === 'ollama') return null
+  if (stage === 3) {
+    return protocol === 'anthropic' ? { type: 'none' } : 'none'
+  }
+  const name = stage === 1 ? 'file_info' : 'run_command'
+  if (stage === 1 && mode !== 'stream') {
+    return protocol === 'anthropic' ? { type: 'any' } : 'required'
+  }
+  if (protocol === 'chat') {
+    return { type: 'function', function: { name } }
+  }
+  if (protocol === 'responses') {
+    return { type: 'function', name }
+  }
+  return { type: 'tool', name }
+}
+
+function normalizedToolArguments(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return null
+  }
+}
+
+function validatePublicToolContracts(request, protocol, stage, label) {
+  const failures = []
+  const contracts = Array.isArray(request?.tool_contracts) ? request.tool_contracts : []
+  const expectedNames = expectedContractNames(protocol, stage)
+  if (canonicalJson(contracts.map((item) => item?.name)) !== canonicalJson(expectedNames)) {
+    failures.push(`${label} tool contract names/order are not exact`)
+    return failures
+  }
+  for (const contract of contracts) {
+    if (
+      !pairedToolParameters[contract?.name]
+      || canonicalJson(contract?.parameters) !== canonicalJson(pairedToolParameters[contract.name])
+    ) {
+      failures.push(`${label} ${contract?.name || 'unknown'} tool schema is not exact`)
+    }
+  }
+  return failures
+}
+
+function toolLinkPresent(
+  request,
+  execution,
+  { requireName = false, allowMissingCallId = false } = {},
+) {
+  const links = Array.isArray(request?.tool_history_linkage)
+    ? request.tool_history_linkage
+    : []
+  return links.some((link) => (
+    link?.kind === 'tool_result'
+    && (
+      String(link?.call_id || '') === String(execution?.call_id || '')
+      || (allowMissingCallId && !String(link?.call_id || ''))
+    )
+    && (!requireName || String(link?.name || '') === String(execution?.name || ''))
+    && Number(link?.output_chars) === Number(execution?.output_chars)
+    && String(link?.output_sha256 || '') === String(execution?.output_sha256 || '')
+  ))
+}
+
+function assistantToolLinkPresent(
+  request,
+  call,
+  { allowMissingCallId = false } = {},
+) {
+  const links = Array.isArray(request?.tool_history_linkage)
+    ? request.tool_history_linkage
+    : []
+  return links.some((link) => (
+    link?.kind === 'assistant_tool_call'
+    && (
+      String(link?.call_id || '') === String(call?.id || '')
+      || (allowMissingCallId && !String(link?.call_id || ''))
+    )
+    && String(link?.name || '') === String(call?.name || '')
+  ))
+}
+
+function validateRawChannelOrder(parsed, roundIndex, label) {
+  const failures = []
+  const channels = Array.isArray(parsed?.orderedChannels)
+    ? parsed.orderedChannels
+    : []
+  const firstTerminal = channels.findIndex((channel) => (
+    String(channel).startsWith('terminal:')
+  ))
+  const nonterminal = firstTerminal >= 0
+    ? channels.slice(0, firstTerminal)
+    : channels
+  if (
+    firstTerminal < 0
+    || channels.slice(firstTerminal).some((channel) => (
+      !String(channel).startsWith('terminal:')
+    ))
+  ) {
+    failures.push(`${label} raw terminal framing is not a terminal-only suffix`)
+  }
+  if (roundIndex < 2) {
+    const reasoningIndexes = []
+    const toolIndexes = []
+    for (let index = 0; index < nonterminal.length; index += 1) {
+      if (nonterminal[index] === 'reasoning') reasoningIndexes.push(index)
+      if (nonterminal[index] === 'tool') toolIndexes.push(index)
+    }
+    if (
+      reasoningIndexes.length < 2
+      || toolIndexes.length < 1
+      || nonterminal.some((channel) => channel === 'content')
+      || Math.max(...reasoningIndexes) > Math.min(...toolIndexes)
+      || nonterminal.some((channel) => (
+        !['reasoning', 'tool'].includes(String(channel))
+      ))
+    ) {
+      failures.push(
+        `${label} raw stream does not preserve progressive reasoning before tool output`,
+      )
+    }
+  } else if (
+    nonterminal.length < 2
+    || nonterminal.some((channel) => channel !== 'content')
+  ) {
+    failures.push(
+      `${label} raw final answer is not a progressive content-only stream`,
+    )
+  }
+  return failures
+}
+
+function validateFlowRoundEvents(round, protocol, mode, roundIndex, label) {
+  const failures = []
+  const events = Array.isArray(round?.events) ? round.events : []
+  const expectedTerminals = expectedFlowTerminals(protocol, mode, roundIndex)
+  const terminalEvents = events.filter((event) => event?.channel === 'terminal')
+  const terminalValues = terminalEvents.map((event) => String(event?.kind || ''))
+  if (
+    canonicalJson(round?.terminals || []) !== canonicalJson(expectedTerminals)
+    || canonicalJson(terminalValues) !== canonicalJson(expectedTerminals)
+  ) {
+    failures.push(`${label} terminal status/count/order is not protocol-native exact`)
+  }
+  const firstTerminal = events.findIndex((event) => event?.channel === 'terminal')
+  if (
+    firstTerminal < 0
+    || events.slice(firstTerminal).some((event) => event?.channel !== 'terminal')
+    || events.length - firstTerminal !== expectedTerminals.length
+  ) {
+    failures.push(`${label} has non-terminal output after terminalization`)
+  }
+  const times = events.map((event) => Number(event?.at_ms))
+  if (
+    times.some((value) => !Number.isFinite(value))
+    || times.some((value, index) => index > 0 && value < times[index - 1])
+  ) {
+    failures.push(`${label} event timestamps are not monotonic`)
+  }
+  return failures
+}
+
+function validateMatrixFlow(flow, protocol, mode, label, repoRoot) {
+  const failures = []
+  const requests = Array.isArray(flow?.requests) ? flow.requests : []
+  const rounds = Array.isArray(flow?.rounds) ? flow.rounds : []
+  const executions = Array.isArray(flow?.executions) ? flow.executions : []
+  if (flow?.pass !== true || Object.values(flow?.checks || {}).some((value) => value !== true)) {
+    failures.push(`${label} flow/checks do not attest pass`)
+  }
+  if (requests.length !== 3 || rounds.length !== 3 || executions.length !== 2) {
+    failures.push(`${label} must contain exactly three requests/rounds and two executions`)
+    return failures
+  }
+  const classifications = Array.isArray(flow?.terminal_classification)
+    ? flow.terminal_classification
+    : []
+  if (
+    classifications.length !== 3
+    || classifications.some((item, index) => (
+      item?.pass !== true
+      || canonicalJson(item?.values) !== canonicalJson(
+        expectedFlowTerminals(protocol, mode, index),
+      )
+    ))
+  ) {
+    failures.push(`${label} terminal classifications are not exact`)
+  }
+  const expectedTools = [
+    { name: 'file_info', arguments: { path: 'panel/package.json' } },
+    { name: 'run_command', arguments: { command: 'pwd' } },
+  ]
+  for (let index = 0; index < 3; index += 1) {
+    const stage = index + 1
+    const request = requests[index]
+    const round = rounds[index]
+    const roundLabel = `${label} round${stage}`
+    if (Number(request?.stage) !== stage || request?.stream !== (mode === 'stream')) {
+      failures.push(`${roundLabel} request stage/stream mode is not exact`)
+    }
+    if (
+      canonicalJson(request?.tool_choice ?? null)
+      !== canonicalJson(expectedToolChoice(protocol, mode, stage))
+    ) {
+      failures.push(`${roundLabel} protocol-native tool_choice is not exact`)
+    }
+    const expectedPreviousResponseId = (
+      protocol === 'responses' && index > 0
+        ? String(rounds[index - 1]?.response_id || '')
+        : null
+    )
+    if (
+      canonicalJson(request?.previous_response_id ?? null)
+      !== canonicalJson(expectedPreviousResponseId)
+    ) {
+      failures.push(`${roundLabel} Responses continuation ID is not exact`)
+    }
+    failures.push(...validatePublicToolContracts(request, protocol, stage, roundLabel))
+    if (Number(round?.status_code) !== 200 || (round?.errors || []).length) {
+      failures.push(`${roundLabel} did not complete with HTTP 200 and zero protocol errors`)
+    }
+    failures.push(...validateFlowRoundEvents(round, protocol, mode, index, roundLabel))
+    if (containsTransientProtocolMarker(round?.content || '')) {
+      failures.push(`${roundLabel} leaked inline reasoning/tool markers into visible content`)
+    }
+    const calls = Array.isArray(round?.tool_calls) ? round.tool_calls : []
+    if (index < 2) {
+      const expected = expectedTools[index]
+      if (
+        calls.length !== 1
+        || !String(calls[0]?.id || '')
+        || calls[0]?.name !== expected.name
+        || canonicalJson(calls[0]?.arguments) !== canonicalJson(expected.arguments)
+        || calls[0]?.arguments_parse_error
+      ) {
+        failures.push(`${roundLabel} exact tool name/arguments/call ID are invalid`)
+      }
+      if (String(round?.content || '').trim()) {
+        failures.push(`${roundLabel} tool round exposed visible answer prose`)
+      }
+      if (!String(round?.reasoning_sha256 || '') || Number(round?.reasoning_chars) <= 0) {
+        failures.push(`${roundLabel} lacks a separate reasoning payload`)
+      }
+      if (mode === 'stream' && Number(round?.reasoning_delta_count) < 2) {
+        failures.push(`${roundLabel} reasoning was not progressively streamed`)
+      }
+    } else {
+      if (calls.length) failures.push(`${roundLabel} final synthesis emitted a tool call`)
+      if (String(round?.content || '').trim() !== String(flow?.expected_final || '').trim()) {
+        failures.push(`${roundLabel} visible final answer is not exact`)
+      }
+      if (mode === 'stream' && Number(round?.content_delta_count) < 2) {
+        failures.push(`${roundLabel} visible answer was not progressively streamed`)
+      }
+    }
+  }
+  for (let index = 0; index < 2; index += 1) {
+    const expected = expectedTools[index]
+    const execution = executions[index]
+    const call = rounds[index]?.tool_calls?.[0]
+    if (
+      execution?.name !== expected.name
+      || String(execution?.call_id || '') !== String(call?.id || '')
+      || canonicalJson(execution?.arguments) !== canonicalJson(expected.arguments)
+      || !validSha256(execution?.output_sha256)
+      || Number(execution?.output_chars) <= 0
+    ) {
+      failures.push(`${label} execution ${index + 1} is not exactly linked to its tool call`)
+    }
+    const continuation = requests[index + 1]
+    if (protocol !== 'responses' && !assistantToolLinkPresent(
+      continuation,
+      call,
+      { allowMissingCallId: protocol === 'ollama' },
+    )) {
+      failures.push(
+        `${label} request${index + 2} is not linked to the prior assistant tool call`,
+      )
+    }
+    if (!toolLinkPresent(continuation, execution, {
+      requireName: protocol === 'ollama',
+      allowMissingCallId: protocol === 'ollama',
+    })) {
+      failures.push(
+        `${label} request${index + 2} is not linked to the real ${execution?.name || 'tool'} result`,
+      )
+    }
+  }
+  if (
+    executions[0]?.result?.path !== 'panel/package.json'
+    || !String(executions[0]?.result?.size_human || '')
+    || String(executions[1]?.result?.stdout || '') !== String(repoRoot || '')
+  ) {
+    failures.push(`${label} real file_info/pwd results are not exact`)
+  }
+  const expectedHistoryKinds = protocol === 'responses'
+    ? [[], ['tool_result'], ['tool_result']]
+    : [
+        [],
+        ['assistant_tool_call', 'tool_result'],
+        [
+          'assistant_tool_call',
+          'tool_result',
+          'assistant_tool_call',
+          'tool_result',
+        ],
+      ]
+  for (let index = 0; index < requests.length; index += 1) {
+    const actualKinds = (requests[index]?.tool_history_linkage || [])
+      .map((link) => link?.kind)
+    if (canonicalJson(actualKinds) !== canonicalJson(expectedHistoryKinds[index])) {
+      failures.push(`${label} request${index + 1} tool history order is not exact`)
+    }
+  }
+  if (
+    protocol !== 'responses'
+    && (
+      !assistantToolLinkPresent(requests[2], rounds[0]?.tool_calls?.[0], {
+        allowMissingCallId: protocol === 'ollama',
+      })
+      || !toolLinkPresent(requests[2], executions[0], {
+        requireName: protocol === 'ollama',
+        allowMissingCallId: protocol === 'ollama',
+      })
+    )
+  ) {
+    failures.push(`${label} request3 does not retain the first tool turn`)
+  }
+  const chain = [
+    Number(rounds[0]?.reasoning_chars) > 0 ? 'reasoning' : '',
+    rounds[0]?.tool_calls?.[0]?.name || '',
+    Number(rounds[1]?.reasoning_chars) > 0 ? 'reasoning' : '',
+    rounds[1]?.tool_calls?.[0]?.name || '',
+    String(rounds[2]?.content || '').trim() ? 'answer' : '',
+  ]
+  if (canonicalJson(chain) !== canonicalJson([
+    'reasoning',
+    'file_info',
+    'reasoning',
+    'run_command',
+    'answer',
+  ])) {
+    failures.push(`${label} does not prove reasoning→tool→reasoning→tool→answer`)
+  }
+  return failures
+}
+
+function healthIdentityMatchesUi(identity, uiBinding) {
+  return [
+    'backend_pid',
+    'python_source_file_count',
+    'python_source_read_error_count',
+    'model_name',
+    'model_bundle_fingerprint_sha256',
+    'cache_topology_fingerprint_sha256',
+    'fingerprint_sha256',
+  ].every((field) => canonicalJson(identity?.[field]) === canonicalJson(uiBinding?.[field]))
+    && canonicalJson(identity?.runtime_source_hashes)
+      === canonicalJson(uiBinding?.runtime_source_hashes)
+}
+
+function validateMatrixIdentity(value, result) {
+  const failures = []
+  const identity = value?.identity || {}
+  if (
+    !Array.isArray(identity?.failures)
+    || identity.failures.length !== 0
+  ) {
+    failures.push('paired matrix identity failure list is not exactly empty')
+  }
+  const sourceBefore = identity?.source?.before || {}
+  const sourceAfter = identity?.source?.after || {}
+  const uiSourceBefore = result?.gitProvenance?.before || {}
+  const uiSourceAfter = result?.gitProvenance?.after || {}
+  for (const field of [
+    'head',
+    'tree',
+    'server_module_sha256',
+    'package_init_sha256',
+    'python_source_tree_sha256',
+    'python_source_file_count',
+    'python_source_read_error_count',
+  ]) {
+    if (
+      canonicalJson(sourceBefore[field]) !== canonicalJson(uiSourceBefore[field === 'head' ? 'commit' : field])
+      || canonicalJson(sourceAfter[field]) !== canonicalJson(uiSourceAfter[field === 'head' ? 'commit' : field])
+    ) {
+      failures.push(`paired matrix source identity mismatch: ${field}`)
+    }
+  }
+  if (
+    sourceBefore.clean !== true
+    || sourceAfter.clean !== true
+    || canonicalJson(sourceBefore) !== canonicalJson(sourceAfter)
+    || identity?.source?.declared_head !== sourceAfter.head
+  ) {
+    failures.push('paired matrix source before/after/declared HEAD is not exact and clean')
+  }
+  const runnerBefore = identity?.runner?.before || {}
+  const runnerAfter = identity?.runner?.after || {}
+  const producerPath = 'tests/cross_matrix/run_agentic_protocol_matrix.py'
+  const expectedHarnessPath = realpathSync(path.join(repoDir, producerPath))
+  if (
+    canonicalJson(runnerBefore) !== canonicalJson(runnerAfter)
+    || runnerBefore.repo_venv !== true
+    || runnerBefore.repo_python !== true
+    || runnerBefore.producer_harness_relative_path !== producerPath
+    || path.resolve(runnerBefore.producer_harness_path || '') !== expectedHarnessPath
+  ) {
+    failures.push('paired matrix producer environment/harness identity is invalid')
+  } else {
+    try {
+      if (
+        !path.isAbsolute(String(runnerBefore.python_executable_path || ''))
+        || sha256Text(runnerBefore.python_executable_path)
+          !== runnerBefore.python_executable_fingerprint_sha256
+        || !path.isAbsolute(String(runnerBefore.python_prefix_path || ''))
+        || sha256Text(runnerBefore.python_prefix_path)
+          !== runnerBefore.python_prefix_fingerprint_sha256
+        || realpathSync(runnerBefore.python_executable_path)
+          !== realpathSync(runnerBefore.producer_executable_path)
+      ) {
+        failures.push('paired matrix producer Python path/fingerprint binding is invalid')
+      }
+      const harness = readExternalFileBytes(
+        runnerBefore.producer_harness_path,
+        'Paired API producer harness',
+      )
+      const executable = readExternalFileBytes(
+        runnerBefore.producer_executable_path,
+        'Paired API producer executable',
+      )
+      if (
+        harness.sha256 !== runnerBefore.producer_harness_sha256
+        || harness.bytes !== Number(runnerBefore.producer_harness_size_bytes)
+        || executable.sha256 !== runnerBefore.producer_executable_sha256
+        || executable.bytes !== Number(runnerBefore.producer_executable_size_bytes)
+      ) {
+        failures.push('paired matrix producer executable/harness bytes do not match reopened files')
+      }
+    } catch (error) {
+      failures.push(String(error?.message || error))
+    }
+  }
+  const producerPid = Number(runnerBefore.producer_pid)
+  const forbiddenPids = [
+    result?.healthProvenance?.after?.binding?.backend_pid,
+    result?.uiRuntimeProvenance?.cdp_process_binding?.launched_root_pid,
+    result?.uiRuntimeProvenance?.cdp_process_binding?.listener_pid,
+  ].map(Number)
+  if (!Number.isInteger(producerPid) || producerPid <= 0 || forbiddenPids.includes(producerPid)) {
+    failures.push('paired matrix producer PID is missing or aliases Electron/backend ownership')
+  }
+  const uiBinding = result?.healthProvenance?.after?.binding || {}
+  if (
+    runnerBefore.python_executable_fingerprint_sha256
+      !== uiBinding?.runtime_source_hashes?.python_executable_fingerprint_sha256
+  ) {
+    failures.push('paired matrix producer Python does not match the UI backend Python')
+  }
+  const bundleBefore = identity?.bundle?.before || {}
+  const bundleAfter = identity?.bundle?.after || {}
+  if (
+    canonicalJson(bundleBefore) !== canonicalJson(bundleAfter)
+    || bundleBefore.fingerprint_sha256 !== uiBinding.model_bundle_fingerprint_sha256
+    || canonicalJson(bundleBefore.files)
+      !== canonicalJson(result?.bundleGenerationContract?.health_attestation?.files)
+  ) {
+    failures.push('paired matrix bundle identity is not bound to the UI model bundle')
+  }
+  for (const baseLabel of ['direct', 'gateway']) {
+    for (const phase of ['before', 'after']) {
+      const row = identity?.health?.[baseLabel]?.[phase] || {}
+      let healthOrigin = ''
+      let requestOrigin = ''
+      try {
+        healthOrigin = new URL(row.url).origin
+        requestOrigin = new URL(value?.bases?.[baseLabel]).origin
+      } catch {
+        failures.push(`${baseLabel} ${phase} health URL origin is invalid`)
+      }
+      if (!healthOrigin || healthOrigin !== requestOrigin) {
+        failures.push(
+          `${baseLabel} ${phase} health URL origin is not bound to its request base`,
+        )
+      }
+      if (
+        !row.full
+        || !validSha256(row.full_sha256)
+        || row.full_sha256 !== canonicalSha256(row.full)
+        || !healthIdentityMatchesUi(row.identity, uiBinding)
+        || row.identity?.fingerprint_sha256 !== value?.backend_identity_fingerprint_sha256
+      ) {
+        failures.push(`${baseLabel} ${phase} health identity is not bound to the UI backend`)
+      }
+    }
+  }
+  return failures
+}
+
+function openedManifestArtifact(runDirectory, fileName, label) {
+  if (
+    !fileName
+    || path.basename(fileName) !== fileName
+    || ['.', '..'].includes(fileName)
+  ) {
+    throw new Error(`${label} filename is unsafe`)
+  }
+  const candidate = path.resolve(runDirectory, fileName)
+  if (!isPathInside(candidate, runDirectory)) {
+    throw new Error(`${label} escapes its private run directory`)
+  }
+  return readPrivateExternalBytes(candidate, label)
+}
+
+function comparableManifestSummary(rawCapture) {
+  const copy = structuredClone(rawCapture || {})
+  for (const key of [
+    'manifest_file',
+    'manifest_path',
+    'manifest_sha256',
+    'run_directory',
+  ]) delete copy[key]
+  return copy
+}
+
+function captureHeadersAreSanitized(headers) {
+  return Array.isArray(headers) && headers.every((header) => {
+    const name = String(header?.name || '')
+      .trim()
+      .toLowerCase()
+      .replaceAll('_', '-')
+    const value = String(header?.value ?? '')
+    return name
+      && (
+        pairedSafeCaptureHeaderNames.has(name)
+        || value === '<redacted>'
+      )
+  })
+}
+
+function validateRawMatrixCapture(value, result) {
+  const failures = []
+  const rawCapture = value?.raw_capture || {}
+  if (
+    rawCapture.enabled !== true
+    || rawCapture.complete !== true
+    || Number(rawCapture.errors) !== 0
+    || rawCapture.run_id !== result?.run_id
+    || !validSha256(rawCapture.manifest_sha256)
+  ) {
+    return ['paired matrix raw parser-input capture is incomplete or unbound']
+  }
+  let manifestOpened
+  let manifest
+  try {
+    manifestOpened = readPrivateExternalBytes(
+      rawCapture.manifest_path,
+      'Paired API raw capture manifest',
+    )
+    manifest = JSON.parse(manifestOpened.raw.toString('utf8'))
+  } catch (error) {
+    return [String(error?.message || error)]
+  }
+  let runDirectory
+  try {
+    const declaredRunDirectory = path.resolve(rawCapture.run_directory || '')
+    const runDirectoryStat = lstatSync(declaredRunDirectory)
+    runDirectory = realpathSync(declaredRunDirectory)
+    if (
+      !runDirectoryStat.isDirectory()
+      || runDirectoryStat.isSymbolicLink()
+      || (runDirectoryStat.mode & 0o077) !== 0
+      || isPathInside(runDirectory, realpathSync(repoDir))
+    ) {
+      return ['paired matrix raw capture run directory is not private, canonical, and external']
+    }
+  } catch (error) {
+    return [`paired matrix raw capture run directory is invalid: ${String(error?.message || error)}`]
+  }
+  if (
+    manifestOpened.sha256 !== rawCapture.manifest_sha256
+    || manifestOpened.path !== path.resolve(runDirectory, rawCapture.manifest_file)
+    || path.dirname(manifestOpened.path) !== runDirectory
+    || canonicalJson(manifest) !== canonicalJson(comparableManifestSummary(rawCapture))
+  ) {
+    failures.push('paired matrix raw capture manifest bytes/path/summary do not match')
+  }
+  const includeCancellation = value?.checks?.abort_recovery_skipped !== true
+  const streamLabels = [
+    'stream-flow-round1',
+    'stream-flow-round2',
+    'stream-flow-round3',
+    ...(includeCancellation ? ['stream-abort', 'stream-recovery'] : []),
+  ]
+  const expectedRoutes = []
+  for (const baseLabel of ['direct', 'gateway']) {
+    for (const protocol of expectedPairedApiProtocols) {
+      for (const captureLabel of streamLabels) {
+        expectedRoutes.push(`${baseLabel}\0${protocol}\0${captureLabel}`)
+      }
+      if (protocol === 'responses') {
+        for (const roundNumber of [1, 2, 3]) {
+          expectedRoutes.push(
+            `${baseLabel}\0responses\0nonstream-flow-round${roundNumber}`,
+          )
+        }
+      }
+    }
+  }
+  const routes = Array.isArray(manifest?.routes) ? manifest.routes : []
+  const actualRoutes = routes.map((route) => (
+    `${route?.base_label || ''}\0${route?.protocol || ''}\0${route?.capture_label || ''}`
+  ))
+  if (
+    Number(manifest?.schema_version) !== 1
+    || manifest?.capture_layer !== pairedCaptureLayer
+    || manifest?.capture_semantics !== pairedCaptureSemantics
+    || Number(manifest?.expected) !== expectedRoutes.length
+    || Number(manifest?.started) !== expectedRoutes.length
+    || Number(manifest?.finished) !== expectedRoutes.length
+    || Number(manifest?.errors) !== 0
+    || manifest?.complete !== true
+    || manifest?.run_id !== result?.run_id
+  ) {
+    failures.push('paired matrix raw capture manifest contract/totals are not exact')
+  }
+  if (
+    canonicalJson([...actualRoutes].sort()) !== canonicalJson([...expectedRoutes].sort())
+    || new Set(actualRoutes).size !== actualRoutes.length
+  ) {
+    failures.push('paired matrix raw capture routes are missing, duplicated, or unexpected')
+  }
+  for (const route of routes) {
+    const label = `${route?.base_label}/${route?.protocol}/${route?.capture_label}`
+    const artifacts = Array.isArray(route?.artifacts) ? route.artifacts : []
+    if (
+      route?.expected !== 1
+      || route?.started !== 1
+      || route?.finished !== 1
+      || (route?.errors || []).length
+      || artifacts.length !== 1
+      || artifacts[0]?.verified !== true
+    ) {
+      failures.push(`${label} raw capture lifecycle is not exact`)
+      continue
+    }
+    const artifact = artifacts[0]
+    let bodyOpened
+    let metadataOpened
+    let metadata
+    try {
+      bodyOpened = openedManifestArtifact(runDirectory, artifact.body_file, `${label} body`)
+      metadataOpened = openedManifestArtifact(
+        runDirectory,
+        artifact.metadata_file,
+        `${label} metadata`,
+      )
+      metadata = JSON.parse(metadataOpened.raw.toString('utf8'))
+    } catch (error) {
+      failures.push(String(error?.message || error))
+      continue
+    }
+    if (
+      Number(metadata?.schema_version) !== 1
+      || metadata?.capture_layer !== pairedCaptureLayer
+      || metadata?.capture_semantics !== pairedCaptureSemantics
+      || bodyOpened.sha256 !== artifact.body_sha256
+      || bodyOpened.bytes !== Number(artifact.body_bytes)
+      || metadataOpened.sha256 !== artifact.metadata_sha256
+      || metadata?.base_label !== route.base_label
+      || metadata?.protocol !== route.protocol
+      || metadata?.capture_label !== route.capture_label
+      || metadata?.response?.body_file !== artifact.body_file
+      || metadata?.response?.body_sha256 !== bodyOpened.sha256
+      || Number(metadata?.response?.body_bytes) !== bodyOpened.bytes
+      || Number(metadata?.response?.status_code) !== 200
+      || metadata?.response?.capture_error_type
+      || metadata?.request?.body_sha256 !== artifact.request_body_sha256
+      || !validSha256(metadata?.request?.body_sha256)
+      || metadata?.request?.prepared_payload_body_sha256
+        !== artifact.prepared_payload_body_sha256
+      || metadata?.request?.prepared_payload_canonical_body_sha256
+        !== artifact.prepared_payload_canonical_body_sha256
+      || metadata?.request?.prepared_payload_body_sha256
+        !== metadata?.request?.payload?.body_sha256
+      || metadata?.request?.prepared_payload_canonical_body_sha256
+        !== metadata?.request?.payload?.canonical_body_sha256
+      || !validSha256(metadata?.request?.prepared_payload_body_sha256)
+      || !validSha256(
+        metadata?.request?.prepared_payload_canonical_body_sha256,
+      )
+      || !captureHeadersAreSanitized(metadata?.request?.headers)
+      || !captureHeadersAreSanitized(metadata?.response?.headers)
+      || metadata?.request?.payload?.model !== value?.requested_model
+      || metadata?.request?.url !== `${value?.bases?.[route.base_label]}${pairedApiProtocolRoutes[route.protocol]}`
+    ) {
+      failures.push(`${label} raw body/metadata/request/response binding is invalid`)
+    }
+    const streamRoundMatch = String(route.capture_label).match(
+      /^stream-flow-round([123])$/,
+    )
+    const nonstreamRoundMatch = String(route.capture_label).match(
+      /^nonstream-flow-round([123])$/,
+    )
+    if (!streamRoundMatch && !nonstreamRoundMatch) continue
+    if (nonstreamRoundMatch && route.protocol !== 'responses') {
+      failures.push(`${label} nonstream raw capture is not Responses`)
+      continue
+    }
+    const mode = streamRoundMatch ? 'stream' : 'nonstream'
+    const roundMatch = streamRoundMatch || nonstreamRoundMatch
+    const roundIndex = Number(roundMatch[1]) - 1
+    const flow = value?.flows?.[route.base_label]?.[route.protocol]?.[mode]
+    const round = flow?.rounds?.[roundIndex]
+    const request = flow?.requests?.[roundIndex]
+    let parsed
+    try {
+      parsed = mode === 'stream'
+        ? collectProtocolStream(route.protocol, bodyOpened.raw, label)
+        : collectResponsesNonstream(bodyOpened.raw, label)
+    } catch (error) {
+      failures.push(String(error?.message || error))
+      continue
+    }
+    if (mode === 'stream') {
+      failures.push(...validateRawChannelOrder(parsed, roundIndex, label))
+    }
+    if (
+      parsed.postTerminalEvents !== 0
+      || parsed.terminal !== true
+      || canonicalJson(parsed.terminalReasons) !== canonicalJson(round?.terminals)
+      || sha256Text(parsed.reasoning) !== round?.reasoning_sha256
+      || parsed.reasoning.length !== Number(round?.reasoning_chars)
+      || sha256Text(parsed.content) !== round?.content_sha256
+      || parsed.content.length !== Number(round?.content_chars)
+      || metadata?.request?.payload?.body_sha256 !== request?.body_sha256
+      || metadata?.request?.payload?.canonical_body_sha256 !== request?.canonical_body_sha256
+      || canonicalJson(metadata?.request?.payload?.tool_contracts)
+        !== canonicalJson(request?.tool_contracts)
+      || canonicalJson(metadata?.request?.payload?.tool_history_linkage)
+        !== canonicalJson(request?.tool_history_linkage)
+    ) {
+      failures.push(`${label} raw bytes do not reproduce the public flow/request evidence`)
+    }
+    const expectedCall = roundIndex < 2 ? round?.tool_calls?.[0] : null
+    const parsedCall = parsed.toolCalls?.[0]
+    if (
+      expectedCall
+      && (
+        parsed.toolCalls.length !== 1
+        || String(parsedCall?.id || '') !== String(expectedCall?.id || '')
+        || parsedCall?.name !== expectedCall?.name
+        || canonicalJson(normalizedToolArguments(parsedCall?.arguments))
+          !== canonicalJson(expectedCall?.arguments)
+      )
+    ) {
+      failures.push(`${label} raw tool call does not match the public exact tool call`)
+    }
+    if (!expectedCall && parsed.toolCalls.length) {
+      failures.push(`${label} raw final answer unexpectedly emitted a tool call`)
+    }
+  }
+  return failures
+}
+
+export function validatePairedApiEvidence(result) {
+  const failures = []
+  const artifact = result?.pairedApiArtifact
+  const claimsDualSurface = result?.surfaceStatus === 'dual_surface_attested'
+  if (!artifact) {
+    if (claimsDualSurface) {
+      failures.push('dual-surface status was claimed without a separate raw API artifact')
+    }
+    return failures
+  }
+  let reopened
+  try {
+    reopened = readPrivateExternalJson(artifact.path, 'Paired raw API proof artifact')
+  } catch (error) {
+    return [String(error?.message || error)]
+  }
+  if (
+    reopened.sha256 !== artifact.sha256
+    || canonicalJson(reopened.value) !== canonicalJson(artifact.value)
+    || reopened.opened_nofollow !== true
+    || reopened.nlink !== 1
+  ) {
+    failures.push('paired raw API metadata does not match its safely reopened artifact bytes')
+  }
+  const value = reopened.value || {}
+  if (
+    value.schema !== 'vmlx-agentic-protocol-matrix-v2'
+    || Number(value.schema_version) !== 2
+    || value.pass !== true
+    || value.run_id !== result?.run_id
+    || value.requested_model !== result?.servedModel
+    || path.resolve(value.repo_root || '') !== realpathSync(repoDir)
+    || value.second_tool_choice !== 'explicit'
+    || !exactStringSet(value.protocols, expectedPairedApiProtocols)
+    || !exactStringSet(value.modes, expectedPairedApiModes)
+  ) {
+    failures.push('paired API artifact is not the exact passing vmlx-agentic-protocol-matrix-v2 run')
+  }
+  for (const [name, passed] of Object.entries(value?.checks || {})) {
+    if (name === 'abort_recovery_skipped') continue
+    if (passed !== true) failures.push(`paired API matrix check failed: ${name}`)
+  }
+  let directOrigin = ''
+  let gatewayOrigin = ''
+  let uiOrigin = ''
+  try {
+    directOrigin = new URL(value?.bases?.direct).origin
+    gatewayOrigin = new URL(value?.bases?.gateway).origin
+    uiOrigin = new URL(result?.baseUrl || result?.server?.baseUrl).origin
+  } catch {
+    failures.push('paired API matrix direct/gateway origins are invalid')
+  }
+  if (
+    directOrigin !== uiOrigin
+    || !gatewayOrigin
+    || gatewayOrigin === directOrigin
+  ) {
+    failures.push('paired API direct/gateway origins are not bound to the UI session')
+  }
+  failures.push(...validateMatrixIdentity(value, result))
+  const flowBases = value?.flows || {}
+  if (!exactStringSet(Object.keys(flowBases), ['direct', 'gateway'])) {
+    failures.push('paired API matrix flow bases are not exactly direct+gateway')
+  } else {
+    for (const baseLabel of ['direct', 'gateway']) {
+      if (!exactStringSet(Object.keys(flowBases[baseLabel] || {}), expectedPairedApiProtocols)) {
+        failures.push(`${baseLabel} matrix protocols are incomplete`)
+        continue
+      }
+      for (const protocol of expectedPairedApiProtocols) {
+        const modes = flowBases[baseLabel]?.[protocol] || {}
+        if (!exactStringSet(Object.keys(modes), expectedPairedApiModes)) {
+          failures.push(`${baseLabel}/${protocol} matrix modes are incomplete`)
+          continue
+        }
+        for (const mode of expectedPairedApiModes) {
+          failures.push(...validateMatrixFlow(
+            modes[mode],
+            protocol,
+            mode,
+            `${baseLabel}/${protocol}/${mode}`,
+            value.repo_root,
+          ))
+        }
+      }
+    }
+  }
+  for (const protocol of expectedPairedApiProtocols) {
+    for (const mode of expectedPairedApiModes) {
+      const directRequests = flowBases?.direct?.[protocol]?.[mode]?.requests || []
+      const gatewayRequests = flowBases?.gateway?.[protocol]?.[mode]?.requests || []
+      if (
+        directRequests.length !== 3
+        || gatewayRequests.length !== 3
+        || directRequests.some((request, index) => (
+          !validSha256(request?.canonical_body_sha256)
+          || request.canonical_body_sha256
+            !== gatewayRequests[index]?.canonical_body_sha256
+        ))
+      ) {
+        failures.push(
+          `${protocol}/${mode} direct and gateway canonical request bodies are not byte-parity equivalent`,
+        )
+      }
+    }
+  }
+  failures.push(...validateRawMatrixCapture(value, result))
+  if (claimsDualSurface && !isServerRequestCorrelationVerified(result)) {
+    failures.push('dual-surface status was claimed without request/cache/settings correlation')
+  }
+  return failures
+}
+
+export function applyTopLevelCorrelationStatus(
+  result,
+  { rendererFailed = false } = {},
+) {
+  if (rendererFailed) {
+    result.status = 'fail'
+    result.pass = false
+    result.surfaceStatus = 'partial_ui_only'
+    return result
+  }
+  const correlationVerified = isServerRequestCorrelationVerified(result)
+  const pairedArtifactPresent = Boolean(result?.pairedApiArtifact)
+  result.status = correlationVerified && pairedArtifactPresent ? 'pass' : 'partial'
+  result.pass = correlationVerified && pairedArtifactPresent
+  result.surfaceStatus = result?.pairedApiArtifact
+    ? correlationVerified
+      ? 'dual_surface_attested'
+      : 'partial_dual_surface_uncorrelated'
+    : 'partial_ui_only'
+  return result
+}
+
+export function applyAssertionFailureStatus(result, error) {
+  result.status = 'fail'
+  result.pass = false
+  result.failureStage = result.failureStage || 'release_assertions'
+  result.assertionFailures = error?.failures || [
+    error?.message || String(error),
+  ]
+  return result
+}
+
 function assertResult(result) {
   const failures = []
   const chat = result.chat || {}
+  const healthBeforeBinding = result.healthProvenance?.before?.binding || {}
+  const healthAfterBinding = result.healthProvenance?.after?.binding || {}
+  const expectedTurns = expectedUiTurnCount(result)
+  const sessionConfig = result.session?.effective_config || {}
   const cacheTelemetryExpected = (
-    Array.isArray(result.serverCommand)
-    && !result.serverCommand.includes('--disable-prefix-cache')
-    && !result.serverCommand.includes('--no-continuous-batching')
+    sessionConfig.enablePrefixCache !== false
+    && sessionConfig.continuousBatching !== false
   )
+  if (result.format !== proofFormat) failures.push(`expected proof format ${proofFormat}`)
+  if (result.bundleGenerationContract?.template?.usable !== true) {
+    failures.push(
+      result.bundleGenerationContract?.template?.warning
+      || 'bundle exposes no usable chat template',
+    )
+  }
+  if (!result.run_id) failures.push('stable run_id was not recorded')
+  if (result.uiStartControl?.clicked !== true) failures.push('session was not started through the visible Electron local Start control')
+  if (result.uiStartControl?.label !== 'Start') failures.push('clicked control was not the local-session Start control')
+  if (result.uiStartControl?.sessionStatusAfter !== 'running') {
+    failures.push(`UI-started session did not reach running state: ${result.uiStartControl?.sessionStatusAfter || 'unknown'}`)
+  }
   if (!result.server?.models?.data?.length) failures.push('real server /v1/models returned no models')
-  if (result.remoteSessionStarted !== true) failures.push('remote session did not start through Electron UI API')
+  if (result.localSessionStarted !== true) failures.push('local model session did not start through the Electron UI control')
   if (!chat.turns?.some((m) => m.role === 'assistant' && m.content)) failures.push('assistant content is empty')
   if (!chat.finalVisibleText) failures.push('final visible assistant content is empty')
   const visibleAssistantTurnsComplete = visibleAssistantAfterEachUser(chat.turns)
@@ -655,9 +5032,103 @@ function assertResult(result) {
   if ((chat.reasoningNumericRunCount || 0) > 0) {
     failures.push('numeric/list-like garbage leaked into reasoning segments')
   }
-  if ((result.eventCounts?.complete || 0) < 2) failures.push('expected two completed UI chat turns')
+  if ((result.eventCounts?.complete || 0) < expectedTurns) {
+    failures.push(`expected ${expectedTurns} completed UI chat turns`)
+  }
   if ((result.eventCounts?.stream || 0) < 1) failures.push('expected streaming events from real model')
-  if ((chat.turns?.length || 0) < 4) failures.push(`expected at least four persisted chat messages, got ${chat.turns?.length || 0}`)
+  if ((chat.turns?.length || 0) < expectedTurns * 2) {
+    failures.push(`expected at least ${expectedTurns * 2} persisted chat messages, got ${chat.turns?.length || 0}`)
+  }
+  if (
+    !Array.isArray(result.messageEventTrace)
+    || result.messageEventTrace.length < expectedTurns
+  ) {
+    failures.push('per-message reasoning/content/tool/terminal stream trace is incomplete')
+  }
+  const tracedTerminalMessages = new Set(
+    (result.messageEventTrace || [])
+      .filter((row) => Array.isArray(row?.events) && row.events.some((event) => event?.event === 'terminal'))
+      .map((row) => row.messageId),
+  )
+  if (tracedTerminalMessages.size < expectedTurns) {
+    failures.push(`expected a terminal event for each of ${expectedTurns} UI turns`)
+  }
+  if (!result.healthProvenance?.before?.raw || !result.healthProvenance?.after?.raw) {
+    failures.push('full /health provenance snapshots were not retained before and after')
+  }
+  if (!healthBeforeBinding.backend_pid || !healthAfterBinding.backend_pid) failures.push('/health runtime PID provenance is missing')
+  for (const field of [
+    'server_module_sha256',
+    'package_init_sha256',
+    'python_source_tree_sha256',
+    'python_executable_fingerprint_sha256',
+  ]) {
+    if (
+      !validSha256(healthBeforeBinding.runtime_source_hashes?.[field])
+      || !validSha256(healthAfterBinding.runtime_source_hashes?.[field])
+    ) failures.push(`/health runtime source hash provenance is invalid: ${field}`)
+  }
+  for (const field of [
+    'server_module_sha256',
+    'package_init_sha256',
+    'python_source_tree_sha256',
+  ]) {
+    if (
+      healthBeforeBinding.runtime_source_hashes?.[field]
+        !== result.gitProvenance?.before?.[field]
+      || healthAfterBinding.runtime_source_hashes?.[field]
+        !== result.gitProvenance?.after?.[field]
+    ) failures.push(`/health runtime source does not match observed checkout: ${field}`)
+  }
+  for (const field of [
+    'python_source_file_count',
+    'python_source_read_error_count',
+  ]) {
+    if (
+      healthBeforeBinding[field] !== result.gitProvenance?.before?.[field]
+      || healthAfterBinding[field] !== result.gitProvenance?.after?.[field]
+    ) failures.push(`/health runtime source count does not match observed checkout: ${field}`)
+  }
+  if (
+    !validSha256(healthBeforeBinding.model_bundle_fingerprint_sha256)
+    || !validSha256(healthAfterBinding.model_bundle_fingerprint_sha256)
+  ) failures.push('/health model-bundle fingerprint provenance is missing')
+  if (
+    !validSha256(healthBeforeBinding.cache_topology_fingerprint_sha256)
+    || !validSha256(healthAfterBinding.cache_topology_fingerprint_sha256)
+  ) failures.push('/health cache-topology fingerprint provenance is missing')
+  if (
+    healthBeforeBinding.backend_pid !== healthAfterBinding.backend_pid
+    || healthBeforeBinding.backend_pid !== result.backend?.pid
+  ) failures.push('backend PID changed or does not match /health runtime provenance')
+  if (
+    !validSha256(healthBeforeBinding.fingerprint_sha256)
+    || healthBeforeBinding.fingerprint_sha256 !== healthAfterBinding.fingerprint_sha256
+    || healthBeforeBinding.fingerprint_sha256
+      !== result.backend_identity_fingerprint_sha256
+  ) failures.push('canonical backend identity fingerprint is missing or changed')
+  if (
+    healthBeforeBinding.model_bundle_fingerprint_sha256
+    !== healthAfterBinding.model_bundle_fingerprint_sha256
+  ) failures.push('model-bundle fingerprint changed during the UI proof')
+  if (
+    healthBeforeBinding.cache_topology_fingerprint_sha256
+    !== healthAfterBinding.cache_topology_fingerprint_sha256
+  ) failures.push('cache-topology fingerprint changed during the UI proof')
+  if (
+    !result.gitProvenance?.before?.commit
+    || !result.gitProvenance?.before?.tree
+    || !result.gitProvenance?.after?.commit
+    || !result.gitProvenance?.after?.tree
+  ) failures.push('exact Git commit/tree provenance is missing')
+  if (result.gitProvenance?.before?.dirty || result.gitProvenance?.after?.dirty) {
+    failures.push('real UI proof requires one clean source checkout')
+  }
+  if (
+    result.gitProvenance?.before?.commit !== result.gitProvenance?.after?.commit
+    || result.gitProvenance?.before?.tree !== result.gitProvenance?.after?.tree
+    || result.gitProvenance?.before?.harness_sha256 !== result.gitProvenance?.after?.harness_sha256
+  ) failures.push('source or UI proof harness changed during the live run')
   if (result.sendErrors?.length) failures.push(`renderer send errors: ${result.sendErrors.join('; ')}`)
   if (cacheTelemetryExpected && (result.cache?.cacheHitTokens || 0) <= 0) failures.push('expected real cache-hit token telemetry after repeated UI turns')
   if (cacheTelemetryExpected && !result.provenSurfaces?.includes('cache_hit_telemetry')) {
@@ -683,8 +5154,14 @@ function assertResult(result) {
   ) {
     failures.push('requested Responses API cache controls but proof did not record responses_cache_detail_usage surface')
   }
-  if (!result.provenSurfaces?.includes('generation_defaults_applied')) {
-    failures.push('live proof did not record model-owned generation defaults / request max_tokens resolution')
+  if (!result.provenSurfaces?.includes('generation_defaults_visible_ui')) {
+    failures.push('live proof did not record visible model-owned generation defaults')
+  }
+  if (
+    isServerRequestCorrelationVerified(result)
+    && !result.provenSurfaces?.includes('generation_defaults_applied')
+  ) {
+    failures.push('server-correlated request did not record resolved generation defaults')
   }
   if (!result.provenSurfaces?.includes('language_leak_check')) {
     failures.push('live proof did not record clean visible/reasoning language leak check')
@@ -704,6 +5181,17 @@ function assertResult(result) {
   if (result.requestedVideo === true && !result.provenSurfaces?.includes('video_where_supported')) {
     failures.push('requested real video media but proof did not record video_where_supported surface')
   }
+  failures.push(...validateRenderedDomEvidence(result))
+  failures.push(...validateReasoningEvidence(result, result.reasoningExpectation || 'optional'))
+  failures.push(...validateExactToolLoopEvidence(result))
+  failures.push(...validateGenerationDefaultsEvidence(result))
+  failures.push(...validateServerCacheEvidence(result))
+  failures.push(...validateUiRuntimeProvenance(result))
+  failures.push(...validateModelBundleBinding(result))
+  failures.push(...validatePairedApiEvidence(result))
+  if (result.status === 'pass' && !isServerRequestCorrelationVerified(result)) {
+    failures.push('top-level pass was claimed without request/cache/settings correlation')
+  }
   if (failures.length) {
     const error = new Error(`Real UI live-model proof failed:\n- ${failures.join('\n- ')}`)
     error.failures = failures
@@ -711,13 +5199,19 @@ function assertResult(result) {
   }
 }
 
-function deriveProvenSurfaces(result) {
+export function deriveProvenSurfaces(result) {
   const surfaces = new Set()
   const chat = result.chat || {}
   const health = result.server?.health || {}
-  if (result.uiLaunchMode === 'installed-app') {
+  if (
+    result.uiLaunchMode === 'installed-app'
+    && validateUiRuntimeProvenance(result).length === 0
+  ) {
     surfaces.add('installed_app_ui')
-  } else if (result.appLogTail?.length) {
+  } else if (
+    result.uiLaunchMode === 'electron-dev'
+    && validateUiRuntimeProvenance(result).length === 0
+  ) {
     surfaces.add('current_electron_dev_build')
   }
   if (health.status === 'healthy' && health.model_loaded === true) surfaces.add('real_loaded_model')
@@ -730,7 +5224,13 @@ function deriveProvenSurfaces(result) {
     && chat.reasoningKoreanLeakCount === 0
     && chat.reasoningNumericRunCount === 0
   ) surfaces.add('language_leak_check')
-  if ((result.cache?.cacheHitTokens || 0) > 0 && cacheReconstructionClean(result)) {
+  surfaces.add('electron_ui')
+  if (
+    result.requestedServerCacheControls === true
+    && isCacheRequestCorrelationVerified(result)
+    && validateRequestCorrelatedCacheEvidence(result).length === 0
+    && cacheReconstructionClean(result)
+  ) {
     surfaces.add('cache_hit_telemetry')
   }
   if (hasNativeCacheStatus(health)) surfaces.add('native_cache_status')
@@ -745,26 +5245,33 @@ function deriveProvenSurfaces(result) {
   if (responsesCacheDetailUsageSeen(result)) {
     surfaces.add('responses_cache_detail_usage')
   }
-  if (generationDefaultsAppliedSeen(result)) {
+  if (validateGenerationDefaultsEvidence(result).length === 0) {
+    surfaces.add('generation_defaults_visible_ui')
+  }
+  if (
+    isServerRequestCorrelationVerified(result)
+    && generationDefaultsAppliedSeen(result)
+  ) {
     surfaces.add('generation_defaults_applied')
   }
   if (liveSpeedFloorSeen(result)) {
     surfaces.add('live_speed_floor')
   }
+  const expectedToolCalls = expectedUiToolCallCount(result)
   if (
-    (result.eventCounts?.tool || 0) >= 3
-    && namedToolResultCount(result) >= 2
-    && namedToolErrorCount(result) === 0
-    && namedToolProbeSemanticsOk(result)
+    expectedToolCalls > 0
+    && validateExactToolLoopEvidence(result).length === 0
   ) {
-    surfaces.add('long_tool_loop')
+    surfaces.add('tool_loop')
+    if (expectedToolCalls >= 2) surfaces.add('long_tool_loop')
   }
   if (
-    ((result.eventCounts?.reasoningDone || 0) > 0 || (result.persistedReasoningCount || 0) > 0)
-    && (result.requestedEnableThinking !== true || visibleAssistantAfterEachUser(chat.turns))
+    validateReasoningEvidence(result, result.reasoningExpectation || 'optional').length === 0
+    && ((result.eventCounts?.reasoningDone || 0) > 0 || (result.persistedReasoningCount || 0) > 0)
   ) {
     surfaces.add('reasoning_display')
   }
+  if (validateRenderedDomEvidence(result).length === 0) surfaces.add('rendered_dom')
   if (result.chatOverrides?.builtinToolsEnabled === result.requestedBuiltinTools) {
     surfaces.add('settings_persistence')
   }
@@ -784,6 +5291,19 @@ function deriveProvenSurfaces(result) {
   }
   if (result.media?.videoVerified === true) {
     surfaces.add('video_where_supported')
+  }
+  const correlationVerified = isServerRequestCorrelationVerified(result)
+  if (
+    result.pairedApiArtifact
+    && validatePairedApiEvidence({
+      ...result,
+      surfaceStatus: correlationVerified
+        ? 'dual_surface_attested'
+        : 'partial_dual_surface_uncorrelated',
+    }).length === 0
+  ) {
+    surfaces.add('separate_raw_api')
+    if (correlationVerified) surfaces.add('dual_surface')
   }
   return [...surfaces].sort()
 }
@@ -933,34 +5453,7 @@ function responsesCacheDetailUsageSeen(result) {
 }
 
 function generationDefaultsAppliedSeen(result) {
-  const chatOverrides = result?.chatOverrides && typeof result.chatOverrides === 'object'
-    ? result.chatOverrides
-    : {}
-  const expectedSampling = result?.requestContract?.samplingOverrides || {}
-  for (const field of ['temperature', 'topP', 'topK', 'minP', 'repeatPenalty']) {
-    if (expectedSampling[field] != null) {
-      if (chatOverrides[field] !== expectedSampling[field]) return false
-    } else if (chatOverrides[field] != null) {
-      return false
-    }
-  }
-  const requestMaxTokens = result?.requestContract?.requestMaxTokens
-  const overrideMaxTokens = chatOverrides.maxTokens
-  if (
-    typeof requestMaxTokens === 'number'
-    && typeof overrideMaxTokens === 'number'
-    && requestMaxTokens !== overrideMaxTokens
-  ) {
-    return false
-  }
-  const logText = Array.isArray(result?.serverLogTail)
-    ? result.serverLogTail.map((line) => String(line)).join('\n')
-    : ''
-  if (!logText.includes('Resolved sampling kwargs route=')) return false
-  if (!logText.includes('kwargs=') || !logText.includes('max_tokens')) return false
-  if (result?.rendererWireApi === 'responses') return logText.includes('/v1/responses')
-  if (result?.rendererWireApi === 'chat') return logText.includes('/v1/chat/completions')
-  return Boolean(result?.rendererWireApi)
+  return validateGenerationDefaultsEvidence(result).length === 0
 }
 
 function cacheReconstructionClean(result) {
@@ -1098,52 +5591,336 @@ function namedToolProbeSemanticsOk(result) {
   )
 }
 
+export function parseResolvedSamplingKwargs(lines) {
+  const records = []
+  for (const line of Array.isArray(lines) ? lines : []) {
+    const text = String(line)
+    const marker = text.indexOf('Resolved sampling kwargs route=')
+    const kwargsMarker = text.indexOf(' kwargs=', marker)
+    if (marker < 0 || kwargsMarker < 0) continue
+    const routeModel = text.slice(marker, kwargsMarker)
+    const routeModelMatch = routeModel.match(
+      /^Resolved sampling kwargs route=(\S+)\s+model=(.*?)(?:\s+proof_request_id=(\S+)\s+request_id=(\S+)\s+message_id=(\S+))?$/,
+    )
+    if (!routeModelMatch) continue
+    const raw = text.slice(kwargsMarker + ' kwargs='.length).trim()
+    const values = {}
+    for (const key of [
+      'temperature',
+      'top_p',
+      'top_k',
+      'min_p',
+      'repetition_penalty',
+      'max_tokens',
+      'enable_thinking',
+    ]) {
+      const match = raw.match(new RegExp(`['"]${key}['"]\\s*:\\s*([^,}]+)`))
+      if (!match) continue
+      const token = match[1].trim().replace(/^['"]|['"]$/g, '')
+      if (/^(?:true|false)$/i.test(token)) values[key] = /^true$/i.test(token)
+      else if (/^(?:none|null)$/i.test(token)) values[key] = null
+      else {
+        const number = Number(token)
+        values[key] = Number.isFinite(number) ? number : token
+      }
+    }
+    const record = {
+      route_model: routeModel,
+      route: routeModelMatch[1],
+      model: routeModelMatch[2],
+      raw,
+      values,
+    }
+    if (routeModelMatch[3]) {
+      record.proof_request_id = routeModelMatch[3]
+      record.request_id = routeModelMatch[4]
+      record.message_id = routeModelMatch[5]
+      record.correlation_source = 'server_emitted'
+    }
+    records.push(record)
+  }
+  return records
+}
+
 function countMatches(text, regex) {
   return (text.match(regex) || []).length
 }
 
-function maxRecursiveNumber(value, keyPattern) {
-  let best = 0
-  const visit = (node, key = '') => {
-    if (typeof node === 'number' && keyPattern.test(key)) {
-      best = Math.max(best, node)
-    } else if (Array.isArray(node)) {
-      node.forEach((item) => visit(item, key))
-    } else if (node && typeof node === 'object') {
-      for (const [childKey, childValue] of Object.entries(node)) {
-        visit(childValue, childKey)
-      }
-    }
-  }
-  visit(value)
-  return best
-}
-
 async function main() {
-  const runDir = mkdtempSync(path.join(tmpdir(), 'vmlx-real-ui-live-'))
+  if (!modelPath) {
+    throw new Error('Set VMLINUX_REAL_UI_MODEL_PATH or VMLX_REAL_UI_MODEL_PATH')
+  }
+  if (requestMaxPromptTokens != null) {
+    throw new Error(
+      'The real UI proof cannot apply a per-chat max prompt/context override through Chat Settings; '
+      + 'remove VMLINUX_REAL_UI_MAX_PROMPT_TOKENS/VMLX_REAL_UI_MAX_PROMPT_TOKENS '
+      + 'instead of recording an unapplied setting',
+    )
+  }
+  if ((pairedApiHoldSeconds > 0 || releaseSentinelPath) && !pairedApiArtifactPath) {
+    throw new Error(
+      'A paired API hold/release sentinel requires VMLINUX_REAL_UI_PAIRED_API_ARTIFACT '
+      + 'to name the separate private raw-API artifact that will be written during the hold',
+    )
+  }
+  if (releaseSentinelPath && !releaseSentinelNonce) {
+    throw new Error(
+      'VMLINUX_REAL_UI_RELEASE_SENTINEL requires a nonempty VMLINUX_REAL_UI_NONCE',
+    )
+  }
+  const attachLifecycleFailures = validateAttachOnlyLifecycle({
+    cdpUrl: attachCdpUrl,
+    electronPid: expectedElectronPid,
+    owner: lifecycleOwner,
+    teardownAllowed: allowTeardown,
+  })
+  if (
+    releaseSentinelPath
+    && (
+      !releaseRunIntentPath
+      || !validSha256(releaseRunIntentSha256)
+      || !Number.isInteger(releaseActivePhaseIndex)
+      || releaseActivePhaseIndex < 0
+      || releaseActivePhaseIndex >= ownedRunIntentPhaseContract.length
+      || !releaseSessionAttestationPath
+      || !Number.isInteger(releaseGatewayPid)
+      || releaseGatewayPid <= 0
+      || !releaseGatewayBaseUrl
+      || !pairedCacheArtifactPath
+      || attachLifecycleFailures.length > 0
+    )
+  ) {
+    throw new Error(
+      'An orchestrated release sentinel requires '
+      + 'VMLINUX_REAL_UI_RUN_INTENT_PATH, VMLINUX_REAL_UI_RUN_INTENT_SHA256, '
+      + 'VMLINUX_REAL_UI_ACTIVE_PHASE_INDEX, VMLINUX_REAL_UI_SESSION_ATTESTATION_PATH, '
+      + 'VMLINUX_REAL_UI_GATEWAY_PID, VMLINUX_REAL_UI_GATEWAY_BASE_URL, '
+      + 'VMLINUX_REAL_UI_PAIRED_CACHE_ARTIFACT, '
+      + 'VMLINUX_REAL_UI_ATTACH_CDP_URL, VMLINUX_REAL_UI_EXPECTED_ELECTRON_PID, '
+      + 'VMLINUX_REAL_UI_LIFECYCLE_OWNER=parent, and VMLINUX_REAL_UI_ALLOW_TEARDOWN=0'
+      + (
+        attachLifecycleFailures.length
+          ? `: ${attachLifecycleFailures.join('; ')}`
+          : ''
+      ),
+    )
+  }
+  if (attachCdpUrl && !releaseSentinelPath) {
+    throw new Error('Attach-only Electron mode is reserved for an orchestrated release run')
+  }
+  if (Boolean(reuseSessionId) !== Boolean(reuseSessionAttestationPath)) {
+    throw new Error(
+      'Owned UI session reuse requires both the exact session ID and prior '
+      + 'session-attestation path',
+    )
+  }
+  if (
+    reuseSessionId
+    && (
+      !releaseSentinelPath
+      || !attachCdpUrl
+      || lifecycleOwner !== 'parent'
+      || allowTeardown
+    )
+  ) {
+    throw new Error(
+      'Owned UI session reuse is restricted to attach-only parent lifecycle phases',
+    )
+  }
+  if (
+    builtinToolsEnabled
+    && (
+      !Number.isInteger(toolResultMaxChars)
+      || toolResultMaxChars < 500
+      || toolResultMaxChars > 50_000
+      || toolResultMaxChars % 500 !== 0
+    )
+  ) {
+    throw new Error(
+      'Tool Result Limit must be an exact visible Chat Settings slider value '
+      + '(integer 500..50000 in steps of 500)',
+    )
+  }
+  const privateCacheAttestationArgs = privateCacheAttestationSessionArgs(
+    privateCacheAttestationTokenFile,
+  )
+  const proofDir = await resolvePrivateProofDir()
+  const gitBefore = await captureGitProvenance()
+  const bundleGenerationContract = captureBundleGenerationContract(modelPath)
+  const releaseManifest = installedAppPath
+    ? readExternalReleaseManifest(installedReleaseManifestPath)
+    : null
+  if (installedAppPath && !releaseManifest) {
+    throw new Error(
+      'Installed-app proof requires VMLINUX_REAL_UI_RELEASE_MANIFEST pointing to an external release manifest',
+    )
+  }
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'vmlx-real-ui-userdata-'))
-  const workingDirectory = process.env.VMLINUX_REAL_UI_WORKING_DIRECTORY
+  const configuredWorkingDirectory = process.env.VMLINUX_REAL_UI_WORKING_DIRECTORY
     || process.env.VMLX_REAL_UI_WORKING_DIRECTORY
+    || ''
+  const workingDirectory = configuredWorkingDirectory
     || mkdtempSync(path.join(tmpdir(), 'vmlx-real-ui-tools-'))
   mkdirSync(workingDirectory, { recursive: true })
-  const proofDir = path.join(repoDir, 'docs', 'internal', 'agent-notes')
-  mkdirSync(proofDir, { recursive: true })
+  for (const name of ['real_ui_tool_probe_1.txt', 'real_ui_tool_probe_2.txt']) {
+    rmSync(path.join(workingDirectory, name), { force: true })
+  }
 
-  const serverPort = Number(process.env.VMLINUX_REAL_UI_SERVER_PORT || await freePort())
-  const debugPort = await freePort()
+  const serverPort = Number(
+    process.env.VMLINUX_REAL_UI_SERVER_PORT
+    || process.env.VMLX_REAL_UI_SERVER_PORT
+    || await freePort(),
+  )
+  const attachCdp = attachCdpUrl ? strictHttpUrl(attachCdpUrl) : null
+  if (
+    attachCdpUrl
+    && (
+      !attachCdp
+      || !['127.0.0.1', 'localhost', '[::1]'].includes(attachCdp.hostname)
+      || !attachCdp.port
+      || attachCdp.pathname !== '/'
+      || attachCdpUrl !== attachCdp.origin
+    )
+  ) {
+    throw new Error('VMLINUX_REAL_UI_ATTACH_CDP_URL must be an exact loopback HTTP(S) origin')
+  }
+  const debugPort = attachCdp ? Number(attachCdp.port) : await freePort()
   const baseUrl = `http://127.0.0.1:${serverPort}`
-  const server = startRealServer(serverPort, runDir)
+  let ownedRunIntent = null
+  let activeReleasePhase = null
+  let reuseSessionAttestation = null
+  if (releaseSentinelPath) {
+    ownedRunIntent = readPrivateExternalJson(
+      releaseRunIntentPath,
+      'Owned UI run intent',
+    )
+    const runIntentFailures = validateOwnedRunIntent(ownedRunIntent, {
+      runId,
+      nonce: releaseSentinelNonce,
+      expectedSha256: releaseRunIntentSha256,
+      expectedSourceCommit: gitBefore.commit,
+      expectedSourceTree: gitBefore.tree,
+      expectedUiHarnessSha256: sha256File(fileURLToPath(import.meta.url)),
+      activePhaseIndex: releaseActivePhaseIndex,
+      activeModel: servedModel,
+      activeModelBundlePath: modelPath,
+      expectedDirectBaseUrl: baseUrl,
+      expectedGatewayBaseUrl: releaseGatewayBaseUrl,
+    })
+    if (runIntentFailures.length) {
+      throw new Error(runIntentFailures.join('; '))
+    }
+    activeReleasePhase = ownedRunIntent.value.phase_plan[releaseActivePhaseIndex]
+    const reusePhase = [1, 2, 3, 4].includes(
+      activeReleasePhase.phase_index,
+    )
+    if (reusePhase !== Boolean(reuseSessionId)) {
+      throw new Error(
+        'Owned UI session reuse is required only for release phases 1-4',
+      )
+    }
+    if (reusePhase) {
+      reuseSessionAttestation = readPrivateExternalJson(
+        reuseSessionAttestationPath,
+        'Owned prior UI session attestation',
+      )
+      const failures = validateOwnedReuseSessionAttestation(
+        reuseSessionAttestation,
+        {
+          runId,
+          nonce: releaseSentinelNonce,
+          runIntentSha256: releaseRunIntentSha256,
+          sessionId: reuseSessionId,
+          activePhase: activeReleasePhase,
+          model: servedModel,
+          modelBundlePath: modelPath,
+          electronPid: expectedElectronPid,
+          cdpOrigin: attachCdp.origin,
+          gatewayPid: releaseGatewayPid,
+          gatewayBaseUrl: releaseGatewayBaseUrl,
+          sourceCommit: gitBefore.commit,
+          sourceTree: gitBefore.tree,
+        },
+      )
+      if (failures.length) throw new Error(failures.join('; '))
+    }
+  }
+  const uiActionProfile = activeReleasePhase?.ui_action_profile
+    || 'legacy-three-turn'
+  const uiTurnCount = Number(activeReleasePhase?.ui_turn_count || 3)
+  const apiActionProfile = activeReleasePhase?.api_action_profile
+    || 'full-agentic'
+  const primarySharedPrefix = [
+    'R18_PRIMARY_SHARED_PREFIX',
+    'cache-anchor-9f4b7d2a',
+    'Keep the response coherent and finite.',
+  ].join(' ')
+  const profilePromptOne = {
+    'primary-reasoning-render-store': [
+      primarySharedPrefix,
+      'Do not call tools.',
+      'Privately compare 47 times 19 with 46 times 20.',
+      'Reply exactly two lines: R18-PRIMARY-STORE-DONE and',
+      'The literal currency string is $43 and \\(47 \\times 19 = 893 < 920 = 46 \\times 20\\).',
+    ].join(' '),
+    'primary-tool-restart-probe': [
+      primarySharedPrefix,
+      'Call the built-in run_command tool exactly once.',
+      'Use it to create real_ui_tool_probe_1.txt containing exactly REAL_UI_LIVE_TOOL_ONE,',
+      'then read that same file.',
+      'After the tool result, include REAL_UI_LIVE_TOOL_ONE in the visible answer.',
+    ].join(' '),
+    'primary-history-paged-evict-refault': [
+      primarySharedPrefix,
+      'Do not call tools.',
+      'Reply exactly R18-PRIMARY-EVICT-REFAULT-DONE.',
+    ].join(' '),
+    'primary-restart-followup': [
+      primarySharedPrefix,
+      'Do not call tools.',
+      'Reply exactly R18-PRIMARY-RESTART-FOLLOWUP-DONE.',
+    ].join(' '),
+    'primary-tq-off-probe': [
+      primarySharedPrefix,
+      'Do not call tools.',
+      'Reply exactly R18-PRIMARY-TQ-OFF-DONE.',
+    ].join(' '),
+  }[uiActionProfile]
+  const selectedPromptOne = promptOneOverride || profilePromptOne || promptOne
+  const selectedPromptTwo = promptTwo
+  const selectedPromptThree = promptThree
   let app
   let cdp
   let appLogs = []
   let serverModels = {}
   let healthBefore = {}
+  let rendererResourceEvidence = {}
+  let cdpProcessBinding = null
+  let backendProcessBinding = null
   try {
-    serverModels = await waitForServer(baseUrl, server)
-    app = startUiApp(userDataDir, debugPort)
+    app = attachCdp
+      ? {
+          proc: null,
+          logs: [],
+          uiLaunchMode: 'electron-dev',
+          command: [],
+          appPath: '',
+          attached: true,
+          lifecycleOwner,
+          allowTeardown,
+          cdpUrl: attachCdp.origin,
+          expectedElectronPid,
+        }
+      : startUiApp(userDataDir, debugPort)
     appLogs = app.logs
 
     const target = await waitForTarget(debugPort, appLogs)
+    cdpProcessBinding = await captureListenerProcessBinding({
+      port: debugPort,
+      expectedRootPid: app.attached ? expectedElectronPid : app.proc.pid,
+      expectedHealthPid: null,
+      kind: 'electron-cdp',
+    })
     cdp = await CdpSocket.connect(target.webSocketDebuggerUrl)
     await cdp.send('Runtime.enable')
     await cdp.send('Page.enable')
@@ -1164,15 +5941,52 @@ async function main() {
         check();
       })
     `)
+    rendererResourceEvidence = await evaluate(cdp, `({
+      pageUrl: location.href,
+      scripts: [...document.scripts].map((script) => script.src).filter(Boolean),
+      resources: performance.getEntriesByType('resource').map((entry) => entry.name),
+    })`)
+    if (app.uiLaunchMode === 'electron-dev') {
+      const servedModules = await evaluate(cdp, `
+        (async () => {
+          const paths = ${JSON.stringify(rendererProofModulePaths)};
+          const records = [];
+          for (const relativePath of paths) {
+            const module = await import(
+              '/' + relativePath + '?raw&vmlx_proof=' + ${JSON.stringify(runId)}
+            );
+            if (typeof module.default !== 'string') {
+              throw new Error('Vite raw renderer module did not return source text: ' + relativePath);
+            }
+            records.push({
+              relative_path: relativePath,
+              source_text: module.default,
+            });
+          }
+          return records;
+        })()
+      `)
+      rendererResourceEvidence.servedModules = servedModules.map((record) => ({
+        relative_path: record.relative_path,
+        size_bytes: Buffer.byteLength(record.source_text),
+        sha256: sha256Text(record.source_text),
+      }))
+      rendererResourceEvidence.servedRendererSourceSha256 = canonicalSha256(
+        rendererResourceEvidence.servedModules,
+      )
+    }
 
-    healthBefore = await requestJson(`${baseUrl}/health`, 5000).catch((error) => ({ error: error.message }))
     let rendererResult
     try {
       rendererResult = await evaluate(cdp, `
       (async () => {
         const baseUrl = ${JSON.stringify(baseUrl)};
+        const modelPath = ${JSON.stringify(modelPath)};
         const servedModel = ${JSON.stringify(servedModel)};
         const wireApi = ${JSON.stringify(wireApi)};
+        const uiActionProfile = ${JSON.stringify(uiActionProfile)};
+        const uiTurnCount = ${JSON.stringify(uiTurnCount)};
+        const apiActionProfile = ${JSON.stringify(apiActionProfile)};
         const builtinToolsEnabled = ${JSON.stringify(builtinToolsEnabled)};
         const enableThinking = ${enableThinkingOverride === undefined ? 'undefined' : JSON.stringify(enableThinkingOverride)};
         const checkMedia = ${JSON.stringify(checkMedia)};
@@ -1183,8 +5997,11 @@ async function main() {
         const videoExpectRegex = ${JSON.stringify(videoExpectRegex)};
         const workingDirectory = ${JSON.stringify(workingDirectory)};
         const samplingOverrides = ${JSON.stringify(samplingOverrides)};
+        const independentBundleDefaults = ${JSON.stringify(bundleGenerationContract.defaults)};
         const endpoint = { host: '127.0.0.1', port: ${JSON.stringify(serverPort)} };
         const l2DiskStorageSeen = ${l2DiskStorageSeen.toString()};
+        const correlateTerminalResponseToCacheExecution =
+          ${correlateTerminalResponseToCacheExecution.toString()};
         const waitForCacheEndpointStorage = async (initial, sessionId) => {
           if (!${JSON.stringify(checkServerCacheControls)}) return initial;
           let latest = initial;
@@ -1198,6 +6015,42 @@ async function main() {
           }
           return latest;
         };
+        const processedRequestCount = (snapshot) =>
+          Number(snapshot?.scheduler_stats?.num_requests_processed || 0);
+        const waitForRequestCacheAdvance = async (initial, sessionId) => {
+          if (!${JSON.stringify(checkServerCacheControls)}) return initial;
+          const before = processedRequestCount(initial);
+          let latest = initial;
+          const started = Date.now();
+          while (Date.now() - started < 15000) {
+            latest = await window.api.cache.stats(endpoint, sessionId)
+              .catch((error) => ({ error: String(error?.message || error) }));
+            if (processedRequestCount(latest) > before) return latest;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          return latest;
+        };
+        const waitForResolvedTurnLog = async (sessionId, startIndex) => {
+          const expectedRoute = wireApi === 'responses'
+            ? '/v1/responses'
+            : '/v1/chat/completions';
+          const expectedMarker = 'Resolved sampling kwargs route='
+            + expectedRoute
+            + ' model=';
+          let latest = [];
+          const started = Date.now();
+          while (Date.now() - started < 10000) {
+            latest = await window.api.sessions.getLogs(sessionId).catch(() => []);
+            if (latest.slice(startIndex).some((line) => (
+              String(line).includes(expectedMarker)
+              && String(line).includes(' kwargs=')
+            ))) {
+              return latest;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          return latest;
+        };
         await new Promise((resolve, reject) => {
           const started = Date.now();
           const check = () => {
@@ -1207,52 +6060,874 @@ async function main() {
           };
           check();
         });
+        const waitFor = (predicate, label, timeoutMs = 30000) => new Promise((resolve, reject) => {
+          const started = Date.now();
+          const check = () => {
+            try {
+              const value = predicate();
+              if (value) return resolve(value);
+            } catch (_) {}
+            if (Date.now() - started > timeoutMs) {
+              return reject(new Error(
+                'Timed out waiting for ' + label + ': ' + document.body.innerText.slice(0, 4000)
+              ));
+            }
+            setTimeout(check, 100);
+          };
+          check();
+        });
+        const isVisible = (element) => {
+          if (!(element instanceof HTMLElement)) return false;
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && Number(style.opacity || 1) !== 0
+            && rect.width > 0
+            && rect.height > 0;
+        };
+        const domSamples = [];
+        const transientAlerts = [];
+        const observedAlertText = new Set();
+        const captureAlerts = () => {
+          for (const alert of document.querySelectorAll('[role="alert"]')) {
+            if (!isVisible(alert)) continue;
+            const text = (alert.textContent || '').replace(/\\s+/g, ' ').trim();
+            const isError = String(alert.className || '').includes('destructive')
+              || /(?:failed|error|exception|traceback|invalid)/i.test(text);
+            if (isError && text && !observedAlertText.has(text)) {
+              observedAlertText.add(text);
+              transientAlerts.push(text);
+            }
+          }
+        };
+        const alertObserver = new MutationObserver(captureAlerts);
+        alertObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+        const snapshotMessage = (messageId, cause) => {
+          const escaped = CSS.escape(String(messageId || ''));
+          const root = document.querySelector(
+            '[data-vmlx-proof-message-id="' + escaped + '"]'
+          );
+          if (!root) return null;
+          const answer = root.querySelector('[data-vmlx-proof-answer="true"]');
+          const reasoningNodes = [...root.querySelectorAll(
+            '[data-vmlx-proof-reasoning-content="true"]'
+          )];
+          const toolCards = [...root.querySelectorAll('[data-vmlx-proof-tool-card]')].map((card) => ({
+            kind: card.getAttribute('data-vmlx-proof-tool-card') || '',
+            name: card.getAttribute('data-vmlx-proof-tool-name') || '',
+            callId: card.getAttribute('data-vmlx-proof-tool-call-id') || '',
+            phase: card.getAttribute('data-vmlx-proof-tool-phase') || '',
+            visible: isVisible(card),
+            text: (card.textContent || '').replace(/\\s+/g, ' ').trim(),
+          }));
+          const currencyOccurrences = [];
+          if (answer) {
+            const walker = document.createTreeWalker(answer, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+              const text = node.nodeValue || '';
+              let offset = text.indexOf('$43');
+              while (offset >= 0) {
+                currencyOccurrences.push({
+                  text: '$43',
+                  insideKatex: Boolean(node.parentElement?.closest('.katex')),
+                });
+                offset = text.indexOf('$43', offset + 3);
+              }
+            }
+          }
+          return {
+            cause,
+            t: performance.now(),
+            messageId: String(messageId || ''),
+            role: root.getAttribute('data-vmlx-proof-message-role') || '',
+            visible: isVisible(root),
+            answerText: (answer?.textContent || '').trim(),
+            reasoningText: reasoningNodes
+              .map((node) => (node.textContent || '').trim())
+              .filter(Boolean)
+              .join('\\n'),
+            html: answer?.innerHTML || '',
+            katexCount: answer?.querySelectorAll('.katex').length || 0,
+            katexErrorCount: answer?.querySelectorAll('.katex-error').length || 0,
+            katexAnnotations: [...(answer?.querySelectorAll(
+              '.katex annotation[encoding="application/x-tex"]'
+            ) || [])].map((annotation) => annotation.textContent || ''),
+            currencyOccurrences,
+            toolCards,
+          };
+        };
+        const scheduleDomSample = (messageId, cause) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const sample = snapshotMessage(messageId, cause);
+            if (sample) domSamples.push(sample);
+            captureAlerts();
+          }));
+        };
         await window.api.engine.checkInstallation().catch(() => null);
         await window.api.chat.clearAllLocks().catch(() => null);
         const events = { stream: [], tool: [], reasoningDone: [], complete: [] };
-        const cleanup = [
-          window.api.chat.onStream((data) => events.stream.push({ t: performance.now(), ...data })),
-          window.api.chat.onToolStatus((data) => events.tool.push({ t: performance.now(), ...data })),
-          window.api.chat.onReasoningDone((data) => events.reasoningDone.push({ t: performance.now(), ...data })),
-          window.api.chat.onComplete((data) => events.complete.push({ t: performance.now(), ...data })),
-        ];
-        try {
-          const remote = await window.api.sessions.createRemote({
-            remoteUrl: baseUrl,
-            remoteModel: servedModel,
+        const eventTrace = [];
+        const priorFullContent = new Map();
+        let eventSequence = 0;
+        const recordEvent = (bucket, event, data) => {
+          const captured = { t: performance.now(), ...data };
+          events[bucket].push(captured);
+          const messageId = data?.messageId || 'unknown';
+          const channel = event === 'stream'
+            ? (data?.isReasoning ? 'reasoning' : 'content')
+            : event === 'tool'
+              ? 'tool'
+              : event === 'reasoning_terminal'
+                ? 'reasoning'
+                : 'terminal';
+          let delta = null;
+          let cumulativeReset = false;
+          if (event === 'stream' && typeof data?.fullContent === 'string') {
+            const key = messageId + ':' + channel;
+            const previous = priorFullContent.get(key) || '';
+            if (data.fullContent.startsWith(previous)) {
+              delta = data.fullContent.slice(previous.length);
+            } else {
+              cumulativeReset = previous.length > 0;
+              delta = data.fullContent;
+            }
+            priorFullContent.set(key, data.fullContent);
+          }
+          eventTrace.push({
+            sequence: ++eventSequence,
+            t: captured.t,
+            event,
+            channel,
+            messageId,
+            delta,
+            cumulativeReset,
+            payload: data,
           });
-          if (!remote.success) throw new Error(remote.error || 'remote session create failed');
-          await window.api.sessions.start(remote.session.id);
+          scheduleDomSample(messageId, event + ':' + channel);
+        };
+        const cleanup = [
+          window.api.chat.onStream((data) => recordEvent('stream', 'stream', data)),
+          window.api.chat.onToolStatus((data) => recordEvent('tool', 'tool', data)),
+          window.api.chat.onReasoningDone((data) => recordEvent('reasoningDone', 'reasoning_terminal', data)),
+          window.api.chat.onComplete((data) => recordEvent('complete', 'terminal', data)),
+        ];
+        let proofSessionId = null;
+        let privateConfigRestoreAdditionalArgs = null;
+        try {
+          const privateCacheAttestationArgs = ${JSON.stringify(privateCacheAttestationArgs)};
+          const stripPrivateCacheAttestationArgs = (raw) => {
+            const tokens = String(raw || '').trim().split(/\s+/).filter(Boolean);
+            const kept = [];
+            for (let index = 0; index < tokens.length; index += 1) {
+              const token = tokens[index];
+              if (token === '--enable-private-cache-attestation') continue;
+              if (token === '--private-cache-attestation-token-file') {
+                index += 1;
+                continue;
+              }
+              if (token.startsWith('--private-cache-attestation-token-file=')) {
+                continue;
+              }
+              kept.push(token);
+            }
+            return kept.join(' ');
+          };
+          const requestedSessionConfig = {
+            host: '127.0.0.1',
+            port: ${JSON.stringify(serverPort)},
+            servedModelName: servedModel,
+            logLevel: 'INFO',
+            ...(privateCacheAttestationArgs
+              ? { additionalArgs: privateCacheAttestationArgs }
+              : {}),
+            ...(builtinToolsEnabled
+              ? { enableAutoToolChoice: true, toolCallParser: 'auto' }
+              : {}),
+          };
+          const requestedReuseSessionId = ${JSON.stringify(reuseSessionId)};
+          let created;
+          if (requestedReuseSessionId) {
+            const existing = await window.api.sessions.get(
+              requestedReuseSessionId,
+            );
+            const storedModelPath = existing?.modelPath
+              || existing?.model_path
+              || '';
+            if (
+              !existing
+              || existing.id !== requestedReuseSessionId
+              || existing.type !== 'local'
+              || storedModelPath !== modelPath
+              || existing.status === 'error'
+            ) {
+              throw new Error(
+                'Parent-attested reused session is missing, errored, '
+                + 'wrong-type, or bound to a different model path',
+              );
+            }
+            created = { success: true, session: existing };
+          } else {
+            created = await window.api.sessions.create(
+              modelPath,
+              requestedSessionConfig,
+            );
+          }
+          if (!created.success) {
+            throw new Error(created.error || 'local session create failed');
+          }
+          proofSessionId = created.session?.id || null;
+          if (created.session?.type !== 'local') {
+            throw new Error('real UI proof requires an Electron-managed local session');
+          }
+          window.dispatchEvent(new CustomEvent('vmlx:navigate', {
+            detail: {
+              mode: 'server',
+              panel: 'session',
+              sessionId: created.session.id,
+            },
+          });
+          let sessionBeforeStart = await window.api.sessions.get(created.session.id);
+          let sessionConfigBeforeProof = {};
+          try {
+            sessionConfigBeforeProof = JSON.parse(sessionBeforeStart?.config || '{}');
+          } catch (_) {}
+          privateConfigRestoreAdditionalArgs = stripPrivateCacheAttestationArgs(
+            sessionConfigBeforeProof.additionalArgs,
+          );
+          if (requestedReuseSessionId && sessionBeforeStart?.status === 'running') {
+            const stopButton = await new Promise((resolve, reject) => {
+              const started = Date.now();
+              const check = () => {
+                const candidate = [...document.querySelectorAll('button')]
+                  .find((button) => {
+                    const label = (button.textContent || '')
+                      .replace(/\\s+/g, ' ')
+                      .trim();
+                    return label === 'Stop' && !button.disabled;
+                  });
+                if (candidate) return resolve(candidate);
+                if (Date.now() - started > 30000) {
+                  return reject(new Error(
+                    'Timed out waiting for the visible Stop control '
+                    + 'for the parent-attested reused session',
+                  ));
+                }
+                setTimeout(check, 100);
+              };
+              check();
+            });
+            stopButton.scrollIntoView({ block: 'center' });
+            stopButton.click();
+            sessionBeforeStart = await new Promise((resolve, reject) => {
+              const started = Date.now();
+              const check = async () => {
+                const current = await window.api.sessions.get(
+                  created.session.id,
+                );
+                if (current?.status === 'stopped') return resolve(current);
+                if (!current || current.status === 'error') {
+                  return reject(new Error(
+                    'Visible Stop left the parent-attested session missing '
+                    + 'or errored',
+                  ));
+                }
+                if (Date.now() - started > 120000) {
+                  return reject(new Error(
+                    'Timed out waiting for the visibly stopped reused session',
+                  ));
+                }
+                setTimeout(check, 100);
+              };
+              check();
+            });
+          }
+          if (
+            requestedReuseSessionId
+            && sessionBeforeStart?.id !== requestedReuseSessionId
+          ) {
+            throw new Error('Visible restart selected a different local session');
+          }
+          if (privateCacheAttestationArgs) {
+            const launchAdditionalArgs = [
+              privateConfigRestoreAdditionalArgs,
+              privateCacheAttestationArgs,
+            ].filter(Boolean).join(' ');
+            const proofConfigUpdate = await window.api.sessions.update(
+              created.session.id,
+              { additionalArgs: launchAdditionalArgs },
+            );
+            if (!proofConfigUpdate?.success) {
+              throw new Error(
+                proofConfigUpdate?.error
+                || 'Failed to stage private cache attestation launch arguments',
+              );
+            }
+            sessionBeforeStart = await window.api.sessions.get(created.session.id);
+          }
+          const startButton = await new Promise((resolve, reject) => {
+            const started = Date.now();
+            const check = () => {
+              const buttons = [...document.querySelectorAll('button')];
+              const candidate = buttons.find((button) => {
+                const label = (button.textContent || '').replace(/\\s+/g, ' ').trim();
+                return label === 'Start'
+                  && button.classList.contains('bg-success')
+                  && !button.disabled;
+              });
+              if (candidate) return resolve(candidate);
+              if (Date.now() - started > 30000) {
+                return reject(new Error(
+                  'Timed out waiting for the visible local-session Start control: '
+                  + document.body.innerText.slice(0, 4000)
+                ));
+              }
+              setTimeout(check, 100);
+            };
+            check();
+          });
+          const uiStartControl = {
+            label: (startButton.textContent || '').replace(/\\s+/g, ' ').trim(),
+            clicked: false,
+            sessionStatusBefore: sessionBeforeStart?.status || null,
+            sessionStatusAfter: null,
+          };
+          startButton.scrollIntoView({ block: 'center' });
+          startButton.click();
+          uiStartControl.clicked = true;
+          const startedSession = await new Promise((resolve, reject) => {
+            const started = Date.now();
+            const check = async () => {
+              const current = await window.api.sessions.get(created.session.id);
+              if (current?.status === 'running') return resolve(current);
+              if (current?.status === 'error') {
+                const logs = await window.api.sessions.getLogs(created.session.id)
+                  .catch(() => []);
+                return reject(new Error(
+                  'UI Start control left session in error state: '
+                  + JSON.stringify(logs.slice(-80))
+                ));
+              }
+              if (Date.now() - started > 900000) {
+                return reject(new Error(
+                  'Timed out waiting for UI-started session to run; last status='
+                  + String(current?.status || 'missing')
+                ));
+              }
+              setTimeout(check, 100);
+            };
+            check();
+          });
+          uiStartControl.sessionStatusAfter = startedSession.status;
           const preloadHealthBefore = await window.api.performance.health(endpoint)
             .catch((error) => ({ error: String(error?.message || error) }));
-          const cacheBefore = await window.api.cache.stats(endpoint, remote.session.id)
+          const cacheBefore = await window.api.cache.stats(endpoint, created.session.id)
             .catch((error) => ({ error: String(error?.message || error) }));
-          const chat = await window.api.chat.create('Real UI live model proof', servedModel, undefined, remote.session.modelPath);
-          const overrides = {
-            chatId: chat.id,
-            wireApi,
-            builtinToolsEnabled,
-            shellEnabled: builtinToolsEnabled,
-            fileToolsEnabled: builtinToolsEnabled,
-            searchToolsEnabled: false,
-            gitEnabled: false,
-            utilityToolsEnabled: builtinToolsEnabled,
-            webSearchEnabled: false,
-            braveSearchEnabled: false,
-            fetchUrlEnabled: false,
-            workingDirectory,
-            maxToolIterations: ${JSON.stringify(maxToolIterations)},
-            toolResultMaxChars: ${JSON.stringify(toolResultMaxChars)},
-            maxTokens: ${JSON.stringify(requestMaxTokens)},
+          const chat = await window.api.chat.create(
+            'Real UI live model proof',
+            servedModel,
+            undefined,
+            created.session.modelPath,
+          );
+          const requestedMaxTokens = ${JSON.stringify(requestMaxTokens ?? null)};
+          const rendererGenerationDefaults = await window.api.models.getGenerationDefaults(modelPath)
+            .catch((error) => ({ error: String(error?.message || error) }));
+
+          window.dispatchEvent(new CustomEvent('vmlx:navigate', { detail: { mode: 'chat' } }));
+          const chatRow = await waitFor(() => {
+            const title = [...document.querySelectorAll('span')]
+              .find((element) => (element.textContent || '').trim() === 'Real UI live model proof');
+            return title?.closest('.cursor-pointer') || null;
+          }, 'new chat row in the visible sidebar');
+          chatRow.scrollIntoView({ block: 'center' });
+          chatRow.click();
+          await waitFor(
+            () => document.querySelector('textarea:not([disabled])'),
+            'active chat composer',
+          );
+
+          const chatSettingsButton = await waitFor(() =>
+            [...document.querySelectorAll('button')].find((button) =>
+              isVisible(button)
+              && (button.textContent || '').replace(/\\s+/g, ' ').trim() === 'Chat'
+            ) || null,
+          'visible Chat settings button');
+          chatSettingsButton.click();
+          const chatSettingsHeader = await waitFor(() =>
+            [...document.querySelectorAll('span')].find((element) =>
+              isVisible(element)
+              && (element.textContent || '').replace(/\\s+/g, ' ').trim() === 'Chat Settings'
+            ) || null,
+          'Chat Settings drawer');
+          const chatSettingsDrawer = chatSettingsHeader.parentElement?.parentElement;
+          const valueSetter = Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            'value',
+          )?.set;
+          const checkedSetter = Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            'checked',
+          )?.set;
+          const selectSetter = Object.getOwnPropertyDescriptor(
+            HTMLSelectElement.prototype,
+            'value',
+          )?.set;
+          const setInput = async (input, value) => {
+            if (!(input instanceof HTMLInputElement) || !valueSetter) {
+              throw new Error('required visible Chat Settings input was not found');
+            }
+            valueSetter.call(input, String(value));
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            await new Promise((resolve) => setTimeout(resolve, 50));
           };
-          for (const [key, value] of Object.entries(samplingOverrides || {})) {
-            if (value !== undefined && value !== null) overrides[key] = value;
+          const rangeValueFor = (label) => {
+            const input = [...(chatSettingsDrawer?.querySelectorAll('input[type="range"]') || [])].find((candidate) => {
+              const field = candidate.parentElement;
+              const fieldLabel = field?.querySelector('div span');
+              return (fieldLabel?.textContent || '').trim() === label;
+            });
+            return input ? Number(input.value) : null;
+          };
+          const rangeInputFor = (label) => [...(chatSettingsDrawer?.querySelectorAll('input[type="range"]') || [])].find((candidate) => {
+            const fieldLabel = candidate.parentElement?.querySelector('div span');
+            return (fieldLabel?.textContent || '').trim() === label;
+          });
+          const numberInputFor = (labelText) => [...(chatSettingsDrawer?.querySelectorAll('input[type="number"]') || [])].find((candidate) => {
+            const label = candidate.parentElement?.querySelector('label');
+            return (label?.textContent || '').trim() === labelText;
+          });
+          const maxTokenInputFor = () => numberInputFor('Max Tokens');
+          const toolResultLimitInputFor = (root = chatSettingsDrawer) => {
+            const label = [...(root?.querySelectorAll('label') || [])]
+              .find((candidate) =>
+                (candidate.textContent || '').replace(/\\s+/g, ' ').trim() === 'Tool Result Limit'
+              );
+            return label?.parentElement?.querySelector('input[type="range"]') || null;
+          };
+          const checkboxFor = (labelText) => [...(chatSettingsDrawer?.querySelectorAll('label') || [])]
+            .find((label) =>
+              (label.textContent || '').replace(/\\s+/g, ' ').trim().startsWith(labelText)
+            )?.querySelector('input[type="checkbox"]');
+          const chatSettingsInteraction = {
+            openedVisibly: true,
+            controlsChanged: [],
+            savedViaVisibleControl: false,
+            reopenedAfterSave: false,
+            persistedAfterReopen: false,
+          };
+          for (const [label, value] of Object.entries({
+            Temperature: samplingOverrides.temperature,
+            'Top P': samplingOverrides.topP,
+            'Top K': samplingOverrides.topK,
+            'Min P': samplingOverrides.minP,
+            'Repetition Penalty': samplingOverrides.repeatPenalty,
+          })) {
+            if (value == null) continue;
+            await setInput(rangeInputFor(label), value);
+            chatSettingsInteraction.controlsChanged.push(label);
           }
-          if (enableThinking !== undefined) overrides.enableThinking = enableThinking;
-          await window.api.chat.setOverrides(chat.id, overrides);
-          const chatOverrides = await window.api.chat.getOverrides(chat.id).catch((error) => ({ error: String(error?.message || error) }));
+          if (requestedMaxTokens != null) {
+            await setInput(maxTokenInputFor(), requestedMaxTokens);
+            chatSettingsInteraction.controlsChanged.push('Max Tokens');
+          }
+          const thinkingLabel = enableThinking === true
+            ? 'On'
+            : enableThinking === false
+              ? 'Off'
+              : 'Auto';
+          const acceptableThinkingLabels = enableThinking === true
+            ? ['On', 'Reasoning']
+            : enableThinking === false
+              ? ['Off', 'Instruct']
+              : ['Auto'];
+          const thinkingButton = [...(chatSettingsDrawer?.querySelectorAll('button') || [])]
+            .find((button) =>
+              isVisible(button)
+              && !button.disabled
+              && acceptableThinkingLabels.includes(
+                (button.textContent || '').replace(/\\s+/g, ' ').trim()
+              )
+            );
+          if (!thinkingButton) {
+            throw new Error('visible reasoning mode control missing: ' + thinkingLabel);
+          }
+          thinkingButton.click();
+          chatSettingsInteraction.controlsChanged.push('Reasoning ' + thinkingLabel);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          const wireSelect = [...(chatSettingsDrawer?.querySelectorAll('select') || [])]
+            .find((candidate) =>
+              [...candidate.options].some((option) => option.value === 'responses')
+            );
+          if (!(wireSelect instanceof HTMLSelectElement) || !selectSetter) {
+            throw new Error('visible API Wire Format control missing');
+          }
+          const desiredWire = wireApi === 'responses' ? 'responses' : 'completions';
+          const alternateWire = desiredWire === 'responses' ? 'completions' : 'responses';
+          for (const nextWire of [alternateWire, desiredWire]) {
+            selectSetter.call(wireSelect, nextWire);
+            wireSelect.dispatchEvent(new Event('change', { bubbles: true }));
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          chatSettingsInteraction.controlsChanged.push('API Wire Format');
+          const builtinInput = checkboxFor('Enable Built-in Coding Tools');
+          if (!(builtinInput instanceof HTMLInputElement) || !checkedSetter) {
+            throw new Error('visible built-in tools checkbox missing');
+          }
+          if (Boolean(builtinInput.checked) !== builtinToolsEnabled) {
+            checkedSetter.call(builtinInput, builtinToolsEnabled);
+            builtinInput.dispatchEvent(new Event('change', { bubbles: true }));
+            chatSettingsInteraction.controlsChanged.push('Enable Built-in Coding Tools');
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          if (builtinToolsEnabled) {
+            const workingInput = [...(chatSettingsDrawer?.querySelectorAll('input[type="text"]') || [])]
+              .find((candidate) =>
+                (candidate.getAttribute('placeholder') || '').includes('project directory')
+              );
+            await setInput(workingInput, workingDirectory);
+            await setInput(numberInputFor('Max Tool Iterations'), ${JSON.stringify(maxToolIterations)});
+            await setInput(
+              toolResultLimitInputFor(),
+              ${JSON.stringify(toolResultMaxChars)},
+            );
+            chatSettingsInteraction.controlsChanged.push(
+              'Working Directory',
+              'Max Tool Iterations',
+              'Tool Result Limit',
+            );
+            for (const [label, desired] of [
+              ['File I/O', true],
+              ['Search', false],
+              ['Shell', true],
+              ['Web Search', false],
+              ['URL Fetch', false],
+              ['Git', false],
+              ['Utilities', true],
+            ]) {
+              const input = checkboxFor(label);
+              if (input instanceof HTMLInputElement && Boolean(input.checked) !== desired) {
+                checkedSetter.call(input, desired);
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                chatSettingsInteraction.controlsChanged.push(label);
+                await new Promise((resolve) => setTimeout(resolve, 30));
+              }
+            }
+          }
+          const saveButton = await waitFor(() =>
+            [...(chatSettingsDrawer?.querySelectorAll('button') || [])].find((button) =>
+              isVisible(button)
+              && !button.disabled
+              && (button.textContent || '').replace(/\\s+/g, ' ').trim() === 'Save'
+            ) || null,
+          'enabled visible Chat Settings Save control');
+          saveButton.click();
+          chatSettingsInteraction.savedViaVisibleControl = true;
+          await waitFor(() => saveButton.disabled, 'Chat Settings save completion');
+          const expectedUiValues = {
+            Temperature: samplingOverrides.temperature ?? independentBundleDefaults?.temperature,
+            'Top P': samplingOverrides.topP ?? independentBundleDefaults?.topP,
+            'Top K': samplingOverrides.topK ?? independentBundleDefaults?.topK,
+            'Min P': samplingOverrides.minP ?? independentBundleDefaults?.minP,
+            'Repetition Penalty':
+              samplingOverrides.repeatPenalty ?? independentBundleDefaults?.repeatPenalty,
+          };
+          await waitFor(() => {
+            if (!independentBundleDefaults) return false;
+            for (const [label, expected] of Object.entries(expectedUiValues)) {
+              if (expected == null) continue;
+              const observed = rangeValueFor(label);
+              if (
+                typeof observed !== 'number'
+                || !Number.isFinite(observed)
+                || Math.abs(observed - Number(expected)) > 1e-6
+              ) return false;
+            }
+            const maxTokens = maxTokenInputFor();
+            if (!maxTokens) return false;
+            return requestedMaxTokens != null
+              ? Number(maxTokens.value) === Number(requestedMaxTokens)
+              : maxTokens.value === ''
+                && (!independentBundleDefaults.maxNewTokens
+                  || maxTokens.placeholder.includes(String(independentBundleDefaults.maxNewTokens)));
+          }, 'model-derived values in the visible Chat Settings drawer');
+          const chatSettingsClose = [...(chatSettingsDrawer?.querySelectorAll('button') || [])]
+            .find((button) => button.getAttribute('aria-label') === 'Close');
+          if (!chatSettingsClose) throw new Error('Chat Settings close control was not visible');
+          chatSettingsClose.click();
+          await waitFor(
+            () => ![...document.querySelectorAll('span')].some((element) =>
+              isVisible(element) && (element.textContent || '').trim() === 'Chat Settings'
+            ),
+            'Chat Settings drawer to close',
+          );
+          chatSettingsButton.click();
+          const reopenedHeader = await waitFor(() =>
+            [...document.querySelectorAll('span')].find((element) =>
+              isVisible(element)
+              && (element.textContent || '').replace(/\\s+/g, ' ').trim() === 'Chat Settings'
+            ) || null,
+          'reopened Chat Settings drawer');
+          chatSettingsInteraction.reopenedAfterSave = true;
+          const reopenedDrawer = reopenedHeader.parentElement?.parentElement;
+          const reopenedRangeValueFor = (label) => {
+            const input = [...(reopenedDrawer?.querySelectorAll('input[type="range"]') || [])]
+              .find((candidate) =>
+                (candidate.parentElement?.querySelector('div span')?.textContent || '').trim() === label
+              );
+            return input ? Number(input.value) : null;
+          };
+          const reopenedMaxToken = [...(reopenedDrawer?.querySelectorAll('input[type="number"]') || [])]
+            .find((candidate) =>
+              (candidate.parentElement?.querySelector('label')?.textContent || '').trim() === 'Max Tokens'
+            );
+          const reopenedNumberValueFor = (labelText) => {
+            const input = [...(reopenedDrawer?.querySelectorAll('input[type="number"]') || [])]
+              .find((candidate) =>
+                (candidate.parentElement?.querySelector('label')?.textContent || '').trim() === labelText
+              );
+            return input?.value ?? null;
+          };
+          const reopenedCheckboxValueFor = (labelText) => {
+            const input = [...(reopenedDrawer?.querySelectorAll('label') || [])]
+              .find((label) =>
+                (label.textContent || '').replace(/\\s+/g, ' ').trim().startsWith(labelText)
+              )?.querySelector('input[type="checkbox"]');
+            return input instanceof HTMLInputElement ? input.checked : null;
+          };
+          const reopenedWireSelect = [...(reopenedDrawer?.querySelectorAll('select') || [])]
+            .find((candidate) =>
+              [...candidate.options].some((option) => option.value === 'responses')
+            );
+          const reopenedThinkingButton = [...(reopenedDrawer?.querySelectorAll('button') || [])]
+            .find((button) => (
+              isVisible(button)
+              && acceptableThinkingLabels.includes(
+                (button.textContent || '').replace(/\\s+/g, ' ').trim()
+              )
+              && String(button.className || '').includes('bg-primary')
+            ));
+          const reopenedWorkingDirectory = [...(reopenedDrawer?.querySelectorAll('input[type="text"]') || [])]
+            .find((candidate) =>
+              (candidate.getAttribute('placeholder') || '').includes('project directory')
+            )?.value ?? null;
+          const reopenedToolResultLimit = toolResultLimitInputFor(reopenedDrawer);
+          const chatSettingsDom = {
+            values: {
+              temperature: reopenedRangeValueFor('Temperature'),
+              topP: reopenedRangeValueFor('Top P'),
+              topK: reopenedRangeValueFor('Top K'),
+              minP: reopenedRangeValueFor('Min P'),
+              repeatPenalty: reopenedRangeValueFor('Repetition Penalty'),
+            },
+            maxTokens: {
+              value: reopenedMaxToken?.value ?? null,
+              placeholder: reopenedMaxToken?.getAttribute('placeholder') || '',
+            },
+            wireApi: reopenedWireSelect?.value ?? null,
+            reasoningMode: (reopenedThinkingButton?.textContent || '')
+              .replace(/\\s+/g, ' ')
+              .trim() || null,
+            builtinToolsEnabled: reopenedCheckboxValueFor('Enable Built-in Coding Tools'),
+            workingDirectory: reopenedWorkingDirectory,
+            maxToolIterations: reopenedNumberValueFor('Max Tool Iterations'),
+            toolResultMaxChars: reopenedToolResultLimit?.value ?? null,
+            toolCategories: {
+              file: reopenedCheckboxValueFor('File I/O'),
+              search: reopenedCheckboxValueFor('Search'),
+              shell: reopenedCheckboxValueFor('Shell'),
+              webSearch: reopenedCheckboxValueFor('Web Search'),
+              urlFetch: reopenedCheckboxValueFor('URL Fetch'),
+              git: reopenedCheckboxValueFor('Git'),
+              utilities: reopenedCheckboxValueFor('Utilities'),
+            },
+            textHead: reopenedDrawer?.innerText.slice(0, 3000) || '',
+          };
+          const chatOverrides = await window.api.chat.getOverrides(chat.id)
+            .catch((error) => ({ error: String(error?.message || error) }));
+          const explicitSamplingPersisted = Object.entries(samplingOverrides)
+            .every(([field, expected]) => (
+              expected == null
+              || (
+                typeof chatOverrides?.[field] === 'number'
+                && Math.abs(Number(chatOverrides[field]) - Number(expected)) <= 1e-6
+              )
+            ));
+          const requestedMaxTokensPersisted = requestedMaxTokens == null
+            || Number(chatOverrides?.maxTokens) === Number(requestedMaxTokens);
+          const visibleSamplingPersisted = Object.entries(expectedUiValues)
+            .every(([label, expected]) => (
+              expected == null
+              || (
+                typeof reopenedRangeValueFor(label) === 'number'
+                && Math.abs(Number(reopenedRangeValueFor(label)) - Number(expected)) <= 1e-6
+              )
+            ));
+          const visibleMaxTokensPersisted = requestedMaxTokens == null
+            ? reopenedMaxToken?.value === ''
+            : Number(reopenedMaxToken?.value) === Number(requestedMaxTokens);
+          const visibleToolSettingsPersisted = !builtinToolsEnabled || (
+            chatSettingsDom.builtinToolsEnabled === true
+            && chatSettingsDom.workingDirectory === workingDirectory
+            && Number(chatSettingsDom.maxToolIterations) === ${JSON.stringify(maxToolIterations)}
+            && Number(chatSettingsDom.toolResultMaxChars) === ${JSON.stringify(toolResultMaxChars)}
+            && chatSettingsDom.toolCategories.file === true
+            && chatSettingsDom.toolCategories.search === false
+            && chatSettingsDom.toolCategories.shell === true
+            && chatSettingsDom.toolCategories.webSearch === false
+            && chatSettingsDom.toolCategories.urlFetch === false
+            && chatSettingsDom.toolCategories.git === false
+            && chatSettingsDom.toolCategories.utilities === true
+          );
+          const toolSettingsPersisted = !builtinToolsEnabled || (
+            chatOverrides?.workingDirectory === workingDirectory
+            && Number(chatOverrides?.maxToolIterations) === ${JSON.stringify(maxToolIterations)}
+            && Number(chatOverrides?.toolResultMaxChars) === ${JSON.stringify(toolResultMaxChars)}
+            && chatOverrides?.fileToolsEnabled !== false
+            && chatOverrides?.searchToolsEnabled === false
+            && chatOverrides?.shellEnabled !== false
+            && chatOverrides?.webSearchEnabled === false
+            && chatOverrides?.fetchUrlEnabled === false
+            && chatOverrides?.gitEnabled === false
+            && chatOverrides?.utilityToolsEnabled !== false
+          );
+          chatSettingsInteraction.persistedAfterReopen = (
+            chatOverrides?.wireApi === desiredWire
+            && Boolean(chatOverrides?.builtinToolsEnabled) === builtinToolsEnabled
+            && (enableThinking === undefined
+              ? chatOverrides?.enableThinking == null
+              : chatOverrides?.enableThinking === enableThinking)
+            && explicitSamplingPersisted
+            && requestedMaxTokensPersisted
+            && toolSettingsPersisted
+            && visibleSamplingPersisted
+            && visibleMaxTokensPersisted
+            && chatSettingsDom.wireApi === desiredWire
+            && acceptableThinkingLabels.includes(chatSettingsDom.reasoningMode)
+            && chatSettingsDom.builtinToolsEnabled === builtinToolsEnabled
+            && visibleToolSettingsPersisted
+          );
+          const reopenedClose = [...(reopenedDrawer?.querySelectorAll('button') || [])]
+            .find((button) => button.getAttribute('aria-label') === 'Close');
+          if (!reopenedClose) throw new Error('reopened Chat Settings close control was not visible');
+          reopenedClose.click();
+          await waitFor(
+            () => ![...document.querySelectorAll('span')].some((element) =>
+              isVisible(element) && (element.textContent || '').trim() === 'Chat Settings'
+            ),
+            'reopened Chat Settings drawer to close',
+          );
+
           const sendErrors = [];
           let rendererFailureStage = null;
+          const uiTurnEvidence = [];
+          const cacheRequestEvidence = [];
+          const sendMessageThroughVisibleComposer = async (turn, stage, prompt) => {
+            try {
+              const proofRequestId = ${JSON.stringify(runId)} + ':ui:' + turn;
+              const logsBefore = await window.api.sessions.getLogs(created.session.id)
+                .catch(() => []);
+              const messagesBefore = await window.api.chat.getMessages(chat.id);
+              const knownMessageIds = new Set(messagesBefore.map((message) => String(message.id)));
+              const turnCacheBefore = await window.api.cache.stats(endpoint, created.session.id)
+                .catch((error) => ({ error: String(error?.message || error) }));
+              const textarea = await waitFor(
+                () => document.querySelector('textarea:not([disabled])'),
+                'enabled visible composer for turn ' + turn,
+              );
+              const setter = Object.getOwnPropertyDescriptor(
+                HTMLTextAreaElement.prototype,
+                'value',
+              )?.set;
+              setter.call(textarea, prompt);
+              textarea.dispatchEvent(new Event('input', { bubbles: true }));
+              textarea.dispatchEvent(new Event('change', { bubbles: true }));
+              const completedBefore = events.complete.length;
+              const sendButton = await waitFor(() => {
+                const sibling = textarea.nextElementSibling;
+                return sibling instanceof HTMLButtonElement
+                  && !sibling.disabled
+                  && isVisible(sibling)
+                  ? sibling
+                  : null;
+              }, 'enabled visible Send control for turn ' + turn);
+              sendButton.scrollIntoView({ block: 'center' });
+              sendButton.click();
+              await waitFor(
+                () => events.complete.length > completedBefore,
+                'terminal event for visible UI turn ' + turn,
+                600000,
+              );
+              const terminalAtCompletion =
+                events.complete.slice(completedBefore).at(-1) || null;
+              // Capture the singleton scheduler execution immediately after
+              // this exact terminal event. The parent does not start any
+              // paired API/cache producer until the UI attestation is written,
+              // so a later unrelated request cannot be time-window attributed
+              // to this turn.
+              const turnCacheAfter = await waitForRequestCacheAdvance(
+                turnCacheBefore,
+                created.session.id,
+              );
+              const turnHealthAfter = await window.api.performance.health(endpoint)
+                .catch((error) => ({ error: String(error?.message || error) }));
+              await waitFor(
+                () => document.querySelector('textarea:not([disabled])'),
+                'composer recovery after turn ' + turn,
+                30000,
+              );
+              const messagesAfter = await window.api.chat.getMessages(chat.id);
+              const addedMessages = messagesAfter.filter(
+                (message) => !knownMessageIds.has(String(message.id))
+              );
+              const userMessage = addedMessages.find(
+                (message) => message.role === 'user' && String(message.content || '') === prompt
+              );
+              const assistantMessage = [...addedMessages]
+                .reverse()
+                .find((message) => message.role === 'assistant');
+              const terminal = events.complete.slice(completedBefore)
+                .find((event) => String(event?.messageId || '') === String(assistantMessage?.id || ''));
+              const logsAfter = await waitForResolvedTurnLog(
+                created.session.id,
+                logsBefore.length,
+              );
+              const boundTerminal = terminal || terminalAtCompletion;
+              uiTurnEvidence.push({
+                turn,
+                prompt,
+                proofRequestId,
+                userMessageId: userMessage?.id || null,
+                assistantMessageId: assistantMessage?.id || null,
+                terminalMessageId: boundTerminal?.messageId || null,
+                terminalResponseId: boundTerminal?.responseId || null,
+                logStartIndex: logsBefore.length,
+                logEndIndex: logsAfter.length,
+                logLines: logsAfter.slice(logsBefore.length),
+              });
+              const cacheCorrelation =
+                correlateTerminalResponseToCacheExecution({
+                  terminal: boundTerminal,
+                  cacheSnapshot: turnHealthAfter,
+                  turn,
+                  proofRequestId,
+                  userMessageId: userMessage?.id || null,
+                  assistantMessageId: assistantMessage?.id || null,
+                });
+              cacheRequestEvidence.push({
+                ...cacheCorrelation,
+                before: turnCacheBefore,
+                after: turnCacheAfter,
+                healthAfter: turnHealthAfter,
+              });
+              return true;
+            } catch (error) {
+              rendererFailureStage = stage;
+              sendErrors.push({ turn, stage, message: String(error?.message || error) });
+              return false;
+            }
+          };
           const sendMessageWithCapture = async (turn, stage, prompt, attachments) => {
             try {
               await window.api.chat.sendMessage(chat.id, prompt, undefined, attachments);
@@ -1263,12 +6938,28 @@ async function main() {
               return false;
             }
           };
-          const firstSent = await sendMessageWithCapture(1, 'first_send_message', ${JSON.stringify(promptOne)});
-          if (firstSent) {
-            await sendMessageWithCapture(2, 'second_send_message', ${JSON.stringify(promptTwo)});
+          const firstSent = await sendMessageThroughVisibleComposer(
+            1,
+            'first_visible_ui_send',
+            ${JSON.stringify(selectedPromptOne)},
+          );
+          let secondSent = false;
+          if (firstSent && uiTurnCount >= 2) {
+            secondSent = await sendMessageThroughVisibleComposer(
+              2,
+              'second_visible_ui_send',
+              ${JSON.stringify(selectedPromptTwo)},
+            );
+          }
+          if (secondSent && uiTurnCount >= 3) {
+            await sendMessageThroughVisibleComposer(
+              3,
+              'third_visible_ui_send',
+              ${JSON.stringify(selectedPromptThree)},
+            );
           }
           if (checkMedia && !rendererFailureStage) {
-            await sendMessageWithCapture(3, 'image_send_message', 'What is the dominant color of the attached image? Reply with one color word in English.', [
+            await sendMessageWithCapture(4, 'image_send_message', 'What is the dominant color of the attached image? Reply with one color word in English.', [
               {
                 name: 'real-ui-proof-image.png',
                 type: 'image/png',
@@ -1281,12 +6972,12 @@ async function main() {
             if (!videoDataUrl) {
               rendererFailureStage = 'video_data_url_missing';
               sendErrors.push({
-                turn: 4,
+                turn: 5,
                 stage: 'video_data_url_missing',
                 message: 'VMLINUX_REAL_UI_CHECK_VIDEO requires VMLINUX_REAL_UI_VIDEO_DATA_URL',
               });
             } else {
-              await sendMessageWithCapture(4, 'video_send_message', 'Describe the attached video briefly in English.', [
+              await sendMessageWithCapture(5, 'video_send_message', 'Describe the attached video briefly in English.', [
                 {
                   name: 'real-ui-proof-video.mp4',
                   type: 'video/mp4',
@@ -1298,13 +6989,66 @@ async function main() {
           }
           const preloadHealthAfter = await window.api.performance.health(endpoint)
             .catch((error) => ({ error: String(error?.message || error) }));
-          const cacheAfter = await window.api.cache.stats(endpoint, remote.session.id)
+          const cacheAfter = await window.api.cache.stats(endpoint, created.session.id)
             .catch((error) => ({ error: String(error?.message || error) }));
-          const cacheAfterSettled = await waitForCacheEndpointStorage(cacheAfter, remote.session.id);
+          const cacheAfterSettled = await waitForCacheEndpointStorage(
+            cacheAfter,
+            created.session.id,
+          );
           const messages = await window.api.chat.getMessages(chat.id);
           const assistants = messages.filter((m) => m.role === 'assistant');
+          const assistantMessageIds = assistants.slice(0, uiTurnCount).map((message) => message.id);
+          if (assistantMessageIds.length === uiTurnCount) {
+            await waitFor(
+              () => assistantMessageIds.every((messageId) =>
+                document.querySelector(
+                  '[data-vmlx-proof-message-id="' + CSS.escape(String(messageId)) + '"]'
+                )
+              ),
+              uiTurnCount + ' assistant messages in the rendered chat DOM',
+            );
+          }
+          for (const messageId of assistantMessageIds) {
+            const root = document.querySelector(
+              '[data-vmlx-proof-message-id="' + CSS.escape(String(messageId)) + '"]'
+            );
+            for (const rail of root?.querySelectorAll('[data-vmlx-proof-reasoning-rail="true"]') || []) {
+              if (!rail.querySelector('[data-vmlx-proof-reasoning-content="true"]')) {
+                rail.querySelector('button')?.click();
+              }
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          const renderedMessages = assistantMessageIds
+            .map((messageId) => snapshotMessage(messageId, 'final'))
+            .filter(Boolean);
+          const bodyText = document.body.innerText || '';
+          const chromeClone = document.body.cloneNode(true);
+          chromeClone.querySelectorAll(
+            '[data-vmlx-proof-message-id], pre, code, script, style'
+          ).forEach((element) => element.remove());
+          const chromeText = chromeClone.innerText || '';
+          const rawI18nKeys = [...new Set(
+            chromeText.match(
+              /\\b(?:[A-Za-z][A-Za-z0-9_-]*\\.){1,6}[A-Za-z][A-Za-z0-9_-]*\\b/g
+            ) || []
+          )];
+          const visibleErrors = [...document.querySelectorAll('[role="alert"], .katex-error')]
+            .filter(isVisible)
+            .map((element) => (element.textContent || '').replace(/\\s+/g, ' ').trim())
+            .filter((text) => /(?:failed|error|exception|traceback|invalid)/i.test(text));
+          const renderedDom = {
+            messages: renderedMessages,
+            samples: domSamples,
+            rawI18nKeys,
+            visibleErrors,
+            transientAlerts,
+            chromeTextHead: chromeText.slice(0, 5000),
+            bodyTextHead: bodyText.slice(0, 5000),
+          };
           const first = assistants[0]?.content || '';
-          const second = assistants[assistants.length - 1]?.content || '';
+          const second = assistants[1]?.content || '';
+          const third = assistants[2]?.content || '';
           const parsePersistedArray = (value) => {
             if (!value) return [];
             try {
@@ -1320,10 +7064,16 @@ async function main() {
           const persistedToolsByMessage = assistants.map((m) =>
             parsePersistedArray(m.toolCallsJson)
           );
+          const persistedOaiCallsByMessage = assistants.map((m) =>
+            parsePersistedArray(m.toolCallsOaiJson)
+          );
+          const persistedOaiResultsByMessage = assistants.map((m) =>
+            parsePersistedArray(m.toolResultsOaiJson)
+          );
           const persistedReasoningSegments = persistedReasoningByMessage.flat();
           const persistedTools = persistedToolsByMessage.flat();
           const allAssistantText = assistants.map((m) => m.content || '').join('\\n');
-          const visible = first + '\\n' + second;
+          const visible = allAssistantText;
           const streamTraceByMessage = Object.values(events.stream.reduce((acc, event) => {
             const key = event?.messageId || 'unknown';
             const row = acc[key] || {
@@ -1348,6 +7098,16 @@ async function main() {
             acc[key] = row;
             return acc;
           }, {}));
+          const messageEventTrace = Object.values(eventTrace.reduce((acc, event) => {
+            const key = event.messageId || 'unknown';
+            const row = acc[key] || { messageId: key, events: [] };
+            row.events.push(event);
+            acc[key] = row;
+            return acc;
+          }, {})).map((row) => ({
+            ...row,
+            events: row.events.slice().sort((left, right) => left.sequence - right.sequence),
+          }));
           const reasoningText = persistedReasoningSegments
             .map((segment) => typeof segment?.text === 'string' ? segment.text : '')
             .filter(Boolean)
@@ -1379,33 +7139,61 @@ async function main() {
             videoExpectedRegex: videoExpectRegex,
             imageSemanticVerified,
             videoSemanticVerified,
-            imageVerified: checkMedia && hasImageAttachment && imageSemanticVerified && !sendErrors.some((item) => item.turn === 3),
-            videoVerified: checkVideo && hasVideoAttachment && videoSemanticVerified && !sendErrors.some((item) => item.turn === 4),
+            imageVerified: checkMedia && hasImageAttachment && imageSemanticVerified && !sendErrors.some((item) => item.turn === 4),
+            videoVerified: checkVideo && hasVideoAttachment && videoSemanticVerified && !sendErrors.some((item) => item.turn === 5),
             persistedImageAttachment: hasImageAttachment,
             persistedVideoAttachment: hasVideoAttachment,
           };
+          let effectiveSessionConfig = {};
+          try {
+            effectiveSessionConfig = JSON.parse(startedSession.config || '{}');
+          } catch (_) {}
+          const sessionLogs = await window.api.sessions.getLogs(created.session.id)
+            .catch(() => []);
           return {
             rendererWireApi: wireApi,
+            uiActionProfile,
+            uiTurnCount,
+            apiActionProfile,
             rendererBuiltinToolsEnabled: builtinToolsEnabled,
             rendererEnableThinking: enableThinking,
             workingDirectory,
-            remoteSessionId: remote.session.id,
-            remoteSessionStarted: true,
+            localSessionId: created.session.id,
+            localSessionStarted: true,
+            sessionType: created.session.type,
+            effectiveSessionConfig,
+            sessionLogs,
+            uiStartControl,
             chatId: chat.id,
             chatOverrides,
+            rendererGenerationDefaults,
+            chatSettingsDom,
+            chatSettingsInteraction,
+            uiTurnEvidence,
+            cacheRequestEvidence,
             sendErrors,
             rendererFailureStage,
             media: mediaEvidence,
             messageCount: messages.length,
             assistantCount: assistants.length,
+            assistantMessageIds,
+            assistantRecords: assistants.slice(0, uiTurnCount).map((message) => ({
+              id: message.id,
+              content: message.content || '',
+            })),
+            renderedDom,
             firstAssistantContent: first,
             secondAssistantContent: second,
+            thirdAssistantContent: third,
             persistedReasoningByMessage,
             persistedToolsByMessage,
+            persistedOaiCallsByMessage,
+            persistedOaiResultsByMessage,
             persistedReasoningText: reasoningText,
             persistedReasoningCount: persistedReasoningSegments.length,
             persistedToolCount: persistedTools.length,
             streamTraceByMessage,
+            messageEventTrace,
             turns: messages.map((m) => ({ role: m.role, content: m.content || '' })),
             rawParserLeak: rawParserLeakRegex.test(visible) || rawParserLeakRegex.test(reasoningText),
             reasoningRawParserLeak: rawParserLeakRegex.test(reasoningText),
@@ -1424,13 +7212,48 @@ async function main() {
             },
           };
         } finally {
+          captureAlerts();
+          alertObserver.disconnect();
           cleanup.forEach((fn) => { try { fn(); } catch (_) {} });
+          if (
+            proofSessionId
+            && privateConfigRestoreAdditionalArgs !== null
+            && privateCacheAttestationArgs
+          ) {
+            const restored = await window.api.sessions.update(
+              proofSessionId,
+              { additionalArgs: privateConfigRestoreAdditionalArgs },
+            );
+            if (!restored?.success) {
+              throw new Error(
+                restored?.error
+                || 'Failed to remove private cache attestation launch arguments',
+              );
+            }
+          }
         }
       })()
-    `, 300_000)
+    `, 1_200_000)
+      healthBefore = rendererResult.preloadHealthBefore || {}
+      serverModels = await requestJson(`${baseUrl}/v1/models`, 5000)
     } catch (error) {
       const healthAfter = await requestJson(`${baseUrl}/health`, 5000)
         .catch((healthError) => ({ error: healthError.message }))
+      const gitAfter = await captureGitProvenance()
+      const healthProvenance = {
+        before: createHealthSnapshot(`${baseUrl}/health`, healthBefore),
+        after: createHealthSnapshot(`${baseUrl}/health`, healthAfter),
+      }
+      const uiRuntimeProvenance = captureUiRuntimeProvenance(
+        app,
+        rendererResourceEvidence,
+        gitAfter,
+        {
+          cdpProcessBinding,
+          backendProcessBinding,
+          releaseManifest,
+        },
+      )
       let chatScreenshot = null
       try {
         chatScreenshot = await capturePng(
@@ -1439,8 +7262,11 @@ async function main() {
         )
       } catch {}
       const result = {
+        format: proofFormat,
+        run_id: runId,
         generatedAt: new Date().toISOString(),
         status: 'fail',
+        surfaceStatus: 'partial_ui_only',
         failureStage: 'renderer_real_ui_chat',
         error: error?.stack || error?.message || String(error),
         repoDir,
@@ -1452,12 +7278,17 @@ async function main() {
         requestedWireApi: wireApi,
         requestedBuiltinTools: builtinToolsEnabled,
         requestedEnableThinking: enableThinkingOverride,
+        reasoningExpectation,
         requestedServerCacheControls: checkServerCacheControls,
         requestedMedia: checkMedia,
         requestedVideo: checkVideo,
         requestContract: {
-          promptOne,
-          promptTwo,
+          uiActionProfile,
+          uiTurnCount,
+          apiActionProfile,
+          promptOne: selectedPromptOne,
+          promptTwo: selectedPromptTwo,
+          promptThree: selectedPromptThree,
           requestMaxTokens,
           requestMaxPromptTokens,
           maxToolIterations,
@@ -1465,6 +7296,10 @@ async function main() {
           wireApi,
           builtinToolsEnabled,
           enableThinking: enableThinkingOverride ?? null,
+          reasoningExpectation,
+          samplingOverrides: Object.fromEntries(
+            Object.entries(samplingOverrides).filter(([, value]) => value !== undefined),
+          ),
           checkServerCacheControls,
           checkMedia,
           checkVideo,
@@ -1472,13 +7307,27 @@ async function main() {
           imageExpectRegex,
           videoExpectRegex,
           cacheExpectRegex,
+          pairedApiHoldSeconds,
         },
         baseUrl,
-        python,
-        runDir,
         userDataDir,
         workingDirectory,
-        serverCommand: server.command,
+        gitProvenance: {
+          before: gitBefore,
+          after: gitAfter,
+        },
+        healthProvenance,
+        bundleGenerationContract,
+        uiRuntimeProvenance,
+        backend: {
+          pid: healthProvenance.after.binding.backend_pid,
+          base_url: baseUrl,
+          model: servedModel,
+          binding_before: healthProvenance.before.binding,
+          binding_after: healthProvenance.after.binding,
+        },
+        backend_identity_fingerprint_sha256:
+          healthProvenance.after.binding.fingerprint_sha256,
         server: {
           baseUrl,
           healthBefore,
@@ -1506,15 +7355,16 @@ async function main() {
           reasoningDone: 0,
           complete: 0,
         },
+        messageEventTrace: [],
         sendErrors: [error?.message || String(error)],
         rendererFailureStage: 'renderer_real_ui_chat',
         appLogTail: appLogs.slice(-120),
-        serverLogTail: server.logs.slice(-160),
+        serverLogTail: [],
       }
       result.visibleAssistantTurnsComplete = visibleAssistantAfterEachUser(result.chat?.turns || [])
       result.liveSpeedSamples = extractLiveSpeedSamples(result)
       result.provenSurfaces = deriveProvenSurfaces(result)
-      writeFileSync(
+      writePrivateArtifactFile(
         path.join(proofDir, `${proofBasename}-proof.json`),
         JSON.stringify(result, null, 2),
       )
@@ -1533,7 +7383,7 @@ async function main() {
       try {
         serverCacheControls = await evaluate(cdp, `
         (async () => {
-          const wait = (predicate, timeoutMs = 15000) => new Promise((resolve, reject) => {
+          const wait = (predicate, label, timeoutMs = 15000) => new Promise((resolve, reject) => {
             const started = Date.now();
             const tick = () => {
               try {
@@ -1541,105 +7391,94 @@ async function main() {
                 if (value) return resolve(value);
               } catch (_) {}
               if (Date.now() - started > timeoutMs) {
-                return reject(new Error('timeout waiting for server cache UI condition: ' + document.body.innerText.slice(0, 4000)));
+                return reject(new Error(
+                  'timeout waiting for ' + label + ': ' + document.body.innerText.slice(0, 4000)
+                ));
               }
               setTimeout(tick, 100);
             };
             tick();
           });
-          const modelPath = ${JSON.stringify(modelPath)};
           const cacheExpectRegex = ${JSON.stringify(cacheExpectRegex)};
           const expectPagedCacheLocked = ${JSON.stringify(expectPagedCacheLocked)};
           const expectPagedCache = ${JSON.stringify(expectPagedCache)};
-          const updateDismiss = [...document.querySelectorAll('button')]
-            .find((b) => b.innerText.includes("Got it"));
-          if (updateDismiss) {
-            updateDismiss.click();
-            await new Promise((resolve) => setTimeout(resolve, 150));
-          }
-          window.dispatchEvent(new CustomEvent('vmlx:navigate', {
-            detail: { mode: 'server', panel: 'create', modelPath }
-          }));
-          await wait(() => {
-            const text = document.body.innerText;
-            return text.includes('Create Session')
-              && text.includes('Step 2: Configure')
-              && text.includes(modelPath)
-              && text.includes('Server Settings');
-          });
+          const serverButton = await wait(() =>
+            [...document.querySelectorAll('button')].find((button) =>
+              (button.textContent || '').replace(/\\s+/g, ' ').trim() === 'Server'
+            ) || null,
+          'running-session Server settings control');
+          serverButton.click();
+          const drawerHeader = await wait(() =>
+            [...document.querySelectorAll('span')].find((element) =>
+              (element.textContent || '').replace(/\\s+/g, ' ').trim() === 'Server Settings'
+            ) || null,
+          'running-session Server Settings drawer');
           const sectionClickResults = [];
           const clickSection = async (title) => {
-            const sectionButtons = [...document.querySelectorAll('button')];
+            const drawer = drawerHeader.parentElement?.parentElement;
+            const sectionButtons = [...(drawer?.querySelectorAll('button') || [])];
             const clickable = sectionButtons.find((button) => {
-              const text = (button.innerText || '').trim();
-              const normalized = text.replace(/\\s+/g, ' ').trim();
-              const titleWithoutDisclosure = normalized.replace(/^[▶▸▾▹]\\s*/, '').trim();
-              return text === title
-                || normalized === title
-                || titleWithoutDisclosure === title
-                || normalized.includes(title);
+              const normalized = (button.innerText || '').replace(/\\s+/g, ' ').trim();
+              return normalized === title || normalized.includes(title);
             });
-            const before = document.body.innerText.includes('Block Disk Cache (L2)');
             if (clickable) {
               clickable.scrollIntoView({ block: 'center' });
-              clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-              clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-              clickable.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+              clickable.click();
               await new Promise((resolve) => setTimeout(resolve, 150));
             }
-            const after = document.body.innerText.includes('Block Disk Cache (L2)');
             sectionClickResults.push({
               title,
               found: !!clickable,
               text: (clickable?.innerText || '').trim(),
-              blockDiskVisibleBefore: before,
-              blockDiskVisibleAfter: after,
             });
             return !!clickable;
           };
           await clickSection('Prefix Cache');
-          await clickSection('Paged KV Cache');
-          await clickSection('KV Cache Quantization');
-          await clickSection('Disk Cache (Persistent)');
-          if (!document.body.innerText.includes('Block Disk Cache (L2)')) {
-            throw new Error(JSON.stringify({
-              message: 'server cache sections did not expand',
-              sectionClickResults,
-              buttons: [...document.querySelectorAll('button')]
-                .map((button) => (button.innerText || '').trim())
-                .filter(Boolean),
-              textHead: document.body.innerText.slice(0, 1800),
-            }, null, 2));
-          }
-          const labelFor = (text) => [...document.querySelectorAll('label')]
-            .find((label) => label.innerText.includes(text));
+          await clickSection('In-Memory Paged Cache');
+          const drawer = drawerHeader.parentElement?.parentElement;
+          const labelFor = (text) => [...(drawer?.querySelectorAll('label') || [])]
+            .find((label) => (label.innerText || '').includes(text));
           const inputFor = (text) => labelFor(text)?.querySelector('input[type="checkbox"]');
-          const checkedState = () => ({
-            enablePrefixCache: !!inputFor('Enable Prefix Cache')?.checked,
-            usePagedCache: !!inputFor('Use Paged KV Cache')?.checked,
-            enableBlockDiskCache: !!inputFor('Block Disk Cache (L2)')?.checked,
-            enableDiskCache: !!inputFor('Enable Disk Cache')?.checked,
-            usePagedCacheDisabled: !!inputFor('Use Paged KV Cache')?.disabled,
-            enableDiskCacheDisabled: !!inputFor('Enable Disk Cache')?.disabled,
-            blockDiskCachePresent: !!inputFor('Block Disk Cache (L2)'),
-          });
-          const initialCacheControls = checkedState();
-          const bodyText = document.body.innerText;
-          const labels = ['Enable Prefix Cache', 'Use Paged KV Cache', 'Block Disk Cache (L2)', 'Enable Disk Cache', 'Stored Cache Quantization']
+          const blockDiskInput = inputFor('Block Disk Cache (SSD / L2)');
+          const pagedInput = inputFor('In-Memory Paged Cache (RAM)');
+          const prefixInput = inputFor('Enable Prefix Cache')
+            || inputFor('DSV4 Native Composite Prefix Cache');
+          const initialCacheControls = {
+            enablePrefixCache: !!prefixInput?.checked,
+            usePagedCache: !!pagedInput?.checked,
+            enableBlockDiskCache: !!blockDiskInput?.checked,
+            usePagedCacheDisabled: !!pagedInput?.disabled,
+            blockDiskCachePresent: !!blockDiskInput,
+          };
+          const bodyText = drawer?.innerText || '';
+          const labels = [
+            'Enable Prefix Cache',
+            'DSV4 Native Composite Prefix Cache',
+            'In-Memory Paged Cache (RAM)',
+            'Block Disk Cache (SSD / L2)',
+            'Stored Cache Quantization',
+          ]
             .filter((label) => bodyText.includes(label));
           const cacheExpectationMatches = !cacheExpectRegex || new RegExp(cacheExpectRegex, 'i').test(bodyText);
-          const verified = labels.length === 5
-            && initialCacheControls.enablePrefixCache === true
+          const verified = initialCacheControls.enablePrefixCache === true
+            && initialCacheControls.enableBlockDiskCache === true
+            && initialCacheControls.blockDiskCachePresent === true
+            && !!prefixInput
+            && !!pagedInput
             && initialCacheControls.usePagedCache === expectPagedCache
             && (!expectPagedCacheLocked || initialCacheControls.usePagedCacheDisabled === true)
-            && initialCacheControls.enableDiskCacheDisabled === true
-            && initialCacheControls.blockDiskCachePresent === true
             && cacheExpectationMatches;
+          const close = [...(drawer?.querySelectorAll('button') || [])]
+            .find((button) => button.getAttribute('aria-label') === 'Close');
+          close?.click();
           return {
             requested: true,
             verified,
+            runningSessionDrawer: true,
+            visibleBlockDiskChecked: initialCacheControls.enableBlockDiskCache,
             cacheExpectRegex,
             expectPagedCacheLocked,
+            expectPagedCache,
             cacheExpectationMatches,
             labels,
             initialCacheControls,
@@ -1657,19 +7496,369 @@ async function main() {
       }
     }
     const healthAfter = await requestJson(`${baseUrl}/health`, 5000).catch((error) => ({ error: error.message }))
-    const visibleText = rendererResult.secondAssistantContent || rendererResult.firstAssistantContent || ''
-    const cacheHitTokens = maxRecursiveNumber(rendererResult, /cached|cacheHit|cache_hit/i)
-      || maxRecursiveNumber(healthAfter, /cached|cacheHit|cache_hit/i)
+    backendProcessBinding = await captureListenerProcessBinding({
+      port: serverPort,
+      expectedRootPid: null,
+      expectedHealthPid: runtimeBindingFromHealth(healthAfter).backend_pid,
+      kind: 'vmlx-python-backend',
+    })
+    const gitAfter = await captureGitProvenance()
+    const healthProvenance = {
+      before: createHealthSnapshot(`${baseUrl}/health`, healthBefore),
+      after: createHealthSnapshot(`${baseUrl}/health`, healthAfter),
+    }
+    const uiRuntimeProvenance = captureUiRuntimeProvenance(
+      app,
+      rendererResourceEvidence,
+      gitAfter,
+      {
+        cdpProcessBinding,
+        backendProcessBinding,
+        releaseManifest,
+      },
+    )
+    rendererResult.cacheRequestEvidence = (
+      rendererResult.cacheRequestEvidence || []
+    ).map((row) => {
+      const artifactValue = {
+        schema: 'vmlx-ui-turn-health-cache-execution-v1',
+        run_id: runId,
+        turn: row.turn,
+        proof_request_id: row.proofRequestId,
+        user_message_id: row.userMessageId,
+        assistant_message_id: row.assistantMessageId,
+        terminal_response_id: row.terminalResponseId,
+        correlation_status: row.correlationStatus,
+        health: row.healthAfter,
+      }
+      const artifactBytes = Buffer.from(canonicalJson(artifactValue))
+      const artifactPath = path.join(
+        proofDir,
+        `${proofBasename}-turn-${Number(row.turn)}-health.json`,
+      )
+      writePrivateArtifactFile(artifactPath, artifactBytes)
+      return {
+        ...row,
+        healthArtifact: {
+          path: path.resolve(artifactPath),
+          sha256: sha256File(artifactPath),
+          size_bytes: artifactBytes.length,
+        },
+      }
+    })
+    const resolvedSamplingRecords = (rendererResult.uiTurnEvidence || [])
+      .flatMap((turn) => parseResolvedSamplingKwargs(turn.logLines || [])
+        .map((record) => ({
+          ...record,
+          observed_window_turn: turn.turn,
+        })))
+    const resolvedSamplingKwargs = resolvedSamplingRecords.at(-1)?.values || {}
+    const cacheRequestCorrelation = {
+      status: (rendererResult.cacheRequestEvidence || []).length
+        === expectedUiTurnCount({
+          requestContract: { uiTurnCount },
+        })
+        && (rendererResult.cacheRequestEvidence || []).every(
+          (row) => row.correlationStatus === 'verified',
+        )
+        ? 'verified'
+        : 'partial',
+      source:
+        'chat:complete.responseId == health.scheduler.last_cache_execution.request_id',
+      turns: (rendererResult.cacheRequestEvidence || []).map((row) => ({
+        turn: row.turn,
+        proofRequestId: row.proofRequestId,
+        userMessageId: row.userMessageId,
+        assistantMessageId: row.assistantMessageId,
+        terminalResponseId: row.terminalResponseId,
+        executionRequestId: row.executionRequestId,
+        correlationStatus: row.correlationStatus,
+        healthArtifact: row.healthArtifact,
+      })),
+    }
+    const requestCorrelation = {
+      status: 'partial_product_support_missing',
+      reason:
+        'The visible Electron terminal now exposes its current server response ID '
+        + 'for exact cache-execution correlation, but server sampling logs still '
+        + 'lack the same request/message identity. Time-window sampling logs remain '
+        + 'non-authoritative.',
+      turns: (rendererResult.uiTurnEvidence || []).map((turn) => ({
+        ...(() => {
+          const cacheRow = (rendererResult.cacheRequestEvidence || []).find(
+            (row) => Number(row?.turn) === Number(turn?.turn),
+          ) || {}
+          return {
+            serverRequestId: cacheRow.serverRequestId || null,
+            cacheObservationCorrelated:
+              cacheRow.correlationStatus === 'verified',
+          }
+        })(),
+        turn: turn.turn,
+        proofRequestId: turn.proofRequestId,
+        userMessageId: turn.userMessageId,
+        assistantMessageId: turn.assistantMessageId,
+        serverProofRequestId: null,
+        serverMessageId: null,
+        resolvedLogCorrelated: false,
+      })),
+    }
+    if (checkServerCacheControls) {
+      const commandLine = [...(rendererResult.sessionLogs || [])]
+        .reverse()
+        .find((line) => String(line).includes('] $ '))
+        || ''
+      const argv = [...String(commandLine).matchAll(/--[A-Za-z0-9-]+/g)]
+        .map((match) => match[0])
+      serverCacheControls = {
+        ...serverCacheControls,
+        commandLine,
+        argv,
+        persistedConfig: rendererResult.effectiveSessionConfig || {},
+        healthNativeCache: healthAfter?.native_cache || {},
+      }
+      serverCacheControls.verified = (
+        serverCacheControls.verified === true
+        && rendererResult.effectiveSessionConfig?.enableBlockDiskCache === true
+        && argv.includes('--enable-block-disk-cache')
+        && healthAfter?.native_cache?.block_disk_l2 === true
+      )
+    }
+    const visibleText = rendererResult.thirdAssistantContent
+      || rendererResult.secondAssistantContent
+      || rendererResult.firstAssistantContent
+      || ''
+    const cacheHitTokens = (rendererResult.cacheRequestEvidence || [])
+      .reduce((total, evidence) => {
+        const before = explicitCacheCounters(evidence?.before)
+        const after = explicitCacheCounters(evidence?.after)
+        return total + Math.max(0, after.hitTokens - before.hitTokens)
+      }, 0)
     const toolProbeFiles = {}
+    const toolProbePaths = []
     for (const name of ['real_ui_tool_probe_1.txt', 'real_ui_tool_probe_2.txt']) {
       const filePath = path.join(workingDirectory, name)
+      toolProbePaths.push(filePath)
       if (existsSync(filePath)) {
         toolProbeFiles[name] = readFileSync(filePath, 'utf8')
       }
     }
+    for (const filePath of toolProbePaths) rmSync(filePath, { force: true })
+    const toolProbeCleanup = {
+      removed: toolProbePaths.every((filePath) => !existsSync(filePath)),
+      paths: toolProbePaths,
+    }
+    const uiBackendBinding = {
+      format: 'vmlx-ui-backend-binding-v3',
+      run_id: runId,
+      generated_at: new Date().toISOString(),
+      base_url: baseUrl,
+      backend_pid: healthProvenance.after.binding.backend_pid,
+      backend_identity_fingerprint_sha256:
+        healthProvenance.after.binding.fingerprint_sha256,
+      binding: healthProvenance.after.binding,
+      runtime_source_hashes:
+        healthProvenance.after.binding.runtime_source_hashes,
+      served_model: servedModel,
+      local_session_id: rendererResult.localSessionId || null,
+      chat_id: rendererResult.chatId || null,
+      model_bundle_fingerprint_sha256:
+        healthProvenance.after.binding.model_bundle_fingerprint_sha256,
+      cache_topology_fingerprint_sha256:
+        healthProvenance.after.binding.cache_topology_fingerprint_sha256,
+      source_commit: gitAfter.commit,
+      source_tree: gitAfter.tree,
+      cdp_url: attachCdp?.origin || `http://127.0.0.1:${debugPort}`,
+      electron_pid: cdpProcessBinding?.listener_pid || null,
+      electron_process_binding: cdpProcessBinding,
+      electron_lifecycle_owner: app.lifecycleOwner || 'ui-proof-child',
+      electron_attached: app.attached === true,
+      electron_teardown_allowed: app.allowTeardown !== false,
+      hold_seconds: pairedApiHoldSeconds,
+      release_sentinel_path: releaseSentinelPath
+        ? path.resolve(releaseSentinelPath)
+        : null,
+      release_nonce_sha256: releaseSentinelNonce
+        ? sha256Text(releaseSentinelNonce)
+        : null,
+      expected_run_intent_path: releaseRunIntentPath
+        ? realpathSync(releaseRunIntentPath)
+        : null,
+      expected_run_intent_sha256: releaseRunIntentSha256 || null,
+      expected_run_intent_canonical_sha256:
+        ownedRunIntent?.value?.canonical_sha256 || null,
+      expected_release_phase: activeReleasePhase,
+      expected_session_attestation_path: releaseSessionAttestationPath
+        ? path.resolve(releaseSessionAttestationPath)
+        : null,
+      expected_paired_cache_artifact_path: pairedCacheArtifactPath
+        ? path.resolve(pairedCacheArtifactPath)
+        : null,
+      live_during_hold: pairedApiHoldSeconds > 0 || Boolean(releaseSentinelPath),
+    }
+    const proofPath = path.join(proofDir, `${proofBasename}-proof.json`)
+    const bindingPath = path.join(proofDir, `${proofBasename}-ui-backend-binding.json`)
+    writePrivateArtifactFile(bindingPath, JSON.stringify(uiBackendBinding, null, 2))
+    const bindingSha256 = sha256File(bindingPath)
+    let uiSessionAttestation = null
+    if (releaseSentinelPath) {
+      const attestationPath = path.resolve(releaseSessionAttestationPath)
+      const existingAncestor = realpathSync(nearestExistingDirectory(attestationPath))
+      if (
+        isPathInside(attestationPath, realpathSync(repoDir))
+        || isPathInside(existingAncestor, realpathSync(repoDir))
+      ) {
+        throw new Error('Owned UI session attestation must stay outside the public Git worktree')
+      }
+      if (existsSync(attestationPath)) {
+        throw new Error('Owned UI session attestation path already exists')
+      }
+      const intentBundle = realpathSync(activeReleasePhase.model_bundle_path)
+      const runtimeBundle = realpathSync(modelPath)
+      const runtimeBundleFingerprint =
+        healthProvenance.after.binding.model_bundle_fingerprint_sha256
+      if (
+        intentBundle !== runtimeBundle
+        || activeReleasePhase.bundle_fingerprint_sha256
+          !== runtimeBundleFingerprint
+      ) {
+        throw new Error(
+          'Owned UI session attestation model bundle does not match live backend provenance',
+        )
+      }
+      const sessionId = String(rendererResult.localSessionId || '')
+      const backendPid = Number(healthProvenance.after.binding.backend_pid)
+      const electronPid = Number(cdpProcessBinding?.listener_pid)
+      if (
+        !sessionId
+        || !Number.isInteger(backendPid)
+        || backendPid <= 0
+        || !Number.isInteger(electronPid)
+        || electronPid <= 0
+      ) {
+        throw new Error('Owned UI session attestation has incomplete PID/session binding')
+      }
+      const attestationValue = {
+        schema: 'vmlx-r18-owned-ui-session-attestation-v5',
+        run_id: runId,
+        nonce: releaseSentinelNonce,
+        run_intent_sha256: releaseRunIntentSha256,
+        phase_index: activeReleasePhase.phase_index,
+        phase_name: activeReleasePhase.phase_name,
+        representative_id: activeReleasePhase.representative_id,
+        bundle_role: activeReleasePhase.bundle_role,
+        cache_policy: activeReleasePhase.cache_policy,
+        paged_ram: activeReleasePhase.paged_ram,
+        ui_action_profile: activeReleasePhase.ui_action_profile,
+        ui_turn_count: activeReleasePhase.ui_turn_count,
+        api_action_profile: activeReleasePhase.api_action_profile,
+        ui_producer_pid: process.pid,
+        session_id: sessionId,
+        model: activeReleasePhase.model,
+        model_bundle_path: intentBundle,
+        bundle_fingerprint_sha256:
+          activeReleasePhase.bundle_fingerprint_sha256,
+        backend_pid: backendPid,
+        gateway_pid: releaseGatewayPid,
+        direct_base_url: ownedRunIntent.value.direct_base_url,
+        gateway_base_url: ownedRunIntent.value.gateway_base_url,
+        electron_pid: electronPid,
+        cdp_origin: attachCdp.origin,
+        lifecycle_owner: lifecycleOwner,
+        source_commit: gitAfter.commit,
+        source_tree: gitAfter.tree,
+        renderer_source_sha256:
+          rendererResourceEvidence.servedRendererSourceSha256,
+        session_binding_sha256: bindingSha256,
+        created_at: new Date().toISOString(),
+      }
+      writePrivateArtifactFile(
+        attestationPath,
+        JSON.stringify(attestationValue),
+      )
+      uiSessionAttestation = readPrivateExternalJson(
+        attestationPath,
+        'Owned UI session attestation',
+      )
+    }
+    const releaseNotBeforeMs = uiSessionAttestation
+      ? lstatSync(uiSessionAttestation.path).mtimeMs
+      : lstatSync(bindingPath).mtimeMs
+    let releaseEvidence = null
+    if (pairedApiHoldSeconds > 0 || releaseSentinelPath) {
+      console.log(JSON.stringify({
+        ui_only_ready_for_separate_api_run: true,
+        run_id: runId,
+        base_url: baseUrl,
+        backend_pid: healthProvenance.after.binding.backend_pid,
+        backend_identity_fingerprint_sha256:
+          healthProvenance.after.binding.fingerprint_sha256,
+        ui_backend_binding_path: bindingPath,
+        ui_backend_binding_sha256: bindingSha256,
+        cdp_url: uiBackendBinding.cdp_url,
+        electron_pid: uiBackendBinding.electron_pid,
+        expected_paired_api_artifact_path: path.resolve(pairedApiArtifactPath),
+        expected_paired_cache_artifact_path: pairedCacheArtifactPath
+          ? path.resolve(pairedCacheArtifactPath)
+          : null,
+        expected_run_intent_path: ownedRunIntent?.path || null,
+        expected_run_intent_sha256: releaseRunIntentSha256 || null,
+        expected_ui_session_attestation_path:
+          uiSessionAttestation?.path || null,
+        expected_ui_session_attestation_sha256:
+          uiSessionAttestation?.sha256 || null,
+        release_phase: activeReleasePhase,
+        required_separate_api_artifact: true,
+        hold_seconds: pairedApiHoldSeconds,
+        release_sentinel_path: releaseSentinelPath
+          ? path.resolve(releaseSentinelPath)
+          : null,
+        release_sentinel_timeout_seconds: releaseSentinelTimeoutSeconds,
+      }))
+      if (releaseSentinelPath) {
+        releaseEvidence = await waitForOwnedUiReleaseSentinel({
+          filePath: releaseSentinelPath,
+          runId,
+          nonce: releaseSentinelNonce,
+          sessionId: rendererResult.localSessionId,
+          orchestrated: true,
+          runIntentPath: releaseRunIntentPath,
+          runIntentSha256: releaseRunIntentSha256,
+          uiSessionAttestationPath: releaseSessionAttestationPath,
+          uiSessionAttestationSha256: uiSessionAttestation.sha256,
+          activePhase: activeReleasePhase,
+          apiArtifactPath: pairedApiArtifactPath,
+          cacheArtifactPath: pairedCacheArtifactPath,
+          notBeforeMs: releaseNotBeforeMs,
+          timeoutMs: releaseSentinelTimeoutSeconds * 1000,
+        })
+      } else {
+        await sleep(pairedApiHoldSeconds * 1000)
+      }
+    }
+    const pairedApiArtifact = pairedApiArtifactPath
+      ? readPrivateExternalJson(
+          pairedApiArtifactPath,
+          'Paired raw API proof artifact',
+        )
+      : null
+    if (
+      releaseEvidence
+      && pairedApiArtifact?.sha256 !== releaseEvidence.api_capture_sha256
+    ) {
+      throw new Error(
+        'paired API artifact changed after the owned release sentinel was consumed',
+      )
+    }
     const result = {
+      format: proofFormat,
+      run_id: runId,
       generatedAt: new Date().toISOString(),
-      status: rendererResult.rendererFailureStage ? 'fail' : 'pass',
+      status: rendererResult.rendererFailureStage ? 'fail' : 'partial',
+      pass: false,
+      surfaceStatus: pairedApiArtifact
+        ? 'partial_dual_surface_uncorrelated'
+        : 'partial_ui_only',
       failureStage: rendererResult.rendererFailureStage || undefined,
       repoDir,
       panelDir,
@@ -1680,12 +7869,17 @@ async function main() {
       requestedWireApi: wireApi,
       requestedBuiltinTools: builtinToolsEnabled,
       requestedEnableThinking: enableThinkingOverride,
+      reasoningExpectation,
       requestedServerCacheControls: checkServerCacheControls,
       requestedMedia: checkMedia,
       requestedVideo: checkVideo,
       requestContract: {
-        promptOne,
-        promptTwo,
+        uiActionProfile,
+        uiTurnCount,
+        apiActionProfile,
+        promptOne: selectedPromptOne,
+        promptTwo: selectedPromptTwo,
+        promptThree: selectedPromptThree,
         requestMaxTokens,
         requestMaxPromptTokens,
         maxToolIterations,
@@ -1693,6 +7887,7 @@ async function main() {
         wireApi,
         builtinToolsEnabled,
         enableThinking: enableThinkingOverride ?? null,
+        reasoningExpectation,
         samplingOverrides: Object.fromEntries(
           Object.entries(samplingOverrides).filter(([, value]) => value !== undefined),
         ),
@@ -1703,16 +7898,14 @@ async function main() {
         imageExpectRegex,
         videoExpectRegex,
         cacheExpectRegex,
+        pairedApiHoldSeconds,
       },
       baseUrl,
-      python,
-      runDir,
       userDataDir,
       workingDirectory,
       uiLaunchMode: app.uiLaunchMode,
       uiCommand: app.command,
       installedAppPath: app.appPath || undefined,
-      serverCommand: server.command,
       server: {
         baseUrl,
         health: healthAfter,
@@ -1739,12 +7932,60 @@ async function main() {
         chat: path.resolve(chatScreenshot),
       },
       ...rendererResult,
+      gitProvenance: {
+        before: gitBefore,
+        after: gitAfter,
+      },
+      healthProvenance,
+      bundleGenerationContract,
+      uiRuntimeProvenance,
+      resolvedSamplingRecords,
+      resolvedSamplingKwargs,
+      requestCorrelation,
+      cacheRequestCorrelation,
+      backend_identity_fingerprint_sha256:
+        healthProvenance.after.binding.fingerprint_sha256,
+      backend: {
+        pid: healthProvenance.after.binding.backend_pid,
+        base_url: baseUrl,
+        model: servedModel,
+        binding_before: healthProvenance.before.binding,
+        binding_after: healthProvenance.after.binding,
+      },
+      uiBackendBinding,
+      ownedRunIntent: ownedRunIntent
+        ? {
+            path: ownedRunIntent.path,
+            sha256: ownedRunIntent.sha256,
+            canonical_sha256: ownedRunIntent.value.canonical_sha256,
+            phase_index: activeReleasePhase.phase_index,
+            phase_name: activeReleasePhase.phase_name,
+          }
+        : null,
+      uiSessionAttestation: uiSessionAttestation
+        ? {
+            path: uiSessionAttestation.path,
+            sha256: uiSessionAttestation.sha256,
+            value: uiSessionAttestation.value,
+          }
+        : null,
+      releaseEvidence,
+      pairedApiArtifact,
+      session: {
+        id: rendererResult.localSessionId || null,
+        type: rendererResult.sessionType || null,
+        effective_config: rendererResult.effectiveSessionConfig || {},
+      },
       serverCacheControls,
       toolProbeFiles,
+      toolProbeCleanup,
       streamTrace: rendererResult.streamTraceByMessage || [],
       appLogTail: appLogs.slice(-80),
-      serverLogTail: server.logs.slice(-120),
+      serverLogTail: rendererResult.sessionLogs || [],
     }
+    applyTopLevelCorrelationStatus(result, {
+      rendererFailed: Boolean(rendererResult.rendererFailureStage),
+    })
     result.visibleAssistantTurnsComplete = visibleAssistantAfterEachUser(result.chat?.turns || [])
     result.liveSpeedSamples = extractLiveSpeedSamples(result)
     result.provenSurfaces = deriveProvenSurfaces(result)
@@ -1753,34 +7994,47 @@ async function main() {
       assertResult(result)
     } catch (error) {
       assertionError = error
-      result.status = 'fail'
-      result.failureStage = result.failureStage || 'release_assertions'
-      result.assertionFailures = error.failures || [error.message]
+      applyAssertionFailureStatus(result, error)
     }
-    writeFileSync(
-      path.join(proofDir, `${proofBasename}-proof.json`),
-      JSON.stringify(result, null, 2),
-    )
+    result.artifacts = {
+      proof: proofPath,
+      ui_backend_binding: bindingPath,
+      owned_run_intent: ownedRunIntent?.path || null,
+      ui_session_attestation: uiSessionAttestation?.path || null,
+      paired_raw_api_proof: pairedApiArtifact?.path || null,
+      owned_release_sentinel: releaseEvidence?.path || null,
+      screenshot: path.resolve(chatScreenshot),
+    }
+    writePrivateArtifactFile(proofPath, JSON.stringify(result, null, 2))
     if (process.env.VMLINUX_REAL_UI_ALLOW_FAIL === '1' || process.env.VMLX_REAL_UI_ALLOW_FAIL === '1') {
       console.log(JSON.stringify({
-        ok: assertionError === null,
+        ok: assertionError === null && result.pass === true,
         failures: assertionError ? result.assertionFailures : undefined,
         result,
       }, null, 2))
     } else {
       if (assertionError) throw assertionError
-      console.log(JSON.stringify({ ok: true, result }, null, 2))
+      console.log(JSON.stringify({ ok: result.pass === true, result }, null, 2))
+      if (result.pass !== true) process.exitCode = 2
     }
   } finally {
     if (cdp) cdp.close()
-    await terminateProcess(app?.proc)
-    await terminateProcess(server.proc)
+    if (!app?.attached && app?.allowTeardown !== false) {
+      await terminateProcess(app?.proc)
+    }
     await removeTemporaryTree(userDataDir)
-    await removeTemporaryTree(runDir)
+    if (!configuredWorkingDirectory) {
+      await removeTemporaryTree(workingDirectory)
+    }
   }
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message || String(error))
-  process.exit(1)
-})
+const invokedAsMain = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+
+if (invokedAsMain) {
+  main().catch((error) => {
+    console.error(error.stack || error.message || String(error))
+    process.exit(1)
+  })
+}

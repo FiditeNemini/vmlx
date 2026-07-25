@@ -75,7 +75,7 @@ class CodebookVQLanguageModel:
         self._codebook_files: Dict[Tuple[int, str], Path] = {}
         self._codebook_metadata: Dict[str, Any] = {}
 
-        # Reconstructed weights cache
+        # Compressed codebook/indices RAM cache
         from vmlx_engine.cache.codebook_cache import CodebookWeightCache
 
         # Handle None config_manager
@@ -88,10 +88,13 @@ class CodebookVQLanguageModel:
             use_metal = True  # Default to metal if no config
             kernel_config = {}
 
+        if hasattr(cache_config, "model_dump"):
+            cache_config = cache_config.model_dump()
+        if hasattr(kernel_config, "model_dump"):
+            kernel_config = kernel_config.model_dump()
+
         self._weight_cache = CodebookWeightCache(
             config=cache_config,
-            disk_cache_dir=cache_config.get("disk_cache_dir"),
-            disk_max_gb=cache_config.get("disk_max_gb", 1000),
             eviction_batch_size=cache_config.get("eviction_batch_size", 4),
         )
 
@@ -140,7 +143,7 @@ class CodebookVQLanguageModel:
         self, layer_idx: int, tensor_type: str
     ) -> Tuple[mx.array, mx.array]:
         """
-        Load and reconstruct one layer's expert weights.
+        Load one layer's compressed codebook and indices.
 
         Args:
             layer_idx: Layer index.
@@ -166,7 +169,7 @@ class CodebookVQLanguageModel:
         codebook = data["codebook"]
         indices = data["indices"]
 
-        # Store reconstructed weights in cache
+        # Retain the compressed tuple in the bounded RAM cache
         self._weight_cache.put(key, (codebook, indices))
 
         return codebook, indices

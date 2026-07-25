@@ -66,14 +66,126 @@ if [ -n "$forbidden" ]; then
   exit 1
 fi
 
+historical_forbidden=$(
+  git log --all --name-only --format= |
+    awk '
+      /^docs\// &&
+        !/^docs\/ARCHITECTURE\.md$/ &&
+        !/^docs\/index\.md$/ &&
+        !/^docs\/mlxstudio-releases-readme\.md$/ &&
+        !/^docs\/api\// &&
+        !/^docs\/benchmarks\// &&
+        !/^docs\/development\/(architecture|build-test-deploy|contributing)\.md$/ &&
+        !/^docs\/getting-started\// &&
+        !/^docs\/guides\// &&
+        !/^docs\/reference\// {
+          print
+          next
+        }
+      index($0, "/") == 0 &&
+        /\.md$/ &&
+        !/^(README|CHANGELOG|CONTRIBUTING|SECURITY|CODE_OF_CONDUCT)\.md$/ {
+          print
+          next
+        }
+      /^notes\// ||
+      /^PLANS\// ||
+      /^autoresearch\// ||
+      /^tmp\// ||
+      /^build\// ||
+      /^assets\/tools-tab\.png$/ ||
+      /^panel\/(CHANGELOG|ENGINE-UPDATES|PROJECT|SETUP)\.md$/ ||
+      /^productionapp\/(INSTALL|TECHNICAL-NOTES)\.md$/ ||
+      /^vmlx_engine\/docs\/CODEBOOK-DEVELOPMENT\.md$/ ||
+      /(^|\/)node_modules\// ||
+      /^panel\/docs\/plans\// ||
+      /^tests\/e2e\/results\// ||
+      /^tests\/e2e\/panel-driver\/node_modules\// ||
+      /^tests\/benchmark\/outputs\// ||
+      /^tests\/e2e\/(AUDIT-REPORT|MATRIX|UI-SUITE)\.md$/ ||
+      /^nohup\.out$/ ||
+      /^trace_err2?\.txt$/ ||
+      /^(gsm8k_qwen3_0\.6b_results|vlm_benchmark_results)\.json$/ ||
+      /^vmlx_engine\/models\/minimax_m3\/(BUILD-STATUS|MASTER-STATUS|CAMPAIGN-CHECKLIST|CAMPAIGN-PROGRESS-LOG|M3-EAGLE3-NATIVE-MTP-HANDOFF|M3-MOE-QUANT-FIX-HANDOFF)\.md$/ ||
+      /^vmlx_engine\/models\/minimax_m3\/MODEL-MATRIX-AUTODETECT\.txt$/ ||
+      /^\.agents\// ||
+      /^\.agent\// ||
+      /^\.claude\// ||
+      /^\.codex\// ||
+      /^\.sisyphus\// ||
+      /^\.factory\// ||
+      /(^|\/)(botes|evidence|private-evidence|vmlx-proof|screenshots?|screen-recordings?|cdp-captures?|raw-sse|runtime-logs?)(\/|$)/ ||
+      /(^|\/)[^\/]+\.(sqlite|db)$/ {
+        print
+      }
+    ' |
+    sort -u
+)
+
+if [ -n "$historical_forbidden" ]; then
+  printf '%s\n' \
+    'ERROR: public repository history contains forbidden private/internal artifacts:' \
+    "$historical_forbidden" >&2
+  exit 1
+fi
+
+sensitive_paths=$(
+  git ls-files |
+    awk '
+      /(^|\/)\.(pypirc|npmrc|netrc)$/ ||
+      /(^|\/)\.env($|\.)/ ||
+      /\.(p8|p12|pem|key|cer|crt|der|mobileprovision|provisionprofile)$/ ||
+      /(^|\/)[^\/]*notary-results?[.]json$/ ||
+      /(^|\/)[^\/]*notary-(info|log|submit)[.]json$/ ||
+      /(^|\/)[^\/]*(notar|sign|release|credential)[^\/]*[.]local[.][^\/]+$/ ||
+      /(^|\/)(notary-results|notary-records|private-release|release-private|release-credentials|signing-secrets)(\/|$)/ {
+        if ($0 !~ /[.]example$/) {
+          print
+        }
+      }
+    '
+)
+
+if [ -n "$sensitive_paths" ]; then
+  printf '%s\n' \
+    'ERROR: public repository contains tracked release credentials or private signing/notarization material:' \
+    "$sensitive_paths" >&2
+  exit 1
+fi
+
+historical_sensitive_paths=$(
+  git log --all --name-only --format= |
+    awk '
+      /(^|\/)\.(pypirc|npmrc|netrc)$/ ||
+      /(^|\/)\.env($|\.)/ ||
+      /\.(p8|p12|pem|key|cer|crt|der|mobileprovision|provisionprofile)$/ ||
+      /(^|\/)[^\/]*notary-results?[.]json$/ ||
+      /(^|\/)[^\/]*notary-(info|log|submit)[.]json$/ ||
+      /(^|\/)[^\/]*(notar|sign|release|credential)[^\/]*[.]local[.][^\/]+$/ ||
+      /(^|\/)(notary-results|notary-records|private-release|release-private|release-credentials|signing-secrets)(\/|$)/ {
+        if ($0 !~ /[.]example$/) {
+          print
+        }
+      }
+    ' |
+    sort -u
+)
+
+if [ -n "$historical_sensitive_paths" ]; then
+  printf '%s\n' \
+    'ERROR: public repository history contains release credentials or private signing/notarization material.' >&2
+  exit 1
+fi
+
 private_host_pattern='erics-m5-'"max"'([0-9]*)?([.]tail[[:alnum:]]+[.]ts[.]net|[.]local)'
 private_volume_pattern='/Volumes/'"Erics"'LLMDrive'
 private_cache_pattern='[.]cache/vmlx-'"proof"
+stale_source_alias_pattern='/(private/)?tmp/vmlx-[0-9][^[:space:]]*-build'
 
 private_strings=$(
   {
     git grep -Il -E \
-      "(${private_host_pattern}|${private_volume_pattern}|${private_cache_pattern})" \
+      "(${private_host_pattern}|${private_volume_pattern}|${private_cache_pattern}|${stale_source_alias_pattern})" \
       -- . ':(exclude)scripts/check-public-repo-hygiene.sh' 2>/dev/null || true
     git grep -InE '/Users/[A-Za-z0-9._-]+' -- . 2>/dev/null |
       grep -Ev '/Users/(example|u)(/|[^A-Za-z0-9._-])' |

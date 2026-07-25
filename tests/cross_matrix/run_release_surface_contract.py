@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Validate release/updater surface state without publishing anything.
+"""Validate prepublication source state or postpublication public surfaces.
 
-This preflight is intentionally local-only by default. It prevents the release
-prep branch from silently advancing `latest.json` beyond the source version, or
-from bumping it to the source version without a matching URL, checksum, and
-release-note version. Live public PyPI/GitHub/update-feed checks are handled by
-the human/operator step before publishing because they can change at any time.
+The default mode is intentionally local-only: it checks the source checkout's
+version stamps and keeps its updater metadata behind the staged source version.
+The ``--live-public`` mode is deliberately separate. It takes the canonical app
+release manifest plus the immutable final notarization manifest, then binds the
+public source tag to the source commit that produced the notarized artifacts.
+It never treats a later metadata-only source HEAD as the artifact source.
 """
 
 from __future__ import annotations
@@ -177,12 +178,102 @@ def _updater_matches_local(public: dict[str, Any], local: dict[str, Any]) -> boo
     )
 
 
+def _public_manifest_checks(
+    source_version: str,
+    public_manifest: dict[str, Any],
+) -> dict[str, bool]:
+    local_style = _local_updater_checks(source_version, public_manifest)
+    return {
+        "public_manifest_version_matches_source": (
+            str(public_manifest.get("version") or "") == source_version
+        ),
+        "public_manifest_release_state_valid": bool(
+            local_style["local_updater_release_state_valid"]
+        ),
+        "public_manifest_has_required_fields": bool(
+            local_style["local_updater_has_required_fields"]
+        ),
+        "public_manifest_url_matches_version": bool(
+            local_style["local_updater_url_matches_version"]
+        ),
+        "public_manifest_sha256_valid": bool(
+            local_style["local_updater_sha256_valid"]
+        ),
+        "public_manifest_notes_match_version": bool(
+            local_style["local_updater_notes_match_version"]
+        ),
+        "public_manifest_platform_downloads_valid": bool(
+            local_style["local_updater_platform_downloads_valid"]
+        ),
+    }
+
+
+def _final_notary_release_identity(
+    source_version: str,
+    public_manifest: dict[str, Any],
+    final_notary_manifest: dict[str, Any],
+) -> tuple[dict[str, bool], dict[str, Any]]:
+    source = (
+        final_notary_manifest.get("source")
+        if isinstance(final_notary_manifest.get("source"), dict)
+        else {}
+    )
+    artifacts = (
+        final_notary_manifest.get("artifacts")
+        if isinstance(final_notary_manifest.get("artifacts"), dict)
+        else {}
+    )
+    expected_source_commit = str(source.get("commit") or "")
+    expected_source_tree = str(source.get("tree") or "")
+    downloads = (
+        public_manifest.get("downloads")
+        if isinstance(public_manifest.get("downloads"), dict)
+        else {}
+    )
+    artifact_hashes: dict[str, str] = {}
+    public_hashes: dict[str, str] = {}
+    hash_matches: list[bool] = []
+    for flavor in ("sequoia", "tahoe"):
+        artifact = artifacts.get(flavor) if isinstance(artifacts.get(flavor), dict) else {}
+        download = downloads.get(flavor) if isinstance(downloads.get(flavor), dict) else {}
+        artifact_sha = str(artifact.get("dmg_post_notary_sha256") or "")
+        public_sha = str(download.get("sha256") or "")
+        artifact_hashes[flavor] = artifact_sha
+        public_hashes[flavor] = public_sha
+        hash_matches.append(
+            re.fullmatch(r"[0-9a-f]{64}", artifact_sha) is not None
+            and public_sha.lower() == artifact_sha
+        )
+    sequoia_sha = artifact_hashes.get("sequoia", "")
+    primary_sha = str(public_manifest.get("sha256") or "").lower()
+    hashes_match = all(hash_matches) and primary_sha == sequoia_sha
+    checks = {
+        "final_notary_manifest_identity_valid": bool(
+            final_notary_manifest.get("stage") == "post_notary"
+            and str(final_notary_manifest.get("version") or "") == source_version
+        ),
+        "final_notary_source_commit_valid": bool(
+            re.fullmatch(r"[0-9a-f]{40,64}", expected_source_commit)
+            and re.fullmatch(r"[0-9a-f]{40,64}", expected_source_tree)
+        ),
+        "public_manifest_matches_notarized_artifacts": bool(hashes_match),
+    }
+    return checks, {
+        "version": final_notary_manifest.get("version"),
+        "stage": final_notary_manifest.get("stage"),
+        "source_commit": expected_source_commit,
+        "source_tree": expected_source_tree,
+        "artifact_sha256": artifact_hashes,
+        "public_manifest_sha256": public_hashes,
+    }
+
+
 def _public_release_checks(
     source_version: str,
-    latest: dict[str, Any],
+    public_manifest: dict[str, Any],
     fetch_json: FetchJson,
     fetch_headers: FetchHeaders,
-    current_revision: str | None,
+    expected_source_commit: str,
 ) -> tuple[dict[str, bool], dict[str, Any]]:
     raw_latest_url = "https://raw.githubusercontent.com/jjang-ai/mlxstudio/main/latest.json"
     site_latest_url = "https://mlx.studio/update/latest.json"
@@ -205,12 +296,12 @@ def _public_release_checks(
             "url": raw_latest.get("url"),
             "sha256": raw_latest.get("sha256"),
         }
-        checks["public_raw_updater_matches_local"] = _updater_matches_local(
-            raw_latest, latest
+        checks["public_raw_updater_matches_manifest"] = _updater_matches_local(
+            raw_latest, public_manifest
         )
     except Exception as exc:  # pragma: no cover - exercised by live failures.
         public["raw_latest_error"] = repr(exc)
-        checks["public_raw_updater_matches_local"] = False
+        checks["public_raw_updater_matches_manifest"] = False
 
     try:
         site_latest = fetch_json(site_latest_url)
@@ -219,12 +310,12 @@ def _public_release_checks(
             "url": site_latest.get("url"),
             "sha256": site_latest.get("sha256"),
         }
-        checks["public_site_updater_matches_local"] = _updater_matches_local(
-            site_latest, latest
+        checks["public_site_updater_matches_manifest"] = _updater_matches_local(
+            site_latest, public_manifest
         )
     except Exception as exc:  # pragma: no cover - exercised by live failures.
         public["site_latest_error"] = repr(exc)
-        checks["public_site_updater_matches_local"] = False
+        checks["public_site_updater_matches_manifest"] = False
 
     try:
         site_headers = fetch_headers(site_latest_url)
@@ -272,12 +363,12 @@ def _public_release_checks(
         public["pypi_error"] = repr(exc)
         checks["public_pypi_has_release_files"] = False
 
-    updater_asset_name = str(latest.get("url") or "").rsplit("/", 1)[-1]
-    expected_digest = "sha256:" + str(latest.get("sha256") or "")
+    updater_asset_name = str(public_manifest.get("url") or "").rsplit("/", 1)[-1]
+    expected_digest = "sha256:" + str(public_manifest.get("sha256") or "")
     expected_assets = {
         updater_asset_name: expected_digest,
     }
-    downloads = latest.get("downloads")
+    downloads = public_manifest.get("downloads")
     if isinstance(downloads, dict):
         for row in downloads.values():
             if not isinstance(row, dict):
@@ -353,14 +444,14 @@ def _public_release_checks(
             "type": tag_type,
             "resolved_sha": resolved_sha,
             "resolved_type": resolved_type,
-            "current_revision": current_revision,
+            "expected_notarized_source_commit": expected_source_commit,
         }
-        checks["public_github_source_release_tag_matches_source_head"] = bool(
-            current_revision and resolved_sha == current_revision
+        checks["public_github_source_release_tag_matches_notarized_source"] = bool(
+            expected_source_commit and resolved_sha == expected_source_commit
         )
     except Exception as exc:  # pragma: no cover - exercised by live failures.
         public["github_source_release_tag_error"] = repr(exc)
-        checks["public_github_source_release_tag_matches_source_head"] = False
+        checks["public_github_source_release_tag_matches_notarized_source"] = False
 
     return checks, public
 
@@ -369,6 +460,9 @@ def build_artifact(
     root: Path,
     *,
     live_public: bool = False,
+    public_manifest_path: Path | None = None,
+    final_notary_manifest_path: Path | None = None,
+    final_notary_manifest_sha256: str | None = None,
     fetch_json: FetchJson = _fetch_json,
     fetch_headers: FetchHeaders = _fetch_headers,
     current_revision: str | None = None,
@@ -392,33 +486,84 @@ def build_artifact(
         **_local_updater_checks(str(source_version or ""), latest),
     }
     public_surfaces: dict[str, Any] = {}
+    public_manifest: dict[str, Any] = {}
+    final_notary_identity: dict[str, Any] = {}
     current_revision = current_revision or _current_git_head(root)
     if live_public and source_version:
+        checks["public_manifest_supplied"] = bool(
+            public_manifest_path and public_manifest_path.is_file()
+        )
+        checks["final_notary_manifest_supplied"] = bool(
+            final_notary_manifest_path and final_notary_manifest_path.is_file()
+        )
+        checks["final_notary_manifest_sha256_valid"] = bool(
+            checks["final_notary_manifest_supplied"]
+            and re.fullmatch(
+                r"[0-9a-f]{64}", str(final_notary_manifest_sha256 or "")
+            )
+            and _sha256(Path(final_notary_manifest_path))
+            == final_notary_manifest_sha256
+        )
+        if checks["public_manifest_supplied"]:
+            public_manifest = _load_json(Path(public_manifest_path))
+            checks.update(_public_manifest_checks(str(source_version), public_manifest))
+        if checks["final_notary_manifest_supplied"]:
+            final_notary_manifest = _load_json(Path(final_notary_manifest_path))
+            final_checks, final_notary_identity = _final_notary_release_identity(
+                str(source_version), public_manifest, final_notary_manifest
+            )
+            checks.update(final_checks)
+            final_notary_identity["manifest_sha256"] = _sha256(
+                Path(final_notary_manifest_path)
+            )
+        expected_source_commit = str(
+            final_notary_identity.get("source_commit") or ""
+        )
         public_checks, public_surfaces = _public_release_checks(
-            str(source_version), latest, fetch_json, fetch_headers, current_revision
+            str(source_version),
+            public_manifest,
+            fetch_json,
+            fetch_headers,
+            expected_source_commit,
         )
         checks.update(public_checks)
-    status_check_names = {
-        "source_version_consistent",
-        "local_updater_not_ahead_of_source",
-        "local_updater_release_state_valid",
-        "local_updater_has_required_fields",
-        "local_updater_url_matches_version",
-        "local_updater_sha256_valid",
-        "local_updater_notes_match_version",
-        "local_updater_platform_downloads_valid",
-    }
+    status_check_names = {"source_version_consistent"}
     if live_public:
         status_check_names.update(
             {
-                "public_raw_updater_matches_local",
-                "public_site_updater_matches_local",
+                "public_manifest_supplied",
+                "public_manifest_version_matches_source",
+                "public_manifest_release_state_valid",
+                "public_manifest_has_required_fields",
+                "public_manifest_url_matches_version",
+                "public_manifest_sha256_valid",
+                "public_manifest_notes_match_version",
+                "public_manifest_platform_downloads_valid",
+                "final_notary_manifest_supplied",
+                "final_notary_manifest_sha256_valid",
+                "final_notary_manifest_identity_valid",
+                "final_notary_source_commit_valid",
+                "public_manifest_matches_notarized_artifacts",
+                "public_raw_updater_matches_manifest",
+                "public_site_updater_matches_manifest",
                 "public_site_updater_cache_headers_safe",
                 "public_pypi_has_release_files",
                 "public_github_release_published",
                 "public_github_release_has_updater_asset",
                 "public_github_release_has_all_manifest_download_assets",
-                "public_github_source_release_tag_matches_source_head",
+                "public_github_source_release_tag_matches_notarized_source",
+            }
+        )
+    else:
+        status_check_names.update(
+            {
+                "local_updater_not_ahead_of_source",
+                "local_updater_release_state_valid",
+                "local_updater_has_required_fields",
+                "local_updater_url_matches_version",
+                "local_updater_sha256_valid",
+                "local_updater_notes_match_version",
+                "local_updater_platform_downloads_valid",
             }
         )
     status_failed_checks = sorted(
@@ -430,7 +575,7 @@ def build_artifact(
     )
     status = "pass" if not status_failed_checks else "fail"
     next_actions = {
-        "public_site_updater_matches_local": (
+        "public_site_updater_matches_manifest": (
             "Update the live mlx.studio origin manifest/download page and purge "
             "Cloudflare only after origin content is correct."
         ),
@@ -438,9 +583,9 @@ def build_artifact(
             "Publish the matching vmlx wheel/sdist to PyPI or explicitly scope "
             "PyPI out of this release surface."
         ),
-        "public_github_source_release_tag_matches_source_head": (
-            "Move or recreate the source release tag only after confirming the "
-            "current source head is the intended public release source."
+        "public_github_source_release_tag_matches_notarized_source": (
+            "Move or recreate the source release tag only after confirming it "
+            "resolves to the source commit bound into the final notarization manifest."
         ),
     }
     return {
@@ -464,6 +609,13 @@ def build_artifact(
             "downloads": latest.get("downloads"),
             "notes_head": str(latest.get("notes") or "").splitlines()[:8],
         },
+        "public_manifest": {
+            "version": public_manifest.get("version"),
+            "url": public_manifest.get("url"),
+            "sha256": public_manifest.get("sha256"),
+            "downloads": public_manifest.get("downloads"),
+        },
+        "final_notary_identity": final_notary_identity,
         "live_public": live_public,
         "public_surfaces": public_surfaces,
         "current_revision": current_revision,
@@ -482,11 +634,44 @@ def main() -> int:
     parser.add_argument(
         "--live-public",
         action="store_true",
-        help="Also verify public GitHub raw/latest, mlx.studio latest, PyPI, and GitHub release asset state.",
+        help=(
+            "Verify postpublication public surfaces against --public-manifest and "
+            "bind the source tag to --final-notary-manifest."
+        ),
+    )
+    parser.add_argument(
+        "--public-manifest",
+        type=Path,
+        help="Canonical published app updater manifest (for example mlxstudio/latest.json).",
+    )
+    parser.add_argument(
+        "--final-notary-manifest",
+        type=Path,
+        help="Immutable private final notarization manifest for the published artifacts.",
+    )
+    parser.add_argument(
+        "--final-notary-manifest-sha256",
+        help="Independent SHA256 handoff for --final-notary-manifest.",
     )
     args = parser.parse_args()
 
-    artifact = build_artifact(args.root, live_public=args.live_public)
+    if args.live_public and (
+        args.public_manifest is None
+        or args.final_notary_manifest is None
+        or args.final_notary_manifest_sha256 is None
+    ):
+        parser.error(
+            "--live-public requires --public-manifest, --final-notary-manifest, "
+            "and --final-notary-manifest-sha256"
+        )
+
+    artifact = build_artifact(
+        args.root,
+        live_public=args.live_public,
+        public_manifest_path=args.public_manifest,
+        final_notary_manifest_path=args.final_notary_manifest,
+        final_notary_manifest_sha256=args.final_notary_manifest_sha256,
+    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
     print(args.out)

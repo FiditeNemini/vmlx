@@ -10,8 +10,9 @@ import hashlib
 import json
 import platform
 import sys
+import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -75,7 +76,10 @@ class TestHealthEndpoint:
         assert cache_attestation["canonical_sha256"] == (
             server._canonical_attestation_sha256(cache_attestation["configuration"])
         )
-        assert all("/Users/" not in str(value) for value in provenance.values())
+        assert all(
+            "/private/example/" not in str(value)
+            for value in provenance.values()
+        )
 
     def test_health_bundle_attestation_hashes_observed_loaded_config_files(
         self,
@@ -161,6 +165,135 @@ class TestHealthEndpoint:
 
         assert "/v1/cache/token-contract" in {route.path for route in app.routes}
 
+    def test_private_cache_attestation_routes_are_hidden_and_proof_authenticated(self):
+        """Proof-only cache contracts are absent unless their private gate passes."""
+        from vmlx_engine import server
+
+        for path in (
+            "/v1/cache/prefix-attestation",
+            "/v1/cache/token-contract",
+        ):
+            route = next(route for route in server.app.routes if route.path == path)
+            dependency_calls = {
+                dependency.call for dependency in route.dependant.dependencies
+            }
+            assert server.verify_private_cache_attestation in dependency_calls
+            assert route.include_in_schema is False
+        assert "/v1/cache/prefix-attestation" not in server.app.openapi()["paths"]
+        assert "/v1/cache/token-contract" not in server.app.openapi()["paths"]
+
+    def test_private_cache_attestation_token_file_and_request_gate(self, tmp_path):
+        """The proof credential is owner-only, symlink-safe, and fail-closed."""
+        from fastapi import HTTPException
+        from fastapi.security import HTTPAuthorizationCredentials
+
+        from vmlx_engine import server
+
+        token = "proof_" + ("a" * 58)
+        token_path = tmp_path / "cache-proof.token"
+        token_path.write_text(token)
+        token_path.chmod(0o600)
+        assert server._load_private_cache_attestation_token_file(str(token_path)) == token
+
+        token_path.chmod(0o640)
+        with pytest.raises(ValueError, match="owner-only"):
+            server._load_private_cache_attestation_token_file(str(token_path))
+        token_path.chmod(0o600)
+        link_path = tmp_path / "cache-proof-link.token"
+        link_path.symlink_to(token_path)
+        with pytest.raises(ValueError, match="owner-only"):
+            server._load_private_cache_attestation_token_file(str(link_path))
+
+        request = SimpleNamespace(headers={})
+        credentials = HTTPAuthorizationCredentials(
+            scheme="Bearer",
+            credentials=token,
+        )
+        with (
+            patch.object(server, "_private_cache_attestation_enabled", False),
+            patch.object(server, "_private_cache_attestation_token", None),
+            pytest.raises(HTTPException) as disabled,
+        ):
+            _run(server.verify_private_cache_attestation(request, None))
+        assert disabled.value.status_code == 404
+
+        with (
+            patch.object(server, "_private_cache_attestation_enabled", True),
+            patch.object(server, "_private_cache_attestation_token", token),
+        ):
+            with pytest.raises(HTTPException) as missing:
+                _run(server.verify_private_cache_attestation(request, None))
+            assert missing.value.status_code == 401
+            with pytest.raises(HTTPException) as intent:
+                _run(server.verify_private_cache_attestation(request, credentials))
+            assert intent.value.status_code == 403
+            allowed_request = SimpleNamespace(
+                headers={
+                    "x-vmlx-private-proof": (
+                        server._PRIVATE_CACHE_ATTESTATION_PROOF_HEADER
+                    )
+                }
+            )
+            assert _run(
+                server.verify_private_cache_attestation(
+                    allowed_request,
+                    credentials,
+                )
+            ) is True
+
+    def test_private_cache_attestation_enforces_byte_and_token_budgets(self):
+        """Proof-only rendering cannot become an unbounded tokenizer workload."""
+        from fastapi import HTTPException
+
+        from vmlx_engine import server
+
+        prefix_body = {
+            "contract_version": 1,
+            "surface": "responses",
+            "model": "fake/model",
+            "inputs": {
+                "left": "a" * (server._PRIVATE_CACHE_ATTESTATION_MAX_PROMPT_BYTES + 1),
+                "right": "b",
+            },
+            "prefix_pairs": {"target": ["left", "right"]},
+        }
+        with (
+            patch.object(server, "_engine", object()),
+            pytest.raises(HTTPException) as too_large,
+        ):
+            _run(server.cache_prefix_attestation(prefix_body))
+        assert too_large.value.status_code == 413
+
+        token_body = {
+            "contract_version": 1,
+            "surface": "responses",
+            "model": "fake/model",
+            "inputs": {"one": "bounded"},
+        }
+        health_attestation = {
+            "model_bundle_provenance": {"fingerprint_sha256": "a" * 64},
+            "cache_topology_provenance": {"fingerprint_sha256": "b" * 64},
+        }
+        oversized_vector = [0] * (
+            server._PRIVATE_CACHE_ATTESTATION_MAX_TOKENS_PER_PROMPT + 1
+        )
+        with (
+            patch.object(server, "_engine", object()),
+            patch.object(server, "health", AsyncMock(return_value=health_attestation)),
+            patch.object(
+                server,
+                "_cache_contract_render_and_tokenize",
+                return_value=(
+                    {"generation_prompt_suffix_tokens": 0},
+                    oversized_vector,
+                    None,
+                ),
+            ),
+            pytest.raises(HTTPException) as token_budget,
+        ):
+            _run(server.cache_token_contract(token_body))
+        assert token_budget.value.status_code == 413
+
     def test_cache_token_contract_uses_loaded_engine_dry_render_and_hashes(
         self,
         tmp_path,
@@ -191,6 +324,7 @@ class TestHealthEndpoint:
                 extra_template_kwargs=None,
                 skip_generation_prompt=False,
             ):
+                self.last_tools = tools
                 text = "\n".join(
                     f"{message['role']}:{message['content']}"
                     for message in messages
@@ -215,6 +349,10 @@ class TestHealthEndpoint:
                 num_videos=0,
                 num_audio=0,
             ):
+                from vmlx_engine.engine.batched import (
+                    _generation_prompt_cache_extra_key,
+                )
+
                 prompt_without_gen = self._apply_chat_template(
                     messages,
                     tools,
@@ -225,9 +363,16 @@ class TestHealthEndpoint:
                     extra_template_kwargs=extra_template_kwargs,
                     skip_generation_prompt=True,
                 )
-                return len(self.tokenizer.encode(prompt_with_gen)) - len(
-                    self.tokenizer.encode(prompt_without_gen)
-                ), None
+                tokens_with = self.tokenizer.encode(prompt_with_gen)
+                tokens_without = self.tokenizer.encode(prompt_without_gen)
+                gen_len = len(tokens_with) - len(tokens_without)
+                return gen_len, _generation_prompt_cache_extra_key(
+                    prompt_with_generation=prompt_with_gen,
+                    prompt_without_generation=prompt_without_gen,
+                    gen_prompt_len=gen_len,
+                    tokens_with_generation=tokens_with,
+                    tokens_without_generation=tokens_without,
+                )
 
         config = tmp_path / "config.json"
         config.write_text('{"model_type":"fake"}\n')
@@ -308,6 +453,302 @@ class TestHealthEndpoint:
             contract["prompts"]["A"]["cache_prompt_token_count"],
             contract["prompts"]["B"]["cache_prompt_token_count"],
         )
+
+    def test_cache_prefix_attestation_binds_exact_path_free_l1_l2_identity(
+        self,
+        tmp_path,
+    ):
+        """The cache gate gets exact chain identity without prompts or paths."""
+        from vmlx_engine import server
+
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return [ord(ch) for ch in text]
+
+        class FakeEngine:
+            is_mllm = False
+            tokenizer = FakeTokenizer()
+            _tokenizer = tokenizer
+
+            def _apply_chat_template(
+                self,
+                messages,
+                tools=None,
+                num_images=0,
+                num_videos=0,
+                num_audio=0,
+                enable_thinking=True,
+                extra_template_kwargs=None,
+                skip_generation_prompt=False,
+            ):
+                text = "\n".join(
+                    f"{message['role']}:{message['content']}"
+                    for message in messages
+                )
+                self.last_tools = tools
+                if tools:
+                    text += "\ntools:" + json.dumps(tools, sort_keys=True)
+                return text + ("" if skip_generation_prompt else "\nassistant:")
+
+            def _compute_gen_prompt_cache_context(
+                self,
+                messages,
+                tools,
+                num_images,
+                enable_thinking,
+                extra_template_kwargs,
+                prompt_with_gen,
+                num_videos=0,
+                num_audio=0,
+            ):
+                from vmlx_engine.engine.batched import (
+                    _generation_prompt_cache_extra_key,
+                )
+
+                without = self._apply_chat_template(
+                    messages,
+                    tools,
+                    num_images=num_images,
+                    num_videos=num_videos,
+                    num_audio=num_audio,
+                    enable_thinking=enable_thinking,
+                    extra_template_kwargs=extra_template_kwargs,
+                    skip_generation_prompt=True,
+                )
+                tokens_with = self.tokenizer.encode(prompt_with_gen)
+                tokens_without = self.tokenizer.encode(without)
+                gen_len = len(tokens_with) - len(tokens_without)
+                return gen_len, _generation_prompt_cache_extra_key(
+                    prompt_with_generation=prompt_with_gen,
+                    prompt_without_generation=without,
+                    gen_prompt_len=gen_len,
+                    tokens_with_generation=tokens_with,
+                    tokens_without_generation=tokens_without,
+                )
+
+        class FakeHashMap:
+            def get_block(self, block_hash):
+                return SimpleNamespace(
+                    block_hash=block_hash,
+                    cache_data=None,
+                    resident_bytes=0,
+                    cache_data_from_disk=False,
+                )
+
+        class FakeDiskStore:
+            def inspect_block_chain(self, block_hashes):
+                now_ns = 1_700_000_000_000_000_000
+                return {
+                    "schema": "vmlx-block-disk-chain-inspection-v1",
+                    "access_metadata_mutated": False,
+                    "expected_blocks": len(block_hashes),
+                    "store_total_entries": len(block_hashes),
+                    "store_total_size_bytes": len(block_hashes) * 1024,
+                    "store_max_size_bytes": 1024 * 1024,
+                    "blocks": [
+                        {
+                            "ordinal": ordinal,
+                            "indexed": True,
+                            "readable": True,
+                            "num_tokens": 8,
+                            "file_size_bytes": 1024,
+                            "created_at_ns": now_ns - 10,
+                            "last_accessed_ns": now_ns,
+                            "access_count": 2,
+                        }
+                        for ordinal, _ in enumerate(block_hashes)
+                    ],
+                }
+
+        fake_paged = SimpleNamespace(
+            block_size=8,
+            disk_only=True,
+            _lock=threading.Lock(),
+            cached_block_hash_to_block=FakeHashMap(),
+            _disk_store=FakeDiskStore(),
+        )
+        fake_scheduler = SimpleNamespace(paged_cache_manager=fake_paged)
+
+        async def fake_health():
+            return {
+                "model_bundle_provenance": {
+                    "fingerprint_sha256": "a" * 64,
+                },
+                "cache_topology_provenance": {
+                    "fingerprint_sha256": "b" * 64,
+                },
+            }
+
+        async def run_inline(callback):
+            return callback()
+
+        body = {
+            "contract_version": 1,
+            "surface": "responses",
+            "model": "fake/model",
+            "inputs": {
+                "left": (
+                    "shared private path /private/example/cache "
+                    "with a left tail"
+                ),
+                "right": (
+                    "shared private path /private/example/cache "
+                    "with a right tail"
+                ),
+            },
+            "prefix_pairs": {"target": ["left", "right"]},
+            "request_controls": {
+                "enable_thinking": False,
+                "instructions": "Keep the source contract stable.",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "cache_contract_unused",
+                        "description": "Stable cache-contract tool schema.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}},
+                        },
+                    }
+                ],
+            },
+            "touch": False,
+        }
+        fake_engine = FakeEngine()
+        with (
+            patch.object(server, "_engine", fake_engine),
+            patch.object(server, "_model_name", "fake/model"),
+            patch.object(server, "_model_path", str(tmp_path)),
+            patch.object(server, "_get_scheduler", return_value=fake_scheduler),
+            patch.object(server, "health", new=fake_health),
+            patch.object(server, "_run_on_model_executor", new=run_inline),
+        ):
+            contract = _run(server.cache_prefix_attestation(body))
+
+        target = contract["prefixes"]["target"]
+        assert contract["method"] == (
+            "final-render-tokenize-cache-prefix-identity-readonly"
+        )
+        assert contract["cache_lookup_bypassed"] is True
+        assert contract["access_metadata_mutated"] is False
+        assert contract["cache_extra_keys_contract"] == (
+            "generation-prompt-only-text-render-v1"
+        )
+        assert contract["caller_cache_or_media_side_keys"] == "rejected"
+        assert contract["model_bundle_fingerprint_sha256"] == "a" * 64
+        assert contract["cache_topology_fingerprint_sha256"] == "b" * 64
+        assert target["reusable_prefix_tokens"] > 0
+        assert target["expected_blocks"] > 0
+        assert target["l1"]["metadata_blocks_present"] > 0
+        assert target["l1"]["resident_payload_blocks_present"] == 0
+        assert target["l1"]["backend_mode"] == "block_disk_only"
+        assert target["l1"]["paged_ram_enabled"] is False
+        assert target["l1"]["disk_only"] is True
+        assert target["l2"]["readable_blocks"] == target["expected_blocks"]
+        assert target["generation_prompt_discriminator_present"] is True
+        assert len(target["generation_prompt_discriminator_sha256"]) == 64
+        assert fake_engine.last_tools[0]["function"]["name"] == (
+            "cache_contract_unused"
+        )
+        serialized = json.dumps(contract, sort_keys=True)
+        assert "/private/example/cache" not in serialized
+        assert "shared private path" not in serialized
+        assert '"token_ids":' not in serialized
+        assert '"cache_prompt_token_ids":' not in serialized
+        assert '"file_name":' not in serialized
+        assert '"host":' not in serialized
+
+    def test_cache_prefix_chain_matches_production_generation_hash_inputs(self):
+        """Attestation delegates to BatchedEngine/PagedCache identity inputs."""
+        from vmlx_engine import server
+        from vmlx_engine.engine.batched import _generation_prompt_cache_extra_key
+        from vmlx_engine.paged_cache import compute_block_hash
+
+        token_ids = list(range(24))
+        block_size = 8
+        first_discriminator = _generation_prompt_cache_extra_key(
+            prompt_with_generation="rendered-prefix<rail-a>",
+            prompt_without_generation="rendered-prefix",
+            gen_prompt_len=2,
+            tokens_with_generation=[*token_ids, 900, 901],
+            tokens_without_generation=token_ids,
+        )
+        second_discriminator = _generation_prompt_cache_extra_key(
+            prompt_with_generation="rendered-prefix<rail-b>",
+            prompt_without_generation="rendered-prefix",
+            gen_prompt_len=2,
+            tokens_with_generation=[*token_ids, 902, 903],
+            tokens_without_generation=token_ids,
+        )
+        assert first_discriminator is not None
+        assert second_discriminator is not None
+        assert first_discriminator != second_discriminator
+
+        observed = server._cache_prefix_chain_hashes(
+            token_ids,
+            block_size,
+            cache_extra_keys=first_discriminator,
+        )
+        expected = []
+        parent_hash = None
+        for start in range(0, len(token_ids), block_size):
+            parent_hash = compute_block_hash(
+                parent_hash,
+                token_ids[start : start + block_size],
+                extra_keys=first_discriminator,
+            )
+            expected.append(bytes(parent_hash))
+
+        assert observed == expected
+        other = server._cache_prefix_chain_hashes(
+            token_ids,
+            block_size,
+            cache_extra_keys=second_discriminator,
+        )
+        assert observed != other
+        assert (
+            server._cache_prefix_chain_fingerprint(observed)
+            != server._cache_prefix_chain_fingerprint(other)
+        )
+
+    def test_cache_prefix_attestation_rejects_touch_and_unsafe_labels(self):
+        from fastapi import HTTPException
+
+        from vmlx_engine import server
+
+        base = {
+            "contract_version": 1,
+            "surface": "responses",
+            "model": "fake/model",
+            "inputs": {"left": "a", "right": "b"},
+            "prefix_pairs": {"target": ["left", "right"]},
+        }
+        with patch.object(server, "_engine", object()):
+            with pytest.raises(HTTPException, match="read-only"):
+                _run(server.cache_prefix_attestation({**base, "touch": True}))
+            unsafe = {
+                **base,
+                "inputs": {"../private": "a", "right": "b"},
+            }
+            with pytest.raises(HTTPException, match="safe identifier"):
+                _run(server.cache_prefix_attestation(unsafe))
+            with pytest.raises(HTTPException, match="cache/media side keys"):
+                _run(
+                    server.cache_prefix_attestation(
+                        {**base, "cache_salt": "caller-owned"}
+                    )
+                )
+            with pytest.raises(HTTPException, match="cache/media side keys"):
+                _run(
+                    server.cache_prefix_attestation(
+                        {
+                            **base,
+                            "request_controls": {
+                                "media_salt": "caller-owned",
+                            },
+                        }
+                    )
+                )
 
     def test_cache_topology_attestation_is_canonical_and_change_sensitive(self):
         """Mapping order is irrelevant while an effective topology change is not."""

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { X } from 'lucide-react'
+import { useTranslation } from '../i18n'
 
 interface UpdateInfo {
   currentVersion: string
@@ -9,6 +10,7 @@ interface UpdateInfo {
 }
 
 export function UpdateBanner() {
+  const { t } = useTranslation()
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [dismissed, setDismissed] = useState(false)
 
@@ -30,7 +32,8 @@ export function UpdateBanner() {
   return (
     <div className="flex items-center gap-3 px-4 py-1.5 bg-accent/50 border-b border-border text-xs">
       <span className="text-foreground">
-        <strong>vMLX {update.latestVersion}</strong> is available
+        <strong>{t('update.banner.versionLabel', { version: update.latestVersion })}</strong>{' '}
+        {t('update.banner.available')}
         {update.notes && <span className="text-muted-foreground ml-1">— {update.notes}</span>}
       </span>
       <a
@@ -41,7 +44,7 @@ export function UpdateBanner() {
         }}
         className="text-primary hover:text-primary/80 font-medium"
       >
-        Download
+        {t('update.banner.download')}
       </a>
       <span className="text-muted-foreground">|</span>
       <a
@@ -52,12 +55,13 @@ export function UpdateBanner() {
         }}
         className="text-muted-foreground hover:text-foreground"
       >
-        Star on GitHub
+        {t('update.banner.starOnGitHub')}
       </a>
       <button
         onClick={handleDismiss}
         className="ml-auto text-muted-foreground hover:text-foreground"
-        title="Dismiss"
+        title={t('update.banner.dismissTitle')}
+        aria-label={t('update.banner.dismissTitle')}
       >
         <X className="h-3.5 w-3.5" />
       </button>

@@ -738,8 +738,8 @@
       "connecting": "连接中...",
       "starting": "启动中...",
       "cancel": "取消",
-      "jangNoticeHeader": "需要更新 JANG 模型:",
-      "jangNoticeBody": "自 2026/3/19 起,所有 JANG 模型都必须从 HuggingFace (JANGQ-AI) 重新下载,以包含正确的聊天模板。如未更新模型,思考开关可能无法正常工作,部分模型可能出现循环。",
+      "missingChatTemplateHeader": "缺少聊天模板:",
+      "missingChatTemplateBody": "此模型包不包含可用的聊天模板。聊天格式、推理控制和工具使用可能无法正常工作。请先安装此特定模型包的修正版，再依赖其进行工作。",
       "imageEditHeader": "图像编辑服务器",
       "imageGenHeader": "图像生成服务器",
       "imageEditBadge": "图像编辑",
@@ -977,24 +977,11 @@
   },
   "update": {
     "banner": {
+      "versionLabel": "vMLX {version}",
+      "available": "现已推出",
+      "download": "下载",
+      "starOnGitHub": "在 GitHub 上加星",
       "dismissTitle": "关闭"
-    },
-    "notice": {
-      "title": "MLX Studio 的新功能",
-      "section1Heading": "MCP tools 与 API gateway",
-      "section1BodyA": "MCP config discovery 现在无需启动参数即可从 mcp.json 或 mcp.yaml 工作，并且按服务器/工具的策略会贯穿 sessions 与 gateway。",
-      "section1BodyB": "Built-in tools 与 MCP tools 现在可一起使用，支持 structured tool calls、multi-round continuation，并通过更安全的 parser cleanup 避免 raw marker leak。",
-      "section2Heading": "Model settings 与 generation defaults",
-      "section2BodyA": "Chat Settings 现在会显示已应用的 temperature、top_p、top_k、repetition penalty、thinking mode、tool parser 和 reasoning parser。",
-      "section2BodyB": "省略 max_tokens 时，现在会解析为有界的 model/default budget，而不是旧的 32768 fallback，并在 request logs 中显示 resolved value。",
-      "section3Heading": "MTP, cache 与 JANG runtime hardening",
-      "section3BodyA": "Qwen3.6 native MTP detection、JANG/JANGTQ group-size recognition、MX matmul dispatch checks，以及 Hunyuan/ZAYA/Gemma/MiniMax routing 都有更严格的 gates。",
-      "section3BodyB": "Prefix cache、in-memory paged cache、L2 disk cache 与 TurboQuant KV 路径现在公开更清晰的 health counters，让 cache reuse 可被确认而不是猜测。",
-      "section4Heading": "Release integrity 与 updater safety",
-      "section4BodyA": "发布前会检查 packaged app 的 Developer ID signing、notarization、bundled source hashes、critical imports、GUI launch，以及 latest.json/update manifest compatibility。",
-      "section4BodyB": "DeepSeek V4 Flash 现在默认使用 native composite cache path，同时继续抑制 generic KV q4/q8；exact long-code output 在 identifier gate 清除前仍列为 follow-up。",
-      "footer": "感谢您使用 MLX Studio 和 JANG。— Jinho Jang",
-      "dismiss": "知道了 — 下次更新前不再显示"
     }
   },
   "ui": {

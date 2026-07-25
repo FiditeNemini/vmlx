@@ -559,8 +559,18 @@ class MLLMScheduler:
                 )
                 block_disk_store = None
                 if self.config.enable_block_disk_cache:
-                    cache_dir = self.config.block_disk_cache_dir
-                    if cache_dir is None and self.config.model_path:
+                    _default_block_cache_root = (
+                        self.config.block_disk_cache_dir is None
+                    )
+                    cache_root = os.path.abspath(
+                        os.path.expanduser(
+                            self.config.block_disk_cache_dir
+                            or os.path.join(
+                                "~", ".cache", "vmlx-engine", "block-cache"
+                            )
+                        )
+                    )
+                    if self.config.model_path:
                         # Include quant config and paged-cache schema in hash
                         # to prevent cross-config / stale L2 cache poisoning.
                         quant_tag = self.config.kv_cache_quantization or "none"
@@ -583,20 +593,21 @@ class MLLMScheduler:
                         model_hash = hashlib.sha256(
                             block_scope_key.encode()
                         ).hexdigest()[:12]
-                        cache_dir = os.path.join(
-                            os.path.expanduser("~"),
-                            ".cache", "vmlx-engine", "block-cache", model_hash,
-                        )
-                    elif cache_dir is None:
-                        cache_dir = os.path.join(
-                            os.path.expanduser("~"),
-                            ".cache", "vmlx-engine", "block-cache", "default",
-                        )
+                        cache_dir = os.path.join(cache_root, model_hash)
+                    else:
+                        cache_dir = os.path.join(cache_root, "default")
                     try:
                         from .block_disk_store import BlockDiskStore
                         block_disk_store = BlockDiskStore(
                             cache_dir=cache_dir,
                             max_size_gb=self.config.block_disk_cache_max_gb,
+                            global_cache_root=cache_root,
+                            allow_legacy_hashed_namespaces=(
+                                _default_block_cache_root
+                            ),
+                            allow_legacy_direct_namespace=(
+                                not _default_block_cache_root
+                            ),
                         )
                         self._block_disk_l2_enabled = True
                         logger.info(
@@ -605,34 +616,24 @@ class MLLMScheduler:
                         )
                         if self._is_hybrid and not self._uses_zaya_cache:
                             try:
-                                try:
-                                    ssm_budget_gb = float(
-                                        os.environ.get(
-                                            "VMLX_SSM_DISK_CACHE_MAX_GB",
-                                            str(self.config.block_disk_cache_max_gb),
-                                        )
-                                    )
-                                    if ssm_budget_gb <= 0:
-                                        ssm_budget_gb = (
-                                            self.config.block_disk_cache_max_gb
-                                        )
-                                except ValueError:
-                                    ssm_budget_gb = self.config.block_disk_cache_max_gb
                                 self._ssm_companion_disk_store = (
                                     SSMCompanionDiskStore(
                                         directory=os.path.join(
                                             cache_dir, "ssm_companion"
                                         ),
-                                        budget_bytes=int(
-                                            ssm_budget_gb * (1024 ** 3)
+                                        budget_bytes=(
+                                            block_disk_store.max_size_bytes
+                                        ),
+                                        global_budget=(
+                                            block_disk_store.global_budget
                                         ),
                                     )
                                 )
                                 logger.info(
                                     "VLM hybrid SSM companion L2 enabled: dir=%s, "
-                                    "max=%.3gGB",
+                                    "shares aggregate root max=%.3gGB",
                                     self._ssm_companion_disk_store.directory,
-                                    ssm_budget_gb,
+                                    self.config.block_disk_cache_max_gb,
                                 )
                             except Exception as ssm_e:
                                 logger.warning(
@@ -730,13 +731,14 @@ class MLLMScheduler:
                         f"max_blocks={self.config.max_cache_blocks}"
                     )
                 except Exception as e:
+                    self._cleanup_failed_block_cache_initialization(
+                        block_disk_store=block_disk_store,
+                    )
                     if block_disk_only:
                         raise RuntimeError(
                             "Failed to initialize authoritative VLM block disk-only cache"
                         ) from e
                     logger.warning(f"Failed to initialize VLM paged cache: {e}")
-                    self.paged_cache_manager = None
-                    self.block_aware_cache = None
 
             elif self.config.use_memory_aware_cache:
                 # Memory-aware cache (L1, recommended for large models)
@@ -4179,6 +4181,41 @@ class MLLMScheduler:
         """Remove a finished request from tracking."""
         return self.requests.pop(request_id, None)
 
+    def _cleanup_failed_block_cache_initialization(
+        self,
+        *,
+        block_disk_store: Optional[Any],
+    ) -> None:
+        """Release asynchronous L2 resources after partial cache construction."""
+        ssm_disk_store = getattr(self, "_ssm_companion_disk_store", None)
+        if ssm_disk_store is not None:
+            try:
+                ssm_disk_store.shutdown(timeout=None)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to stop VLM SSM companion after cache init failure: %s",
+                    exc,
+                )
+            finally:
+                self._ssm_companion_disk_store = None
+
+        manager = getattr(self, "paged_cache_manager", None)
+        manager_disk_store = getattr(manager, "_disk_store", None)
+        owned_block_store = manager_disk_store or block_disk_store
+        if owned_block_store is not None:
+            try:
+                owned_block_store.shutdown()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to stop VLM block disk cache after cache init failure: %s",
+                    exc,
+                )
+        if manager is not None and manager_disk_store is not None:
+            manager._disk_store = None
+        self.paged_cache_manager = None
+        self.block_aware_cache = None
+        self._block_disk_l2_enabled = False
+
     # ========== Async API (for streaming) ==========
 
     async def start(self) -> None:
@@ -4220,6 +4257,29 @@ class MLLMScheduler:
         if self.batch_generator is not None:
             self.batch_generator.close()
             self.batch_generator = None
+
+        # The SSM companion publishes through its own asynchronous worker but
+        # shares BlockDiskStore's aggregate-budget lease. Drain it before the
+        # block store releases that lease.
+        ssm_disk_store = getattr(self, "_ssm_companion_disk_store", None)
+        if ssm_disk_store is not None:
+            ssm_disk_store.shutdown(timeout=None)
+            self._ssm_companion_disk_store = None
+
+        # The VLM scheduler owns the block-L2 store even when its model worker
+        # executor is provided by BatchedEngine.  Release the background writer
+        # and aggregate budget lease before BatchedEngine drops this scheduler;
+        # otherwise repeated VLM unload/reload keeps dead same-PID cap owners
+        # until process exit.
+        disk_store = getattr(
+            getattr(self, "paged_cache_manager", None),
+            "_disk_store",
+            None,
+        )
+        if disk_store is not None:
+            disk_store.shutdown()
+            self.paged_cache_manager._disk_store = None
+        self._block_disk_l2_enabled = False
 
         logger.info("MLLM Scheduler stopped")
 

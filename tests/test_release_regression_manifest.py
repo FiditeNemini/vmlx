@@ -1,8 +1,10 @@
-import json
-import re
-from pathlib import Path
-import shlex
 import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+from pathlib import Path
 
 from tests.cross_matrix import release_regression_manifest
 from tests.cross_matrix.run_release_regression_manifest import build_manifest_artifact
@@ -4362,6 +4364,15 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     script = Path("panel/scripts/live-real-ui-model-proof.mjs")
     source = script.read_text(encoding="utf-8")
 
+    assert "vmlx-electron-ui-proof-v2" in source
+    assert "VMLINUX_REAL_UI_PROOF_DIR" in source
+    assert "VMLX_PRIVATE_EVIDENCE_ROOT" in source
+    assert "to a private directory outside every Git worktree" in source
+    assert "path.join(repoDir, 'docs', 'internal'" not in source
+    assert "VMLINUX_REAL_UI_RUN_ID" in source
+    assert "VMLINUX_REAL_UI_PAIRED_API_HOLD_SECONDS" in source
+    assert "vmlx-ui-backend-binding-v3" in source
+    assert "vmlx-agentic-protocol-matrix-v2" in source
     assert "VMLINUX_REAL_UI_MODEL_PATH" in source
     assert "VMLINUX_REAL_UI_WIRE_API" in source
     assert "VMLINUX_REAL_UI_BUILTIN_TOOLS" in source
@@ -4369,6 +4380,8 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "real_ui_tool_probe_2.txt" in source
     assert "REAL_UI_LIVE_TOOL_ONE" in source
     assert "REAL_UI_LIVE_TOOL_TWO" in source
+    assert "VMLINUX_REAL_UI_PROMPT_3" in source
+    assert "third UI turn" in source
     assert "VMLINUX_REAL_UI_WORKING_DIRECTORY" in source
     assert "VMLINUX_REAL_UI_ENABLE_THINKING" in source
     assert "VMLINUX_REAL_UI_CHECK_SERVER_CACHE_CONTROLS" in source
@@ -4380,10 +4393,10 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "VMLINUX_REAL_UI_VIDEO_EXPECT_REGEX" in source
     assert "provenSurfaces" in source
     assert "serverCacheControls" in source
-    assert "sectionButtons = [...document.querySelectorAll('button')]" in source
-    assert "const normalized = text.replace(/\\\\s+/g, ' ').trim()" in source
-    assert "titleWithoutDisclosure === title" in source
-    assert "new MouseEvent('click'" in source
+    assert "sectionButtons = [...(drawer?.querySelectorAll('button') || [])]" in source
+    assert "const normalized = (button.innerText || '')" in source
+    assert "normalized === title || normalized.includes(title)" in source
+    assert "clickable.click()" in source
     assert "sectionClickResults" in source
     assert "media: mediaEvidence" in source
     assert "imageVerified" in source
@@ -4395,7 +4408,8 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "live_speed_floor" in source
     assert "sendErrors" in source
     assert "rendererFailureStage" in source
-    assert "status: rendererResult.rendererFailureStage ? 'fail' : 'pass'" in source
+    assert "status: rendererResult.rendererFailureStage ? 'fail' : 'partial'" in source
+    assert "applyTopLevelCorrelationStatus(result" in source
     assert "status: rendererResult.rendererFailureStage ? 'fail' : undefined" not in source
     assert "failureStage: rendererResult.rendererFailureStage || undefined" in source
     assert "persistedToolsByMessage" in source
@@ -4406,10 +4420,15 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "reasoningKoreanLeakCount" in source
     assert "reasoningNumericRunCount" in source
     assert "numeric/list-like garbage leaked into reasoning segments" in source
-    assert "--enable-auto-tool-choice" in source
-    assert "--tool-call-parser" in source
-    assert "window.api.sessions.create" in source
-    assert "window.api.sessions.start" in source
+    assert "enableAutoToolChoice: true" in source
+    assert "toolCallParser: 'auto'" in source
+    assert "window.api.sessions.create(" in source
+    assert "window.api.sessions.createRemote" not in source
+    assert "window.api.sessions.start(remote.session.id)" not in source
+    assert "startButton.click()" in source
+    assert "visible Electron local Start control" in source
+    assert "real UI proof requires an Electron-managed local session" in source
+    assert "return label === 'Start'" in source
     assert "window.api.chat.sendMessage" in source
     assert "window.api.performance.health" in source
     assert "window.api.cache.stats" in source
@@ -4428,7 +4447,6 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "terminateProcessTree" in source
     assert "process.kill(pid, signal)" in source
     assert "removeTemporaryTree(userDataDir)" in source
-    assert "removeTemporaryTree(runDir)" in source
     assert "maxRetries" in source
     assert "ENOTEMPTY" in source
     assert "rawParserTagLeak" in source
@@ -4436,10 +4454,20 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "<\\\\|point_end\\\\|>" in source
     assert "cjkLeakCount" in source
     assert "clearTimeout(timer)" in source
-    assert "current-real-ui-live-model-zaya-text-20260526" in source
-    assert "server process exited before health" in source
-    assert "server.proc.exitCode" in source
-    assert "server.logs.slice(-80)" in source
+    assert "uniqueProofBasename({" in source
+    assert "requestedProofBasename" in source
+    assert "window.api.sessions.getLogs(created.session.id)" in source
+    assert "captureGitProvenance" in source
+    assert "HEAD^{tree}" in source
+    assert "healthProvenance" in source
+    assert "model_bundle_fingerprint_sha256" in source
+    assert "cache_topology_fingerprint_sha256" in source
+    assert "backend_pid" in source
+    assert "runtime_source_hashes" in source
+    assert "server_module_sha256" in source
+    assert "package_init_sha256" in source
+    assert "python_source_tree_sha256" in source
+    assert "backend_identity_fingerprint_sha256" in source
 
 
 def test_release_regression_manifest_real_ui_live_model_cdp_write_guards_epipe():
@@ -4529,10 +4557,78 @@ def test_release_regression_manifest_real_ui_script_records_stream_text_trace():
     source = script.read_text(encoding="utf-8")
 
     assert "streamTraceByMessage" in source
+    assert "messageEventTrace" in source
+    assert "eventTrace" in source
+    assert "recordEvent('complete', 'terminal', data)" in source
+    assert "recordEvent('tool', 'tool', data)" in source
+    assert "recordEvent('reasoningDone', 'reasoning_terminal', data)" in source
+    assert "delta," in source
+    assert "cumulativeReset" in source
     assert "lastFullContent" in source
     assert "lastReasoningContent" in source
     assert "streamTrace: rendererResult.streamTraceByMessage" in source
     assert "requested Responses API mode but proof did not record responses_delta_streaming surface" in source
+
+
+def test_release_regression_manifest_real_ui_v2_requires_three_turns_and_exact_binding():
+    source = Path("panel/scripts/live-real-ui-model-proof.mjs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function expectedUiTurnCount(result)" in source
+    assert "configured >= 1 && configured <= 3" in source
+    assert "expected ${expectedTurns} completed UI chat turns" in source
+    assert "expected at least ${expectedTurns * 2} persisted chat messages" in source
+    assert "sendMessageThroughVisibleComposer(" in source
+    assert "'third_visible_ui_send'" in source
+    assert "uiTurnCount >= 3" in source
+    assert "tracedTerminalMessages.size < expectedTurns" in source
+    assert "before: createHealthSnapshot(`${baseUrl}/health`, healthBefore)" in source
+    assert "after: createHealthSnapshot(`${baseUrl}/health`, healthAfter)" in source
+    assert "binding_before: healthProvenance.before.binding" in source
+    assert "binding_after: healthProvenance.after.binding" in source
+    assert "healthBeforeBinding.backend_pid !== result.backend?.pid" in source
+    assert "healthBeforeBinding.runtime_source_hashes?.[field]" in source
+    assert "healthBeforeBinding.fingerprint_sha256" in source
+    assert "backend_identity_fingerprint_sha256" in source
+    assert "result.gitProvenance?.before?.commit" in source
+    assert "result.gitProvenance?.before?.tree" in source
+    assert "harness_sha256" in source
+
+
+def test_release_regression_manifest_real_ui_v2_rejects_missing_or_git_proof_dir():
+    script = Path("panel/scripts/live-real-ui-model-proof.mjs")
+    base_env = os.environ.copy()
+    for key in (
+        "VMLINUX_REAL_UI_PROOF_DIR",
+        "VMLX_REAL_UI_PROOF_DIR",
+        "VMLX_PRIVATE_EVIDENCE_ROOT",
+    ):
+        base_env.pop(key, None)
+    base_env["VMLX_REAL_UI_MODEL_PATH"] = "/tmp/vmlx-proof-dir-negative-test"
+
+    missing = subprocess.run(
+        ["node", str(script)],
+        cwd=Path.cwd(),
+        env=base_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert missing.returncode != 0
+    assert "to a private directory outside every Git worktree" in missing.stderr
+
+    in_git_env = {**base_env, "VMLINUX_REAL_UI_PROOF_DIR": str(Path.cwd())}
+    in_git = subprocess.run(
+        ["node", str(script)],
+        cwd=Path.cwd(),
+        env=in_git_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert in_git.returncode != 0
+    assert "outside the public vMLX Git worktree" in in_git.stderr
 
 
 def test_release_regression_manifest_real_ui_script_requires_responses_cache_detail_when_requested():
@@ -4553,10 +4649,8 @@ def test_release_regression_manifest_real_ui_script_requires_generation_defaults
 
     assert "generationDefaultsAppliedSeen(result)" in source
     assert "generation_defaults_applied" in source
-    assert (
-        "live proof did not record model-owned generation defaults / request max_tokens resolution"
-        in source
-    )
+    assert "live proof did not record visible model-owned generation defaults" in source
+    assert "server-correlated request did not record resolved generation defaults" in source
 
 
 def test_release_regression_manifest_real_ui_script_requires_language_leak_surface():
@@ -4617,6 +4711,7 @@ def test_release_regression_manifest_real_ui_script_records_request_contract():
     assert "requestContract" in result_block
     assert "promptOne" in result_block
     assert "promptTwo" in result_block
+    assert "promptThree" in result_block
     assert "requestMaxTokens" in result_block
     assert "requestMaxPromptTokens" in result_block
     assert "maxToolIterations" in result_block
@@ -4638,6 +4733,7 @@ def test_release_regression_manifest_real_ui_script_records_request_contract_on_
     assert "requestContract" in failure_block
     assert "promptOne" in failure_block
     assert "promptTwo" in failure_block
+    assert "promptThree" in failure_block
     assert "requestMaxTokens" in failure_block
     assert "requestMaxPromptTokens" in failure_block
     assert "maxToolIterations" in failure_block
@@ -4667,7 +4763,9 @@ def test_release_regression_manifest_real_ui_script_waits_for_async_l2_cache_sta
     )[0]
     assert "const waitForCacheEndpointStorage = async (initial, sessionId)" in source
     assert "window.api.cache.stats(endpoint, sessionId)" in source
-    assert "await waitForCacheEndpointStorage(cacheAfter, remote.session.id)" in renderer_block
+    assert "await waitForCacheEndpointStorage(" in renderer_block
+    assert "cacheAfter," in renderer_block
+    assert "created.session.id," in renderer_block
 
 
 def test_release_regression_manifest_real_ui_default_image_fixture_has_valid_png_crc():
@@ -12485,7 +12583,6 @@ def test_release_regression_manifest_requires_focused_pytest_gate_source_hashes(
 
     required = {
         "tests/test_objective_proof_digest.py",
-        "tests/test_agents_release_control_plane.py",
         "tests/test_mimo_v2_no_source_exactness_classifier.py",
         "tests/test_dsv4_default_cache_tool_loop_gate.py",
         "tests/test_release_gate_python_app.py",

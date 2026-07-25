@@ -19,12 +19,10 @@ memory:
       sink_tokens: 4                               # First N tokens at full precision
       seed: 42
 
-  # Codebook weight cache (LRU with disk spillover)
+  # Experimental codebook-VQ weight cache (RAM LRU; evictions reload model shards)
   codebook_cache:
     enabled: true
-    memory_limit_mb: null              # null = unlimited (LRU to disk)
-    disk_cache_dir: "~/.cache/vmlx-engine/codebook-cache"
-    disk_max_gb: 1000                 # 1TB disk budget
+    memory_limit_mb: 4096              # bounded RAM LRU; 0/null explicitly opts out
     eviction_batch_size: 4             # Evict 4 layers at a time
 
   # Prefix cache (token trie)
@@ -59,9 +57,7 @@ codebook:
     max_batch_size: 32
   cache:
     enabled: true
-    memory_limit_mb: null              # null = unlimited (LRU to disk)
-    disk_cache_dir: "~/.cache/vmlx-engine/codebook-cache"
-    disk_max_gb: 1000
+    memory_limit_mb: 4096              # bounded RAM LRU; 0/null explicitly opts out
     eviction_batch_size: 4
 
 # TurboQuant KV cache settings (alternative config location)

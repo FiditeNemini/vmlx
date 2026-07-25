@@ -57,21 +57,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
   const [overridesVersion, setOverridesVersion] = useState(0)
   const [effectiveReasoningParser, setEffectiveReasoningParser] = useState<string | undefined>(undefined)
   const [jangLabel, setJangLabel] = useState<string | undefined>(undefined)
-  const [jangNeedsTemplateUpdate, setJangNeedsTemplateUpdate] = useState(false)
-  const [jangNoticeDismissed, setJangNoticeDismissed] = useState(true) // hidden by default until checked
-
-  // Check JANG redownload notice dismiss state
-  useEffect(() => {
-    try {
-      const val = window.api.settings?.get('jang_redownload_dismissed')
-      if (val instanceof Promise) {
-        val.then((v: any) => { if (v !== '2026-03-19') setJangNoticeDismissed(false) })
-           .catch(() => setJangNoticeDismissed(false))
-      } else {
-        if (val !== '2026-03-19') setJangNoticeDismissed(false)
-      }
-    } catch { setJangNoticeDismissed(false) }
-  }, [])
+  const [missingChatTemplate, setMissingChatTemplate] = useState(false)
+  const [missingTemplateNoticeDismissed, setMissingTemplateNoticeDismissed] = useState(false)
 
   // Load session and its chats
   useEffect(() => {
@@ -80,7 +67,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
         const s = await window.api.sessions.get(sessionId)
         setSession(s)
         setJangLabel(undefined)
-        setJangNeedsTemplateUpdate(false)
+        setMissingChatTemplate(false)
+        setMissingTemplateNoticeDismissed(false)
         // Auto-open logs panel if session is in error state
         if (s?.status === 'error') setShowLogs(true)
 
@@ -125,9 +113,9 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
             try {
               const models = await window.api.models.scan()
               const match = models.find((m: any) => m.path === s.modelPath)
+              setMissingChatTemplate(match?.hasChatTemplate === false)
               if (match?.quantization && match.quantization.startsWith('JANG')) {
                 setJangLabel(match.quantization)
-                setJangNeedsTemplateUpdate(match.hasChatTemplate === false)
               }
             } catch (_) { /* ignore scan errors */ }
           }
@@ -441,20 +429,19 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
       {/* Loading Progress Bar */}
       {session.status === 'loading' && <SessionViewLoadBar sessionId={session.id} />}
 
-      {/* JANG Redownload Notice */}
-      {jangLabel && jangNeedsTemplateUpdate && !jangNoticeDismissed && (
+      {/* Bundle-specific missing chat-template notice */}
+      {missingChatTemplate && !missingTemplateNoticeDismissed && (
         <div className="flex items-start gap-2 px-4 py-2 bg-amber-500/10 border-b border-amber-500/20 flex-shrink-0">
           <AlertTriangle className="h-3.5 w-3.5 text-amber-400 flex-shrink-0 mt-0.5" />
           <p className="text-xs text-amber-300/90 flex-1">
-            <span className="font-semibold">{t('sessions.view.jangNoticeHeader')}</span>{' '}
-            {t('sessions.view.jangNoticeBody')}
+            <span className="font-semibold">{t('sessions.view.missingChatTemplateHeader')}</span>{' '}
+            {t('sessions.view.missingChatTemplateBody')}
           </p>
           <button
-            onClick={() => {
-              setJangNoticeDismissed(true)
-              try { window.api.settings?.set('jang_redownload_dismissed', '2026-03-19') } catch {}
-            }}
+            onClick={() => setMissingTemplateNoticeDismissed(true)}
             className="text-amber-400/60 hover:text-amber-300 flex-shrink-0"
+            title={t('common.dismiss')}
+            aria-label={t('common.dismiss')}
           >
             <X className="h-3.5 w-3.5" />
           </button>

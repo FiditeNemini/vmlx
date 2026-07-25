@@ -1002,8 +1002,18 @@ class Scheduler:
                 # Create optional block-level disk store (L2)
                 block_disk_store = None
                 if self.config.enable_block_disk_cache:
-                    cache_dir = self.config.block_disk_cache_dir
-                    if cache_dir is None and self.config.model_path:
+                    _default_block_cache_root = (
+                        self.config.block_disk_cache_dir is None
+                    )
+                    cache_root = os.path.abspath(
+                        os.path.expanduser(
+                            self.config.block_disk_cache_dir
+                            or os.path.join(
+                                "~", ".cache", "vmlx-engine", "block-cache"
+                            )
+                        )
+                    )
+                    if self.config.model_path:
                         import hashlib
 
                         # Include quant + runtime cache shape in hash to prevent
@@ -1053,25 +1063,13 @@ class Scheduler:
                         model_hash = hashlib.sha256(
                             block_scope_key.encode()
                         ).hexdigest()[:12]
-                        cache_dir = os.path.join(
-                            os.path.expanduser("~"),
-                            ".cache",
-                            "vmlx-engine",
-                            "block-cache",
-                            model_hash,
-                        )
-                    elif cache_dir is None:
+                        cache_dir = os.path.join(cache_root, model_hash)
+                    else:
                         logger.warning(
-                            "Block disk cache: model_path not set, using shared 'default' dir. "
-                            "Different models will share cache — this may cause issues."
+                            "Block disk cache: model_path not set, using isolated "
+                            "'default' namespace."
                         )
-                        cache_dir = os.path.join(
-                            os.path.expanduser("~"),
-                            ".cache",
-                            "vmlx-engine",
-                            "block-cache",
-                            "default",
-                        )
+                        cache_dir = os.path.join(cache_root, "default")
                     # Derive expected layer count
                     # from model config and pass to BlockDiskStore so the
                     # validator can hard-reject wrong-model L2 entries.
@@ -1081,6 +1079,13 @@ class Scheduler:
                             cache_dir=cache_dir,
                             max_size_gb=self.config.block_disk_cache_max_gb,
                             expected_num_layers=_expected_n_layers,
+                            global_cache_root=cache_root,
+                            allow_legacy_hashed_namespaces=(
+                                _default_block_cache_root
+                            ),
+                            allow_legacy_direct_namespace=(
+                                not _default_block_cache_root
+                            ),
                         )
                         if self.config.step_executor is not None:
                             block_disk_store.set_load_executor(
@@ -1098,28 +1103,17 @@ class Scheduler:
                             and self._ssm_state_cache is not None
                         ):
                             try:
-                                try:
-                                    _ssm_budget_gb = float(
-                                        os.environ.get(
-                                            "VMLX_SSM_DISK_CACHE_MAX_GB",
-                                            str(self.config.block_disk_cache_max_gb),
-                                        )
-                                    )
-                                    if _ssm_budget_gb <= 0:
-                                        _ssm_budget_gb = (
-                                            self.config.block_disk_cache_max_gb
-                                        )
-                                except ValueError:
-                                    _ssm_budget_gb = self.config.block_disk_cache_max_gb
                                 _ssm_disk = SSMCompanionDiskStore(
                                     directory=os.path.join(cache_dir, "ssm_companion"),
-                                    budget_bytes=int(_ssm_budget_gb * (1024 ** 3)),
+                                    budget_bytes=block_disk_store.max_size_bytes,
+                                    global_budget=block_disk_store.global_budget,
                                 )
                                 self._ssm_state_cache.attach_disk_store(_ssm_disk)
                                 logger.info(
-                                    "Hybrid SSM companion L2 enabled: dir=%s, max=%.3gGB",
+                                    "Hybrid SSM companion L2 enabled: dir=%s; "
+                                    "shares aggregate root max=%.3gGB",
                                     _ssm_disk.directory,
-                                    _ssm_budget_gb,
+                                    self.config.block_disk_cache_max_gb,
                                 )
                             except Exception as _ssm_disk_e:
                                 logger.warning(
@@ -1159,40 +1153,46 @@ class Scheduler:
                         max_memory_percent=self.config.cache_memory_percent,
                     ).compute_memory_limit()
                 )
-                self.paged_cache_manager = PagedCacheManager(
-                    block_size=self.config.paged_cache_block_size,
-                    max_blocks=self.config.max_cache_blocks,
-                    disk_store=block_disk_store,
-                    max_resident_bytes=_paged_resident_budget,
-                    disk_only=_block_disk_only,
-                )
-                if _block_disk_only:
-                    logger.info(
-                        "Block disk-only prefix backend: paged RAM disabled, "
-                        "max_index_blocks=%d; payloads restore transiently from SSD",
-                        self.config.max_cache_blocks,
+                try:
+                    self.paged_cache_manager = PagedCacheManager(
+                        block_size=self.config.paged_cache_block_size,
+                        max_blocks=self.config.max_cache_blocks,
+                        disk_store=block_disk_store,
+                        max_resident_bytes=_paged_resident_budget,
+                        disk_only=_block_disk_only,
                     )
-                else:
-                    logger.info(
-                        "Paged cache RAM ceiling: %.0f MB (%.0f%% of available); "
-                        "block pool max_blocks=%d",
-                        _paged_resident_budget / (1024 * 1024),
-                        self.config.cache_memory_percent * 100,
-                        self.config.max_cache_blocks,
+                    if _block_disk_only:
+                        logger.info(
+                            "Block disk-only prefix backend: paged RAM disabled, "
+                            "max_index_blocks=%d; payloads restore transiently from SSD",
+                            self.config.max_cache_blocks,
+                        )
+                    else:
+                        logger.info(
+                            "Paged cache RAM ceiling: %.0f MB (%.0f%% of available); "
+                            "block pool max_blocks=%d",
+                            _paged_resident_budget / (1024 * 1024),
+                            self.config.cache_memory_percent * 100,
+                            self.config.max_cache_blocks,
+                        )
+                    self.block_aware_cache = BlockAwarePrefixCache(
+                        model=model,
+                        paged_cache_manager=self.paged_cache_manager,
+                        model_path=self.config.model_path,
+                        smelt_enabled=self.config.smelt_enabled,
+                        smelt_pct=self.config.smelt_pct,
+                        tq_enabled=(
+                            self._tq_active
+                            and not self._uses_dsv4_cache
+                            and not self._uses_zaya_cache
+                        ),
+                        kv_quant_bits=self._kv_cache_bits,
                     )
-                self.block_aware_cache = BlockAwarePrefixCache(
-                    model=model,
-                    paged_cache_manager=self.paged_cache_manager,
-                    model_path=self.config.model_path,
-                    smelt_enabled=self.config.smelt_enabled,
-                    smelt_pct=self.config.smelt_pct,
-                    tq_enabled=(
-                        self._tq_active
-                        and not self._uses_dsv4_cache
-                        and not self._uses_zaya_cache
-                    ),
-                    kv_quant_bits=self._kv_cache_bits,
-                )
+                except Exception:
+                    self._cleanup_failed_block_cache_initialization(
+                        block_disk_store=block_disk_store,
+                    )
+                    raise
                 if self._uses_dsv4_cache:
                     logger.info(
                         "DSV4 native composite block index enabled: "
@@ -5799,6 +5799,45 @@ class Scheduler:
         """Get number of running requests."""
         return len(self.running)
 
+    def _cleanup_failed_block_cache_initialization(
+        self,
+        *,
+        block_disk_store: Optional[Any],
+    ) -> None:
+        """Release asynchronous L2 resources after partial cache construction."""
+        ssm_state_cache = getattr(self, "_ssm_state_cache", None)
+        ssm_disk_store = (
+            getattr(ssm_state_cache, "_disk", None)
+            if ssm_state_cache is not None
+            else None
+        )
+        if ssm_disk_store is not None:
+            try:
+                ssm_disk_store.shutdown(timeout=None)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to stop SSM companion after cache init failure: %s",
+                    exc,
+                )
+            finally:
+                ssm_state_cache._disk = None
+
+        manager = getattr(self, "paged_cache_manager", None)
+        manager_disk_store = getattr(manager, "_disk_store", None)
+        owned_block_store = manager_disk_store or block_disk_store
+        if owned_block_store is not None:
+            try:
+                owned_block_store.shutdown()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to stop block disk cache after cache init failure: %s",
+                    exc,
+                )
+        if manager is not None and manager_disk_store is not None:
+            manager._disk_store = None
+        self.paged_cache_manager = None
+        self.block_aware_cache = None
+
     def shutdown(self) -> None:
         """Shutdown the scheduler and flush disk caches. Idempotent."""
         if getattr(self, "_shutdown_done", False):
@@ -5810,6 +5849,17 @@ class Scheduler:
             logger.info("Shutting down prompt disk cache...")
             self.disk_cache.shutdown()
             logger.info("Prompt disk cache shutdown complete")
+
+        # Flush hybrid SSM companion writes before releasing the shared
+        # aggregate-budget lease owned by BlockDiskStore.  SSM publication is
+        # asynchronous and uses that same coordinator for atomic accounting.
+        if self._ssm_state_cache is not None:
+            ssm_disk_store = getattr(self._ssm_state_cache, "_disk", None)
+            if ssm_disk_store is not None:
+                logger.info("Shutting down SSM companion disk cache...")
+                ssm_disk_store.shutdown(timeout=None)
+                self._ssm_state_cache._disk = None
+                logger.info("SSM companion disk cache shutdown complete")
 
         # Flush block-level disk cache (BlockDiskStore)
         if hasattr(self, "paged_cache_manager") and self.paged_cache_manager:

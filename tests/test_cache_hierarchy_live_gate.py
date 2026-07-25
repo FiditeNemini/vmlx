@@ -12,8 +12,6 @@ import tests.cross_matrix.run_cache_hierarchy_live_gate as gate
 from tests.cross_matrix.run_cache_hierarchy_live_gate import (
     _cache_prompts,
     _canonical_sha256,
-    _compare_attestation_snapshots,
-    _compare_source_checkout_observations,
     _counter_deltas,
     _external_artifact_dir,
     _health_attestation_snapshot,
@@ -21,9 +19,7 @@ from tests.cross_matrix.run_cache_hierarchy_live_gate import (
     _observe_local_listener_identity,
     _prompt_contract,
     _summarize,
-    _token_contract_request,
     _validate_health_runtime_provenance,
-    _validate_tokenizer_lcp_contract,
     _wait_for_store_durability,
     validate_cache_rows,
     validate_probe_linkage,
@@ -49,6 +45,8 @@ TOKEN_CONTRACT = {
             "input_sha256": hashlib.sha256(f"prompt-{label}".encode()).hexdigest(),
             "cache_prompt_token_count": 128,
             "cache_prompt_token_ids_sha256": label.lower() * 64,
+            "generation_prompt_discriminator_present": True,
+            "generation_prompt_discriminator_sha256": "9" * 64,
         }
         for label in ("A", "B", "C")
     },
@@ -58,6 +56,366 @@ TOKEN_CONTRACT = {
         "A:C": 127,
     },
 }
+
+
+def test_private_attestation_post_requires_and_sends_dedicated_proof_headers(
+    monkeypatch,
+):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"ok":true}'
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.delenv(gate.PRIVATE_ATTESTATION_TOKEN_ENV, raising=False)
+    with pytest.raises(ValueError, match=gate.PRIVATE_ATTESTATION_TOKEN_ENV):
+        gate._json_post(
+            "http://127.0.0.1:8000/v1/cache/token-contract",
+            {"contract_version": 1},
+            5,
+            private_attestation=True,
+        )
+
+    token = "private_" + ("q" * 48)
+    monkeypatch.setenv(gate.PRIVATE_ATTESTATION_TOKEN_ENV, token)
+    monkeypatch.setattr(gate.urllib.request, "urlopen", fake_urlopen)
+    assert gate._json_post(
+        "http://127.0.0.1:8000/v1/cache/token-contract",
+        {"contract_version": 1},
+        7,
+        private_attestation=True,
+    ) == {"ok": True}
+    request = captured["request"]
+    assert captured["timeout"] == 7
+    assert request.get_header("Authorization") == f"Bearer {token}"
+    assert (
+        request.get_header("X-vmlx-private-proof")
+        == gate.PRIVATE_ATTESTATION_PROOF_HEADER
+    )
+    assert token.encode() not in request.data
+
+
+def _prefix_snapshot(
+    *,
+    disk_only: bool = False,
+    resident: bool = True,
+    l2_readable: bool = True,
+    access_count: int = 1,
+    access_time: int = 100,
+) -> tuple[dict, dict]:
+    resident = resident and not disk_only
+    l1 = {
+        "schema": "vmlx-cache-prefix-l1-snapshot-v1",
+        "access_metadata_mutated": False,
+        "backend_mode": "block_disk_only" if disk_only else "paged",
+        "paged_ram_enabled": not disk_only,
+        "disk_only": disk_only,
+        "expected_blocks": 2,
+        "metadata_blocks_present": 2,
+        "contiguous_metadata_blocks": 2,
+        "resident_payload_blocks_present": 2 if resident else 0,
+        "contiguous_resident_payload_blocks": 2 if resident else 0,
+        "metadata_only_blocks": 0 if resident else 2,
+        "resident_payload_bytes": 2048 if resident else 0,
+        "payloads_promoted_from_disk": 0,
+        "terminal_metadata_present": True,
+        "terminal_resident_payload_present": resident,
+        "terminal_payload_from_disk": False,
+    }
+    readable = 2 if l2_readable else 1
+    l2 = {
+        "schema": "vmlx-cache-prefix-l2-snapshot-v1",
+        "access_metadata_mutated": False,
+        "expected_blocks": 2,
+        "indexed_blocks": readable,
+        "readable_blocks": readable,
+        "contiguous_indexed_blocks": readable,
+        "contiguous_readable_blocks": readable,
+        "stale_index_blocks": 0,
+        "matched_file_size_bytes": readable * 100,
+        "total_access_count": readable * access_count,
+        "oldest_last_accessed_ns": access_time if readable else 0,
+        "newest_last_accessed_ns": access_time if readable else 0,
+        "terminal_indexed": l2_readable,
+        "terminal_readable": l2_readable,
+        "terminal_num_tokens": 16 if l2_readable else 0,
+        "terminal_last_accessed_ns": access_time if l2_readable else 0,
+        "terminal_access_count": access_count if l2_readable else 0,
+        "store_total_entries": 8,
+        "store_total_size_bytes": 800,
+        "store_max_size_bytes": 1000,
+    }
+    return l1, l2
+
+
+def _prefix_contract(
+    *,
+    chain_fingerprint: str = "e" * 64,
+    terminal_fingerprint: str = "f" * 64,
+    token_fingerprint: str = "1" * 64,
+    resident: bool = True,
+    l2_readable: bool = True,
+    access_count: int = 1,
+    access_time: int = 100,
+    disk_only: bool = False,
+) -> tuple[dict, dict]:
+    prompts = {
+        "left": "a shared /private/example/cache final-render prefix left",
+        "right": "a shared /private/example/cache final-render prefix right",
+    }
+    request = gate._prefix_attestation_request(
+        MODEL,
+        prompts,
+        {"target": ("left", "right")},
+    )
+    l1, l2 = _prefix_snapshot(
+        disk_only=disk_only,
+        resident=resident,
+        l2_readable=l2_readable,
+        access_count=access_count,
+        access_time=access_time,
+    )
+    contract = {
+        "contract_version": 1,
+        "method": gate.PREFIX_ATTESTATION_METHOD,
+        "surface": "responses",
+        "cache_extra_keys_contract": "generation-prompt-only-text-render-v1",
+        "caller_cache_or_media_side_keys": "rejected",
+        "cache_lookup_bypassed": True,
+        "access_metadata_mutated": False,
+        "request_sha256": _canonical_sha256(request),
+        "model_bundle_fingerprint_sha256": CONFIG,
+        "cache_topology_fingerprint_sha256": CACHE_TOPOLOGY,
+        "block_size": 16,
+        "snapshot_wall_time_ns": access_time,
+        "prompts": {
+            label: {
+                "input_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                "cache_prompt_token_count": 35,
+                "cache_prompt_token_ids_sha256": (
+                    "a" * 64 if label == "left" else "b" * 64
+                ),
+                "generation_prompt_suffix_tokens": 1,
+                "generation_prompt_discriminator_present": True,
+                "generation_prompt_discriminator_sha256": "9" * 64,
+            }
+            for label, prompt in prompts.items()
+        },
+        "prefixes": {
+            "target": {
+                "labels": ["left", "right"],
+                "longest_common_prefix_tokens": 33,
+                "reusable_prefix_tokens": 32,
+                "uncached_left_tokens": 3,
+                "uncached_right_tokens": 3,
+                "expected_blocks": 2,
+                "prefix_token_vector_sha256": token_fingerprint,
+                "block_chain_fingerprint_sha256": chain_fingerprint,
+                "terminal_block_fingerprint_sha256": terminal_fingerprint,
+                "generation_prompt_discriminator_present": True,
+                "generation_prompt_discriminator_sha256": "9" * 64,
+                "l1": l1,
+                "l2": l2,
+            }
+        },
+    }
+    return request, contract
+
+
+def _prefix_health_attestation() -> dict:
+    health_attestation, failures = _health_attestation_snapshot(_health())
+    assert failures == []
+    return health_attestation
+
+
+def _path_free_execution() -> dict:
+    return {
+        "response_id": "resp-l2",
+        "response_id_consistent": True,
+        "status_code": 200,
+        "terminal_ok": True,
+        "marker_ok": True,
+        "cached_tokens": 32,
+        "cache_detail": {},
+        "last_cache_execution": {
+            "request_id": "resp-l2",
+            "cache_reuse_applied": True,
+            "cache_outcome": "hit",
+            "cache_detail": "block-disk",
+            "prompt_tokens": 35,
+            "cached_tokens": 32,
+            "uncached_prompt_tokens": 3,
+            "prefill_tokens": 3,
+            "disk_blocks": 2,
+        },
+    }
+
+
+def _l2_eviction_observation(*, disk_only: bool = False) -> dict:
+    _, old_contract = _prefix_contract(
+        chain_fingerprint="2" * 64,
+        terminal_fingerprint="3" * 64,
+        token_fingerprint="4" * 64,
+        resident=not disk_only,
+        access_count=1,
+        access_time=100,
+        disk_only=disk_only,
+    )
+    _, recent_contract = _prefix_contract(
+        chain_fingerprint="5" * 64,
+        terminal_fingerprint="6" * 64,
+        token_fingerprint="7" * 64,
+        resident=not disk_only,
+        access_count=1,
+        access_time=150,
+        disk_only=disk_only,
+    )
+    old_before = gate._prefix_binding(old_contract, "target")
+    recent_before = gate._prefix_binding(recent_contract, "target")
+
+    recent_pre_contract = deepcopy(recent_contract)
+    recent_pre_contract["snapshot_wall_time_ns"] = 200
+    recent_pre_contract["prefixes"]["target"]["l1"] = _prefix_snapshot(
+        disk_only=disk_only,
+        resident=False,
+        access_count=2,
+        access_time=200,
+    )[0]
+    recent_pre_contract["prefixes"]["target"]["l2"] = _prefix_snapshot(
+        disk_only=disk_only,
+        resident=False,
+        access_count=2,
+        access_time=200,
+    )[1]
+    recent_pre = gate._prefix_binding(recent_pre_contract, "target")
+
+    recent_post_contract = deepcopy(recent_pre_contract)
+    recent_post_contract["snapshot_wall_time_ns"] = 300
+    recent_post_contract["prefixes"]["target"]["l2"] = _prefix_snapshot(
+        disk_only=disk_only,
+        resident=True,
+        access_count=3,
+        access_time=300,
+    )[1]
+    recent_post = gate._prefix_binding(recent_post_contract, "target")
+
+    old_final_contract = deepcopy(old_contract)
+    old_final_contract["prefixes"]["target"]["l2"] = _prefix_snapshot(
+        disk_only=disk_only,
+        resident=False,
+        l2_readable=False,
+        access_count=0,
+        access_time=0,
+    )[1]
+    old_final = gate._prefix_binding(old_final_contract, "target")
+    recent_final = recent_post
+    return {
+        "schema": gate.L2_SIZE_EVICTION_SCHEMA,
+        "scenario": "store-evict-refault",
+        "source_head": SOURCE,
+        "source_tree": _observed_source(SOURCE)["tree"],
+        "model_bundle_fingerprint_sha256": CONFIG,
+        "cache_topology_fingerprint_sha256": CACHE_TOPOLOGY,
+        "saved_max_bytes": 1000,
+        "peak_observed_bytes": 900,
+        "final_observed_bytes": 800,
+        "bounded_filler_request_count": 2,
+        "old_prefix_fingerprint_sha256": "2" * 64,
+        "recent_prefix_fingerprint_sha256": "5" * 64,
+        "old_prefix_evicted": True,
+        "recent_prefix_present": True,
+        "recent_prefix_last_access_after_old": True,
+        "old_before": old_before,
+        "recent_before": recent_before,
+        "recent_pre_refault": recent_pre,
+        "recent_post_refault": recent_post,
+        "evicting_filler_fence": {
+            "tag": "l2_filler_001",
+            "response_id": "resp-filler",
+            "request_id": "resp-filler",
+            "request_correlated": True,
+            "ok": True,
+            "post_eviction_complete": True,
+            "fence_sealed": True,
+            "fence_completion_generation": 2,
+            "strict_physical_reconcile": True,
+            "baseline_reconciliation_generation": 0,
+            "global_reconciliation_generation": 1,
+            "global_accounting_generation": 1,
+            "global_bytes_after": 800,
+            "global_max_size_bytes": 1000,
+            "disk_writes_delta": 2,
+            "disk_evictions_delta": 1,
+            "attestation_sha256": "8" * 64,
+        },
+        "old_after_durable_filler": old_final,
+        "recent_after_durable_filler": recent_final,
+        "old_final": old_final,
+        "recent_final": recent_final,
+        "recent_refault_execution": _path_free_execution(),
+        "write_fences": [
+            {
+                "tag": "filler",
+                "ok": True,
+                "strict_physical_reconcile": True,
+                "baseline_reconciliation_generation": 0,
+                "global_reconciliation_generation": 1,
+                "global_accounting_generation": 1,
+                "global_bytes_after": 800,
+                "global_max_size_bytes": 1000,
+                "attestation_sha256": "8" * 64,
+            }
+        ],
+    }
+
+
+def _l2_restart_observation(store: dict) -> dict:
+    _, recent_contract = _prefix_contract(
+        chain_fingerprint=store["recent_prefix_fingerprint_sha256"],
+        terminal_fingerprint="6" * 64,
+        token_fingerprint="7" * 64,
+        resident=False,
+        access_count=3,
+        access_time=300,
+    )
+    restart_pre = gate._prefix_binding(recent_contract, "target")
+    post_contract = deepcopy(recent_contract)
+    post_contract["snapshot_wall_time_ns"] = 400
+    post_contract["prefixes"]["target"]["l2"] = _prefix_snapshot(
+        resident=True,
+        access_count=4,
+        access_time=400,
+    )[1]
+    restart_post = gate._prefix_binding(post_contract, "target")
+    return {
+        "schema": gate.L2_RESTART_RESTORE_SCHEMA,
+        "scenario": "restart-restore",
+        "source_head": SOURCE,
+        "source_tree": _observed_source(SOURCE)["tree"],
+        "model_bundle_fingerprint_sha256": CONFIG,
+        "cache_topology_fingerprint_sha256": CACHE_TOPOLOGY,
+        "restart_probe_prefix_fingerprint_sha256": store[
+            "recent_prefix_fingerprint_sha256"
+        ],
+        "restart_restored_tokens": 32,
+        "restart_disk_blocks": 2,
+        "restart_uncached_tokens": 3,
+        "restart_restore_source": "block-disk",
+        "restart_pre": restart_pre,
+        "restart_post": restart_post,
+        "restart_execution": _path_free_execution(),
+    }
 
 
 def _validate_rows(
@@ -73,6 +431,230 @@ def _validate_rows(
         store_summary=store_summary,
         token_contract=TOKEN_CONTRACT if token_contract is None else token_contract,
     )
+
+
+def test_cache_hierarchy_live_gate_uses_release_semantic_artifact_schema():
+    assert gate.ARTIFACT_SCHEMA == "vmlx-cache-hierarchy-live-gate-v2"
+
+
+def test_cache_scenario_keeps_instructions_and_tool_schema_stable():
+    prompts = {"A": "shared alpha", "B": "shared beta"}
+    token_request = gate._token_contract_request(MODEL, prompts)
+    prefix_request = gate._prefix_attestation_request(
+        MODEL,
+        prompts,
+        {"target": ("A", "B")},
+    )
+    generated = gate._payload(MODEL, prompts["A"])
+
+    assert token_request["request_controls"] == prefix_request["request_controls"]
+    controls = token_request["request_controls"]
+    assert controls["instructions"] == generated["instructions"]
+    assert controls["tools"] == generated["tools"]
+    assert controls["tools"][0]["name"] == "cache_contract_unused"
+    assert "cache_salt" not in controls
+    assert "media_salt" not in controls
+
+
+def test_prefix_attestation_contract_is_path_free_and_supports_disk_only_l2():
+    request, contract = _prefix_contract(disk_only=True, resident=False)
+
+    failures = gate._validate_prefix_attestation_contract(
+        contract,
+        request_payload=request,
+        health_attestation=_prefix_health_attestation(),
+    )
+
+    assert failures == []
+    serialized = json.dumps(contract, sort_keys=True)
+    assert "/private/example/cache" not in serialized
+    assert '"token_ids":' not in serialized
+    assert '"block_hash":' not in serialized
+    assert contract["prefixes"]["target"]["l1"]["backend_mode"] == (
+        "block_disk_only"
+    )
+
+
+def test_prefix_attestation_rejects_raw_tokens_paths_and_wrong_provenance():
+    request, contract = _prefix_contract()
+    contract["token_ids"] = [1, 2, 3]
+    contract["debug_path"] = "/private/example/cache"
+    contract["model_bundle_fingerprint_sha256"] = "9" * 64
+    contract["cache_topology_fingerprint_sha256"] = "0" * 64
+
+    failures = gate._validate_prefix_attestation_contract(
+        contract,
+        request_payload=request,
+        health_attestation=_prefix_health_attestation(),
+    )
+
+    assert any("forbidden field" in failure for failure in failures)
+    assert any("absolute local path leaked" in failure for failure in failures)
+    assert any("model_bundle_fingerprint" in failure for failure in failures)
+    assert any("cache_topology_fingerprint" in failure for failure in failures)
+
+
+def test_l2_eviction_observation_requires_exact_identity_not_generic_counters():
+    observation = _l2_eviction_observation()
+    assert gate.validate_l2_size_eviction_observation(
+        observation,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+        max_filler_requests=64,
+    ) == []
+
+    generic_only = {
+        key: value
+        for key, value in observation.items()
+        if key
+        not in {
+            "old_before",
+            "recent_before",
+            "recent_pre_refault",
+            "recent_post_refault",
+            "evicting_filler_fence",
+            "old_after_durable_filler",
+            "recent_after_durable_filler",
+            "old_final",
+            "recent_final",
+            "recent_refault_execution",
+        }
+    }
+    generic_only["disk_hits"] = 9
+    failures = gate.validate_l2_size_eviction_observation(
+        generic_only,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+        max_filler_requests=64,
+    )
+    assert any("source prefix binding is missing" in failure for failure in failures)
+    assert any("exact request execution is missing" in failure for failure in failures)
+
+
+def test_l2_eviction_observation_accepts_truthful_ssd_only_state():
+    observation = _l2_eviction_observation(disk_only=True)
+
+    failures = gate.validate_l2_size_eviction_observation(
+        observation,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+        max_filler_requests=64,
+    )
+
+    assert failures == []
+    for label in (
+        "recent_before",
+        "recent_pre_refault",
+        "recent_post_refault",
+        "recent_after_durable_filler",
+        "recent_final",
+    ):
+        l1 = observation[label]["l1"]
+        assert l1["backend_mode"] == "block_disk_only"
+        assert l1["paged_ram_enabled"] is False
+        assert l1["resident_payload_blocks_present"] == 0
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_failure"),
+    (
+        (
+            lambda row: row["evicting_filler_fence"].update(
+                {"disk_evictions_delta": 0}
+            ),
+            "disk_evictions delta must be positive",
+        ),
+        (
+            lambda row: row["recent_before"]["l2"].update(
+                {"terminal_last_accessed_ns": 50}
+            ),
+            "old prefix was not strictly older",
+        ),
+        (
+            lambda row: row["old_after_durable_filler"]["l2"].update(
+                {"terminal_readable": True}
+            ),
+            "did not disappear after the durable",
+        ),
+        (
+            lambda row: row["recent_after_durable_filler"]["l2"].update(
+                {"store_total_size_bytes": 1001}
+            ),
+            "configured byte limit",
+        ),
+        (
+            lambda row: row["evicting_filler_fence"].update(
+                {"request_id": "resp-other"}
+            ),
+            "not bound to its Responses request_id",
+        ),
+    ),
+)
+def test_l2_eviction_observation_fails_closed_without_exact_filler_proof(
+    mutate,
+    expected_failure,
+):
+    observation = _l2_eviction_observation()
+    mutate(observation)
+
+    failures = gate.validate_l2_size_eviction_observation(
+        observation,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+        max_filler_requests=64,
+    )
+
+    assert any(expected_failure in failure for failure in failures)
+
+
+def test_l2_eviction_observation_rejects_swapped_stale_and_wrong_source():
+    observation = _l2_eviction_observation()
+    observation["source_tree"] = "wrong-tree"
+    observation["recent_prefix_fingerprint_sha256"] = observation[
+        "old_prefix_fingerprint_sha256"
+    ]
+    observation["recent_pre_refault"]["l2"]["terminal_readable"] = False
+
+    failures = gate.validate_l2_size_eviction_observation(
+        observation,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+        max_filler_requests=64,
+    )
+
+    assert any("source tree does not match" in failure for failure in failures)
+    assert any("old and recent prefixes are identical" in failure for failure in failures)
+    assert any("absent from L2 before refault" in failure for failure in failures)
+
+
+def test_l2_restart_observation_binds_same_surviving_prefix_and_source():
+    store = _l2_eviction_observation()
+    restart = _l2_restart_observation(store)
+    assert gate.validate_l2_restart_restore_observation(
+        restart,
+        store_observation=store,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+    ) == []
+
+    swapped_store = deepcopy(store)
+    swapped_store["recent_prefix_fingerprint_sha256"] = "9" * 64
+    restart["source_head"] = "wrong-source"
+    failures = gate.validate_l2_restart_restore_observation(
+        restart,
+        store_observation=swapped_store,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+    )
+    assert any("source HEAD does not match" in failure for failure in failures)
+    assert any("not the stored recent prefix" in failure for failure in failures)
 
 
 def _runtime_provenance(*, pid: int) -> dict:
@@ -163,6 +745,7 @@ def _observed_source(head: str = SOURCE) -> dict:
     return {
         "git_root": str(GIT_ROOT),
         "head": head,
+        "tree": "tree-" + head,
         "dirty": False,
         "status_porcelain": [],
         "status_sha256": hashlib.sha256(b"").hexdigest(),
@@ -1106,6 +1689,11 @@ def _disk_health(
     inflight: int = 0,
     completion_generation: int = 1,
     evictions: int = 0,
+    strict_fences: bool = True,
+    reconciliation_generation: int = 1,
+    accounting_generation: int = 1,
+    managed_bytes: int = 900,
+    managed_max_bytes: int = 1000,
 ) -> dict:
     fences = []
     if request_id is not None:
@@ -1124,15 +1712,32 @@ def _disk_health(
                 "seal_failed": False,
                 "post_eviction_complete": post_eviction_complete,
                 "completion_generation": completion_generation,
+                "global_reconciliation_generation": reconciliation_generation,
+                "global_accounting_generation": accounting_generation,
+                "global_bytes_after": managed_bytes,
+                "global_max_size_bytes": managed_max_bytes,
             }
         )
     return {
         "scheduler": {"num_waiting": 0, "num_running": 0},
         "cache": {
+            "scheduler_cache": {
+                "strict_block_disk_write_fence": strict_fences,
+            },
             "block_disk_cache": {
                 "disk_writes": writes,
                 "disk_evictions": evictions,
                 "blocks_on_disk": blocks,
+                "global_budget": {
+                    "accounted": True,
+                    "compliant": (
+                        managed_max_bytes <= 0 or managed_bytes <= managed_max_bytes
+                    ),
+                    "bytes_after": managed_bytes,
+                    "max_size_bytes": managed_max_bytes,
+                    "accounting_generation": accounting_generation,
+                    "reconciliation_generation": reconciliation_generation,
+                },
                 "write_pipeline": {
                     "queue_depth": queue_depth,
                     "inflight": inflight,
@@ -1148,7 +1753,9 @@ def _disk_health(
 def test_store_durability_barrier_accepts_full_capacity_replacement(
     monkeypatch,
 ):
-    baseline = _health_cache_counters(_disk_health(writes=10, blocks=5))
+    baseline = _health_cache_counters(
+        _disk_health(writes=10, blocks=5, reconciliation_generation=0)
+    )
     health_responses = iter(
         [
             _disk_health(writes=10, blocks=5, request_id=None),
@@ -1183,7 +1790,9 @@ def test_store_durability_barrier_accepts_full_capacity_replacement(
 def test_store_durability_barrier_rejects_aggregate_write_without_request_fence(
     monkeypatch,
 ):
-    baseline = _health_cache_counters(_disk_health(writes=10, blocks=5))
+    baseline = _health_cache_counters(
+        _disk_health(writes=10, blocks=5, reconciliation_generation=0)
+    )
     monkeypatch.setattr(
         gate,
         "_json_get",
@@ -1214,7 +1823,9 @@ def test_store_durability_barrier_rejects_aggregate_write_without_request_fence(
 
 
 def test_store_durability_barrier_rejects_post_eviction_loss(monkeypatch):
-    baseline = _health_cache_counters(_disk_health(writes=10, blocks=5))
+    baseline = _health_cache_counters(
+        _disk_health(writes=10, blocks=5, reconciliation_generation=0)
+    )
     monkeypatch.setattr(
         gate,
         "_json_get",
@@ -1239,6 +1850,57 @@ def test_store_durability_barrier_rejects_post_eviction_loss(monkeypatch):
     assert durability["ok"] is False
     assert any(
         "retained=1 != expected=2" in item for item in durability["contract_failures"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("health_kwargs", "expected_failure"),
+    [
+        (
+            {"strict_fences": False},
+            "not launched with strict physical block-disk fences",
+        ),
+        (
+            {"reconciliation_generation": 0},
+            "did not advance physical reconciliation",
+        ),
+        (
+            {"managed_bytes": 1001, "managed_max_bytes": 1000},
+            "managed-root physical bytes are over limit",
+        ),
+    ],
+)
+def test_store_durability_barrier_requires_strict_physical_attestation(
+    monkeypatch,
+    health_kwargs,
+    expected_failure,
+):
+    baseline = _health_cache_counters(
+        _disk_health(writes=10, blocks=5, reconciliation_generation=0)
+    )
+    monkeypatch.setattr(
+        gate,
+        "_json_get",
+        lambda _url, _timeout: _disk_health(
+            writes=11,
+            blocks=6,
+            **health_kwargs,
+        ),
+    )
+
+    durability, _final_health = _wait_for_store_durability(
+        base_url="http://127.0.0.1:8001",
+        request_timeout=1,
+        request_id="resp-cold_a",
+        baseline_counters=baseline,
+        timeout_s=0,
+        poll_interval_s=0.001,
+    )
+
+    assert durability["ok"] is False
+    assert any(
+        expected_failure in failure
+        for failure in durability["contract_failures"]
     )
 
 

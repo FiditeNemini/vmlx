@@ -7635,7 +7635,7 @@ class TestStartupCompatibilityGuards:
         # Ling/Bailing hybrid needs the mlx-lm runtime floor that the bundle
         # uses before the local bailing_hybrid vendor file is applied.
         assert '"mlx-lm>=0.31.3"' in pyproject
-        assert pyproject.count('"jang>=2.5.33"') >= 3
+        assert pyproject.count('"jang>=2.5.34"') >= 3
 
     def test_bundled_python_installs_distutils_version_shim_for_radio(self):
         bundle_script = Path("./panel/scripts/bundle-python.sh").read_text()
@@ -9081,7 +9081,7 @@ class TestStartupCompatibilityGuards:
         assert 'VMLINUX_BUNDLE_MLX_PLATFORM="$platform"' not in source
         assert 'VMLX_BUNDLE_MLX_PLATFORM="$platform"' in source
         assert 'vMLX-\\${version}-${flavor}-\\${arch}.\\${ext}' in source
-        assert "electron-builder --mac" in source
+        assert "run_electron_builder_action --mac" in source
         assert "run_release_regression_manifest.py" in source
         assert "--require-prepackage-ready" in source
         assert 'cd "$ROOT_DIR"' in source
@@ -9090,7 +9090,10 @@ class TestStartupCompatibilityGuards:
         assert panel_package["build"]["dmg"]["sign"] is True
         assert "--require-release-ready" in panel_package["scripts"]["release:ready"]
         assert "--require-prepackage-ready" in panel_package["scripts"]["release:prepackage"]
-        assert panel_package["scripts"]["dist"].startswith("npm run release:prepackage && ")
+        assert panel_package["scripts"]["dist"] == (
+            "VMLX_RELEASE_SCOPE=production "
+            "./scripts/build-release-dmgs.sh all"
+        )
 
     def test_release_build_signs_bundled_python_before_dmg_signing(self):
         """Release DMG builds must not leave bundled Python dylibs unsigned."""
@@ -9102,13 +9105,21 @@ class TestStartupCompatibilityGuards:
         assert "Signature=adhoc|flags=.*adhoc|TeamIdentifier=not set" in source
         assert 'find "$bundled_python" -type f' in source
         assert '-name "*.dylib" -o -name "*.so" -o -perm +111' in source
-        assert 'codesign --force --timestamp --options runtime --sign "$identity" "$native_file"' in source
+        assert 'APPLE_CODESIGN="/usr/bin/codesign"' in source
+        assert 'assert_unshadowed_tool codesign "$APPLE_CODESIGN"' in source
+        assert (
+            '"$APPLE_CODESIGN" --force --timestamp --options runtime '
+            '--sign "$identity" "$native_file"'
+        ) in source
         assert "finalize_release_app_signature" in source
         assert (
-            'codesign --force --deep --timestamp --options runtime --entitlements "$entitlements" '
+            '"$APPLE_CODESIGN" --force --deep --timestamp --options runtime '
+            '--entitlements "$entitlements" '
             '--sign "$identity" "$app_path"'
         ) in source
-        assert 'codesign --verify --deep --strict --verbose=2 "$app_path"' in source
+        assert (
+            '"$APPLE_CODESIGN" --verify --deep --strict --verbose=2 "$app_path"'
+        ) in source
         assert 'sign_remaining_app_macho_leaves "$app_path" "$identity"' in source
         assert 'verify_release_macho_leaves "$app_path"' in source
         assert 'finalize_release_app_signature "$app_path"' in source

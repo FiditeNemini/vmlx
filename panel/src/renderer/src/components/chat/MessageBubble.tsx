@@ -422,7 +422,11 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
     // Edit mode for user messages
     if (editing && onEdit) {
       return (
-        <div className="flex justify-end gap-2.5 ml-[5%] md:ml-[10%] lg:ml-[15%]">
+        <div
+          className="flex justify-end gap-2.5 ml-[5%] md:ml-[10%] lg:ml-[15%]"
+          data-vmlx-proof-message-id={message.id}
+          data-vmlx-proof-message-role="user"
+        >
           <div className="flex flex-col items-end max-w-full w-full">
             <textarea
               value={editText}
@@ -451,7 +455,11 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
     }
 
     return (
-      <div className="flex justify-end gap-2.5 ml-[5%] md:ml-[10%] lg:ml-[15%] group">
+      <div
+        className="flex justify-end gap-2.5 ml-[5%] md:ml-[10%] lg:ml-[15%] group"
+        data-vmlx-proof-message-id={message.id}
+        data-vmlx-proof-message-role="user"
+      >
         {/* Edit button on hover */}
         {onEdit && !isStreaming && (
           <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
@@ -509,7 +517,11 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
 
   // ─── Assistant message: left-aligned with avatar ───────────────
   return (
-    <div className="flex gap-2.5 group mr-[5%] md:mr-[10%] lg:mr-[15%]">
+    <div
+      className="flex gap-2.5 group mr-[5%] md:mr-[10%] lg:mr-[15%]"
+      data-vmlx-proof-message-id={message.id}
+      data-vmlx-proof-message-role="assistant"
+    >
       <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
         <Sparkles className="h-3.5 w-3.5 text-primary" />
       </div>
@@ -564,7 +576,10 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
         )}
 
         {/* Main content */}
-        <div className="text-sm">
+        <div
+          className="text-sm"
+          data-vmlx-proof-answer="true"
+        >
           {renderInlineContent()}
           {answerPassPending && isStreaming && !message.content && (
             <div className="flex items-center gap-2 text-muted-foreground py-1">

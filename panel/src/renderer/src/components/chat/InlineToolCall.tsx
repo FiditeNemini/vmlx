@@ -27,7 +27,12 @@ export function InlineToolCall({ group, isStreaming }: InlineToolCallProps) {
   const iteration = callingStatus?.iteration
 
   return (
-    <div className={`my-1.5 rounded-lg border overflow-hidden transition-all duration-150 ${
+    <div
+      data-vmlx-proof-tool-card="inline"
+      data-vmlx-proof-tool-name={group.name}
+      data-vmlx-proof-tool-call-id={callingStatus?.toolCallId || ''}
+      data-vmlx-proof-tool-phase={lastPhase.phase}
+      className={`my-1.5 rounded-lg border overflow-hidden transition-all duration-150 ${
       !isDone && isStreaming ? 'border-warning/40 border-l-warning border-l-2' : 'border-border/60'
     } bg-popover/80`}>
       <button

@@ -7,6 +7,8 @@ bundled-python/
 .DS_Store
 .env
 .env.*
+!.env.example
+!.env.*.example
 .claude/
 test-*.js
 theme-preview.html

@@ -6,6 +6,7 @@ import hashlib
 import json
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,159 @@ import pytest
 import requests
 
 from tests.cross_matrix import run_agentic_protocol_matrix as matrix
+
+
+TEST_PYTHON_EXECUTABLE_PATH = str(Path(sys.executable).absolute())
+TEST_PYTHON_EXECUTABLE_FINGERPRINT = matrix._sha256(
+    TEST_PYTHON_EXECUTABLE_PATH
+)
+TEST_PYTHON_PREFIX_PATH = str(Path(sys.prefix).resolve())
+TEST_PYTHON_PREFIX_FINGERPRINT = matrix._sha256(TEST_PYTHON_PREFIX_PATH)
+
+
+def _identity_repo(tmp_path: Path) -> tuple[Path, dict]:
+    repo_root = tmp_path / "repo"
+    package_json = repo_root / matrix.FILE_INFO_PATH
+    package_json.parent.mkdir(parents=True)
+    package_json.write_text("{}\n")
+    engine = repo_root / "vmlx_engine"
+    engine.mkdir()
+    (engine / "__init__.py").write_text('__version__ = "test"\n')
+    (engine / "server.py").write_text("SERVER = True\n")
+    subprocess.run(
+        ["git", "init", "-q", str(repo_root)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_root), "add", "."],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return repo_root, matrix.observe_source_checkout(repo_root)
+
+
+def _identity_bundle(tmp_path: Path) -> tuple[Path, dict]:
+    bundle_root = tmp_path / "served-org" / "served-model"
+    bundle_root.mkdir(parents=True)
+    (bundle_root / "config.json").write_text('{"model_type":"test"}\n')
+    (bundle_root / "tokenizer_config.json").write_text(
+        '{"chat_template":"{{ messages }}"}\n'
+    )
+    return bundle_root, matrix.observe_bundle_configuration(bundle_root)
+
+
+def _identity_runner() -> dict:
+    return {
+        "repo_venv": True,
+        "repo_python": True,
+        "python_executable_path": TEST_PYTHON_EXECUTABLE_PATH,
+        "python_executable_fingerprint_sha256":
+            TEST_PYTHON_EXECUTABLE_FINGERPRINT,
+        "python_prefix_path": TEST_PYTHON_PREFIX_PATH,
+        "python_prefix_fingerprint_sha256": TEST_PYTHON_PREFIX_FINGERPRINT,
+        "producer_pid": 2468,
+        "producer_executable_path": str(Path(sys.executable).resolve()),
+        "producer_executable_sha256": "1" * 64,
+        "producer_executable_size_bytes": 4096,
+        "producer_harness_relative_path":
+            "tests/cross_matrix/run_agentic_protocol_matrix.py",
+        "producer_harness_path":
+            "/private/repo/tests/cross_matrix/run_agentic_protocol_matrix.py",
+        "producer_harness_sha256": "2" * 64,
+        "producer_harness_size_bytes": 8192,
+    }
+
+
+def _identity_health(
+    source: dict,
+    *,
+    pid: int = 1234,
+    model_name: str = "served-org/served-model",
+    bundle: dict | None = None,
+    cache_fingerprint: str = "b" * 64,
+) -> dict:
+    if bundle is None:
+        files = {
+            name: {"state": "missing"}
+            for name in matrix.BUNDLE_ATTESTATION_FILENAMES
+        }
+        for name in ("config.json", "tokenizer_config.json"):
+            files[name] = {
+                "state": "present",
+                "size_bytes": 2,
+                "sha256": hashlib.sha256(b"{}\n").hexdigest(),
+            }
+        bundle_observed = {
+            "schema": "vmlx-bundle-config-v1",
+            "directory_state": "available",
+            "files": files,
+        }
+        bundle_fingerprint = matrix._canonical_sha256(bundle_observed)
+        bundle = {
+            **bundle_observed,
+            "aggregate_sha256": bundle_fingerprint,
+            "fingerprint_sha256": bundle_fingerprint,
+        }
+    cache_configuration = {
+        "schema": "test-cache-topology-v1",
+        "nonce": cache_fingerprint,
+    }
+    cache_digest = matrix._canonical_sha256(cache_configuration)
+    model_bundle_provenance = {
+        key: copy.deepcopy(value)
+        for key, value in bundle.items()
+        if key != "model_name"
+    }
+    cache_topology_provenance = {
+        "schema": "vmlx-cache-topology-attestation-v1",
+        "configuration": cache_configuration,
+        "canonical_sha256": cache_digest,
+        "fingerprint_sha256": cache_digest,
+    }
+    return {
+        "status": "healthy",
+        "model_loaded": True,
+        "model_name": model_name,
+        "runtime_provenance": {
+            "pid": pid,
+            "server_module_sha256": source["server_module_sha256"],
+            "package_init_sha256": source["package_init_sha256"],
+            "python_source_tree_sha256": source[
+                "python_source_tree_sha256"
+            ],
+            "python_source_file_count": source["python_source_file_count"],
+            "python_source_read_error_count": source[
+                "python_source_read_error_count"
+            ],
+            "python_executable_fingerprint_sha256":
+                TEST_PYTHON_EXECUTABLE_FINGERPRINT,
+            "model_bundle_provenance": copy.deepcopy(model_bundle_provenance),
+            "cache_topology_provenance": copy.deepcopy(
+                cache_topology_provenance
+            ),
+        },
+        "model_bundle_provenance": model_bundle_provenance,
+        "cache_topology_provenance": cache_topology_provenance,
+        "scheduler": {"num_waiting": 0, "num_running": 0},
+        "cache": {"scheduler_cache": {"cache_hits": 0}},
+    }
 
 
 def _round(call_id: str = "call_1", name: str = "file_info", arguments=None):
@@ -44,6 +198,158 @@ def _execution(call_id: str = "call_1", name: str = "file_info"):
         "result": {"ok": True},
         "output": '{"ok":true}',
     }
+
+
+def test_runner_identity_requires_real_producer_pid_executable_and_harness_bytes():
+    runner = _identity_runner()
+    assert matrix._runner_environment_failures(runner) == []
+
+    runner["producer_pid"] = 0
+    runner["producer_executable_sha256"] = "not-a-hash"
+    runner["producer_harness_relative_path"] = "different.py"
+    assert matrix._runner_environment_failures(runner) == [
+        "proof producer PID is invalid",
+        "proof producer executable bytes fingerprint is invalid",
+        "proof producer harness relative path is invalid",
+    ]
+
+    runner = _identity_runner()
+    runner["python_executable_path"] = "/private/not-the-runner"
+    assert matrix._runner_environment_failures(runner) == [
+        "proof runner Python executable path binding is invalid",
+        "proof producer executable path cannot be resolved",
+    ]
+
+
+def test_public_request_metadata_retains_exact_tool_contracts_and_safe_history_links():
+    payload = {
+        "stream": True,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_info",
+                    "parameters": matrix.TOOL_PARAMETERS["file_info"],
+                },
+            },
+            {
+                "name": "run_command",
+                "input_schema": matrix.TOOL_PARAMETERS["run_command"],
+            },
+        ],
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_file",
+                        "function": {"name": "file_info", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_file",
+                "name": "file_info",
+                "content": '{"size_human":"5.2 KB"}',
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_pwd",
+                        "name": "run_command",
+                        "input": {"command": "pwd"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_pwd",
+                        "content": '{"stdout":"/private/repo"}',
+                    }
+                ],
+            },
+        ],
+    }
+
+    public = matrix._request_public(2, payload)
+
+    assert public["tool_contracts"] == [
+        {
+            "name": "file_info",
+            "parameters": matrix.TOOL_PARAMETERS["file_info"],
+        },
+        {
+            "name": "run_command",
+            "parameters": matrix.TOOL_PARAMETERS["run_command"],
+        },
+    ]
+    assert public["tool_history_linkage"] == [
+        {
+            "kind": "assistant_tool_call",
+            "role": "assistant",
+            "call_id": "call_file",
+            "name": "file_info",
+        },
+        {
+            "kind": "tool_result",
+            "role": "tool",
+            "call_id": "call_file",
+            "name": "file_info",
+            "output_chars": len('{"size_human":"5.2 KB"}'),
+            "output_sha256": matrix._sha256('{"size_human":"5.2 KB"}'),
+        },
+        {
+            "kind": "assistant_tool_call",
+            "role": "assistant",
+            "call_id": "call_pwd",
+            "name": "run_command",
+        },
+        {
+            "kind": "tool_result",
+            "role": "user",
+            "call_id": "call_pwd",
+            "output_chars": len('{"stdout":"/private/repo"}'),
+            "output_sha256": matrix._sha256('{"stdout":"/private/repo"}'),
+        },
+    ]
+    serialized = json.dumps(public, sort_keys=True)
+    assert "5.2 KB" not in serialized
+    assert "/private/repo" not in serialized
+
+
+def test_public_request_metadata_links_responses_function_output_without_payload():
+    output = '{"stdout":"/private/repo"}'
+    public = matrix._request_public(
+        3,
+        {
+            "previous_response_id": "response-2",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_pwd",
+                    "output": output,
+                }
+            ]
+        },
+    )
+
+    assert public["tool_history_linkage"] == [
+        {
+            "kind": "tool_result",
+            "role": "function_call_output",
+            "call_id": "call_pwd",
+            "output_chars": len(output),
+            "output_sha256": matrix._sha256(output),
+        }
+    ]
+    assert public["previous_response_id"] == "response-2"
+    assert output not in json.dumps(public, sort_keys=True)
 
 
 def test_fragmented_tool_assembler_reconstructs_split_name_and_arguments():
@@ -224,11 +530,13 @@ def test_responses_history_carries_real_output_then_latest_user_instruction():
     [
         ("chat", ["tool_calls", "DONE"], True, True, True),
         ("chat", ["stop", "DONE"], True, False, True),
+        ("chat", ["DONE", "stop"], True, False, False),
         ("chat", ["stop", "DONE", "DONE"], True, False, False),
         ("responses", ["response.completed"], True, True, True),
         ("responses", ["response.incomplete"], True, False, False),
         ("anthropic", ["tool_use", "message_stop"], True, True, True),
         ("anthropic", ["end_turn", "message_stop"], True, False, True),
+        ("anthropic", ["message_stop", "end_turn"], True, False, False),
         ("ollama", ["tool_calls"], True, True, True),
         ("ollama", ["stop"], True, True, False),
         ("ollama", ["stop"], False, False, True),
@@ -243,6 +551,64 @@ def test_terminal_classification(protocol, terminals, stream, expect_tool, expec
     )
 
     assert result["pass"] is expected
+
+
+def test_terminal_classification_rejects_nonterminal_event_after_terminal():
+    result = matrix.classify_terminal(
+        "chat",
+        ["stop", "DONE"],
+        stream=True,
+        expect_tool=False,
+        events=[
+            {"channel": "content", "kind": "chat.content.delta"},
+            {"channel": "terminal", "kind": "stop"},
+            {"channel": "content", "kind": "chat.content.delta"},
+            {"channel": "terminal", "kind": "DONE"},
+        ],
+    )
+
+    assert result["pass"] is False
+    assert result["post_terminal_events"] == 1
+
+
+def test_responses_nonstream_requires_explicit_completed_status():
+    missing = matrix.parse_nonstream(
+        "responses",
+        {
+            "id": "response-without-status",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}],
+                }
+            ],
+        },
+        200,
+        1.0,
+    )
+    explicit = matrix.parse_nonstream(
+        "responses",
+        {
+            "id": "response-completed",
+            "status": "completed",
+            "output": [],
+        },
+        200,
+        1.0,
+    )
+
+    assert missing["terminals"] == []
+    assert [error["kind"] for error in missing["errors"]] == [
+        "responses.missing_status"
+    ]
+    assert matrix.classify_terminal(
+        "responses",
+        missing["terminals"],
+        stream=False,
+        expect_tool=False,
+        events=missing["events"],
+    )["pass"] is False
+    assert explicit["terminals"] == ["response.completed"]
 
 
 @pytest.mark.parametrize(
@@ -568,16 +934,31 @@ def test_import_safe_parser_requires_caller_supplied_model_and_base(tmp_path: Pa
             "gateway=http://127.0.0.1:8088",
             "--model",
             "served-model",
+            "--bundle-root",
+            str(tmp_path),
             "--output",
             str(tmp_path / "out.json"),
+            "--source-head",
+            "observed-at-run-time",
+            "--run-id",
+            "paired-proof-run",
         ]
     )
     assert args.model == "served-model"
+    assert args.bundle_root == tmp_path
     assert args.base_url == [
         "direct=http://127.0.0.1:8000",
         "gateway=http://127.0.0.1:8088",
     ]
     assert args.raw_artifact_dir is None
+    assert args.source_head == "observed-at-run-time"
+    assert args.run_id == "paired-proof-run"
+
+
+@pytest.mark.parametrize("run_id", ["", "bad id", "x" * 81])
+def test_run_matrix_rejects_non_binding_run_ids(run_id):
+    with pytest.raises(ValueError, match="--run-id must be a nonempty"):
+        matrix.run_matrix(SimpleNamespace(run_id=run_id))
 
 
 def test_raw_capture_rejects_worktree_and_symlink_escape(
@@ -736,6 +1117,12 @@ def test_opt_in_capture_preserves_parser_input_bytes_and_allowlists_metadata(
     assert (
         metadata["request"]["body_sha256"] == hashlib.sha256(prepared.body).hexdigest()
     )
+    assert metadata["request"]["prepared_payload_body_sha256"] == (
+        metadata["request"]["payload"]["body_sha256"]
+    )
+    assert metadata["request"][
+        "prepared_payload_canonical_body_sha256"
+    ] == metadata["request"]["payload"]["canonical_body_sha256"]
     assert metadata["request"]["payload"]["top_level_fields"] == [
         "max_tokens",
         "messages",
@@ -758,6 +1145,23 @@ def test_opt_in_capture_preserves_parser_input_bytes_and_allowlists_metadata(
         row["name"].lower(): row["value"] for row in metadata["response"]["headers"]
     }["content-type"] == "text/event-stream"
     assert metadata["response"]["status_code"] == 200
+    route = capture_summary["routes"][0]
+    assert (
+        route["base_label"],
+        route["protocol"],
+        route["capture_label"],
+    ) == ("direct", "chat", "stream-round1")
+    artifact = route["artifacts"][0]
+    assert artifact["verified"] is True
+    assert artifact["route_bound"] is True
+    assert artifact["body_sha256"] == hashlib.sha256(response_body).hexdigest()
+    assert artifact["body_bytes"] == len(response_body)
+    assert artifact["metadata_sha256"] == hashlib.sha256(
+        metadata_path.read_bytes()
+    ).hexdigest()
+    assert artifact["request_body_sha256"] == hashlib.sha256(
+        prepared.body
+    ).hexdigest()
     assert metadata["response"]["body_bytes"] == len(response_body)
     assert (
         metadata["response"]["body_sha256"] == hashlib.sha256(response_body).hexdigest()
@@ -775,6 +1179,129 @@ def test_opt_in_capture_preserves_parser_input_bytes_and_allowlists_metadata(
     assert capture_summary["finished"] == 1
     assert capture_summary["errors"] == 0
     assert capture_summary["complete"] is True
+
+
+def test_responses_nonstream_capture_retains_exact_missing_status_bytes(
+    monkeypatch,
+    tmp_path: Path,
+):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    response_body = json.dumps(
+        {
+            "id": "response-without-status",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "visible"}],
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).encode()
+    payload = {
+        "model": "served-model",
+        "input": "private prompt",
+        "stream": False,
+    }
+    prepared = requests.Request(
+        "POST",
+        "http://127.0.0.1:8000/v1/responses",
+        json=payload,
+    ).prepare()
+    response = requests.Response()
+    response.status_code = 200
+    response.request = prepared
+    response.encoding = "utf-8"
+    response.raw = SimpleNamespace(
+        headers={"Content-Type": "application/json"},
+        close=lambda: None,
+    )
+    response._content = response_body
+    response._content_consumed = True
+    monkeypatch.setattr(matrix.requests, "post", lambda *_args, **_kwargs: response)
+
+    recorder = matrix.DecompressedParserInputCaptureRecorder(
+        tmp_path / "private-captures",
+        worktree,
+        run_id="responses-nonstream-missing-status",
+    )
+    recorder.configure_expected(
+        [("direct", "responses", "nonstream-flow-round1")]
+    )
+    client = matrix.ProtocolClient(
+        "http://127.0.0.1:8000",
+        None,
+        30,
+        base_label="direct",
+        raw_recorder=recorder,
+    )
+
+    result = client.send(
+        "responses",
+        payload,
+        False,
+        capture_label="nonstream-flow-round1",
+    )
+    summary = recorder.finalize()
+    body_path = next(recorder.run_dir.glob("*.decompressed-parser-input.bin"))
+    metadata = json.loads(
+        next(recorder.run_dir.glob("*.metadata.json")).read_text()
+    )
+
+    assert body_path.read_bytes() == response_body
+    assert result["terminals"] == []
+    assert [error["kind"] for error in result["errors"]] == [
+        "responses.missing_status"
+    ]
+    assert metadata["request"]["prepared_payload_body_sha256"] == (
+        metadata["request"]["payload"]["body_sha256"]
+    )
+    assert metadata["request"][
+        "prepared_payload_canonical_body_sha256"
+    ] == metadata["request"]["payload"]["canonical_body_sha256"]
+    assert summary["complete"] is True
+
+
+def test_capture_rejects_prepared_body_that_differs_from_declared_payload(
+    tmp_path: Path,
+):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    recorder = matrix.DecompressedParserInputCaptureRecorder(
+        tmp_path / "private-captures",
+        worktree,
+        run_id="prepared-body-mismatch",
+    )
+    recorder.configure_expected([("direct", "chat", "stream-round1")])
+    response = requests.Response()
+    response.status_code = 200
+    response.raw = SimpleNamespace(headers={"Content-Type": "text/event-stream"})
+    response.request = requests.Request(
+        "POST",
+        "http://127.0.0.1:8000/v1/chat/completions",
+        json={"model": "served-model", "stream": True, "temperature": 0.9},
+    ).prepare()
+
+    with pytest.raises(
+        ValueError,
+        match="prepared request body does not match",
+    ):
+        recorder.begin(
+            base_label="direct",
+            protocol="chat",
+            capture_label="stream-round1",
+            payload={
+                "model": "served-model",
+                "stream": True,
+                "temperature": 0.1,
+            },
+            response=response,
+            started=time.monotonic(),
+            started_at="2026-07-24T00:00:00+00:00",
+        )
+
+    assert recorder.finalize()["complete"] is False
 
 
 @pytest.mark.parametrize("base_label", ["direct", "gateway"])
@@ -1114,6 +1641,369 @@ def _finish_synthetic_capture(
     capture.finish(completed_ms=1.0)
 
 
+@pytest.mark.parametrize("failure_mode", ["declared-head", "dirty"])
+def test_run_matrix_fails_closed_before_generation_on_unobserved_source_identity(
+    monkeypatch,
+    tmp_path: Path,
+    failure_mode: str,
+):
+    repo_root, source = _identity_repo(tmp_path)
+    bundle_root, bundle = _identity_bundle(tmp_path)
+    if failure_mode == "dirty":
+        (repo_root / matrix.FILE_INFO_PATH).write_text('{"dirty":true}\n')
+        source = matrix.observe_source_checkout(repo_root)
+    health = _identity_health(source, bundle=bundle)
+    monkeypatch.setattr(
+        matrix,
+        "observe_runner_environment",
+        lambda _repo_root: copy.deepcopy(_identity_runner()),
+    )
+    monkeypatch.setattr(
+        matrix,
+        "_get_full_health",
+        lambda _url, _timeout: copy.deepcopy(health),
+    )
+
+    def generation_must_not_run(*_args, **_kwargs):
+        raise AssertionError("generation ran before provenance passed")
+
+    monkeypatch.setattr(matrix.ProtocolClient, "send", generation_must_not_run)
+    declared_head = (
+        "0" * len(source["head"])
+        if failure_mode == "declared-head"
+        else source["head"]
+    )
+    args = matrix.build_parser().parse_args(
+        [
+            "--base-url",
+            "direct=http://direct.invalid",
+            "--base-url",
+            "gateway=http://gateway.invalid",
+            "--model",
+            bundle["model_name"],
+            "--bundle-root",
+            str(bundle_root),
+            "--repo-root",
+            str(repo_root),
+            "--output",
+            str(tmp_path / "result.json"),
+            "--source-head",
+            declared_head,
+            "--run-id",
+            "identity-failure-run",
+            "--protocol",
+            "chat",
+            "--mode",
+            "nonstream",
+            "--skip-cancellation",
+        ]
+    )
+
+    result = matrix.run_matrix(args)
+
+    assert result["schema"] == "vmlx-agentic-protocol-matrix-v2"
+    assert result["pass"] is False
+    assert result["checks"]["identity_provenance_pass"] is False
+    assert result["backend_identity_fingerprint_sha256"] is None
+    assert result["flows"] == {}
+    joined = "\n".join(result["identity"]["failures"])
+    expected = (
+        "--source-head does not match"
+        if failure_mode == "declared-head"
+        else "source checkout is dirty"
+    )
+    assert expected in joined
+
+
+def test_run_matrix_fails_closed_when_direct_and_gateway_are_different_backends(
+    monkeypatch,
+    tmp_path: Path,
+):
+    repo_root, source = _identity_repo(tmp_path)
+    bundle_root, bundle = _identity_bundle(tmp_path)
+    direct_health = _identity_health(source, pid=111, bundle=bundle)
+    gateway_health = _identity_health(source, pid=222, bundle=bundle)
+    monkeypatch.setattr(
+        matrix,
+        "observe_runner_environment",
+        lambda _repo_root: copy.deepcopy(_identity_runner()),
+    )
+
+    def fake_health(url, _timeout):
+        return copy.deepcopy(
+            direct_health if "direct.invalid" in url else gateway_health
+        )
+
+    monkeypatch.setattr(matrix, "_get_full_health", fake_health)
+    monkeypatch.setattr(
+        matrix.ProtocolClient,
+        "send",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("generation ran against mismatched backends")
+        ),
+    )
+    args = matrix.build_parser().parse_args(
+        [
+            "--base-url",
+            "direct=http://direct.invalid",
+            "--base-url",
+            "gateway=http://gateway.invalid",
+            "--model",
+            bundle["model_name"],
+            "--bundle-root",
+            str(bundle_root),
+            "--repo-root",
+            str(repo_root),
+            "--output",
+            str(tmp_path / "result.json"),
+            "--source-head",
+            source["head"],
+            "--run-id",
+            "backend-mismatch-run",
+            "--protocol",
+            "chat",
+            "--mode",
+            "nonstream",
+            "--skip-cancellation",
+        ]
+    )
+
+    result = matrix.run_matrix(args)
+
+    assert result["pass"] is False
+    assert result["checks"]["identity_provenance_pass"] is False
+    assert result["backend_identity_fingerprint_sha256"] is None
+    assert any(
+        "backend runtime/model/cache identity differs" in failure
+        for failure in result["identity"]["failures"]
+    )
+    assert (
+        result["identity"]["health"]["direct"]["before"]["identity"][
+            "backend_pid"
+        ]
+        == 111
+    )
+    assert (
+        result["identity"]["health"]["gateway"]["before"]["identity"][
+            "backend_pid"
+        ]
+        == 222
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["wrong-model", "wrong-bundle", "wrong-python", "same-origin"],
+)
+def test_run_matrix_rejects_cross_surface_identity_substitution(
+    monkeypatch,
+    tmp_path: Path,
+    failure_mode: str,
+):
+    repo_root, source = _identity_repo(tmp_path)
+    bundle_root, bundle = _identity_bundle(tmp_path)
+    health = _identity_health(source, bundle=bundle)
+    runner = _identity_runner()
+    requested_model = bundle["model_name"]
+    direct_url = "http://direct.invalid"
+    gateway_url = "http://gateway.invalid"
+
+    if failure_mode == "wrong-model":
+        requested_model = "served-org/different-model"
+    elif failure_mode == "wrong-bundle":
+        forged = copy.deepcopy(health["model_bundle_provenance"])
+        forged["files"]["config.json"]["sha256"] = "9" * 64
+        observed = {
+            "schema": forged["schema"],
+            "directory_state": forged["directory_state"],
+            "files": forged["files"],
+        }
+        forged["aggregate_sha256"] = matrix._canonical_sha256(observed)
+        forged["fingerprint_sha256"] = forged["aggregate_sha256"]
+        health["model_bundle_provenance"] = forged
+        health["runtime_provenance"]["model_bundle_provenance"] = copy.deepcopy(
+            forged
+        )
+    elif failure_mode == "wrong-python":
+        runner["python_executable_fingerprint_sha256"] = "7" * 64
+    elif failure_mode == "same-origin":
+        gateway_url = direct_url
+
+    monkeypatch.setattr(
+        matrix,
+        "observe_runner_environment",
+        lambda _repo_root: copy.deepcopy(runner),
+    )
+    monkeypatch.setattr(
+        matrix,
+        "_get_full_health",
+        lambda _url, _timeout: copy.deepcopy(health),
+    )
+    monkeypatch.setattr(
+        matrix.ProtocolClient,
+        "send",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("generation ran before identity substitution failed")
+        ),
+    )
+    args = matrix.build_parser().parse_args(
+        [
+            "--base-url",
+            f"direct={direct_url}",
+            "--base-url",
+            f"gateway={gateway_url}",
+            "--model",
+            requested_model,
+            "--bundle-root",
+            str(bundle_root),
+            "--repo-root",
+            str(repo_root),
+            "--output",
+            str(tmp_path / f"{failure_mode}.json"),
+            "--source-head",
+            source["head"],
+            "--run-id",
+            f"identity-substitution-{failure_mode}",
+            "--protocol",
+            "chat",
+            "--mode",
+            "nonstream",
+            "--skip-cancellation",
+        ]
+    )
+
+    result = matrix.run_matrix(args)
+
+    assert result["pass"] is False
+    assert result["flows"] == {}
+    failures = "\n".join(result["identity"]["failures"])
+    expected = {
+        "wrong-model": "requested --model does not match",
+        "wrong-bundle": "bundle fingerprint does not match",
+        "wrong-python": "Python executable does not match",
+        "same-origin": "direct and gateway must be distinct",
+    }[failure_mode]
+    assert expected in failures
+
+
+def test_health_capture_rejects_cross_origin_substitution_before_fetch(
+    monkeypatch,
+):
+    fetched = False
+
+    def unexpected_fetch(_url, _timeout):
+        nonlocal fetched
+        fetched = True
+        raise AssertionError("cross-origin health must not be fetched")
+
+    monkeypatch.setattr(matrix, "_get_full_health", unexpected_fetch)
+    evidence, failures = matrix._capture_health_evidence(
+        {"gateway": "http://127.0.0.1:8080"},
+        {"gateway": "http://127.0.0.1:8000/health"},
+        30,
+    )
+
+    assert fetched is False
+    assert evidence["gateway"]["error_type"] == "HealthOriginMismatch"
+    assert failures == [
+        "gateway: /health URL origin does not match its corresponding request base"
+    ]
+
+
+def test_run_matrix_rejects_result_output_inside_git_worktree(
+    tmp_path: Path,
+):
+    repo_root, source = _identity_repo(tmp_path)
+    bundle_root, bundle = _identity_bundle(tmp_path)
+    output = repo_root / "build" / "private-result.json"
+    args = matrix.build_parser().parse_args(
+        [
+            "--base-url",
+            "direct=http://direct.invalid",
+            "--base-url",
+            "gateway=http://gateway.invalid",
+            "--model",
+            bundle["model_name"],
+            "--bundle-root",
+            str(bundle_root),
+            "--repo-root",
+            str(repo_root),
+            "--output",
+            str(output),
+            "--source-head",
+            source["head"],
+            "--run-id",
+            "inside-worktree-output",
+            "--protocol",
+            "chat",
+            "--mode",
+            "nonstream",
+            "--skip-cancellation",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="outside every Git worktree"):
+        matrix.run_matrix(args)
+    assert not output.exists()
+
+
+def test_identity_comparison_detects_runtime_model_cache_and_source_drift(
+    tmp_path: Path,
+):
+    repo_root, source_before = _identity_repo(tmp_path)
+    source_after = copy.deepcopy(source_before)
+    source_after["tree"] = "f" * len(source_after["tree"])
+    before_health = _identity_health(source_before)
+    before_identity, assert_no_failure = matrix._health_identity(before_health)
+    assert assert_no_failure == []
+    bundle_before = {
+        **before_health["model_bundle_provenance"],
+        "model_name": before_health["model_name"],
+    }
+    bundle_after = copy.deepcopy(bundle_before)
+    bundle_after["files"]["config.json"]["sha256"] = "c" * 64
+    bundle_observed = {
+        "schema": bundle_after["schema"],
+        "directory_state": bundle_after["directory_state"],
+        "files": bundle_after["files"],
+    }
+    bundle_after["aggregate_sha256"] = matrix._canonical_sha256(bundle_observed)
+    bundle_after["fingerprint_sha256"] = bundle_after["aggregate_sha256"]
+    after_health = _identity_health(
+        source_before,
+        pid=5678,
+        bundle=bundle_after,
+        cache_fingerprint="d" * 64,
+    )
+    after_identity, assert_no_failure = matrix._health_identity(after_health)
+    assert assert_no_failure == []
+
+    failures = matrix._compare_identity_evidence(
+        source_before,
+        source_after,
+        _identity_runner(),
+        _identity_runner(),
+        bundle_before,
+        bundle_after,
+        before_health["model_name"],
+        {
+            "direct": {"identity": before_identity},
+            "gateway": {"identity": before_identity},
+        },
+        {
+            "direct": {"identity": after_identity},
+            "gateway": {"identity": after_identity},
+        },
+    )
+
+    assert "source identity changed during the matrix: tree" in failures
+    assert any(
+        "backend runtime/model/cache identity differs" in failure
+        for failure in failures
+    )
+    assert repo_root.is_dir()
+
+
 @pytest.mark.parametrize(
     (
         "capture_enabled",
@@ -1124,7 +2014,6 @@ def _finish_synthetic_capture(
     [
         (True, None, True, 40),
         (True, "stream-flow-round2", False, 32),
-        (False, None, True, 0),
     ],
 )
 def test_run_matrix_binds_full_stream_capture_manifest_into_pass(
@@ -1135,17 +2024,17 @@ def test_run_matrix_binds_full_stream_capture_manifest_into_pass(
     expected_pass: bool,
     expected_started: int,
 ):
-    repo_root = tmp_path / "repo"
+    repo_root, source = _identity_repo(tmp_path)
+    bundle_root, bundle = _identity_bundle(tmp_path)
     package_json = repo_root / matrix.FILE_INFO_PATH
-    package_json.parent.mkdir(parents=True)
-    package_json.write_text("{}\n")
-    subprocess.run(
-        ["git", "init", "-q", str(repo_root)],
-        check=True,
-        capture_output=True,
-    )
     raw_root = tmp_path / "private-captures"
     size_human = matrix._human_size(package_json.stat().st_size)
+    health = _identity_health(source, bundle=bundle)
+    monkeypatch.setattr(
+        matrix,
+        "observe_runner_environment",
+        lambda _repo_root: copy.deepcopy(_identity_runner()),
+    )
 
     def fake_send(
         client,
@@ -1254,6 +2143,19 @@ def test_run_matrix_binds_full_stream_capture_manifest_into_pass(
                     "kind": "response.output_item.done",
                 },
             ]
+        next_at_ms = max(
+            (float(event.get("at_ms") or 0) for event in result["events"]),
+            default=0.0,
+        )
+        for terminal in result["terminals"]:
+            next_at_ms += 1.0
+            result["events"].append(
+                {
+                    "at_ms": next_at_ms,
+                    "channel": "terminal",
+                    "kind": terminal,
+                }
+            )
         return result
 
     def fake_abort(
@@ -1290,13 +2192,20 @@ def test_run_matrix_binds_full_stream_capture_manifest_into_pass(
         "abort_stream_after_deltas",
         fake_abort,
     )
+    monkeypatch.setattr(
+        matrix,
+        "_get_full_health",
+        lambda _url, _timeout: copy.deepcopy(health),
+    )
     argv = [
         "--base-url",
         "direct=http://direct.invalid",
         "--base-url",
         "gateway=http://gateway.invalid",
         "--model",
-        "served-model",
+        bundle["model_name"],
+        "--bundle-root",
+        str(bundle_root),
         "--repo-root",
         str(repo_root),
         "--output",
@@ -1304,6 +2213,10 @@ def test_run_matrix_binds_full_stream_capture_manifest_into_pass(
         "--mode",
         "stream",
         "--no-enable-thinking",
+        "--source-head",
+        source["head"],
+        "--run-id",
+        "full-stream-matrix",
     ]
     if capture_enabled:
         argv.extend(("--raw-artifact-dir", str(raw_root)))
@@ -1311,21 +2224,34 @@ def test_run_matrix_binds_full_stream_capture_manifest_into_pass(
 
     result = matrix.run_matrix(args)
 
+    assert result["schema"] == matrix.OUTPUT_SCHEMA
+    assert result["schema_version"] == 2
+    assert result["run_id"] == "full-stream-matrix"
+    assert result["checks"]["identity_provenance_pass"] is True
+    expected_backend_identity, failures = matrix._health_identity(health)
+    assert failures == []
+    assert result["backend_identity_fingerprint_sha256"] == (
+        expected_backend_identity["fingerprint_sha256"]
+    )
+    assert result["identity"]["source"]["before"] == source
+    assert result["identity"]["source"]["after"] == source
+    assert result["identity"]["health"]["direct"]["before"]["full"] == health
+    assert result["identity"]["health"]["gateway"]["after"]["full"] == health
     assert result["checks"]["all_flows_pass"] is True
     assert result["checks"]["all_abort_recovery_pass"] is True
     assert result["raw_capture"]["enabled"] is capture_enabled
     assert result["raw_capture"]["started"] == expected_started
     assert result["pass"] is expected_pass
-    if not capture_enabled:
-        assert result["raw_capture"]["reason"] == ("--raw-artifact-dir not supplied")
-        assert result["checks"]["raw_capture_complete"] is True
-        return
-
+    assert result["raw_capture"]["run_id"] == result["run_id"]
     assert result["raw_capture"]["expected"] == 40
     assert result["raw_capture"]["finished"] == expected_started
     assert result["raw_capture"]["errors"] == 0
     assert result["checks"]["raw_capture_complete"] is expected_pass
     manifest_path = next(raw_root.glob("*/manifest.json"))
+    assert result["raw_capture"]["manifest_path"] == str(manifest_path.resolve())
+    assert result["raw_capture"]["run_directory"] == str(
+        manifest_path.parent.resolve()
+    )
     manifest_bytes = manifest_path.read_bytes()
     assert (
         hashlib.sha256(manifest_bytes).hexdigest()
@@ -1348,9 +2274,73 @@ def test_run_matrix_binds_full_stream_capture_manifest_into_pass(
             "stream-abort",
             "stream-recovery",
         }
+        artifacts = [
+            artifact
+            for route in result["raw_capture"]["routes"]
+            for artifact in route["artifacts"]
+        ]
+        assert all(artifact["verified"] is True for artifact in artifacts)
+        assert all(len(artifact["body_sha256"]) == 64 for artifact in artifacts)
+        assert all(
+            len(artifact["metadata_sha256"]) == 64 for artifact in artifacts
+        )
+        assert all(
+            len(artifact["request_body_sha256"]) == 64
+            for artifact in artifacts
+        )
 
 
-def test_run_matrix_rejects_nonstream_only_private_capture_before_creation(
+def test_stream_matrix_requires_private_raw_capture(tmp_path: Path):
+    package_json = tmp_path / matrix.FILE_INFO_PATH
+    package_json.parent.mkdir(parents=True)
+    package_json.write_text("{}\n")
+    args = SimpleNamespace(
+        run_id="missing-raw-stream",
+        base_url=[
+            "direct=http://direct.invalid",
+            "gateway=http://gateway.invalid",
+        ],
+        allow_single_base=False,
+        health_url=[],
+        repo_root=str(tmp_path),
+        protocol=["chat"],
+        mode=["stream"],
+        raw_artifact_dir=None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="--raw-artifact-dir is required whenever stream mode",
+    ):
+        matrix.run_matrix(args)
+
+
+def test_responses_nonstream_matrix_requires_private_raw_capture(tmp_path: Path):
+    package_json = tmp_path / matrix.FILE_INFO_PATH
+    package_json.parent.mkdir(parents=True)
+    package_json.write_text("{}\n")
+    args = SimpleNamespace(
+        run_id="missing-raw-responses-nonstream",
+        base_url=[
+            "direct=http://direct.invalid",
+            "gateway=http://gateway.invalid",
+        ],
+        allow_single_base=False,
+        health_url=[],
+        repo_root=str(tmp_path),
+        protocol=["responses"],
+        mode=["nonstream"],
+        raw_artifact_dir=None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Responses nonstream mode is requested",
+    ):
+        matrix.run_matrix(args)
+
+
+def test_run_matrix_rejects_nonstream_nonresponses_capture_before_creation(
     tmp_path: Path,
 ):
     repo_root = tmp_path / "repo"
@@ -1371,21 +2361,31 @@ def test_run_matrix_rejects_nonstream_only_private_capture_before_creation(
             "gateway=http://gateway.invalid",
             "--model",
             "served-model",
+            "--bundle-root",
+            str(tmp_path),
             "--repo-root",
             str(repo_root),
             "--output",
             str(tmp_path / "result.json"),
             "--mode",
             "nonstream",
+            "--protocol",
+            "chat",
             "--raw-artifact-dir",
             str(raw_root),
+            "--source-head",
+            "not-observed-because-mode-validation-runs-first",
+            "--run-id",
+            "nonstream-capture-rejection",
         ]
     )
 
     with pytest.raises(
         ValueError,
-        match="captures streaming parser-input bytes and requires --mode stream",
+        match="request --mode stream or --protocol responses",
     ):
         matrix.run_matrix(args)
     assert not raw_root.exists()
-    assert "requires --mode stream" in matrix.build_parser().format_help()
+    assert "--protocol responses --mode nonstream" in (
+        matrix.build_parser().format_help()
+    )

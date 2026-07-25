@@ -2020,8 +2020,15 @@ class TestSchedulerCacheResilience:
             assert scheduler.paged_cache_manager.disk_only is True
             assert scheduler._ssm_state_cache is not None
             assert scheduler._ssm_state_cache._disk is not None
+            namespace_dir = scheduler.paged_cache_manager._disk_store.cache_dir
+            assert namespace_dir.parent == cache_dir
+            assert len(namespace_dir.name) == 12
             assert scheduler._ssm_state_cache._disk.directory == (
-                cache_dir / "ssm_companion"
+                namespace_dir / "ssm_companion"
+            )
+            assert (
+                scheduler.paged_cache_manager._disk_store.global_cache_root
+                == cache_dir
             )
             assert scheduler._hybrid_kv_positions == [0]
         finally:

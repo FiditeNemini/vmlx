@@ -164,6 +164,96 @@ class TestJangDetection:
 
         assert jang_loader.load_jang_model(tmp_path, skip_eval=True) is expected
 
+    def test_load_codebook_vq_forwards_config_manager(self, tmp_path, monkeypatch):
+        from vmlx_engine.utils import jang_loader
+
+        (tmp_path / "config.json").write_text('{"model_type":"test"}')
+        (tmp_path / "jang_config.json").write_text(
+            '{"version":2,"weight_format":"affine","quantization":{}}'
+        )
+        config_manager = object()
+        expected = (object(), object())
+        captured = {}
+
+        monkeypatch.setattr(jang_loader, "_is_codebook_vq_model", lambda path: True)
+        monkeypatch.setattr(
+            jang_loader,
+            "_ensure_jang_family_runtime_supported",
+            lambda path, config: None,
+        )
+
+        def fake_load(path, jang_cfg, config_manager=None):
+            captured["config_manager"] = config_manager
+            return expected
+
+        monkeypatch.setattr(jang_loader, "_load_codebook_vq_model", fake_load)
+
+        assert (
+            jang_loader.load_jang_model(tmp_path, config_manager=config_manager)
+            is expected
+        )
+        assert captured["config_manager"] is config_manager
+
+    def test_load_codebook_vq_constructs_production_config_manager(
+        self, tmp_path, monkeypatch
+    ):
+        from vmlx_engine.config import manager as config_manager_module
+        from vmlx_engine.utils import jang_loader
+
+        (tmp_path / "config.json").write_text('{"model_type":"test"}')
+        (tmp_path / "jang_config.json").write_text(
+            '{"version":2,"weight_format":"affine","quantization":{}}'
+        )
+        expected = (object(), object())
+        captured = {}
+        generated_config = object()
+
+        monkeypatch.setattr(jang_loader, "_is_codebook_vq_model", lambda path: True)
+        monkeypatch.setattr(
+            jang_loader,
+            "_ensure_jang_family_runtime_supported",
+            lambda path, config: None,
+        )
+
+        def fake_config_manager(*, model_name):
+            captured["model_name"] = model_name
+            return generated_config
+
+        def fake_load(path, jang_cfg, config_manager=None):
+            captured["config_manager"] = config_manager
+            return expected
+
+        monkeypatch.setattr(config_manager_module, "ConfigManager", fake_config_manager)
+        monkeypatch.setattr(jang_loader, "_load_codebook_vq_model", fake_load)
+
+        assert jang_loader.load_jang_model(tmp_path) is expected
+        assert captured == {
+            "model_name": tmp_path.name,
+            "config_manager": generated_config,
+        }
+
+    def test_mxtq_does_not_route_to_experimental_codebook_vq(self, tmp_path):
+        from vmlx_engine.utils.jang_loader import _is_codebook_vq_model
+
+        (tmp_path / "jang_config.json").write_text(
+            '{"version":2,"weight_format":"mxtq","quantization":{}}'
+        )
+        (tmp_path / "codebook-layer-000-gate_proj.safetensors").touch()
+
+        assert _is_codebook_vq_model(tmp_path) is False
+
+    def test_codebook_vq_requires_flag_and_shard(self, tmp_path):
+        from vmlx_engine.utils.jang_loader import _is_codebook_vq_model
+
+        (tmp_path / "jang_config.json").write_text(
+            '{"version":2,"weight_format":"affine",'
+            '"quantization":{"codebook_vq":true}}'
+        )
+        assert _is_codebook_vq_model(tmp_path) is False
+
+        (tmp_path / "codebook-layer-000-gate_proj.safetensors").touch()
+        assert _is_codebook_vq_model(tmp_path) is True
+
     def test_load_jang_vlm_model_accepts_jangtq_format_sidecar(
         self, tmp_path, monkeypatch
     ):

@@ -12,10 +12,15 @@ and Ollama, in streaming and non-streaming modes:
 Only two allowlisted read-only tools exist.  Private reasoning and exact
 decompressed parser-input response bodies are not written to the output
 artifact; the artifact retains hashes, lengths, timestamps, visible text, tool
-metadata, and terminal classifications.  Callers may opt into private streaming
-parser-input capture with ``--raw-artifact-dir`` when stream mode is requested.
-That directory must resolve outside every Git worktree, and capture metadata
-retains values only for an explicit safe-header allowlist.
+metadata, and terminal classifications. Streaming mode and Responses
+non-streaming mode require private parser-input capture with
+``--raw-artifact-dir``. That directory must resolve outside every Git
+worktree, and capture metadata retains values only for an explicit safe-header
+allowlist.
+
+The v2 result fails closed unless the runner observes one clean Git commit/tree
+and matching immutable runtime, model-bundle, and cache-topology attestations
+from full direct and gateway health snapshots before and after the matrix.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -83,12 +89,30 @@ SAFE_CAPTURE_HEADER_NAMES = {
     "content-type",
     "transfer-encoding",
 }
-CAPTURE_LAYER = "requests.decompressed_iter_lines_input"
+CAPTURE_LAYER = "requests.decompressed_response_parser_input"
 CAPTURE_SEMANTICS = (
-    "Exact decompressed streaming response-body bytes delivered to "
-    "requests.iter_lines before line splitting, Unicode decoding, or protocol "
-    "parsing; excludes nonstream responses, HTTP transfer framing, and "
-    "compressed transport octets."
+    "Exact decompressed response-body bytes delivered to protocol parsers: "
+    "streaming bytes before requests.iter_lines line splitting or Unicode "
+    "decoding, and Responses nonstream bytes before JSON decoding; excludes "
+    "HTTP transfer framing and compressed transport octets."
+)
+OUTPUT_SCHEMA = "vmlx-agentic-protocol-matrix-v2"
+OUTPUT_SCHEMA_VERSION = 2
+BUNDLE_ATTESTATION_FILENAMES = (
+    "config.json",
+    "generation_config.json",
+    "jang_config.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+)
+RUNTIME_SOURCE_HASH_FIELDS = (
+    "server_module_sha256",
+    "package_init_sha256",
+    "python_source_tree_sha256",
+)
+RUNTIME_HASH_FIELDS = (
+    *RUNTIME_SOURCE_HASH_FIELDS,
+    "python_executable_fingerprint_sha256",
 )
 
 TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
@@ -116,6 +140,425 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+
+
+def _valid_sha256(value: Any) -> bool:
+    text = str(value or "")
+    return len(text) == 64 and all(
+        character in "0123456789abcdef" for character in text.lower()
+    )
+
+
+def _sha256_file(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _opened_regular_file_identity(path: Path, label: str) -> dict[str, Any]:
+    """Hash one resolved regular file through a no-follow descriptor."""
+    resolved = path.expanduser().resolve(strict=True)
+    path_stat = resolved.lstat()
+    if not stat.S_ISREG(path_stat.st_mode) or stat.S_ISLNK(path_stat.st_mode):
+        raise ValueError(f"{label} is not a regular non-symlink file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(resolved, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError(f"{label} is not a regular file")
+        if (
+            opened.st_dev != path_stat.st_dev
+            or opened.st_ino != path_stat.st_ino
+            or opened.st_size != path_stat.st_size
+        ):
+            raise ValueError(f"{label} changed identity while opening")
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    finally:
+        os.close(descriptor)
+    return {
+        "path": str(resolved),
+        "sha256": digest.hexdigest(),
+        "size_bytes": size,
+    }
+
+
+def _git_text(repo_root: Path, *arguments: str) -> str:
+    environment = dict(os.environ)
+    for name in ("GIT_DIR", "GIT_WORK_TREE"):
+        environment.pop(name, None)
+    environment["LC_ALL"] = "C"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+    except OSError as exc:
+        raise ValueError("cannot observe source Git identity") from exc
+    if proc.returncode != 0:
+        raise ValueError("cannot observe source Git identity")
+    return proc.stdout.strip()
+
+
+def _python_source_tree_digest(root: Path) -> tuple[str, int, int]:
+    digest = hashlib.sha256()
+    count = 0
+    read_errors = 0
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root.parent).as_posix().encode()
+        try:
+            content = path.read_bytes()
+        except OSError:
+            digest.update(relative)
+            digest.update(b"\0UNREADABLE\0")
+            read_errors += 1
+            continue
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+        count += 1
+    return digest.hexdigest(), count, read_errors
+
+
+def observe_source_checkout(repo_root: Path) -> dict[str, Any]:
+    """Observe the exact checkout rather than trusting a caller label."""
+    requested_root = repo_root.resolve(strict=True)
+    git_root = Path(
+        _git_text(requested_root, "rev-parse", "--show-toplevel")
+    ).resolve(strict=True)
+    if git_root != requested_root:
+        raise ValueError("--repo-root must be the observed Git worktree root")
+    head = _git_text(git_root, "rev-parse", "HEAD")
+    tree = _git_text(git_root, "rev-parse", "HEAD^{tree}")
+    status = _git_text(
+        git_root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    )
+    source_tree_sha256, source_file_count, source_read_error_count = (
+        _python_source_tree_digest(git_root / "vmlx_engine")
+    )
+    return {
+        "git_root": str(git_root),
+        "head": head,
+        "tree": tree,
+        "clean": not bool(status),
+        "status_sha256": _sha256(status),
+        "python_source_tree_sha256": source_tree_sha256,
+        "python_source_file_count": source_file_count,
+        "python_source_read_error_count": source_read_error_count,
+        "server_module_sha256": hashlib.sha256(
+            (git_root / "vmlx_engine" / "server.py").read_bytes()
+        ).hexdigest(),
+        "package_init_sha256": hashlib.sha256(
+            (git_root / "vmlx_engine" / "__init__.py").read_bytes()
+        ).hexdigest(),
+    }
+
+
+def observe_runner_environment(repo_root: Path) -> dict[str, Any]:
+    """Bind the proof runner to the same checkout-owned Python as the server."""
+    git_root = repo_root.resolve(strict=True)
+    expected_prefix = (git_root / ".venv").resolve(strict=True)
+    actual_prefix = Path(sys.prefix).resolve(strict=True)
+    executable = Path(sys.executable).absolute()
+    executable_file = _opened_regular_file_identity(
+        Path(sys.executable),
+        "proof runner executable",
+    )
+    harness_relative_path = "tests/cross_matrix/run_agentic_protocol_matrix.py"
+    harness_file = _opened_regular_file_identity(
+        git_root / harness_relative_path,
+        "proof runner harness",
+    )
+    expected_executables = tuple(
+        candidate.absolute()
+        for candidate in (
+            git_root / ".venv" / "bin" / "python",
+            git_root / ".venv" / "bin" / "python3",
+        )
+        if candidate.is_file()
+    )
+    return {
+        "repo_venv": actual_prefix == expected_prefix,
+        "repo_python": executable in expected_executables,
+        "python_executable_path": str(executable),
+        "python_executable_fingerprint_sha256": hashlib.sha256(
+            str(executable).encode()
+        ).hexdigest(),
+        "python_prefix_path": str(actual_prefix),
+        "python_prefix_fingerprint_sha256": hashlib.sha256(
+            str(actual_prefix).encode()
+        ).hexdigest(),
+        "producer_pid": os.getpid(),
+        "producer_executable_path": executable_file["path"],
+        "producer_executable_sha256": executable_file["sha256"],
+        "producer_executable_size_bytes": executable_file["size_bytes"],
+        "producer_harness_relative_path": harness_relative_path,
+        "producer_harness_path": harness_file["path"],
+        "producer_harness_sha256": harness_file["sha256"],
+        "producer_harness_size_bytes": harness_file["size_bytes"],
+    }
+
+
+def _normalized_bundle_model_name(bundle_root: Path) -> str:
+    parts = bundle_root.resolve(strict=True).parts
+    for part in parts:
+        if part.startswith("models--") and "--" in part[len("models--") :]:
+            organization, repository = part[len("models--") :].split("--", 1)
+            if organization and repository:
+                return f"{organization}/{repository}"
+    if len(parts) >= 2:
+        return f"{parts[-2]}/{parts[-1]}"
+    return parts[-1]
+
+
+def observe_bundle_configuration(bundle_root: Path) -> dict[str, Any]:
+    """Independently hash the exact local bundle selected for this proof."""
+    root = bundle_root.expanduser().resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("--bundle-root must resolve to a local model directory")
+    files: dict[str, dict[str, Any]] = {}
+    for name in BUNDLE_ATTESTATION_FILENAMES:
+        candidate = root / name
+        if not candidate.exists():
+            files[name] = {"state": "missing"}
+            continue
+        if not candidate.is_file() or candidate.is_symlink():
+            raise ValueError(
+                f"--bundle-root contains a non-regular attestation file: {name}"
+            )
+        try:
+            data = candidate.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"cannot read bundle attestation file: {name}") from exc
+        files[name] = {
+            "state": "present",
+            "size_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    observed = {
+        "schema": "vmlx-bundle-config-v1",
+        "directory_state": "available",
+        "files": files,
+    }
+    aggregate = _canonical_sha256(observed)
+    return {
+        **observed,
+        "aggregate_sha256": aggregate,
+        "fingerprint_sha256": aggregate,
+        "model_name": _normalized_bundle_model_name(root),
+    }
+
+
+def _get_full_health(url: str, timeout: int) -> dict[str, Any]:
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+        health = response.json()
+    except (OSError, requests.RequestException, ValueError) as exc:
+        raise ValueError("could not capture full /health evidence") from exc
+    if not isinstance(health, dict):
+        raise ValueError("full /health evidence is not a JSON object")
+    return health
+
+
+def _health_identity(health: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Extract immutable backend identity while retaining the full health body."""
+    failures: list[str] = []
+    runtime = health.get("runtime_provenance")
+    bundle = health.get("model_bundle_provenance")
+    topology = health.get("cache_topology_provenance")
+    if not isinstance(runtime, dict):
+        failures.append("/health runtime_provenance is missing")
+        runtime = {}
+    if not isinstance(bundle, dict):
+        failures.append("/health model_bundle_provenance is missing")
+        bundle = {}
+    if not isinstance(topology, dict):
+        failures.append("/health cache_topology_provenance is missing")
+        topology = {}
+    if runtime.get("model_bundle_provenance") != bundle:
+        failures.append(
+            "/health nested and top-level model bundle provenance differ"
+        )
+    if runtime.get("cache_topology_provenance") != topology:
+        failures.append(
+            "/health nested and top-level cache topology provenance differ"
+        )
+
+    try:
+        backend_pid = int(runtime.get("pid") or 0)
+    except (TypeError, ValueError):
+        backend_pid = 0
+    if backend_pid <= 0:
+        failures.append("/health runtime_provenance.pid is invalid")
+
+    runtime_hashes = {
+        hash_field: str(runtime.get(hash_field) or "")
+        for hash_field in RUNTIME_HASH_FIELDS
+    }
+    for hash_field, value in runtime_hashes.items():
+        if not _valid_sha256(value):
+            failures.append(
+                f"/health runtime_provenance.{hash_field} is invalid"
+            )
+
+    bundle_fingerprint = str(bundle.get("fingerprint_sha256") or "")
+    topology_fingerprint = str(topology.get("fingerprint_sha256") or "")
+    if not _valid_sha256(bundle_fingerprint):
+        failures.append(
+            "/health model_bundle_provenance.fingerprint_sha256 is invalid"
+        )
+    if not _valid_sha256(topology_fingerprint):
+        failures.append(
+            "/health cache_topology_provenance.fingerprint_sha256 is invalid"
+        )
+    topology_configuration = topology.get("configuration")
+    if topology.get("schema") != "vmlx-cache-topology-attestation-v1":
+        failures.append("/health cache_topology_provenance.schema is invalid")
+    if not isinstance(topology_configuration, dict):
+        failures.append(
+            "/health cache_topology_provenance.configuration is missing"
+        )
+        topology_configuration = {}
+    computed_topology_fingerprint = _canonical_sha256(topology_configuration)
+    if topology.get("canonical_sha256") != computed_topology_fingerprint:
+        failures.append(
+            "/health cache_topology_provenance.canonical_sha256 is not self-consistent"
+        )
+    if topology_fingerprint != computed_topology_fingerprint:
+        failures.append(
+            "/health cache_topology_provenance.fingerprint_sha256 is not self-consistent"
+        )
+    if health.get("model_loaded") is not True:
+        failures.append("/health does not attest model_loaded=true")
+    model_name = str(health.get("model_name") or "")
+    if not model_name:
+        failures.append("/health model_name is empty")
+
+    bundle_files = bundle.get("files")
+    if bundle.get("schema") != "vmlx-bundle-config-v1":
+        failures.append("/health model_bundle_provenance.schema is invalid")
+    if bundle.get("directory_state") != "available":
+        failures.append(
+            "/health model_bundle_provenance does not attest an available local bundle"
+        )
+    if not isinstance(bundle_files, dict) or set(bundle_files) != set(
+        BUNDLE_ATTESTATION_FILENAMES
+    ):
+        failures.append("/health model_bundle_provenance.files is incomplete")
+        bundle_files = {}
+    observed_bundle = {
+        "schema": bundle.get("schema"),
+        "directory_state": bundle.get("directory_state"),
+        "files": bundle_files,
+    }
+    computed_bundle_fingerprint = _canonical_sha256(observed_bundle)
+    if bundle.get("aggregate_sha256") != computed_bundle_fingerprint:
+        failures.append(
+            "/health model_bundle_provenance.aggregate_sha256 is not self-consistent"
+        )
+    if bundle_fingerprint != computed_bundle_fingerprint:
+        failures.append(
+            "/health model_bundle_provenance.fingerprint_sha256 is not self-consistent"
+        )
+    for required_name in ("config.json", "tokenizer_config.json"):
+        row = bundle_files.get(required_name)
+        if not isinstance(row, dict) or row.get("state") != "present":
+            failures.append(
+                f"/health model bundle does not contain required {required_name}"
+            )
+
+    identity = {
+        "backend_pid": backend_pid,
+        "runtime_source_hashes": runtime_hashes,
+        "python_source_file_count": runtime.get("python_source_file_count"),
+        "python_source_read_error_count": runtime.get(
+            "python_source_read_error_count"
+        ),
+        "model_name": model_name,
+        "model_bundle_fingerprint_sha256": bundle_fingerprint,
+        "model_bundle_files": bundle_files,
+        "cache_topology_fingerprint_sha256": topology_fingerprint,
+    }
+    identity["fingerprint_sha256"] = _canonical_sha256(identity)
+    return identity, failures
+
+
+def _validate_health_source_binding(
+    identity: dict[str, Any],
+    source: dict[str, Any],
+    runner: dict[str, Any],
+    bundle: dict[str, Any],
+    requested_model: str,
+) -> list[str]:
+    failures: list[str] = []
+    runtime_hashes = identity.get("runtime_source_hashes")
+    if not isinstance(runtime_hashes, dict):
+        return ["observed backend runtime source hashes are missing"]
+    for source_field in RUNTIME_SOURCE_HASH_FIELDS:
+        if runtime_hashes.get(source_field) != source.get(source_field):
+            failures.append(
+                f"observed backend {source_field} does not match the source checkout"
+            )
+    for count_field in ("python_source_file_count", "python_source_read_error_count"):
+        if identity.get(count_field) != source.get(count_field):
+            failures.append(
+                f"observed backend {count_field} does not match the source checkout"
+            )
+    if (
+        identity.get("runtime_source_hashes", {}).get(
+            "python_executable_fingerprint_sha256"
+        )
+        != runner.get("python_executable_fingerprint_sha256")
+    ):
+        failures.append(
+            "observed backend Python executable does not match the proof runner"
+        )
+    if identity.get("model_name") != requested_model:
+        failures.append(
+            "requested --model does not match the loaded /health model_name"
+        )
+    if identity.get("model_name") != bundle.get("model_name"):
+        failures.append(
+            "loaded /health model_name does not match the independently observed bundle"
+        )
+    if identity.get("model_bundle_fingerprint_sha256") != bundle.get(
+        "fingerprint_sha256"
+    ):
+        failures.append(
+            "loaded model bundle fingerprint does not match --bundle-root"
+        )
+    if identity.get("model_bundle_files") != bundle.get("files"):
+        failures.append(
+            "loaded model bundle configuration files do not match --bundle-root"
+        )
+    return failures
+
+
 def _canonical_request_payload(value: Any) -> Any:
     """Normalize only volatile tool-call IDs for cross-base body comparison."""
     if isinstance(value, list):
@@ -135,6 +578,107 @@ def _canonical_request_payload(value: Any) -> Any:
     return result
 
 
+def _public_tool_contracts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    contracts: list[dict[str, Any]] = []
+    for tool in payload.get("tools") or []:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if isinstance(function, dict):
+            name = str(function.get("name") or "")
+            parameters = function.get("parameters")
+        elif isinstance(tool, dict):
+            name = str(tool.get("name") or "")
+            parameters = tool.get("parameters", tool.get("input_schema"))
+        else:
+            continue
+        contracts.append(
+            {
+                "name": name,
+                "parameters": copy.deepcopy(parameters),
+            }
+        )
+    return contracts
+
+
+def _public_tool_history_linkage(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expose role/order/call linkage without retaining full prompt text."""
+    history = payload.get("input", payload.get("messages"))
+    if not isinstance(history, list):
+        return []
+    linkage: list[dict[str, Any]] = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "")
+        item_type = str(item.get("type") or "")
+        if item_type == "function_call_output":
+            output = str(item.get("output") or "")
+            linkage.append(
+                {
+                    "kind": "tool_result",
+                    "role": "function_call_output",
+                    "call_id": str(item.get("call_id") or ""),
+                    "output_chars": len(output),
+                    "output_sha256": _sha256(output),
+                }
+            )
+        for call in item.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") or {}
+            linkage.append(
+                {
+                    "kind": "assistant_tool_call",
+                    "role": role,
+                    "call_id": str(call.get("id") or ""),
+                    "name": str(function.get("name") or ""),
+                }
+            )
+        content = item.get("content")
+        if role == "tool":
+            output = str(content or "")
+            linkage.append(
+                {
+                    "kind": "tool_result",
+                    "role": role,
+                    "call_id": str(
+                        item.get("tool_call_id")
+                        or item.get("tool_use_id")
+                        or ""
+                    ),
+                    "name": str(item.get("name") or item.get("tool_name") or ""),
+                    "output_chars": len(output),
+                    "output_sha256": _sha256(output),
+                }
+            )
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "")
+            if block_type == "tool_use":
+                linkage.append(
+                    {
+                        "kind": "assistant_tool_call",
+                        "role": role,
+                        "call_id": str(block.get("id") or ""),
+                        "name": str(block.get("name") or ""),
+                    }
+                )
+            elif block_type == "tool_result":
+                output = str(block.get("content") or "")
+                linkage.append(
+                    {
+                        "kind": "tool_result",
+                        "role": role,
+                        "call_id": str(block.get("tool_use_id") or ""),
+                        "output_chars": len(output),
+                        "output_sha256": _sha256(output),
+                    }
+                )
+    return linkage
+
+
 def _request_public(stage: int, payload: dict[str, Any]) -> dict[str, Any]:
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     canonical = json.dumps(
@@ -151,12 +695,19 @@ def _request_public(stage: int, payload: dict[str, Any]) -> dict[str, Any]:
         "tool_choice": copy.deepcopy(payload.get("tool_choice")),
         "stream": bool(payload.get("stream")),
         "enable_thinking": payload.get("enable_thinking", payload.get("think")),
+        "previous_response_id": (
+            str(payload.get("previous_response_id"))
+            if payload.get("previous_response_id")
+            else None
+        ),
         "max_output_tokens": payload.get(
             "max_output_tokens",
             payload.get(
                 "max_tokens", (payload.get("options") or {}).get("num_predict")
             ),
         ),
+        "tool_contracts": _public_tool_contracts(payload),
+        "tool_history_linkage": _public_tool_history_linkage(payload),
     }
 
 
@@ -244,6 +795,40 @@ def _reject_capture_destination(path: Path, guarded_worktree: Path) -> None:
         )
 
 
+def _validate_private_result_destination(
+    path: Path,
+    guarded_worktree: Path,
+) -> Path:
+    """Require a new private result file outside every Git worktree."""
+    output = path.expanduser().absolute()
+    if output.exists():
+        raise ValueError("--output must be a new file; stale result reuse is forbidden")
+    _reject_capture_destination(output, guarded_worktree)
+    return output
+
+
+def _write_private_result_exclusive(
+    path: Path,
+    result: dict[str, Any],
+    guarded_worktree: Path,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _reject_capture_destination(path, guarded_worktree)
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        stat.S_IRUSR | stat.S_IWUSR,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output_file:
+            json.dump(result, output_file, indent=2, sort_keys=True)
+            output_file.write("\n")
+    except BaseException:
+        with suppress(OSError):
+            path.unlink(missing_ok=True)
+        raise
+
+
 def _git_worktree_root(repo_root: Path) -> Path:
     proc = subprocess.run(
         ["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"],
@@ -298,6 +883,28 @@ def _prepared_body_bytes(body: Any) -> bytes:
     return str(body).encode("utf-8", errors="replace")
 
 
+def _prepared_request_public(
+    request_body: bytes,
+    expected_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind the exact prepared request body to the public payload evidence."""
+    try:
+        decoded = json.loads(request_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("prepared request body is not a UTF-8 JSON object") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("prepared request body is not a JSON object")
+    prepared_public = _request_public(0, decoded)
+    prepared_public.pop("stage", None)
+    expected_public = _request_public(0, expected_payload)
+    expected_public.pop("stage", None)
+    if prepared_public != expected_public:
+        raise ValueError(
+            "prepared request body does not match the declared request payload"
+        )
+    return prepared_public
+
+
 def _safe_capture_label(value: str) -> str:
     label = "".join(
         character if character.isalnum() or character in {"-", "_"} else "-"
@@ -327,7 +934,7 @@ def _capture_route_key(row: dict[str, Any]) -> tuple[str, str, str]:
 
 
 class DecompressedParserInputCaptureSession:
-    """Write decompressed bytes before line splitting, decoding, or parsing."""
+    """Write decompressed bytes before streaming or JSON parsing."""
 
     def __init__(
         self,
@@ -374,6 +981,10 @@ class DecompressedParserInputCaptureSession:
             request_body = _prepared_body_bytes(
                 prepared.body if prepared is not None else None
             )
+            prepared_request_public = _prepared_request_public(
+                request_body,
+                payload,
+            )
             request_public = _request_public(0, payload)
             request_public.pop("stage", None)
             response_headers = getattr(response.raw, "headers", None)
@@ -397,6 +1008,11 @@ class DecompressedParserInputCaptureSession:
                     ),
                     "body_bytes": len(request_body),
                     "body_sha256": hashlib.sha256(request_body).hexdigest(),
+                    "prepared_payload_body_sha256": prepared_request_public[
+                        "body_sha256"
+                    ],
+                    "prepared_payload_canonical_body_sha256":
+                        prepared_request_public["canonical_body_sha256"],
                     "payload": {
                         **request_public,
                         "model": str(payload.get("model") or ""),
@@ -686,15 +1302,103 @@ class DecompressedParserInputCaptureRecorder:
                 for row in self._errors
                 if _capture_route_key(row) == key
             ]
-            artifacts = [
-                {
+            artifacts: list[dict[str, Any]] = []
+            for row in self._started:
+                if _capture_route_key(row) != key:
+                    continue
+                body_path = self.run_dir / row["body_file"]
+                metadata_path = self.run_dir / row["metadata_file"]
+                artifact: dict[str, Any] = {
                     "sequence": row["sequence"],
                     "body_file": row["body_file"],
                     "metadata_file": row["metadata_file"],
+                    "verified": False,
                 }
-                for row in self._started
-                if _capture_route_key(row) == key
-            ]
+                if body_path.is_file():
+                    try:
+                        body_sha256, body_bytes = _sha256_file(body_path)
+                    except OSError:
+                        pass
+                    else:
+                        artifact["body_bytes"] = body_bytes
+                        artifact["body_sha256"] = body_sha256
+                if metadata_path.is_file():
+                    try:
+                        metadata_bytes = metadata_path.read_bytes()
+                        artifact["metadata_sha256"] = hashlib.sha256(
+                            metadata_bytes
+                        ).hexdigest()
+                        metadata = json.loads(metadata_bytes)
+                    except (
+                        OSError,
+                        UnicodeDecodeError,
+                        json.JSONDecodeError,
+                    ):
+                        metadata = {}
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    response = metadata.get("response")
+                    request = metadata.get("request")
+                    route_bound = all(
+                        (
+                            metadata.get("base_label") == base_label,
+                            metadata.get("protocol") == protocol,
+                            metadata.get("capture_label") == capture_label,
+                        )
+                    )
+                    artifact["route_bound"] = route_bound
+                    if isinstance(request, dict):
+                        artifact["request_body_sha256"] = str(
+                            request.get("body_sha256") or ""
+                        )
+                        artifact["prepared_payload_body_sha256"] = str(
+                            request.get("prepared_payload_body_sha256") or ""
+                        )
+                        artifact[
+                            "prepared_payload_canonical_body_sha256"
+                        ] = str(
+                            request.get(
+                                "prepared_payload_canonical_body_sha256"
+                            )
+                            or ""
+                        )
+                    request_payload = (
+                        request.get("payload")
+                        if isinstance(request, dict)
+                        else None
+                    )
+                    prepared_payload_matches = (
+                        isinstance(request_payload, dict)
+                        and artifact.get("prepared_payload_body_sha256")
+                        == request_payload.get("body_sha256")
+                        and artifact.get(
+                            "prepared_payload_canonical_body_sha256"
+                        )
+                        == request_payload.get("canonical_body_sha256")
+                    )
+                    response_matches = (
+                        isinstance(response, dict)
+                        and response.get("body_file") == row["body_file"]
+                        and response.get("body_bytes") == artifact.get("body_bytes")
+                        and response.get("body_sha256")
+                        == artifact.get("body_sha256")
+                    )
+                    artifact["verified"] = bool(
+                        route_bound
+                        and response_matches
+                        and _valid_sha256(artifact.get("metadata_sha256"))
+                        and _valid_sha256(artifact.get("request_body_sha256"))
+                        and _valid_sha256(
+                            artifact.get("prepared_payload_body_sha256")
+                        )
+                        and _valid_sha256(
+                            artifact.get(
+                                "prepared_payload_canonical_body_sha256"
+                            )
+                        )
+                        and prepared_payload_matches
+                    )
+                artifacts.append(artifact)
             routes.append(
                 {
                     "base_label": base_label,
@@ -712,6 +1416,11 @@ class DecompressedParserInputCaptureRecorder:
             and started_counts == expected_counts
             and finished_counts == expected_counts
             and not self._errors
+            and all(
+                artifact.get("verified") is True
+                for route in routes
+                for artifact in route["artifacts"]
+            )
         )
         return {
             "schema_version": 1,
@@ -760,6 +1469,8 @@ class DecompressedParserInputCaptureRecorder:
         self._final_summary = {
             **manifest,
             "manifest_file": self.manifest_path.name,
+            "manifest_path": str(self.manifest_path.resolve(strict=True)),
+            "run_directory": str(self.run_dir.resolve(strict=True)),
             "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         }
         return dict(self._final_summary)
@@ -1255,31 +1966,74 @@ def classify_terminal(
     *,
     stream: bool,
     expect_tool: bool,
+    events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Classify one protocol-native terminal without conflating SSE framing."""
+    """Require the exact protocol-native terminal suffix and event ordering."""
     values = [str(value) for value in terminals if value]
     if protocol == "chat":
-        done = values.count("DONE")
+        expected_semantic = ["tool_calls" if expect_tool else "stop"]
         semantic = [value for value in values if value != "DONE"]
-        expected = "tool_calls" if expect_tool else "stop"
-        passed = semantic == [expected] and (done == 1 if stream else done == 0)
+        expected_values = [*expected_semantic, *(["DONE"] if stream else [])]
     elif protocol == "responses":
-        semantic = values
-        passed = semantic == ["response.completed"]
+        expected_semantic = ["response.completed"]
+        semantic = list(values)
+        expected_values = list(expected_semantic)
     elif protocol == "anthropic":
-        message_stop = values.count("message_stop")
+        expected_semantic = ["tool_use" if expect_tool else "end_turn"]
         semantic = [value for value in values if value != "message_stop"]
-        expected = "tool_use" if expect_tool else "end_turn"
-        passed = semantic == [expected] and (
-            message_stop == 1 if stream else message_stop == 0
-        )
+        expected_values = [
+            *expected_semantic,
+            *(["message_stop"] if stream else []),
+        ]
     elif protocol == "ollama":
-        semantic = values
-        expected = "tool_calls" if expect_tool else "stop"
-        passed = semantic == [expected]
+        expected_semantic = ["tool_calls" if expect_tool else "stop"]
+        semantic = list(values)
+        expected_values = list(expected_semantic)
     else:
         raise ValueError(f"unknown protocol: {protocol}")
-    return {"pass": passed, "values": values, "semantic": semantic}
+
+    event_values: list[str] | None = None
+    post_terminal_events = 0
+    event_order_pass = True
+    if events is not None:
+        event_values = [
+            str(event.get("kind") or "")
+            for event in events
+            if event.get("channel") == "terminal"
+        ]
+        first_terminal = next(
+            (
+                index
+                for index, event in enumerate(events)
+                if event.get("channel") == "terminal"
+            ),
+            -1,
+        )
+        post_terminal_events = (
+            0
+            if first_terminal < 0
+            else sum(
+                1
+                for event in events[first_terminal:]
+                if event.get("channel") != "terminal"
+            )
+        )
+        event_order_pass = (
+            first_terminal >= 0
+            and event_values == expected_values
+            and post_terminal_events == 0
+            and len(events) - first_terminal == len(expected_values)
+        )
+
+    return {
+        "pass": values == expected_values and event_order_pass,
+        "values": values,
+        "expected": expected_values,
+        "expected_semantic": expected_semantic,
+        "semantic": semantic,
+        "event_values": event_values,
+        "post_terminal_events": post_terminal_events,
+    }
 
 
 def _parse_stream_object(
@@ -1516,7 +2270,15 @@ def parse_nonstream(
                     complete=True,
                     at_ms=elapsed_ms,
                 )
-        collector.terminal(f"response.{body.get('status') or 'completed'}", elapsed_ms)
+        response_status = body.get("status")
+        if isinstance(response_status, str) and response_status:
+            collector.terminal(f"response.{response_status}", elapsed_ms)
+        else:
+            collector.error(
+                "responses.missing_status",
+                "Responses nonstream payload omitted explicit status",
+                elapsed_ms,
+            )
     elif protocol == "anthropic":
         for index, block in enumerate(body.get("content") or []):
             if block.get("type") in {"thinking", "reasoning"}:
@@ -1632,12 +2394,59 @@ class ProtocolClient:
             timeout=(15, self.timeout),
         )
         if not stream:
-            elapsed = _milliseconds(started)
+            capture: DecompressedParserInputCaptureSession | None = None
+            capture_error_type: str | None = None
+            completed_ms = 0.0
             try:
-                body = response.json()
-            except Exception:
-                body = {"error": response.text[:2000]}
-            return parse_nonstream(protocol, body, response.status_code, elapsed)
+                if protocol == "responses" and self.raw_recorder is not None:
+                    capture = self.raw_recorder.begin(
+                        base_label=self.base_label,
+                        protocol=protocol,
+                        capture_label=capture_label,
+                        payload=payload,
+                        response=response,
+                        started=started,
+                        started_at=started_at,
+                    )
+                raw_body = bytes(response.content)
+                if capture is not None:
+                    capture.write(raw_body)
+                try:
+                    decoded = raw_body.decode(response.encoding or "utf-8")
+                    body = json.loads(decoded)
+                    if not isinstance(body, dict):
+                        raise ValueError("nonstream response JSON is not an object")
+                except Exception:
+                    body = {
+                        "error": raw_body.decode(
+                            response.encoding or "utf-8",
+                            errors="replace",
+                        )[:2000]
+                    }
+                completed_ms = _milliseconds(started)
+                return parse_nonstream(
+                    protocol,
+                    body,
+                    response.status_code,
+                    completed_ms,
+                )
+            except BaseException as exc:
+                capture_error_type = type(exc).__name__
+                raise
+            finally:
+                try:
+                    response.close()
+                except BaseException as exc:
+                    if capture_error_type is None:
+                        capture_error_type = type(exc).__name__
+                    raise
+                finally:
+                    completed_ms = _milliseconds(started)
+                    if capture is not None:
+                        capture.finish(
+                            completed_ms=completed_ms,
+                            error_type=capture_error_type,
+                        )
 
         collector = EventCollector(protocol=protocol, started=started)
         event_name: str | None = None
@@ -1989,13 +2798,25 @@ def run_flow(
     stream = mode == "stream"
     terminals = [
         classify_terminal(
-            protocol, round1.get("terminals") or [], stream=stream, expect_tool=True
+            protocol,
+            round1.get("terminals") or [],
+            stream=stream,
+            expect_tool=True,
+            events=round1.get("events") or [],
         ),
         classify_terminal(
-            protocol, round2.get("terminals") or [], stream=stream, expect_tool=True
+            protocol,
+            round2.get("terminals") or [],
+            stream=stream,
+            expect_tool=True,
+            events=round2.get("events") or [],
         ),
         classify_terminal(
-            protocol, round3.get("terminals") or [], stream=stream, expect_tool=False
+            protocol,
+            round3.get("terminals") or [],
+            stream=stream,
+            expect_tool=False,
+            events=round3.get("events") or [],
         ),
     ]
     reasoning1 = str(round1.get("reasoning") or "")
@@ -2409,6 +3230,7 @@ def run_recovery(
         result.get("terminals") or [],
         stream=mode == "stream",
         expect_tool=False,
+        events=result.get("events") or [],
     )
     public = _sanitized_round(result)
     public["expected"] = marker
@@ -2436,6 +3258,43 @@ def parse_named_urls(values: list[str], option: str) -> dict[str, str]:
     return parsed
 
 
+def _validate_base_origins(bases: dict[str, str]) -> list[str]:
+    failures: list[str] = []
+    origins: dict[str, tuple[str, str, int | None, str]] = {}
+    for label, value in bases.items():
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"}:
+            failures.append(f"{label}: endpoint scheme must be http or https")
+        if parsed.username is not None or parsed.password is not None:
+            failures.append(f"{label}: endpoint URL must not contain credentials")
+        if parsed.query or parsed.fragment:
+            failures.append(f"{label}: endpoint URL must not contain query or fragment")
+        origins[label] = (
+            parsed.scheme.lower(),
+            (parsed.hostname or "").lower(),
+            parsed.port,
+            parsed.path.rstrip("/"),
+        )
+    if (
+        "direct" in origins
+        and "gateway" in origins
+        and origins["direct"] == origins["gateway"]
+    ):
+        failures.append(
+            "direct and gateway must be distinct observed network origins"
+        )
+    return failures
+
+
+def _network_origin(value: str) -> tuple[str, str, int | None]:
+    parsed = urlparse(value)
+    scheme = parsed.scheme.lower()
+    port = parsed.port
+    if port is None:
+        port = 80 if scheme == "http" else 443 if scheme == "https" else None
+    return (scheme, (parsed.hostname or "").lower(), port)
+
+
 def expected_parser_input_capture_routes(
     bases: Iterable[str],
     protocols: Iterable[str],
@@ -2443,21 +3302,29 @@ def expected_parser_input_capture_routes(
     *,
     skip_cancellation: bool,
 ) -> list[tuple[str, str, str]]:
-    if "stream" not in set(modes):
-        return []
-    labels = [
-        "stream-flow-round1",
-        "stream-flow-round2",
-        "stream-flow-round3",
-    ]
-    if not skip_cancellation:
-        labels.extend(("stream-abort", "stream-recovery"))
-    return [
-        (base_label, protocol, capture_label)
-        for base_label in bases
-        for protocol in protocols
-        for capture_label in labels
-    ]
+    mode_set = set(modes)
+    protocol_list = list(protocols)
+    routes: list[tuple[str, str, str]] = []
+    for base_label in bases:
+        if "stream" in mode_set:
+            labels = [
+                "stream-flow-round1",
+                "stream-flow-round2",
+                "stream-flow-round3",
+            ]
+            if not skip_cancellation:
+                labels.extend(("stream-abort", "stream-recovery"))
+            routes.extend(
+                (base_label, protocol, capture_label)
+                for protocol in protocol_list
+                for capture_label in labels
+            )
+        if "nonstream" in mode_set and "responses" in protocol_list:
+            routes.extend(
+                (base_label, "responses", f"nonstream-flow-round{round_number}")
+                for round_number in (1, 2, 3)
+            )
+    return routes
 
 
 def _disabled_capture_summary() -> dict[str, Any]:
@@ -2476,23 +3343,261 @@ def _disabled_capture_summary() -> dict[str, Any]:
     }
 
 
+def _source_identity_failures(
+    source: dict[str, Any],
+    declared_head: str,
+) -> list[str]:
+    failures: list[str] = []
+    if not declared_head:
+        failures.append("--source-head is required")
+    elif source.get("head") != declared_head:
+        failures.append(
+            "--source-head does not match the observed current Git HEAD"
+        )
+    if source.get("clean") is not True:
+        failures.append("observed source checkout is dirty")
+    if int(source.get("python_source_read_error_count") or 0):
+        failures.append("observed source tree contains unreadable Python files")
+    return failures
+
+
+def _runner_environment_failures(runner: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if runner.get("repo_venv") is not True:
+        failures.append("proof runner sys.prefix is not the source checkout .venv")
+    if runner.get("repo_python") is not True:
+        failures.append("proof runner executable is not the source checkout Python")
+    if not _valid_sha256(runner.get("python_executable_fingerprint_sha256")):
+        failures.append("proof runner Python executable fingerprint is invalid")
+    if not _valid_sha256(runner.get("python_prefix_fingerprint_sha256")):
+        failures.append("proof runner Python prefix fingerprint is invalid")
+    executable_path = Path(str(runner.get("python_executable_path") or ""))
+    prefix_path = Path(str(runner.get("python_prefix_path") or ""))
+    if (
+        not executable_path.is_absolute()
+        or _sha256(str(executable_path))
+        != runner.get("python_executable_fingerprint_sha256")
+    ):
+        failures.append("proof runner Python executable path binding is invalid")
+    if (
+        not prefix_path.is_absolute()
+        or _sha256(str(prefix_path))
+        != runner.get("python_prefix_fingerprint_sha256")
+    ):
+        failures.append("proof runner Python prefix path binding is invalid")
+    try:
+        producer_pid = int(runner.get("producer_pid") or 0)
+    except (TypeError, ValueError):
+        producer_pid = 0
+    if producer_pid <= 0:
+        failures.append("proof producer PID is invalid")
+    if not Path(str(runner.get("producer_executable_path") or "")).is_absolute():
+        failures.append("proof producer executable path is invalid")
+    if not _valid_sha256(runner.get("producer_executable_sha256")):
+        failures.append("proof producer executable bytes fingerprint is invalid")
+    if int(runner.get("producer_executable_size_bytes") or 0) <= 0:
+        failures.append("proof producer executable byte count is invalid")
+    try:
+        if (
+            executable_path.resolve(strict=True)
+            != Path(str(runner.get("producer_executable_path") or "")).resolve(
+                strict=True
+            )
+        ):
+            failures.append(
+                "proof producer executable is not the bound runner Python"
+            )
+    except OSError:
+        failures.append("proof producer executable path cannot be resolved")
+    if (
+        runner.get("producer_harness_relative_path")
+        != "tests/cross_matrix/run_agentic_protocol_matrix.py"
+    ):
+        failures.append("proof producer harness relative path is invalid")
+    if not Path(str(runner.get("producer_harness_path") or "")).is_absolute():
+        failures.append("proof producer harness path is invalid")
+    if not _valid_sha256(runner.get("producer_harness_sha256")):
+        failures.append("proof producer harness bytes fingerprint is invalid")
+    if int(runner.get("producer_harness_size_bytes") or 0) <= 0:
+        failures.append("proof producer harness byte count is invalid")
+    return failures
+
+
+def _capture_health_evidence(
+    bases: dict[str, str],
+    health_urls: dict[str, str],
+    timeout: int,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    evidence: dict[str, dict[str, Any]] = {}
+    failures: list[str] = []
+    for base_label, base_url in bases.items():
+        health_url = health_urls.get(base_label, base_url + "/health")
+        if _network_origin(health_url) != _network_origin(base_url):
+            evidence[base_label] = {
+                "url": _safe_request_url(health_url),
+                "error_type": "HealthOriginMismatch",
+            }
+            failures.append(
+                f"{base_label}: /health URL origin does not match its "
+                "corresponding request base"
+            )
+            continue
+        try:
+            full = _get_full_health(health_url, timeout)
+        except ValueError as exc:
+            evidence[base_label] = {
+                "url": _safe_request_url(health_url),
+                "error_type": type(exc).__name__,
+            }
+            failures.append(f"{base_label}: full /health capture failed")
+            continue
+        identity, identity_failures = _health_identity(full)
+        evidence[base_label] = {
+            "url": _safe_request_url(health_url),
+            "full": full,
+            "full_sha256": _canonical_sha256(full),
+            "identity": identity,
+        }
+        failures.extend(
+            f"{base_label}: {failure}" for failure in identity_failures
+        )
+    return evidence, failures
+
+
+def _compare_identity_evidence(
+    source_before: dict[str, Any],
+    source_after: dict[str, Any],
+    runner_before: dict[str, Any],
+    runner_after: dict[str, Any],
+    bundle_before: dict[str, Any],
+    bundle_after: dict[str, Any],
+    requested_model: str,
+    health_before: dict[str, dict[str, Any]],
+    health_after: dict[str, dict[str, Any]],
+) -> list[str]:
+    failures: list[str] = []
+    for source_field in (
+        "git_root",
+        "head",
+        "tree",
+        "clean",
+        "status_sha256",
+        "python_source_tree_sha256",
+        "python_source_file_count",
+        "python_source_read_error_count",
+        "server_module_sha256",
+        "package_init_sha256",
+    ):
+        if source_before.get(source_field) != source_after.get(source_field):
+            failures.append(
+                f"source identity changed during the matrix: {source_field}"
+            )
+    if runner_before != runner_after:
+        failures.append("proof runner environment changed during the matrix")
+    if bundle_before != bundle_after:
+        failures.append("model bundle configuration changed during the matrix")
+
+    observed_identities: list[tuple[str, str, dict[str, Any]]] = []
+    for phase, evidence in (("before", health_before), ("after", health_after)):
+        for base_label, row in evidence.items():
+            identity = row.get("identity")
+            if not isinstance(identity, dict):
+                failures.append(
+                    f"{base_label}: observed backend identity missing {phase}"
+                )
+                continue
+            observed_identities.append((phase, base_label, identity))
+            failures.extend(
+                f"{base_label}: {failure}"
+                for failure in _validate_health_source_binding(
+                    identity,
+                    source_before if phase == "before" else source_after,
+                    runner_before if phase == "before" else runner_after,
+                    bundle_before if phase == "before" else bundle_after,
+                    requested_model,
+                )
+            )
+    if observed_identities:
+        reference = observed_identities[0][2]
+        for phase, base_label, identity in observed_identities[1:]:
+            if identity != reference:
+                failures.append(
+                    f"{base_label}: backend runtime/model/cache identity differs "
+                    f"at {phase}"
+                )
+    return failures
+
+
 def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
+    run_id = str(args.run_id or "")
+    if not run_id or _safe_capture_label(run_id) != run_id:
+        raise ValueError(
+            "--run-id must be a nonempty 80-character-or-shorter identifier "
+            "containing only letters, digits, hyphens, or underscores"
+        )
     bases = parse_named_urls(args.base_url, "--base-url")
     required_bases = {"direct", "gateway"}
     if not args.allow_single_base and not required_bases.issubset(bases):
         raise ValueError("--base-url must include direct=... and gateway=...")
+    base_origin_failures = _validate_base_origins(bases)
     health_urls = parse_named_urls(args.health_url or [], "--health-url")
+    unknown_health_labels = sorted(set(health_urls) - set(bases))
+    if unknown_health_labels:
+        raise ValueError(
+            "--health-url names an unknown base: "
+            + ", ".join(unknown_health_labels)
+        )
     repo_root = Path(args.repo_root).resolve()
     if not (repo_root / FILE_INFO_PATH).is_file():
         raise ValueError(f"repo root does not contain {FILE_INFO_PATH}: {repo_root}")
     protocols = args.protocol or list(PROTOCOLS)
     modes = args.mode or list(MODES)
     raw_artifact_dir = getattr(args, "raw_artifact_dir", None)
-    if raw_artifact_dir is not None and "stream" not in modes:
+    capture_required = (
+        "stream" in modes
+        or ("responses" in protocols and "nonstream" in modes)
+    )
+    if capture_required and raw_artifact_dir is None:
+        raise ValueError(
+            "--raw-artifact-dir is required whenever stream mode or "
+            "Responses nonstream mode is requested"
+        )
+    if raw_artifact_dir is not None and not capture_required:
         raise ValueError(
             "--raw-artifact-dir captures streaming parser-input bytes and "
-            "requires --mode stream"
+            "Responses nonstream JSON parser-input bytes; request --mode "
+            "stream or --protocol responses --mode nonstream"
         )
+    git_worktree = _git_worktree_root(repo_root)
+    _validate_private_result_destination(Path(args.output), git_worktree)
+    source_before = observe_source_checkout(repo_root)
+    runner_before = observe_runner_environment(repo_root)
+    bundle_before = observe_bundle_configuration(Path(args.bundle_root))
+    identity_failures = _source_identity_failures(
+        source_before,
+        args.source_head,
+    )
+    identity_failures.extend(base_origin_failures)
+    identity_failures.extend(_runner_environment_failures(runner_before))
+    health_before, health_before_failures = _capture_health_evidence(
+        bases,
+        health_urls,
+        args.timeout,
+    )
+    identity_failures.extend(health_before_failures)
+    identity_failures.extend(
+        _compare_identity_evidence(
+            source_before,
+            source_before,
+            runner_before,
+            runner_before,
+            bundle_before,
+            bundle_before,
+            args.model,
+            health_before,
+            health_before,
+        )
+    )
     expected_capture_routes = expected_parser_input_capture_routes(
         bases,
         protocols,
@@ -2500,22 +3605,48 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         skip_cancellation=args.skip_cancellation,
     )
     raw_recorder: DecompressedParserInputCaptureRecorder | None = None
-    if raw_artifact_dir is not None:
+    if raw_artifact_dir is not None and not identity_failures:
         raw_recorder = DecompressedParserInputCaptureRecorder(
             Path(raw_artifact_dir),
-            _git_worktree_root(repo_root),
+            git_worktree,
+            run_id=run_id,
         )
         raw_recorder.configure_expected(expected_capture_routes)
     output: dict[str, Any] = {
-        "schema_version": 1,
+        "schema": OUTPUT_SCHEMA,
+        "schema_version": OUTPUT_SCHEMA_VERSION,
+        "run_id": run_id,
         "created_at": datetime.now(UTC).isoformat(),
-        "source_head": args.source_head,
-        "model": args.model,
+        "requested_model": args.model,
         "repo_root": str(repo_root),
         "bases": bases,
         "protocols": protocols,
         "modes": modes,
         "second_tool_choice": args.second_tool_choice,
+        "backend_identity_fingerprint_sha256": None,
+        "identity": {
+            "source": {
+                "declared_head": args.source_head,
+                "before": source_before,
+                "after": None,
+            },
+            "runner": {
+                "before": runner_before,
+                "after": None,
+            },
+            "bundle": {
+                "before": bundle_before,
+                "after": None,
+            },
+            "health": {
+                base_label: {
+                    "before": health_before.get(base_label),
+                    "after": None,
+                }
+                for base_label in bases
+            },
+            "failures": list(dict.fromkeys(identity_failures)),
+        },
         "raw_capture": (
             {
                 **_disabled_capture_summary(),
@@ -2525,11 +3656,35 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
                 "complete": False,
             }
             if raw_recorder is not None
-            else _disabled_capture_summary()
+            else (
+                {
+                    **_disabled_capture_summary(),
+                    "enabled": True,
+                    "reason": (
+                        "identity preflight failed before private capture setup"
+                    ),
+                    "expected": len(expected_capture_routes),
+                    "complete": False,
+                }
+                if raw_artifact_dir is not None
+                else _disabled_capture_summary()
+            )
         ),
         "flows": {},
         "abort_recovery": {},
     }
+    if identity_failures:
+        output["checks"] = {
+            "identity_provenance_pass": False,
+            "all_requested_flows_present": False,
+            "all_flows_pass": False,
+            "abort_recovery_skipped": bool(args.skip_cancellation),
+            "all_abort_recovery_pass": False,
+            "raw_capture_complete": bool(output["raw_capture"]["complete"]),
+        }
+        output["pass"] = False
+        return output
+
     for base_label, base_url in bases.items():
         client = ProtocolClient(
             base_url,
@@ -2638,7 +3793,62 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
                 "complete": False,
                 "manifest_error_type": type(exc).__name__,
             }
+    source_after: dict[str, Any] = {}
+    runner_after: dict[str, Any] = {}
+    bundle_after: dict[str, Any] = {}
+    try:
+        source_after = observe_source_checkout(repo_root)
+    except ValueError as exc:
+        identity_failures.append(
+            f"source identity capture failed after matrix: {type(exc).__name__}"
+        )
+    try:
+        runner_after = observe_runner_environment(repo_root)
+    except (OSError, ValueError) as exc:
+        identity_failures.append(
+            f"runner identity capture failed after matrix: {type(exc).__name__}"
+        )
+    try:
+        bundle_after = observe_bundle_configuration(Path(args.bundle_root))
+    except (OSError, ValueError) as exc:
+        identity_failures.append(
+            f"bundle identity capture failed after matrix: {type(exc).__name__}"
+        )
+    health_after, health_after_failures = _capture_health_evidence(
+        bases,
+        health_urls,
+        args.timeout,
+    )
+    identity_failures.extend(health_after_failures)
+    if source_after and runner_after and bundle_after:
+        identity_failures.extend(
+            _compare_identity_evidence(
+                source_before,
+                source_after,
+                runner_before,
+                runner_after,
+                bundle_before,
+                bundle_after,
+                args.model,
+                health_before,
+                health_after,
+            )
+        )
+    output["identity"]["source"]["after"] = source_after or None
+    output["identity"]["runner"]["after"] = runner_after or None
+    output["identity"]["bundle"]["after"] = bundle_after or None
+    for base_label in bases:
+        output["identity"]["health"][base_label]["after"] = health_after.get(
+            base_label
+        )
+    output["identity"]["failures"] = list(dict.fromkeys(identity_failures))
+    if not identity_failures:
+        first_base = next(iter(bases))
+        output["backend_identity_fingerprint_sha256"] = health_before[
+            first_base
+        ]["identity"]["fingerprint_sha256"]
     output["checks"] = {
+        "identity_provenance_pass": not bool(identity_failures),
         "all_requested_flows_present": len(flow_rows)
         == len(bases) * len(protocols) * len(modes),
         "all_flows_pass": bool(flow_rows)
@@ -2675,18 +3885,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional backend health URL per base label for idle checks",
     )
     parser.add_argument("--model", required=True)
+    parser.add_argument(
+        "--bundle-root",
+        type=Path,
+        required=True,
+        help=(
+            "Exact local model bundle whose fixed configuration files must "
+            "match the loaded backend attestation"
+        ),
+    )
     parser.add_argument("--repo-root", default=os.getcwd())
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--raw-artifact-dir",
         type=Path,
         help=(
-            "Optional private root for exact decompressed streaming "
-            "parser-input response bytes and safe-allowlisted metadata; "
-            "requires --mode stream and must resolve outside every Git worktree"
+            "Private root required for exact decompressed streaming and "
+            "Responses nonstream parser-input response bytes with "
+            "safe-allowlisted metadata; requires --mode stream or --protocol "
+            "responses --mode nonstream and must resolve outside every Git "
+            "worktree"
         ),
     )
-    parser.add_argument("--source-head", default="")
+    parser.add_argument(
+        "--source-head",
+        required=True,
+        help="Expected Git HEAD; the runner must observe an exact clean match",
+    )
+    parser.add_argument(
+        "--run-id",
+        required=True,
+        help="Stable paired Electron/API proof run identifier",
+    )
     parser.add_argument("--api-key")
     parser.add_argument("--protocol", action="append", choices=PROTOCOLS)
     parser.add_argument("--mode", action="append", choices=MODES)
@@ -2716,20 +3946,44 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        guarded_worktree = _git_worktree_root(Path(args.repo_root))
+        output_path = _validate_private_result_destination(
+            Path(args.output),
+            guarded_worktree,
+        )
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "pass": False,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+                indent=2,
+            )
+        )
+        return 1
+    try:
         result = run_matrix(args)
     except Exception as exc:
         result = {
-            "schema_version": 1,
+            "schema": OUTPUT_SCHEMA,
+            "schema_version": OUTPUT_SCHEMA_VERSION,
+            "run_id": args.run_id,
+            "backend_identity_fingerprint_sha256": None,
             "pass": False,
             "error_type": type(exc).__name__,
             "error": str(exc),
         }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    _write_private_result_exclusive(
+        output_path,
+        result,
+        guarded_worktree,
+    )
     print(
         json.dumps(
             {
-                "output": str(args.output),
+                "output": str(output_path),
                 "pass": result.get("pass"),
                 "checks": result.get("checks"),
             },

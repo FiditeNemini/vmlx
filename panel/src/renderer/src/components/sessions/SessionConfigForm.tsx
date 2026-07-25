@@ -1105,7 +1105,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           <>
             <SliderField
               label="Block Cache Max (GB)"
-              tooltip="Maximum disk space for cached blocks. Oldest blocks are evicted when exceeded. Each block is small (~100KB-1MB), so 10GB can hold tens of thousands of blocks. Set to 0 for unlimited."
+              tooltip="Maximum physical disk space for the managed block-cache root, shared across model/config namespaces and typed companion state. Least-recently-used entries are evicted when the aggregate root exceeds the limit. If multiple live sessions share the root, the smallest finite limit is enforced. Set to 0 for unlimited only when no live session supplies a finite limit."
               value={config.blockDiskCacheMaxGb}
               onChange={v => onChange('blockDiskCacheMaxGb', v)}
               min={0}
@@ -1119,7 +1119,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             <div className="block">
               <span className="text-xs font-medium text-muted-foreground">
                 Block Cache Directory
-                <Tooltip text="Directory for block-level disk cache files. A model-specific subdirectory is created automatically. Leave empty for default (~/.cache/vmlx-engine/block-cache/<model_hash>/)." />
+                <Tooltip text="Managed root for block-level disk cache files. A model/config-specific subdirectory is created automatically, and the size limit applies across all managed subdirectories and typed companions in this root. Leave empty for ~/.cache/vmlx-engine/block-cache/." />
               </span>
               <input
                 type="text"

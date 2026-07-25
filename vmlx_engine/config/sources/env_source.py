@@ -30,8 +30,6 @@ ENV_TO_PATH = {
     "VMLX_MEMORY_KV_CACHE_QUANTIZATION": "memory.kv_cache.quantization",
     "VMLX_MEMORY_KV_CACHE_MEMORY_LIMIT_MB": "memory.kv_cache.memory_limit_mb",
     "VMLX_CODEBOOK_MEMORY_LIMIT_MB": "memory.codebook_cache.memory_limit_mb",
-    "VMLX_CODEBOOK_DISK_CACHE_DIR": "memory.codebook_cache.disk_cache_dir",
-    "VMLX_CODEBOOK_DISK_MAX_GB": "memory.codebook_cache.disk_max_gb",
     "VMLX_PREFIX_CACHE_ENABLED": "memory.prefix_cache.enabled",
     "VMLX_PREFIX_CACHE_MEMORY_LIMIT_MB": "memory.prefix_cache.memory_limit_mb",
     "VMLX_PAGED_CACHE_ENABLED": "memory.paged_cache.enabled",

@@ -1,74 +1,64 @@
 """
-Codebook Weight Cache - LRU cache with disk spillover for expert weights.
+Codebook Weight Cache - RAM LRU for experimental codebook-VQ expert weights.
 
 Expert weights are stored as codebook + indices (compressed).
 On cache miss, we:
     1. Load codebook and indices from safetensors
-    2. Reconstruct weights: flat_weights = codebook[flat_indices]
-    3. Reshape to weight matrix
-    4. Store in memory cache (LRU)
-    5. On memory pressure, evict LRU entries to disk
+    2. Retain the compressed tuple in memory (LRU)
+    3. Reconstruct or fuse the requested matmul at use time
+    4. On memory pressure, evict LRU entries and reload the original compressed
+       model shard on the next miss
 
-Memory budget is unlimited by default (all weights spill to disk if needed).
+Memory budget is unlimited by default.  This cache deliberately has no SSD
+spill: the compressed ``(codebook, indices)`` tuple already lives in the model
+artifact, so duplicating it under a global unscoped cache root adds correctness,
+capacity, and concurrency hazards without preserving unique data.
 
 Usage:
     cache = CodebookWeightCache(config)
 
-    # Get reconstructed weights (lazy load + reconstruct)
+    # Get compressed codebook data (lazy load)
     weights = cache.get((layer_idx, "gate_proj"))
 
     # Cache miss triggers:
     # 1. Load codebook-layer-{layer_idx}-gate_proj.safetensors
-    # 2. Reconstruct: weights = codebook[indices.reshape(-1)]
-    # 3. Cache in memory
+    # 2. Cache the compressed tuple in memory
 """
 
-import os
-import time
 import logging
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field
-from collections import OrderedDict
 import threading
-import hashlib
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Any
 
 logger = logging.getLogger(__name__)
-
-try:
-    import mlx.core as mx
-
-    _MLX_AVAILABLE = True
-except ImportError:
-    _MLX_AVAILABLE = False
 
 
 @dataclass
 class CacheEntry:
     """Cache entry for reconstructed expert weights."""
 
-    weights: Any  # mx.array
+    weights: Any  # mx.array or a nested tuple such as (codebook, indices)
     access_time: float = field(default_factory=time.time)
     size_bytes: int = 0
-    disk_path: Optional[Path] = None
 
 
 class CodebookWeightCache:
     """
-    LRU cache with disk spillover for codebook VQ expert weights.
+    RAM-only LRU cache for codebook VQ expert weights.
 
     Features:
-    - Unlimited memory (LRU to disk when needed)
+    - Unlimited RAM by default, or bounded RAM LRU when configured
     - Thread-safe operations
-    - Async disk I/O for eviction
-    - Configurable disk cache directory and max size
+    - Evicted entries reload from their original model safetensors shard
     - Memory pressure monitoring
     """
 
     def __init__(
         self,
-        config: Optional[Dict[str, Any]] = None,
-        disk_cache_dir: Optional[str] = None,
+        config: dict[str, Any] | None = None,
+        disk_cache_dir: str | None = None,
         disk_max_gb: int = 1000,
         eviction_batch_size: int = 4,
     ):
@@ -77,23 +67,24 @@ class CodebookWeightCache:
 
         Args:
             config: Configuration dict with memory/disk settings.
-            disk_cache_dir: Directory for disk spillover.
-            disk_max_gb: Maximum disk cache size in GB.
+            disk_cache_dir: Deprecated compatibility argument; ignored.
+            disk_max_gb: Deprecated compatibility argument; ignored.
             eviction_batch_size: Number of entries to evict at once.
         """
         self._config = config or {}
 
         # Memory cache (LRU OrderedDict)
-        self._memory_cache: OrderedDict[Tuple[int, str], CacheEntry] = OrderedDict()
-        self._memory_budget_bytes: Optional[int] = None
-        self._current_memory_bytes: int = 0
-
-        # Disk cache
-        self._disk_cache_dir = self._resolve_path(
-            disk_cache_dir
-            or self._config.get("disk_cache_dir", "~/.cache/vmlx-engine/codebook-cache")
+        self._memory_cache: OrderedDict[tuple[int, str], CacheEntry] = OrderedDict()
+        memory_limit_mb = self._config.get("memory_limit_mb")
+        normalized_memory_limit_mb = (
+            None if memory_limit_mb is None else float(memory_limit_mb)
         )
-        self._disk_max_bytes = disk_max_gb * 1024 * 1024 * 1024
+        self._memory_budget_bytes: int | None = (
+            None
+            if normalized_memory_limit_mb is None or normalized_memory_limit_mb <= 0
+            else int(normalized_memory_limit_mb * 1024 * 1024)
+        )
+        self._current_memory_bytes: int = 0
         self._eviction_batch_size = eviction_batch_size or 4
 
         # Thread safety
@@ -103,48 +94,15 @@ class CodebookWeightCache:
         self._hits = 0
         self._misses = 0
         self._evictions = 0
-        self._disk_writes = 0
-        self._disk_reads = 0
-
-        # Ensure disk cache directory exists
-        self._disk_cache_dir.mkdir(parents=True, exist_ok=True)
-
-        # Index file for quick lookups
-        self._index_file = self._disk_cache_dir / ".index"
-        self._disk_index: Dict[str, Dict] = self._load_disk_index()
-
         logger.info(
-            f"CodebookWeightCache initialized: disk_cache={self._disk_cache_dir}, "
-            f"max_disk_gb={disk_max_gb}"
+            "CodebookWeightCache initialized: RAM limit=%s; redundant SSD "
+            "spill is disabled",
+            "unlimited"
+            if self._memory_budget_bytes is None
+            else f"{self._memory_budget_bytes / 1024**2:.1f} MB",
         )
 
-    def _resolve_path(self, path: str) -> Path:
-        """Resolve ~ and environment variables in path."""
-        return Path(os.path.expandvars(os.path.expanduser(path)))
-
-    def _load_disk_index(self) -> Dict[str, Dict]:
-        """Load disk cache index from disk."""
-        if self._index_file.exists():
-            import json
-
-            try:
-                with open(self._index_file, "r") as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.warning(f"Failed to load disk index: {e}")
-        return {}
-
-    def _save_disk_index(self):
-        """Save disk cache index to disk."""
-        import json
-
-        try:
-            with open(self._index_file, "w") as f:
-                json.dump(self._disk_index, f)
-        except Exception as e:
-            logger.warning(f"Failed to save disk index: {e}")
-
-    def get(self, key: Tuple[int, str]) -> Optional[Any]:
+    def get(self, key: tuple[int, str]) -> Any | None:
         """
         Get reconstructed expert weights for a layer/tensor_type.
 
@@ -164,22 +122,11 @@ class CodebookWeightCache:
                 self._hits += 1
                 return entry.weights
 
-            # Check disk cache
-            disk_path = self._get_disk_path(key)
-            if disk_path and disk_path.exists():
-                self._disk_reads += 1
-                weights = self._load_from_disk(disk_path)
-                if weights is not None:
-                    # Load into memory cache
-                    self._put_memory(key, weights)
-                    self._hits += 1
-                    return weights
-
             # Cache miss
             self._misses += 1
             return None
 
-    def put(self, key: Tuple[int, str], weights: Any):
+    def put(self, key: tuple[int, str], weights: Any):
         """
         Store reconstructed weights in cache.
 
@@ -190,17 +137,41 @@ class CodebookWeightCache:
         with self._lock:
             self._put_memory(key, weights)
 
-    def _put_memory(self, key: Tuple[int, str], weights: Any):
-        """Put weights into memory cache, evicting LRU if needed."""
-        import mlx.core as mx
+    @classmethod
+    def _entry_nbytes(cls, value: Any) -> int:
+        """Return physical tensor bytes for nested codebook cache values."""
+        if isinstance(value, dict):
+            return sum(cls._entry_nbytes(item) for item in value.values())
+        if isinstance(value, (tuple, list)):
+            return sum(cls._entry_nbytes(item) for item in value)
+        try:
+            return max(0, int(value.nbytes))
+        except (AttributeError, TypeError, ValueError):
+            return 0
 
-        size_bytes = weights.nbytes if hasattr(weights, "nbypes") else weights.nbytes
+    def _put_memory(self, key: tuple[int, str], weights: Any):
+        """Put weights into memory cache, evicting LRU if needed."""
+        size_bytes = self._entry_nbytes(weights)
 
         # Check if already in cache
         if key in self._memory_cache:
-            old_entry = self._memory_cache[key]
+            old_entry = self._memory_cache.pop(key)
             self._current_memory_bytes -= old_entry.size_bytes
-            del old_entry
+
+        # An entry larger than the complete RAM allowance remains usable by the
+        # caller but is not retained. The model wrapper will reload its original
+        # compressed shard on the next miss.
+        if (
+            self._memory_budget_bytes is not None
+            and size_bytes > self._memory_budget_bytes
+        ):
+            logger.debug(
+                "Skipping oversized codebook cache entry %s (%d > %d bytes)",
+                key,
+                size_bytes,
+                self._memory_budget_bytes,
+            )
+            return
 
         # Evict if over budget (unlimited budget if memory_budget_bytes is None)
         while (
@@ -221,7 +192,7 @@ class CodebookWeightCache:
         )
 
     def _evict_lru(self):
-        """Evict least recently used entries to disk."""
+        """Evict least recently used entries from RAM."""
         if not self._memory_cache:
             return
 
@@ -230,12 +201,6 @@ class CodebookWeightCache:
             key, entry = self._memory_cache.popitem(last=False)
             self._current_memory_bytes -= entry.size_bytes
 
-            # Save to disk before removing from memory
-            disk_path = self._get_disk_path(key)
-            if disk_path:
-                self._save_to_disk(key, entry.weights, disk_path)
-                self._disk_writes += 1
-
             self._evictions += 1
 
         logger.debug(
@@ -243,51 +208,7 @@ class CodebookWeightCache:
             f"freed {entry.size_bytes / 1e6:.1f} MB"
         )
 
-    def _get_disk_path(self, key: Tuple[int, str]) -> Path:
-        """Get disk path for a cache key."""
-        layer_idx, tensor_type = key
-        # Use hash of key for filename safety
-        key_hash = hashlib.md5(f"{layer_idx}_{tensor_type}".encode()).hexdigest()[:12]
-        return (
-            self._disk_cache_dir
-            / f"codebook_{layer_idx:03d}_{tensor_type}_{key_hash}.safetensors"
-        )
-
-    def _save_to_disk(self, key: Tuple[int, str], weights: Any, path: Path):
-        """Save weights to disk."""
-        try:
-            if _MLX_AVAILABLE:
-                mx.save_safetensors(str(path), {"weights": weights})
-            else:
-                import numpy as np
-
-                np.save(str(path), np.array(weights))
-
-            # Update index
-            self._disk_index[str(key)] = {
-                "path": str(path),
-                "size_bytes": weights.nbytes if hasattr(weights, "nbytes") else 0,
-                "time": time.time(),
-            }
-            self._save_disk_index()
-        except Exception as e:
-            logger.warning(f"Failed to save {key} to disk: {e}")
-
-    def _load_from_disk(self, path: Path) -> Optional[Any]:
-        """Load weights from disk."""
-        try:
-            if _MLX_AVAILABLE:
-                data = mx.load(str(path))
-                return list(data.values())[0] if data else None
-            else:
-                import numpy as np
-
-                return np.load(str(path))
-        except Exception as e:
-            logger.warning(f"Failed to load from disk {path}: {e}")
-            return None
-
-    def prefetch(self, keys: List[Tuple[int, str]]):
+    def prefetch(self, keys: list[tuple[int, str]]):
         """
         Prefetch weights for multiple keys.
 
@@ -299,7 +220,7 @@ class CodebookWeightCache:
                 # Trigger lazy load
                 self.get(key)
 
-    def invalidate(self, key: Tuple[int, str]):
+    def invalidate(self, key: tuple[int, str]):
         """Invalidate a cache entry."""
         with self._lock:
             if key in self._memory_cache:
@@ -307,21 +228,12 @@ class CodebookWeightCache:
                 self._current_memory_bytes -= entry.size_bytes
 
     def clear(self):
-        """Clear all cache entries (memory and disk)."""
+        """Clear all retained RAM entries."""
         with self._lock:
             self._memory_cache.clear()
             self._current_memory_bytes = 0
 
-            # Clear disk cache
-            for key_str, info in self._disk_index.items():
-                path = Path(info["path"])
-                if path.exists():
-                    path.unlink()
-
-            self._disk_index.clear()
-            self._save_disk_index()
-
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Get cache statistics."""
         total = self._hits + self._misses
         hit_rate = self._hits / total if total > 0 else 0.0
@@ -331,12 +243,13 @@ class CodebookWeightCache:
             "misses": self._misses,
             "hit_rate": hit_rate,
             "evictions": self._evictions,
-            "disk_writes": self._disk_writes,
-            "disk_reads": self._disk_reads,
+            "disk_persistence": False,
+            "disk_writes": 0,
+            "disk_reads": 0,
             "memory_entries": len(self._memory_cache),
             "memory_bytes": self._current_memory_bytes,
-            "disk_entries": len(self._disk_index),
-            "disk_bytes": sum(info["size_bytes"] for info in self._disk_index.values()),
+            "disk_entries": 0,
+            "disk_bytes": 0,
         }
 
     @property
@@ -346,5 +259,5 @@ class CodebookWeightCache:
 
     @property
     def disk_bytes(self) -> int:
-        """Current disk cache size in bytes."""
-        return sum(info["size_bytes"] for info in self._disk_index.values())
+        """Codebook-VQ cache does not duplicate model shards on disk."""
+        return 0

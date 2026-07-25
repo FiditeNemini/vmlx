@@ -5,7 +5,6 @@ import {
   isToolNameProvidedForCurrentTurn,
   requestedExactFinalToolNames,
   requestedOnceToolNames,
-  requestsDirectAnswerAfterSingleTool,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
   requestsPrivateReasoningWithoutToolUse,
@@ -62,26 +61,25 @@ describe('tool auto-continue policy', () => {
     expect(shouldFinishZayaAppleScriptToolRound(true, [])).toBe(false)
   })
 
-  it('recognizes only explicit one-tool exact-final contracts', () => {
+  it('recognizes explicit exact-final tool scopes', () => {
     expect(
-      requestsDirectAnswerAfterSingleTool(
+      requestedExactFinalToolNames(
         'Call file_info exactly once. After the tool result, reply exactly DONE and nothing else.',
       ),
-    ).toBe(true)
+    ).toEqual(['file_info'])
     expect(
-      requestsDirectAnswerAfterSingleTool(
+      requestedExactFinalToolNames(
         'Continue this same chat. Call the built-in file_info tool exactly once with path pyproject.toml. After the real tool result, reply exactly B1-NONE-MT2-DONE and nothing else.',
       ),
-    ).toBe(true)
+    ).toEqual(['file_info'])
     expect(
-      requestsDirectAnswerAfterSingleTool(
+      requestedExactFinalToolNames(
         'Call the built-in file_info tool exactly once with path panel/package.json. After its result, reply exactly B1-ELECTRON-TOOL-TEMPLATE1-DONE and nothing else.',
       ),
-    ).toBe(true)
+    ).toEqual(['file_info'])
     const liveLfmContract =
       'Call the built-in file_info tool exactly once with path panel/package.json. Use the real tool. Then reply exactly two visible lines: R18-LFM-EPOCH-ACCEPT-1-DONE and FILE=panel/package.json SIZE=<human-readable tool size>. Do not add other visible text.'
     expect(requestedExactFinalToolNames(liveLfmContract)).toEqual(['file_info'])
-    expect(requestsDirectAnswerAfterSingleTool(liveLfmContract)).toBe(true)
     const scoped = scopeToolDefinitionsByName(
       [
         { function: { name: 'file_info' } },
@@ -94,30 +92,10 @@ describe('tool auto-continue policy', () => {
     expect(isToolNameProvidedForCurrentTurn('file_info', scopedNames)).toBe(true)
     expect(isToolNameProvidedForCurrentTurn('write_file', scopedNames)).toBe(false)
     expect(
-      requestsDirectAnswerAfterSingleTool(
-        'First call file_info exactly once with path panel/package.json. After that result, call run_command exactly once with command pwd. Use exactly those two tools in that order. After both tool results, reply exactly B1-CURRENT-MULTI3-DONE.',
-      ),
-    ).toBe(false)
-    expect(
       requestedExactFinalToolNames(
         'First call file_info exactly once with path panel/package.json. After that result, call run_command exactly once with command pwd. Use exactly those two tools in that order. After both tool results, reply exactly B1-CURRENT-MULTI3-DONE.',
       ),
     ).toEqual(['file_info', 'run_command'])
-    expect(
-      requestsDirectAnswerAfterSingleTool(
-        'Call file_info and run_command exactly once each. After both tool results, reply exactly DONE.',
-      ),
-    ).toBe(false)
-    expect(
-      requestsDirectAnswerAfterSingleTool(
-        'Use tools as needed, then reply exactly DONE.',
-      ),
-    ).toBe(false)
-    expect(
-      requestsDirectAnswerAfterSingleTool(
-        'Call file_info exactly once, then summarize the result.',
-      ),
-    ).toBe(false)
     expect(
       requestedExactFinalToolNames(
         'Call file_info exactly once. Use tools as needed, then reply exactly DONE.',
@@ -134,11 +112,6 @@ describe('tool auto-continue policy', () => {
         ['write_file', 'read_file', 'file_info'],
       ),
     ).toEqual(['file_info', 'read_file'])
-    expect(
-      requestsDirectAnswerAfterSingleTool(
-        'Call file_info exactly once. After checking prerequisites. The tool result may be long; reply exactly DONE.',
-      ),
-    ).toBe(false)
   })
 
   it('retires explicitly named exactly-once tools even without exact final wording', () => {

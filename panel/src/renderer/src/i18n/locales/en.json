@@ -738,8 +738,8 @@
       "connecting": "Connecting...",
       "starting": "Starting...",
       "cancel": "Cancel",
-      "jangNoticeHeader": "JANG Model Update Required:",
-      "jangNoticeBody": "As of 3/19/2026, all JANG models must be re-downloaded from HuggingFace (JANGQ-AI) to include proper chat templates. Without updated models, thinking on/off may not work correctly and some models may loop.",
+      "missingChatTemplateHeader": "Chat Template Missing:",
+      "missingChatTemplateBody": "This model bundle does not include a usable chat template. Chat formatting, reasoning controls, and tool use may not work correctly. Install a corrected copy of this specific bundle before relying on it.",
       "imageEditHeader": "Image Edit Server",
       "imageGenHeader": "Image Generation Server",
       "imageEditBadge": "Image Edit",
@@ -977,24 +977,11 @@
   },
   "update": {
     "banner": {
+      "versionLabel": "vMLX {version}",
+      "available": "is available",
+      "download": "Download",
+      "starOnGitHub": "Star on GitHub",
       "dismissTitle": "Dismiss"
-    },
-    "notice": {
-      "title": "What's New in MLX Studio",
-      "section1Heading": "MCP tools and API gateway",
-      "section1BodyA": "MCP config discovery now works from mcp.json or mcp.yaml without a launch flag, and per-server/per-tool policy is carried through sessions and the gateway.",
-      "section1BodyB": "Built-in tools and MCP tools can run together with structured tool calls, multi-round continuation, and safer parser cleanup to prevent raw marker leaks.",
-      "section2Heading": "Model settings and generation defaults",
-      "section2BodyA": "Chat Settings now reflect applied generation config: temperature, top_p, top_k, repetition penalty, thinking mode, tool parser, and reasoning parser.",
-      "section2BodyB": "Omitted max_tokens now resolves to a bounded model/default budget instead of the old 32768 fallback, with request logs showing the resolved value.",
-      "section3Heading": "MTP, cache, and JANG runtime hardening",
-      "section3BodyA": "Qwen3.6 native MTP detection, JANG/JANGTQ group-size recognition, MX matmul dispatch checks, and Hunyuan/ZAYA/Gemma/MiniMax family routing have stricter gates.",
-      "section3BodyB": "Prefix cache, in-memory paged cache, L2 disk cache, and TurboQuant KV paths now expose clearer health counters so cache reuse is visible instead of guessed.",
-      "section4Heading": "Release integrity and updater safety",
-      "section4BodyA": "The packaged app is checked for Developer ID signing, notarization, bundled source hashes, critical imports, GUI launch, and latest.json/update manifest compatibility before release.",
-      "section4BodyB": "DeepSeek V4 Flash now launches with its native composite cache path by default while generic KV q4/q8 stays suppressed; exact long-code output remains listed as a follow-up until the identifier gate is cleared.",
-      "footer": "Thank you for using MLX Studio and JANG. — Jinho Jang",
-      "dismiss": "Got it — don't show until next update"
     }
   },
   "ui": {

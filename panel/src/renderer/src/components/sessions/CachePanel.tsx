@@ -102,6 +102,8 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
   const nativeCache = stats?.native_cache
   const turboQuantKv = stats?.turboquant_kv_cache
   const cacheTotals = stats?.cache_totals
+  const blockDiskCache = stats?.block_disk_cache
+  const globalBlockDiskBudget = blockDiskCache?.global_budget
   const attentionKvStorage =
     nativeCache?.attention_kv_storage_quantization ??
     nativeCache?.storage_quantization
@@ -576,16 +578,48 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       )}
 
       {/* Block Disk Cache (SSD / L2 content-addressed blocks) */}
-      {stats?.block_disk_cache && (
+      {blockDiskCache && (
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Block Disk Cache (SSD / L2)</h4>
+          <p className="mb-2 text-xs text-muted-foreground">
+            Namespace values describe this model/configuration. Managed-root
+            values include every block-cache namespace and typed companion under
+            the same SSD root.
+          </p>
           <div className="grid grid-cols-2 gap-2 text-sm">
-            <StatCard label="Blocks on Disk" value={String(stats.block_disk_cache.blocks_on_disk ?? 0)} />
-            <StatCard label="Disk Size" value={`${(stats.block_disk_cache.disk_size_gb ?? 0).toFixed(2)} GB`} />
-            {stats.block_disk_cache.total_tokens_on_disk != null && <StatCard label="Tokens on Disk" value={(stats.block_disk_cache.total_tokens_on_disk || 0).toLocaleString()} />}
-            <StatCard label="Disk Hits / Misses" value={`${stats.block_disk_cache.disk_hits ?? 0} / ${stats.block_disk_cache.disk_misses ?? 0}`} />
-            <StatCard label="Disk Writes" value={String(stats.block_disk_cache.disk_writes ?? 0)} />
-            {(stats.block_disk_cache.disk_evictions ?? 0) > 0 && <StatCard label="Disk Evictions" value={String(stats.block_disk_cache.disk_evictions)} />}
+            <StatCard label="Namespace Blocks" value={String(blockDiskCache.blocks_on_disk ?? 0)} />
+            <StatCard label="Namespace Size" value={`${(blockDiskCache.disk_size_gb ?? 0).toFixed(2)} GB`} />
+            {globalBlockDiskBudget && (
+              <StatCard
+                label="Managed Root Size"
+                value={globalBlockDiskBudget.accounted === true && globalBlockDiskBudget.bytes_after != null
+                  ? `${(globalBlockDiskBudget.bytes_after / 1024 ** 3).toFixed(2)} GB`
+                  : 'Reconciliation pending'}
+              />
+            )}
+            {globalBlockDiskBudget?.max_size_bytes != null && (
+              <StatCard
+                label="Managed Root Limit"
+                value={globalBlockDiskBudget.max_size_bytes > 0
+                  ? `${(globalBlockDiskBudget.max_size_bytes / 1024 ** 3).toFixed(2)} GB`
+                  : 'Unlimited'}
+              />
+            )}
+            {globalBlockDiskBudget && (
+              <StatCard
+                label="Managed Root Status"
+                value={globalBlockDiskBudget.accounted !== true
+                  ? 'Reconciliation pending'
+                  : globalBlockDiskBudget.compliant
+                    ? 'Within limit'
+                    : 'Over limit'}
+              />
+            )}
+            {blockDiskCache.total_tokens_on_disk != null && <StatCard label="Namespace Tokens" value={(blockDiskCache.total_tokens_on_disk || 0).toLocaleString()} />}
+            <StatCard label="Disk Hits / Misses" value={`${blockDiskCache.disk_hits ?? 0} / ${blockDiskCache.disk_misses ?? 0}`} />
+            <StatCard label="Disk Writes" value={String(blockDiskCache.disk_writes ?? 0)} />
+            {(blockDiskCache.disk_evictions ?? 0) > 0 && <StatCard label="Process Evictions" value={String(blockDiskCache.disk_evictions)} />}
+            {(globalBlockDiskBudget?.evicted_entries ?? 0) > 0 && <StatCard label="Last Global Eviction" value={String(globalBlockDiskBudget.evicted_entries)} />}
           </div>
         </div>
       )}

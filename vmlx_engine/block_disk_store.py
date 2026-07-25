@@ -46,17 +46,19 @@ Supported cache_data tuple types (from prefix_cache.py):
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 import queue
 import sqlite3
-import tempfile
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -202,13 +204,44 @@ class BlockDiskStore:
         max_size_gb: float = 10.0,
         expected_num_layers: Optional[int] = None,
         allow_tq_native: Optional[bool] = None,
+        global_cache_root: Optional[str] = None,
+        allow_legacy_hashed_namespaces: bool = False,
+        allow_legacy_direct_namespace: bool = False,
+        max_pending_write_bytes: Optional[int] = None,
         **kwargs,
     ):
-        self.cache_dir = Path(cache_dir)
+        from .global_disk_cache_budget import (
+            ensure_managed_block_cache_namespace,
+            get_global_disk_cache_budget,
+        )
+
+        # ``max_size_gb`` is the one physical budget for the configured root,
+        # not an allowance that each hashed model namespace may consume again.
+        # Direct callers default to a one-namespace root; schedulers pass the
+        # default/custom parent root explicitly.
+        requested_cache_dir = Path(cache_dir).expanduser().resolve()
+        self.global_cache_root = Path(
+            global_cache_root if global_cache_root is not None else cache_dir
+        ).expanduser().resolve()
+        if not requested_cache_dir.is_relative_to(self.global_cache_root):
+            raise ValueError(
+                "block-cache namespace must be contained by its aggregate "
+                f"budget root: namespace={requested_cache_dir}, "
+                f"root={self.global_cache_root}"
+            )
+        self.cache_dir = ensure_managed_block_cache_namespace(cache_dir)
+        if not self.cache_dir.is_relative_to(self.global_cache_root):
+            # Defend against a path substitution between the preflight resolve
+            # and namespace claim.  An out-of-root namespace would otherwise
+            # publish bytes that the aggregate size scanner can never count or
+            # evict.
+            raise OSError(
+                "block-cache namespace escaped its aggregate budget root: "
+                f"namespace={self.cache_dir}, root={self.global_cache_root}"
+            )
         self.blocks_dir = self.cache_dir / "blocks"
         self.blocks_dir.mkdir(parents=True, exist_ok=True)
         self.max_size_bytes = int(max(0.0, max_size_gb) * 1024**3)
-
         # Codex 2026-05-06 contract #4: expected layer count from model
         # config (e.g. 43 for DSV4-Flash). Validator hard-rejects cache
         # records whose layer count differs — that is the canonical
@@ -252,6 +285,13 @@ class BlockDiskStore:
         self._write_fence_seq = 0
         self._write_completion_generation = 0
         self._write_inflight = 0
+        self._pending_write_bytes = 0
+        self._pending_write_byte_drops = 0
+        self._max_pending_write_bytes = (
+            max(1, int(max_pending_write_bytes))
+            if max_pending_write_bytes is not None
+            else 512 * 1024 * 1024
+        )
         self._write_fences: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._max_recent_write_fences = 64
 
@@ -270,37 +310,102 @@ class BlockDiskStore:
         self._ensure_read_conn()
 
         # Background writer thread
-        # Queue items: (block_hash, tmp_path_str, dtype_str, num_layers, token_count)
+        # Queue items contain an immutable in-memory safetensors image, never
+        # live MLX arrays:
+        # (block_hash, payload_bytes, dtype, num_layers, token_count,
+        #  fence_id, reserved_bytes)
         # or special commands: ("__access__", ...) or ("__cleanup__", ...)
         self._write_queue: queue.Queue = queue.Queue(maxsize=1000)
         self._tmp_seq = 0  # Monotonic counter for unique temp file names
         self._stop_event = threading.Event()
+        # Publication lifecycle is intentionally separate from ``_stats_lock``.
+        # A producer can spend meaningful time freezing MLX state before it
+        # reaches the queue.  Shutdown/clear must close admission first and wait
+        # for those producers without holding telemetry or aggregate-budget
+        # locks that the producer/writer also needs.
+        self._write_lifecycle_lock = threading.Lock()
+        self._write_lifecycle = threading.Condition(self._write_lifecycle_lock)
+        self._accepting_writes = True
+        self._shutdown_started = False
+        self._clear_in_progress = False
+        self._active_write_producers = 0
+        # Counts queued *and dequeued* items until their containing batch has
+        # fully completed.  ``Queue.empty()`` cannot provide this guarantee: a
+        # writer may already have dequeued a block that can still republish it.
+        self._pending_write_items = 0
         self._writer_thread = threading.Thread(
             target=self._background_writer, daemon=True, name="block-disk-writer"
         )
+        self._writer_shutdown_timeout_seconds = 5.0
+        self._shutdown_finalize_lock = threading.Lock()
+        self._shutdown_finalized = False
+        self._delayed_shutdown_thread: Optional[threading.Thread] = None
+        self._budget_recovery_lock = threading.Lock()
+        self._budget_recovery_interval_ns = int(5.0 * 1_000_000_000)
+        self._last_budget_recovery_attempt_ns = 0
 
-        # Clean up orphaned .tmp files from crashed writes
-        self._cleanup_orphaned_tmp()
-
-        # A user can lower the disk-cap slider between sessions. Enforce that
-        # new ceiling before serving reads or accepting writes; waiting for the
-        # first background write left an oversized cache indefinitely after
-        # restart. This synchronous startup trim touches only files and SQLite.
-        startup_conn = sqlite3.connect(str(self._db_path), timeout=5.0)
-        try:
-            self._maybe_evict(startup_conn)
-        finally:
-            startup_conn.close()
-
-        self._writer_thread.start()
-
-        entry_count = self._count_entries()
-        total_size = self._total_size()
-        logger.info(
-            f"BlockDiskStore initialized: dir={self.cache_dir}, "
-            f"max_size={max_size_gb:.1f}GB, entries={entry_count}, "
-            f"size={total_size / 1024**3:.2f}GB"
+        # Publish the aggregate-budget owner only after local DB/read/thread
+        # primitives are ready.  A constructor failure after lease publication
+        # must remove that lease; otherwise this live PID can pin a stale,
+        # stricter max until process exit even though no store owns it.
+        self.global_budget = get_global_disk_cache_budget(
+            self.global_cache_root,
+            self.max_size_bytes,
+            allow_legacy_hashed_namespaces=allow_legacy_hashed_namespaces,
+            allow_legacy_direct_namespace=allow_legacy_direct_namespace,
         )
+        try:
+            # Never delete temporary files owned by another process. They are
+            # excluded from eviction and counted as protected physical bytes by the
+            # root coordinator; a writer removes its own temp on success/failure.
+            self._cleanup_orphaned_tmp()
+
+            # A user can lower the disk-cap slider between sessions. Enforce that
+            # new ceiling before serving reads or accepting writes; waiting for the
+            # first background write left an oversized cache indefinitely after
+            # restart. This synchronous startup trim touches only files and SQLite.
+            global_startup_trim = self.global_budget.enforce(force=True)
+            self._global_budget_write_enabled = bool(
+                global_startup_trim.accounted
+                and global_startup_trim.compliant
+            )
+            self.disk_evictions += int(
+                getattr(global_startup_trim, "evicted_entries", 0) or 0
+            )
+            if not self._global_budget_write_enabled:
+                self._last_budget_recovery_attempt_ns = time.monotonic_ns()
+            if not global_startup_trim.compliant:
+                logger.warning(
+                    "Global block-cache startup trim incomplete: %s",
+                    global_startup_trim.error
+                    or (
+                        f"{global_startup_trim.bytes_after} bytes remain above "
+                        f"{global_startup_trim.max_size_bytes}"
+                    ),
+                )
+
+            self._writer_thread.start()
+
+            entry_count = self._count_entries()
+            total_size = self._total_size()
+            logger.info(
+                f"BlockDiskStore initialized: dir={self.cache_dir}, "
+                f"max_size={max_size_gb:.1f}GB, entries={entry_count}, "
+                f"size={total_size / 1024**3:.2f}GB"
+            )
+        except Exception:
+            self._stop_event.set()
+            if self._writer_thread.is_alive():
+                self._writer_thread.join(timeout=5.0)
+            try:
+                conn = getattr(self._thread_local, "read_conn", None)
+                if conn is not None:
+                    conn.close()
+                    self._thread_local.read_conn = None
+            except Exception:
+                pass
+            self.global_budget.close()
+            raise
 
     def _init_db(self) -> None:
         """Create SQLite index with WAL mode."""
@@ -342,19 +447,8 @@ class BlockDiskStore:
         return self._ensure_read_conn()
 
     def _cleanup_orphaned_tmp(self) -> None:
-        """Remove orphaned .tmp files left from crashed writes."""
-        try:
-            count = 0
-            for tmp in self.blocks_dir.rglob("*.tmp.safetensors"):
-                try:
-                    tmp.unlink()
-                    count += 1
-                except OSError:
-                    pass
-            if count:
-                logger.info(f"BlockDiskStore: cleaned up {count} orphaned .tmp file(s)")
-        except Exception:
-            pass
+        """Preserve temp files because ownership cannot be proven cross-process."""
+        return
 
     def _count_entries(self) -> int:
         return self._read_conn.execute("SELECT COUNT(*) FROM blocks").fetchone()[0]
@@ -373,6 +467,13 @@ class BlockDiskStore:
 
     def has_block(self, block_hash: bytes) -> bool:
         """Return whether a block hash has a readable finalized L2 entry."""
+        with self.global_budget.mutation_guard() as locked:
+            if not locked:
+                return False
+            return self._has_block_guarded(block_hash)
+
+    def _has_block_guarded(self, block_hash: bytes) -> bool:
+        """Guarded implementation of :meth:`has_block`."""
         hash_hex = block_hash.hex()
         try:
             row = self._read_conn.execute(
@@ -422,27 +523,17 @@ class BlockDiskStore:
         file_path: Path,
         cache_data: List[Tuple],
     ) -> bool:
-        """Evict a TQ representation that conflicts with explicit non-TQ mode."""
+        """Queue eviction of TQ data that conflicts with explicit non-TQ mode."""
         if self._allow_tq_native or not _cache_data_has_tq(cache_data):
             return False
-        try:
-            self._read_conn.execute(
-                "DELETE FROM blocks WHERE block_hash = ?", (hash_hex,)
-            )
-            self._read_conn.commit()
-            file_path.unlink(missing_ok=True)
-        except Exception as exc:
-            logger.warning(
-                "Failed to evict incompatible TQ-native block %s: %s",
-                hash_hex[:12],
-                exc,
-            )
-            # The record is still incompatible even if cleanup lost a race or
-            # the index is temporarily locked.  Fail closed for this request;
-            # never turn an eviction failure into a TQ read under explicit Off.
-            return True
+        # has_block/read_block hold the aggregate *shared* read lock.  Physical
+        # deletion here would race another process's load and bypass global
+        # accounting.  The background writer consumes cleanup commands under
+        # the exclusive mutation lock and reconciles the aggregate ledger.
+        self._queue_index_cleanup(hash_hex)
         logger.info(
-            "Evicted TQ-native block %s because persisted TQ reads are disabled",
+            "Queued eviction of TQ-native block %s because persisted TQ reads "
+            "are disabled",
             hash_hex[:12],
         )
         return True
@@ -483,6 +574,19 @@ class BlockDiskStore:
             return None
 
     def _read_block_impl(self, block_hash: bytes) -> Optional[List[Tuple]]:
+        # Root-exclusive eviction cannot unlink the payload while validation,
+        # MLX load, deserialization, and the durable LRU touch are in flight.
+        with self.global_budget.mutation_guard() as locked:
+            if not locked:
+                with self._stats_lock:
+                    self.disk_misses += 1
+                return None
+            return self._read_block_impl_guarded(block_hash)
+
+    def _read_block_impl_guarded(
+        self,
+        block_hash: bytes,
+    ) -> Optional[List[Tuple]]:
         """
         Read a block from disk by its chain hash.
 
@@ -551,9 +655,12 @@ class BlockDiskStore:
                     str(file_path),
                     expected_num_layers=getattr(self, "_expected_num_layers", None),
                     source=f"L2-disk-header:{hash_hex[:12]}",
-                    delete_on_reject=True,
+                    # read_block holds the aggregate shared lock; cleanup is
+                    # queued below and runs under the exclusive writer lock.
+                    delete_on_reject=False,
                 ):
-                    # File deleted on reject; queue index cleanup too.
+                    # Queue index + file cleanup under the background writer's
+                    # exclusive aggregate mutation transaction.
                     self._queue_index_cleanup(hash_hex)
                     with self._stats_lock:
                         self.disk_misses += 1
@@ -586,6 +693,13 @@ class BlockDiskStore:
                 self.disk_hits += 1
                 if _cache_data_has_tq(cache_data):
                     self.tq_native_hits += 1
+            # File mtime is the non-droppable cross-process LRU signal.  The
+            # SQLite update remains asynchronous for latency, but a full queue
+            # can no longer make a just-read block appear old to global trim.
+            try:
+                os.utime(file_path, None)
+            except OSError:
+                pass
             # Queue access metadata update to background (non-blocking)
             self._queue_access_update(hash_hex)
             logger.debug(f"Disk cache hit: {hash_hex[:12]} ({dtype}, {len(cache_data)} layers)")
@@ -600,23 +714,211 @@ class BlockDiskStore:
 
     def _queue_access_update(self, hash_hex: str) -> None:
         """Queue an access time update for the background writer."""
-        try:
-            self._write_queue.put_nowait(("__access__", hash_hex, time.time()))
-        except queue.Full:
-            pass  # Non-critical metadata update — safe to drop
+        self._try_enqueue_write_item(("__access__", hash_hex, time.time()))
 
     def _queue_index_cleanup(self, hash_hex: str) -> None:
         """Queue a stale index entry cleanup for the background writer."""
-        try:
-            self._write_queue.put_nowait(("__cleanup__", hash_hex, 0))
-        except queue.Full:
-            pass  # Will be cleaned up on next access attempt
+        self._try_enqueue_write_item(("__cleanup__", hash_hex, 0))
+
+    def _try_enqueue_write_item(self, item: Tuple[Any, ...]) -> str:
+        """Atomically admit one queue item and track it through publication.
+
+        Returns ``queued``, ``full``, ``quiescing``, or ``writer_stopped``.
+        The lifecycle lock closes the check/enqueue race with clear/shutdown.
+        """
+
+        with self._write_lifecycle:
+            if not self._accepting_writes:
+                return "quiescing"
+            if not self._writer_thread.is_alive():
+                return "writer_stopped"
+            try:
+                self._write_queue.put_nowait(item)
+            except queue.Full:
+                return "full"
+            self._pending_write_items += 1
+            self._write_lifecycle.notify_all()
+            return "queued"
+
+    def _complete_write_items(self, count: int) -> None:
+        if count <= 0:
+            return
+        with self._write_lifecycle:
+            self._pending_write_items = max(
+                0,
+                self._pending_write_items - int(count),
+            )
+            self._write_lifecycle.notify_all()
+
+    def _begin_write_producer(self) -> bool:
+        with self._write_lifecycle:
+            if (
+                not self._accepting_writes
+                or self._shutdown_started
+                or not self._writer_thread.is_alive()
+            ):
+                return False
+            self._active_write_producers += 1
+            return True
+
+    def _end_write_producer(self) -> None:
+        with self._write_lifecycle:
+            self._active_write_producers = max(
+                0,
+                self._active_write_producers - 1,
+            )
+            self._write_lifecycle.notify_all()
+
+    def _write_admission_open(self) -> bool:
+        with self._write_lifecycle:
+            return bool(
+                self._accepting_writes
+                and not self._shutdown_started
+                and self._writer_thread.is_alive()
+            )
 
     # =========================================================================
     # Write (async)
     # =========================================================================
 
-    def begin_write_fence(self, request_id: str) -> str:
+    @staticmethod
+    def _estimate_cache_payload_bytes(cache_data: Any) -> int:
+        """Conservatively estimate a frozen safetensors image before encoding.
+
+        Admission must happen before ``_serialize_block`` or any MLX-backed
+        safetensors work.  Cache payloads are small object trees whose leaves
+        are arrays; count each array once and reserve ample header space.  The
+        reservation is reconciled to the exact immutable byte length before
+        enqueue.
+        """
+
+        seen: set[int] = set()
+        tensor_count = 0
+
+        def walk(value: Any, depth: int = 0) -> int:
+            nonlocal tensor_count
+            if value is None or depth > 16:
+                return 0
+            identity = id(value)
+            if identity in seen:
+                return 0
+            if isinstance(value, (str, bytes, bytearray, int, float, bool)):
+                return len(value) if isinstance(value, (bytes, bytearray)) else 0
+            nbytes = getattr(value, "nbytes", None)
+            if nbytes is not None and hasattr(value, "shape"):
+                seen.add(identity)
+                tensor_count += 1
+                try:
+                    return max(0, int(nbytes))
+                except (TypeError, ValueError):
+                    return 0
+            if isinstance(value, dict):
+                seen.add(identity)
+                return sum(walk(item, depth + 1) for item in value.values())
+            if isinstance(value, (list, tuple)):
+                seen.add(identity)
+                return sum(walk(item, depth + 1) for item in value)
+            attributes = getattr(value, "__dict__", None)
+            if isinstance(attributes, dict):
+                seen.add(identity)
+                return sum(walk(item, depth + 1) for item in attributes.values())
+            return 0
+
+        tensor_bytes = walk(cache_data)
+        # Safetensors headers are JSON and padded; 64 KiB plus 1 KiB/tensor is
+        # intentionally generous so exact reconciliation almost always shrinks
+        # rather than grows the reservation.
+        return max(1, tensor_bytes + 65536 + tensor_count * 1024)
+
+    def _reserve_pending_write_bytes(self, requested: int) -> bool:
+        amount = max(1, int(requested))
+        with self._stats_lock:
+            if (
+                amount > self._max_pending_write_bytes
+                or self._pending_write_bytes + amount
+                > self._max_pending_write_bytes
+            ):
+                self._pending_write_byte_drops += 1
+                return False
+            self._pending_write_bytes += amount
+        return True
+
+    def _resize_pending_write_reservation(self, previous: int, actual: int) -> bool:
+        old_amount = max(0, int(previous))
+        new_amount = max(1, int(actual))
+        with self._stats_lock:
+            delta = new_amount - old_amount
+            if (
+                new_amount > self._max_pending_write_bytes
+                or self._pending_write_bytes + delta
+                > self._max_pending_write_bytes
+            ):
+                self._pending_write_bytes = max(
+                    0, self._pending_write_bytes - old_amount
+                )
+                self._pending_write_byte_drops += 1
+                return False
+            self._pending_write_bytes = max(
+                0, self._pending_write_bytes + delta
+            )
+        return True
+
+    def _release_pending_write_bytes(self, reserved: int) -> None:
+        with self._stats_lock:
+            self._pending_write_bytes = max(
+                0,
+                self._pending_write_bytes - max(0, int(reserved)),
+            )
+
+    @staticmethod
+    def _freeze_safetensors_bytes(
+        tensors: Dict[str, Any],
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> bytes:
+        """Freeze materialized MLX tensors into immutable in-memory bytes.
+
+        ``mx.save_safetensors`` supports a file-like target.  Keeping it on the
+        model-owning caller preserves Metal thread affinity and native BF16
+        bits, while the returned ``bytes`` object is safe to hand to the disk
+        writer thread.
+        """
+
+        buffer = io.BytesIO()
+        mx.save_safetensors(buffer, tensors, metadata)
+        return buffer.getvalue()
+
+    def _disable_global_budget_writes(self) -> None:
+        self._global_budget_write_enabled = False
+        self._last_budget_recovery_attempt_ns = time.monotonic_ns()
+
+    def _maybe_recover_global_budget_writes(self) -> bool:
+        """Retry a failed aggregate reconcile at a bounded cadence."""
+
+        if self._global_budget_write_enabled:
+            return True
+        now_ns = time.monotonic_ns()
+        with self._budget_recovery_lock:
+            if self._global_budget_write_enabled:
+                return True
+            if (
+                self._last_budget_recovery_attempt_ns
+                and now_ns - self._last_budget_recovery_attempt_ns
+                < self._budget_recovery_interval_ns
+            ):
+                return False
+            self._last_budget_recovery_attempt_ns = now_ns
+            result = self.global_budget.enforce(force=True)
+            self._global_budget_write_enabled = bool(
+                result.accounted and result.compliant
+            )
+            return self._global_budget_write_enabled
+
+    def begin_write_fence(
+        self,
+        request_id: str,
+        *,
+        strict_reconcile: bool = False,
+    ) -> str:
         """Create an opaque, request-correlated asynchronous write fence."""
         normalized_request_id = str(request_id or "").strip()
         if not normalized_request_id:
@@ -646,6 +948,7 @@ class BlockDiskStore:
                 "producer_aborted": False,
                 "post_eviction_complete": False,
                 "completion_generation": None,
+                "_strict_reconcile": bool(strict_reconcile),
                 "_queued_hashes": [],
                 "_active": 0,
             }
@@ -679,6 +982,7 @@ class BlockDiskStore:
     def _write_fence_expected(self, fence_id: Optional[str]) -> bool:
         if not fence_id:
             return False
+        budget_healthy = self._maybe_recover_global_budget_writes()
         with self._stats_lock:
             state = self._write_fences.get(fence_id)
             if (
@@ -690,7 +994,16 @@ class BlockDiskStore:
                 return False
             state["expected"] += 1
             state["_active"] = int(state.get("_active") or 0) + 1
-            return True
+        if not budget_healthy:
+            # Preserve a truthful expected/failed pair for request fences even
+            # when startup reconciliation disabled all publications.
+            self._write_fence_queue_result(fence_id, failed=True)
+            logger.warning(
+                "BlockDiskStore write skipped because aggregate budget "
+                "coordination is not healthy"
+            )
+            return False
+        return True
 
     def _write_fence_ready_locked(self, state: Dict[str, Any]) -> bool:
         accounted = (
@@ -774,16 +1087,26 @@ class BlockDiskStore:
         return self._enqueue_write_fence_sentinel(fence_id)
 
     def _enqueue_write_fence_sentinel(self, fence_id: str) -> bool:
-        try:
-            self._write_queue.put_nowait(("__fence__", fence_id, 0))
-        except queue.Full:
+        enqueue_result = self._try_enqueue_write_item(
+            ("__fence__", fence_id, 0)
+        )
+        if enqueue_result != "queued":
             with self._stats_lock:
                 state = self._write_fences.get(fence_id)
                 if state is not None:
                     state["seal_failed"] = True
-            logger.warning(
-                "BlockDiskStore write queue full; request fence %s was not queued",
+            self._fail_write_fence(
                 fence_id,
+                (
+                    "block-disk write queue full before fence sentinel"
+                    if enqueue_result == "full"
+                    else "block-disk writer quiescing before fence sentinel"
+                ),
+            )
+            logger.warning(
+                "BlockDiskStore fence sentinel was not queued (%s): %s",
+                fence_id,
+                enqueue_result,
             )
             return False
         with self._stats_lock:
@@ -801,17 +1124,41 @@ class BlockDiskStore:
         request_id: Optional[str] = None,
         fence_id: Optional[str] = None,
     ) -> bool:
+        """Admit one producer across freeze and immutable queue publication."""
+
+        if not self._begin_write_producer():
+            return False
+        try:
+            return self._write_block_async_admitted(
+                block_hash,
+                cache_data,
+                token_count,
+                request_id=request_id,
+                fence_id=fence_id,
+            )
+        finally:
+            self._end_write_producer()
+
+    def _write_block_async_admitted(
+        self,
+        block_hash: bytes,
+        cache_data: List[Tuple],
+        token_count: int,
+        *,
+        request_id: Optional[str] = None,
+        fence_id: Optional[str] = None,
+    ) -> bool:
         """
-        Queue a block for background writing to disk. Non-blocking.
+        Freeze a block on the model-owning thread and queue disk publication.
 
         ALL MLX operations happen on the calling (main) thread:
         - Serialize cache_data to flat tensor dict
         - Materialize lazy arrays with mx.eval()
-        - Write safetensors file with mx.save_safetensors()
+        - Encode safetensors into an in-memory ``bytes`` image
 
-        The background thread ONLY does: atomic rename + SQLite index update.
-        This prevents Metal command buffer crashes from concurrent GPU access
-        (mx.save_safetensors accesses Metal buffer memory internally).
+        The background thread performs every filesystem operation: temporary
+        write, fsync, atomic publish, SQLite index/accounting, and eviction.
+        No live MLX array crosses the queue boundary.
 
         Args:
             block_hash: Chain hash (BlockHash bytes)
@@ -820,7 +1167,16 @@ class BlockDiskStore:
             request_id: Scheduler request ID associated with ``fence_id``.
             fence_id: Opaque ID returned by :meth:`begin_write_fence`.
         """
-        tracked = self._write_fence_expected(fence_id)
+        if fence_id:
+            tracked = self._write_fence_expected(fence_id)
+        else:
+            tracked = False
+            if not self._maybe_recover_global_budget_writes():
+                logger.warning(
+                    "BlockDiskStore write skipped because aggregate budget "
+                    "coordination is not healthy"
+                )
+                return False
         if fence_id and not tracked:
             logger.warning(
                 "Rejecting block write for unknown or sealed fence %s",
@@ -828,19 +1184,37 @@ class BlockDiskStore:
             )
             return False
         if tracked:
+            request_mismatch = False
             with self._stats_lock:
                 state = self._write_fences.get(str(fence_id))
                 if state is None or state.get("request_id") != str(request_id or ""):
-                    if state is not None:
-                        state["failed"] += 1
-                    logger.warning(
-                        "Rejecting block write whose request ID does not match "
-                        "fence %s",
-                        fence_id,
-                    )
-                    return False
+                    request_mismatch = True
+            if request_mismatch:
+                # Balance the expected/active producer registered above. A
+                # manual failed++ left _active stuck and a later seal could
+                # never enqueue or terminalize the fence.
+                self._write_fence_queue_result(fence_id, failed=True)
+                logger.warning(
+                    "Rejecting block write whose request ID does not match "
+                    "fence %s",
+                    fence_id,
+                )
+                return False
         if not HAS_MLX:
             self._write_fence_queue_result(fence_id, failed=True)
+            return False
+
+        # Fail item admission before walking/serializing MLX state.  The item
+        # queue bounds metadata commands; the byte reservation independently
+        # bounds immutable payload RAM.
+        if not self._write_admission_open():
+            self._write_fence_queue_result(fence_id, dropped=True)
+            return False
+        if self._write_queue.full():
+            self._write_fence_queue_result(fence_id, dropped=True)
+            logger.warning(
+                "BlockDiskStore write queue full (1000), skipping serialization"
+            )
             return False
 
         if _cache_data_has_tq(cache_data) and not self._allow_tq_native:
@@ -860,12 +1234,24 @@ class BlockDiskStore:
             # _write_block().
             self.has_block(block_hash)
 
+        reserved_bytes = self._estimate_cache_payload_bytes(cache_data)
+        if not self._reserve_pending_write_bytes(reserved_bytes):
+            self._write_fence_queue_result(fence_id, dropped=True)
+            logger.warning(
+                "BlockDiskStore pending-write byte budget full "
+                "(%d bytes), skipping serialization",
+                self._max_pending_write_bytes,
+            )
+            return False
+
         hash_hex = block_hash.hex()
 
-        # Pre-serialize on the calling (main) thread.
+        payload: bytes
+        # Serialize to immutable memory on the calling/model-owning thread.
         try:
             tensors, dtype, num_layers = _serialize_block(cache_data)
             if num_layers == 0:
+                self._release_pending_write_bytes(reserved_bytes)
                 self._write_fence_queue_result(fence_id, failed=True)
                 return False
 
@@ -879,58 +1265,61 @@ class BlockDiskStore:
             # original-dtype restore remains as a no-op for new blocks and a
             # compatibility cast for blocks written by older builds.
             import numpy as np
-            needs_eval = []
             for k, v in tensors.items():
                 if isinstance(v, np.ndarray):
                     tensors[k] = mx.array(v)
-                    needs_eval.append(tensors[k])
 
             # Materialize all lazy MLX arrays on the calling thread.
             arrays_to_eval = [v for v in tensors.values() if isinstance(v, mx.array)]
             if arrays_to_eval:
                 mx.eval(*arrays_to_eval)  # noqa: S307 — mlx tensor materialization
 
-            # Write safetensors file on the main thread.
-            # mx.save_safetensors accesses Metal buffer memory internally,
-            # so it MUST run on the same thread as inference to avoid
-            # concurrent Metal command buffer assertions.
-            file_path = self._hash_to_path(hash_hex)
-            seq = self._tmp_seq
-            self._tmp_seq += 1
-            tmp_path = file_path.with_name(f"{file_path.stem}.{seq}.tmp.safetensors")
-            mx.save_safetensors(str(tmp_path), tensors)
+            payload = self._freeze_safetensors_bytes(tensors)
+            if not self._resize_pending_write_reservation(
+                reserved_bytes, len(payload)
+            ):
+                self._write_fence_queue_result(fence_id, dropped=True)
+                logger.warning(
+                    "BlockDiskStore frozen payload exceeded pending-write "
+                    "byte budget (%d bytes)",
+                    self._max_pending_write_bytes,
+                )
+                return False
+            reserved_bytes = len(payload)
         except Exception as e:
-            logger.debug(f"Pre-serialize/write failed for block {hash_hex[:12]}: {e}")
+            self._release_pending_write_bytes(reserved_bytes)
+            logger.debug(f"Pre-serialize failed for block {hash_hex[:12]}: {e}")
             self._write_fence_queue_result(fence_id, failed=True)
             return False
 
-        # Queue only the rename + DB update for the background thread.
-        # No MLX operations happen after this point.
-        try:
-            self._write_queue.put_nowait(
-                (
-                    block_hash,
-                    str(tmp_path),
-                    dtype,
-                    num_layers,
-                    token_count,
-                    fence_id,
-                )
+        # Queue only immutable bytes. No MLX object is reachable from the item.
+        enqueue_result = self._try_enqueue_write_item(
+            (
+                block_hash,
+                payload,
+                dtype,
+                num_layers,
+                token_count,
+                fence_id,
+                reserved_bytes,
             )
+        )
+        if enqueue_result == "queued":
             self._write_fence_queue_result(fence_id, block_hash=block_hash)
             if _cache_data_has_tq(cache_data):
                 with self._stats_lock:
                     self.tq_native_writes += 1
             return True
-        except queue.Full:
-            # Clean up the temp file since background won't process it
-            try:
-                Path(tmp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
-            self._write_fence_queue_result(fence_id, dropped=True)
+        self._release_pending_write_bytes(reserved_bytes)
+        self._write_fence_queue_result(fence_id, dropped=True)
+        if enqueue_result == "full":
             logger.warning("BlockDiskStore write queue full (1000), dropping block write")
-            return False
+        else:
+            logger.debug(
+                "BlockDiskStore rejected frozen block while writer was %s",
+                enqueue_result,
+            )
+        return False
 
     def wait_for_blocks(
         self,
@@ -997,7 +1386,7 @@ class BlockDiskStore:
         write_conn.execute("PRAGMA journal_mode=WAL")
 
         try:
-            while not self._stop_event.is_set():
+            while not self._stop_event.is_set() or not self._write_queue.empty():
                 # Collect a batch: block on the first item (with timeout so we
                 # can check the stop event), then drain any remaining items.
                 batch = []
@@ -1014,7 +1403,10 @@ class BlockDiskStore:
                     except queue.Empty:
                         break
 
-                self._process_write_batch(write_conn, batch)
+                try:
+                    self._process_write_batch(write_conn, batch)
+                finally:
+                    self._complete_write_items(len(batch))
         finally:
             write_conn.close()
 
@@ -1023,7 +1415,7 @@ class BlockDiskStore:
         write_conn: sqlite3.Connection,
         batch: List[Tuple[Any, ...]],
     ) -> None:
-        """Persist one drained batch and settle request fences after eviction."""
+        """Persist one drained batch and settle fences after aggregate eviction."""
         block_items = [
             item
             for item in batch
@@ -1031,58 +1423,157 @@ class BlockDiskStore:
             and not isinstance(item[0], str)
         ]
         with self._stats_lock:
-            self._write_inflight += len(block_items)
+            # Include metadata/fence commands as well as payload writes.  A
+            # dequeued access update is still active filesystem/index work;
+            # reporting inflight=0 before it commits makes durability/LRU
+            # waiters race the writer.
+            self._write_inflight += len(batch)
 
         fences_to_finalize: List[str] = []
+        net_payload_bytes = 0
+        new_block_hashes: list[bytes] = []
+        budget_failure_reason: str | None = None
         try:
-            for item in batch:
-                fence_id: Optional[str] = None
-                try:
-                    if item[0] == "__access__":
-                        _, hash_hex, ts = item
-                        self._update_access(write_conn, hash_hex, ts)
-                    elif item[0] == "__cleanup__":
-                        _, hash_hex, _ = item
-                        self._cleanup_entry(write_conn, hash_hex)
-                    elif item[0] == "__fence__":
-                        _, fence_id, _ = item
-                        fences_to_finalize.append(str(fence_id))
-                    else:
-                        (
-                            block_hash,
-                            tmp_path_str,
-                            dtype,
-                            num_layers,
-                            token_count,
-                            *metadata,
-                        ) = item
+            # Access/cleanup updates, final rename, and SQLite mutation share
+            # one publication lock. Root-global eviction therefore sees a
+            # stable set of finalized records and ordered LRU metadata.
+            with self.global_budget.exclusive_mutation_guard() as locked:
+                if not locked:
+                    for item in block_items:
                         fence_id = (
-                            str(metadata[0])
-                            if metadata and metadata[0] is not None
+                            str(item[5])
+                            if len(item) > 5 and item[5] is not None
                             else None
                         )
-                        self._write_block(
-                            write_conn,
-                            block_hash,
-                            tmp_path_str,
-                            dtype,
-                            num_layers,
-                            token_count,
-                        )
-                        self._write_fence_completion(fence_id, failed=False)
-                except Exception as e:
-                    if item and not isinstance(item[0], str):
                         self._write_fence_completion(fence_id, failed=True)
-                    h = item[0] if isinstance(item[0], str) else (
-                        item[0].hex()[:12] if isinstance(item[0], bytes) else "?"
+                    for item in batch:
+                        if item and item[0] == "__fence__":
+                            self._fail_write_fence(
+                                str(item[1]),
+                                "global block-cache publication lock unavailable",
+                            )
+                    return
+                metadata_before = self._index_physical_bytes()
+                for item in batch:
+                    fence_id: Optional[str] = None
+                    try:
+                        if item[0] == "__access__":
+                            _, hash_hex, ts = item
+                            self._update_access(write_conn, hash_hex, ts)
+                        elif item[0] == "__cleanup__":
+                            _, hash_hex, _ = item
+                            net_payload_bytes -= self._cleanup_entry(
+                                write_conn, hash_hex
+                            )
+                        elif item[0] == "__fence__":
+                            _, fence_id, _ = item
+                            fences_to_finalize.append(str(fence_id))
+                        else:
+                            (
+                                block_hash,
+                                payload,
+                                dtype,
+                                num_layers,
+                                token_count,
+                                *metadata,
+                            ) = item
+                            fence_id = (
+                                str(metadata[0])
+                                if metadata and metadata[0] is not None
+                                else None
+                            )
+                            written_bytes = self._write_block(
+                                write_conn,
+                                block_hash,
+                                payload,
+                                dtype,
+                                num_layers,
+                                token_count,
+                            )
+                            net_payload_bytes += written_bytes
+                            if written_bytes > 0:
+                                new_block_hashes.append(bytes(block_hash))
+                            self._write_fence_completion(fence_id, failed=False)
+                    except Exception as e:
+                        if item and not isinstance(item[0], str):
+                            self._write_fence_completion(fence_id, failed=True)
+                        h = item[0] if isinstance(item[0], str) else (
+                            item[0].hex()[:12] if isinstance(item[0], bytes) else "?"
+                        )
+                        logger.warning(f"Background writer error ({h}): {e}")
+                metadata_delta = self._index_physical_bytes() - metadata_before
+                with self._stats_lock:
+                    strict_reconcile = any(
+                        bool(
+                            self._write_fences.get(pending_fence_id, {}).get(
+                                "_strict_reconcile"
+                            )
+                        )
+                        for pending_fence_id in fences_to_finalize
                     )
-                    logger.warning(f"Background writer error ({h}): {e}")
+                try:
+                    global_result = (
+                        self.global_budget.account_finalized_write_locked(
+                            net_payload_bytes + metadata_delta,
+                            require_reconciled=strict_reconcile,
+                        )
+                    )
+                    if not global_result.accounted or not global_result.compliant:
+                        budget_failure_reason = (
+                            global_result.error
+                            or (
+                                "aggregate block-cache remains over budget "
+                                f"({global_result.bytes_after} > "
+                                f"{global_result.max_size_bytes})"
+                            )
+                        )
+                        for written_hash in new_block_hashes:
+                            self._cleanup_entry(
+                                write_conn,
+                                written_hash.hex(),
+                            )
+                        self._disable_global_budget_writes()
+                        # Rebuild physical truth after rollback; this is still
+                        # inside the same root-exclusive transaction.
+                        global_result = self.global_budget._enforce_locked()
+                except Exception as exc:
+                    for written_hash in new_block_hashes:
+                        try:
+                            self._cleanup_entry(
+                                write_conn,
+                                written_hash.hex(),
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        self.global_budget._enforce_locked()
+                    except Exception:
+                        pass
+                    self._disable_global_budget_writes()
+                    logger.warning("Background writer accounting error: %s", exc)
+                    for pending_fence_id in fences_to_finalize:
+                        self._fail_write_fence(pending_fence_id, str(exc))
+                    return
 
             try:
-                # Request fences are intentionally finalized only after this
-                # batch-wide eviction.  This prevents a capacity replacement
-                # from reporting a write as retained before the LRU trim.
-                self._maybe_evict(write_conn)
+                # Reserve exact new payload bytes plus the SQLite/WAL/SHM net
+                # change under the root ledger. Ordinary batches are O(1);
+                # strict request fences force a physical reconciliation before
+                # they may report completion.
+                if budget_failure_reason is not None:
+                    raise RuntimeError(budget_failure_reason)
+                if not global_result.accounted or not global_result.compliant:
+                    raise RuntimeError(
+                        global_result.error
+                        or (
+                            "aggregate block-cache remains over budget "
+                            f"({global_result.bytes_after} > "
+                            f"{global_result.max_size_bytes})"
+                        )
+                    )
+                if global_result.evicted_entries:
+                    with self._stats_lock:
+                        self.disk_evictions += global_result.evicted_entries
             except Exception as exc:
                 logger.warning("Background writer eviction error: %s", exc)
                 for fence_id in fences_to_finalize:
@@ -1091,6 +1582,7 @@ class BlockDiskStore:
 
             for fence_id in fences_to_finalize:
                 try:
+                    self._last_global_fence_result = global_result
                     self._finalize_write_fence(write_conn, fence_id)
                 except Exception as exc:
                     logger.warning(
@@ -1100,10 +1592,13 @@ class BlockDiskStore:
                     )
                     self._fail_write_fence(fence_id, str(exc))
         finally:
+            for item in block_items:
+                if len(item) > 6:
+                    self._release_pending_write_bytes(item[6])
             with self._stats_lock:
                 self._write_inflight = max(
                     0,
-                    self._write_inflight - len(block_items),
+                    self._write_inflight - len(batch),
                 )
 
     def _finalize_write_fence(
@@ -1112,6 +1607,11 @@ class BlockDiskStore:
         fence_id: str,
     ) -> None:
         """Record exact-hash retention after the containing batch's eviction."""
+        global_result = getattr(self, "_last_global_fence_result", None)
+        if global_result is None:
+            raise RuntimeError(
+                "global block-cache accounting result missing at fence finalization"
+            )
         with self._stats_lock:
             state = self._write_fences.get(fence_id)
             if state is None:
@@ -1139,6 +1639,14 @@ class BlockDiskStore:
             state["retained"] = retained
             state["post_eviction_complete"] = True
             state["completion_generation"] = self._write_completion_generation
+            state["global_accounting_generation"] = (
+                global_result.accounting_generation
+            )
+            state["global_reconciliation_generation"] = (
+                global_result.reconciliation_generation
+            )
+            state["global_bytes_after"] = global_result.bytes_after
+            state["global_max_size_bytes"] = global_result.max_size_bytes
             self._prune_write_fences_locked()
 
     def _fail_write_fence(self, fence_id: str, reason: str) -> None:
@@ -1162,7 +1670,7 @@ class BlockDiskStore:
         )
         conn.commit()
 
-    def _cleanup_entry(self, conn: sqlite3.Connection, hash_hex: str) -> None:
+    def _cleanup_entry(self, conn: sqlite3.Connection, hash_hex: str) -> int:
         """Remove a stale index entry and its file (background thread only)."""
         row = conn.execute(
             "SELECT file_name FROM blocks WHERE block_hash = ?", (hash_hex,)
@@ -1170,48 +1678,83 @@ class BlockDiskStore:
         if row:
             file_path = self.cache_dir / row[0]
             try:
+                removed_bytes = max(0, int(file_path.stat().st_size))
+            except FileNotFoundError:
+                removed_bytes = 0
+            try:
                 file_path.unlink(missing_ok=True)
             except Exception:
                 pass
             conn.execute("DELETE FROM blocks WHERE block_hash = ?", (hash_hex,))
             conn.commit()
+            return removed_bytes
+        return 0
+
+    @staticmethod
+    def _write_payload_file(path: Path, payload: bytes) -> None:
+        """Durably write an immutable payload (writer thread only)."""
+
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags, 0o600)
+        try:
+            view = memoryview(payload)
+            written = 0
+            while written < len(view):
+                count = os.write(fd, view[written:])
+                if count <= 0:
+                    raise OSError("short block-cache payload write")
+                written += count
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        fd = os.open(path, flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def _write_block(
         self,
         conn: sqlite3.Connection,
         block_hash: bytes,
-        tmp_path_str: str,
+        payload: bytes,
         dtype: str,
         num_layers: int,
         token_count: int,
-    ) -> None:
-        """Finalize a pre-written block file (called from background thread).
-
-        The safetensors file was already written by the main thread.
-        This method ONLY does: atomic rename + SQLite index update.
-        No MLX operations — prevents Metal command buffer crashes.
-        """
+    ) -> int:
+        """Write and publish a frozen block (background writer thread only)."""
         hash_hex = block_hash.hex()
-        tmp_path = Path(tmp_path_str)
 
         # Skip if already on disk
         exists = conn.execute(
             "SELECT 1 FROM blocks WHERE block_hash = ?", (hash_hex,)
         ).fetchone()
         if exists:
-            # Clean up the temp file — block already persisted
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            return
+            return 0
 
-        # Atomic rename from temp to final path
         file_path = self._hash_to_path(hash_hex)
         rel_path = file_path.relative_to(self.cache_dir)
+        seq = self._tmp_seq
+        self._tmp_seq += 1
+        tmp_path = file_path.with_name(
+            f"{file_path.stem}.{self.global_budget.lease_id}.{seq}."
+            f"{uuid.uuid4().hex}.tmp.safetensors"
+        )
 
         try:
-            os.rename(str(tmp_path), str(file_path))
+            self._write_payload_file(tmp_path, payload)
+            os.replace(str(tmp_path), str(file_path))
+            self._fsync_directory(file_path.parent)
         except Exception:
             # Clean up partial file
             try:
@@ -1239,51 +1782,22 @@ class BlockDiskStore:
             f"Disk cache write: {hash_hex[:12]} ({dtype}, {num_layers} layers, "
             f"{file_size / 1024:.1f}KB, {token_count} tokens)"
         )
+        return max(0, int(file_size))
 
-    # =========================================================================
-    # Eviction
-    # =========================================================================
-
-    def _maybe_evict(self, conn: sqlite3.Connection) -> None:
-        """Evict LRU blocks if total disk usage exceeds max."""
-        if self.max_size_bytes <= 0:
-            return
-
-        total = conn.execute(
-            "SELECT COALESCE(SUM(file_size), 0) FROM blocks"
-        ).fetchone()[0]
-
-        if total <= self.max_size_bytes:
-            return
-
-        target = int(self.max_size_bytes * 0.8)  # Free down to 80%
-        rows = conn.execute(
-            "SELECT block_hash, file_name, file_size FROM blocks "
-            "ORDER BY last_accessed ASC"
-        ).fetchall()
-
-        evicted = 0
-        for hash_hex, file_name, file_size in rows:
-            if total <= target:
-                break
-            file_path = self.cache_dir / file_name
+    def _index_physical_bytes(self) -> int:
+        """Return physical bytes for this namespace's SQLite index files."""
+        total = 0
+        for path in (
+            self._db_path,
+            Path(f"{self._db_path}-wal"),
+            Path(f"{self._db_path}-shm"),
+            Path(f"{self._db_path}-journal"),
+        ):
             try:
-                file_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            conn.execute("DELETE FROM blocks WHERE block_hash = ?", (hash_hex,))
-            total -= file_size
-            evicted += 1
-
-        conn.commit()
-
-        if evicted:
-            with self._stats_lock:
-                self.disk_evictions += evicted
-            logger.info(
-                f"Disk cache eviction: removed {evicted} blocks "
-                f"(now {total / 1024**3:.2f}GB)"
-            )
+                total += max(0, int(path.stat().st_size))
+            except FileNotFoundError:
+                continue
+        return total
 
     # =========================================================================
     # Management
@@ -1291,16 +1805,22 @@ class BlockDiskStore:
 
     def get_stats(self) -> Dict[str, Any]:
         """Return cache statistics."""
-        conn = sqlite3.connect(str(self._db_path), timeout=1.0)
-        try:
-            row = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(file_size), 0), "
-                "COALESCE(SUM(access_count), 0), "
-                "COALESCE(SUM(num_tokens), 0) FROM blocks"
-            ).fetchone()
-        finally:
-            conn.close()
+        # Fence completion and the SQLite row it certifies must be one coherent
+        # observation.  Querying first and taking ``_stats_lock`` afterward can
+        # race a writer commit: callers would see blocks_on_disk=0 beside a
+        # terminal successful fence.  Writers commit SQLite before taking this
+        # lock, so reading the index while holding it is deadlock-safe and makes
+        # a completed fence imply the matching row is already visible.
         with self._stats_lock:
+            conn = sqlite3.connect(str(self._db_path), timeout=1.0)
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(file_size), 0), "
+                    "COALESCE(SUM(access_count), 0), "
+                    "COALESCE(SUM(num_tokens), 0) FROM blocks"
+                ).fetchone()
+            finally:
+                conn.close()
             recent_write_fences = []
             for state in self._write_fences.values():
                 recent_write_fences.append(
@@ -1310,7 +1830,7 @@ class BlockDiskStore:
                         if not key.startswith("_")
                     }
                 )
-            return {
+            stats = {
                 "blocks_on_disk": row[0],
                 "disk_size_bytes": row[1],
                 "disk_size_gb": round(row[1] / 1024**3, 3),
@@ -1327,11 +1847,151 @@ class BlockDiskStore:
                 "write_pipeline": {
                     "queue_depth": self._write_queue.qsize(),
                     "inflight": self._write_inflight,
+                    "active_producers": self._active_write_producers,
+                    "pending_items": self._pending_write_items,
+                    "accepting_writes": self._accepting_writes,
+                    "pending_bytes": self._pending_write_bytes,
+                    "max_pending_bytes": self._max_pending_write_bytes,
+                    "byte_budget_drops": self._pending_write_byte_drops,
                     "writer_alive": self._writer_thread.is_alive(),
                     "completion_generation": self._write_completion_generation,
                     "recent_fences": recent_write_fences,
                 },
             }
+        # Never hold ``_stats_lock`` while taking the process-shared root lock:
+        # the background writer takes those locks in the opposite phase order.
+        global_health = self.global_budget.refresh_health()
+        stats["global_budget"] = {
+            "root": str(self.global_cache_root),
+            "max_size_bytes": global_health.max_size_bytes,
+            "bytes_after": global_health.bytes_after,
+            "compliant": global_health.compliant,
+            "accounted": global_health.accounted,
+            "scan_performed": global_health.scan_performed,
+            "evicted_entries": global_health.evicted_entries,
+            "evicted_bytes": global_health.evicted_bytes,
+            "accounting_generation": global_health.accounting_generation,
+            "reconciliation_generation": (
+                global_health.reconciliation_generation
+            ),
+        }
+        return stats
+
+    def inspect_block_chain(self, block_hashes: list[bytes]) -> dict[str, Any]:
+        """Inspect exact chain membership without loading blocks or touching LRU.
+
+        This is the source-owned observation path used by the live cache gate.
+        Callers provide the already-derived chain hashes internally; neither the
+        hashes nor index file names are returned.  The dedicated SQLite
+        connection is opened read-only and query-only, and filesystem checks
+        reject symlinks or paths that are not lexically contained by the cache
+        directory.  In particular, this method must not call ``has_block`` or
+        ``read_block`` because the latter intentionally updates access metadata.
+        """
+        normalized: list[bytes] = []
+        for value in block_hashes:
+            if not isinstance(value, (bytes, bytearray, memoryview)):
+                raise TypeError("block hashes must be bytes-like")
+            block_hash = bytes(value)
+            if len(block_hash) != 32:
+                raise ValueError("block hashes must be 32-byte SHA-256 values")
+            normalized.append(block_hash)
+        if len(normalized) > 16_384:
+            raise ValueError("block-chain inspection exceeds the bounded limit")
+
+        database_uri = (
+            f"file:{quote(str(self._db_path), safe='/')}?mode=ro"
+        )
+        conn = sqlite3.connect(
+            database_uri,
+            timeout=1.0,
+            uri=True,
+        )
+        cache_root = self.cache_dir.resolve(strict=True)
+        try:
+            conn.execute("PRAGMA query_only = ON")
+            total_size, total_entries = conn.execute(
+                "SELECT COALESCE(SUM(file_size), 0), COUNT(*) FROM blocks"
+            ).fetchone()
+            rows: list[dict[str, Any]] = []
+            for ordinal, block_hash in enumerate(normalized):
+                row = conn.execute(
+                    "SELECT file_name, num_tokens, file_size, created_at, "
+                    "last_accessed, access_count FROM blocks "
+                    "WHERE block_hash = ?",
+                    (block_hash.hex(),),
+                ).fetchone()
+                if row is None:
+                    rows.append(
+                        {
+                            "ordinal": ordinal,
+                            "indexed": False,
+                            "readable": False,
+                            "num_tokens": 0,
+                            "file_size_bytes": 0,
+                            "created_at_ns": 0,
+                            "last_accessed_ns": 0,
+                            "access_count": 0,
+                        }
+                    )
+                    continue
+
+                (
+                    file_name,
+                    num_tokens,
+                    file_size,
+                    created_at,
+                    last_accessed,
+                    access_count,
+                ) = row
+                relative_path = Path(str(file_name))
+                lexically_safe = (
+                    not relative_path.is_absolute()
+                    and ".." not in relative_path.parts
+                )
+                file_path = self.cache_dir / relative_path
+                readable = False
+                if lexically_safe and not file_path.is_symlink():
+                    try:
+                        resolved_file = file_path.resolve(strict=True)
+                        stat_result = resolved_file.stat()
+                        readable = bool(
+                            resolved_file.is_relative_to(cache_root)
+                            and resolved_file.is_file()
+                            and stat_result.st_size == max(0, int(file_size or 0))
+                        )
+                    except OSError:
+                        readable = False
+                rows.append(
+                    {
+                        "ordinal": ordinal,
+                        "indexed": True,
+                        "readable": readable,
+                        "num_tokens": max(0, int(num_tokens or 0)),
+                        "file_size_bytes": max(0, int(file_size or 0)),
+                        "created_at_ns": max(
+                            0,
+                            int(float(created_at or 0.0) * 1_000_000_000),
+                        ),
+                        "last_accessed_ns": max(
+                            0,
+                            int(float(last_accessed or 0.0) * 1_000_000_000),
+                        ),
+                        "access_count": max(0, int(access_count or 0)),
+                    }
+                )
+        finally:
+            conn.close()
+
+        return {
+            "schema": "vmlx-block-disk-chain-inspection-v1",
+            "access_metadata_mutated": False,
+            "expected_blocks": len(normalized),
+            "store_total_entries": max(0, int(total_entries or 0)),
+            "store_total_size_bytes": max(0, int(total_size or 0)),
+            "store_max_size_bytes": max(0, int(self.max_size_bytes or 0)),
+            "blocks": rows,
+        }
 
     def partial_token_counts(self, block_size: int) -> List[int]:
         """Return persisted terminal block sizes smaller than ``block_size``.
@@ -1356,68 +2016,178 @@ class BlockDiskStore:
     def clear(self) -> None:
         """Clear all cached blocks from disk."""
         import shutil
-        # Drain the write queue so the background writer doesn't write
-        # blocks we're about to delete
-        drained_fences: set[str] = set()
-        while not self._write_queue.empty():
-            try:
-                item = self._write_queue.get_nowait()
-            except queue.Empty:
-                break
-            if not item:
-                continue
-            if item[0] == "__fence__" and len(item) > 1:
-                drained_fences.add(str(item[1]))
-            elif not isinstance(item[0], str) and len(item) > 5 and item[5] is not None:
-                drained_fences.add(str(item[5]))
-        if self.blocks_dir.exists():
-            shutil.rmtree(self.blocks_dir)
-            self.blocks_dir.mkdir(parents=True)
-        conn = sqlite3.connect(str(self._db_path), timeout=5.0)
-        try:
-            conn.execute("DELETE FROM blocks")
-            conn.commit()
-        finally:
-            conn.close()
-        with self._stats_lock:
-            self.tq_native_writes = 0
-            self.tq_native_hits = 0
-            for fence_id, state in self._write_fences.items():
-                if state.get("sealed") and not state.get("post_eviction_complete"):
-                    drained_fences.add(fence_id)
-        for fence_id in drained_fences:
-            self._fail_write_fence(fence_id, "disk cache cleared before fence settled")
-        logger.info("Disk cache cleared")
+        deadline = time.monotonic() + self._writer_shutdown_timeout_seconds
+        with self._write_lifecycle:
+            while self._clear_in_progress:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("another block-disk clear did not quiesce")
+                self._write_lifecycle.wait(timeout=remaining)
+            if self._shutdown_started:
+                raise RuntimeError("block-disk store is shutting down")
+            self._clear_in_progress = True
+            self._accepting_writes = False
 
-    def shutdown(self) -> None:
-        """Stop background writer and flush pending writes."""
-        self._stop_event.set()
-        self._writer_thread.join(timeout=5.0)
-        if self._writer_thread.is_alive():
-            logger.warning("BlockDiskStore writer thread did not stop in time, skipping flush")
-            return
-        # Flush remaining (safe because writer thread has stopped)
-        remaining = []
-        while not self._write_queue.empty():
-            try:
-                remaining.append(self._write_queue.get_nowait())
-            except queue.Empty:
-                break
-        if remaining:
-            flush_conn = sqlite3.connect(str(self._db_path), timeout=5.0)
-            flush_conn.execute("PRAGMA journal_mode=WAL")
-            try:
-                self._process_write_batch(flush_conn, remaining)
-            finally:
-                flush_conn.close()
-        # Close thread-local read connection (current thread only)
         try:
-            conn = getattr(self._thread_local, 'read_conn', None)
+            with self._write_lifecycle:
+                while (
+                    self._active_write_producers > 0
+                    or self._pending_write_items > 0
+                ):
+                    if (
+                        self._pending_write_items > 0
+                        and not self._writer_thread.is_alive()
+                    ):
+                        raise RuntimeError(
+                            "block-disk writer stopped before clear quiesced"
+                        )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            "block-disk writes did not quiesce before clear"
+                        )
+                    self._write_lifecycle.wait(timeout=remaining)
+
+            with self.global_budget.exclusive_mutation_guard() as locked:
+                if not locked:
+                    raise OSError(
+                        "global block-cache exclusive mutation lock unavailable"
+                    )
+                if self.blocks_dir.exists():
+                    shutil.rmtree(self.blocks_dir)
+                    self.blocks_dir.mkdir(parents=True)
+                conn = sqlite3.connect(str(self._db_path), timeout=5.0)
+                try:
+                    conn.execute("DELETE FROM blocks")
+                    conn.commit()
+                finally:
+                    conn.close()
+                # Reconcile before releasing the same exclusive transaction.
+                # SQLite page reuse means the byte delta cannot be inferred from
+                # deleted logical rows, and another process must not publish in the
+                # gap between physical deletion and the accounting rebuild.
+                refreshed = self.global_budget.account_finalized_write_locked(-1)
+            self._global_budget_write_enabled = bool(
+                refreshed is not None
+                and refreshed.accounted
+                and refreshed.compliant
+            )
+            unsettled_fences: set[str] = set()
+            with self._stats_lock:
+                self.tq_native_writes = 0
+                self.tq_native_hits = 0
+                for fence_id, state in self._write_fences.items():
+                    if state.get("sealed") and not state.get("post_eviction_complete"):
+                        unsettled_fences.add(fence_id)
+            for fence_id in unsettled_fences:
+                self._fail_write_fence(
+                    fence_id,
+                    "disk cache cleared before fence settled",
+                )
+            logger.info("Disk cache cleared")
+        finally:
+            with self._write_lifecycle:
+                self._clear_in_progress = False
+                if not self._shutdown_started:
+                    self._accepting_writes = True
+                self._write_lifecycle.notify_all()
+
+    def _close_current_read_connection(self) -> None:
+        try:
+            conn = getattr(self._thread_local, "read_conn", None)
             if conn is not None:
                 conn.close()
                 self._thread_local.read_conn = None
         except Exception:
             pass
+
+    def _finalize_shutdown_after_writer_stop(self) -> None:
+        """Flush queued publications, then release the cap owner exactly once."""
+
+        with self._shutdown_finalize_lock:
+            if self._shutdown_finalized or self._writer_thread.is_alive():
+                return
+            remaining = []
+            while not self._write_queue.empty():
+                try:
+                    remaining.append(self._write_queue.get_nowait())
+                except queue.Empty:
+                    break
+            try:
+                if remaining:
+                    flush_conn = sqlite3.connect(str(self._db_path), timeout=5.0)
+                    flush_conn.execute("PRAGMA journal_mode=WAL")
+                    try:
+                        self._process_write_batch(flush_conn, remaining)
+                    finally:
+                        flush_conn.close()
+                        self._complete_write_items(len(remaining))
+            except Exception as exc:
+                logger.warning(
+                    "BlockDiskStore delayed shutdown flush failed: %s",
+                    exc,
+                )
+                # Any unfinalized temp remains owner-tagged and is protected
+                # until this lease closes, then becomes normal orphan cleanup.
+            self._close_current_read_connection()
+            if self.global_budget.close():
+                self._shutdown_finalized = True
+            else:
+                logger.warning(
+                    "BlockDiskStore stopped but its aggregate budget lease "
+                    "could not be removed; atexit will retry"
+                )
+
+    def _wait_for_writer_and_finalize_shutdown(self) -> None:
+        with self._write_lifecycle:
+            while self._active_write_producers > 0 or self._clear_in_progress:
+                self._write_lifecycle.wait()
+            self._stop_event.set()
+        self._writer_thread.join()
+        self._finalize_shutdown_after_writer_stop()
+
+    def shutdown(self) -> None:
+        """Stop the writer; defer lease release if its bounded join times out."""
+
+        with self._shutdown_finalize_lock:
+            if self._shutdown_finalized:
+                return
+        deadline = time.monotonic() + self._writer_shutdown_timeout_seconds
+        with self._write_lifecycle:
+            self._shutdown_started = True
+            self._accepting_writes = False
+            while self._active_write_producers > 0 or self._clear_in_progress:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._write_lifecycle.wait(timeout=remaining)
+            producers_quiesced = (
+                self._active_write_producers == 0 and not self._clear_in_progress
+            )
+            if producers_quiesced:
+                self._stop_event.set()
+        remaining_timeout = max(0.0, deadline - time.monotonic())
+        if producers_quiesced:
+            self._writer_thread.join(timeout=remaining_timeout)
+        self._close_current_read_connection()
+        if not producers_quiesced or self._writer_thread.is_alive():
+            logger.warning(
+                "BlockDiskStore producers/writer did not stop in time; scheduling "
+                "delayed drain and lease release"
+            )
+            with self._shutdown_finalize_lock:
+                if (
+                    self._delayed_shutdown_thread is None
+                    or not self._delayed_shutdown_thread.is_alive()
+                ):
+                    self._delayed_shutdown_thread = threading.Thread(
+                        target=self._wait_for_writer_and_finalize_shutdown,
+                        daemon=True,
+                        name="block-disk-shutdown",
+                    )
+                    self._delayed_shutdown_thread.start()
+            return
+        self._finalize_shutdown_after_writer_stop()
 
 
 # =============================================================================
@@ -1554,6 +2324,24 @@ def _serialize_block(
                     if hasattr(sk, "dtype"):
                         meta.setdefault("__orig_dtypes__", {})[f"{i}_sub_{j}"] = str(sk.dtype)
                     sub_count += 1
+                elif sub_tag == "quantized_kv":
+                    _, skt, svt, squant_meta = sub_entry
+                    if len(skt) != 3 or len(svt) != 3:
+                        raise ValueError(
+                            "CacheList quantized_kv entries require "
+                            "3-component key/value tuples"
+                        )
+                    tensors[f"layer_{i}_sub_{j}_keys_data"] = skt[0]
+                    tensors[f"layer_{i}_sub_{j}_keys_scales"] = skt[1]
+                    tensors[f"layer_{i}_sub_{j}_keys_zeros"] = skt[2]
+                    tensors[f"layer_{i}_sub_{j}_values_data"] = svt[0]
+                    tensors[f"layer_{i}_sub_{j}_values_scales"] = svt[1]
+                    tensors[f"layer_{i}_sub_{j}_values_zeros"] = svt[2]
+                    meta.setdefault(str(i), {}).setdefault("subs", {})[str(j)] = {
+                        "type": "quantized_kv",
+                        "quant_meta": _json_safe(squant_meta),
+                    }
+                    sub_count += 1
                 elif sub_tag == "turboquant_kv":
                     _, sck, scv, stq = sub_entry
                     tensors[f"layer_{i}_sub_{j}_tq_ck_indices_packed"] = sck.indices_packed
@@ -1583,6 +2371,10 @@ def _serialize_block(
                         "class_name": sub_cls, "meta": sub_meta
                     }
                     sub_count += 1
+                else:
+                    raise ValueError(
+                        f"unsupported CacheList sub-cache tag {sub_tag!r}"
+                    )
             meta.setdefault(str(i), {})["sub_count"] = len(sub_slices)
 
         elif tag == "zaya_cca":
@@ -1880,6 +2672,32 @@ def _deserialize_block(
                             sk = sk.astype(target)
                             sv = sv.astype(target)
                     sub_slices.append(("kv", sk, sv))
+                elif subs_meta.get(str(j), {}).get("type") == "quantized_kv":
+                    try:
+                        keys_tuple = (
+                            data[f"layer_{i}_sub_{j}_keys_data"],
+                            data[f"layer_{i}_sub_{j}_keys_scales"],
+                            data[f"layer_{i}_sub_{j}_keys_zeros"],
+                        )
+                        values_tuple = (
+                            data[f"layer_{i}_sub_{j}_values_data"],
+                            data[f"layer_{i}_sub_{j}_values_scales"],
+                            data[f"layer_{i}_sub_{j}_values_zeros"],
+                        )
+                        sub_slices.append((
+                            "quantized_kv",
+                            keys_tuple,
+                            values_tuple,
+                            subs_meta.get(str(j), {}).get("quant_meta", ()),
+                        ))
+                    except KeyError as exc:
+                        logger.warning(
+                            "Quantized CacheList layer %d/%d is incomplete: %s",
+                            i,
+                            j,
+                            exc,
+                        )
+                        return []
                 elif subs_meta.get(str(j), {}).get("type") == "turboquant_kv":
                     try:
                         sub_slices.append(
@@ -2020,11 +2838,7 @@ def _infer_layer_type(data: Dict[str, Any], layer_idx: int, fallback_dtype: str)
     has_max_size = f"{prefix}max_size" in data
     has_rotating_pending = f"{prefix}rotating_pending" in data
     has_keys = f"{prefix}keys" in data
-    has_sub = (
-        f"{prefix}sub_0_keys" in data
-        or f"{prefix}sub_0_cumulative_0" in data
-        or f"{prefix}sub_0_tq_ck_indices_packed" in data
-    )
+    has_sub = any(key.startswith(f"{prefix}sub_") for key in data)
 
     if has_sub:
         return "cache_list"

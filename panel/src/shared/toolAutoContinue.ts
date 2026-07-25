@@ -182,10 +182,6 @@ export function requestedExactFinalToolNames(
   return [...requested]
 }
 
-export function requestsDirectAnswerAfterSingleTool(text: string): boolean {
-  return requestedExactFinalToolNames(text).length === 1
-}
-
 function containsExplicitToolRequest(text: string): boolean {
   const explicitToolRequest =
     /\b(?:call|use|invoke|run|execute)\s+(?:the\s+)?(?:built[- ]in\s+)?`?[a-z][\w-]*`?(?:\s+(?:tool|function))?\b/i

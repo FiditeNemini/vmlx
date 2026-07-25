@@ -321,6 +321,12 @@ class BatchedEngine(BaseEngine):
         self._engine = None  # AsyncEngineCore for LLM
         self._mllm_scheduler = None  # MLLMScheduler for MLLM
         self._mllm_instance = None  # MLXMultimodalLM instance
+        # The model loader and every scheduler step share this executor because
+        # MLX streams are thread-local.  BatchedEngine creates it, so
+        # BatchedEngine must also shut it down.  Keeping the worker alive after
+        # deep sleep retains that thread's Metal stream and a model-sized
+        # allocation even after every Python model reference is cleared.
+        self._step_executor = None
         self._loaded = False
 
     @property
@@ -959,6 +965,7 @@ class BatchedEngine(BaseEngine):
         loader_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="mllm-worker"
         )
+        self._step_executor = loader_executor
         self._mllm_instance = MLXMultimodalLM(
             self._model_name,
             trust_remote_code=self._trust_remote_code,
@@ -1091,6 +1098,7 @@ class BatchedEngine(BaseEngine):
         loader_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="llm-worker"
         )
+        self._step_executor = loader_executor
         loop = asyncio.get_running_loop()
 
         # GH#138/#156: only explicit `--kv-cache-quantization {q4,q8,none}`
@@ -1234,26 +1242,48 @@ class BatchedEngine(BaseEngine):
 
         await self._engine.engine.start()
 
+    def _shutdown_step_executor(self) -> None:
+        """Release the loader/step worker and its thread-local MLX state."""
+        executor = self._step_executor
+        if executor is None:
+            return
+        self._step_executor = None
+
+        # ``server._cli_args`` intentionally retains SchedulerConfig across
+        # deep sleep so wake can reconstruct the same settings.  Never let that
+        # durable config retain a stopped engine's executor/thread.
+        scheduler_config = self._scheduler_config
+        if (
+            scheduler_config is not None
+            and getattr(scheduler_config, "step_executor", None) is executor
+        ):
+            scheduler_config.step_executor = None
+
+        executor.shutdown(wait=True, cancel_futures=True)
+        logger.info("BatchedEngine loader/step executor shut down")
+
     async def stop(self) -> None:
         """Stop the engine and cleanup resources."""
-        if self._mllm_scheduler:
-            await self._mllm_scheduler.stop()
+        try:
+            if self._mllm_scheduler:
+                await self._mllm_scheduler.stop()
+
+            if self._engine:
+                await self._engine.stop()
+                # close() handles scheduler.shutdown() + deep_reset() + collector cleanup.
+                # stop() already called scheduler.shutdown(), but close() is idempotent
+                # and handles additional cleanup (model ownership, deep_reset).
+                self._engine.engine.close()
+        finally:
             self._mllm_scheduler = None
-
-        if self._engine:
-            await self._engine.stop()
-            # close() handles scheduler.shutdown() + deep_reset() + collector cleanup.
-            # stop() already called scheduler.shutdown(), but close() is idempotent
-            # and handles additional cleanup (model ownership, deep_reset).
-            self._engine.engine.close()
             self._engine = None
-
-        self._model = None
-        self._tokenizer = None
-        self._processor = None
-        self._mllm_instance = None
-        self._loaded = False
-        logger.info("BatchedEngine stopped")
+            self._model = None
+            self._tokenizer = None
+            self._processor = None
+            self._mllm_instance = None
+            self._loaded = False
+            self._shutdown_step_executor()
+            logger.info("BatchedEngine stopped")
 
     def _inject_fallback_chat_template(self, tokenizer) -> str | None:
         """Best-effort attach a chat_template to a tokenizer that's missing one.

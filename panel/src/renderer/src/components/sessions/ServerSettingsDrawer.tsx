@@ -35,6 +35,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
   const [detectedUsePagedCache, setDetectedUsePagedCache] = useState<boolean | undefined>(undefined)
   const [detectedCacheSubtype, setDetectedCacheSubtype] = useState<string | undefined>()
   const [detectedFamily, setDetectedFamily] = useState<string | undefined>()
+  const [detectedArchitectureHints, setDetectedArchitectureHints] = useState<Record<string, string | number | boolean> | undefined>()
   const [detectedToolParser, setDetectedToolParser] = useState<string | undefined>()
   const [detectedReasoningParser, setDetectedReasoningParser] = useState<string | undefined>()
   const [detectedEnableAutoToolChoice, setDetectedEnableAutoToolChoice] = useState<boolean | undefined>()
@@ -53,6 +54,23 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
   useEffect(() => {
     let active = true
     resetRequestRef.current += 1
+    // A replacement session must never inherit the previous model's async
+    // detection while the new lookup is in flight. In particular, stale
+    // Laguna architecture hints would incorrectly disable JIT controls for an
+    // unrelated model.
+    setDetectedCacheType('kv')
+    setDetectedUsePagedCache(undefined)
+    setDetectedCacheSubtype(undefined)
+    setDetectedFamily(undefined)
+    setDetectedArchitectureHints(undefined)
+    setDetectedToolParser(undefined)
+    setDetectedReasoningParser(undefined)
+    setDetectedEnableAutoToolChoice(undefined)
+    setDetectedIsTurboQuant(false)
+    setDetectedIsMultimodal(false)
+    setDetectedForceTextOnly(false)
+    setDetectedMaxContext(undefined)
+    setDetectedNativeMtp(undefined)
     const load = async () => {
       let base: SessionConfig
       try {
@@ -84,6 +102,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         if (det?.cacheType) setDetectedCacheType(det.cacheType)
         setDetectedUsePagedCache(det?.usePagedCache)
         setDetectedCacheSubtype(det?.cacheSubtype)
+        setDetectedArchitectureHints(det?.architectureHints)
         if (det?.family && det.family !== 'unknown') setDetectedFamily(det.family)
         else setDetectedFamily(undefined)
         setDetectedToolParser(det?.toolParser)
@@ -102,6 +121,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           setDetectedReasoningParser(undefined)
           setDetectedEnableAutoToolChoice(undefined)
           setDetectedCacheSubtype(undefined)
+          setDetectedArchitectureHints(undefined)
         }
       }
     }
@@ -252,6 +272,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           setDetectedReasoningParser(detected.reasoningParser)
           setDetectedEnableAutoToolChoice(detected.enableAutoToolChoice)
           setDetectedCacheSubtype(detected.cacheSubtype)
+          setDetectedArchitectureHints(detected.architectureHints)
           setDetectedIsTurboQuant(!!detected.isTurboQuant)
           setDetectedIsMultimodal(!!detected.isMultimodal)
           setDetectedForceTextOnly(!!detected.forceTextOnly)
@@ -261,6 +282,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           setDetectedReasoningParser(undefined)
           setDetectedEnableAutoToolChoice(undefined)
           setDetectedCacheSubtype(undefined)
+          setDetectedArchitectureHints(undefined)
           setDetectedIsTurboQuant(false)
           setDetectedIsMultimodal(false)
           setDetectedForceTextOnly(false)
@@ -272,6 +294,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         setDetectedReasoningParser(undefined)
         setDetectedEnableAutoToolChoice(undefined)
         setDetectedCacheSubtype(undefined)
+        setDetectedArchitectureHints(undefined)
         setDetectedIsTurboQuant(false)
         setDetectedIsMultimodal(false)
         setDetectedForceTextOnly(false)
@@ -371,7 +394,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             />
           </div>
         ) : (
-          <SessionConfigForm config={config} onChange={handleChange} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedToolParser={detectedToolParser} detectedReasoningParser={detectedReasoningParser} detectedEnableAutoToolChoice={detectedEnableAutoToolChoice} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} imageMode={(() => { try { return JSON.parse(session.config || '{}').imageMode } catch { return undefined } })()} sessionId={session.id} modelIdentity={`${session.modelName || ''} ${session.modelPath}`} />
+          <SessionConfigForm config={config} onChange={handleChange} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedArchitectureHints={detectedArchitectureHints} detectedToolParser={detectedToolParser} detectedReasoningParser={detectedReasoningParser} detectedEnableAutoToolChoice={detectedEnableAutoToolChoice} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} imageMode={(() => { try { return JSON.parse(session.config || '{}').imageMode } catch { return undefined } })()} sessionId={session.id} modelIdentity={`${session.modelName || ''} ${session.modelPath}`} />
         )}
       </div>
 

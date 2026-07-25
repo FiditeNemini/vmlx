@@ -1057,6 +1057,7 @@ class ResponsesObject(BaseModel):
     ] = Field(default_factory=list)
     usage: ResponsesUsage = Field(default_factory=ResponsesUsage)
     previous_response_id: str | None = None
+    incomplete_details: dict[str, str] | None = None
     error: dict | None = None
     # Non-fatal warnings surfaced to the client. Set when the response is
     # technically valid but a chain/coherence/cache-prefix risk applies — e.g.,

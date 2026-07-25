@@ -3,6 +3,11 @@ import { ArrowLeft, ChevronRight } from 'lucide-react'
 import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG, commitActiveSettingsInput } from './SessionConfigForm'
 import { useTranslation } from '../../i18n'
 import { resolveCacheLaunchPolicy } from '../../../../shared/cacheControlPolicy'
+import {
+  DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV,
+  isLagunaMixedSwaTurboQuantEffective,
+  shouldDisableLagunaJitDefault,
+} from '../../../../shared/lagunaCachePolicy'
 import { buildMcpPolicyArgs } from '../../../../shared/mcpPolicy'
 import { resolveEffectiveReasoningParser } from '../../../../shared/reasoningParserAliases'
 import { resolveEffectiveToolParser } from '../../../../shared/toolParserAliases'
@@ -356,7 +361,7 @@ function filterAdditionalArgs(raw: string | undefined, blockedFlags: Set<string>
 function buildCommandPreview(
   modelPath: string,
   config: SessionConfig,
-  detected?: { toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; cacheType?: string; cacheSubtype?: string; family?: string; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; blockedReason?: string } } | null
+  detected?: { toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; cacheType?: string; cacheSubtype?: string; family?: string; architectureHints?: Record<string, string | number | boolean>; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; blockedReason?: string } } | null
 ): string {
   const parts = ['vmlx-engine serve', modelPath]
   const requestedDistributed = !!(config as any).distributedEnabled
@@ -395,7 +400,28 @@ function buildCommandPreview(
   const subtypePagedCacheActive = cacheSubtypeRequiresPaged(detected?.cacheSubtype)
   const effectiveDistributed = requestedDistributed && !dsv4Active
   const effectiveFlashMoe = requestedFlashMoe && !effectiveDistributed && !dsv4Active
-  const effectiveEnableJit = !!config.enableJit && !isVLM && !effectiveFlashMoe && !effectiveDistributed && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !hybridCacheActive
+  const lagunaMixedSwaTurboQuantActive = isLagunaMixedSwaTurboQuantEffective({
+    detected,
+    kvCacheQuantization: config.kvCacheQuantization,
+    explicitKvCacheQuantizationApplied:
+      config.continuousBatching !== false &&
+      config.enablePrefixCache !== false &&
+      !!config.kvCacheQuantization &&
+      config.kvCacheQuantization !== 'auto',
+  })
+  const effectiveEnableJit = !!config.enableJit && !isVLM && !effectiveFlashMoe && !effectiveDistributed && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !lagunaMixedSwaTurboQuantActive && !hybridCacheActive
+  if (shouldDisableLagunaJitDefault({
+    detected,
+    kvCacheQuantization: config.kvCacheQuantization,
+    explicitKvCacheQuantizationApplied:
+      config.continuousBatching !== false &&
+      config.enablePrefixCache !== false &&
+      !!config.kvCacheQuantization &&
+      config.kvCacheQuantization !== 'auto',
+    enableJitRequested: !!config.enableJit,
+  })) {
+    parts[0] = `${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1 vmlx-engine serve`
+  }
 
   // Server settings
   parts.push('--host', config.host)
@@ -676,7 +702,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
   const [restarting, setRestarting] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [showPreview, setShowPreview] = useState(false)
-  const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; maxContextLength?: number; dsv4PoolQuantDefault?: boolean; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; blockedReason?: string } } | null>(null)
+  const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; architectureHints?: Record<string, string | number | boolean>; maxContextLength?: number; dsv4PoolQuantDefault?: boolean; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; blockedReason?: string } } | null>(null)
   const sessionIdRef = useRef(sessionId)
   const resetRequestRef = useRef(0)
   sessionIdRef.current = sessionId
@@ -949,7 +975,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
         )}
 
         {/* Config Form */}
-        <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedConfig?.cacheType} detectedUsePagedCache={detectedConfig?.usePagedCache} detectedCacheSubtype={detectedConfig?.cacheSubtype} detectedFamily={detectedConfig?.family} detectedToolParser={detectedConfig?.toolParser} detectedReasoningParser={detectedConfig?.reasoningParser} detectedEnableAutoToolChoice={detectedConfig?.enableAutoToolChoice} detectedIsTurboQuant={detectedConfig?.isTurboQuant} detectedIsMultimodal={detectedConfig?.isMultimodal} detectedForceTextOnly={detectedConfig?.forceTextOnly} detectedMaxContext={detectedConfig?.maxContextLength} detectedNativeMtp={(detectedConfig as any)?.nativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} sessionId={sessionId} modelIdentity={`${session.modelName || ''} ${session.modelPath}`} />
+        <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedConfig?.cacheType} detectedUsePagedCache={detectedConfig?.usePagedCache} detectedCacheSubtype={detectedConfig?.cacheSubtype} detectedFamily={detectedConfig?.family} detectedArchitectureHints={detectedConfig?.architectureHints} detectedToolParser={detectedConfig?.toolParser} detectedReasoningParser={detectedConfig?.reasoningParser} detectedEnableAutoToolChoice={detectedConfig?.enableAutoToolChoice} detectedIsTurboQuant={detectedConfig?.isTurboQuant} detectedIsMultimodal={detectedConfig?.isMultimodal} detectedForceTextOnly={detectedConfig?.forceTextOnly} detectedMaxContext={detectedConfig?.maxContextLength} detectedNativeMtp={(detectedConfig as any)?.nativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} sessionId={sessionId} modelIdentity={`${session.modelName || ''} ${session.modelPath}`} />
 
         {/* Command Preview */}
         <div className="mt-4">

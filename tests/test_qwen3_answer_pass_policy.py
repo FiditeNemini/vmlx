@@ -106,6 +106,78 @@ class _Qwen35AutoBudgetOverrunEngine:
         )
 
 
+class _Qwen35ReasoningOnlyStopEngine:
+    """Natural EOS inside reasoning must not be reported as output truncation."""
+
+    tokenizer = SimpleNamespace(has_thinking=False)
+    is_mllm = False
+    preserve_native_tool_format = False
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def chat(self, *, messages, **kwargs):
+        self.calls.append(kwargs)
+        reasoning = "<think>native reasoning ended before a visible answer"
+        return GenerationOutput(
+            text=reasoning,
+            raw_text=reasoning,
+            tokens=[],
+            prompt_tokens=17,
+            completion_tokens=7,
+            finished=True,
+            finish_reason="stop",
+        )
+
+    async def stream_chat(self, *, messages, **kwargs):
+        self.calls.append(kwargs)
+        reasoning = "<think>native reasoning ended before a visible answer"
+        yield GenerationOutput(
+            text=reasoning,
+            raw_text=reasoning,
+            new_text=reasoning,
+            tokens=[],
+            prompt_tokens=17,
+            completion_tokens=7,
+            finished=True,
+            finish_reason="stop",
+        )
+
+
+class _Qwen35CleanAnswerPassEngine:
+    """A length-bounded reasoning stage followed by a clean stop answer."""
+
+    tokenizer = SimpleNamespace(has_thinking=False)
+    is_mllm = False
+    preserve_native_tool_format = False
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def chat(self, *, messages, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("enable_thinking") is False:
+            return GenerationOutput(
+                text="Q35-CLEAN-ANSWER",
+                raw_text="Q35-CLEAN-ANSWER",
+                tokens=[],
+                prompt_tokens=11,
+                completion_tokens=4,
+                finished=True,
+                finish_reason="stop",
+            )
+        reasoning = "<think>bounded private reasoning"
+        return GenerationOutput(
+            text=reasoning,
+            raw_text=reasoning,
+            tokens=[],
+            prompt_tokens=17,
+            completion_tokens=int(kwargs["max_tokens"]),
+            finished=True,
+            finish_reason="length",
+        )
+
+
 class _Qwen35NativeTransitionEngine:
     """One native decode crosses from reasoning into progressive visible text."""
 
@@ -930,6 +1002,118 @@ async def test_qwen35_nonstream_responses_reasoning_only_is_incomplete(monkeypat
     assert engine.calls[0]["max_tokens"] == 256
     assert response.output_text in (None, "")
     assert response.status == "incomplete"
+    assert response.incomplete_details == {"reason": "max_output_tokens"}
+    assert response.output
+    assert {item.status for item in response.output} == {"incomplete"}
+    assert response.warnings
+    assert any("max_output_tokens" in warning for warning in response.warnings)
+
+
+@pytest.mark.asyncio
+async def test_qwen35_nonstream_responses_reasoning_only_stop_is_incomplete(
+    monkeypatch,
+):
+    _install_qwen_policy(monkeypatch, "qwen3_5")
+    engine = _Qwen35ReasoningOnlyStopEngine()
+    monkeypatch.setattr(server, "_engine", engine)
+    monkeypatch.setattr(
+        server, "_served_model_name", "dealignai/Qwen3.6-27B-MXFP8-CRACK-MTP"
+    )
+    monkeypatch.setattr(server, "_model_type", "llm")
+    monkeypatch.setattr(server, "_mcp_manager", None)
+    request = ResponsesRequest(
+        model="dealignai/Qwen3.6-27B-MXFP8-CRACK-MTP",
+        input="reason and stop naturally",
+        stream=False,
+        max_output_tokens=256,
+    )
+
+    response = await server.create_response(request, fastapi_request=None)
+
+    assert len(engine.calls) == 1
+    assert response.output_text in (None, "")
+    assert response.status == "incomplete"
+    assert response.incomplete_details == {"reason": "reasoning_only_no_content"}
+    assert response.output
+    assert {item.status for item in response.output} == {"incomplete"}
+    assert response.warnings
+    assert any("ended normally" in warning for warning in response.warnings)
+    assert all("max_output_tokens" not in warning for warning in response.warnings)
+
+
+@pytest.mark.asyncio
+async def test_qwen35_nonstream_responses_clean_answer_pass_owns_stop_terminal(
+    monkeypatch,
+):
+    _install_qwen_policy(monkeypatch, "qwen3_5")
+    engine = _Qwen35CleanAnswerPassEngine()
+    monkeypatch.setattr(server, "_engine", engine)
+    monkeypatch.setattr(
+        server, "_served_model_name", "dealignai/Qwen3.6-27B-MXFP8-CRACK-MTP"
+    )
+    monkeypatch.setattr(server, "_model_type", "llm")
+    monkeypatch.setattr(server, "_mcp_manager", None)
+    request = ResponsesRequest(
+        model="dealignai/Qwen3.6-27B-MXFP8-CRACK-MTP",
+        input="finish the bounded turn",
+        stream=False,
+        enable_thinking=True,
+        max_thinking_tokens=64,
+        max_output_tokens=256,
+    )
+
+    response = await server.create_response(request, fastapi_request=None)
+
+    assert len(engine.calls) == 2
+    assert response.output_text == "Q35-CLEAN-ANSWER"
+    assert response.status == "completed"
+    assert response.incomplete_details is None
+    assert {item.status for item in response.output} == {"completed"}
+
+
+@pytest.mark.asyncio
+async def test_qwen35_chat_reasoning_only_warning_precedes_structured_error(
+    monkeypatch,
+):
+    _install_qwen_policy(monkeypatch, "qwen3_5")
+    engine = _Qwen35ReasoningOnlyStopEngine()
+    messages = [Message(role="user", content="reason and stop naturally")]
+    request = ChatCompletionRequest(
+        model="dealignai/Qwen3.6-27B-MXFP8-CRACK-MTP",
+        messages=messages,
+        stream=True,
+        enable_thinking=True,
+        max_tokens=256,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in server.stream_chat_completion(
+            engine,
+            messages,
+            request,
+            fastapi_request=None,
+            max_tokens=256,
+        )
+    ]
+    events = _data_events(chunks)
+    warning_index = next(index for index, event in enumerate(events) if event.get("warnings"))
+    terminals = [
+        (index, choice["finish_reason"])
+        for index, event in enumerate(events)
+        for choice in event.get("choices", [])
+        if choice.get("finish_reason") is not None
+    ]
+    errors = [
+        (index, event["error"])
+        for index, event in enumerate(events)
+        if event.get("error")
+    ]
+
+    assert terminals == []
+    assert len(errors) == 1
+    assert errors[0][0] == warning_index + 1
+    assert errors[0][1]["code"] == "reasoning_only_no_content"
 
 
 @pytest.mark.asyncio

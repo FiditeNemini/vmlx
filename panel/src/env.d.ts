@@ -33,6 +33,7 @@ declare global {
           dsv4PoolQuantDefault?: boolean;
           cacheType: string;
           cacheSubtype?: string;
+          architectureHints?: Record<string, string | number | boolean>;
           usePagedCache: boolean;
           enableAutoToolChoice: boolean;
           isMultimodal: boolean;

@@ -19,8 +19,42 @@ export interface ResponsesPayloadLike {
   // Other fields are present but not required for warning extraction.
 }
 
+export interface ResponsesIncompleteDetailsLike {
+  reason?: unknown
+}
+
 export const OUTPUT_TRUNCATED_WARNING =
   'Output truncated because the maximum output-token limit was reached. Increase Max Tokens or send a follow-up message to continue.'
+
+/**
+ * Translate a Responses terminal envelope without treating every incomplete
+ * response as output truncation.
+ */
+export function responsesTerminalFinishReason(
+  status: unknown,
+  incompleteDetails?: ResponsesIncompleteDetailsLike | null,
+): string | undefined {
+  if (status === 'completed') return 'stop'
+  if (status === 'incomplete') {
+    const reason =
+      typeof incompleteDetails?.reason === 'string'
+        ? incompleteDetails.reason.trim().toLowerCase()
+        : ''
+    if (reason === 'max_output_tokens') return 'length'
+    if (
+      reason === 'cancelled' ||
+      reason === 'canceled' ||
+      reason === 'aborted' ||
+      reason === 'abort'
+    ) {
+      return 'cancelled'
+    }
+    if (reason === 'error') return 'error'
+    return 'incomplete'
+  }
+  if (status === 'failed') return 'error'
+  return typeof status === 'string' && status.trim() ? status : undefined
+}
 
 /**
  * Preserve a terminal length stop as response metadata, not assistant text.

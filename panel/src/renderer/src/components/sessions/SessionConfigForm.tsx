@@ -18,6 +18,7 @@ import {
   pagedCacheMemoryIgnoredText,
 } from '../../../../shared/cacheCapacityDisplay'
 import { metalWiredLimitHelpText } from '../../../../shared/metalWiredLimit'
+import { isLagunaMixedSwaTurboQuantEffective } from '../../../../shared/lagunaCachePolicy'
 import { normalizeMcpPolicyList } from '../../../../shared/mcpPolicy'
 import { canonicalizeToolParserId } from '../../../../shared/toolParserAliases'
 export interface SessionConfig {
@@ -284,6 +285,8 @@ interface SessionConfigFormProps {
   detectedCacheSubtype?: string
   /** Detected model family for feature gating where cache type alone is ambiguous */
   detectedFamily?: string
+  /** Bundle-grounded per-architecture hints that do not change generic cache controls */
+  detectedArchitectureHints?: Record<string, string | number | boolean>
   detectedToolParser?: string
   detectedReasoningParser?: string
   detectedEnableAutoToolChoice?: boolean
@@ -315,7 +318,7 @@ interface SessionConfigFormProps {
   modelIdentity?: string
 }
 
-export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedUsePagedCache, detectedCacheSubtype, detectedFamily, detectedToolParser, detectedReasoningParser, detectedEnableAutoToolChoice, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId, modelIdentity }: SessionConfigFormProps) {
+export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedUsePagedCache, detectedCacheSubtype, detectedFamily, detectedArchitectureHints, detectedToolParser, detectedReasoningParser, detectedEnableAutoToolChoice, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId, modelIdentity }: SessionConfigFormProps) {
   const { t } = useTranslation()
   const isImage = modelType === 'image'
   const isImageEdit = isImage && (imageMode === 'edit' || config.imageMode === 'edit')
@@ -367,6 +370,18 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     ? dsv4CompositeCacheOptIn && config.enablePrefixCache !== false
     : config.enablePrefixCache
   const prefixOff = !effectivePrefixCacheEnabled
+  const lagunaMixedSwaTurboQuantActive = isLagunaMixedSwaTurboQuantEffective({
+    detected: {
+      family: normalizedDetectedFamily,
+      architectureHints: detectedArchitectureHints,
+    },
+    kvCacheQuantization: config.kvCacheQuantization,
+    explicitKvCacheQuantizationApplied:
+      !effectivelyNoBatching &&
+      !prefixOff &&
+      !!config.kvCacheQuantization &&
+      config.kvCacheQuantization !== 'auto',
+  })
   const isMambaCache =
     detectedCacheType === 'mamba' ||
     detectedCacheType === 'hybrid' ||
@@ -1292,12 +1307,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         <PerformanceHint text="Controls token streaming, response length, and prompt-window limits. Max Output Tokens caps generated tokens; Max Context Tokens caps accepted prompt/context tokens." />
         {/* JIT is not available for image models or VLM chat models. */}
         <Field label="JIT Compile (mx.compile)" tooltip="Enable Metal kernel fusion via mx.compile on the model forward pass. This optimizes GPU operations for faster inference after a one-time warmup on the first request. May not work with all models — falls back gracefully if compilation fails. Requires restart.">
-          <label className={`flex items-center gap-2 ${flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || multimodalActive || hybridCacheActive ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
+          <label className={`flex items-center gap-2 ${flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
             <input
               type="checkbox"
-              checked={!!config.enableJit && !flashMoeActive && !distributedActive && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !multimodalActive && !hybridCacheActive}
+              checked={!!config.enableJit && !flashMoeActive && !distributedActive && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !lagunaMixedSwaTurboQuantActive && !multimodalActive && !hybridCacheActive}
               onChange={e => onChange('enableJit', e.target.checked)}
-              disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || multimodalActive || hybridCacheActive}
+              disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive}
               className="rounded border-input"
             />
             <span className="text-xs text-muted-foreground">
@@ -1305,7 +1320,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             </span>
           </label>
         </Field>
-        {(flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || multimodalActive || hybridCacheActive) && (
+        {(flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive) && (
           <IncompatWarning text={dsv4Active
             ? "JIT is disabled for DeepSeek-V4 native composite cache. DSV4 uses path-dependent SWA+CSA/HCA state that must stay on the uncompiled scheduler path."
             : m3Active
@@ -1318,6 +1333,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             ? "JIT is disabled for hybrid SSM/Mamba cache models. Their path-dependent Python cache objects are not mx.compile safe."
             : turboQuantActive
             ? "Server-level mx.compile is disabled for JANGTQ/TurboQuant KV because the live cache uses custom TurboQuant objects that mx.compile cannot trace. JANGTQ fused Metal kernels still run."
+            : lagunaMixedSwaTurboQuantActive
+            ? "JIT is disabled for Laguna while Auto cache quantization uses TurboQuantKVCache on full-attention slots and preserves native rotating sliding-window slots. Choose an explicit stored-cache codec (including None) to disable the live TurboQuant wrapper before enabling JIT."
             : flashMoeActive
             ? "JIT is disabled while Flash MoE is on. Flash MoE's on-demand expert loading is incompatible with mx.compile tracing."
             : "JIT is disabled while distributed mode is on. Distributed orchestration cannot safely compile the local coordinator graph."} />

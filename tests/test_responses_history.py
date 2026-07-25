@@ -595,6 +595,8 @@ async def test_responses_streaming_length_finish_emits_incomplete_terminal_event
         response = incomplete[0]["response"]
         assert response["status"] == "incomplete"
         assert response["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert response["output"]
+        assert {item["status"] for item in response["output"]} == {"incomplete"}
     finally:
         server._reasoning_parser = original_parser
 
@@ -646,9 +648,10 @@ async def test_responses_streaming_reasoning_only_stores_placeholder_and_marker(
                 FakeEngine(), messages, request
             )
         ]
-        completed = _sse_payloads(events, "response.completed")
-        assert completed, "stream must emit response.completed"
-        response_id = completed[-1]["response"]["id"]
+        incomplete = _sse_payloads(events, "response.incomplete")
+        assert incomplete, "stream must emit response.incomplete"
+        assert _sse_payloads(events, "response.completed") == []
+        response_id = incomplete[-1]["response"]["id"]
 
         assert server._responses_get_history(response_id) == [
             {"role": "user", "content": "hello"},
@@ -659,8 +662,16 @@ async def test_responses_streaming_reasoning_only_stores_placeholder_and_marker(
             },
         ]
         assert server._chain_warnings_for_previous_response_id(response_id)
-        warnings = completed[-1]["response"].get("warnings") or []
+        warnings = incomplete[-1]["response"].get("warnings") or []
         assert any("produced reasoning only" in w for w in warnings)
+        assert any("ended normally" in w for w in warnings)
+        assert all("max_output_tokens" not in w for w in warnings)
+        assert incomplete[-1]["response"]["incomplete_details"] == {
+            "reason": "reasoning_only_no_content"
+        }
+        assert {
+            item["status"] for item in incomplete[-1]["response"]["output"]
+        } == {"incomplete"}
     finally:
         server._reasoning_parser = original_parser
         server._responses_history.clear()
@@ -748,11 +759,104 @@ def test_reasoning_only_detection_ignores_empty_output_text_message():
 def test_current_response_warning_for_reasoning_only_output():
     from vmlx_engine.server import _current_response_warnings_for_reasoning_only
 
-    warnings = _current_response_warnings_for_reasoning_only(True)
+    stop_warnings = _current_response_warnings_for_reasoning_only(True, "stop")
+    length_warnings = _current_response_warnings_for_reasoning_only(True, "length")
+    cancelled_warnings = _current_response_warnings_for_reasoning_only(
+        True, "aborted"
+    )
+    unknown_warnings = _current_response_warnings_for_reasoning_only(True, None)
 
-    assert warnings is not None
-    assert any("produced reasoning only" in w for w in warnings)
+    assert stop_warnings is not None
+    assert any("produced reasoning only" in w for w in stop_warnings)
+    assert any("ended normally" in w for w in stop_warnings)
+    assert all("max_output_tokens" not in w for w in stop_warnings)
+    assert length_warnings is not None
+    assert any("max_output_tokens" in w for w in length_warnings)
+    assert cancelled_warnings is not None
+    assert any("cancelled or aborted" in w for w in cancelled_warnings)
+    assert all("max_output_tokens" not in w for w in cancelled_warnings)
+    assert unknown_warnings is not None
+    assert any("did not report a terminal cause" in w for w in unknown_warnings)
+    assert all("max_output_tokens" not in w for w in unknown_warnings)
     assert _current_response_warnings_for_reasoning_only(False) is None
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "expected_finish", "status", "item_status", "event_type", "details"),
+    [
+        ("stop", "stop", "completed", "completed", "response.completed", None),
+        (
+            "length",
+            "length",
+            "incomplete",
+            "incomplete",
+            "response.incomplete",
+            {"reason": "max_output_tokens"},
+        ),
+        (
+            "aborted",
+            "cancelled",
+            "incomplete",
+            "incomplete",
+            "response.incomplete",
+            {"reason": "cancelled"},
+        ),
+        (
+            "abort",
+            "cancelled",
+            "incomplete",
+            "incomplete",
+            "response.incomplete",
+            {"reason": "cancelled"},
+        ),
+        (
+            "cancelled",
+            "cancelled",
+            "incomplete",
+            "incomplete",
+            "response.incomplete",
+            {"reason": "cancelled"},
+        ),
+        (
+            "canceled",
+            "cancelled",
+            "incomplete",
+            "incomplete",
+            "response.incomplete",
+            {"reason": "cancelled"},
+        ),
+        ("error", "error", "failed", "incomplete", "response.failed", None),
+    ],
+)
+def test_responses_terminal_state_normalizes_every_supported_finish_alias(
+    finish_reason,
+    expected_finish,
+    status,
+    item_status,
+    event_type,
+    details,
+):
+    from vmlx_engine.server import _responses_terminal_state
+
+    terminal = _responses_terminal_state(finish_reason)
+
+    assert terminal.finish_reason == expected_finish
+    assert terminal.response_status == status
+    assert terminal.item_status == item_status
+    assert terminal.event_type == event_type
+    assert terminal.incomplete_details == details
+
+
+def test_responses_terminal_state_marks_reasoning_only_stop_incomplete():
+    from vmlx_engine.server import _responses_terminal_state
+
+    terminal = _responses_terminal_state("stop", reasoning_only_no_content=True)
+
+    assert terminal.finish_reason == "stop"
+    assert terminal.response_status == "incomplete"
+    assert terminal.item_status == "incomplete"
+    assert terminal.event_type == "response.incomplete"
+    assert terminal.incomplete_details == {"reason": "reasoning_only_no_content"}
 
 
 def test_chat_completion_warning_for_reasoning_only_message():
@@ -762,19 +866,24 @@ def test_chat_completion_warning_for_reasoning_only_message():
         content=None,
         reasoning="internal analysis",
         tool_calls=None,
+        finish_reason="stop",
     )
 
     assert warnings is not None
     assert any("produced reasoning only" in w for w in warnings)
+    assert any("ended normally" in w for w in warnings)
+    assert all("max_output_tokens" not in w for w in warnings)
     assert _chat_completion_warnings_for_reasoning_only(
         content="visible answer",
         reasoning="internal analysis",
         tool_calls=None,
+        finish_reason="stop",
     ) is None
     assert _chat_completion_warnings_for_reasoning_only(
         content=None,
         reasoning="internal analysis",
         tool_calls=[{"id": "call_1"}],
+        finish_reason="stop",
     ) is None
 
 
@@ -895,6 +1004,19 @@ def test_responses_object_warnings_default_none():
     from vmlx_engine.api.models import ResponsesObject
     obj = ResponsesObject(model="m")
     assert obj.warnings is None
+    assert obj.incomplete_details is None
+
+
+def test_responses_object_supports_incomplete_details():
+    from vmlx_engine.api.models import ResponsesObject
+
+    obj = ResponsesObject(
+        model="m",
+        status="incomplete",
+        incomplete_details={"reason": "max_output_tokens"},
+    )
+
+    assert obj.incomplete_details == {"reason": "max_output_tokens"}
 
 
 def test_reasoning_only_marker_stored_per_response_id():

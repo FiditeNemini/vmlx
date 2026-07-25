@@ -11,6 +11,11 @@ import { db, Session } from './database'
 import { resolveImageModelFromDirectoryName } from '../shared/imageModels'
 import { dsv4EnvFromConfig } from '../shared/dsv4Env'
 import { resolveCacheLaunchPolicy } from '../shared/cacheControlPolicy'
+import {
+  applyLagunaJitDefaultEnvironment,
+  DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV,
+  isLagunaMixedSwaTurboQuantEffective,
+} from '../shared/lagunaCachePolicy'
 import { buildMcpPolicyArgs } from '../shared/mcpPolicy'
 import {
   canonicalizeToolParserId,
@@ -1875,10 +1880,12 @@ export class SessionManager extends EventEmitter {
     // replaced with a different model (same folder name, different model_type).
     // User-set overrides (port, host, apiKey, etc.) are preserved.
     let freshDetectedFamily: string | undefined
+    let freshDetectedConfig: ReturnType<typeof detectModelConfigFromDir> | undefined
     if (!isImageSession) {
       try {
         const freshConfig = detectModelConfigFromDir(config.modelPath)
         if (freshConfig) {
+          freshDetectedConfig = freshConfig
           const freshFamily = normalizeDetectedFamilyName(freshConfig.family)
           freshDetectedFamily = freshFamily
           const oldFamily = config.toolCallParser
@@ -2134,6 +2141,35 @@ export class SessionManager extends EventEmitter {
       '/usr/local/bin',
     ].join(':')
     const spawnEnv: Record<string, string | undefined> = { ...process.env, PATH: `${extraPath}:${process.env.PATH || ''}` }
+    // The Python CLI defaults mx.compile back ON for affine JANG bundles when
+    // --enable-jit is absent. Laguna's complete full/sliding layout installs a
+    // selective TurboQuant cache in Auto mode, which is not compile-safe.
+    // Preserve any deliberate parent-shell opt-out, honor Laguna's saved Off
+    // choice, and explicitly disable the source-detected unsafe topology.
+    // `args` is authoritative for whether an explicit q4/q8/none cache mode
+    // will reach the engine.
+    const lagunaJitPolicyInput = {
+      detected: freshDetectedConfig,
+      kvCacheQuantization: config.kvCacheQuantization,
+      explicitKvCacheQuantizationApplied: args.includes('--kv-cache-quantization'),
+      enableJitRequested: !!config.enableJit,
+    }
+    const lagunaMixedSwaTurboQuantActive =
+      isLagunaMixedSwaTurboQuantEffective(lagunaJitPolicyInput)
+    const disableLagunaAffineJitDefault = applyLagunaJitDefaultEnvironment(
+      spawnEnv,
+      lagunaJitPolicyInput,
+    )
+    if (disableLagunaAffineJitDefault) {
+      this.pushLog(
+        sessionId,
+        `[ENV] ${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1 (${
+          lagunaMixedSwaTurboQuantActive
+            ? 'Laguna mixed full/sliding Auto TurboQuant is not mx.compile-safe'
+            : 'Laguna JIT is Off; preventing the affine-JANG CLI auto-default'
+        })`,
+      )
+    }
     // Pass API key via env var (not CLI arg) to avoid exposure in ps aux
     if (config.apiKey) {
       spawnEnv.VLLM_API_KEY = config.apiKey
@@ -3963,9 +3999,17 @@ export class SessionManager extends EventEmitter {
     const requestedDistributed = !!(config as any).distributedEnabled
     const requestedFlashMoe = !!(config as any).flashMoe
     const turboQuantActive = !!(detected as any).isTurboQuant
+    const lagunaMixedSwaTurboQuantActive = isLagunaMixedSwaTurboQuantEffective({
+      detected,
+      kvCacheQuantization: config.kvCacheQuantization,
+      explicitKvCacheQuantizationApplied:
+        !prefixCacheOff &&
+        !!config.kvCacheQuantization &&
+        config.kvCacheQuantization !== 'auto',
+    })
     const effectiveDistributed = requestedDistributed && !dsv4Active
     const effectiveFlashMoe = requestedFlashMoe && !effectiveDistributed && !dsv4Active
-    const effectiveEnableJit = !!config.enableJit && !isVLM && !effectiveFlashMoe && !effectiveDistributed && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !hybridCacheActive
+    const effectiveEnableJit = !!config.enableJit && !isVLM && !effectiveFlashMoe && !effectiveDistributed && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !lagunaMixedSwaTurboQuantActive && !hybridCacheActive
     if (dsv4Active && ((config as any).smelt || requestedFlashMoe || requestedDistributed || config.speculativeModel)) {
       console.warn('[SESSION] DSV4-Flash detected: ignoring stale Smelt/Flash MoE/distributed/speculative flags; native DSV4 cache and expert hydration own this runtime')
     }
@@ -3983,6 +4027,8 @@ export class SessionManager extends EventEmitter {
         ? 'multimodal/VLM models use the mlx-vlm streaming path, which is not mx.compile safe'
         : turboQuantActive
         ? 'TurboQuantKVCache uses custom cache objects that mx.compile cannot trace'
+        : lagunaMixedSwaTurboQuantActive
+        ? 'Laguna Auto cache mode uses selective TurboQuantKVCache for full-attention slots, which mx.compile cannot trace'
         : hybridCacheActive
         ? 'hybrid SSM/Mamba cache uses path-dependent Python cache objects that mx.compile cannot trace'
         : 'Flash MoE or distributed mode is active'

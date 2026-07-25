@@ -12,6 +12,12 @@ import { resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import { resolveCacheLaunchPolicy } from '../src/shared/cacheControlPolicy'
 import { buildMcpPolicyArgs } from '../src/shared/mcpPolicy'
+import {
+    applyLagunaJitDefaultEnvironment,
+    DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV,
+    isLagunaMixedSwaTurboQuantEffective,
+    shouldDisableLagunaJitDefault,
+} from '../src/shared/lagunaCachePolicy'
 import { resolveEffectiveToolParser } from '../src/shared/toolParserAliases'
 import {
     canonicalizeReasoningParserForCli,
@@ -187,6 +193,7 @@ type DetectedConfig = {
     cacheType?: string
     cacheSubtype?: string
     family?: string
+    architectureHints?: Record<string, string | number | boolean>
     isTurboQuant?: boolean
     nativeMtp?: {
         supported?: boolean
@@ -359,7 +366,28 @@ function buildCommandPreview(
         !zayaCcaActive && !dsv4Active && detectedFamily !== 'openpangu_v2'
     const effectiveDistributed = requestedDistributed && !dsv4Active
     const effectiveFlashMoe = requestedFlashMoe && !effectiveDistributed && !dsv4Active
-    const effectiveEnableJit = !!config.enableJit && !isVLM && !effectiveFlashMoe && !effectiveDistributed && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !hybridCacheActive
+    const lagunaMixedSwaTurboQuantActive = isLagunaMixedSwaTurboQuantEffective({
+        detected,
+        kvCacheQuantization: config.kvCacheQuantization,
+        explicitKvCacheQuantizationApplied:
+            config.continuousBatching !== false &&
+            config.enablePrefixCache !== false &&
+            !!config.kvCacheQuantization &&
+            config.kvCacheQuantization !== 'auto',
+    })
+    const effectiveEnableJit = !!config.enableJit && !isVLM && !effectiveFlashMoe && !effectiveDistributed && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !lagunaMixedSwaTurboQuantActive && !hybridCacheActive
+    if (shouldDisableLagunaJitDefault({
+        detected,
+        kvCacheQuantization: config.kvCacheQuantization,
+        explicitKvCacheQuantizationApplied:
+            config.continuousBatching !== false &&
+            config.enablePrefixCache !== false &&
+            !!config.kvCacheQuantization &&
+            config.kvCacheQuantization !== 'auto',
+        enableJitRequested: !!config.enableJit,
+    })) {
+        parts[0] = `${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1 vmlx-engine serve`
+    }
 
     parts.push('--host', config.host)
     parts.push('--port', config.port.toString())
@@ -3045,6 +3073,99 @@ describe('Default IP and New Settings', () => {
 })
 
 describe('JIT Toggle', () => {
+    it('applies and scrubs the real Laguna affine-JIT child environment contract', () => {
+        const env: Record<string, string | undefined> = {
+            [DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV]: 'stale-parent-value',
+        }
+        const detected = {
+            family: 'laguna',
+            architectureHints: {
+                attentionArch: 'full_and_sliding_kv',
+                cacheSchema: 'mixed_swa_kv_v1',
+                selectiveTurboQuantKv: true,
+            },
+        }
+
+        expect(applyLagunaJitDefaultEnvironment(env, {
+            detected,
+            kvCacheQuantization: 'auto',
+            explicitKvCacheQuantizationApplied: false,
+            enableJitRequested: true,
+        })).toBe(true)
+        expect(env[DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV]).toBe('1')
+
+        const unrelatedEnv: Record<string, string | undefined> = {
+            [DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV]: 'parent-shell-opt-out',
+        }
+        expect(applyLagunaJitDefaultEnvironment(env, {
+            detected: { family: 'qwen3' },
+            kvCacheQuantization: 'auto',
+            explicitKvCacheQuantizationApplied: false,
+            enableJitRequested: false,
+        })).toBe(false)
+        expect(applyLagunaJitDefaultEnvironment(unrelatedEnv, {
+            detected: { family: 'qwen3' },
+            kvCacheQuantization: 'auto',
+            explicitKvCacheQuantizationApplied: false,
+            enableJitRequested: false,
+        })).toBe(false)
+        expect(unrelatedEnv[DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV]).toBe('parent-shell-opt-out')
+    })
+
+    it.each([
+        ['auto', false, false, true],
+        ['auto', false, true, true],
+        ['q4', false, false, true],
+        ['q4', false, true, true],
+        ['q4', true, false, true],
+        ['q8', true, false, true],
+        ['none', true, false, true],
+        ['q4', true, true, false],
+        ['q8', true, true, false],
+        ['none', true, true, false],
+    ] as const)(
+        'Laguna JIT policy mode=%s explicit=%s requested=%s disablesDefault=%s',
+        (mode, explicitApplied, enableJitRequested, expected) => {
+            expect(shouldDisableLagunaJitDefault({
+                detected: {
+                    family: 'laguna',
+                    architectureHints: {
+                        attentionArch: 'full_and_sliding_kv',
+                        cacheSchema: 'mixed_swa_kv_v1',
+                        selectiveTurboQuantKv: true,
+                    },
+                },
+                kvCacheQuantization: mode,
+                explicitKvCacheQuantizationApplied: explicitApplied,
+                enableJitRequested,
+            })).toBe(expected)
+        },
+    )
+
+    it('honors Laguna JIT Off when the bundle disables live TurboQuant', () => {
+        const detected = {
+            family: 'laguna',
+            architectureHints: {
+                attentionArch: 'full_and_sliding_kv',
+                cacheSchema: 'mixed_swa_kv_v1',
+                selectiveTurboQuantKv: true,
+                loaderTurboQuantEnabled: false,
+            },
+        }
+        expect(shouldDisableLagunaJitDefault({
+            detected,
+            kvCacheQuantization: 'auto',
+            explicitKvCacheQuantizationApplied: false,
+            enableJitRequested: false,
+        })).toBe(true)
+        expect(shouldDisableLagunaJitDefault({
+            detected,
+            kvCacheQuantization: 'auto',
+            explicitKvCacheQuantizationApplied: false,
+            enableJitRequested: true,
+        })).toBe(false)
+    })
+
     it('enableJit false does not emit --enable-jit flag', () => {
         const out = preview({ enableJit: false })
         expect(hasFlag(out, '--enable-jit')).toBe(false)
@@ -3108,6 +3229,117 @@ describe('JIT Toggle', () => {
 
         expect(hasFlag(hybrid, '--enable-jit')).toBe(false)
         expect(hasFlag(mamba, '--enable-jit')).toBe(false)
+    })
+
+    it('Laguna mixed full/sliding Auto TurboQuant suppresses JIT without changing KV cache controls', () => {
+        const detected = {
+            family: 'laguna',
+            cacheType: 'kv',
+            usePagedCache: false,
+            architectureHints: {
+                attentionArch: 'full_and_sliding_kv',
+                cacheSchema: 'mixed_swa_kv_v1',
+                selectiveTurboQuantKv: true,
+            },
+        }
+        const out = preview(
+            {
+                enableJit: true,
+                kvCacheQuantization: 'auto',
+                usePagedCache: false,
+                enableBlockDiskCache: true,
+            },
+            detected,
+        )
+
+        expect(hasFlag(out, '--enable-jit')).toBe(false)
+        expect(out).toContain(`${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1`)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
+        expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
+    })
+
+    it.each(['none', 'q4', 'q8'])(
+        'Laguna explicit %s cache choice disables the live TQ wrapper and preserves JIT',
+        mode => {
+            const out = preview(
+                {
+                    enableJit: true,
+                    kvCacheQuantization: mode,
+                    enablePrefixCache: true,
+                },
+                {
+                    family: 'laguna',
+                    cacheType: 'kv',
+                    architectureHints: {
+                        attentionArch: 'full_and_sliding_kv',
+                        cacheSchema: 'mixed_swa_kv_v1',
+                        selectiveTurboQuantKv: true,
+                    },
+                },
+            )
+
+            expect(getFlagValue(out, '--kv-cache-quantization')).toBe(mode)
+            expect(out).not.toContain(`${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1`)
+            expect(hasFlag(out, '--enable-jit')).toBe(true)
+        },
+    )
+
+    it('does not suppress JIT for unrelated plain-KV models or unstamped Laguna topology', () => {
+        const qwen = preview(
+            { enableJit: true, kvCacheQuantization: 'auto' },
+            { family: 'qwen3', cacheType: 'kv' },
+        )
+        const unstampedLaguna = preview(
+            { enableJit: true, kvCacheQuantization: 'auto' },
+            { family: 'laguna', cacheType: 'kv' },
+        )
+
+        expect(hasFlag(qwen, '--enable-jit')).toBe(true)
+        expect(hasFlag(unstampedLaguna, '--enable-jit')).toBe(true)
+        expect(qwen).not.toContain(`${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1`)
+        expect(unstampedLaguna).not.toContain(`${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1`)
+    })
+
+    it('preserves a bundle-owned Laguna live TurboQuant disable', () => {
+        const out = preview(
+            { enableJit: true, kvCacheQuantization: 'auto' },
+            {
+                family: 'laguna',
+                cacheType: 'kv',
+                architectureHints: {
+                    attentionArch: 'full_and_sliding_kv',
+                    cacheSchema: 'mixed_swa_kv_v1',
+                    selectiveTurboQuantKv: true,
+                    loaderTurboQuantEnabled: false,
+                },
+            },
+        )
+
+        expect(hasFlag(out, '--enable-jit')).toBe(true)
+        expect(out).not.toContain(`${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1`)
+    })
+
+    it('wires the same Laguna topology gate through launcher preview and form', () => {
+        const sessions = readFileSync('src/main/sessions.ts', 'utf8')
+        const settings = readFileSync(
+            'src/renderer/src/components/sessions/SessionSettings.tsx',
+            'utf8',
+        )
+        const form = readFileSync(
+            'src/renderer/src/components/sessions/SessionConfigForm.tsx',
+            'utf8',
+        )
+
+        for (const source of [sessions, settings, form]) {
+            expect(source).toContain('isLagunaMixedSwaTurboQuantEffective')
+            expect(source).toContain('lagunaMixedSwaTurboQuantActive')
+        }
+        expect(sessions).toContain('applyLagunaJitDefaultEnvironment')
+        expect(sessions).toContain("args.includes('--kv-cache-quantization')")
+        expect(sessions).toContain('DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV')
+        expect(form).toContain('detectedArchitectureHints')
+        expect(form).toContain('Auto cache quantization uses TurboQuantKVCache')
     })
 
     it('Flash MoE and distributed launch modes suppress --enable-jit in preview and runtime policy', () => {

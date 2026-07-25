@@ -146,6 +146,7 @@ from .reasoning import get_parser as _get_reasoning_parser_class
 from .reasoning.gptoss_parser import GptOssReasoningParser
 from .tool_parsers import ToolParserManager
 from .tool_parsers.abstract_tool_parser import generate_tool_id
+from .utils.hybrid_tq_cache import is_turboquant_make_cache
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1582,11 +1583,11 @@ def _main_pass_finish_reason(
     """
     if not finished:
         return None
-    if (
-        answer_pass_pending
-        and bool((accumulated_reasoning or "").strip())
-        and not content_was_emitted
-    ):
+    if bool((accumulated_reasoning or "").strip()) and not content_was_emitted:
+        # A reasoning-only terminal still needs a diagnostic warning. Hold the
+        # terminal until that warning can be emitted, then send exactly one
+        # authoritative finish chunk. This also covers the bounded answer-pass
+        # case, whose first-stage finish is internal.
         return None
     return finish_reason
 
@@ -5070,6 +5071,7 @@ _JIT_UNTRACEABLE_CACHE_CLASS_NAMES = frozenset(
         "ArraysCache",
         "BatchMambaCache",
         "MambaCache",
+        "TurboQuantKVCache",
     }
 )
 
@@ -5197,8 +5199,7 @@ def _apply_jit_compilation():
         if _eng_model is not None:
             _lm_for_tq = getattr(_eng_model, "language_model", None) or _eng_model
             _make_cache = getattr(_lm_for_tq, "make_cache", None)
-            _make_cache_name = getattr(_make_cache, "__name__", "") if _make_cache else ""
-            if _make_cache_name in ("_turboquant_make_cache", "_tq_make_cache"):
+            if is_turboquant_make_cache(_make_cache):
                 logger.info(
                     "JIT: Skipping mx.compile — TurboQuantKVCache is active. "
                     "mx.compile() cannot trace custom cache objects (issue #66). "
@@ -10378,10 +10379,7 @@ async def cache_stats():
     if _engine:
         model = getattr(_engine, "_model", None) or getattr(_engine, "model", None)
         if model and hasattr(model, "make_cache"):
-            _tq_active = getattr(model.make_cache, "__name__", "") in (
-                "_tq_make_cache",
-                "_turboquant_make_cache",
-            )
+            _tq_active = is_turboquant_make_cache(model.make_cache)
             if _tq_active:
                 result["turbo_quant"] = {"enabled": True}
 
@@ -15182,9 +15180,21 @@ async def create_chat_completion(
             response_content,
             reasoning_text,
             tool_calls,
+            finish_reason,
         ),
         structured_output_warnings,
     )
+    if (
+        response_warnings
+        and not response_content
+        and reasoning_text
+        and not tool_calls
+        and _normalize_responses_finish_reason(finish_reason) != "length"
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail=_reasoning_only_chat_error_payload(response_id)["error"],
+        )
 
     response = ChatCompletionResponse(
         id=response_id,
@@ -15470,35 +15480,158 @@ def _chain_warnings_for_previous_response_id(
     return [
         "previous_response_id chained a response that produced reasoning only "
         "(no visible message, no tool calls). Chat continuity may be impaired "
-        "and prefix-cache reuse may be lower than expected. Consider raising "
-        "max_output_tokens or sending enable_thinking=false on the prior turn."
+        "and prefix-cache reuse may be lower than expected. Inspect the prior "
+        "response terminal status before deciding whether to retry it."
     ]
+
+
+@dataclass(frozen=True)
+class _ResponsesTerminalState:
+    """One normalized Responses terminal contract shared by every adapter."""
+
+    finish_reason: str | None
+    response_status: str
+    item_status: str
+    event_type: str
+    incomplete_details: dict[str, str] | None = None
+
+
+def _normalize_responses_finish_reason(finish_reason: Any) -> str | None:
+    """Normalize engine/adapter terminal aliases without inventing success."""
+
+    raw = str(finish_reason or "").strip().lower()
+    if not raw:
+        return None
+    if raw in {"abort", "aborted", "cancelled", "canceled"}:
+        return "cancelled"
+    if raw in {"stop", "length", "error"}:
+        return raw
+    return raw
+
+
+def _responses_terminal_state(
+    finish_reason: Any,
+    *,
+    cancelled: bool = False,
+    failed: bool = False,
+    reasoning_only_no_content: bool = False,
+) -> _ResponsesTerminalState:
+    """Return matching response/item status, details, and SSE terminal event."""
+
+    normalized = _normalize_responses_finish_reason(finish_reason)
+    if failed or normalized == "error":
+        return _ResponsesTerminalState(
+            finish_reason="error",
+            response_status="failed",
+            item_status="incomplete",
+            event_type="response.failed",
+        )
+    if cancelled or normalized == "cancelled":
+        return _ResponsesTerminalState(
+            finish_reason="cancelled",
+            response_status="incomplete",
+            item_status="incomplete",
+            event_type="response.incomplete",
+            incomplete_details={"reason": "cancelled"},
+        )
+    if normalized == "length":
+        return _ResponsesTerminalState(
+            finish_reason="length",
+            response_status="incomplete",
+            item_status="incomplete",
+            event_type="response.incomplete",
+            incomplete_details={"reason": "max_output_tokens"},
+        )
+    if reasoning_only_no_content:
+        return _ResponsesTerminalState(
+            finish_reason=normalized,
+            response_status="incomplete",
+            item_status="incomplete",
+            event_type="response.incomplete",
+            incomplete_details={"reason": "reasoning_only_no_content"},
+        )
+    return _ResponsesTerminalState(
+        finish_reason=normalized,
+        response_status="completed",
+        item_status="completed",
+        event_type="response.completed",
+    )
 
 
 def _current_response_warnings_for_reasoning_only(
     reasoning_only: bool,
+    finish_reason: str | None = None,
 ) -> list[str] | None:
     if not reasoning_only:
         return None
-    return [
+    base = (
         "This response produced reasoning only (no visible message, no tool "
         "calls). The reasoning was preserved separately, but the visible answer "
-        "is empty. Consider raising max_output_tokens or sending "
-        "enable_thinking=false for the final synthesis turn."
-    ]
+        "is empty. "
+    )
+    normalized_finish = _normalize_responses_finish_reason(finish_reason)
+    if normalized_finish == "length":
+        detail = (
+            "The maximum output-token limit was reached before a visible answer. "
+            "Increase max_output_tokens or send a follow-up request to continue."
+        )
+    elif normalized_finish == "cancelled":
+        detail = (
+            "Generation ended early because the request was cancelled or aborted; "
+            "this was not an output-token-limit completion."
+        )
+    elif normalized_finish == "stop":
+        detail = (
+            "The model ended normally while still in its reasoning phase; this was "
+            "not output-token truncation."
+        )
+    elif normalized_finish == "error":
+        detail = (
+            "Generation reported an error while the response was still in its "
+            "reasoning phase; this was not output-token truncation."
+        )
+    else:
+        detail = (
+            "The engine did not report a terminal cause, so output-token "
+            "truncation must not be inferred."
+        )
+    return [base + detail]
 
 
 def _chat_completion_warnings_for_reasoning_only(
     content: str | None,
     reasoning: str | None,
     tool_calls: list | None,
+    finish_reason: str | None = None,
 ) -> list[str] | None:
     has_visible_content = bool((content or "").strip())
     has_reasoning = bool((reasoning or "").strip())
     has_tool_calls = bool(tool_calls)
     return _current_response_warnings_for_reasoning_only(
-        has_reasoning and not has_visible_content and not has_tool_calls
+        has_reasoning and not has_visible_content and not has_tool_calls,
+        finish_reason,
     )
+
+
+def _reasoning_only_chat_error_payload(
+    response_id: str,
+    *,
+    message: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": response_id,
+        "object": "chat.completion.chunk",
+        "error": {
+            "message": message
+            or (
+                "The model produced reasoning_content but no visible answer and no "
+                "tool call. This turn is incomplete; retry with a larger output "
+                "budget or adjust the prompt/reasoning settings."
+            ),
+            "type": "invalid_response_error",
+            "code": "reasoning_only_no_content",
+        },
+    }
 
 
 def _merge_responses_warnings(*warning_lists: list[str] | None) -> list[str] | None:
@@ -16515,7 +16648,10 @@ def _adapt_omni_chat_completion_to_responses_payload(
     visible_text = message.get("content") or ""
     reasoning_text = message.get("reasoning_content") or ""
     finish_reason = choice.get("finish_reason")
-    response_status = "incomplete" if finish_reason == "length" else "completed"
+    terminal = _responses_terminal_state(
+        finish_reason,
+        reasoning_only_no_content=bool(reasoning_text and not visible_text),
+    )
     usage = chat_completion.get("usage") or {}
 
     output: list[dict] = []
@@ -16524,7 +16660,7 @@ def _adapt_omni_chat_completion_to_responses_payload(
             {
                 "id": f"rs_{uuid.uuid4().hex[:12]}",
                 "type": "reasoning",
-                "status": response_status,
+                "status": terminal.item_status,
                 "summary": [
                     {"type": "summary_text", "text": reasoning_text}
                 ],
@@ -16536,7 +16672,7 @@ def _adapt_omni_chat_completion_to_responses_payload(
             {
                 "type": "message",
                 "id": f"msg_{uuid.uuid4().hex[:12]}",
-                "status": response_status,
+                "status": terminal.item_status,
                 "role": "assistant",
                 "content": [
                     {
@@ -16553,7 +16689,7 @@ def _adapt_omni_chat_completion_to_responses_payload(
         "object": "response",
         "created_at": chat_completion.get("created", int(time.time())),
         "model": model,
-        "status": response_status,
+        "status": terminal.response_status,
         "output_text": visible_text,
         "output": output,
         "usage": {
@@ -16562,8 +16698,14 @@ def _adapt_omni_chat_completion_to_responses_payload(
             "total_tokens": usage.get("total_tokens", 0),
         },
     }
-    if response_status == "incomplete":
-        payload["incomplete_details"] = {"reason": "max_output_tokens"}
+    if terminal.incomplete_details:
+        payload["incomplete_details"] = terminal.incomplete_details
+    reasoning_only_warnings = _current_response_warnings_for_reasoning_only(
+        bool(reasoning_text and not visible_text),
+        finish_reason,
+    )
+    if reasoning_only_warnings:
+        payload["warnings"] = reasoning_only_warnings
     return payload
 
 
@@ -16740,7 +16882,7 @@ async def _adapt_omni_chat_stream_to_responses(
     )
     reasoning_text = ""
     content_text = ""
-    finish_reason = "stop"
+    finish_reason = None
     usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     raw_buffer = ""
     stream_failed = False
@@ -16857,24 +16999,27 @@ async def _adapt_omni_chat_stream_to_responses(
     reasoning_text = reasoning_text.strip()
     content_text = content_text.strip()
     if reasoning_text and not content_text:
+        reasoning_only_warning = _current_response_warnings_for_reasoning_only(
+            True,
+            finish_reason,
+        )
         yield _sse(
             "response.warning",
             {
                 "type": "response.warning",
                 "code": "reasoning_only_response",
-                "message": (
-                    "The model completed with reasoning but no visible answer. "
-                    "Increase max_output_tokens or disable thinking for a direct turn."
-                ),
+                "message": reasoning_only_warning[0],
             },
         )
 
-    response_status = "incomplete" if finish_reason == "length" else "completed"
-    output_status = "incomplete" if response_status == "incomplete" else "completed"
+    terminal = _responses_terminal_state(
+        finish_reason,
+        reasoning_only_no_content=bool(reasoning_text and not content_text),
+    )
     if reasoning_text:
         for event in _finish_reasoning_item_events(
             reasoning_text,
-            status=output_status,
+            status=terminal.item_status,
         ):
             yield event
     if content_text or not reasoning_text:
@@ -16883,7 +17028,7 @@ async def _adapt_omni_chat_stream_to_responses(
         message_item = {
             "id": msg_id,
             "type": "message",
-            "status": output_status,
+            "status": terminal.item_status,
             "role": "assistant",
             "content": [{
                 "type": "output_text",
@@ -16930,36 +17075,32 @@ async def _adapt_omni_chat_stream_to_responses(
     output_items = [
         output_items_by_index[index] for index in sorted(output_items_by_index)
     ]
+    for item in output_items:
+        if "status" in item:
+            item["status"] = terminal.item_status
     completed_response = {
         "id": response_id,
         "object": "response",
         "created_at": created_at,
-        "status": response_status,
+        "status": terminal.response_status,
         "model": request.model,
         "output_text": content_text,
         "output": output_items,
         "usage": usage,
     }
-    if response_status == "incomplete":
-        completed_response["incomplete_details"] = {
-            "reason": "max_output_tokens"
-        }
-    else:
+    if terminal.incomplete_details:
+        completed_response["incomplete_details"] = terminal.incomplete_details
+    if terminal.response_status == "completed":
         _responses_store_history(
             response_id,
             (history_messages or [])
             + _responses_output_to_assistant_messages(output_items),
             reasoning_only=bool(reasoning_text and not content_text),
         )
-    terminal_event = (
-        "response.incomplete"
-        if response_status == "incomplete"
-        else "response.completed"
-    )
     yield _sse(
-        terminal_event,
+        terminal.event_type,
         {
-            "type": terminal_event,
+            "type": terminal.event_type,
             "response": completed_response,
         },
     )
@@ -17597,6 +17738,7 @@ async def create_response(
     # Responses parity with Chat: only an explicit max_thinking_tokens may
     # reserve output for the direct-answer stage.
     _ns_answer_pass_original_cap = None
+    _ns_visible_answer_finish_reason: str | None = None
     _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
     if (
         _ns_pre_mtt is not None
@@ -17986,6 +18128,9 @@ async def create_response(
                 _ns_answer_complete = not _ns_reasoning_leak
                 if _ns_text and _ns_answer_complete:
                     content_for_parsing = _ns_text
+                    _ns_visible_answer_finish_reason = getattr(
+                        _ns_out, "finish_reason", None
+                    )
                     try:
                         output.completion_tokens += int(getattr(_ns_out, "completion_tokens", 0) or 0)
                     except Exception:
@@ -18061,6 +18206,9 @@ async def create_response(
                 )
                 if _retry_output is not None and _retry_report.get("is_valid"):
                     output = _retry_output
+                    _ns_visible_answer_finish_reason = getattr(
+                        _retry_output, "finish_reason", None
+                    )
                     reasoning_text = None
                     content_for_parsing = _retry_output.text
                     cleaned_text = _retry_output.text
@@ -18108,6 +18256,9 @@ async def create_response(
                 )
                 if _retry_output is not None and _retry_report.get("is_valid"):
                     output = _retry_output
+                    _ns_visible_answer_finish_reason = getattr(
+                        _retry_output, "finish_reason", None
+                    )
                     reasoning_text = None
                     content_for_parsing = _retry_output.text
                     cleaned_text = _retry_output.text
@@ -18149,6 +18300,13 @@ async def create_response(
             },
         )
 
+    _response_finish = (
+        _ns_visible_answer_finish_reason
+        if _ns_visible_answer_finish_reason is not None
+        else getattr(output, "finish_reason", None)
+    )
+    _response_terminal = _responses_terminal_state(_response_finish)
+
     # Build output array
     output_items = []
 
@@ -18156,6 +18314,7 @@ async def create_response(
     if reasoning_text:
         output_items.append(
             ResponsesReasoningItem(
+                status=_response_terminal.item_status,
                 summary=[ResponsesReasoningSummaryText(text=reasoning_text)],
             )
         )
@@ -18173,6 +18332,7 @@ async def create_response(
     if final_text:
         output_items.append(
             ResponsesOutputMessage(
+                status=_response_terminal.item_status,
                 role="assistant",
                 content=[ResponsesOutputText(text=final_text)],
             )
@@ -18192,37 +18352,50 @@ async def create_response(
             )
             if tc_call_id:
                 fc_kwargs["call_id"] = tc_call_id
-            output_items.append(ResponsesFunctionCall(**fc_kwargs))
+            output_items.append(
+                ResponsesFunctionCall(
+                    status=_response_terminal.item_status,
+                    **fc_kwargs,
+                )
+            )
 
     # Detect reasoning-only output: any reasoning items present, no visible
     # message text, no tool/function calls. Empty streaming-style message
     # shells do not count as visible output. Tracked so chained turns surface
     # a warning.
     _reasoning_only = _responses_output_is_reasoning_only(output_items)
-    _response_status = (
-        "incomplete"
-        if _reasoning_only or getattr(output, "finish_reason", None) == "length"
-        else "completed"
-    )
+    if _reasoning_only:
+        _response_terminal = _responses_terminal_state(
+            _response_finish,
+            reasoning_only_no_content=True,
+        )
+        for _item in output_items:
+            if hasattr(_item, "status"):
+                _item.status = _response_terminal.item_status
 
     response_obj = ResponsesObject(
         id=response_id,
         model=request.model,
-        status=_response_status,
+        status=_response_terminal.response_status,
         output=output_items,
         usage=_get_responses_usage(output),
         previous_response_id=request.previous_response_id,
+        incomplete_details=_response_terminal.incomplete_details,
         warnings=_merge_responses_warnings(
             _chain_warnings_for_previous_response_id(request.previous_response_id),
-            _current_response_warnings_for_reasoning_only(_reasoning_only),
+            _current_response_warnings_for_reasoning_only(
+                _reasoning_only,
+                _response_finish,
+            ),
             structured_output_warnings,
         ),
     )
-    _responses_store_history(
-        response_obj.id,
-        history_messages + _responses_output_to_assistant_messages(output_items),
-        reasoning_only=_reasoning_only,
-    )
+    if _response_terminal.finish_reason not in {"cancelled", "error"}:
+        _responses_store_history(
+            response_obj.id,
+            history_messages + _responses_output_to_assistant_messages(output_items),
+            reasoning_only=_reasoning_only,
+        )
     return response_obj
 
 
@@ -20310,26 +20483,10 @@ async def stream_chat_completion(
                     f"Request {response_id}: tool markers found in suppressed "
                     "reasoning but parsing failed — preserving hidden reasoning"
                 )
-                diag_chunk = ChatCompletionChunk(
-                    id=response_id, created=_created_ts, model=request.model,
-                    choices=[ChatCompletionChunkChoice(
-                        delta=ChatCompletionChunkDelta(),
-                        finish_reason="stop",
-                    )],
-                )
-                yield f"data: {_dump_chat_chunk(diag_chunk)}\n\n"
         else:
             logger.info(
                 f"Request {response_id}: model produced only reasoning ({len(accumulated_reasoning)} chars) — suppressed per user setting"
             )
-            diag_chunk = ChatCompletionChunk(
-                id=response_id, created=_created_ts, model=request.model,
-                choices=[ChatCompletionChunkChoice(
-                    delta=ChatCompletionChunkDelta(),
-                    finish_reason="stop",
-                )],
-            )
-            yield f"data: {_dump_chat_chunk(diag_chunk)}\n\n"
 
     _stream_chat_warnings = None
     if (
@@ -20342,6 +20499,11 @@ async def stream_chat_completion(
             content=None,
             reasoning=accumulated_reasoning,
             tool_calls=None,
+            finish_reason=(
+                getattr(last_output, "finish_reason", None)
+                if last_output is not None
+                else None
+            ),
         )
     # Bug 5: surface dropped-tool-call diagnostics to the client even when no
     # reasoning-only warning fired. A parser-dropped call leaves the stream
@@ -20361,32 +20523,39 @@ async def stream_chat_completion(
             warnings=_stream_chat_warnings,
         )
         yield f"data: {_dump_chat_chunk(warning_chunk)}\n\n"
-        # Strict OpenAI clients (langchain, harnesses) wait for a chunk with
-        # non-null finish_reason before closing the stream. The warning chunk
-        # above carries choices=[] so it has no finish_reason; without an
-        # additional terminal chunk the client hangs until timeout. Emit a
-        # finish chunk with finish_reason="length" (best matches the situation:
-        # reasoning ran the budget without producing visible content or tool
-        # calls). The chat-completion finalizer below would normally do this
-        # for content/tool paths but only when content_was_emitted or
-        # tool_calls_emitted is true.
-        if (
-            not content_was_emitted
-            and not tool_calls_emitted
-            and not getattr(last_output, "finish_reason", None)
-        ):
-            warning_finish_chunk = ChatCompletionChunk(
-                id=response_id,
-                created=_created_ts,
-                model=request.model,
-                choices=[
-                    ChatCompletionChunkChoice(
-                        delta=ChatCompletionChunkDelta(),
-                        finish_reason="length",
-                    )
-                ],
+        if not content_was_emitted and not tool_calls_emitted:
+            _warning_finish_reason = _normalize_responses_finish_reason(
+                (
+                    getattr(last_output, "finish_reason", None)
+                    if last_output is not None
+                    else None
+                )
+                or "stop"
             )
-            yield f"data: {_dump_chat_chunk(warning_finish_chunk)}\n\n"
+            if _warning_finish_reason == "length":
+                warning_finish_chunk = ChatCompletionChunk(
+                    id=response_id,
+                    created=_created_ts,
+                    model=request.model,
+                    choices=[
+                        ChatCompletionChunkChoice(
+                            delta=ChatCompletionChunkDelta(),
+                            finish_reason="length",
+                        )
+                    ],
+                )
+                yield f"data: {_dump_chat_chunk(warning_finish_chunk)}\n\n"
+                return
+            yield (
+                "data: "
+                + json.dumps(
+                    _reasoning_only_chat_error_payload(response_id),
+                    ensure_ascii=True,
+                )
+                + "\n\n"
+            )
+            yield "data: [DONE]\n\n"
+            return
 
     # Safeguard: if model generated zero tokens (empty stream), finish the stream
     # without injecting diagnostic prose as assistant output. The warning belongs
@@ -21543,9 +21712,12 @@ async def stream_responses_api(
             and getattr(last_output, "finish_reason", None) == "aborted"
         )
     )
-    _response_output_status = (
-        "incomplete" if _response_was_cancelled else "completed"
+    _resp_finish = getattr(last_output, "finish_reason", None) if last_output else None
+    _response_terminal = _responses_terminal_state(
+        _resp_finish,
+        cancelled=_response_was_cancelled,
     )
+    _response_output_status = _response_terminal.item_status
 
     # Tool calls may share the reasoning rail (DSV4 emits canonical DSML there).
     # Preserve the raw accumulator for final tool parsing, but expose only the
@@ -22196,6 +22368,12 @@ async def stream_responses_api(
                     # response.incomplete even when this pass stopped cleanly.
                     if _ans_last_out is not None:
                         last_output = _ans_last_out
+                        _resp_finish = getattr(last_output, "finish_reason", None)
+                        _response_terminal = _responses_terminal_state(
+                            _resp_finish,
+                            cancelled=_response_was_cancelled,
+                        )
+                        _response_output_status = _response_terminal.item_status
             except Exception as e:
                 logger.error(
                     "%s visible answer pass failed for %s: %s",
@@ -22225,14 +22403,15 @@ async def stream_responses_api(
                     },
                 )
             elif reasoning_was_streamed:
-                # Reasoning-only completion is now intentional (B1 fix).
-                # Empty display_text means the panel should render the
-                # reasoning_content that was already streamed.
+                # Preserve the already-streamed reasoning rail, but leave
+                # display_text empty. Finalization below marks this as
+                # response.incomplete unless a visible answer or tool call
+                # exists.
                 display_text = ""
                 logger.info(
                     f"Request {response_id}: reasoning-only completion "
                     f"({len(accumulated_reasoning)} chars reasoning, no content) — "
-                    f"empty output_text is correct; client renders reasoning_content"
+                    f"final response will be marked incomplete"
                 )
             else:
                 display_text = ""
@@ -22417,28 +22596,33 @@ async def stream_responses_api(
     # Responses stream uses response.incomplete when max_output_tokens is hit;
     # a response.completed envelope with status=incomplete breaks clients that
     # dispatch terminal handling by event type.
+    # Compute the terminal only after any visible-answer pass has replaced
+    # ``last_output``. The second pass owns the terminal cause when its output
+    # was accepted; retaining the first pass's length here falsely marked a
+    # clean visible answer incomplete.
     _resp_finish = getattr(last_output, "finish_reason", None) if last_output else None
-    _resp_status = (
-        "failed"
-        if _required_tool_contract_failed
-        else (
-            "incomplete"
-            if _resp_finish in {"length", "aborted"} or _response_was_cancelled
-            else "completed"
-        )
-    )
-    _resp_extra: dict = {}
-    if _resp_status == "incomplete":
-        _resp_extra["incomplete_details"] = {
-            "reason": (
-                "cancelled"
-                if _response_was_cancelled or _resp_finish == "aborted"
-                else "max_output_tokens"
-            )
-        }
     # Reasoning-only detection mirrors the non-stream path. Empty streaming
-    # output_text shells do not count as visible output.
+    # output_text shells do not count as visible output. Compute this before the
+    # terminal state so a natural EOS inside the reasoning rail cannot be
+    # reported as response.completed.
     _stream_reasoning_only = _responses_output_is_reasoning_only(all_output_items)
+    _response_terminal = _responses_terminal_state(
+        _resp_finish,
+        cancelled=_response_was_cancelled,
+        failed=_required_tool_contract_failed,
+        reasoning_only_no_content=_stream_reasoning_only,
+    )
+    _resp_status = _response_terminal.response_status
+    _resp_extra: dict = {}
+    if _response_terminal.incomplete_details:
+        _resp_extra["incomplete_details"] = _response_terminal.incomplete_details
+
+    # The terminal response is the authoritative snapshot. Keep every retained
+    # item aligned with it even when an earlier reasoning stage ended before a
+    # bounded visible-answer continuation selected the final terminal cause.
+    for _item in all_output_items:
+        if isinstance(_item, dict) and "status" in _item:
+            _item["status"] = _response_terminal.item_status
     _stream_chain_warnings = _chain_warnings_for_previous_response_id(
         getattr(request, "previous_response_id", None)
     )
@@ -22447,7 +22631,10 @@ async def stream_responses_api(
     _dropped_tc_diagnostics = _take_tool_call_drop_diagnostics()
     _stream_warnings = _merge_responses_warnings(
         _stream_chain_warnings,
-        _current_response_warnings_for_reasoning_only(_stream_reasoning_only),
+        _current_response_warnings_for_reasoning_only(
+            _stream_reasoning_only,
+            _resp_finish,
+        ),
         _dropped_tc_diagnostics or None,
     )
 
@@ -22486,14 +22673,10 @@ async def stream_responses_api(
             + _responses_output_to_assistant_messages(all_output_items),
             reasoning_only=_stream_reasoning_only,
         )
-    _terminal_response_event = {
-        "incomplete": "response.incomplete",
-        "failed": "response.failed",
-    }.get(_resp_status, "response.completed")
     yield _sse(
-        _terminal_response_event,
+        _response_terminal.event_type,
         {
-            "type": _terminal_response_event,
+            "type": _response_terminal.event_type,
             "response": completed_response,
         },
     )

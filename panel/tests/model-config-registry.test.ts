@@ -1713,6 +1713,70 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
     expect(detected.defaultEnableThinking).toBe(false)
   })
 
+  it('classifies Laguna full/sliding attention without changing its KV cache policy', () => {
+    const dir = makeModelDir({
+      model_type: 'laguna',
+      num_hidden_layers: 3,
+      layer_types: [
+        'full_attention',
+        'sliding_attention',
+        'sliding_attention',
+      ],
+      sliding_window: 512,
+    })
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('laguna')
+    expect(detected.cacheType).toBe('kv')
+    expect(detected.cacheSubtype).toBeUndefined()
+    expect(detected.architectureHints).toMatchObject({
+      attentionArch: 'full_and_sliding_kv',
+      cacheSchema: 'mixed_swa_kv_v1',
+      selectiveTurboQuantKv: true,
+    })
+  })
+
+  it('does not classify Laguna as mixed-SWA without both full and sliding layers', () => {
+    const dir = makeModelDir({
+      model_type: 'laguna',
+      num_hidden_layers: 2,
+      layer_types: ['full_attention', 'full_attention'],
+    })
+
+    expect(detectModelConfigFromDir(dir).architectureHints).toBeUndefined()
+  })
+
+  it('does not classify Laguna selective TQ from a truncated per-layer layout', () => {
+    const dir = makeModelDir({
+      model_type: 'laguna',
+      num_hidden_layers: 48,
+      layer_types: ['full_attention', 'sliding_attention'],
+    })
+
+    expect(detectModelConfigFromDir(dir).architectureHints).toBeUndefined()
+  })
+
+  it('preserves a Laguna bundle-owned TurboQuant disable alongside mixed topology', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'laguna',
+        num_hidden_layers: 2,
+        layer_types: ['full_attention', 'sliding_attention'],
+      },
+      {
+        turboquant: { enabled: false },
+      },
+    )
+
+    expect(detectModelConfigFromDir(dir).architectureHints).toMatchObject({
+      attentionArch: 'full_and_sliding_kv',
+      cacheSchema: 'mixed_swa_kv_v1',
+      selectiveTurboQuantKv: true,
+      loaderTurboQuantEnabled: false,
+    })
+  })
+
   it('uses Laguna JANG chat metadata to default Auto reasoning on for S-2.1 bundles', () => {
     const dir = makeModelDir(
       { model_type: 'laguna' },

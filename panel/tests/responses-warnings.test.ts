@@ -6,6 +6,7 @@ import {
   dropSupersededRecoveryWarnings,
   OUTPUT_TRUNCATED_WARNING,
   categorizeResponsesWarning,
+  responsesTerminalFinishReason,
 } from '../src/renderer/src/lib/responsesWarnings'
 
 describe('extractResponsesWarnings', () => {
@@ -77,8 +78,8 @@ describe('extractResponsesWarnings', () => {
     const SERVER_MSG =
       'previous_response_id chained a response that produced reasoning only ' +
       '(no visible message, no tool calls). Chat continuity may be impaired ' +
-      'and prefix-cache reuse may be lower than expected. Consider raising ' +
-      'max_output_tokens or sending enable_thinking=false on the prior turn.'
+      'and prefix-cache reuse may be lower than expected. Inspect the prior ' +
+      'response terminal status before deciding whether to retry it.'
     const w = extractResponsesWarnings({ warnings: [SERVER_MSG] })
     expect(w).toEqual([SERVER_MSG])
   })
@@ -134,6 +135,44 @@ describe('appendOutputTruncationWarning', () => {
   })
 })
 
+describe('responsesTerminalFinishReason', () => {
+  it('maps only the output-limit incomplete cause to length', () => {
+    expect(
+      responsesTerminalFinishReason('incomplete', {
+        reason: 'max_output_tokens',
+      }),
+    ).toBe('length')
+  })
+
+  it('preserves cancellation without synthesizing truncation', () => {
+    expect(
+      responsesTerminalFinishReason('incomplete', {
+        reason: 'cancelled',
+      }),
+    ).toBe('cancelled')
+    expect(
+      responsesTerminalFinishReason('incomplete', {
+        reason: 'abort',
+      }),
+    ).toBe('cancelled')
+    expect(
+      appendOutputTruncationWarning(
+        null,
+        responsesTerminalFinishReason('incomplete', {
+          reason: 'cancelled',
+        }),
+      ),
+    ).toBeNull()
+  })
+
+  it('keeps completed and unknown incomplete terminals distinct', () => {
+    expect(responsesTerminalFinishReason('completed', null)).toBe('stop')
+    expect(responsesTerminalFinishReason('failed', null)).toBe('error')
+    expect(responsesTerminalFinishReason('incomplete', null)).toBe('incomplete')
+    expect(responsesTerminalFinishReason(undefined, null)).toBeUndefined()
+  })
+})
+
 describe('categorizeResponsesWarning', () => {
   it('categorizes the reasoning-only chain warning', () => {
     expect(
@@ -174,6 +213,7 @@ describe('Responses warnings panel wiring', () => {
     const source = readFileSync(new URL('../src/main/ipc/chat.ts', import.meta.url), 'utf8')
     expect(source).toContain('dropSupersededRecoveryWarnings,')
     expect(source).toContain('appendOutputTruncationWarning,')
+    expect(source).toContain('responsesTerminalFinishReason,')
     expect(source).toContain('extractResponsesWarnings,')
     expect(source).toContain('from "../../shared/responsesWarnings"')
     expect(source).toContain('responsesEventType === "response.warning"')
@@ -185,6 +225,7 @@ describe('Responses warnings panel wiring', () => {
     expect(source).toContain('const completedWarnings = extractResponsesWarnings(')
     expect(source).toContain('const chatWarnings = extractResponsesWarnings(parsed)')
     expect(source).toContain('const finalResponseWarnings = appendOutputTruncationWarning(')
+    expect(source).toContain('responsesTerminalFinishReason(')
     expect(source).toContain('assistantMessage.warningsJson = JSON.stringify(finalResponseWarnings)')
     expect(source).toContain('warnings: finalResponseWarnings || undefined')
   })

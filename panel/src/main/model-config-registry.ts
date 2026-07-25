@@ -1014,6 +1014,44 @@ function configDeclaresMixedSwaAttention(config: any): boolean {
   return false
 }
 
+/**
+ * Match the loader's minimum pre-launch proof for Laguna selective TQ.
+ *
+ * The Python loader applies the mixed-SWA wrapper only when `layer_types`
+ * maps one-to-one onto native cache slots. The panel cannot instantiate those
+ * slots before launch, but it can reject incomplete metadata by requiring the
+ * bundle's declared hidden-layer count to match the complete per-layer list.
+ */
+function configDeclaresCompleteLagunaMixedSwaAttention(config: any): boolean {
+  if (!config || typeof config !== 'object') return false
+  const containers = [config]
+  if (config.text_config && typeof config.text_config === 'object') {
+    containers.push(config.text_config)
+  }
+  for (const container of containers) {
+    const layerTypes = container.layer_types
+    const declaredLayers = Number(
+      container.num_hidden_layers ?? config.num_hidden_layers,
+    )
+    if (
+      !Array.isArray(layerTypes) ||
+      !Number.isInteger(declaredLayers) ||
+      declaredLayers <= 0 ||
+      layerTypes.length !== declaredLayers
+    ) {
+      continue
+    }
+    const normalized = layerTypes.map(v => String(v || '').toLowerCase())
+    if (
+      normalized.some(v => v.includes('sliding')) &&
+      normalized.some(v => !v.includes('sliding'))
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
 function applyConfigMetadataOverrides(
   detected: DetectedConfig,
   parsedConfig: any,
@@ -1067,6 +1105,21 @@ function applyConfigMetadataOverrides(
     // Gemma 4's typed mixed-SWA cache supports paged prefix reuse and block-disk
     // restore. Keep the effective UI default aligned with that runtime path.
     next.usePagedCache = true
+  }
+  if (
+    next.family === 'laguna' &&
+    configDeclaresCompleteLagunaMixedSwaAttention(parsedConfig)
+  ) {
+    // Laguna is still a KV family: every layer is attention-backed. Record the
+    // per-layer full/sliding topology separately so the panel can mirror the
+    // loader's Auto policy without routing Laguna through SSM-hybrid cache
+    // controls or changing the user's paged/SSD choices.
+    next.architectureHints = {
+      ...(next.architectureHints ?? {}),
+      attentionArch: 'full_and_sliding_kv',
+      cacheSchema: 'mixed_swa_kv_v1',
+      selectiveTurboQuantKv: true,
+    }
   }
   // 2026-07-12 (paged default ON, MLLM/#98 guard): a family can be marked
   // multimodal AFTER its registry paged default was computed (e.g. Qwen3.5 media,
@@ -1128,6 +1181,17 @@ function applyJangCapabilities(
 ): DetectedConfig {
   const caps = jangCfg?.capabilities
   const next = readJangChatMetadata(detected, jangCfg)
+  if (
+    next.family === 'laguna' &&
+    jangCfg?.turboquant &&
+    typeof jangCfg.turboquant === 'object' &&
+    jangCfg.turboquant.enabled === false
+  ) {
+    next.architectureHints = {
+      ...(next.architectureHints ?? {}),
+      loaderTurboQuantEnabled: false,
+    }
+  }
   if (
     next.family === 'deepseek-v4' &&
     typeof jangCfg?.cache?.pool_quant_default === 'boolean'

@@ -21,6 +21,7 @@ import {
   appendOutputTruncationWarning,
   dropSupersededRecoveryWarnings,
   extractResponsesWarnings,
+  responsesTerminalFinishReason,
 } from "../../shared/responsesWarnings";
 import {
   appendReasoningDelta,
@@ -2978,9 +2979,11 @@ export function registerChatHandlers(
                 }
                 // Track status for truncation detection
                 const respStatus = parsed.response?.status;
-                if (respStatus === "incomplete") lastFinishReason = "length";
-                else if (respStatus === "completed") lastFinishReason = "stop";
-                else if (respStatus) lastFinishReason = respStatus;
+                lastFinishReason =
+                  responsesTerminalFinishReason(
+                    respStatus,
+                    parsed.response?.incomplete_details,
+                  ) ?? lastFinishReason;
               }
               if (isResponsesTerminalEvent && respUsage) {
                 if (respUsage.output_tokens != null) {

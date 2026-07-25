@@ -7201,6 +7201,59 @@ class TestAnthropicOmniStreamingAdapter:
         assert message["content"][0]["text"] == "visible answer"
         assert "private analysis" not in payload["output_text"]
 
+    def test_omni_nonstream_reasoning_only_warning_uses_terminal_cause(self):
+        from vmlx_engine.server import (
+            _adapt_omni_chat_completion_to_responses_payload,
+        )
+
+        def adapt(finish_reason):
+            return _adapt_omni_chat_completion_to_responses_payload(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "reasoning_content": "private analysis",
+                                "content": "",
+                            },
+                            "finish_reason": finish_reason,
+                        }
+                    ],
+                    "usage": {},
+                },
+                "omni-test",
+        )
+
+        stopped = adapt("stop")
+        assert stopped["status"] == "incomplete"
+        assert stopped["incomplete_details"] == {"reason": "reasoning_only_no_content"}
+        assert {item["status"] for item in stopped["output"]} == {"incomplete"}
+        assert any("ended normally" in warning for warning in stopped["warnings"])
+        assert all(
+            "max_output_tokens" not in warning for warning in stopped["warnings"]
+        )
+
+        limited = adapt("length")
+        assert limited["status"] == "incomplete"
+        assert limited["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert {item["status"] for item in limited["output"]} == {"incomplete"}
+        assert any(
+            "max_output_tokens" in warning for warning in limited["warnings"]
+        )
+
+        cancelled = adapt("abort")
+        assert cancelled["status"] == "incomplete"
+        assert cancelled["incomplete_details"] == {"reason": "cancelled"}
+        assert {item["status"] for item in cancelled["output"]} == {"incomplete"}
+        assert all(
+            "max_output_tokens" not in warning
+            for warning in cancelled["warnings"]
+        )
+
+        failed = adapt("error")
+        assert failed["status"] == "failed"
+        assert "incomplete_details" not in failed
+        assert {item["status"] for item in failed["output"]} == {"incomplete"}
+
     @pytest.mark.asyncio
     async def test_omni_chat_stream_translates_to_incremental_responses_events(
         self, monkeypatch
@@ -13573,10 +13626,12 @@ class TestTurboQuantKVTelemetry:
             assert "if (config.enableJit) args.push('--enable-jit')" not in source
 
         assert "normalizedDetectedFamily === 'deepseek-v4'" in form_source
-        # JIT incompat list expanded 2026-05-09 to include TurboQuant
+        # JIT incompat list includes TurboQuant and Laguna mixed-SWA live TQ
         # (engine skips mx.compile for TurboQuantKVCache; UI now matches).
-        assert "disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || multimodalActive || hybridCacheActive}" in form_source
-        assert "checked={!!config.enableJit && !flashMoeActive && !distributedActive && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !multimodalActive && !hybridCacheActive}" in form_source
+        assert "lagunaMixedSwaTurboQuantActive" in form_source
+        assert "turboQuantActive || lagunaMixedSwaTurboQuantActive" in form_source
+        assert "disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive}" in form_source
+        assert "checked={!!config.enableJit && !flashMoeActive && !distributedActive && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !lagunaMixedSwaTurboQuantActive && !multimodalActive && !hybridCacheActive}" in form_source
         assert "disabled={config.continuousBatching || multimodalActive || dsv4Active}" in form_source
 
     def test_responses_long_context_tool_cache_gate_script_pins_artifacts(self):
@@ -15785,20 +15840,18 @@ class TestJitTurboQuantSymmetricGuard:
 
     def test_engine_jit_skip_for_turboquant_make_cache(self):
         """Engine apply_jit_compilation must short-circuit when the active
-        model has the TurboQuant patched make_cache function name."""
-        import inspect
+        model has any TurboQuant patched make_cache function name."""
         from pathlib import Path
 
         source = Path("vmlx_engine/server.py").read_text()
-        # The skip block is identified by these load-bearing strings:
-        assert "_turboquant_make_cache" in source
-        assert "_tq_make_cache" in source
+        helper_source = Path("vmlx_engine/utils/hybrid_tq_cache.py").read_text()
+        assert "is_turboquant_make_cache" in source
+        assert "is_turboquant_make_cache(_make_cache)" in source
+        assert "_turboquant_make_cache" in helper_source
+        assert "_tq_make_cache" in helper_source
+        assert "_hybrid_turboquant_make_cache" in helper_source
+        assert '"TurboQuantKVCache"' in source
         assert "JIT: Skipping mx.compile — TurboQuantKVCache is active" in source
-        # Make sure the early-return is wired in (return after detecting TQ name)
-        assert (
-            'if _make_cache_name in ("_turboquant_make_cache", "_tq_make_cache"):'
-            in source
-        )
 
     def test_panel_session_launcher_suppresses_jit_for_turboquant(self):
         """Panel launcher must compute effectiveEnableJit with turboQuantActive
@@ -15822,8 +15875,10 @@ class TestJitTurboQuantSymmetricGuard:
 
         assert "turboQuantActive" in form
         assert "detectedIsTurboQuant" in form
-        # disabled prop covers turboQuantActive and hybrid path-dependent caches.
-        assert "disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || multimodalActive || hybridCacheActive}" in form
+        # disabled prop covers turboQuantActive, Laguna mixed-SWA live TQ, and
+        # hybrid path-dependent caches.
+        assert "lagunaMixedSwaTurboQuantActive" in form
+        assert "disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive}" in form
 
     def test_detect_config_stamps_isTurboQuant_flag(self):
         """detectModelConfigFromDir must set isTurboQuant when bundle is TQ.

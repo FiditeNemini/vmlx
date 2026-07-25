@@ -34,6 +34,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
   const [detectedUsePagedCache, setDetectedUsePagedCache] = useState<boolean | undefined>(undefined)
   const [detectedCacheSubtype, setDetectedCacheSubtype] = useState<string | undefined>()
   const [detectedFamily, setDetectedFamily] = useState<string | undefined>()
+  const [detectedArchitectureHints, setDetectedArchitectureHints] = useState<Record<string, string | number | boolean> | undefined>()
   const [detectedToolParser, setDetectedToolParser] = useState<string | undefined>()
   const [detectedReasoningParser, setDetectedReasoningParser] = useState<string | undefined>()
   const [detectedEnableAutoToolChoice, setDetectedEnableAutoToolChoice] = useState<boolean | undefined>()
@@ -96,6 +97,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
     else setDetectedCacheType('kv')
     setDetectedUsePagedCache(detected?.usePagedCache)
     setDetectedCacheSubtype(detected?.cacheSubtype)
+    setDetectedArchitectureHints(detected?.architectureHints)
     if (detected?.family && detected.family !== 'unknown') setDetectedFamily(detected.family)
     else setDetectedFamily(undefined)
     setDetectedToolParser(detected?.toolParser)
@@ -224,6 +226,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           setDetectedReasoningParser(detected.reasoningParser)
           setDetectedEnableAutoToolChoice(detected.enableAutoToolChoice)
           setDetectedCacheSubtype(detected.cacheSubtype)
+          setDetectedArchitectureHints(detected.architectureHints)
           setDetectedIsTurboQuant(!!detected.isTurboQuant)
           setDetectedIsMultimodal(!!detected.isMultimodal)
           setDetectedForceTextOnly(!!detected.forceTextOnly)
@@ -234,6 +237,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           setDetectedReasoningParser(undefined)
           setDetectedEnableAutoToolChoice(undefined)
           setDetectedCacheSubtype(undefined)
+          setDetectedArchitectureHints(undefined)
           setDetectedIsTurboQuant(false)
           setDetectedIsMultimodal(false)
           setDetectedForceTextOnly(false)
@@ -247,6 +251,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         setDetectedReasoningParser(undefined)
         setDetectedEnableAutoToolChoice(undefined)
         setDetectedCacheSubtype(undefined)
+        setDetectedArchitectureHints(undefined)
         setDetectedIsTurboQuant(false)
         setDetectedIsMultimodal(false)
         setDetectedForceTextOnly(false)
@@ -635,6 +640,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                                 if (det?.cacheType) setDetectedCacheType(det.cacheType)
                                 setDetectedUsePagedCache(det?.usePagedCache)
                                 setDetectedCacheSubtype(det?.cacheSubtype)
+                                setDetectedArchitectureHints(det?.architectureHints)
                                 if (det?.family && det.family !== 'unknown') setDetectedFamily(det.family)
                                 else setDetectedFamily(undefined)
                                 setDetectedToolParser(det?.toolParser)
@@ -876,7 +882,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             </p>
           </div>
         ) : (
-          <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedToolParser={detectedToolParser} detectedReasoningParser={detectedReasoningParser} detectedEnableAutoToolChoice={detectedEnableAutoToolChoice} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelIdentity={selectedModel} />
+          <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedArchitectureHints={detectedArchitectureHints} detectedToolParser={detectedToolParser} detectedReasoningParser={detectedReasoningParser} detectedEnableAutoToolChoice={detectedEnableAutoToolChoice} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelIdentity={selectedModel} />
         )}
 
         {/* Launch */}

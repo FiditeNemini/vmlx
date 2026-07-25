@@ -720,6 +720,23 @@ def _validate_health_runtime_provenance(
     source_tree_sha256, source_file_count, source_read_error_count = (
         _python_source_tree_digest(git_root / "vmlx_engine")
     )
+    python_executable_hashes = {
+        hashlib.sha256(
+            str(observed_engine.get("python_executable") or "").encode()
+        ).hexdigest()
+    }
+    # Python.framework/pyvenv launches can report the framework Python.app in
+    # `ps`, while `sys.executable` inside the process truthfully resolves to the
+    # checkout venv entrypoint.  Keep the gate strict by accepting only the venv
+    # that belongs to the already-proven source checkout.
+    checkout_venv_python = git_root / ".venv" / "bin" / "python3"
+    if (
+        observed_engine.get("launch_shape") == "python-module-vmlx-engine-cli"
+        and checkout_venv_python.exists()
+    ):
+        python_executable_hashes.add(
+            hashlib.sha256(str(checkout_venv_python.absolute()).encode()).hexdigest()
+        )
     expected = {
         "pid": _integer(observed_engine.get("pid")),
         "server_module_relpath": "vmlx_engine/server.py",
@@ -733,9 +750,6 @@ def _validate_health_runtime_provenance(
         "python_source_tree_sha256": source_tree_sha256,
         "python_source_file_count": source_file_count,
         "python_source_read_error_count": source_read_error_count,
-        "python_executable_fingerprint_sha256": hashlib.sha256(
-            str(observed_engine.get("python_executable") or "").encode()
-        ).hexdigest(),
     }
     for field, expected_value in expected.items():
         if attestation.get(field) != expected_value:
@@ -743,6 +757,14 @@ def _validate_health_runtime_provenance(
                 f"provenance: /health {field} does not match the observed "
                 "listener/source"
             )
+    if (
+        attestation.get("python_executable_fingerprint_sha256")
+        not in python_executable_hashes
+    ):
+        failures.append(
+            "provenance: /health python_executable_fingerprint_sha256 does not "
+            "match the observed listener/source"
+        )
     if source_read_error_count:
         failures.append(
             "provenance: source-tree attestation could not read every Python file"

@@ -3604,6 +3604,28 @@ def test_r18_v5_six_phase_cache_facts_are_raw_and_do_not_invent_cross_surface_po
         representatives,
     ) == (set(), [])
 
+    def replace_phase_summary(capture_value, phase_index, mutate):
+        changed = deepcopy(capture_value)
+        phase = changed["phases"][phase_index]
+        summary = json.loads(base64.b64decode(phase["summary_b64"]))
+        mutate(summary)
+        summary_bytes = json.dumps(
+            summary,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        phase["summary_b64"] = _fixture_b64(summary_bytes)
+        phase["artifact_manifest_b64"] = _fixture_json_b64(
+            [
+                {
+                    "relative_path": "summary.json",
+                    "sha256": hashlib.sha256(summary_bytes).hexdigest(),
+                    "size": len(summary_bytes),
+                }
+            ]
+        )
+        return changed
+
     tampered_captures = []
 
     wrong_model = deepcopy(capture)
@@ -3654,6 +3676,53 @@ def test_r18_v5_six_phase_cache_facts_are_raw_and_do_not_invent_cross_surface_po
         native_tq_summary
     )
     tampered_captures.append(native_tq_enabled)
+
+    tampered_captures.append(
+        replace_phase_summary(
+            capture,
+            3,
+            lambda summary: summary.__setitem__(
+                "scenario_contract_ok",
+                False,
+            ),
+        )
+    )
+    tampered_captures.append(
+        replace_phase_summary(
+            capture,
+            3,
+            lambda summary: summary["l2_restart_restore_observation"].__setitem__(
+                "restart_probe_prefix_fingerprint_sha256",
+                "9" * 64,
+            ),
+        )
+    )
+    tampered_captures.append(
+        replace_phase_summary(
+            capture,
+            3,
+            lambda summary: summary["l2_restart_restore_observation"][
+                "restart_pre"
+            ].__setitem__("longest_common_prefix_tokens", 0),
+        )
+    )
+    for field, value in (
+        ("cached_tokens", 0),
+        ("disk_blocks", 0),
+        ("uncached_prompt_tokens", 17),
+    ):
+        tampered_captures.append(
+            replace_phase_summary(
+                capture,
+                3,
+                lambda summary, field=field, value=value: summary[
+                    "l2_restart_restore_observation"
+                ]["restart_execution"]["last_cache_execution"].__setitem__(
+                    field,
+                    value,
+                ),
+            )
+        )
 
     for tampered in tampered_captures:
         tampered_raw = json.dumps(

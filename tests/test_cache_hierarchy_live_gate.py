@@ -1168,6 +1168,155 @@ def test_restart_restore_uses_surviving_recent_chain_not_evicted_standard_chain(
     ] == ["restart_partial_c", "restart_a"]
 
 
+def _run_restart_restore_main(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    include_store_observation: bool = True,
+    scenario_rows: list[dict] | None = None,
+    scenario_failures: list[str] | None = None,
+) -> tuple[int, dict, dict]:
+    store = _store_summary()
+    store["prompt_contract"] = _prompt_contract(
+        gate._common_prefix(NONCE, 320),
+        320,
+    )
+    store_observation = _l2_eviction_observation()
+    if include_store_observation:
+        store["l2_size_eviction_observation"] = store_observation
+    store_path = tmp_path / "store-summary.json"
+    store_path.write_text(json.dumps(store))
+    calls = {"scenario": 0, "generic": 0}
+
+    def unexpected_generic_request(*_args, **_kwargs):
+        calls["generic"] += 1
+        raise AssertionError("restart-restore must not probe evicted A/C rows")
+
+    def fake_restart_scenario(**kwargs):
+        calls["scenario"] += 1
+        assert kwargs["store_observation"] == store.get(
+            "l2_size_eviction_observation"
+        )
+        return (
+            _l2_restart_observation(store_observation),
+            (
+                [
+                    {
+                        "status_code": 200,
+                        "marker_ok": True,
+                        "terminal_ok": True,
+                    }
+                ]
+                if scenario_rows is None
+                else scenario_rows
+            ),
+            [] if scenario_failures is None else scenario_failures,
+            _health(pid=5678),
+        )
+
+    monkeypatch.setattr(
+        gate,
+        "_observe_local_listener_identity",
+        lambda _base_url: _observed_engine(
+            "engine-after-restart",
+            pid=5678,
+        ),
+    )
+    monkeypatch.setattr(gate, "_observe_source_checkout", _observed_source)
+    monkeypatch.setattr(
+        gate,
+        "_json_get",
+        lambda _url, _timeout: _health(pid=5678),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_fetch_tokenizer_lcp_contract",
+        lambda **_kwargs: (TOKEN_CONTRACT, []),
+    )
+    monkeypatch.setattr(gate, "_post_sse", unexpected_generic_request)
+    monkeypatch.setattr(
+        gate,
+        "_run_restart_restore_scenario",
+        fake_restart_scenario,
+    )
+    artifact_dir = tmp_path / "probe"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_cache_hierarchy_live_gate.py",
+            "--model",
+            MODEL,
+            "--nonce",
+            NONCE,
+            "--source-identity",
+            SOURCE,
+            "--config-identity",
+            CONFIG,
+            "--store-summary",
+            str(store_path),
+            "--artifact-dir",
+            str(artifact_dir),
+            "--phase",
+            "probe",
+            "--cache-scenario",
+            "restart-restore",
+        ],
+    )
+
+    exit_code = gate.main()
+    return (
+        exit_code,
+        json.loads((artifact_dir / "summary.json").read_text()),
+        calls,
+    )
+
+
+def test_restart_restore_main_runs_only_surviving_recent_chain(
+    monkeypatch,
+    tmp_path,
+):
+    exit_code, summary, calls = _run_restart_restore_main(
+        monkeypatch,
+        tmp_path,
+    )
+
+    assert exit_code == 0
+    assert calls == {"scenario": 1, "generic": 0}
+    assert summary["requests"] == []
+    assert len(summary["scenario_requests"]) == 1
+    assert summary["scenario_contract_ok"] is True
+    assert summary["gate_ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("include_store_observation", "scenario_rows", "scenario_failures"),
+    [
+        (False, None, None),
+        (True, [], None),
+        (True, None, ["invalid restart observation"]),
+    ],
+)
+def test_restart_restore_main_fails_closed_on_missing_or_invalid_scenario(
+    monkeypatch,
+    tmp_path,
+    include_store_observation,
+    scenario_rows,
+    scenario_failures,
+):
+    exit_code, summary, calls = _run_restart_restore_main(
+        monkeypatch,
+        tmp_path,
+        include_store_observation=include_store_observation,
+        scenario_rows=scenario_rows,
+        scenario_failures=scenario_failures,
+    )
+
+    assert exit_code == 1
+    assert calls == {"scenario": 1, "generic": 0}
+    assert summary["gate_ok"] is False
+    assert summary["scenario_contract_ok"] is False
+
+
 def test_probe_contract_requires_unseen_c_then_allows_ram_exact_a():
     rows = _valid_probe_rows()
     store_summary = _store_summary()

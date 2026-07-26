@@ -3860,8 +3860,9 @@ def main() -> int:
         choices=CACHE_SCENARIOS,
         default="standard",
         help=(
-            "Run the standard store/probe contract plus an explicit L2 "
-            "eviction or restart-identity scenario."
+            "Run the standard store/probe contract plus explicit L2 "
+            "eviction proof; restart-restore instead probes the recent chain "
+            "that the linked eviction phase attested as surviving."
         ),
     )
     parser.add_argument(

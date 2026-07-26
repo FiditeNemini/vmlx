@@ -8,6 +8,7 @@ and last_request_time fields by patching server globals directly.
 import asyncio
 import hashlib
 import json
+import pathlib
 import platform
 import sys
 import threading
@@ -240,6 +241,18 @@ class TestHealthEndpoint:
                     credentials,
                 )
             ) is True
+
+    def test_private_cache_attestation_enables_prefix_cache_strict_fence_env(self):
+        """Private cache proof entrypoints must set the env var the cache reads."""
+        root = pathlib.Path(__file__).resolve().parents[1]
+        expected = 'os.environ["VMLX_STRICT_BLOCK_DISK_WRITE_FENCE"] = "1"'
+        stale = 'os.environ["VMLINUX_STRICT_BLOCK_DISK_WRITE_FENCE"] = "1"'
+        for relative in ("vmlx_engine/cli.py", "vmlx_engine/server.py"):
+            text = (root / relative).read_text()
+            assert expected in text
+            assert stale not in text
+        prefix_cache = (root / "vmlx_engine/prefix_cache.py").read_text()
+        assert '"VMLX_STRICT_BLOCK_DISK_WRITE_FENCE"' in prefix_cache
 
     def test_private_cache_attestation_enforces_byte_and_token_budgets(self):
         """Proof-only rendering cannot become an unbounded tokenizer workload."""

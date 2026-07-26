@@ -2230,6 +2230,40 @@ def test_r18_bundle_attestation_accepts_production_path_free_health_shape(
     ) is None
 
 
+def test_r18_v5_runtime_bundle_attestation_requires_production_nested_shape(
+    tmp_path: Path,
+):
+    module = load_module()
+    root = tmp_path / "model"
+    bundle_attestation(module, root)
+    snapshot = module._read_bundle_directory_snapshot(root.resolve())
+    assert snapshot is not None
+    provenance = deepcopy(snapshot["health_attestation"])
+    health = {"model_bundle_provenance": provenance}
+    runtime = {"model_bundle_provenance": deepcopy(provenance)}
+    assert module._v5_validate_runtime_bundle_attestation(
+        health,
+        runtime,
+        snapshot,
+    )
+
+    altered = deepcopy(provenance)
+    altered["fingerprint_sha256"] = "0" * 64
+    assert not module._v5_validate_runtime_bundle_attestation(
+        {"model_bundle_provenance": altered},
+        {"model_bundle_provenance": deepcopy(altered)},
+        snapshot,
+    )
+    assert not module._v5_validate_runtime_bundle_attestation(
+        {
+            "model_bundle_path": snapshot["model_bundle_path"],
+            "bundle_fingerprint_sha256": snapshot["fingerprint_sha256"],
+        },
+        {},
+        snapshot,
+    )
+
+
 def test_r18_bundle_attestation_rejects_symlink_and_hardlink_files(
     tmp_path: Path,
 ):
@@ -3079,13 +3113,14 @@ def test_r18_v5_main_owned_children_fail_closed_on_unowned_release_rows(
     def raw_runtime_observer(args, observed, snapshot) -> dict:
         del observed
         current_backend_pid["value"] = args.backend_pid
+        bundle_provenance = deepcopy(snapshot["health_attestation"])
         health = {
-            "model_bundle_path": snapshot["model_bundle_path"],
-            "bundle_fingerprint_sha256": snapshot["fingerprint_sha256"],
+            "model_bundle_provenance": bundle_provenance,
             "runtime_provenance": {
                 "package_init_path": str(
                     (runtime_package / "__init__.py").resolve()
-                )
+                ),
+                "model_bundle_provenance": deepcopy(bundle_provenance),
             },
         }
         return {

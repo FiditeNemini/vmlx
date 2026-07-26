@@ -4806,6 +4806,31 @@ def _v5_hash_python_runtime(imported_init: Path) -> dict[str, Any] | None:
     }
 
 
+def _v5_validate_runtime_bundle_attestation(
+    health: dict[str, Any],
+    runtime: dict[str, Any],
+    bundle_snapshot: dict[str, Any],
+) -> bool:
+    """Bind the held runtime to the production nested bundle attestation."""
+
+    health_attestation = health.get("model_bundle_provenance")
+    runtime_attestation = runtime.get("model_bundle_provenance")
+    if (
+        not isinstance(health_attestation, dict)
+        or runtime_attestation != health_attestation
+        or health_attestation.get("fingerprint_sha256")
+        != bundle_snapshot.get("fingerprint_sha256")
+    ):
+        return False
+    return (
+        _validated_bundle_attestation(
+            bundle_snapshot.get("model_bundle_path"),
+            health_attestation,
+        )
+        is not None
+    )
+
+
 def _v5_independent_runtime_observation(
     args: argparse.Namespace,
     source: dict[str, Any],
@@ -4881,9 +4906,11 @@ def _v5_independent_runtime_observation(
         or runtime_hashes["python_source_file_count"]
         != expected["python_source_file_count"]
         or dom.get("sourceCommit") != source.get("commit")
-        or health.get("model_bundle_path") != bundle_snapshot["model_bundle_path"]
-        or health.get("bundle_fingerprint_sha256")
-        != bundle_snapshot["fingerprint_sha256"]
+        or not _v5_validate_runtime_bundle_attestation(
+            health,
+            runtime,
+            bundle_snapshot,
+        )
     ):
         raise RuntimeError("live runtime does not match exact source or bundle")
     return {

@@ -7969,7 +7969,20 @@ def _v5_wait_for_ui_hold(
                 last_read_error = exc
                 time.sleep(0.05)
                 continue
-            observation = observer(binding)
+            try:
+                observation = observer(binding)
+            except RuntimeError as exc:
+                # Clearing the renderer's minimum-width emulation is
+                # asynchronous at the CDP boundary. The source-owned UI child
+                # can publish its immutable binding just before Chromium has
+                # reported the restored layout viewport. Retry only that exact
+                # transient; every provenance or ownership mismatch still
+                # fails immediately.
+                if str(exc) != "CDP viewport did not restore after clearing override":
+                    raise
+                last_read_error = exc
+                time.sleep(0.05)
+                continue
             if not isinstance(observation, dict):
                 raise RuntimeError("held UI observer returned no raw observation")
             return binding, binding_digest, observation

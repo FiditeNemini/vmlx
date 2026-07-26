@@ -5990,6 +5990,22 @@ async function main() {
   const uiTurnCount = Number(activeReleasePhase?.ui_turn_count || 3)
   const apiActionProfile = activeReleasePhase?.api_action_profile
     || 'full-agentic'
+  const releaseBlockDiskCacheDir = activeReleasePhase
+    ? path.join(
+      proofDir,
+      'block-disk-cache',
+      [
+        String(activeReleasePhase.phase_index).padStart(2, '0'),
+        safeArtifactComponent(activeReleasePhase.phase_name, 'phase'),
+        safeArtifactComponent(activeReleasePhase.representative_id, 'representative'),
+      ].join('-'),
+    )
+    : ''
+  if (releaseBlockDiskCacheDir) {
+    mkdirSync(releaseBlockDiskCacheDir, { recursive: true })
+    chmodSync(path.dirname(releaseBlockDiskCacheDir), 0o700)
+    chmodSync(releaseBlockDiskCacheDir, 0o700)
+  }
   const primarySharedPrefix = [
     'R18_PRIMARY_SHARED_PREFIX',
     'cache-anchor-9f4b7d2a',
@@ -6500,6 +6516,7 @@ async function main() {
               usePagedCache: Boolean(activeReleasePhase.paged_ram),
               enableBlockDiskCache: true,
               kvCacheQuantization: String(activeReleasePhase.kv_cache_quantization || 'none'),
+              blockDiskCacheDir: releaseBlockDiskCacheDir,
             } : {})}),
             ...(privateCacheAttestationArgs
               ? { additionalArgs: privateCacheAttestationArgs }
@@ -6617,6 +6634,7 @@ async function main() {
               usePagedCache: Boolean(activeReleasePhase.paged_ram),
               enableBlockDiskCache: true,
               kvCacheQuantization: String(activeReleasePhase.kv_cache_quantization || 'none'),
+              blockDiskCacheDir: releaseBlockDiskCacheDir,
             } : {})};
             if (Object.keys(releasePhaseSessionConfig).length) {
               const phaseConfigUpdate = await window.api.sessions.update(

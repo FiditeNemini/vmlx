@@ -7464,7 +7464,6 @@ def _v5_default_owned_check_plans(
                         str(python),
                         "-m",
                         "venv",
-                        "--copies",
                         str(jang_venv),
                     ],
                     "cwd": ROOT,

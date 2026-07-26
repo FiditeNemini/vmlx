@@ -1154,6 +1154,39 @@ def test_v5_jang_import_uses_public_distribution_metadata_name(tmp_path: Path):
     assert "metadata.version('jang-tools')" not in import_script
 
 
+def test_v5_jang_venv_plan_uses_symlinks_with_pinned_source_python(
+    tmp_path: Path,
+):
+    module = load_module()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    jang_source = _fixture_v5_jang_source(tmp_path)
+    plans = module._v5_default_owned_check_plans(run_dir, jang_source)
+    command = next(
+        row
+        for row in plans["jang_runtime_provenance"]["commands"]
+        if row["command_id"] == "jang_venv"
+    )
+    python = ROOT / ".venv/bin/python"
+    assert command["argv"] == [
+        str(python),
+        "-m",
+        "venv",
+        str(run_dir / "jang-installed"),
+    ]
+    assert "--copies" not in command["argv"]
+
+    executable_pin, invocation = module._v5_pin_executable_invocation(
+        Path(command["argv"][0]),
+        run_dir,
+    )
+    assert invocation is not None
+    assert invocation["path"] == str(python)
+    assert invocation["target"] == os.readlink(python)
+    assert invocation["resolved_path"] == executable_pin["path"]
+    assert module._v5_executable_invocation_unchanged(invocation) is True
+
+
 def test_v5_canonical_json_bytes_are_stable_and_callable():
     module = load_module()
     assert module._canonical_json_bytes({"z": 1, "a": "value"}) == (

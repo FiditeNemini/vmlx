@@ -619,7 +619,7 @@ establish_r18_release_python_provenance() {
   provenance="$(
     run_release_python -I - \
       "$ROOT_DIR" \
-      "$VMLX_R18_RELEASE_PYTHON_ACTION" \
+      "$AUTHORITATIVE_PYTHON" \
       "$VERSION" <<'PY'
 import importlib.util
 import pathlib

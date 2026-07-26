@@ -127,11 +127,16 @@ function bindReleasePython(aliasPath, options = {}) {
   const sourcePath = realpathSync(alias);
   const source = openIdentity(sourcePath);
   const binDir = dirname(alias);
+  const sourceBinDir = dirname(sourcePath);
   const pyvenvPath = resolve(binDir, "..", "pyvenv.cfg");
   const pyvenv = regularFileIdentity(pyvenvPath);
   const verifier = regularFileIdentity(__filename);
   const nonce = randomUUID().replaceAll("-", "");
-  const actionPath = join(binDir, `.vmlx-r18-python-${nonce}`);
+  // Keep the executable hardlink beside the physical interpreter. Standalone
+  // CPython builds resolve libpython through an executable-relative @rpath;
+  // moving the hardlink into a venv bin directory makes dyld search the venv
+  // for a library that lives beside the physical interpreter instead.
+  const actionPath = join(sourceBinDir, `.vmlx-r18-python-${nonce}`);
   const planPath = join(binDir, `.vmlx-r18-python-${nonce}.json`);
   let actionCreated = false;
   let planCreated = false;
@@ -356,11 +361,14 @@ function scriptBinding(args) {
   };
 }
 
-function sanitizedPythonEnvironment() {
+function sanitizedPythonEnvironment(launcher) {
   const env = { ...process.env, PATH: FIXED_PATH };
   for (const key of Object.keys(env)) {
     if (key.startsWith("PYTHON")) delete env[key];
   }
+  // Executing the source-adjacent hardlink preserves the interpreter rpath;
+  // this pinned launcher preserves the authoritative venv prefix/import path.
+  env.__PYVENV_LAUNCHER__ = launcher;
   return env;
 }
 
@@ -421,7 +429,7 @@ function runPinnedReleasePythonAction(args, options = {}) {
     }
     proc = spawnSync(before.plan.action.path, script.argv, {
       cwd: options.cwd ? resolve(options.cwd) : process.cwd(),
-      env: sanitizedPythonEnvironment(),
+      env: sanitizedPythonEnvironment(before.plan.alias),
       encoding: options.capture ? "utf8" : undefined,
       input: script.input,
       stdio: options.capture

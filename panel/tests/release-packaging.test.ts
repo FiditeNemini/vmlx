@@ -12,7 +12,7 @@ import {
 } from "fs";
 import { spawnSync } from "child_process";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { createRequire } from "module";
 import { createHash } from "crypto";
 import { describe, expect, it } from "vitest";
@@ -1464,6 +1464,7 @@ describe("release packaging", () => {
     try {
       process.env.PATH = helper.FIXED_PATH;
       const binding = helper.bindReleasePython(alias);
+      expect(dirname(binding.actionPath)).toBe(dirname(realpathSync(source)));
       process.env.VMLX_R18_RELEASE_PYTHON_PLAN = binding.planPath;
       process.env.VMLX_R18_RELEASE_PYTHON_PLAN_SHA256 =
         binding.planSha256;
@@ -1494,6 +1495,45 @@ describe("release packaging", () => {
       ).toThrow(/cross-device/);
     } finally {
       rmSync(root, { recursive: true, force: true });
+      for (const key of Object.keys(process.env)) {
+        if (!(key in oldEnv)) delete process.env[key];
+      }
+      Object.assign(process.env, oldEnv);
+    }
+  });
+
+  it("preserves the macOS standalone-Python loader and authoritative venv identity", () => {
+    if (process.platform !== "darwin") return;
+    const helper = requireCjs(
+      join(repo, "scripts/release-python-action.cjs"),
+    );
+    const python = join(repo, "..", ".venv", "bin", "python");
+    const expectedPrefix = join(repo, "..", ".venv");
+    const oldEnv = { ...process.env };
+    let bound = false;
+    try {
+      process.env.PATH = helper.FIXED_PATH;
+      const binding = helper.bindReleasePython(python);
+      bound = true;
+      expect(dirname(binding.actionPath)).toBe(
+        dirname(realpathSync(python)),
+      );
+      process.env.VMLX_R18_RELEASE_PYTHON_PLAN = binding.planPath;
+      process.env.VMLX_R18_RELEASE_PYTHON_PLAN_SHA256 =
+        binding.planSha256;
+      const probe = JSON.parse(
+        helper.runPinnedReleasePythonAction(
+          [
+            "-c",
+            "import json,sys; print(json.dumps({'executable':sys.executable,'prefix':sys.prefix}))",
+          ],
+          { cwd: join(repo, ".."), capture: true },
+        ),
+      );
+      expect(probe.executable).toBe(python);
+      expect(probe.prefix).toBe(expectedPrefix);
+    } finally {
+      if (bound) helper.cleanupReleasePythonBinding();
       for (const key of Object.keys(process.env)) {
         if (!(key in oldEnv)) delete process.env[key];
       }

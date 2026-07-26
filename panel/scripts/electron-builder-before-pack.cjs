@@ -1088,7 +1088,8 @@ function verifyR18PackagingContext(panelDir, context) {
   const expectedServer = join(rootDir, "vmlx_engine", "server.py");
   const expectedPrefix = join(rootDir, ".venv");
   if (
-    resolve(probe.executable) !== pythonPlan.action.path ||
+    resolve(probe.executable) !== resolve(authoritativePython) ||
+    resolve(pythonPlan.alias) !== resolve(authoritativePython) ||
     realpathSync(authoritativePython) !== pythonPlan.source.path ||
     resolve(probe.prefix) !== expectedPrefix ||
     resolve(probe.init_path) !== expectedInit ||

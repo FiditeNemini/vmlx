@@ -200,6 +200,43 @@ describe("generated CDP expression syntax", () => {
     expect(tryIndex).toBeLessThan(finallyIndex);
     expect(cleanupReadIndex).toBeGreaterThan(finallyIndex);
   });
+
+  it("double-escapes regex character classes inside the generated worker template", () => {
+    const harnessSource = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+    const workerStart = harnessSource.indexOf(
+      "      rendererResult = await evaluate(cdp, `",
+    );
+    const workerEnd = harnessSource.indexOf(
+      "        failureStage: 'renderer_real_ui_chat',",
+      workerStart,
+    );
+    const workerTemplate = harnessSource.slice(workerStart, workerEnd);
+    const hazards: string[] = [];
+    const regexEscapeClasses = new Set(["s", "S", "d", "D", "w", "W", "b", "B"]);
+    for (let index = 0; index < workerTemplate.length - 1; index += 1) {
+      if (workerTemplate[index] !== "\\") continue;
+      const next = workerTemplate[index + 1];
+      if (!regexEscapeClasses.has(next)) continue;
+      let runLength = 1;
+      for (
+        let cursor = index - 1;
+        cursor >= 0 && workerTemplate[cursor] === "\\";
+        cursor -= 1
+      ) {
+        runLength += 1;
+      }
+      if (runLength % 2 === 1) {
+        hazards.push(workerTemplate.slice(index, index + 2));
+      }
+    }
+
+    expect(workerStart).toBeGreaterThan(-1);
+    expect(workerEnd).toBeGreaterThan(workerStart);
+    expect(hazards).toEqual([]);
+  });
 });
 
 function canonicalJson(value: unknown): string {

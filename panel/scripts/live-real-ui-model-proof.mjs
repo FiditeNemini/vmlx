@@ -6152,7 +6152,7 @@ async function main() {
               );
             });
             const matchedRequestIds = new Set(matchedLines.map((line) => {
-              const match = String(line).match(/\srequest_id=(\S+)\smessage_id=/);
+              const match = String(line).match(/\\srequest_id=(\\S+)\\smessage_id=/);
               return match?.[1] || '';
             }).filter(Boolean));
             if (
@@ -6342,7 +6342,7 @@ async function main() {
         const privateCacheAttestationArgs = ${JSON.stringify(privateCacheAttestationArgs)};
         try {
           const stripPrivateCacheAttestationArgs = (raw) => {
-            const tokens = String(raw || '').trim().split(/\s+/).filter(Boolean);
+            const tokens = String(raw || '').trim().split(/\\s+/).filter(Boolean);
             const kept = [];
             for (let index = 0; index < tokens.length; index += 1) {
               const token = tokens[index];

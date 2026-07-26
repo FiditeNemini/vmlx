@@ -6584,10 +6584,6 @@ async function main() {
             HTMLInputElement.prototype,
             'value',
           )?.set;
-          const checkedSetter = Object.getOwnPropertyDescriptor(
-            HTMLInputElement.prototype,
-            'checked',
-          )?.set;
           const selectSetter = Object.getOwnPropertyDescriptor(
             HTMLSelectElement.prototype,
             'value',
@@ -6691,20 +6687,24 @@ async function main() {
           }
           chatSettingsInteraction.controlsChanged.push('API Wire Format');
           const builtinInput = checkboxFor('Enable Built-in Coding Tools');
-          if (!(builtinInput instanceof HTMLInputElement) || !checkedSetter) {
+          if (!(builtinInput instanceof HTMLInputElement)) {
             throw new Error('visible built-in tools checkbox missing');
           }
           if (Boolean(builtinInput.checked) !== builtinToolsEnabled) {
-            checkedSetter.call(builtinInput, builtinToolsEnabled);
-            builtinInput.dispatchEvent(new Event('change', { bubbles: true }));
+            builtinInput.click();
             chatSettingsInteraction.controlsChanged.push('Enable Built-in Coding Tools');
-            await new Promise((resolve) => setTimeout(resolve, 100));
+            await waitFor(
+              () => Boolean(builtinInput.checked) === builtinToolsEnabled,
+              'visible built-in tools checkbox state',
+            );
           }
           if (builtinToolsEnabled) {
-            const workingInput = [...(chatSettingsDrawer?.querySelectorAll('input[type="text"]') || [])]
-              .find((candidate) =>
-                (candidate.getAttribute('placeholder') || '').includes('project directory')
-              );
+            const workingInput = await waitFor(() =>
+              [...(chatSettingsDrawer?.querySelectorAll('input[type="text"]') || [])]
+                .find((candidate) =>
+                  (candidate.getAttribute('placeholder') || '').includes('project directory')
+                ) || null,
+            'visible Working Directory input');
             await setInput(workingInput, workingDirectory);
             await setInput(numberInputFor('Max Tool Iterations'), ${JSON.stringify(maxToolIterations)});
             await setInput(
@@ -6727,10 +6727,12 @@ async function main() {
             ]) {
               const input = checkboxFor(label);
               if (input instanceof HTMLInputElement && Boolean(input.checked) !== desired) {
-                checkedSetter.call(input, desired);
-                input.dispatchEvent(new Event('change', { bubbles: true }));
+                input.click();
                 chatSettingsInteraction.controlsChanged.push(label);
-                await new Promise((resolve) => setTimeout(resolve, 30));
+                await waitFor(
+                  () => Boolean(input.checked) === desired,
+                  'visible ' + label + ' tool checkbox state',
+                );
               }
             }
           }

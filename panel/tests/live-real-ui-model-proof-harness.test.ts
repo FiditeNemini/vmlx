@@ -268,6 +268,10 @@ describe("generated CDP expression syntax", () => {
     expect(harnessSource).not.toContain(
       ".trim() === 'Chat'\n            ) || null,",
     );
+    expect(harnessSource).toContain("builtinInput.click();");
+    expect(harnessSource).toContain("input.click();");
+    expect(harnessSource).toContain("'visible Working Directory input'");
+    expect(harnessSource).not.toContain("checkedSetter.call(");
   });
 });
 

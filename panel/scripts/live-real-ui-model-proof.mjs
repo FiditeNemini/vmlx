@@ -6736,16 +6736,33 @@ async function main() {
               }
             }
           }
-          const saveButton = await waitFor(() =>
-            [...(chatSettingsDrawer?.querySelectorAll('button') || [])].find((button) =>
-              isVisible(button)
+          const saveButton = await waitFor(() => {
+            const buttons = [...(chatSettingsDrawer?.querySelectorAll(
+              '[data-vmlx-control="chat-settings-save"]',
+            ) || [])].filter((candidate) =>
+              candidate instanceof HTMLButtonElement && isVisible(candidate)
+            );
+            const button = buttons.length === 1 ? buttons[0] : null;
+            return button instanceof HTMLButtonElement
               && !button.disabled
-              && (button.textContent || '').replace(/\\s+/g, ' ').trim() === 'Save'
-            ) || null,
+              && button.getAttribute('data-vmlx-state') === 'dirty'
+              ? button
+              : null;
+          },
           'enabled visible Chat Settings Save control');
           saveButton.click();
           chatSettingsInteraction.savedViaVisibleControl = true;
-          await waitFor(() => saveButton.disabled, 'Chat Settings save completion');
+          await waitFor(() => {
+            const buttons = [...(chatSettingsDrawer?.querySelectorAll(
+              '[data-vmlx-control="chat-settings-save"]',
+            ) || [])].filter((candidate) =>
+              candidate instanceof HTMLButtonElement && isVisible(candidate)
+            );
+            const current = buttons.length === 1 ? buttons[0] : null;
+            return current instanceof HTMLButtonElement
+              && current.disabled
+              && current.getAttribute('data-vmlx-state') === 'saved';
+          }, 'Chat Settings save completion');
           const expectedUiValues = {
             Temperature: samplingOverrides.temperature ?? independentBundleDefaults?.temperature,
             'Top P': samplingOverrides.topP ?? independentBundleDefaults?.topP,

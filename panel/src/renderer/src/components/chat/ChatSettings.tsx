@@ -922,6 +922,8 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
       {/* Footer Actions */}
       <div className="flex items-center gap-2 px-4 py-3 border-t border-border flex-shrink-0">
         <button
+          data-vmlx-control="chat-settings-save"
+          data-vmlx-state={saving ? 'saving' : dirty ? 'dirty' : 'saved'}
           onClick={handleSave}
           disabled={!dirty || saving}
           className="flex-1 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-40"

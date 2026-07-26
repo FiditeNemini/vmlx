@@ -259,11 +259,32 @@ describe("generated CDP expression syntax", () => {
     expect(chatSettingsSource).toContain(
       'data-vmlx-surface="chat-settings"',
     );
+    expect(chatSettingsSource).toContain(
+      'data-vmlx-control="chat-settings-save"',
+    );
+    expect(chatSettingsSource).toContain(
+      "data-vmlx-state={saving ? 'saving' : dirty ? 'dirty' : 'saved'}",
+    );
     expect(harnessSource).toContain(
       'document.querySelectorAll(\'[data-vmlx-control="chat-settings"]\')',
     );
     expect(harnessSource).toContain(
       'document.querySelector(\'[data-vmlx-surface="chat-settings"]\')',
+    );
+    expect(harnessSource).toContain(
+      '\'[data-vmlx-control="chat-settings-save"]\'',
+    );
+    expect(harnessSource).toContain(
+      "const button = buttons.length === 1 ? buttons[0] : null;",
+    );
+    expect(harnessSource).toContain(
+      "button.getAttribute('data-vmlx-state') === 'dirty'",
+    );
+    expect(harnessSource).toContain(
+      "current.getAttribute('data-vmlx-state') === 'saved'",
+    );
+    expect(harnessSource).not.toContain(
+      "(button.textContent || '').replace(/\\\\s+/g, ' ').trim() === 'Save'",
     );
     expect(harnessSource).not.toContain(
       ".trim() === 'Chat'\n            ) || null,",

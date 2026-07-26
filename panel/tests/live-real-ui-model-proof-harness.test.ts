@@ -231,6 +231,44 @@ describe("generated CDP expression syntax", () => {
     expect(workerEnd).toBeGreaterThan(workerStart);
     expect(hazards).toEqual([]);
   });
+
+  it("binds the live proof to the product-owned Chat Settings controls", () => {
+    const harnessSource = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+    const toolbarSource = readFileSync(
+      path.resolve("src/renderer/src/components/layout/ChatModeToolbar.tsx"),
+      "utf8",
+    );
+    const sessionViewSource = readFileSync(
+      path.resolve("src/renderer/src/components/sessions/SessionView.tsx"),
+      "utf8",
+    );
+    const chatSettingsSource = readFileSync(
+      path.resolve("src/renderer/src/components/chat/ChatSettings.tsx"),
+      "utf8",
+    );
+
+    expect(toolbarSource).toContain(
+      'data-vmlx-control="chat-settings"',
+    );
+    expect(sessionViewSource).toContain(
+      'data-vmlx-control="chat-settings"',
+    );
+    expect(chatSettingsSource).toContain(
+      'data-vmlx-surface="chat-settings"',
+    );
+    expect(harnessSource).toContain(
+      'document.querySelectorAll(\'[data-vmlx-control="chat-settings"]\')',
+    );
+    expect(harnessSource).toContain(
+      'document.querySelector(\'[data-vmlx-surface="chat-settings"]\')',
+    );
+    expect(harnessSource).not.toContain(
+      ".trim() === 'Chat'\n            ) || null,",
+    );
+  });
 });
 
 function canonicalJson(value: unknown): string {

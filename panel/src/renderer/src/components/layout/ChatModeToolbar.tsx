@@ -436,6 +436,7 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
         {displaySession && (
           <div className="flex items-center gap-1 flex-shrink-0 max-[800px]:basis-full max-[800px]:justify-end">
             <button
+              data-vmlx-control="chat-settings"
               onClick={() => { setShowChatSettings(!showChatSettings); setShowServerSettings(false) }}
               className={`flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors ${
                 showChatSettings ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'

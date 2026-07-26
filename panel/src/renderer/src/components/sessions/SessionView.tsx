@@ -294,6 +294,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
                 {t('sessions.view.chatButton')}
               </button>
               <button
+                data-vmlx-control="chat-settings"
                 onClick={() => { setShowSettings(!showSettings); if (!showSettings) { setShowServerSettings(false); setShowCache(false); setShowBenchmark(false); setShowEmbeddings(false); setShowPerformance(false); setShowLogs(false) } }}
                 className={`text-sm px-2 py-1 rounded flex items-center gap-1 ${showSettings ? 'bg-accent' : 'hover:bg-accent'}`}
                 title={t('sessions.view.chatSettingsTitle')}

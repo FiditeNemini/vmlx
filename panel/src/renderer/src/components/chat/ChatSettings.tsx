@@ -316,7 +316,10 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   })
 
   return (
-    <div className="w-full max-w-80 h-full border-l border-border bg-card flex flex-col overflow-hidden flex-shrink-0">
+    <div
+      data-vmlx-surface="chat-settings"
+      className="w-full max-w-80 h-full border-l border-border bg-card flex flex-col overflow-hidden flex-shrink-0"
+    >
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border flex-shrink-0">
         <span className="font-medium text-sm">{t('chat.settings.header')}</span>

@@ -6571,20 +6571,15 @@ async function main() {
             'active chat composer',
           );
 
-          const chatSettingsButton = await waitFor(() =>
-            [...document.querySelectorAll('button')].find((button) =>
-              isVisible(button)
-              && (button.textContent || '').replace(/\\s+/g, ' ').trim() === 'Chat'
-            ) || null,
-          'visible Chat settings button');
+          const chatSettingsButton = await waitFor(() => {
+            return [...document.querySelectorAll('[data-vmlx-control="chat-settings"]')]
+              .find((button) => button instanceof HTMLButtonElement && isVisible(button)) || null;
+          }, 'visible Chat settings button');
           chatSettingsButton.click();
-          const chatSettingsHeader = await waitFor(() =>
-            [...document.querySelectorAll('span')].find((element) =>
-              isVisible(element)
-              && (element.textContent || '').replace(/\\s+/g, ' ').trim() === 'Chat Settings'
-            ) || null,
-          'Chat Settings drawer');
-          const chatSettingsDrawer = chatSettingsHeader.parentElement?.parentElement;
+          const chatSettingsDrawer = await waitFor(() => {
+            const drawer = document.querySelector('[data-vmlx-surface="chat-settings"]');
+            return drawer instanceof HTMLElement && isVisible(drawer) ? drawer : null;
+          }, 'Chat Settings drawer');
           const valueSetter = Object.getOwnPropertyDescriptor(
             HTMLInputElement.prototype,
             'value',
@@ -6781,20 +6776,15 @@ async function main() {
           if (!chatSettingsClose) throw new Error('Chat Settings close control was not visible');
           chatSettingsClose.click();
           await waitFor(
-            () => ![...document.querySelectorAll('span')].some((element) =>
-              isVisible(element) && (element.textContent || '').trim() === 'Chat Settings'
-            ),
+            () => !document.querySelector('[data-vmlx-surface="chat-settings"]'),
             'Chat Settings drawer to close',
           );
           chatSettingsButton.click();
-          const reopenedHeader = await waitFor(() =>
-            [...document.querySelectorAll('span')].find((element) =>
-              isVisible(element)
-              && (element.textContent || '').replace(/\\s+/g, ' ').trim() === 'Chat Settings'
-            ) || null,
-          'reopened Chat Settings drawer');
+          const reopenedDrawer = await waitFor(() => {
+            const drawer = document.querySelector('[data-vmlx-surface="chat-settings"]');
+            return drawer instanceof HTMLElement && isVisible(drawer) ? drawer : null;
+          }, 'reopened Chat Settings drawer');
           chatSettingsInteraction.reopenedAfterSave = true;
-          const reopenedDrawer = reopenedHeader.parentElement?.parentElement;
           const reopenedRangeValueFor = (label) => {
             const input = [...(reopenedDrawer?.querySelectorAll('input[type="range"]') || [])]
               .find((candidate) =>
@@ -6937,9 +6927,7 @@ async function main() {
           if (!reopenedClose) throw new Error('reopened Chat Settings close control was not visible');
           reopenedClose.click();
           await waitFor(
-            () => ![...document.querySelectorAll('span')].some((element) =>
-              isVisible(element) && (element.textContent || '').trim() === 'Chat Settings'
-            ),
+            () => !document.querySelector('[data-vmlx-surface="chat-settings"]'),
             'reopened Chat Settings drawer to close',
           );
 

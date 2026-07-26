@@ -14,6 +14,7 @@ import { ThemeToggle } from "../ui/theme-toggle";
 import { useAppState } from "../../contexts/AppStateContext";
 import {
   useTranslation,
+  LOCALES,
   LOCALE_NAMES,
   LOCALE_FLAGS,
   type Locale,
@@ -147,12 +148,13 @@ function LanguagePicker({
     return undefined;
   }, [open]);
 
-  const locales: Locale[] = ["en", "zh", "ko", "ja", "es"];
   const { t } = useTranslation();
 
   return (
     <div className="relative" ref={ref}>
       <button
+        data-vmlx-locale-picker="true"
+        data-vmlx-supported-locales={LOCALES.join(",")}
         onClick={() => setOpen(!open)}
         className="p-1 text-muted-foreground hover:text-foreground rounded hover:bg-accent transition-colors text-sm leading-none"
         title={t("titlebar.languageTitle")}
@@ -161,9 +163,10 @@ function LanguagePicker({
       </button>
       {open && (
         <div className="absolute right-0 top-full mt-1 bg-popover border border-border rounded-lg shadow-lg py-1 z-50 min-w-[140px]">
-          {locales.map((l) => (
+          {LOCALES.map((l) => (
             <button
               key={l}
+              data-vmlx-locale-option={l}
               onClick={() => {
                 setLocale(l);
                 setOpen(false);

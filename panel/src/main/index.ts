@@ -14,7 +14,7 @@ import { registerEmbeddingHandlers } from './ipc/embeddings'
 import { registerExportHandlers } from './ipc/export'
 import { registerPerformanceHandlers } from './ipc/performance'
 import { registerDeveloperHandlers, killActiveOperation } from './ipc/developer'
-import { loadLocales, setLocale as setMainLocale, getLocale as getMainLocale, t as tMain } from './i18n'
+import { loadLocales, setLocale as setMainLocale, getLocale as getMainLocale, getCatalogContract as getMainCatalogContract, t as tMain } from './i18n'
 import { rebuildMenu as rebuildTrayMenu } from './tray'
 import { registerCodingToolHandlers } from './ipc/coding-tools'
 import { registerDistributedHandlers } from './ipc/distributed'
@@ -409,6 +409,7 @@ app.whenReady().then(async () => {
     return { ok: true, locale: getMainLocale() }
   })
   ipcMain.handle('i18n:get-locale', () => getMainLocale())
+  ipcMain.handle('i18n:get-catalog-contract', () => getMainCatalogContract())
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)

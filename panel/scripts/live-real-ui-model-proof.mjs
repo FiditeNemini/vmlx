@@ -1776,6 +1776,7 @@ function captureUiRuntimeProvenance(
     source_tree: git?.tree || null,
     renderer_source_tree_sha256: git?.renderer_source_tree_sha256 || null,
     renderer_source_file_count: git?.renderer_source_file_count ?? null,
+    renderer_build_source_commit: rendererResources?.buildSourceCommit || null,
     page_url: rendererResources?.pageUrl || null,
     renderer_resources: allResources,
     vite_client_seen: allResources.some((url) => /(?:@vite\/client|@vite\/client)/.test(url)),
@@ -2984,6 +2985,11 @@ export function validateGenerationDefaultsEvidence(result) {
     failures.push('bundle has no independently resolved generation defaults')
     return failures
   }
+  if (!requestCorrelationVerified) {
+    failures.push(
+      'resolved generation defaults lack exact proof/request/message correlation for every UI wire request',
+    )
+  }
   if (settingsInteraction.openedVisibly !== true) {
     failures.push('Chat Settings was not opened through its visible control')
   }
@@ -3459,29 +3465,62 @@ export function isServerRequestCorrelationVerified(result) {
     correlation.status !== 'verified'
     || turns.length !== expectedTurns
     || uiTurns.length !== expectedTurns
+    || (correlation.turns || []).length !== expectedTurns
+    || (result?.uiTurnEvidence || []).length !== expectedTurns
   ) {
     return false
   }
-  return uiTurns.every((uiTurn) => {
+  const allRequestIds = []
+  const verified = uiTurns.every((uiTurn) => {
     const row = turns.find((item) => Number(item?.turn) === Number(uiTurn?.turn))
+    const uiRequestIds = [...new Set(
+      (Array.isArray(uiTurn?.requestIds) ? uiTurn.requestIds : [])
+        .map((value) => String(value || ''))
+        .filter(Boolean),
+    )]
+    const rowRequestIds = [...new Set(
+      (Array.isArray(row?.serverRequestIds) ? row.serverRequestIds : [])
+        .map((value) => String(value || ''))
+        .filter(Boolean),
+    )]
     if (
       !row
       || !uiTurn?.proofRequestId
+      || String(uiTurn.proofRequestId) !== String(uiTurn.userMessageId || '')
       || String(row.proofRequestId || '') !== String(uiTurn.proofRequestId)
       || String(row.userMessageId || '') !== String(uiTurn.userMessageId || '')
       || String(row.assistantMessageId || '') !== String(uiTurn.assistantMessageId || '')
       || String(row.serverProofRequestId || '') !== String(uiTurn.proofRequestId)
-      || !String(row.serverRequestId || '')
+      || String(uiTurn.terminalProofRequestId || '') !== String(uiTurn.proofRequestId)
       || String(row.serverMessageId || '') !== String(uiTurn.assistantMessageId || '')
+      || String(uiTurn.terminalMessageId || '') !== String(uiTurn.assistantMessageId || '')
+      || uiTurn.logMatchMode !== 'exact_identity_ring_safe'
+      || uiRequestIds.length === 0
+      || rowRequestIds.length !== uiRequestIds.length
+      || rowRequestIds.some((requestId) => !uiRequestIds.includes(requestId))
+      || row.resolvedLogCorrelated !== true
     ) {
       return false
     }
-    return records.some((record) => (
+    allRequestIds.push(...rowRequestIds)
+    const matchingRecords = records.filter((record) => (
       String(record?.proof_request_id || '') === String(uiTurn.proofRequestId)
-      && String(record?.request_id || '') === String(row.serverRequestId)
       && String(record?.message_id || '') === String(uiTurn.assistantMessageId)
     ))
+    const recordRequestIds = matchingRecords.map((record) => String(record?.request_id || ''))
+    return (
+      matchingRecords.length === rowRequestIds.length
+      && recordRequestIds.every(Boolean)
+      && new Set(recordRequestIds).size === rowRequestIds.length
+      && rowRequestIds.every((requestId) => recordRequestIds.includes(requestId))
+      && matchingRecords.every((record) => record?.correlation_source === 'server_emitted')
+    )
   })
+  return (
+    verified
+    && allRequestIds.length === records.length
+    && new Set(allRequestIds).size === allRequestIds.length
+  )
 }
 
 export function validateUiRuntimeProvenance(result) {
@@ -3531,6 +3570,12 @@ export function validateUiRuntimeProvenance(result) {
   }
   if (provenance.source_commit !== result?.gitProvenance?.after?.commit) {
     failures.push('renderer source commit is not bound to the proof HEAD')
+  }
+  if (
+    !/^[0-9a-f]{40}$/.test(String(provenance.renderer_build_source_commit || ''))
+    || provenance.renderer_build_source_commit !== result?.gitProvenance?.after?.commit
+  ) {
+    failures.push('build-injected renderer source commit is not bound to the proof HEAD')
   }
   if (provenance.source_tree !== result?.gitProvenance?.after?.tree) {
     failures.push('renderer source tree is not bound to the proof tree')
@@ -5945,6 +5990,9 @@ async function main() {
       pageUrl: location.href,
       scripts: [...document.scripts].map((script) => script.src).filter(Boolean),
       resources: performance.getEntriesByType('resource').map((entry) => entry.name),
+      buildSourceCommit: globalThis.__VMLINUX_SOURCE_COMMIT__
+        || document.documentElement.dataset.sourceCommit
+        || '',
     })`)
     if (app.uiLaunchMode === 'electron-dev') {
       const servedModules = await evaluate(cdp, `
@@ -6030,26 +6078,62 @@ async function main() {
           }
           return latest;
         };
-        const waitForResolvedTurnLog = async (sessionId, startIndex) => {
+        const waitForResolvedTurnLog = async (
+          sessionId,
+          { proofRequestId, messageId, requestIds },
+        ) => {
           const expectedRoute = wireApi === 'responses'
             ? '/v1/responses'
             : '/v1/chat/completions';
           const expectedMarker = 'Resolved sampling kwargs route='
             + expectedRoute
             + ' model=';
+          const expectedRequestIds = [...new Set(
+            (Array.isArray(requestIds) ? requestIds : [])
+              .map((value) => String(value || ''))
+              .filter(Boolean),
+          )];
+          if (!proofRequestId || !messageId || expectedRequestIds.length === 0) {
+            return { logs: [], matchedLines: [] };
+          }
           let latest = [];
           const started = Date.now();
           while (Date.now() - started < 10000) {
             latest = await window.api.sessions.getLogs(sessionId).catch(() => []);
-            if (latest.slice(startIndex).some((line) => (
-              String(line).includes(expectedMarker)
-              && String(line).includes(' kwargs=')
-            ))) {
-              return latest;
+            const matchedLines = latest.filter((line) => {
+              const text = String(line);
+              return (
+                text.includes(expectedMarker)
+                && text.includes(' proof_request_id=' + proofRequestId + ' ')
+                && text.includes(' message_id=' + messageId + ' kwargs=')
+                && expectedRequestIds.some((requestId) =>
+                  text.includes(' request_id=' + requestId + ' ')
+                )
+              );
+            });
+            const matchedRequestIds = new Set(matchedLines.map((line) => {
+              const match = String(line).match(/\srequest_id=(\S+)\smessage_id=/);
+              return match?.[1] || '';
+            }).filter(Boolean));
+            if (
+              matchedLines.length === expectedRequestIds.length
+              && expectedRequestIds.every((requestId) => matchedRequestIds.has(requestId))
+            ) {
+              return { logs: latest, matchedLines };
             }
             await new Promise((resolve) => setTimeout(resolve, 100));
           }
-          return latest;
+          return {
+            logs: latest,
+            matchedLines: latest.filter((line) => {
+              const text = String(line);
+              return (
+                text.includes(expectedMarker)
+                && text.includes(' proof_request_id=' + proofRequestId + ' ')
+                && text.includes(' message_id=' + messageId + ' kwargs=')
+              );
+            }),
+          };
         };
         await new Promise((resolve, reject) => {
           const started = Date.now();
@@ -6825,9 +6909,6 @@ async function main() {
           const cacheRequestEvidence = [];
           const sendMessageThroughVisibleComposer = async (turn, stage, prompt) => {
             try {
-              const proofRequestId = ${JSON.stringify(runId)} + ':ui:' + turn;
-              const logsBefore = await window.api.sessions.getLogs(created.session.id)
-                .catch(() => []);
               const messagesBefore = await window.api.chat.getMessages(chat.id);
               const knownMessageIds = new Set(messagesBefore.map((message) => String(message.id)));
               const turnCacheBefore = await window.api.cache.stats(endpoint, created.session.id)
@@ -6889,22 +6970,34 @@ async function main() {
                 .find((message) => message.role === 'assistant');
               const terminal = events.complete.slice(completedBefore)
                 .find((event) => String(event?.messageId || '') === String(assistantMessage?.id || ''));
-              const logsAfter = await waitForResolvedTurnLog(
-                created.session.id,
-                logsBefore.length,
-              );
               const boundTerminal = terminal || terminalAtCompletion;
+              const proofRequestId = String(userMessage?.id || '');
+              const terminalProofRequestId = String(boundTerminal?.proofRequestId || '');
+              const requestIds = [...new Set(
+                (Array.isArray(boundTerminal?.requestIds) ? boundTerminal.requestIds : [])
+                  .map((value) => String(value || ''))
+                  .filter(Boolean),
+              )];
+              const resolvedLogEvidence = await waitForResolvedTurnLog(
+                created.session.id,
+                {
+                  proofRequestId,
+                  messageId: String(assistantMessage?.id || ''),
+                  requestIds,
+                },
+              );
               uiTurnEvidence.push({
                 turn,
                 prompt,
                 proofRequestId,
+                terminalProofRequestId,
+                requestIds,
                 userMessageId: userMessage?.id || null,
                 assistantMessageId: assistantMessage?.id || null,
                 terminalMessageId: boundTerminal?.messageId || null,
                 terminalResponseId: boundTerminal?.responseId || null,
-                logStartIndex: logsBefore.length,
-                logEndIndex: logsAfter.length,
-                logLines: logsAfter.slice(logsBefore.length),
+                logMatchMode: 'exact_identity_ring_safe',
+                logLines: resolvedLogEvidence.matchedLines,
               });
               const cacheCorrelation =
                 correlateTerminalResponseToCacheExecution({
@@ -7576,32 +7669,55 @@ async function main() {
         healthArtifact: row.healthArtifact,
       })),
     }
-    const requestCorrelation = {
-      status: 'partial_product_support_missing',
-      reason:
-        'The visible Electron terminal now exposes its current server response ID '
-        + 'for exact cache-execution correlation, but server sampling logs still '
-        + 'lack the same request/message identity. Time-window sampling logs remain '
-        + 'non-authoritative.',
-      turns: (rendererResult.uiTurnEvidence || []).map((turn) => ({
-        ...(() => {
-          const cacheRow = (rendererResult.cacheRequestEvidence || []).find(
-            (row) => Number(row?.turn) === Number(turn?.turn),
-          ) || {}
-          return {
-            serverRequestId: cacheRow.serverRequestId || null,
-            cacheObservationCorrelated:
-              cacheRow.correlationStatus === 'verified',
-          }
-        })(),
+    const requestCorrelationTurns = (rendererResult.uiTurnEvidence || []).map((turn) => {
+      const cacheRow = (rendererResult.cacheRequestEvidence || []).find(
+        (row) => Number(row?.turn) === Number(turn?.turn),
+      ) || {}
+      const serverRequestIds = [...new Set(
+        (Array.isArray(turn?.requestIds) ? turn.requestIds : [])
+          .map((value) => String(value || ''))
+          .filter(Boolean),
+      )]
+      const matchingRecords = resolvedSamplingRecords.filter((record) => (
+        String(record?.proof_request_id || '') === String(turn?.proofRequestId || '')
+        && String(record?.message_id || '') === String(turn?.assistantMessageId || '')
+      ))
+      const recordRequestIds = matchingRecords.map(
+        (record) => String(record?.request_id || ''),
+      )
+      const resolvedLogCorrelated = Boolean(
+        turn?.proofRequestId
+        && String(turn.proofRequestId) === String(turn.userMessageId || '')
+        && String(turn.terminalProofRequestId || '') === String(turn.proofRequestId)
+        && String(turn.terminalMessageId || '') === String(turn.assistantMessageId || '')
+        && turn.logMatchMode === 'exact_identity_ring_safe'
+        && serverRequestIds.length > 0
+        && matchingRecords.length === serverRequestIds.length
+        && new Set(recordRequestIds).size === serverRequestIds.length
+        && serverRequestIds.every((requestId) => recordRequestIds.includes(requestId))
+      )
+      return {
         turn: turn.turn,
         proofRequestId: turn.proofRequestId,
         userMessageId: turn.userMessageId,
         assistantMessageId: turn.assistantMessageId,
-        serverProofRequestId: null,
-        serverMessageId: null,
-        resolvedLogCorrelated: false,
-      })),
+        serverProofRequestId: turn.terminalProofRequestId,
+        serverRequestIds,
+        serverMessageId: turn.terminalMessageId,
+        resolvedLogCorrelated,
+        cacheObservationCorrelated: cacheRow.correlationStatus === 'verified',
+      }
+    })
+    const requestCorrelation = {
+      status: (
+        requestCorrelationTurns.length === uiTurnCount
+        && requestCorrelationTurns.every((turn) => turn.resolvedLogCorrelated === true)
+        && new Set(requestCorrelationTurns.flatMap((turn) => turn.serverRequestIds)).size
+          === requestCorrelationTurns.flatMap((turn) => turn.serverRequestIds).length
+      ) ? 'verified' : 'partial',
+      source:
+        'chat:complete proofRequestId/requestIds/messageId matched exactly to server-emitted sampling identities',
+      turns: requestCorrelationTurns,
     }
     if (checkServerCacheControls) {
       const commandLine = [...(rendererResult.sessionLogs || [])]

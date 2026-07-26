@@ -693,6 +693,24 @@ def _v5_cache_gate_operation(phase: dict[str, Any]) -> str:
     raise ValueError(f"unknown v5 cache operation: {operation!r}")
 
 
+def _v5_cache_gate_scenario(phase: dict[str, Any]) -> str:
+    """Select the cache gate scenario required by the release phase.
+
+    The phase-2/phase-3 pair owns the strict L2 size-eviction and restart
+    observations.  Leaving the cache harness on its ``standard`` default makes
+    those observations structurally impossible, so bind the scenarios to the
+    canonical phase indexes rather than relying on a caller-supplied value.
+    """
+
+    phase_index = phase.get("index")
+    operation = phase.get("operation")
+    if phase_index == 2 and operation == "store-evict-refault":
+        return "store-evict-refault"
+    if phase_index == 3 and operation == "probe":
+        return "restart-restore"
+    return "standard"
+
+
 def _v5_derive_l2_size_eviction_attestation(
     *,
     run_id: str,
@@ -4311,8 +4329,132 @@ def _v5_cdp_dom_snapshot(cdp_base_url: str, *, timeout: float = 10.0) -> bytes:
                 raise RuntimeError("oversized CDP websocket handshake")
         if not handshake.startswith(b"HTTP/1.1 101"):
             raise RuntimeError("CDP websocket upgrade failed")
+        def cdp_command(
+            command_id: int,
+            method: str,
+            params: dict[str, Any],
+        ) -> dict[str, Any]:
+            command = json.dumps(
+                {
+                    "id": command_id,
+                    "method": method,
+                    "params": params,
+                },
+                separators=(",", ":"),
+            ).encode()
+            stream.sendall(_v5_websocket_frame(command))
+            while True:
+                opcode, payload = _v5_recv_websocket_frame(stream)
+                if opcode == 0x9:
+                    stream.sendall(bytes((0x8A, len(payload))) + payload)
+                    continue
+                if opcode == 0x8:
+                    raise RuntimeError("CDP websocket closed before response")
+                if opcode != 0x1:
+                    continue
+                decoded = json.loads(payload)
+                if decoded.get("id") != command_id:
+                    continue
+                if decoded.get("error") or nested(
+                    decoded,
+                    "result",
+                    "exceptionDetails",
+                ):
+                    raise RuntimeError(f"CDP command failed: {method}")
+                return decoded
+
+        metrics_result = cdp_command(
+            1,
+            "Runtime.evaluate",
+            {
+                "expression": (
+                    "JSON.stringify({width:window.innerWidth,"
+                    "height:window.innerHeight,"
+                    "deviceScaleFactor:window.devicePixelRatio||1})"
+                ),
+                "returnByValue": True,
+            },
+        )
+        metrics_value = nested(metrics_result, "result", "result", "value")
+        try:
+            prior_metrics = json.loads(metrics_value)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("CDP did not expose prior viewport metrics") from exc
+        if (
+            not isinstance(prior_metrics, dict)
+            or not isinstance(prior_metrics.get("width"), int)
+            or prior_metrics["width"] <= 0
+            or not isinstance(prior_metrics.get("height"), int)
+            or prior_metrics["height"] <= 0
+            or not isinstance(
+                prior_metrics.get("deviceScaleFactor"),
+                (int, float),
+            )
+            or prior_metrics["deviceScaleFactor"] <= 0
+        ):
+            raise RuntimeError("CDP prior viewport metrics are invalid")
+        cdp_command(
+            2,
+            "Emulation.setDeviceMetricsOverride",
+            {
+                "width": 640,
+                "height": 900,
+                "deviceScaleFactor": 1,
+                "mobile": False,
+            },
+        )
         expression = (
             "(async()=>{"
+            "const wait=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));"
+            "const visible=(node)=>Boolean(node&&node.getClientRects().length);"
+            "const catalog=await globalThis.api?.i18n?.getCatalogContract?.();"
+            "if(!catalog||!Array.isArray(catalog.supportedLocales)||"
+            "!Array.isArray(catalog.translationKeys)||"
+            "catalog.supportedLocales.length===0||catalog.translationKeys.length===0)"
+            "throw new Error('authoritative locale catalog missing');"
+            "const supportedLocales=[...new Set(catalog.supportedLocales.map(String))];"
+            "const translationKeys=[...new Set(catalog.translationKeys.map(String))];"
+            "const canonicalKeySet=new Set(translationKeys.map((key)=>key.toLowerCase()));"
+            "const rawTranslationKeys=(text)=>[...new Set("
+            "(String(text).match(/[A-Za-z][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_-]+)+/g)||[])"
+            ".filter((token)=>canonicalKeySet.has(token.toLowerCase())))].sort();"
+            "const initial=localStorage.getItem('vmlx-locale')||'en';"
+            "const localeEvidence=[];"
+            "let visibleLocaleOptions=[];"
+            "let pickerSupportedLocales=[];"
+            "for(const locale of supportedLocales){"
+            "const picker=[...document.querySelectorAll('[data-vmlx-locale-picker]')]"
+            ".find((button)=>visible(button));"
+            "if(!picker)throw new Error('visible language picker missing');"
+            "picker.click();await wait(80);"
+            "const options=[...document.querySelectorAll('[data-vmlx-locale-option]')]"
+            ".filter((button)=>visible(button));"
+            "visibleLocaleOptions=[...new Set(options.map((button)=>"
+            "button.getAttribute('data-vmlx-locale-option')||'').filter(Boolean))].sort();"
+            "pickerSupportedLocales=[...new Set(String("
+            "picker.getAttribute('data-vmlx-supported-locales')||'').split(',')"
+            ".filter(Boolean))].sort();"
+            "const option=options.find((button)=>"
+            "button.getAttribute('data-vmlx-locale-option')===locale);"
+            "if(!option)throw new Error('visible locale option missing:'+locale);"
+            "option.click();"
+            "for(let i=0;i<40&&localStorage.getItem('vmlx-locale')!==locale;i++)"
+            "await wait(25);"
+            "await wait(80);"
+            "const text=document.body?.innerText||'';"
+            "localeEvidence.push({locale,"
+            "selected_locale:localStorage.getItem('vmlx-locale')||'',"
+            "raw_translation_keys:rawTranslationKeys(text).slice(0,64)});"
+            "}"
+            "if(supportedLocales.includes(initial)){"
+            "const picker=[...document.querySelectorAll('[data-vmlx-locale-picker]')]"
+            ".find((button)=>visible(button));"
+            "picker?.click();await wait(80);"
+            "const option=[...document.querySelectorAll('[data-vmlx-locale-option]')]"
+            ".find((button)=>visible(button)&&"
+            "button.getAttribute('data-vmlx-locale-option')===initial);"
+            "option?.click();await wait(100);"
+            "}"
             "const sessions=await globalThis.api?.sessions?.list?.()||"
             "await globalThis.window?.api?.sessions?.list?.()||[];"
             "const messageRoots=[...document.querySelectorAll("
@@ -4334,6 +4476,17 @@ def _v5_cdp_dom_snapshot(cdp_base_url: str, *, timeout: float = 10.0) -> bytes:
             "text:document.body?.innerText||'',"
             "html:document.body?.innerHTML||'',"
             "messages,"
+            "locales:localeEvidence,"
+            "locale_catalog_source:'main_ipc_canonical_locale_json',"
+            "supported_locales:supportedLocales,"
+            "picker_supported_locales:pickerSupportedLocales,"
+            "visible_locale_options:visibleLocaleOptions,"
+            "translation_key_count:translationKeys.length,"
+            "catalog_translation_keys:translationKeys,"
+            "raw_translation_keys:rawTranslationKeys(document.body?.innerText||'').slice(0,64),"
+            "viewport:{width:window.innerWidth,"
+            "scroll_width:Math.max(document.documentElement?.scrollWidth||0,"
+            "document.body?.scrollWidth||0)},"
             "sourceCommit:globalThis.__VMLINUX_SOURCE_COMMIT__||"
             "document.documentElement.dataset.sourceCommit||'',"
             "session_ids:Array.isArray(sessions)?sessions.map((row)=>row?.id)"
@@ -4341,6 +4494,117 @@ def _v5_cdp_dom_snapshot(cdp_base_url: str, *, timeout: float = 10.0) -> bytes:
             "});"
             "})()"
         )
+        value: str | None = None
+        try:
+            decoded = cdp_command(
+                3,
+                "Runtime.evaluate",
+                {
+                    "expression": expression,
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                },
+            )
+            value = nested(decoded, "result", "result", "value")
+            if not isinstance(value, str):
+                raise RuntimeError("CDP DOM evaluation returned no value")
+        finally:
+            cdp_command(
+                4,
+                "Emulation.clearDeviceMetricsOverride",
+                {},
+            )
+        restored_result = cdp_command(
+            5,
+            "Runtime.evaluate",
+            {
+                "expression": "JSON.stringify({width:window.innerWidth,height:window.innerHeight})",
+                "returnByValue": True,
+            },
+        )
+        restored_value = nested(restored_result, "result", "result", "value")
+        try:
+            restored_metrics = json.loads(restored_value)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("CDP did not expose restored viewport metrics") from exc
+        if (
+            restored_metrics.get("width") != prior_metrics["width"]
+            or restored_metrics.get("height") != prior_metrics["height"]
+        ):
+            raise RuntimeError("CDP viewport did not restore after clearing override")
+        if value is None:
+            raise RuntimeError("CDP DOM evaluation returned no value")
+        snapshot = json.loads(value)
+        snapshot["viewport_restore"] = {
+            "method": "Emulation.clearDeviceMetricsOverride",
+            "verified": True,
+            "prior": prior_metrics,
+            "restored": restored_metrics,
+        }
+        return canonical_json_bytes(snapshot)
+    finally:
+        stream.close()
+
+
+def _v5_cdp_evaluate_json(
+    cdp_base_url: str,
+    expression: str,
+    *,
+    timeout: float = 10.0,
+) -> Any:
+    """Evaluate one read-only expression in the sole loopback Electron page."""
+
+    parsed = urlsplit(cdp_base_url)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.port is None
+    ):
+        raise ValueError("CDP base URL must be loopback HTTP")
+    targets = json.loads(
+        _v5_loopback_http_get(
+            f"http://{parsed.hostname}:{parsed.port}/json/list",
+            timeout=timeout,
+        )
+    )
+    pages = [
+        item
+        for item in targets
+        if isinstance(item, dict)
+        and item.get("type") == "page"
+        and isinstance(item.get("webSocketDebuggerUrl"), str)
+    ]
+    if len(pages) != 1:
+        raise RuntimeError("CDP did not expose exactly one page target")
+    websocket_url = urlsplit(pages[0]["webSocketDebuggerUrl"])
+    if (
+        websocket_url.scheme != "ws"
+        or websocket_url.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or websocket_url.port is None
+    ):
+        raise RuntimeError("CDP websocket is not loopback")
+    stream = socket.create_connection(
+        (websocket_url.hostname, websocket_url.port),
+        timeout=timeout,
+    )
+    try:
+        key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+        request = (
+            f"GET {websocket_url.path} HTTP/1.1\r\n"
+            f"Host: {websocket_url.hostname}:{websocket_url.port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        ).encode("ascii")
+        stream.sendall(request)
+        handshake = b""
+        while b"\r\n\r\n" not in handshake:
+            handshake += stream.recv(4096)
+            if len(handshake) > 65536:
+                raise RuntimeError("oversized CDP websocket handshake")
+        if not handshake.startswith(b"HTTP/1.1 101"):
+            raise RuntimeError("CDP websocket upgrade failed")
         command = json.dumps(
             {
                 "id": 1,
@@ -4366,12 +4630,35 @@ def _v5_cdp_dom_snapshot(cdp_base_url: str, *, timeout: float = 10.0) -> bytes:
             decoded = json.loads(payload)
             if decoded.get("id") != 1:
                 continue
+            if decoded.get("error") or nested(
+                decoded,
+                "result",
+                "exceptionDetails",
+            ):
+                raise RuntimeError("CDP Runtime.evaluate failed")
             value = nested(decoded, "result", "result", "value")
             if not isinstance(value, str):
-                raise RuntimeError("CDP DOM evaluation returned no value")
-            return value.encode("utf-8")
+                raise RuntimeError("CDP Runtime.evaluate returned no JSON")
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("CDP Runtime.evaluate returned malformed JSON") from exc
     finally:
         stream.close()
+
+
+def _v5_cdp_session_logs(
+    cdp_base_url: str,
+    session_id: str,
+) -> list[str]:
+    expression = (
+        "(async()=>JSON.stringify(await (globalThis.api||window.api)"
+        f".sessions.getLogs({json.dumps(session_id)})))()"
+    )
+    value = _v5_cdp_evaluate_json(cdp_base_url, expression)
+    if not isinstance(value, list) or not all(isinstance(row, str) for row in value):
+        raise RuntimeError("Electron session logs are not a string array")
+    return value
 
 
 def _v5_hash_python_runtime(imported_init: Path) -> dict[str, Any] | None:
@@ -4604,6 +4891,7 @@ def _v5_ui_facts(
     if len(captures) != len(V5_CACHE_PHASES):
         return set(), []
     artifacts_by_phase: dict[int, tuple[dict[str, Any], bytes]] = {}
+    source_proofs_by_phase: dict[int, dict[str, Any]] = {}
     prefix_hashes: list[str] = []
     for artifact, raw_artifact in captures:
         phase_index = artifact.get("phase_index")
@@ -4703,6 +4991,7 @@ def _v5_ui_facts(
                 return set(), []
             prefix_hashes.append(health_pin["sha256"])
         artifacts_by_phase[phase_index] = artifact, raw_artifact
+        source_proofs_by_phase[phase_index] = source_proof
         prefix_hashes.extend(
             (
                 hashlib.sha256(raw_artifact).hexdigest(),
@@ -4966,13 +5255,63 @@ def _v5_ui_facts(
     visible_text = str(dom.get("text") or "")
     locales = dom.get("locales")
     viewport = dom.get("viewport")
-    if not re.search(
-        r"\b(?:app|layout|settings|chat)\.[A-Za-z0-9_.]+\b",
-        visible_text,
+    viewport_restore = dom.get("viewport_restore")
+    catalog_keys = dom.get("catalog_translation_keys")
+    supported_locales = dom.get("supported_locales")
+    picker_locales = dom.get("picker_supported_locales")
+    visible_locale_options = dom.get("visible_locale_options")
+    locale_records = (
+        locales
+        if isinstance(locales, list)
+        and all(isinstance(row, dict) for row in locales)
+        else []
+    )
+    catalog_key_set = {
+        str(key)
+        for key in catalog_keys
+        if isinstance(key, str) and key
+    } if isinstance(catalog_keys, list) else set()
+    canonical_key_lookup = {key.lower() for key in catalog_key_set}
+    visible_key_tokens = {
+        token.lower()
+        for token in re.findall(
+            r"[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)+",
+            visible_text,
+        )
+    }
+    locale_keys_clean = bool(locale_records) and all(
+        row.get("selected_locale") == row.get("locale")
+        and row.get("raw_translation_keys") == []
+        for row in locale_records
+    )
+    locale_catalog_exact = (
+        dom.get("locale_catalog_source") == "main_ipc_canonical_locale_json"
+        and bool(catalog_key_set)
+        and dom.get("translation_key_count") == len(catalog_key_set)
+        and isinstance(supported_locales, list)
+        and bool(supported_locales)
+        and sorted(str(value) for value in supported_locales)
+        == sorted(str(value) for value in picker_locales or [])
+        == sorted(str(value) for value in visible_locale_options or [])
+    )
+    if (
+        locale_catalog_exact
+        and not (visible_key_tokens & canonical_key_lookup)
+        and dom.get("raw_translation_keys") == []
+        and locale_keys_clean
     ):
         facts.add("no_raw_translation_keys")
-    if isinstance(locales, list) and sorted(locales) == sorted(
-        dom.get("supported_locales") or []
+    observed_locales = (
+        [str(row.get("locale") or "") for row in locale_records]
+        if locale_records
+        else locales
+    )
+    if (
+        isinstance(observed_locales, list)
+        and sorted(observed_locales)
+        == sorted(str(value) for value in supported_locales or [])
+        and locale_catalog_exact
+        and locale_keys_clean
     ):
         facts.add("all_supported_locales_checked")
     if (
@@ -4981,26 +5320,324 @@ def _v5_ui_facts(
         and viewport["width"] <= 640
         and isinstance(viewport.get("scroll_width"), int)
         and viewport["scroll_width"] <= viewport["width"]
+        and isinstance(viewport_restore, dict)
+        and viewport_restore.get("method")
+        == "Emulation.clearDeviceMetricsOverride"
+        and viewport_restore.get("verified") is True
+        and nested(viewport_restore, "prior", "width")
+        == nested(viewport_restore, "restored", "width")
+        and nested(viewport_restore, "prior", "height")
+        == nested(viewport_restore, "restored", "height")
     ):
         facts.add("minimum_window_width_checked")
-    settings = dom.get("settings")
     defaults = bundle_snapshot["derived"]["generation_defaults"]
-    if isinstance(settings, dict):
-        if settings.get("new_session") == defaults:
-            facts.add("bundle_defaults_in_new_ui_session")
-        override = settings.get("override")
-        persisted = settings.get("after_restart")
-        if isinstance(override, dict) and persisted == override and override != defaults:
-            facts.update(
-                {"ui_override_session_scoped", "ui_override_restart_persisted"}
-            )
+
+    def canonical_defaults(value: Any) -> dict[str, int | float]:
+        if not isinstance(value, dict):
+            return {}
+        aliases = {
+            "temperature": ("temperature",),
+            "top_p": ("top_p", "topP"),
+            "top_k": ("top_k", "topK"),
+            "min_p": ("min_p", "minP"),
+            "repetition_penalty": (
+                "repetition_penalty",
+                "repeatPenalty",
+            ),
+            "max_output_tokens": (
+                "max_output_tokens",
+                "max_new_tokens",
+                "max_tokens",
+                "maxNewTokens",
+                "maxTokens",
+            ),
+        }
+        result: dict[str, int | float] = {}
+        for target, keys in aliases.items():
+            for key in keys:
+                candidate = value.get(key)
+                if isinstance(candidate, (int, float)) and not isinstance(
+                    candidate,
+                    bool,
+                ):
+                    result[target] = candidate
+                    break
+        return result
+
+    def matches_defaults(observed: Any, expected: dict[str, Any]) -> bool:
+        normalized = canonical_defaults(observed)
+        return bool(expected) and all(
+            key in normalized
+            and abs(float(normalized[key]) - float(value)) <= 1e-6
+            for key, value in expected.items()
+        )
+
+    expected_defaults = canonical_defaults(defaults)
+    initial_proof = source_proofs_by_phase.get(0) or {}
+    live_contract_defaults = nested(
+        initial_proof,
+        "bundleGenerationContract",
+        "defaults",
+    )
+    renderer_defaults = initial_proof.get("rendererGenerationDefaults")
+    visible_settings = initial_proof.get("chatSettingsDom")
+    visible_values = (
+        visible_settings.get("values")
+        if isinstance(visible_settings, dict)
+        else None
+    )
+    health_defaults = nested(initial_proof, "server", "health", "effective_defaults")
+    resolved_sampling_records = initial_proof.get("resolvedSamplingRecords")
+
+    def exact_request_correlation(proof: dict[str, Any]) -> bool:
+        expected_turns = int(nested(proof, "requestContract", "uiTurnCount") or 0)
+        ui_turns = proof.get("uiTurnEvidence")
+        correlation = proof.get("requestCorrelation")
+        records = proof.get("resolvedSamplingRecords")
         if (
-            settings.get("max_context_tokens")
-            != settings.get("max_output_tokens")
-            and settings.get("preview") == settings.get("argv")
-            == settings.get("health")
+            expected_turns <= 0
+            or not isinstance(ui_turns, list)
+            or len(ui_turns) != expected_turns
+            or not isinstance(correlation, dict)
+            or correlation.get("status") != "verified"
+            or not isinstance(correlation.get("turns"), list)
+            or len(correlation["turns"]) != expected_turns
+            or not isinstance(records, list)
         ):
-            facts.update({"max_context_output_distinct", "preview_argv_health_parity"})
+            return False
+        all_request_ids: list[str] = []
+        for ui_turn in ui_turns:
+            if not isinstance(ui_turn, dict):
+                return False
+            proof_id = str(ui_turn.get("proofRequestId") or "")
+            user_id = str(ui_turn.get("userMessageId") or "")
+            assistant_id = str(ui_turn.get("assistantMessageId") or "")
+            request_ids = [
+                str(value)
+                for value in ui_turn.get("requestIds", [])
+                if str(value)
+            ] if isinstance(ui_turn.get("requestIds"), list) else []
+            row = next(
+                (
+                    candidate
+                    for candidate in correlation["turns"]
+                    if isinstance(candidate, dict)
+                    and candidate.get("turn") == ui_turn.get("turn")
+                ),
+                None,
+            )
+            if (
+                not proof_id
+                or proof_id != user_id
+                or not assistant_id
+                or ui_turn.get("terminalProofRequestId") != proof_id
+                or ui_turn.get("terminalMessageId") != assistant_id
+                or ui_turn.get("logMatchMode") != "exact_identity_ring_safe"
+                or not request_ids
+                or len(request_ids) != len(set(request_ids))
+                or not isinstance(row, dict)
+                or row.get("proofRequestId") != proof_id
+                or row.get("userMessageId") != user_id
+                or row.get("assistantMessageId") != assistant_id
+                or row.get("serverProofRequestId") != proof_id
+                or row.get("serverMessageId") != assistant_id
+                or row.get("resolvedLogCorrelated") is not True
+                or row.get("serverRequestIds") != request_ids
+            ):
+                return False
+            matching = [
+                record
+                for record in records
+                if isinstance(record, dict)
+                and record.get("proof_request_id") == proof_id
+                and record.get("message_id") == assistant_id
+            ]
+            record_ids = [str(record.get("request_id") or "") for record in matching]
+            if (
+                len(matching) != len(request_ids)
+                or any(not value for value in record_ids)
+                or len(record_ids) != len(set(record_ids))
+                or set(record_ids) != set(request_ids)
+                or any(
+                    record.get("correlation_source") != "server_emitted"
+                    for record in matching
+                )
+            ):
+                return False
+            all_request_ids.extend(request_ids)
+        return (
+            len(all_request_ids) == len(set(all_request_ids))
+            and len(all_request_ids) == len(records)
+        )
+
+    request_correlation_exact = exact_request_correlation(initial_proof)
+    resolved_defaults_match = (
+        request_correlation_exact
+        and
+        isinstance(resolved_sampling_records, list)
+        and len(resolved_sampling_records)
+        >= int(nested(initial_proof, "requestContract", "uiTurnCount") or 0)
+        and all(
+            isinstance(row, dict)
+            and matches_defaults(row.get("values"), expected_defaults)
+            for row in resolved_sampling_records
+        )
+    )
+    request_sampling = nested(
+        initial_proof,
+        "requestContract",
+        "samplingOverrides",
+    )
+    stored_overrides = initial_proof.get("chatOverrides")
+    stored_sampling_absent = isinstance(stored_overrides, dict) and all(
+        stored_overrides.get(key) is None
+        for key in (
+            "temperature",
+            "topP",
+            "topK",
+            "minP",
+            "repeatPenalty",
+            "maxTokens",
+        )
+    )
+    expected_without_output = {
+        key: value
+        for key, value in expected_defaults.items()
+        if key != "max_output_tokens"
+    }
+    max_output = expected_defaults.get("max_output_tokens")
+    max_tokens_visible = (
+        isinstance(visible_settings, dict)
+        and isinstance(visible_settings.get("maxTokens"), dict)
+        and str(visible_settings["maxTokens"].get("value") or "") == ""
+        and (
+            max_output is None
+            or str(max_output)
+            in str(visible_settings["maxTokens"].get("placeholder") or "")
+        )
+    )
+    if (
+        matches_defaults(live_contract_defaults, expected_defaults)
+        and matches_defaults(renderer_defaults, expected_defaults)
+        and matches_defaults(visible_values, expected_without_output)
+        and matches_defaults(health_defaults, expected_defaults)
+        and resolved_defaults_match
+        and max_tokens_visible
+        and request_sampling == {}
+        and stored_sampling_absent
+    ):
+        facts.add("bundle_defaults_in_new_ui_session")
+
+    settings_interaction = initial_proof.get("chatSettingsInteraction")
+    if (
+        isinstance(settings_interaction, dict)
+        and settings_interaction.get("openedVisibly") is True
+        and settings_interaction.get("savedViaVisibleControl") is True
+        and settings_interaction.get("reopenedAfterSave") is True
+        and settings_interaction.get("persistedAfterReopen") is True
+        and initial_proof.get("requestedBuiltinTools") is True
+        and isinstance(stored_overrides, dict)
+        and stored_overrides.get("builtinToolsEnabled") is True
+        and stored_overrides.get("wireApi")
+        == nested(initial_proof, "chatSettingsDom", "wireApi")
+        and stored_overrides.get("workingDirectory")
+        == initial_proof.get("workingDirectory")
+    ):
+        facts.add("ui_override_session_scoped")
+
+    restarted_proof = source_proofs_by_phase.get(1) or {}
+    initial_config = nested(initial_proof, "session", "effective_config")
+    restarted_config = nested(restarted_proof, "session", "effective_config")
+    persisted_keys = (
+        "enablePrefixCache",
+        "usePagedCache",
+        "enableBlockDiskCache",
+        "kvCacheQuantization",
+        "blockDiskMaxSizeGB",
+        "prefixCacheMemoryPercent",
+    )
+    persisted_values = {
+        key: initial_config.get(key)
+        for key in persisted_keys
+        if isinstance(initial_config, dict) and key in initial_config
+    }
+    if (
+        persisted_values
+        and isinstance(restarted_config, dict)
+        and all(restarted_config.get(key) == value for key, value in persisted_values.items())
+        and nested(initial_proof, "serverCacheControls", "verified") is True
+        and nested(restarted_proof, "serverCacheControls", "verified") is True
+    ):
+        facts.add("ui_override_restart_persisted")
+
+    max_prompt_tokens = nested(initial_proof, "server", "health", "max_prompt_tokens")
+    max_output_tokens = nested(
+        initial_proof,
+        "server",
+        "health",
+        "effective_defaults",
+        "max_output_tokens",
+    )
+    if (
+        isinstance(max_prompt_tokens, int)
+        and max_prompt_tokens > 0
+        and isinstance(max_output_tokens, int)
+        and max_output_tokens > 0
+        and max_prompt_tokens != max_output_tokens
+    ):
+        facts.add("max_context_output_distinct")
+    cache_controls = initial_proof.get("serverCacheControls")
+    cache_visible = (
+        cache_controls.get("initialCacheControls")
+        if isinstance(cache_controls, dict)
+        else None
+    )
+    cache_config = (
+        cache_controls.get("persistedConfig")
+        if isinstance(cache_controls, dict)
+        else None
+    )
+    cache_health = (
+        cache_controls.get("healthNativeCache")
+        if isinstance(cache_controls, dict)
+        else None
+    )
+    cache_argv = (
+        cache_controls.get("argv")
+        if isinstance(cache_controls, dict)
+        else None
+    )
+    cache_parity = bool(
+        isinstance(cache_visible, dict)
+        and isinstance(cache_config, dict)
+        and isinstance(cache_health, dict)
+        and isinstance(cache_argv, list)
+        and cache_visible.get("enablePrefixCache")
+        == cache_config.get("enablePrefixCache")
+        and cache_visible.get("usePagedCache")
+        == cache_config.get("usePagedCache")
+        and cache_visible.get("enableBlockDiskCache")
+        == cache_config.get("enableBlockDiskCache")
+        and cache_config.get("enableBlockDiskCache") is True
+        and "--enable-block-disk-cache" in cache_argv
+        and cache_health.get("block_disk_l2") is True
+        and cache_health.get("prefix")
+        == cache_config.get("enablePrefixCache")
+        and cache_health.get("paged") == cache_config.get("usePagedCache")
+        and cache_health.get("block_disk_only")
+        == (not cache_config.get("usePagedCache"))
+        and (
+            "--use-paged-cache"
+            if cache_config.get("usePagedCache")
+            else "--no-paged-cache"
+        )
+        in cache_argv
+    )
+    if (
+        nested(initial_proof, "serverCacheControls", "verified") is True
+        and cache_parity
+    ):
+        facts.add("preview_argv_health_parity")
     media = dom.get("media")
     if isinstance(media, list):
         types = {
@@ -5265,23 +5902,214 @@ def _v5_api_facts(
     if isinstance(sampling, dict):
         hashes.append(hashlib.sha256(defaults_bytes).hexdigest())
         bundle_defaults = bundle_snapshot["derived"]["generation_defaults"]
-        default_resolved = sampling.get("default_resolved")
-        override_request = sampling.get("override_request")
-        override_resolved = sampling.get("override_resolved")
-        after_override = sampling.get("after_override_resolved")
-        if default_resolved == bundle_defaults:
-            global_facts.add("bundle_defaults_in_api")
-        if (
-            isinstance(override_request, dict)
-            and isinstance(override_resolved, dict)
-            and override_request != bundle_defaults
-            and all(
-                override_resolved.get(key) == value
-                for key, value in override_request.items()
+        sampler_keys = (
+            "temperature",
+            "top_p",
+            "top_k",
+            "min_p",
+            "repetition_penalty",
+        )
+
+        def numeric_mapping(
+            value: Any,
+            keys: tuple[str, ...],
+        ) -> dict[str, int | float]:
+            if not isinstance(value, dict):
+                return {}
+            return {
+                key: candidate
+                for key in keys
+                if isinstance((candidate := value.get(key)), (int, float))
+                and not isinstance(candidate, bool)
+            }
+
+        def values_match(
+            observed: Any,
+            expected: dict[str, int | float],
+        ) -> bool:
+            actual = numeric_mapping(observed, tuple(expected))
+            return bool(expected) and set(actual) == set(expected) and all(
+                abs(float(actual[key]) - float(value)) <= 1e-6
+                for key, value in expected.items()
             )
-            and after_override == bundle_defaults
+
+        def values_include(
+            observed: Any,
+            expected: dict[str, int | float],
+        ) -> bool:
+            actual = numeric_mapping(observed, sampler_keys)
+            return bool(expected) and all(
+                key in actual
+                and abs(float(actual[key]) - float(value)) <= 1e-6
+                for key, value in expected.items()
+            )
+
+        observations = sampling.get("observations")
+        validated_observations: list[
+            tuple[dict[str, Any], dict[str, Any]]
+        ] = []
+        if (
+            sampling.get("schema") == "vmlx-r18-owned-sampling-attestation-v1"
+            and isinstance(observations, list)
+            and len(observations) == 3
         ):
-            global_facts.add("api_request_override_request_scoped")
+            expected_labels = ("default", "override", "after_override")
+            seen_ids: set[str] = set()
+            for expected_label, observation in zip(
+                expected_labels,
+                observations,
+                strict=True,
+            ):
+                if not isinstance(observation, dict):
+                    validated_observations = []
+                    break
+                request, request_bytes = _v5_json_bytes(
+                    observation.get("request_b64")
+                )
+                result_bytes = _v5_decode_bytes(observation.get("result_b64"))
+                resolved = observation.get("resolved")
+                line_bytes = _v5_decode_bytes(
+                    resolved.get("line_b64")
+                    if isinstance(resolved, dict)
+                    else None
+                )
+                proof_request_id = str(
+                    observation.get("proof_request_id") or ""
+                )
+                request_id = str(observation.get("request_id") or "")
+                message_id = str(observation.get("message_id") or "")
+                identity_values = (
+                    proof_request_id,
+                    request_id,
+                    message_id,
+                )
+                if (
+                    observation.get("label") != expected_label
+                    or not isinstance(request, dict)
+                    or request_bytes is None
+                    or result_bytes is None
+                    or line_bytes is None
+                    or not isinstance(resolved, dict)
+                    or not all(
+                        re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value)
+                        for value in identity_values
+                    )
+                    or any(value in seen_ids for value in identity_values)
+                    or observation.get("request_sha256")
+                    != hashlib.sha256(request_bytes).hexdigest()
+                    or observation.get("result_sha256")
+                    != hashlib.sha256(result_bytes).hexdigest()
+                    or resolved.get("line_sha256")
+                    != hashlib.sha256(line_bytes).hexdigest()
+                    or request.get("max_tokens") != 2
+                    or request.get("enable_thinking") is not False
+                    or resolved.get("values", {}).get("max_tokens") != 2
+                    or resolved.get("values", {}).get("enable_thinking")
+                    is not False
+                ):
+                    validated_observations = []
+                    break
+                try:
+                    line = line_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    validated_observations = []
+                    break
+                reparsed = _v5_parse_resolved_sampling_log(
+                    line,
+                    route="/v1/chat/completions",
+                    expected_models={str(request.get("model") or "")},
+                    proof_request_id=proof_request_id,
+                    request_id=request_id,
+                    message_id=message_id,
+                )
+                if reparsed != resolved:
+                    validated_observations = []
+                    break
+                seen_ids.update(identity_values)
+                validated_observations.append((observation, request))
+
+        if len(validated_observations) == 3:
+            default_resolved = sampling.get("default_resolved")
+            override_request = sampling.get("override_request")
+            override_resolved = sampling.get("override_resolved")
+            after_override = sampling.get("after_override_resolved")
+            resolved_rows = [
+                row[0]["resolved"]["values"]
+                for row in validated_observations
+            ]
+            top_level_bound = (
+                default_resolved == resolved_rows[0]
+                and override_resolved == resolved_rows[1]
+                and after_override == resolved_rows[2]
+            )
+            expected_sampler = numeric_mapping(bundle_defaults, sampler_keys)
+            health_defaults = sampling.get("health_effective_defaults")
+            expected_output = next(
+                (
+                    bundle_defaults[key]
+                    for key in ("max_output_tokens", "max_new_tokens")
+                    if isinstance(bundle_defaults.get(key), (int, float))
+                    and not isinstance(bundle_defaults.get(key), bool)
+                ),
+                None,
+            )
+            health_output = (
+                health_defaults.get("max_output_tokens")
+                if isinstance(health_defaults, dict)
+                else None
+            )
+            output_default_matches = (
+                expected_output is None
+                or (
+                    isinstance(health_output, (int, float))
+                    and not isinstance(health_output, bool)
+                    and abs(float(health_output) - float(expected_output)) <= 1e-6
+                )
+            )
+            if (
+                top_level_bound
+                and values_match(default_resolved, expected_sampler)
+                and values_match(after_override, expected_sampler)
+                and values_match(health_defaults, expected_sampler)
+                and output_default_matches
+                and all(
+                    not any(key in request for key in sampler_keys)
+                    for _observation, request in (
+                        validated_observations[0],
+                        validated_observations[2],
+                    )
+                )
+            ):
+                global_facts.add("bundle_defaults_in_api")
+            expected_override = numeric_mapping(override_request, sampler_keys)
+            override_payload = validated_observations[1][1]
+            default_without_override = {
+                key: value
+                for key, value in expected_sampler.items()
+                if key not in expected_override
+            }
+            if (
+                top_level_bound
+                and expected_override
+                and set(expected_override) <= set(sampler_keys)
+                and all(
+                    key in override_payload
+                    and abs(float(override_payload[key]) - float(value)) <= 1e-6
+                    for key, value in expected_override.items()
+                )
+                and values_include(override_resolved, expected_override)
+                and all(
+                    key in numeric_mapping(override_resolved, sampler_keys)
+                    and abs(
+                        float(numeric_mapping(override_resolved, sampler_keys)[key])
+                        - float(value)
+                    )
+                    <= 1e-6
+                    for key, value in default_without_override.items()
+                )
+                and values_match(after_override, expected_sampler)
+            ):
+                global_facts.add("api_request_override_request_scoped")
     media_types: set[str] = set()
     for rows in grouped.values():
         for request, _response, _reasoning_mode in rows:
@@ -6016,15 +6844,62 @@ def _v5_owned_check_facts(
         return set(), {}
     if check_name in {"full_python_suite", "full_panel_suite"}:
         if check_name == "full_python_suite":
-            collected = re.search(r"collected\s+(\d+)\s+items?", text)
-            passed = re.search(r"(\d+)\s+passed\b", text)
-            baseline = OWNED_SUITE_BASELINES[check_name]
-            valid = bool(
-                collected
-                and passed
-                and int(collected.group(1)) == int(passed.group(1))
-                and int(passed.group(1)) >= baseline["passed"]
+            plain_text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+            terminal_summaries = [
+                line
+                for line in plain_text.splitlines()
+                if re.search(r"\b\d+\s+passed\b", line)
+                and re.search(r"\bin\s+[0-9:.]+s?(?:\s|$)", line)
+            ]
+            if not terminal_summaries:
+                return set(), {}
+            terminal_summary = terminal_summaries[-1]
+
+            def terminal_count(label: str) -> int:
+                match = re.search(
+                    rf"\b(\d+)\s+{re.escape(label)}\b",
+                    terminal_summary,
+                )
+                return int(match.group(1)) if match else 0
+
+            passed_count = terminal_count("passed")
+            deselected_count = terminal_count("deselected")
+            skipped_count = terminal_count("skipped")
+            xfailed_count = terminal_count("xfailed")
+            xpassed_count = terminal_count("xpassed")
+            failed_count = terminal_count("failed")
+            error_match = re.search(
+                r"\b(\d+)\s+errors?\b",
+                terminal_summary,
             )
+            error_count = int(error_match.group(1)) if error_match else 0
+            baseline = OWNED_SUITE_BASELINES[check_name]
+            completed_count = (
+                passed_count
+                + skipped_count
+                + xfailed_count
+                + xpassed_count
+                + failed_count
+                + error_count
+            )
+            expected_collected = completed_count + deselected_count
+            collection_counts = {
+                int(value)
+                for value in re.findall(
+                    r"\bcollected\s+(\d+)\s+items?\b",
+                    plain_text,
+                )
+            }
+            valid = bool(
+                expected_collected in collection_counts
+                and completed_count > 0
+                and passed_count >= baseline["passed"]
+                and failed_count == 0
+                and error_count == 0
+            )
+            if valid:
+                return set(V5_RELEASE_ASSERTIONS[check_name]), {}
+            return set(), {}
         else:
             tests = re.search(r"\bTests\s+(\d+)\s+passed\b", text)
             files = re.search(r"\bTest Files\s+(\d+)\s+passed\b", text)
@@ -6035,7 +6910,7 @@ def _v5_owned_check_facts(
                 and int(tests.group(1)) >= baseline["passed"]
                 and int(files.group(1)) >= baseline["files"]
             )
-        if valid and not re.search(r"\b(?:failed|error|deselected)\b", text):
+        if valid and not re.search(r"\b(?:failed|error)\b", text):
             return set(V5_RELEASE_ASSERTIONS[check_name]), {}
         return set(), {}
     if check_name == "typecheck":
@@ -7591,6 +8466,262 @@ def _v5_reasoning_mode_request(
     return request, mode
 
 
+def _v5_parse_resolved_sampling_log(
+    line: str,
+    *,
+    route: str,
+    expected_models: set[str],
+    proof_request_id: str,
+    request_id: str = "",
+    message_id: str = "",
+) -> dict[str, Any] | None:
+    marker = f"Resolved sampling kwargs route={route} model="
+    start = line.find(marker)
+    kwargs_marker = line.find(" kwargs=", start + len(marker))
+    if start < 0 or kwargs_marker < 0:
+        return None
+    model_and_ids = line[start + len(marker) : kwargs_marker]
+    identity_matches = list(
+        re.finditer(
+            r" (proof_request_id|request_id|message_id)="
+            r"([A-Za-z0-9_.:-]{1,160})",
+            model_and_ids,
+        )
+    )
+    if not identity_matches:
+        return None
+    observed_model = model_and_ids[: identity_matches[0].start()]
+    expected_position = identity_matches[0].start()
+    identities: dict[str, str] = {}
+    for match in identity_matches:
+        if match.start() != expected_position or match.group(1) in identities:
+            return None
+        identities[match.group(1)] = match.group(2)
+        expected_position = match.end()
+    if expected_position != len(model_and_ids):
+        return None
+    observed_proof_id = identities.get("proof_request_id", "")
+    if observed_model not in expected_models:
+        return None
+    if observed_proof_id != proof_request_id:
+        return None
+    if request_id and identities.get("request_id") != request_id:
+        return None
+    if message_id and identities.get("message_id") != message_id:
+        return None
+    raw = line[kwargs_marker + len(" kwargs=") :].strip()
+    values: dict[str, Any] = {}
+    for key in (
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repetition_penalty",
+        "max_tokens",
+        "enable_thinking",
+    ):
+        match = re.search(rf"['\"]{re.escape(key)}['\"]\s*:\s*([^,}}]+)", raw)
+        if match is None:
+            continue
+        token = match.group(1).strip().strip("'\"")
+        if token.lower() in {"true", "false"}:
+            values[key] = token.lower() == "true"
+        elif token.lower() in {"none", "null"}:
+            values[key] = None
+        else:
+            try:
+                number = float(token)
+            except ValueError:
+                values[key] = token
+            else:
+                values[key] = int(number) if number.is_integer() else number
+    if not values:
+        return None
+    return {
+        "route": route,
+        "model": observed_model,
+        "proof_request_id": observed_proof_id,
+        "request_id": identities.get("request_id", ""),
+        "message_id": identities.get("message_id", ""),
+        "values": values,
+        "line_sha256": hashlib.sha256(line.encode()).hexdigest(),
+        "line_b64": _v5_encode_bytes(line.encode()),
+    }
+
+
+def _v5_wait_for_resolved_sampling_log(
+    binding: dict[str, Any],
+    before: list[str],
+    *,
+    route: str,
+    proof_request_id: str,
+    request_id: str = "",
+    message_id: str = "",
+    timeout: float = 15.0,
+) -> tuple[dict[str, Any], list[str]]:
+    deadline = time.monotonic() + timeout
+    expected_models = {
+        str(binding["model"]),
+        str(binding["model_bundle_path"]),
+    }
+    if any(
+        _v5_parse_resolved_sampling_log(
+            row,
+            route=route,
+            expected_models=expected_models,
+            proof_request_id=proof_request_id,
+            request_id=request_id,
+            message_id=message_id,
+        )
+        is not None
+        for row in before
+    ):
+        raise RuntimeError("sampling probe proof ID existed before request")
+    while time.monotonic() < deadline:
+        current = _v5_cdp_session_logs(
+            str(binding["cdp_url"]),
+            str(binding["session_id"]),
+        )
+        observations = [
+            parsed
+            for row in current
+            if (
+                parsed := _v5_parse_resolved_sampling_log(
+                    row,
+                    route=route,
+                    expected_models=expected_models,
+                    proof_request_id=proof_request_id,
+                    request_id=request_id,
+                    message_id=message_id,
+                )
+            )
+            is not None
+        ]
+        if len(observations) == 1:
+            return observations[0], current
+        if len(observations) > 1:
+            raise RuntimeError("sampling probe observed multiple resolved requests")
+        time.sleep(0.1)
+    raise RuntimeError("sampling probe observed no resolved server kwargs")
+
+
+def _v5_api_sampling_capture(
+    harness: Any,
+    original_send: Any,
+    binding: dict[str, Any],
+) -> dict[str, Any]:
+    health_before_bytes = _v5_loopback_http_get(str(binding["health_url"]))
+    health_before = json.loads(health_before_bytes)
+    effective_defaults = health_before.get("effective_defaults")
+    if not isinstance(effective_defaults, dict) or not effective_defaults:
+        raise RuntimeError("sampling probe health has no effective defaults")
+    default_temperature = effective_defaults.get("temperature")
+    override_temperature = (
+        0.123
+        if not isinstance(default_temperature, (int, float))
+        or abs(float(default_temperature) - 0.123) > 1e-6
+        else 0.456
+    )
+    client = harness.ProtocolClient(
+        str(binding["direct_base_url"]),
+        None,
+        300,
+        base_label="direct",
+    )
+    observations: list[dict[str, Any]] = []
+    for label, override in (
+        ("default", {}),
+        ("override", {"temperature": override_temperature}),
+        ("after_override", {}),
+    ):
+        proof_request_id = f"r18-sampling-{label}-{secrets.token_hex(12)}"
+        request_id = f"{proof_request_id}-request"
+        message_id = f"{proof_request_id}-message"
+        request = {
+            "model": binding["model"],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"Reply exactly R18-SAMPLING-{label.upper()}.",
+                }
+            ],
+            "stream": False,
+            "max_tokens": 2,
+            "enable_thinking": False,
+            **override,
+        }
+        logs_before = _v5_cdp_session_logs(
+            str(binding["cdp_url"]),
+            str(binding["session_id"]),
+        )
+        client.headers["x-vmlx-proof-request-id"] = proof_request_id
+        client.headers["x-vmlx-request-id"] = request_id
+        client.headers["x-vmlx-message-id"] = message_id
+        result = original_send(
+            client,
+            "chat",
+            request,
+            False,
+            capture_label=f"sampling_{label}",
+        )
+        if (
+            result.get("status_code") != 200
+            or result.get("errors")
+            or not result.get("terminals")
+        ):
+            raise RuntimeError("sampling probe request did not complete successfully")
+        resolved, logs_after = _v5_wait_for_resolved_sampling_log(
+            binding,
+            logs_before,
+            route="/v1/chat/completions",
+            proof_request_id=proof_request_id,
+            request_id=request_id,
+            message_id=message_id,
+        )
+        request_bytes = json.dumps(
+            request,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        result_bytes = json.dumps(
+            result,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        observations.append(
+            {
+                "label": label,
+                "proof_request_id": proof_request_id,
+                "request_id": request_id,
+                "message_id": message_id,
+                "request_b64": _v5_encode_bytes(request_bytes),
+                "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
+                "result_b64": _v5_encode_bytes(result_bytes),
+                "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+                "log_start_index": len(logs_before),
+                "log_end_index": len(logs_after),
+                "resolved": resolved,
+            }
+        )
+    health_after_bytes = _v5_loopback_http_get(str(binding["health_url"]))
+    health_after = json.loads(health_after_bytes)
+    if health_after.get("effective_defaults") != effective_defaults:
+        raise RuntimeError("per-request sampling override changed server defaults")
+    return {
+        "schema": "vmlx-r18-owned-sampling-attestation-v1",
+        "health_effective_defaults": effective_defaults,
+        "health_before_sha256": hashlib.sha256(health_before_bytes).hexdigest(),
+        "health_after_sha256": hashlib.sha256(health_after_bytes).hexdigest(),
+        "default_resolved": observations[0]["resolved"]["values"],
+        "override_request": {"temperature": override_temperature},
+        "override_resolved": observations[1]["resolved"]["values"],
+        "after_override_resolved": observations[2]["resolved"]["values"],
+        "observations": observations,
+    }
+
+
 def _v5_api_worker_capture(
     args: argparse.Namespace,
     binding: dict[str, Any],
@@ -7686,6 +8817,11 @@ def _v5_api_worker_capture(
         matrix = harness.run_matrix(matrix_args)
     finally:
         harness.ProtocolClient.send = original_send
+    sampling = _v5_api_sampling_capture(
+        harness,
+        original_send,
+        binding,
+    )
     harness._write_private_result_exclusive(
         output_path,
         matrix,
@@ -7815,6 +8951,13 @@ def _v5_api_worker_capture(
             args.v5_session_binding_path.read_bytes()
         ).hexdigest(),
         "flows": flows,
+        "sampling_b64": _v5_encode_bytes(
+            json.dumps(
+                sampling,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ),
         "matrix_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
     }
     return json.dumps(capture, sort_keys=True, separators=(",", ":")).encode()
@@ -8514,6 +9657,8 @@ def _v5_cache_worker_phase(
         str(phase_root),
         "--phase",
         gate_operation,
+        "--cache-scenario",
+        _v5_cache_gate_scenario(phase),
     ]
     if gate_operation == "probe":
         if store_summary_path is None:
@@ -8559,6 +9704,7 @@ def _v5_cache_worker_phase(
     if (
         summary.get("schema") != CACHE_PROOF_SCHEMA
         or summary.get("phase") != gate_operation
+        or summary.get("cache_scenario") != _v5_cache_gate_scenario(phase)
         or summary.get("nonce") != args.v5_nonce
         or summary.get("base_url") != binding["direct_base_url"]
         or summary.get("model") != binding["model"]

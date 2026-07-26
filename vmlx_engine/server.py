@@ -2696,7 +2696,15 @@ def _set_resolved_repetition_penalty(
         target.pop("repetition_penalty", None)
 
 
-def _log_resolved_sampling_kwargs(route: str, model_name: str, kwargs: dict) -> None:
+def _log_resolved_sampling_kwargs(
+    route: str,
+    model_name: str,
+    kwargs: dict,
+    *,
+    proof_request_id: str = "",
+    request_id: str = "",
+    message_id: str = "",
+) -> None:
     """Emit the live sampling kwargs that are about to enter generation."""
     keys = (
         "temperature",
@@ -2716,12 +2724,36 @@ def _log_resolved_sampling_kwargs(route: str, model_name: str, kwargs: dict) -> 
             for key in ("reasoning_effort", "thinking_budget", "enable_thinking")
             if key in ct_kwargs
         }
-    logger.info(
-        "Resolved sampling kwargs route=%s model=%s kwargs=%s",
-        route,
-        model_name,
-        sample,
-    )
+    identity_values = {
+        "proof_request_id": proof_request_id,
+        "request_id": request_id,
+        "message_id": message_id,
+    }
+    valid_identities = {
+        key: value
+        for key, value in identity_values.items()
+        if value and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value)
+    }
+    if valid_identities:
+        identity_suffix = " ".join(
+            f"{key}={valid_identities[key]}"
+            for key in ("proof_request_id", "request_id", "message_id")
+            if key in valid_identities
+        )
+        logger.info(
+            "Resolved sampling kwargs route=%s model=%s %s kwargs=%s",
+            route,
+            model_name,
+            identity_suffix,
+            sample,
+        )
+    else:
+        logger.info(
+            "Resolved sampling kwargs route=%s model=%s kwargs=%s",
+            route,
+            model_name,
+            sample,
+        )
 
 
 def _compute_bypass_prefix_cache(request_obj) -> bool:
@@ -15689,6 +15721,12 @@ async def create_chat_completion(
         "/v1/chat/completions",
         _model_path or _model_name or request.model,
         chat_kwargs,
+        proof_request_id=fastapi_request.headers.get(
+            "x-vmlx-proof-request-id",
+            "",
+        ),
+        request_id=fastapi_request.headers.get("x-vmlx-request-id", ""),
+        message_id=fastapi_request.headers.get("x-vmlx-message-id", ""),
     )
 
     # Add multimodal content
@@ -18701,6 +18739,12 @@ async def create_response(
         "/v1/responses",
         _model_path or _model_name or request.model,
         chat_kwargs,
+        proof_request_id=fastapi_request.headers.get(
+            "x-vmlx-proof-request-id",
+            "",
+        ),
+        request_id=fastapi_request.headers.get("x-vmlx-request-id", ""),
+        message_id=fastapi_request.headers.get("x-vmlx-message-id", ""),
     )
 
     # Video processing controls (MLLM models)

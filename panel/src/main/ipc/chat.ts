@@ -1428,6 +1428,22 @@ export function registerChatHandlers(
 
       // Generate assistant message ID upfront so typing indicator can reference it
       const assistantMessageId = uuidv4();
+      // Local proof correlation is carried out-of-band so it cannot perturb the
+      // model request body or remote-provider contracts. One visible user turn
+      // owns one proof/message identity; every initial/tool-continuation HTTP
+      // request gets its own request ID.
+      const proofRequestId = userMessage.id;
+      const wireRequestIds: string[] = [];
+      const nextLocalRequestCorrelationHeaders = (): Record<string, string> => {
+        if (isRemote) return {};
+        const requestId = uuidv4();
+        wireRequestIds.push(requestId);
+        return {
+          "X-vMLX-Proof-Request-ID": proofRequestId,
+          "X-vMLX-Request-ID": requestId,
+          "X-vMLX-Message-ID": assistantMessageId,
+        };
+      };
 
       // Signal to renderer that the model is processing (typing indicator during TTFT)
       try {
@@ -2266,6 +2282,7 @@ export function registerChatHandlers(
                 "Content-Type": "application/json",
                 ...authHeaders,
                 ...vmlxResponsesUsageHeaders,
+                ...nextLocalRequestCorrelationHeaders(),
               },
               body: requestBody,
               signal: abortController.signal,
@@ -2276,6 +2293,7 @@ export function registerChatHandlers(
                 "Content-Type": "application/json",
                 ...authHeaders,
                 ...vmlxResponsesUsageHeaders,
+                ...nextLocalRequestCorrelationHeaders(),
               },
               body: requestBody,
               signal: abortController.signal,
@@ -3441,7 +3459,11 @@ export function registerChatHandlers(
           const followUpBody = JSON.stringify(buildRequestBody());
           const followUpInit = {
             method: "POST",
-            headers: { "Content-Type": "application/json", ...authHeaders },
+            headers: {
+              "Content-Type": "application/json",
+              ...authHeaders,
+              ...nextLocalRequestCorrelationHeaders(),
+            },
             body: followUpBody,
             signal: abortController.signal,
           };
@@ -4504,6 +4526,8 @@ export function registerChatHandlers(
             win.webContents.send("chat:complete", {
               chatId,
               messageId: assistantMessage.id,
+              proofRequestId,
+              requestIds: [...wireRequestIds],
               responseId: activeRequests.get(chatId)?.responseId,
               content: fullContent,
               reasoningContent: finalReasoningContent || undefined,
@@ -4722,6 +4746,8 @@ export function registerChatHandlers(
               win.webContents.send("chat:complete", {
                 chatId,
                 messageId: assistantMessage.id,
+                proofRequestId,
+                requestIds: [...wireRequestIds],
                 responseId: activeRequests.get(chatId)?.responseId,
                 content: assistantMessage.content,
                 reasoningContent: abortReasoningContent || undefined,

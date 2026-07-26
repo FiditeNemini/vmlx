@@ -373,6 +373,7 @@ function cacheStats({
 }
 
 function goodResult(): Record<string, any> {
+  const sourceCommit = "c".repeat(40);
   const modules = localRendererModuleEvidence();
   const records = assistantIds.map((id, index) => ({
     id,
@@ -609,11 +610,14 @@ function goodResult(): Record<string, any> {
     uiTurnEvidence: assistantIds.map((assistantMessageId, index) => ({
       turn: index + 1,
       prompt: prompts[index],
-      proofRequestId: `ui-run-1:ui:${index + 1}`,
+      proofRequestId: `user-${index + 1}`,
+      terminalProofRequestId: `user-${index + 1}`,
+      requestIds: [`wire-request-${index + 1}`],
       userMessageId: `user-${index + 1}`,
       assistantMessageId,
       terminalMessageId: assistantMessageId,
       terminalResponseId: `server-request-${index + 1}`,
+      logMatchMode: "exact_identity_ring_safe",
     })),
     resolvedSamplingKwargs: {
       temperature: 0.7,
@@ -629,8 +633,8 @@ function goodResult(): Record<string, any> {
       route: "/v1/chat/completions",
       model: "/private/models/test-model",
       turn: index + 1,
-      proof_request_id: `ui-run-1:ui:${index + 1}`,
-      request_id: `server-request-${index + 1}`,
+      proof_request_id: `user-${index + 1}`,
+      request_id: `wire-request-${index + 1}`,
       message_id: assistantMessageId,
       correlation_source: "server_emitted",
       user_message_id: `user-${index + 1}`,
@@ -648,11 +652,11 @@ function goodResult(): Record<string, any> {
       status: "verified",
       turns: assistantIds.map((assistantMessageId, index) => ({
         turn: index + 1,
-        proofRequestId: `ui-run-1:ui:${index + 1}`,
+        proofRequestId: `user-${index + 1}`,
         userMessageId: `user-${index + 1}`,
         assistantMessageId,
-        serverProofRequestId: `ui-run-1:ui:${index + 1}`,
-        serverRequestId: `server-request-${index + 1}`,
+        serverProofRequestId: `user-${index + 1}`,
+        serverRequestIds: [`wire-request-${index + 1}`],
         serverMessageId: assistantMessageId,
         resolvedLogCorrelated: true,
         cacheObservationCorrelated: true,
@@ -678,7 +682,7 @@ function goodResult(): Record<string, any> {
     cacheRequestEvidence: [
       {
         turn: 1,
-        proofRequestId: "ui-run-1:ui:1",
+        proofRequestId: "user-1",
         terminalResponseId: "server-request-1",
         serverRequestId: "server-request-1",
         executionRequestId: "server-request-1",
@@ -686,7 +690,7 @@ function goodResult(): Record<string, any> {
         userMessageId: "user-1",
         assistantMessageId: assistantIds[0],
         serverObservation: {
-          proof_request_id: "ui-run-1:ui:1",
+          proof_request_id: "user-1",
           request_id: "server-request-1",
           terminal_response_id: "server-request-1",
           message_id: assistantIds[0],
@@ -717,7 +721,7 @@ function goodResult(): Record<string, any> {
       },
       {
         turn: 2,
-        proofRequestId: "ui-run-1:ui:2",
+        proofRequestId: "user-2",
         terminalResponseId: "server-request-2",
         serverRequestId: "server-request-2",
         executionRequestId: "server-request-2",
@@ -725,7 +729,7 @@ function goodResult(): Record<string, any> {
         userMessageId: "user-2",
         assistantMessageId: assistantIds[1],
         serverObservation: {
-          proof_request_id: "ui-run-1:ui:2",
+          proof_request_id: "user-2",
           request_id: "server-request-2",
           terminal_response_id: "server-request-2",
           message_id: assistantIds[1],
@@ -757,7 +761,7 @@ function goodResult(): Record<string, any> {
       },
       {
         turn: 3,
-        proofRequestId: "ui-run-1:ui:3",
+        proofRequestId: "user-3",
         terminalResponseId: "server-request-3",
         serverRequestId: "server-request-3",
         executionRequestId: "server-request-3",
@@ -765,7 +769,7 @@ function goodResult(): Record<string, any> {
         userMessageId: "user-3",
         assistantMessageId: assistantIds[2],
         serverObservation: {
-          proof_request_id: "ui-run-1:ui:3",
+          proof_request_id: "user-3",
           request_id: "server-request-3",
           terminal_response_id: "server-request-3",
           message_id: assistantIds[2],
@@ -819,9 +823,10 @@ function goodResult(): Record<string, any> {
     uiRuntimeProvenance: {
       mode: "electron-dev",
       renderer_source_tree_sha256: sha,
+      renderer_build_source_commit: sourceCommit,
       electron_executable: testExecutablePath,
       electron_executable_sha256: testExecutableSha,
-      source_commit: "commit",
+      source_commit: sourceCommit,
       source_tree: "tree",
       vite_renderer_source_seen: true,
       vite_client_seen: true,
@@ -847,7 +852,7 @@ function goodResult(): Record<string, any> {
     gitProvenance: {
       before: {
         renderer_source_tree_sha256: sha,
-        commit: "commit",
+        commit: sourceCommit,
         tree: "tree",
         server_module_sha256: sha,
         package_init_sha256: sha,
@@ -857,7 +862,7 @@ function goodResult(): Record<string, any> {
       },
       after: {
         renderer_source_tree_sha256: sha,
-        commit: "commit",
+        commit: sourceCommit,
         tree: "tree",
         server_module_sha256: sha,
         package_init_sha256: sha,
@@ -1939,6 +1944,50 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("rejects a renderer build commit that does not match the frozen proof HEAD", () => {
+    const result = structuredClone(goodResult());
+    result.uiRuntimeProvenance.renderer_build_source_commit = "d".repeat(40);
+    expect(validateUiRuntimeProvenance(result).join("\n")).toMatch(
+      /build-injected renderer source commit/,
+    );
+  });
+
+  it("derives renderer provenance from Git and wires local request identity through every wire request", () => {
+    const viteConfig = readFileSync(
+      path.join(process.cwd(), "electron.vite.config.ts"),
+      "utf8",
+    );
+    const rendererMain = readFileSync(
+      path.join(process.cwd(), "src/renderer/src/main.tsx"),
+      "utf8",
+    );
+    const chatSource = readFileSync(
+      path.join(process.cwd(), "src/main/ipc/chat.ts"),
+      "utf8",
+    );
+    const serverSource = readFileSync(
+      path.join(process.cwd(), "../vmlx_engine/server.py"),
+      "utf8",
+    );
+    expect(viteConfig).toContain("['-C', __dirname, 'rev-parse', 'HEAD']");
+    expect(viteConfig).toContain("__VMLINUX_BUILD_SOURCE_COMMIT__");
+    expect(rendererMain).toContain(
+      "globalThis.__VMLINUX_SOURCE_COMMIT__ = __VMLINUX_BUILD_SOURCE_COMMIT__",
+    );
+    expect(rendererMain).toContain(
+      "document.documentElement.dataset.sourceCommit = __VMLINUX_BUILD_SOURCE_COMMIT__",
+    );
+    expect(chatSource).toContain("const proofRequestId = userMessage.id;");
+    expect(chatSource).toContain('"X-vMLX-Proof-Request-ID": proofRequestId');
+    expect(chatSource).toContain('"X-vMLX-Request-ID": requestId');
+    expect(chatSource).toContain('"X-vMLX-Message-ID": assistantMessageId');
+    expect(chatSource.match(/nextLocalRequestCorrelationHeaders\(\)/g)).toHaveLength(3);
+    expect(chatSource.match(/requestIds: \[\.\.\.wireRequestIds\]/g)).toHaveLength(2);
+    expect(
+      serverSource.match(/proof_request_id=fastapi_request\.headers\.get\(/g),
+    ).toHaveLength(2);
+  });
+
   it("binds installed ASAR, release manifest, bundled Python, runtime, and proof HEAD", () => {
     const result = structuredClone(goodResult());
     result.uiRuntimeProvenance = {
@@ -1948,7 +1997,7 @@ describe("real UI model proof harness", () => {
       external_release_manifest_sha256: sha,
       external_release_manifest: {
         schema: "vmlx-installed-release-manifest-v1",
-        source_commit: "commit",
+        source_commit: result.gitProvenance.after.commit,
         source_tree: "tree",
         app_asar_sha256: sha,
         electron_executable_sha256: testExecutableSha,
@@ -1957,7 +2006,7 @@ describe("real UI model proof harness", () => {
       },
       bundled_provenance_sha256: sha,
       bundled_provenance: {
-        vmlx: { commit: "commit", version: "1.6.18" },
+        vmlx: { commit: result.gitProvenance.after.commit, version: "1.6.18" },
       },
       bundled_source: {
         server_module_sha256: sha,
@@ -2939,6 +2988,41 @@ describe("real UI model proof harness", () => {
     ]);
   });
 
+  it("parses the complete server-emitted proof, request, and message identity tuple", () => {
+    expect(
+      parseResolvedSamplingKwargs([
+        "INFO Resolved sampling kwargs route=/v1/responses model=/models/gemma proof_request_id=user-1 request_id=wire-1 message_id=assistant-1 kwargs={'temperature': 0.8}",
+      ])[0],
+    ).toMatchObject({
+      route: "/v1/responses",
+      model: "/models/gemma",
+      proof_request_id: "user-1",
+      request_id: "wire-1",
+      message_id: "assistant-1",
+      correlation_source: "server_emitted",
+      values: { temperature: 0.8 },
+    });
+  });
+
+  it("accepts multiple unique tool-continuation request IDs under one UI turn and rejects reuse", () => {
+    const result = structuredClone(goodResult());
+    const followupId = "wire-request-1-followup";
+    result.uiTurnEvidence[0].requestIds.push(followupId);
+    result.requestCorrelation.turns[0].serverRequestIds.push(followupId);
+    result.resolvedSamplingRecords.splice(1, 0, {
+      ...structuredClone(result.resolvedSamplingRecords[0]),
+      request_id: followupId,
+    });
+    expect(isServerRequestCorrelationVerified(result)).toBe(true);
+
+    result.uiTurnEvidence[1].requestIds = [followupId];
+    result.requestCorrelation.turns[1].serverRequestIds = [followupId];
+    result.resolvedSamplingRecords.find(
+      (record: Record<string, unknown>) => record.proof_request_id === "user-2",
+    ).request_id = followupId;
+    expect(isServerRequestCorrelationVerified(result)).toBe(false);
+  });
+
   it("keeps a fixed full-tuple hash suffix when long sanitized prefixes collide", () => {
     const common = "x".repeat(400);
     const first = uniqueProofBasename({
@@ -3022,12 +3106,14 @@ describe("real UI model proof harness", () => {
     );
 
     expect(isServerRequestCorrelationVerified(result)).toBe(false);
-    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+    expect(validateGenerationDefaultsEvidence(result).join("\n")).toMatch(
+      /lack exact proof\/request\/message correlation/,
+    );
     expect(validateRequestCorrelatedCacheEvidence(result).join("\n")).toMatch(
       /do not exactly match|lacks exact server-emitted request correlation/,
     );
     const surfaces = deriveProvenSurfaces(result);
-    expect(surfaces).toContain("generation_defaults_visible_ui");
+    expect(surfaces).not.toContain("generation_defaults_visible_ui");
     expect(surfaces).not.toContain("generation_defaults_applied");
     expect(surfaces).not.toContain("cache_hit_telemetry");
   });

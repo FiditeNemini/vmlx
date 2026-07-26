@@ -36,6 +36,35 @@ type LocaleTree = Record<string, any>
 const locales: Record<Locale, LocaleTree> = { en, zh, ko, ja, es }
 let currentLocale: Locale = 'en'
 
+function flattenTranslationKeys(tree: LocaleTree, prefix = ''): string[] {
+  const keys: string[] = []
+  for (const [key, value] of Object.entries(tree)) {
+    const path = prefix ? `${prefix}.${key}` : key
+    if (typeof value === 'string') keys.push(path)
+    else if (value && typeof value === 'object' && !Array.isArray(value)) {
+      keys.push(...flattenTranslationKeys(value as LocaleTree, path))
+    }
+  }
+  return keys
+}
+
+const TRANSLATION_KEYS = Object.freeze(
+  Array.from(new Set(SUPPORTED_LOCALES.flatMap((locale) =>
+    flattenTranslationKeys(locales[locale]),
+  ))).sort(),
+)
+
+/** Canonical, read-only catalog contract used by renderer diagnostics/proof. */
+export function getCatalogContract(): {
+  supportedLocales: Locale[]
+  translationKeys: string[]
+} {
+  return {
+    supportedLocales: [...SUPPORTED_LOCALES],
+    translationKeys: [...TRANSLATION_KEYS],
+  }
+}
+
 /**
  * No-op kept for API compatibility — the renderer imports the same files
  * so there is nothing to load at runtime. Left as a named export so the

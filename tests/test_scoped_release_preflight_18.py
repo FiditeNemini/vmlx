@@ -341,6 +341,107 @@ def _fixture_protocol_nonstream_response(protocol: str, turn: int) -> bytes:
     return json.dumps(value, separators=(",", ":")).encode()
 
 
+def _fixture_sampling_attestation(
+    module,
+    *,
+    model: str = "fixture-laguna",
+    defaults: dict | None = None,
+) -> dict:
+    defaults = dict(defaults or {"temperature": 0.6, "top_p": 0.95})
+    resolved_defaults = {
+        key: defaults[key]
+        for key in (
+            "temperature",
+            "top_p",
+            "top_k",
+            "min_p",
+            "repetition_penalty",
+        )
+        if key in defaults
+    }
+    health_defaults = dict(resolved_defaults)
+    for output_key in ("max_output_tokens", "max_new_tokens"):
+        if output_key in defaults:
+            health_defaults["max_output_tokens"] = defaults[output_key]
+            break
+    observations = []
+    resolved_rows = []
+    override_request = {"temperature": 0.2}
+    for label, override in (
+        ("default", {}),
+        ("override", override_request),
+        ("after_override", {}),
+    ):
+        proof_request_id = f"r18-sampling-{label}-fixture"
+        request_id = f"{proof_request_id}-request"
+        message_id = f"{proof_request_id}-message"
+        request = {
+            "model": model,
+            "messages": [{"role": "user", "content": f"sample-{label}"}],
+            "stream": False,
+            "max_tokens": 2,
+            "enable_thinking": False,
+            **override,
+        }
+        resolved_values = {
+            **resolved_defaults,
+            **override,
+            "max_tokens": 2,
+            "enable_thinking": False,
+        }
+        line = (
+            "Resolved sampling kwargs route=/v1/chat/completions "
+            f"model={model} proof_request_id={proof_request_id} "
+            f"request_id={request_id} message_id={message_id} "
+            f"kwargs={resolved_values!r}"
+        )
+        request_bytes = json.dumps(
+            request,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        result_bytes = json.dumps(
+            {"status_code": 200, "terminals": [{"status": "completed"}]},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        resolved = {
+            "route": "/v1/chat/completions",
+            "model": model,
+            "proof_request_id": proof_request_id,
+            "request_id": request_id,
+            "message_id": message_id,
+            "values": resolved_values,
+            "line_sha256": hashlib.sha256(line.encode()).hexdigest(),
+            "line_b64": module._v5_encode_bytes(line.encode()),
+        }
+        observations.append(
+            {
+                "label": label,
+                "proof_request_id": proof_request_id,
+                "request_id": request_id,
+                "message_id": message_id,
+                "request_b64": module._v5_encode_bytes(request_bytes),
+                "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
+                "result_b64": module._v5_encode_bytes(result_bytes),
+                "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+                "resolved": resolved,
+            }
+        )
+        resolved_rows.append(resolved_values)
+    return {
+        "schema": "vmlx-r18-owned-sampling-attestation-v1",
+        "health_effective_defaults": health_defaults,
+        "default_resolved": resolved_rows[0],
+        "override_request": override_request,
+        "override_resolved": resolved_rows[1],
+        "after_override_resolved": resolved_rows[2],
+        "observations": observations,
+    }
+
+
 def _fixture_api_capture(
     module,
     run_id: str,
@@ -440,15 +541,7 @@ def _fixture_api_capture(
         "session_binding_sha256": str(phase_index) * 64,
         "flows": flows,
         "sampling_b64": _fixture_json_b64(
-            {
-                "default_resolved": {"temperature": 0.6, "top_p": 0.95},
-                "override_request": {"temperature": 0.2},
-                "override_resolved": {"temperature": 0.2, "top_p": 0.95},
-                "after_override_resolved": {
-                    "temperature": 0.6,
-                    "top_p": 0.95,
-                },
-            }
+            _fixture_sampling_attestation(module)
         ),
     }
 
@@ -475,6 +568,8 @@ def _fixture_ui_capture(
     source_records = []
     source_reasoning = []
     source_ui_turns = []
+    resolved_sampling_records = []
+    request_correlation_turns = []
     cache_rows = []
     for turn in range(1, turn_count + 1):
         response_id = f"resp-ui-{phase_index}-{turn}"
@@ -581,11 +676,37 @@ def _fixture_ui_capture(
         source_ui_turns.append(
             {
                 "turn": turn,
-                "proofRequestId": f"{run_id}:ui:{turn}",
+                "proofRequestId": f"u{turn}",
+                "terminalProofRequestId": f"u{turn}",
+                "requestIds": [f"wire-{phase_index}-{turn}"],
                 "userMessageId": f"u{turn}",
                 "assistantMessageId": f"m{turn}",
                 "terminalMessageId": f"m{turn}",
                 "terminalResponseId": response_id,
+                "logMatchMode": "exact_identity_ring_safe",
+            }
+        )
+        resolved_sampling_records.append(
+            {
+                "route": "/v1/chat/completions",
+                "model": "fixture-model",
+                "proof_request_id": f"u{turn}",
+                "request_id": f"wire-{phase_index}-{turn}",
+                "message_id": f"m{turn}",
+                "correlation_source": "server_emitted",
+                "values": {},
+            }
+        )
+        request_correlation_turns.append(
+            {
+                "turn": turn,
+                "proofRequestId": f"u{turn}",
+                "userMessageId": f"u{turn}",
+                "assistantMessageId": f"m{turn}",
+                "serverProofRequestId": f"u{turn}",
+                "serverRequestIds": [f"wire-{phase_index}-{turn}"],
+                "serverMessageId": f"m{turn}",
+                "resolvedLogCorrelated": True,
             }
         )
         health = {
@@ -673,9 +794,15 @@ def _fixture_ui_capture(
                 "run_id": run_id,
                 "session": {"id": session_id},
                 "uiStartControl": {"clicked": True},
+                "requestContract": {"uiTurnCount": turn_count},
                 "assistantRecords": source_records,
                 "persistedReasoningByMessage": source_reasoning,
                 "uiTurnEvidence": source_ui_turns,
+                "resolvedSamplingRecords": resolved_sampling_records,
+                "requestCorrelation": {
+                    "status": "verified",
+                    "turns": request_correlation_turns,
+                },
                 "cacheRequestEvidence": cache_rows,
                 "cacheRequestCorrelation": {
                     "status": "verified",
@@ -701,9 +828,32 @@ def _fixture_ui_capture(
         "sourceCommit": "",
         "messages": dom_messages,
         "text": "Chats Server Tools Image API Today",
-        "locales": ["en", "es", "fr"],
-        "supported_locales": ["en", "es", "fr"],
+        "locale_catalog_source": "main_ipc_canonical_locale_json",
+        "supported_locales": ["en", "zh", "ko", "ja", "es"],
+        "picker_supported_locales": ["en", "zh", "ko", "ja", "es"],
+        "visible_locale_options": ["en", "zh", "ko", "ja", "es"],
+        "translation_key_count": 3,
+        "catalog_translation_keys": [
+            "app.mode.server",
+            "common.stream",
+            "sessions.start",
+        ],
+        "raw_translation_keys": [],
+        "locales": [
+            {
+                "locale": locale,
+                "selected_locale": locale,
+                "raw_translation_keys": [],
+            }
+            for locale in ("en", "zh", "ko", "ja", "es")
+        ],
         "viewport": {"width": 640, "scroll_width": 640},
+        "viewport_restore": {
+            "method": "Emulation.clearDeviceMetricsOverride",
+            "verified": True,
+            "prior": {"width": 1440, "height": 1000},
+            "restored": {"width": 1440, "height": 1000},
+        },
         "settings": {
             "new_session": {"temperature": 0.6, "top_p": 0.95},
             "override": {"temperature": 0.2, "top_p": 0.8},
@@ -2863,6 +3013,194 @@ def test_r18_v5_run_intent_is_canonical_ordered_and_non_circular(
         module._v5_validate_run_intent(tampered, run_context, expected)
 
 
+def test_r18_v5_cache_gate_scenarios_bind_strict_l2_phase_pair():
+    module = load_module()
+    assert [
+        module._v5_cache_gate_scenario(phase)
+        for phase in module.V5_CACHE_PHASES
+    ] == [
+        "standard",
+        "standard",
+        "store-evict-refault",
+        "restart-restore",
+        "standard",
+        "standard",
+    ]
+
+
+def test_r18_v5_python_suite_accepts_selected_pass_skip_summary():
+    module = load_module()
+    execution = {
+        "exit_code": 0,
+        "__stdout_bytes": (
+            b"collected 6961 items / 92 deselected / 6869 selected\n"
+            b"subprocess: collected 25 items\n"
+            b"subprocess: 25 passed in 0.10s\n"
+            b"6761 passed, 108 skipped, 92 deselected in 123.45s\n"
+        ),
+        "__stderr_bytes": b"",
+    }
+    facts, details = module._v5_owned_check_facts(
+        "full_python_suite",
+        [execution],
+        {},
+        {},
+    )
+    assert facts == set(module.V5_RELEASE_ASSERTIONS["full_python_suite"])
+    assert details == {}
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        b"collected 6961 items / 92 deselected / 6869 selected\n"
+        b"6760 passed, 108 skipped, 92 deselected in 123.45s\n",
+        b"collected 6961 items / 92 deselected / 6869 selected\n"
+        b"6760 passed, 108 skipped, 1 failed, 92 deselected in 123.45s\n",
+    ],
+)
+def test_r18_v5_python_suite_rejects_incomplete_or_failed_summary(summary):
+    module = load_module()
+    facts, details = module._v5_owned_check_facts(
+        "full_python_suite",
+        [
+            {
+                "exit_code": 0,
+                "__stdout_bytes": summary,
+                "__stderr_bytes": b"",
+            }
+        ],
+        {},
+        {},
+    )
+    assert facts == set()
+    assert details == {}
+
+
+def test_r18_v5_sampling_log_parser_binds_all_request_identities():
+    module = load_module()
+    line = (
+        "INFO Resolved sampling kwargs route=/v1/chat/completions "
+        "model=fixture-laguna proof_request_id=proof-1 "
+        "request_id=request-1 message_id=message-1 "
+        "kwargs={'temperature': 0.6, 'max_tokens': 2, "
+        "'enable_thinking': False}"
+    )
+    parsed = module._v5_parse_resolved_sampling_log(
+        line,
+        route="/v1/chat/completions",
+        expected_models={"fixture-laguna"},
+        proof_request_id="proof-1",
+        request_id="request-1",
+        message_id="message-1",
+    )
+    assert parsed is not None
+    assert parsed["proof_request_id"] == "proof-1"
+    assert parsed["request_id"] == "request-1"
+    assert parsed["message_id"] == "message-1"
+    assert parsed["values"]["max_tokens"] == 2
+    assert parsed["values"]["enable_thinking"] is False
+
+
+def test_r18_v5_sampling_log_lookup_survives_ring_wrap_and_rejects_duplicates(
+    monkeypatch,
+):
+    module = load_module()
+    binding = {
+        "model": "fixture-laguna",
+        "model_bundle_path": "/models/fixture-laguna",
+        "cdp_url": "http://127.0.0.1:9335",
+        "session_id": "session-1",
+    }
+    before = [f"old-{index}" for index in range(2000)]
+    target = (
+        "Resolved sampling kwargs route=/v1/chat/completions "
+        "model=fixture-laguna proof_request_id=proof-1 "
+        "request_id=request-1 message_id=message-1 "
+        "kwargs={'temperature': 0.6, 'max_tokens': 2, "
+        "'enable_thinking': False}"
+    )
+    current = before[250:] + [target]
+    monkeypatch.setattr(
+        module,
+        "_v5_cdp_session_logs",
+        lambda _cdp, _session: current,
+    )
+    observed, logs = module._v5_wait_for_resolved_sampling_log(
+        binding,
+        before,
+        route="/v1/chat/completions",
+        proof_request_id="proof-1",
+        request_id="request-1",
+        message_id="message-1",
+        timeout=0.1,
+    )
+    assert observed["values"]["temperature"] == 0.6
+    assert logs == current
+
+    monkeypatch.setattr(
+        module,
+        "_v5_cdp_session_logs",
+        lambda _cdp, _session: current + [target],
+    )
+    with pytest.raises(RuntimeError, match="multiple resolved requests"):
+        module._v5_wait_for_resolved_sampling_log(
+            binding,
+            before,
+            route="/v1/chat/completions",
+            proof_request_id="proof-1",
+            request_id="request-1",
+            message_id="message-1",
+            timeout=0.1,
+        )
+
+
+def test_r18_v5_api_sampling_uses_bundle_sampler_keys_not_probe_output_fields(
+    tmp_path: Path,
+):
+    module = load_module()
+    bundle_root = tmp_path / "laguna"
+    bundle_attestation(module, bundle_root)
+    laguna_defaults = {
+        "temperature": 0.65,
+        "top_p": 0.9,
+        "top_k": 40,
+        "min_p": 0.01,
+        "repetition_penalty": 1.05,
+        "max_new_tokens": 4096,
+    }
+    (bundle_root / "generation_config.json").write_text(
+        json.dumps(laguna_defaults),
+        encoding="utf-8",
+    )
+    bundle = module._read_bundle_directory_snapshot(bundle_root.resolve())
+    assert bundle is not None
+    captures = []
+    for phase_index in range(len(module.V5_CACHE_PHASES)):
+        artifact = _fixture_api_capture(
+            module,
+            "sampling-run",
+            "sampling-nonce",
+            phase_index=phase_index,
+        )
+        if phase_index == 0:
+            artifact["sampling_b64"] = _fixture_json_b64(
+                _fixture_sampling_attestation(
+                    module,
+                    defaults=laguna_defaults,
+                )
+            )
+        raw = json.dumps(
+            artifact,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        captures.append((artifact, raw))
+    _protocol, facts, _hashes = module._v5_api_facts(captures, bundle)
+    assert "bundle_defaults_in_api" in facts
+    assert "api_request_override_request_scoped" in facts
+
+
 def test_r18_v5_ui_facts_do_not_invent_unobserved_settings_or_layout(
     tmp_path: Path,
 ):
@@ -2974,6 +3312,151 @@ def test_r18_v5_ui_facts_do_not_invent_unobserved_settings_or_layout(
         },
         bundle,
     ) == (set(), [])
+
+
+def test_r18_v5_ui_facts_detects_common_namespace_translation_key(
+    tmp_path: Path,
+):
+    module = load_module()
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    captures = []
+    phase_observations = []
+    for phase in module.V5_CACHE_PHASES:
+        capture, dom = _fixture_ui_capture(
+            module,
+            "i18n-adversary",
+            "d" * 32,
+            session_id=("i18n-native" if phase["index"] == 5 else "i18n-primary"),
+            phase_index=phase["index"],
+            evidence_root=tmp_path / f"phase-{phase['index']}",
+        )
+        raw = json.dumps(capture, sort_keys=True, separators=(",", ":")).encode()
+        captures.append((capture, raw))
+        dom_bytes = json.dumps(dom, sort_keys=True, separators=(",", ":")).encode()
+        phase_observations.append(
+            {
+                "phase_index": phase["index"],
+                "observation": {
+                    "dom": dom,
+                    "dom_bytes_sha256": hashlib.sha256(dom_bytes).hexdigest(),
+                },
+            }
+        )
+    runtime = {
+        "dom": phase_observations[5]["observation"]["dom"],
+        "dom_bytes_sha256": phase_observations[5]["observation"][
+            "dom_bytes_sha256"
+        ],
+        "phase_observations": phase_observations,
+    }
+    facts, _ = module._v5_ui_facts(captures, runtime, bundle)
+    assert "no_raw_translation_keys" in facts
+    assert "all_supported_locales_checked" in facts
+
+    leaked_runtime = deepcopy(runtime)
+    leaked_dom = leaked_runtime["phase_observations"][5]["observation"]["dom"]
+    # CSS text-transform can uppercase a leaked i18n key in innerText. The
+    # detector must compare case-insensitively while retaining captured text.
+    leaked_dom["text"] += " COMMON.STREAM"
+    leaked_bytes = json.dumps(
+        leaked_dom,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    leaked_runtime["phase_observations"][5]["observation"][
+        "dom_bytes_sha256"
+    ] = hashlib.sha256(leaked_bytes).hexdigest()
+    leaked_runtime["dom"] = leaked_dom
+    leaked_runtime["dom_bytes_sha256"] = hashlib.sha256(leaked_bytes).hexdigest()
+    leaked_facts, _ = module._v5_ui_facts(captures, leaked_runtime, bundle)
+    assert "no_raw_translation_keys" not in leaked_facts
+
+
+def test_r18_v5_ui_defaults_require_exact_wire_request_correlation(
+    tmp_path: Path,
+):
+    module = load_module()
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    captures = []
+    phase_observations = []
+    for phase in module.V5_CACHE_PHASES:
+        capture, dom = _fixture_ui_capture(
+            module,
+            "defaults-correlation",
+            "e" * 32,
+            session_id=(
+                "defaults-native" if phase["index"] == 5 else "defaults-primary"
+            ),
+            phase_index=phase["index"],
+            evidence_root=tmp_path / f"defaults-phase-{phase['index']}",
+        )
+        if phase["index"] == 0:
+            source_proof = json.loads(
+                base64.b64decode(capture["source_proof_b64"], validate=True)
+            )
+            source_proof.update(
+                {
+                    "bundleGenerationContract": {
+                        "defaults": {"temperature": 0.6, "topP": 0.95}
+                    },
+                    "rendererGenerationDefaults": {
+                        "temperature": 0.6,
+                        "topP": 0.95,
+                    },
+                    "chatSettingsDom": {
+                        "values": {"temperature": 0.6, "topP": 0.95},
+                        "maxTokens": {"value": "", "placeholder": "model default"},
+                    },
+                    "server": {
+                        "health": {
+                            "effective_defaults": {
+                                "temperature": 0.6,
+                                "top_p": 0.95,
+                            }
+                        }
+                    },
+                    "chatOverrides": {},
+                }
+            )
+            source_proof["requestContract"]["samplingOverrides"] = {}
+            for record in source_proof["resolvedSamplingRecords"]:
+                record["values"] = {"temperature": 0.6, "top_p": 0.95}
+            capture["source_proof_b64"] = _fixture_json_b64(source_proof)
+        raw = json.dumps(capture, sort_keys=True, separators=(",", ":")).encode()
+        captures.append((capture, raw))
+        dom_bytes = json.dumps(dom, sort_keys=True, separators=(",", ":")).encode()
+        phase_observations.append(
+            {
+                "phase_index": phase["index"],
+                "observation": {
+                    "dom": dom,
+                    "dom_bytes_sha256": hashlib.sha256(dom_bytes).hexdigest(),
+                },
+            }
+        )
+    runtime = {
+        "dom": phase_observations[5]["observation"]["dom"],
+        "dom_bytes_sha256": phase_observations[5]["observation"][
+            "dom_bytes_sha256"
+        ],
+        "phase_observations": phase_observations,
+    }
+    facts, _ = module._v5_ui_facts(captures, runtime, bundle)
+    assert "bundle_defaults_in_new_ui_session" in facts
+
+    uncorrelated = deepcopy(captures)
+    phase_zero = uncorrelated[0][0]
+    source_proof = json.loads(
+        base64.b64decode(phase_zero["source_proof_b64"], validate=True)
+    )
+    source_proof["requestCorrelation"]["status"] = "partial"
+    phase_zero["source_proof_b64"] = _fixture_json_b64(source_proof)
+    uncorrelated[0] = (
+        phase_zero,
+        json.dumps(phase_zero, sort_keys=True, separators=(",", ":")).encode(),
+    )
+    partial_facts, _ = module._v5_ui_facts(uncorrelated, runtime, bundle)
+    assert "bundle_defaults_in_new_ui_session" not in partial_facts
 
 
 @pytest.mark.parametrize(
@@ -4571,7 +5054,7 @@ def _v5_fixture_child(argv: list[str]) -> int:
     command = args.v5_fixture_command
     if command == "full_python_suite":
         print("collected 1000 items")
-        print("1000 passed")
+        print("1000 passed in 1.00s")
     elif command == "full_panel_suite":
         print("Test Files 5 passed")
         print("Tests 50 passed")

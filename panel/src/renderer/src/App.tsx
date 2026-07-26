@@ -21,7 +21,7 @@ import { ModelConverter } from './components/tools/ModelConverter'
 import { ApiDashboard } from './components/api/ApiDashboard'
 import { ImageTab } from './components/image/ImageTab'
 import { isImageSession, sessionMatchesModelPath } from '../../shared/sessionUtils'
-import { useTranslation, LOCALE_NAMES, LOCALE_FLAGS, type Locale } from './i18n'
+import { useTranslation, LOCALES, LOCALE_NAMES, LOCALE_FLAGS } from './i18n'
 
 function App() {
   const { t } = useTranslation()
@@ -416,7 +416,7 @@ function ServerModeContent() {
             <div className="border border-border rounded-lg p-5">
               <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">{t('app.about.language')}</h3>
               <div className="flex gap-2">
-                {(['en', 'zh', 'ko', 'ja', 'es'] as Locale[]).map((l) => (
+                {LOCALES.map((l) => (
                   <button
                     key={l}
                     onClick={() => setLocale(l)}

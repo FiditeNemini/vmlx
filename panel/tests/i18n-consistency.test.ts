@@ -170,6 +170,53 @@ describe('i18n locale consistency', () => {
     }
   })
 
+  it('exposes one authoritative locale/key catalog to the visible picker and CDP gate', () => {
+    const mainI18n = readFileSync(
+      resolve(__dirname, '..', 'src', 'main', 'i18n.ts'),
+      'utf8',
+    )
+    const mainIndex = readFileSync(
+      resolve(__dirname, '..', 'src', 'main', 'index.ts'),
+      'utf8',
+    )
+    const preload = readFileSync(
+      resolve(__dirname, '..', 'src', 'preload', 'index.ts'),
+      'utf8',
+    )
+    const titleBar = readFileSync(
+      resolve(
+        __dirname,
+        '..',
+        'src',
+        'renderer',
+        'src',
+        'components',
+        'layout',
+        'TitleBar.tsx',
+      ),
+      'utf8',
+    )
+    const preflight = readFileSync(
+      resolve(__dirname, '..', 'scripts', 'scoped-release-preflight-18.py'),
+      'utf8',
+    )
+    expect(Object.keys(flat.en)).toContain('common.stream')
+    expect(mainI18n).toContain('export function getCatalogContract()')
+    expect(mainIndex).toContain("ipcMain.handle('i18n:get-catalog-contract'")
+    expect(preload).toContain("ipcRenderer.invoke('i18n:get-catalog-contract')")
+    expect(titleBar).toContain('LOCALES.map((l) =>')
+    expect(titleBar).toContain('data-vmlx-locale-picker="true"')
+    expect(titleBar).toContain('data-vmlx-locale-option={l}')
+    expect(preflight).toContain('getCatalogContract')
+    expect(preflight).toContain('main_ipc_canonical_locale_json')
+    expect(preflight).toContain(
+      'translationKeys.map((key)=>key.toLowerCase())',
+    )
+    expect(preflight).toContain('canonicalKeySet.has(token.toLowerCase())')
+    expect(preflight).toContain('Emulation.clearDeviceMetricsOverride')
+    expect(preflight).not.toContain("const specs=[")
+  })
+
   it('language switcher persists to localStorage key vmlx-locale', () => {
     // Verifies the persistence contract both language pickers depend on.
     const providerSrc = readFileSync(

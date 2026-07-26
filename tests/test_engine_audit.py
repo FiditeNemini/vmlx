@@ -1348,6 +1348,11 @@ class TestServerSamplingResolution:
 
         chat_resp = client.post(
             "/v1/chat/completions",
+            headers={
+                "x-vmlx-proof-request-id": "proof-chat",
+                "x-vmlx-request-id": "wire-chat",
+                "x-vmlx-message-id": "message-chat",
+            },
             json={
                 "model": "kwarg-model",
                 "messages": [{"role": "user", "content": "hi"}],
@@ -1362,6 +1367,11 @@ class TestServerSamplingResolution:
         )
         responses_resp = client.post(
             "/v1/responses",
+            headers={
+                "x-vmlx-proof-request-id": "proof-responses",
+                "x-vmlx-request-id": "wire-responses",
+                "x-vmlx-message-id": "message-responses",
+            },
             json={
                 "model": "kwarg-model",
                 "input": "hi",
@@ -1398,6 +1408,14 @@ class TestServerSamplingResolution:
         log_text = "\n".join(record.getMessage() for record in caplog.records)
         assert "Resolved sampling kwargs route=/v1/chat/completions" in log_text
         assert "Resolved sampling kwargs route=/v1/responses" in log_text
+        assert (
+            "proof_request_id=proof-chat request_id=wire-chat "
+            "message_id=message-chat"
+        ) in log_text
+        assert (
+            "proof_request_id=proof-responses request_id=wire-responses "
+            "message_id=message-responses"
+        ) in log_text
         assert "'top_k': 42" in log_text
         assert "'min_p': 0.04" in log_text
 

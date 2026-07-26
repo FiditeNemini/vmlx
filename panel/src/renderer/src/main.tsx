@@ -8,6 +8,17 @@ import { SessionsProvider } from './contexts/SessionsContext'
 import { DownloadsView } from './components/DownloadsView'
 import './index.css'
 
+declare const __VMLINUX_BUILD_SOURCE_COMMIT__: string
+
+declare global {
+  // Runtime provenance consumed by the attached CDP release gate.
+  // The value is injected by electron.vite.config.ts from Git itself.
+  var __VMLINUX_SOURCE_COMMIT__: string | undefined
+}
+
+globalThis.__VMLINUX_SOURCE_COMMIT__ = __VMLINUX_BUILD_SOURCE_COMMIT__
+document.documentElement.dataset.sourceCommit = __VMLINUX_BUILD_SOURCE_COMMIT__
+
 // Download window: skip all providers, render only the downloads view
 const isDownloadWindow = new URLSearchParams(window.location.search).get('view') === 'downloads'
 

@@ -452,6 +452,7 @@ const api = {
   i18n: {
     setLocale: (locale: string) => ipcRenderer.invoke('i18n:set-locale', locale),
     getLocale: () => ipcRenderer.invoke('i18n:get-locale'),
+    getCatalogContract: () => ipcRenderer.invoke('i18n:get-catalog-contract'),
   },
 }
 

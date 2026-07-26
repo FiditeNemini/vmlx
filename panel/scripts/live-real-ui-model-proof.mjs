@@ -5990,14 +5990,33 @@ async function main() {
   const uiTurnCount = Number(activeReleasePhase?.ui_turn_count || 3)
   const apiActionProfile = activeReleasePhase?.api_action_profile
     || 'full-agentic'
+  const releaseBlockDiskCacheAnchorPhase = (() => {
+    if (!activeReleasePhase) return null
+    if (activeReleasePhase.operation !== 'probe') return activeReleasePhase
+    const plan = Array.isArray(ownedRunIntent?.value?.phase_plan)
+      ? ownedRunIntent.value.phase_plan
+      : []
+    const prior = [...plan]
+      .filter((candidate) => (
+        candidate
+        && candidate.phase_index < activeReleasePhase.phase_index
+        && candidate.representative_id === activeReleasePhase.representative_id
+        && candidate.cache_policy === activeReleasePhase.cache_policy
+        && candidate.kv_cache_quantization === activeReleasePhase.kv_cache_quantization
+        && candidate.paged_ram === activeReleasePhase.paged_ram
+        && candidate.operation !== 'probe'
+      ))
+      .sort((left, right) => right.phase_index - left.phase_index)[0]
+    return prior || activeReleasePhase
+  })()
   const releaseBlockDiskCacheDir = activeReleasePhase
     ? path.join(
-      proofDir,
-      'block-disk-cache',
+      path.dirname(proofDir),
+      'ui-shared-block-disk-cache',
       [
-        String(activeReleasePhase.phase_index).padStart(2, '0'),
-        safeArtifactComponent(activeReleasePhase.phase_name, 'phase'),
-        safeArtifactComponent(activeReleasePhase.representative_id, 'representative'),
+        String(releaseBlockDiskCacheAnchorPhase.phase_index).padStart(2, '0'),
+        safeArtifactComponent(releaseBlockDiskCacheAnchorPhase.phase_name, 'phase'),
+        safeArtifactComponent(releaseBlockDiskCacheAnchorPhase.representative_id, 'representative'),
       ].join('-'),
     )
     : ''

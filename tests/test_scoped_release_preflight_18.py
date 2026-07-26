@@ -2231,6 +2231,17 @@ def test_r18_v5_cache_phase_wait_seals_private_streams_on_early_exit(
     assert (stderr_path.stat().st_mode & 0o777) == 0o600
 
 
+def test_r18_v5_ui_probe_phases_reuse_prior_store_block_disk_root():
+    source = (ROOT / "panel/scripts/live-real-ui-model-proof.mjs").read_text(
+        encoding="utf-8",
+    )
+    assert "releaseBlockDiskCacheAnchorPhase" in source
+    assert "activeReleasePhase.operation !== 'probe'" in source
+    assert "candidate.phase_index < activeReleasePhase.phase_index" in source
+    assert "candidate.operation !== 'probe'" in source
+    assert "ui-shared-block-disk-cache" in source
+
+
 def test_r18_owned_jang_runner_requires_build_import_and_test(
     tmp_path: Path,
     monkeypatch,

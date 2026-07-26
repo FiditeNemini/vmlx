@@ -301,6 +301,14 @@ def observe_runner_environment(repo_root: Path) -> dict[str, Any]:
         )
         if candidate.is_file()
     )
+    producer_executable = Path(executable_file["path"]).resolve(strict=True)
+    checkout_python_invocation_fingerprints = sorted(
+        {
+            _sha256(str(candidate))
+            for candidate in expected_executables
+            if candidate.resolve(strict=True) == producer_executable
+        }
+    )
     return {
         "repo_venv": actual_prefix == expected_prefix,
         "repo_python": executable in expected_executables,
@@ -308,6 +316,9 @@ def observe_runner_environment(repo_root: Path) -> dict[str, Any]:
         "python_executable_fingerprint_sha256": hashlib.sha256(
             str(executable).encode()
         ).hexdigest(),
+        "checkout_python_invocation_fingerprints_sha256": (
+            checkout_python_invocation_fingerprints
+        ),
         "python_prefix_path": str(actual_prefix),
         "python_prefix_fingerprint_sha256": hashlib.sha256(
             str(actual_prefix).encode()
@@ -529,11 +540,15 @@ def _validate_health_source_binding(
             failures.append(
                 f"observed backend {count_field} does not match the source checkout"
             )
+    observed_python_fingerprint = identity.get("runtime_source_hashes", {}).get(
+        "python_executable_fingerprint_sha256"
+    )
+    checkout_python_fingerprints = runner.get(
+        "checkout_python_invocation_fingerprints_sha256"
+    )
     if (
-        identity.get("runtime_source_hashes", {}).get(
-            "python_executable_fingerprint_sha256"
-        )
-        != runner.get("python_executable_fingerprint_sha256")
+        not isinstance(checkout_python_fingerprints, list)
+        or observed_python_fingerprint not in checkout_python_fingerprints
     ):
         failures.append(
             "observed backend Python executable does not match the proof runner"
@@ -3369,6 +3384,22 @@ def _runner_environment_failures(runner: dict[str, Any]) -> list[str]:
         failures.append("proof runner executable is not the source checkout Python")
     if not _valid_sha256(runner.get("python_executable_fingerprint_sha256")):
         failures.append("proof runner Python executable fingerprint is invalid")
+    checkout_python_fingerprints = runner.get(
+        "checkout_python_invocation_fingerprints_sha256"
+    )
+    if (
+        not isinstance(checkout_python_fingerprints, list)
+        or not checkout_python_fingerprints
+        or any(
+            not _valid_sha256(fingerprint)
+            for fingerprint in checkout_python_fingerprints
+        )
+        or runner.get("python_executable_fingerprint_sha256")
+        not in checkout_python_fingerprints
+    ):
+        failures.append(
+            "proof runner checkout Python invocation fingerprints are invalid"
+        )
     if not _valid_sha256(runner.get("python_prefix_fingerprint_sha256")):
         failures.append("proof runner Python prefix fingerprint is invalid")
     executable_path = Path(str(runner.get("python_executable_path") or ""))
@@ -3427,6 +3458,7 @@ def _capture_health_evidence(
     bases: dict[str, str],
     health_urls: dict[str, str],
     timeout: int,
+    requested_model: str,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     evidence: dict[str, dict[str, Any]] = {}
     failures: list[str] = []
@@ -3443,7 +3475,7 @@ def _capture_health_evidence(
             )
             continue
         try:
-            full = _get_full_health(health_url, timeout)
+            transport_full = _get_full_health(health_url, timeout)
         except ValueError as exc:
             evidence[base_label] = {
                 "url": _safe_request_url(health_url),
@@ -3451,13 +3483,95 @@ def _capture_health_evidence(
             }
             failures.append(f"{base_label}: full /health capture failed")
             continue
+        identity_url = health_url
+        full = transport_full
+        if (
+            base_label == "gateway"
+            and not isinstance(transport_full.get("runtime_provenance"), dict)
+        ):
+            direct_base = bases.get("direct")
+            if not direct_base:
+                evidence[base_label] = {
+                    "url": _safe_request_url(health_url),
+                    "full": transport_full,
+                    "full_sha256": _canonical_sha256(transport_full),
+                    "error_type": "GatewayBackendIdentityMissing",
+                }
+                failures.append(
+                    "gateway: topology /health cannot bind a missing direct backend"
+                )
+                continue
+            direct_origin = _network_origin(direct_base)
+            gateway_origin = _network_origin(bases[base_label])
+            if direct_origin[:2] != gateway_origin[:2]:
+                evidence[base_label] = {
+                    "url": _safe_request_url(health_url),
+                    "full": transport_full,
+                    "full_sha256": _canonical_sha256(transport_full),
+                    "error_type": "GatewayBackendOriginMismatch",
+                }
+                failures.append(
+                    "gateway: topology and direct backend do not share "
+                    "scheme and hostname"
+                )
+                continue
+            direct_port = direct_origin[2]
+            matching_backends = []
+            for backend in transport_full.get("backends") or []:
+                if not isinstance(backend, dict):
+                    continue
+                try:
+                    backend_port = int(backend.get("port") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    backend_port == direct_port
+                    and backend.get("model") == requested_model
+                    and backend.get("status") == "running"
+                ):
+                    matching_backends.append(backend)
+            if len(matching_backends) != 1:
+                evidence[base_label] = {
+                    "url": _safe_request_url(health_url),
+                    "full": transport_full,
+                    "full_sha256": _canonical_sha256(transport_full),
+                    "error_type": "GatewayBackendIdentityMissing",
+                }
+                failures.append(
+                    "gateway: topology /health does not name exactly one running "
+                    "requested model on the direct backend port"
+                )
+                continue
+            identity_url = health_urls.get("direct", direct_base + "/health")
+            try:
+                full = _get_full_health(identity_url, timeout)
+            except ValueError:
+                evidence[base_label] = {
+                    "url": _safe_request_url(health_url),
+                    "full": transport_full,
+                    "full_sha256": _canonical_sha256(transport_full),
+                    "identity_url": _safe_request_url(identity_url),
+                    "error_type": "GatewayBackendHealthCaptureFailed",
+                }
+                failures.append(
+                    "gateway: bound backend /health capture failed"
+                )
+                continue
         identity, identity_failures = _health_identity(full)
         evidence[base_label] = {
             "url": _safe_request_url(health_url),
-            "full": full,
-            "full_sha256": _canonical_sha256(full),
+            "full": transport_full,
+            "full_sha256": _canonical_sha256(transport_full),
             "identity": identity,
         }
+        if base_label == "gateway" and identity_url != health_url:
+            evidence[base_label].update(
+                {
+                    "identity_url": _safe_request_url(identity_url),
+                    "identity_full": full,
+                    "identity_full_sha256": _canonical_sha256(full),
+                }
+            )
         failures.extend(
             f"{base_label}: {failure}" for failure in identity_failures
         )
@@ -3583,6 +3697,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         bases,
         health_urls,
         args.timeout,
+        args.model,
     )
     identity_failures.extend(health_before_failures)
     identity_failures.extend(
@@ -3818,6 +3933,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         bases,
         health_urls,
         args.timeout,
+        args.model,
     )
     identity_failures.extend(health_after_failures)
     if source_after and runner_after and bundle_after:

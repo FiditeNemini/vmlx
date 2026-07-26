@@ -80,6 +80,9 @@ def _identity_runner() -> dict:
         "python_executable_path": TEST_PYTHON_EXECUTABLE_PATH,
         "python_executable_fingerprint_sha256":
             TEST_PYTHON_EXECUTABLE_FINGERPRINT,
+        "checkout_python_invocation_fingerprints_sha256": [
+            TEST_PYTHON_EXECUTABLE_FINGERPRINT
+        ],
         "python_prefix_path": TEST_PYTHON_PREFIX_PATH,
         "python_prefix_fingerprint_sha256": TEST_PYTHON_PREFIX_FINGERPRINT,
         "producer_pid": 2468,
@@ -219,6 +222,30 @@ def test_runner_identity_requires_real_producer_pid_executable_and_harness_bytes
         "proof runner Python executable path binding is invalid",
         "proof producer executable path cannot be resolved",
     ]
+
+
+def test_backend_identity_accepts_equivalent_checkout_python_alias(tmp_path: Path):
+    repo_root, source = _identity_repo(tmp_path)
+    bundle_root, bundle = _identity_bundle(tmp_path)
+    del repo_root, bundle_root
+    health = _identity_health(source, bundle=bundle)
+    identity, failures = matrix._health_identity(health)
+    assert failures == []
+    alias_fingerprint = "a" * 64
+    identity["runtime_source_hashes"][
+        "python_executable_fingerprint_sha256"
+    ] = alias_fingerprint
+    runner = _identity_runner()
+    runner["checkout_python_invocation_fingerprints_sha256"].append(
+        alias_fingerprint
+    )
+    assert matrix._validate_health_source_binding(
+        identity,
+        source,
+        runner,
+        bundle,
+        bundle["model_name"],
+    ) == []
 
 
 def test_public_request_metadata_retains_exact_tool_contracts_and_safe_history_links():
@@ -1826,6 +1853,7 @@ def test_run_matrix_rejects_cross_surface_identity_substitution(
         )
     elif failure_mode == "wrong-python":
         runner["python_executable_fingerprint_sha256"] = "7" * 64
+        runner["checkout_python_invocation_fingerprints_sha256"] = ["7" * 64]
     elif failure_mode == "same-origin":
         gateway_url = direct_url
 
@@ -1901,6 +1929,7 @@ def test_health_capture_rejects_cross_origin_substitution_before_fetch(
         {"gateway": "http://127.0.0.1:8080"},
         {"gateway": "http://127.0.0.1:8000/health"},
         30,
+        "served-org/served-model",
     )
 
     assert fetched is False
@@ -1908,6 +1937,54 @@ def test_health_capture_rejects_cross_origin_substitution_before_fetch(
     assert failures == [
         "gateway: /health URL origin does not match its corresponding request base"
     ]
+
+
+def test_gateway_health_binds_topology_to_direct_backend_identity(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _, source = _identity_repo(tmp_path)
+    _, bundle = _identity_bundle(tmp_path)
+    backend_health = _identity_health(source, bundle=bundle)
+    gateway_health = {
+        "status": "ok",
+        "backends": [
+            {
+                "model": bundle["model_name"],
+                "port": 8000,
+                "status": "running",
+            }
+        ],
+    }
+
+    def fake_health(url, _timeout):
+        if url == "http://127.0.0.1:8080/health":
+            return copy.deepcopy(gateway_health)
+        if url == "http://127.0.0.1:8000/health":
+            return copy.deepcopy(backend_health)
+        raise AssertionError(f"unexpected health URL: {url}")
+
+    monkeypatch.setattr(matrix, "_get_full_health", fake_health)
+    evidence, failures = matrix._capture_health_evidence(
+        {
+            "direct": "http://127.0.0.1:8000",
+            "gateway": "http://127.0.0.1:8080",
+        },
+        {
+            "direct": "http://127.0.0.1:8000/health",
+            "gateway": "http://127.0.0.1:8080/health",
+        },
+        30,
+        bundle["model_name"],
+    )
+
+    assert failures == []
+    assert evidence["gateway"]["full"] == gateway_health
+    assert evidence["gateway"]["identity_full"] == backend_health
+    assert (
+        evidence["gateway"]["identity"]
+        == evidence["direct"]["identity"]
+    )
 
 
 def test_run_matrix_rejects_result_output_inside_git_worktree(

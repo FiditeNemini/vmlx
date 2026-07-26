@@ -2159,6 +2159,78 @@ def test_r18_v5_failed_owned_child_seals_private_streams(
     assert (stderr_path.stat().st_mode & 0o777) == 0o600
 
 
+def test_r18_v5_cache_phase_wait_seals_private_streams_on_early_exit(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    output_path = tmp_path / "cache.producer.json"
+    output_fd = os.open(
+        output_path,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+
+    class FailedCacheProcess:
+        pid = 7831
+        returncode = 1
+
+        @staticmethod
+        def poll():
+            return 1
+
+        @staticmethod
+        def communicate(*, input=None, timeout=None):
+            assert input == b"finish\n"
+            assert timeout == 5
+            return b"cache private stdout\n", b"cache private stderr\n"
+
+    monkeypatch.setattr(
+        module,
+        "_v5_pin_unchanged",
+        lambda _pin, executable=False: True,
+    )
+    monkeypatch.setattr(
+        module,
+        "_v5_executable_invocation_unchanged",
+        lambda _invocation: True,
+    )
+    handle = {
+        "name": "cache",
+        "process": FailedCacheProcess(),
+        "output_fd": output_fd,
+        "output_path": output_path,
+        "argv": ["fixture"],
+        "cwd": str(tmp_path),
+        "started_at": STAMP,
+        "executable": {"path": str(tmp_path / "python")},
+        "executable_invocation": None,
+        "scripts": [],
+        "process_observation": {"pid": FailedCacheProcess.pid},
+    }
+    phase = dict(module.V5_CACHE_PHASES[1])
+
+    with pytest.raises(RuntimeError) as exc_info:
+        module._v5_wait_for_cache_phase_done(
+            handle,
+            tmp_path / "missing.done.json",
+            run_context={"run_id": "run", "nonce": "a" * 32},
+            phase=phase,
+            binding={"session_id": "session", "backend_pid": 1234},
+            binding_sha256="b" * 64,
+            timeout=60,
+        )
+
+    message = str(exc_info.value)
+    stdout_path = output_path.with_name("cache.producer.stdout")
+    stderr_path = output_path.with_name("cache.producer.stderr")
+    assert "retained child failure details" in message
+    assert stdout_path.read_bytes() == b"cache private stdout\n"
+    assert stderr_path.read_bytes() == b"cache private stderr\n"
+    assert (stdout_path.stat().st_mode & 0o777) == 0o600
+    assert (stderr_path.stat().st_mode & 0o777) == 0o600
+
+
 def test_r18_owned_jang_runner_requires_build_import_and_test(
     tmp_path: Path,
     monkeypatch,

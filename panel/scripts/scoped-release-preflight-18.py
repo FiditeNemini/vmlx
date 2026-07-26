@@ -8094,8 +8094,20 @@ def _v5_wait_for_cache_phase_done(
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
+            try:
+                _v5_finish_owned_child(
+                    cache_handle,
+                    run_context,
+                    timeout=5,
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "cache producer exited before phase "
+                    f"{phase['name']} completed; retained child failure details"
+                ) from exc
             raise RuntimeError(
-                f"cache producer exited before phase {phase['name']} completed"
+                "cache producer exited before phase "
+                f"{phase['name']} completed despite a valid producer envelope"
             )
         if done_path.exists() or done_path.is_symlink():
             try:

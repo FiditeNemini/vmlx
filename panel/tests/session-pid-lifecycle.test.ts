@@ -33,4 +33,15 @@ describe('session PID lifecycle', () => {
     expect(source).toContain('config: contextSession?.config ?? sessionDetail.config')
     expect(source).toContain('pid: displaySession.pid')
   })
+
+  it('fences an intentional Stop from in-flight health-monitor failures', () => {
+    const source = read('src/main/sessions.ts')
+
+    expect(source).toContain('private intentionalStops = new Map<string, number>()')
+    expect(source).toContain('(this.intentionalStops.get(sessionId) || 0) + 1')
+    expect(source).toContain('if (remaining > 0) this.intentionalStops.set(sessionId, remaining)')
+    expect(source).toContain('this.intentionalStops.delete(sessionId)')
+    expect(source.match(/this\.intentionalStops\.has\(sessionId\)/g)?.length).toBeGreaterThanOrEqual(4)
+    expect(source).toContain('Adoption probes are asynchronous')
+  })
 })

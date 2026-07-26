@@ -1051,6 +1051,8 @@ export class SessionManager extends EventEmitter {
   private processes = new Map<string, ManagedProcess>()
   private monitorInterval: ReturnType<typeof setInterval> | null = null
   private failCounts = new Map<string, number>()
+  /** Refcounted user-requested stops that are actively terminating a backend. */
+  private intentionalStops = new Map<string, number>()
   /** Per-session operation lock to prevent concurrent start/stop races */
   private operationLocks = new Map<string, Promise<void>>()
   /** Global creation lock to prevent port assignment races between concurrent createSession calls */
@@ -2390,7 +2392,12 @@ export class SessionManager extends EventEmitter {
         return
       }
       const lastStderr = managed?.lastStderr
-      const intentional = managed?.intentionalStop === true
+      // The stop fence survives a concurrent health monitor deleting the
+      // managed-process row before this exit callback runs.
+      const intentional = (
+        managed?.intentionalStop === true
+        || this.intentionalStops.has(sessionId)
+      )
       this.processes.delete(sessionId)
       this.failCounts.delete(sessionId)
       const killed = signal === 'SIGKILL'
@@ -2518,6 +2525,14 @@ export class SessionManager extends EventEmitter {
       return
     }
 
+    // A global health probe may already be in flight when visible Stop
+    // terminates the backend. Keep this fence until `stopped` is durable so
+    // that probe cannot race the intentional exit and rewrite it as `error`.
+    this.intentionalStops.set(
+      sessionId,
+      (this.intentionalStops.get(sessionId) || 0) + 1,
+    )
+
     // Serialize start/stop operations per session to prevent races
     await this.withSessionLock(sessionId, async () => {
       this.failCounts.delete(sessionId)
@@ -2558,6 +2573,10 @@ export class SessionManager extends EventEmitter {
       this.lastRequestAt.delete(sessionId)
       this.pushLog(sessionId, '[INFO] Session stopped — log retained for postmortem until next start')
       this.emit('session:stopped', { sessionId })
+    }).finally(() => {
+      const remaining = (this.intentionalStops.get(sessionId) || 1) - 1
+      if (remaining > 0) this.intentionalStops.set(sessionId, remaining)
+      else this.intentionalStops.delete(sessionId)
     })
   }
 
@@ -3470,6 +3489,13 @@ export class SessionManager extends EventEmitter {
   }
 
   private async incrementFailAndCheck(sessionId: string): Promise<void> {
+    if (
+      this.intentionalStops.has(sessionId)
+      || this.processes.get(sessionId)?.intentionalStop === true
+    ) {
+      this.failCounts.delete(sessionId)
+      return
+    }
     const count = (this.failCounts.get(sessionId) || 0) + 1
     this.failCounts.set(sessionId, count)
 
@@ -3480,6 +3506,15 @@ export class SessionManager extends EventEmitter {
     // always returns false. Use the normal fail-count threshold instead.
     if (session?.type !== 'remote' && session && !this.isProcessAlive(sessionId, session.pid)) {
       if (await this.adoptHealthyReplacementForSession(session)) return
+      // Adoption probes are asynchronous. A user can click Stop while one is
+      // pending, so re-check the fence before classifying the dead backend.
+      if (
+        this.intentionalStops.has(sessionId)
+        || this.processes.get(sessionId)?.intentionalStop === true
+      ) {
+        this.failCounts.delete(sessionId)
+        return
+      }
       console.log(`[SESSIONS] Process dead for session ${sessionId} (fail #${count}), marking down`)
       this.failCounts.delete(sessionId)
       this.handleSessionDown(sessionId)
@@ -3508,6 +3543,13 @@ export class SessionManager extends EventEmitter {
   }
 
   private handleSessionDown(sessionId: string): void {
+    if (
+      this.intentionalStops.has(sessionId)
+      || this.processes.get(sessionId)?.intentionalStop === true
+    ) {
+      this.failCounts.delete(sessionId)
+      return
+    }
     const session = db.getSession(sessionId)
     if (session && (session.status === 'running' || session.status === 'loading')) {
       if (session.type === 'remote') {

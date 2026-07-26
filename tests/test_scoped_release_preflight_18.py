@@ -2098,6 +2098,67 @@ def test_r18_owned_runner_captures_child_and_derives_full_suite(
     ).hexdigest()
 
 
+def test_r18_v5_failed_owned_child_seals_private_streams(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    output_path = tmp_path / "api.phase-00.producer.json"
+    output_fd = os.open(
+        output_path,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+
+    class FailedProcess:
+        pid = 7719
+        returncode = 1
+
+        def communicate(self, *, input=None, timeout=None):
+            assert input == b"finish\n"
+            return b"private stdout detail\n", b"private stderr detail\n"
+
+    monkeypatch.setattr(
+        module,
+        "_v5_pin_unchanged",
+        lambda _pin, executable=False: True,
+    )
+    monkeypatch.setattr(
+        module,
+        "_v5_executable_invocation_unchanged",
+        lambda _invocation: True,
+    )
+    handle = {
+        "name": "api",
+        "process": FailedProcess(),
+        "output_fd": output_fd,
+        "output_path": output_path,
+        "argv": ["fixture"],
+        "cwd": str(tmp_path),
+        "started_at": STAMP,
+        "executable": {"path": str(tmp_path / "python")},
+        "executable_invocation": None,
+        "scripts": [],
+        "process_observation": {"pid": FailedProcess.pid},
+    }
+
+    with pytest.raises(RuntimeError) as exc_info:
+        module._v5_finish_owned_child(
+            handle,
+            {"run_id": "run", "nonce": "a" * 32},
+        )
+
+    message = str(exc_info.value)
+    stdout_path = output_path.with_name("api.phase-00.producer.stdout")
+    stderr_path = output_path.with_name("api.phase-00.producer.stderr")
+    assert f"stdout_path={stdout_path}" in message
+    assert f"stderr_path={stderr_path}" in message
+    assert stdout_path.read_bytes() == b"private stdout detail\n"
+    assert stderr_path.read_bytes() == b"private stderr detail\n"
+    assert (stdout_path.stat().st_mode & 0o777) == 0o600
+    assert (stderr_path.stat().st_mode & 0o777) == 0o600
+
+
 def test_r18_owned_jang_runner_requires_build_import_and_test(
     tmp_path: Path,
     monkeypatch,

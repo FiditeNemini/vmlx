@@ -4254,13 +4254,25 @@ def _v5_finish_owned_child(
         or not invocation_stable
         or not scripts_stable
     ):
+        stdout_path = _v5_write_private_child_stream_capture(
+            output_path,
+            "stdout",
+            stdout,
+        )
+        stderr_path = _v5_write_private_child_stream_capture(
+            output_path,
+            "stderr",
+            stderr,
+        )
         raise RuntimeError(
             f"{name} owned producer failed or changed "
             f"(exit={process.returncode}, capture_bytes={len(capture)}, "
             f"executable_stable={executable_stable}, "
             f"invocation_stable={invocation_stable}, "
             f"scripts_stable={scripts_stable}, stderr_sha256="
-            f"{hashlib.sha256(stderr).hexdigest()})"
+            f"{hashlib.sha256(stderr).hexdigest()}, "
+            f"stdout_path={stdout_path or 'none'}, "
+            f"stderr_path={stderr_path or 'none'})"
         )
     path_stat = output_path.lstat()
     if (
@@ -4299,6 +4311,32 @@ def _v5_finish_owned_child(
         "capture_sha256": hashlib.sha256(capture).hexdigest(),
         "capture": envelope,
     }
+
+
+def _v5_write_private_child_stream_capture(
+    output_path: Path,
+    suffix: str,
+    payload: bytes,
+) -> str | None:
+    """Retain a failed producer stream in the private run directory.
+
+    The release manifest still carries only hashes.  The path is emitted only
+    when a producer fails before writing a valid owned envelope, so the operator
+    can inspect the root exception without weakening public artifact hygiene.
+    """
+
+    if not payload:
+        return None
+    if suffix not in {"stdout", "stderr"}:
+        raise ValueError("unsafe child stream suffix")
+    capture_name = f"{output_path.stem}.{suffix}"
+    capture_path, fd = _v5_open_exclusive_capture(output_path.parent, capture_name)
+    try:
+        os.write(fd, payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return str(capture_path)
 
 
 def _v5_run_owned_child(

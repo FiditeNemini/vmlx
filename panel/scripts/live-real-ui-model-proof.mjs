@@ -6594,7 +6594,11 @@ async function main() {
           privateConfigRestoreAdditionalArgs = stripPrivateCacheAttestationArgs(
             sessionConfigBeforeProof.additionalArgs,
           );
-          if (requestedReuseSessionId && sessionBeforeStart?.status === 'running') {
+          // sessions.create() intentionally deduplicates by model identity and may
+          // return an already-active row even for the first phase of a proof run.
+          // Stop every active state through the visible UI before requiring the
+          // Start control, so the proof still attests a real user-driven restart.
+          if (['running', 'loading', 'standby'].includes(sessionBeforeStart?.status)) {
             const stopButton = await new Promise((resolve, reject) => {
               const started = Date.now();
               const check = () => {
@@ -6609,7 +6613,7 @@ async function main() {
                 if (Date.now() - started > 30000) {
                   return reject(new Error(
                     'Timed out waiting for the visible Stop control '
-                    + 'for the parent-attested reused session',
+                    + 'for the active local session',
                   ));
                 }
                 setTimeout(check, 100);
@@ -6627,7 +6631,7 @@ async function main() {
                 if (current?.status === 'stopped') return resolve(current);
                 if (!current || current.status === 'error') {
                   return reject(new Error(
-                    'Visible Stop left the parent-attested session missing '
+                    'Visible Stop left the active local session missing '
                     + 'or errored',
                   ));
                 }

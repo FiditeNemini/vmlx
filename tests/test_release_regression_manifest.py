@@ -4428,6 +4428,8 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "startButton.click()" in source
     assert "visible Electron local Start control" in source
     assert "real UI proof requires an Electron-managed local session" in source
+    assert "['running', 'loading', 'standby'].includes(sessionBeforeStart?.status)" in source
+    assert "for the active local session" in source
     assert "return label === 'Start'" in source
     assert "window.api.chat.sendMessage" in source
     assert "window.api.performance.health" in source

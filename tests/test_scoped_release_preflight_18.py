@@ -2296,6 +2296,25 @@ def test_r18_v5_runtime_source_attestation_requires_path_free_health_shape():
     assert module._v5_runtime_source_attestation(unreadable) is None
 
 
+def test_r18_v5_backend_invocation_fingerprint_preserves_venv_symlink(
+    tmp_path: Path,
+):
+    module = load_module()
+    target = Path(sys.executable).resolve()
+    invocation = tmp_path / "venv-python"
+    invocation.symlink_to(target)
+    backend = {
+        "argv": [str(invocation.absolute()), "-m", "vmlx_engine.cli"],
+        "executable_path": str(target.resolve()),
+    }
+    assert module._v5_backend_invocation_fingerprint(backend) == hashlib.sha256(
+        str(invocation.absolute()).encode()
+    ).hexdigest()
+    mismatched = deepcopy(backend)
+    mismatched["executable_path"] = str(Path("/bin/sh").resolve())
+    assert module._v5_backend_invocation_fingerprint(mismatched) is None
+
+
 def test_r18_bundle_attestation_rejects_symlink_and_hardlink_files(
     tmp_path: Path,
 ):

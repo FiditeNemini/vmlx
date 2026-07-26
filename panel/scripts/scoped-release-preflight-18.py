@@ -4841,6 +4841,34 @@ def _v5_runtime_source_attestation(
     }
 
 
+def _v5_backend_invocation_fingerprint(
+    backend: dict[str, Any],
+) -> str | None:
+    """Mirror the runtime's non-resolving sys.executable fingerprint."""
+
+    argv = backend.get("argv")
+    executable_path = backend.get("executable_path")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not isinstance(argv[0], str)
+        or not isinstance(executable_path, str)
+    ):
+        return None
+    invocation = Path(argv[0])
+    observed = Path(executable_path)
+    try:
+        if (
+            not invocation.is_absolute()
+            or not invocation.is_file()
+            or invocation.resolve() != observed.resolve()
+        ):
+            return None
+    except OSError:
+        return None
+    return hashlib.sha256(str(invocation.absolute()).encode()).hexdigest()
+
+
 def _v5_validate_runtime_bundle_attestation(
     health: dict[str, Any],
     runtime: dict[str, Any],
@@ -4941,9 +4969,7 @@ def _v5_independent_runtime_observation(
         != expected["python_source_file_count"]
         or runtime_hashes["python_source_read_error_count"] != 0
         or runtime_hashes["python_executable_fingerprint_sha256"]
-        != hashlib.sha256(
-            str(Path(backend["executable_path"]).absolute()).encode()
-        ).hexdigest()
+        != _v5_backend_invocation_fingerprint(backend)
         or dom.get("sourceCommit") != source.get("commit")
         or not _v5_validate_runtime_bundle_attestation(
             health,

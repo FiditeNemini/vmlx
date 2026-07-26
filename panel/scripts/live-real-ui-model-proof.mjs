@@ -2144,7 +2144,18 @@ export function viteRawRendererModulePath(relativePath, runId) {
   if (!servedPath || servedPath.startsWith('/') || servedPath.includes('..')) {
     throw new Error(`Renderer proof module has an unsafe served path: ${relativePath}`)
   }
-  return `/${servedPath}?raw&vmlx_proof=${encodeURIComponent(runId)}`
+  // The renderer entry is already cached by Vite as `/src/main.tsx`, and Vite
+  // reuses that transform even when `?raw` is added. Importing that URL then
+  // parses the TSX entry instead of returning source text. A physical `/@fs/`
+  // URL gives the proof import its own raw-transform identity for entry and
+  // non-entry modules alike.
+  const absolutePath = path.resolve(panelDir, relativePath)
+  const rendererRoot = path.resolve(panelDir, 'src/renderer')
+  if (!absolutePath.startsWith(`${rendererRoot}${path.sep}`)) {
+    throw new Error(`Renderer proof module escapes the Vite renderer root: ${relativePath}`)
+  }
+  const viteFsPath = absolutePath.split(path.sep).join('/')
+  return `/@fs${encodeURI(viteFsPath)}?raw&vmlx_proof=${encodeURIComponent(runId)}`
 }
 
 export function localRendererModuleEvidence() {

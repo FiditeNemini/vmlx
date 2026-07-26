@@ -1638,20 +1638,23 @@ function rewriteRawCaptureMetadata(
 }
 
 describe("real UI model proof harness", () => {
-  it("maps repository renderer paths to the actual Electron-Vite renderer root", () => {
+  it("maps renderer paths to distinct raw Vite filesystem module identities", () => {
+    const panelRoot = path.resolve(new URL("..", import.meta.url).pathname);
     expect(
       viteRawRendererModulePath(
         "src/renderer/src/main.tsx",
         "r18 proof/one",
       ),
-    ).toBe("/src/main.tsx?raw&vmlx_proof=r18%20proof%2Fone");
+    ).toBe(
+      `/@fs${panelRoot}/src/renderer/src/main.tsx?raw&vmlx_proof=r18%20proof%2Fone`,
+    );
     expect(
       viteRawRendererModulePath(
         "src/renderer/src/components/chat/ReasoningBox.tsx",
         "r18-two",
       ),
     ).toBe(
-      "/src/components/chat/ReasoningBox.tsx?raw&vmlx_proof=r18-two",
+      `/@fs${panelRoot}/src/renderer/src/components/chat/ReasoningBox.tsx?raw&vmlx_proof=r18-two`,
     );
   });
 

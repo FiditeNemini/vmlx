@@ -8878,8 +8878,18 @@ def _v5_import_pinned_module(path: Path, name: str) -> tuple[Any, dict[str, Any]
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load source-owned harness: {path.name}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Match normal import semantics before executing the module.  Python 3.13's
+    # dataclass decorator resolves annotations through sys.modules while the
+    # class body is being processed, so an unregistered dynamic module fails
+    # before the source-owned API harness can run.
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
     if not _v5_pin_unchanged(pin):
+        sys.modules.pop(name, None)
         raise RuntimeError(f"source-owned harness changed while loading: {path.name}")
     return module, pin
 

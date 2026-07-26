@@ -6599,6 +6599,9 @@ async function main() {
           // Stop every active state through the visible UI before requiring the
           // Start control, so the proof still attests a real user-driven restart.
           if (['running', 'loading', 'standby'].includes(sessionBeforeStart?.status)) {
+            const stopControlLabel = sessionBeforeStart?.status === 'loading'
+              ? 'Cancel'
+              : 'Stop';
             const stopButton = await new Promise((resolve, reject) => {
               const started = Date.now();
               const check = () => {
@@ -6607,12 +6610,13 @@ async function main() {
                     const label = (button.textContent || '')
                       .replace(/\\s+/g, ' ')
                       .trim();
-                    return label === 'Stop' && !button.disabled;
+                    return label === stopControlLabel && !button.disabled;
                   });
                 if (candidate) return resolve(candidate);
                 if (Date.now() - started > 30000) {
                   return reject(new Error(
-                    'Timed out waiting for the visible Stop control '
+                    'Timed out waiting for the visible '
+                    + stopControlLabel + ' control '
                     + 'for the active local session',
                   ));
                 }
@@ -6631,13 +6635,14 @@ async function main() {
                 if (current?.status === 'stopped') return resolve(current);
                 if (!current || current.status === 'error') {
                   return reject(new Error(
-                    'Visible Stop left the active local session missing '
+                    'Visible ' + stopControlLabel
+                    + ' left the active local session missing '
                     + 'or errored',
                   ));
                 }
                 if (Date.now() - started > 120000) {
                   return reject(new Error(
-                    'Timed out waiting for the visibly stopped reused session',
+                    'Timed out waiting for the visibly stopped active local session',
                   ));
                 }
                 setTimeout(check, 100);

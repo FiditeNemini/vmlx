@@ -2952,6 +2952,29 @@ def _cache_prompts(prefix: str, nonce: str) -> dict[str, str]:
     return {selector: f"{stem}{selector}" for selector in ("A", "B", "C")}
 
 
+def _standard_cache_requests(
+    phase: str,
+    cache_scenario: str,
+    prompts: dict[str, str],
+) -> list[tuple[str, str, str]]:
+    """Select ordinary A/B/C rows without contradicting L2 scenarios."""
+
+    if cache_scenario == "restart-restore":
+        # Its linked eviction phase proves that the old A/B/C chain is absent;
+        # the dedicated recent-chain scenario below owns restart proof.
+        return []
+    if phase == "store":
+        return [
+            ("cold_a", prompts["A"], "A"),
+            ("warm_a", prompts["A"], "A"),
+            ("partial_b", prompts["B"], "B"),
+        ]
+    return [
+        ("restart_partial_c", prompts["C"], "C"),
+        ("restart_a", prompts["A"], "A"),
+    ]
+
+
 def _payload(
     model: str,
     prompt: str,
@@ -3963,20 +3986,10 @@ def main() -> int:
     }
     prefix = _common_prefix(args.nonce, args.records)
     prompts = _cache_prompts(prefix, args.nonce)
-    prompt_a = prompts["A"]
-    prompt_b = prompts["B"]
-    prompt_c = prompts["C"]
-    requests = (
-        [
-            ("cold_a", prompt_a, "A"),
-            ("warm_a", prompt_a, "A"),
-            ("partial_b", prompt_b, "B"),
-        ]
-        if args.phase == "store"
-        else [
-            ("restart_partial_c", prompt_c, "C"),
-            ("restart_a", prompt_a, "A"),
-        ]
+    requests = _standard_cache_requests(
+        args.phase,
+        args.cache_scenario,
+        prompts,
     )
     prompt_contract = _prompt_contract(prefix, args.records)
     tokenizer_lcp_contract: dict[str, Any] = {}
@@ -4134,11 +4147,15 @@ def main() -> int:
             flush=True,
         )
 
-    validation_failures = validate_cache_rows(
-        args.phase,
-        rows,
-        store_summary=store_summary,
-        token_contract=tokenizer_lcp_contract,
+    validation_failures = (
+        []
+        if args.cache_scenario == "restart-restore"
+        else validate_cache_rows(
+            args.phase,
+            rows,
+            store_summary=store_summary,
+            token_contract=tokenizer_lcp_contract,
+        )
     )
     request_contract_ok = all(
         row["status_code"] == 200 and row["marker_ok"] and row["terminal_ok"]

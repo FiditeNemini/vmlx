@@ -1154,6 +1154,20 @@ def test_cache_prompts_differ_only_at_the_final_ascii_selector():
     assert all(ord(prompt[-1]) < 128 for prompt in prompts.values())
 
 
+def test_restart_restore_uses_surviving_recent_chain_not_evicted_standard_chain():
+    prompts = _cache_prompts("shared prefix", NONCE)
+
+    assert gate._standard_cache_requests(
+        "probe", "restart-restore", prompts
+    ) == []
+    assert [
+        tag
+        for tag, _prompt, _selector in gate._standard_cache_requests(
+            "probe", "standard", prompts
+        )
+    ] == ["restart_partial_c", "restart_a"]
+
+
 def test_probe_contract_requires_unseen_c_then_allows_ram_exact_a():
     rows = _valid_probe_rows()
     store_summary = _store_summary()

@@ -942,7 +942,17 @@ def _fixture_cache_capture(
         )
         partial_selector = "B" if gate_operation == "store" else "C"
         disk_refault = gate_operation == "probe" or phase["index"] == 2
-        requests = [
+        partial_execution = {
+            "prompt_tokens": 128,
+            "cached_tokens": 112,
+            "uncached_prompt_tokens": 16,
+            "prefill_tokens": 16,
+            "disk_blocks": 7 if disk_refault else 0,
+            "cache_detail": (
+                "paged+tq+disk" if disk_refault else "paged+tq"
+            ),
+        }
+        requests = [] if phase["index"] == 3 else [
             {
                 "tag": partial_tag,
                 "cache_contract_ok": True,
@@ -955,16 +965,7 @@ def _fixture_cache_capture(
                         1 if phase["index"] == 2 else 0
                     ),
                 },
-                "last_cache_execution": {
-                    "prompt_tokens": 128,
-                    "cached_tokens": 112,
-                    "uncached_prompt_tokens": 16,
-                    "prefill_tokens": 16,
-                    "disk_blocks": 7 if disk_refault else 0,
-                    "cache_detail": (
-                        "paged+tq+disk" if disk_refault else "paged+tq"
-                    ),
-                },
+                "last_cache_execution": partial_execution,
             }
         ]
         if gate_operation == "store":
@@ -984,6 +985,7 @@ def _fixture_cache_capture(
             "base_url": "http://127.0.0.1:8001",
             "model": phase_model,
             "gate_ok": True,
+            "scenario_contract_ok": True,
             "probe_linkage_ok": (
                 True if gate_operation == "probe" else None
             ),
@@ -1030,6 +1032,12 @@ def _fixture_cache_capture(
                 "restart_disk_blocks": 7,
                 "restart_uncached_tokens": 16,
                 "restart_restore_source": "block-disk",
+                "restart_pre": {
+                    "longest_common_prefix_tokens": 127,
+                },
+                "restart_execution": {
+                    "last_cache_execution": partial_execution,
+                },
             }
         summary_bytes = json.dumps(
             summary,

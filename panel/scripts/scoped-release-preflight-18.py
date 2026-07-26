@@ -6525,33 +6525,68 @@ def _v5_cache_facts(
             for row in requests
             if isinstance(row, dict)
         }
-        partial_tag = (
-            "partial_b"
-            if gate_operation == "store"
-            else "restart_partial_c"
-        )
-        partial = by_tag.get(partial_tag)
-        execution = (
-            partial.get("last_cache_execution")
-            if isinstance(partial, dict)
-            else None
-        )
-        token_contract = summary.get("tokenizer_lcp_contract")
-        lcp_rows = (
-            token_contract.get("longest_common_prefix_tokens")
-            if isinstance(token_contract, dict)
-            else None
-        )
-        lcp_key = (
-            "A:B"
-            if gate_operation == "store"
-            else "A:C"
-        )
-        independent_lcp = (
-            integer(lcp_rows.get(lcp_key))
-            if isinstance(lcp_rows, dict)
-            else 0
-        )
+        phase_index = expected_phase["index"]
+        partial_contract_ok = False
+        if phase_index == 3:
+            # Phase 2 intentionally evicts the old standard A/B/C chain.  The
+            # restart proof is therefore the source-bound recent-chain
+            # observation, not a second probe of the chain proved absent.
+            restart_observation = summary.get(
+                "l2_restart_restore_observation"
+            )
+            restart_execution = (
+                restart_observation.get("restart_execution")
+                if isinstance(restart_observation, dict)
+                else None
+            )
+            execution = (
+                restart_execution.get("last_cache_execution")
+                if isinstance(restart_execution, dict)
+                else None
+            )
+            restart_pre = (
+                restart_observation.get("restart_pre")
+                if isinstance(restart_observation, dict)
+                else None
+            )
+            independent_lcp = (
+                integer(restart_pre.get("longest_common_prefix_tokens"))
+                if isinstance(restart_pre, dict)
+                else 0
+            )
+            partial_contract_ok = summary.get("scenario_contract_ok") is True
+        else:
+            partial_tag = (
+                "partial_b"
+                if gate_operation == "store"
+                else "restart_partial_c"
+            )
+            partial = by_tag.get(partial_tag)
+            execution = (
+                partial.get("last_cache_execution")
+                if isinstance(partial, dict)
+                else None
+            )
+            token_contract = summary.get("tokenizer_lcp_contract")
+            lcp_rows = (
+                token_contract.get("longest_common_prefix_tokens")
+                if isinstance(token_contract, dict)
+                else None
+            )
+            lcp_key = (
+                "A:B"
+                if gate_operation == "store"
+                else "A:C"
+            )
+            independent_lcp = (
+                integer(lcp_rows.get(lcp_key))
+                if isinstance(lcp_rows, dict)
+                else 0
+            )
+            partial_contract_ok = (
+                isinstance(partial, dict)
+                and partial.get("cache_contract_ok") is True
+            )
         cached_tokens = (
             integer(execution.get("cached_tokens"))
             if isinstance(execution, dict)
@@ -6568,8 +6603,7 @@ def _v5_cache_facts(
             else 0
         )
         if (
-            not isinstance(partial, dict)
-            or partial.get("cache_contract_ok") is not True
+            not partial_contract_ok
             or independent_lcp <= 1
             or cached_tokens <= 0
             or cached_tokens > independent_lcp

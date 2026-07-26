@@ -424,12 +424,14 @@ def _validate_rows(
     *,
     store_summary: dict | None = None,
     token_contract: dict | None = None,
+    contract_profile: str = "generic",
 ) -> list[str]:
     return validate_cache_rows(
         phase,
         rows,
         store_summary=store_summary,
         token_contract=TOKEN_CONTRACT if token_contract is None else token_contract,
+        contract_profile=contract_profile,
     )
 
 
@@ -1006,6 +1008,113 @@ def test_store_contract_accepts_cold_warm_and_longest_partial_prefix():
     assert all(row["cache_contract_ok"] is True for row in rows)
     assert rows[2]["expected_shared_prefix_floor_tokens"] == 112
     assert rows[2]["last_cache_execution"]["prefill_tokens"] == 16
+
+
+def test_minimax_m3_native_profile_accepts_stable_offset_and_block_floors():
+    token_contract = deepcopy(TOKEN_CONTRACT)
+    for prompt in token_contract["prompts"].values():
+        prompt["cache_prompt_token_count"] = 130
+        prompt["generation_prompt_suffix_tokens"] = 4
+    token_contract["longest_common_prefix_tokens"]["A:A"] = 130
+    token_contract["longest_common_prefix_tokens"]["A:B"] = 127
+    rows = _valid_store_rows()
+    for row in rows:
+        execution = row["last_cache_execution"]
+        execution["prompt_tokens"] = 133
+        execution["uncached_prompt_tokens"] = 133 - execution["cached_tokens"]
+        execution["prefill_tokens"] = execution["uncached_prompt_tokens"]
+        row["scheduler_cache"]["block_size"] = 16
+    rows[1]["cached_tokens"] = 128
+    rows[1]["last_cache_execution"].update(
+        {
+            "attempted_cached_tokens": 128,
+            "cached_tokens": 128,
+            "uncached_prompt_tokens": 5,
+            "prefill_tokens": 5,
+        }
+    )
+
+    failures = _validate_rows(
+        "store",
+        rows,
+        token_contract=token_contract,
+        contract_profile="minimax_m3_sparse_block",
+    )
+
+    assert failures == []
+    assert all(row["native_prompt_token_offset"] == 3 for row in rows)
+    assert rows[1]["expected_shared_prefix_floor_tokens"] == 128
+    assert rows[2]["expected_shared_prefix_floor_tokens"] == 112
+
+    unstable = deepcopy(rows)
+    unstable[2]["last_cache_execution"]["prompt_tokens"] = 134
+    assert any(
+        "native sparse prompt offset is not stable" in failure
+        for failure in _validate_rows(
+            "store",
+            unstable,
+            token_contract=token_contract,
+            contract_profile="minimax_m3_sparse_block",
+        )
+    )
+
+    unrelated_suffix = deepcopy(token_contract)
+    unrelated_suffix["prompts"]["A"]["generation_prompt_suffix_tokens"] = 0
+    unrelated_suffix["prompts"]["B"]["generation_prompt_suffix_tokens"] = 0
+    unrelated_suffix["prompts"]["C"]["generation_prompt_suffix_tokens"] = 4
+    assert any(
+        "minimum required-prompt template suffix allowance=0" in failure
+        for failure in _validate_rows(
+            "store",
+            deepcopy(rows),
+            token_contract=unrelated_suffix,
+            contract_profile="minimax_m3_sparse_block",
+        )
+    )
+
+
+def test_cache_contract_profile_requires_exact_minimax_m3_topology():
+    health = _health()
+    topology = {}
+    health["cache_topology_provenance"]["configuration"] = topology
+    topology["native_cache"] = {
+        "family": "minimax_m3",
+        "cache_type": "native_msa_sparse_kv",
+        "schema": "minimax_m3_msa_v1",
+        "generic_turboquant_kv": {"enabled": False},
+    }
+    topology["turboquant_kv_cache"] = {"enabled": False}
+    topology["kv_cache_quantization"] = {"enabled": False}
+    assert (
+        gate._cache_contract_profile_from_health(health)
+        == "minimax_m3_sparse_block"
+    )
+
+    for field, value in (
+        ("family", "dsv4"),
+        ("cache_type", "generic_kv"),
+        ("schema", "other"),
+    ):
+        changed = deepcopy(health)
+        changed["cache_topology_provenance"]["configuration"]["native_cache"][
+            field
+        ] = value
+        assert gate._cache_contract_profile_from_health(changed) == "generic"
+
+    for path in (
+        ("native_cache", "generic_turboquant_kv"),
+        ("turboquant_kv_cache",),
+        ("kv_cache_quantization",),
+    ):
+        changed = deepcopy(health)
+        node = changed["cache_topology_provenance"]["configuration"]
+        if len(path) == 2:
+            node = node[path[0]]
+            key = path[1]
+        else:
+            key = path[0]
+        node[key]["enabled"] = True
+        assert gate._cache_contract_profile_from_health(changed) == "generic"
 
 
 def test_standard_scheduler_prefill_does_not_require_generation_suffix_field():

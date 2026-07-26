@@ -6819,13 +6819,9 @@ def _v5_cache_facts(
             )
             if (
                 representative_id != V5_NATIVE_REPRESENTATIVE_ID
-                or derived_native
-                not in {
-                    "minimax_m3_sparse",
-                    "dsv4_composite",
-                    "openpangu_native",
-                    "cca",
-                }
+                or derived_native != "minimax_m3_sparse"
+                or summary.get("cache_contract_profile")
+                != "minimax_m3_sparse_block"
                 or not isinstance(configured, dict)
                 or configured.get("kv_cache_quantization") != "none"
                 or configured.get("kv_cache_quantization_explicit") is not False
@@ -6834,6 +6830,9 @@ def _v5_cache_facts(
                 or not isinstance(kv_quant, dict)
                 or kv_quant.get("enabled") is not False
                 or not isinstance(native_cache, dict)
+                or native_cache.get("family") != "minimax_m3"
+                or native_cache.get("cache_type") != "native_msa_sparse_kv"
+                or native_cache.get("schema") != "minimax_m3_msa_v1"
                 or not isinstance(generic_tq, dict)
                 or generic_tq.get("enabled") is not False
             ):
@@ -11287,13 +11286,44 @@ def _v5_validate_release_checks(
     if "cache_ttft_tps" in ui_facts and "raw_timing_matches" in api_facts:
         output_facts.add("ttft_tps_compared_to_raw_timing")
     facts_by_check["output_integrity_terminal_stats"] = output_facts
+    release_cache_facts = set(cache_facts)
+    native_ui_required = {
+        "real_start_button",
+        "minimum_three_turns",
+        "visible_content",
+        "terminal_state",
+        "tool_result_continuation",
+        "exact_tool_arguments",
+        "reasoning_tool_reasoning_tool_answer",
+        "coherence",
+    }
+    native_api_required = {
+        "tool_result_continuation",
+        "exact_tool_arguments",
+        "reasoning_tool_reasoning_tool_answer",
+        "terminal_truthful",
+        "nonempty_final",
+    }
+    if (
+        "unsupported_architecture_exception_cache" in cache_facts
+        and set(V5_RELEASE_ASSERTIONS["exact_source_provenance"])
+        <= source_facts
+        and native_ui_required <= ui_facts
+        and all(
+            native_api_required <= api_by_protocol.get(protocol, set())
+            for protocol in ("chat", "responses", "anthropic", "ollama")
+        )
+    ):
+        release_cache_facts.add("unsupported_architecture_exception_honored")
     for name in (
         "cache_paged_off_ssd_partial",
         "cache_paged_on_eviction_refault",
         "cache_restart_and_size_eviction",
         "turboquant_policy",
     ):
-        facts_by_check[name] = cache_facts & set(V5_RELEASE_ASSERTIONS[name])
+        facts_by_check[name] = release_cache_facts & set(
+            V5_RELEASE_ASSERTIONS[name]
+        )
     settings_facts = ui_facts | api_facts
     facts_by_check["settings_defaults_and_persistence"] = settings_facts & set(
         V5_RELEASE_ASSERTIONS["settings_defaults_and_persistence"]

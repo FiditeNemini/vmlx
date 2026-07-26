@@ -919,7 +919,11 @@ def _fixture_cache_capture(
             },
             "kv_cache_quantization": {"enabled": tq_enabled},
             "native_cache": {
-                "family": "minimax_m3_sparse" if is_native else "standard_kv",
+                "family": "minimax_m3" if is_native else "standard_kv",
+                "cache_type": (
+                    "native_msa_sparse_kv" if is_native else "standard_kv"
+                ),
+                "schema": "minimax_m3_msa_v1" if is_native else "standard_v1",
                 "generic_turboquant_kv": {"enabled": tq_enabled},
             },
         }
@@ -984,6 +988,9 @@ def _fixture_cache_capture(
             "nonce": nonce,
             "base_url": "http://127.0.0.1:8001",
             "model": phase_model,
+            "cache_contract_profile": (
+                "minimax_m3_sparse_block" if is_native else "generic"
+            ),
             "gate_ok": True,
             "scenario_contract_ok": True,
             "probe_linkage_ok": (
@@ -3492,7 +3499,6 @@ def test_r18_v5_main_owned_children_fail_closed_on_unowned_release_rows(
     }
     assert blocked == {
         "cache_restart_and_size_eviction",
-        "turboquant_policy",
         "settings_defaults_and_persistence",
         "i18n_katex_responsive_ui",
     }
@@ -3510,7 +3516,7 @@ def test_r18_v5_main_owned_children_fail_closed_on_unowned_release_rows(
     assert manifest["checks"]["turboquant_policy"]["assertions"][
         "explicit_off_honored"
     ]
-    assert not manifest["checks"]["turboquant_policy"]["assertions"][
+    assert manifest["checks"]["turboquant_policy"]["assertions"][
         "unsupported_architecture_exception_honored"
     ]
     assert not manifest["checks"]["settings_defaults_and_persistence"][
@@ -3688,6 +3694,31 @@ def test_r18_v5_six_phase_cache_facts_are_raw_and_do_not_invent_cross_surface_po
         native_tq_summary
     )
     tampered_captures.append(native_tq_enabled)
+
+    native_generic_contract = replace_phase_summary(
+        capture,
+        5,
+        lambda summary: summary.__setitem__(
+            "cache_contract_profile",
+            "generic",
+        ),
+    )
+    tampered_captures.append(native_generic_contract)
+
+    for field, value in (
+        ("family", "dsv4"),
+        ("cache_type", "wrong"),
+        ("schema", "wrong"),
+    ):
+        tampered_captures.append(
+            replace_phase_summary(
+                capture,
+                5,
+                lambda summary, field=field, value=value: summary["identity"][
+                    "cache_topology_provenance"
+                ]["configuration"]["native_cache"].__setitem__(field, value),
+            )
+        )
 
     tampered_captures.append(
         replace_phase_summary(

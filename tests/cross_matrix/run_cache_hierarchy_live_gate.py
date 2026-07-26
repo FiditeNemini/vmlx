@@ -1902,6 +1902,7 @@ def _tokenizer_prefix_floor(
     selector: str,
     require_partial: bool,
     token_contract: dict[str, Any],
+    exact_complete_block_floor: bool = False,
 ) -> tuple[int, int, int, list[str]]:
     """Derive the cache floor from independent final-render tokenization."""
     tag = str(row.get("tag") or "<missing-tag>")
@@ -1930,7 +1931,7 @@ def _tokenizer_prefix_floor(
             "a multi-token prefix candidate"
         )
 
-    if require_partial:
+    if require_partial or exact_complete_block_floor:
         cache = row.get("scheduler_cache")
         if not isinstance(cache, dict):
             cache = {}
@@ -1944,6 +1945,8 @@ def _tokenizer_prefix_floor(
             # A cache may preserve the exact terminal partial block. At minimum
             # it must recover every complete block wholly inside the independent
             # token LCP; this floor does not trust cache-selection telemetry.
+            # Native sparse caches also use this floor for exact prompts because
+            # they may re-feed a short architecture-owned terminal boundary.
             minimum = (independent_lcp // block_size) * block_size
     else:
         # Exact prompt reuse intentionally re-feeds the final prompt token to
@@ -1958,12 +1961,42 @@ def _tokenizer_prefix_floor(
     return minimum, independent_lcp, expected_prompt_tokens, failures
 
 
+def _cache_contract_profile_from_health(health: dict[str, Any]) -> str:
+    """Select only an attested architecture-owned cache contract."""
+
+    topology_attestation = health.get("cache_topology_provenance")
+    topology = (
+        topology_attestation.get("configuration")
+        if isinstance(topology_attestation, dict)
+        else None
+    )
+    native = topology.get("native_cache") if isinstance(topology, dict) else None
+    generic_tq = (
+        native.get("generic_turboquant_kv")
+        if isinstance(native, dict)
+        else None
+    )
+    if (
+        isinstance(native, dict)
+        and native.get("family") == "minimax_m3"
+        and native.get("cache_type") == "native_msa_sparse_kv"
+        and native.get("schema") == "minimax_m3_msa_v1"
+        and isinstance(generic_tq, dict)
+        and generic_tq.get("enabled") is False
+        and (topology.get("turboquant_kv_cache") or {}).get("enabled") is False
+        and (topology.get("kv_cache_quantization") or {}).get("enabled") is False
+    ):
+        return "minimax_m3_sparse_block"
+    return "generic"
+
+
 def validate_cache_rows(
     phase: str,
     rows: list[dict[str, Any]],
     *,
     store_summary: dict[str, Any] | None = None,
     token_contract: dict[str, Any] | None = None,
+    contract_profile: str = "generic",
 ) -> list[str]:
     """Validate the cache-specific contract for one store or restart phase.
 
@@ -1977,6 +2010,9 @@ def validate_cache_rows(
         for row in rows
         if isinstance(row, dict) and row.get("tag")
     }
+    if contract_profile not in {"generic", "minimax_m3_sparse_block"}:
+        return [f"unsupported cache contract profile: {contract_profile}"]
+    native_sparse = contract_profile == "minimax_m3_sparse_block"
     requirements = (
         {
             "cold_a": "cold",
@@ -2008,6 +2044,50 @@ def validate_cache_rows(
 
     if phase == "probe" and not isinstance(store_summary, dict):
         failures.append("probe: linked passing store summary is required")
+    prompt_offset = 0
+    if native_sparse:
+        prompts = token_contract.get("prompts")
+        selectors = {
+            "cold_a": "A",
+            "warm_a": "A",
+            "partial_b": "B",
+            "restart_partial_c": "C",
+            "restart_a": "A",
+        }
+        offsets: set[int] = set()
+        suffix_allowances: list[int] = []
+        if isinstance(prompts, dict):
+            for tag in requirements:
+                row = by_tag.get(tag)
+                prompt = prompts.get(selectors[tag])
+                execution = (
+                    row.get("last_cache_execution")
+                    if isinstance(row, dict)
+                    else None
+                )
+                if not isinstance(prompt, dict) or not isinstance(execution, dict):
+                    continue
+                suffix_allowances.append(
+                    _integer(prompt.get("generation_prompt_suffix_tokens"))
+                )
+                expected = _integer(prompt.get("cache_prompt_token_count"))
+                observed = _integer(execution.get("prompt_tokens"))
+                if expected > 1 and observed > 1:
+                    offsets.add(observed - expected)
+        if len(offsets) != 1:
+            failures.append(
+                f"{phase}: native sparse prompt offset is not stable: "
+                f"{sorted(offsets)}"
+            )
+        else:
+            prompt_offset = next(iter(offsets))
+            suffix_allowance = min(suffix_allowances, default=0)
+            if not 0 <= prompt_offset <= suffix_allowance:
+                failures.append(
+                    f"{phase}: native sparse prompt offset={prompt_offset} exceeds "
+                    "minimum required-prompt template suffix allowance="
+                    f"{suffix_allowance}"
+                )
     for tag, requirement in requirements.items():
         row = by_tag.get(tag)
         if row is None:
@@ -2053,14 +2133,14 @@ def validate_cache_rows(
                     row_failures.append(
                         f"{tag}: independent tokenizer prompt count is missing"
                     )
-                elif (
-                    _integer(execution.get("prompt_tokens"))
-                    != expected_prompt_tokens
+                elif _integer(execution.get("prompt_tokens")) != (
+                    expected_prompt_tokens + prompt_offset
                 ):
                     row_failures.append(
                         f"{tag}: execution prompt_tokens="
                         f"{_integer(execution.get('prompt_tokens'))} does not "
-                        f"match independent tokenizer count={expected_prompt_tokens}"
+                        "match independent tokenizer count plus attested offset="
+                        f"{expected_prompt_tokens + prompt_offset}"
                     )
         else:
             selector = "A"
@@ -2078,6 +2158,7 @@ def validate_cache_rows(
                 selector=selector,
                 require_partial=requirement in {"partial", "disk_partial"},
                 token_contract=token_contract,
+                exact_complete_block_floor=native_sparse,
             )
             row_failures = _validate_hit_row(
                 row,
@@ -2085,7 +2166,7 @@ def validate_cache_rows(
                 require_disk_origin=requirement == "disk_partial",
                 minimum_cached_tokens=minimum_cached_tokens,
                 maximum_cached_tokens=independent_lcp_tokens,
-                expected_prompt_tokens=expected_prompt_tokens,
+                expected_prompt_tokens=expected_prompt_tokens + prompt_offset,
                 # Standard scheduler/TQ hits may be direct memory/prefix reuse.
                 # Only restart-C must prove worker reconstruction from disk.
                 allow_direct_reuse=requirement != "disk_partial",
@@ -2097,6 +2178,9 @@ def validate_cache_rows(
             )
             row["independent_prompt_tokens"] = expected_prompt_tokens
         row["cache_contract_required"] = True
+        row["cache_contract_profile"] = contract_profile
+        if native_sparse:
+            row["native_prompt_token_offset"] = prompt_offset
         row["cache_contract_ok"] = not row_failures
         row["cache_contract_failures"] = row_failures
         failures.extend(row_failures)
@@ -3985,6 +4069,7 @@ def main() -> int:
             "combined_sha256"
         ),
     }
+    cache_contract_profile = _cache_contract_profile_from_health(health_before)
     prefix = _common_prefix(args.nonce, args.records)
     prompts = _cache_prompts(prefix, args.nonce)
     requests = _standard_cache_requests(
@@ -4016,6 +4101,7 @@ def main() -> int:
         "base_url": args.base_url,
         "model": args.model,
         "identity": identity,
+        "cache_contract_profile": cache_contract_profile,
         "prompt_contract": prompt_contract,
         "tokenizer_lcp_contract": tokenizer_lcp_contract,
     }
@@ -4156,6 +4242,7 @@ def main() -> int:
             rows,
             store_summary=store_summary,
             token_contract=tokenizer_lcp_contract,
+            contract_profile=cache_contract_profile,
         )
     )
     request_contract_ok = all(

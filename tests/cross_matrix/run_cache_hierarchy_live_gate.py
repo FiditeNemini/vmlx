@@ -2922,7 +2922,13 @@ def _payload(
         "input": prompt,
         "stream": True,
         "store": False,
-        "max_output_tokens": 32,
+        # The release probe validates an exact marker of the form
+        # CACHE-HIERARCHY-<32-byte nonce>-<selector>.  A 32-token cap can
+        # truncate the marker itself on normal byte-fragmenting tokenizers and
+        # turn a healthy cache hit into response.incomplete. Keep the cap small
+        # enough to preserve the transport-only nature of the probe, but large
+        # enough to allow the full marker plus EOS.
+        "max_output_tokens": 96,
         "temperature": 0.0,
         "top_p": 1.0,
         "top_k": 20,

@@ -456,6 +456,63 @@ def test_cache_scenario_keeps_instructions_and_tool_schema_stable():
     assert "media_salt" not in controls
 
 
+def test_prefix_attestation_sends_only_pair_referenced_prompts():
+    prompts = {
+        "old_store": "old store",
+        "old_probe": "old probe",
+        "old_restart": "unused old restart",
+        "recent_store": "recent store",
+        "recent_probe": "recent probe",
+        "recent_restart": "unused recent restart",
+    }
+
+    request = gate._prefix_attestation_request(
+        MODEL,
+        prompts,
+        {
+            "old": ("old_store", "old_probe"),
+            "recent": ("recent_store", "recent_probe"),
+        },
+    )
+
+    assert request["inputs"] == {
+        "old_probe": "old probe",
+        "old_store": "old store",
+        "recent_probe": "recent probe",
+        "recent_store": "recent store",
+    }
+    assert "old_restart" not in request["inputs"]
+    assert "recent_restart" not in request["inputs"]
+
+
+def test_prefix_attestation_rejects_missing_pair_prompt():
+    with pytest.raises(ValueError, match="references missing prompts"):
+        gate._prefix_attestation_request(
+            MODEL,
+            {"store": "stored"},
+            {"target": ("store", "missing")},
+        )
+
+
+def test_l2_eviction_producers_diverge_before_shared_prompt_and_omit_tools():
+    prompts = gate._l2_identity_prompts(NONCE, 2)
+    filler, _ = gate._l2_filler_prompt(NONCE, 2, 0)
+    controls = gate._l2_scenario_request_controls()
+
+    assert prompts["old_store"].startswith(
+        f"CACHE-IDENTITY {NONCE}-l2-old\n"
+    )
+    assert prompts["recent_store"].startswith(
+        f"CACHE-IDENTITY {NONCE}-l2-recent\n"
+    )
+    assert filler.startswith(f"CACHE-IDENTITY {NONCE}-l2-filler-000\n")
+    assert controls == {
+        "enable_thinking": False,
+        "instructions": gate.L2_EVICTION_INSTRUCTIONS,
+    }
+    assert "tools" not in controls
+
+
 def test_prefix_attestation_contract_is_path_free_and_supports_disk_only_l2():
     request, contract = _prefix_contract(disk_only=True, resident=False)
 

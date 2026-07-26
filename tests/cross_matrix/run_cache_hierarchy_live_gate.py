@@ -59,6 +59,7 @@ CACHE_SCENARIO_TOOLS = (
         },
     },
 )
+L2_EVICTION_INSTRUCTIONS = "Reply with the requested exact marker."
 
 
 def _cache_scenario_request_controls() -> dict[str, Any]:
@@ -66,6 +67,26 @@ def _cache_scenario_request_controls() -> dict[str, Any]:
         "enable_thinking": False,
         "instructions": CACHE_SCENARIO_INSTRUCTIONS,
         "tools": [dict(tool) for tool in CACHE_SCENARIO_TOOLS],
+    }
+
+
+def _l2_scenario_request_controls() -> dict[str, Any]:
+    """Keep L2 eviction producers cold on hybrid cache architectures.
+
+    The regular cache contract deliberately includes a stable tool schema so
+    it can prove that tools participate in cache identity.  Reusing that large
+    stable prefix for every L2 eviction producer creates a paged-cache hit
+    before the request-specific identity.  Hybrid SSM runtimes intentionally
+    do not recursively promote reconstructed state, so such a request cannot
+    own a new disk-write fence.  The eviction scenario has a different job:
+    create independently owned disk entries and prove their LRU lifecycle.
+    Use a concise, tool-free render shape and put the unique identity at the
+    start of each user prompt so every producer is cold before block 0.
+    """
+
+    return {
+        "enable_thinking": False,
+        "instructions": L2_EVICTION_INSTRUCTIONS,
     }
 
 
@@ -496,14 +517,33 @@ def _prefix_attestation_request(
     *,
     request_controls: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    referenced_labels: set[str] = set()
+    normalized_pairs: dict[str, list[str]] = {}
+    for pair_name, labels in sorted(pairs.items()):
+        if (
+            not isinstance(pair_name, str)
+            or not pair_name
+            or not isinstance(labels, (tuple, list))
+            or len(labels) != 2
+            or any(not isinstance(label, str) or not label for label in labels)
+        ):
+            raise ValueError("prefix pair labels must name exactly two prompts")
+        missing = [label for label in labels if label not in prompts]
+        if missing:
+            raise ValueError(
+                f"prefix pair {pair_name!r} references missing prompts {missing!r}"
+            )
+        normalized = list(labels)
+        normalized_pairs[pair_name] = normalized
+        referenced_labels.update(normalized)
     return {
         "contract_version": 1,
         "surface": "responses",
         "model": model,
-        "inputs": prompts,
-        "prefix_pairs": {
-            name: list(labels) for name, labels in sorted(pairs.items())
+        "inputs": {
+            label: prompts[label] for label in sorted(referenced_labels)
         },
+        "prefix_pairs": normalized_pairs,
         "request_controls": (
             _cache_scenario_request_controls()
             if request_controls is None
@@ -879,8 +919,14 @@ def _fetch_prefix_attestation(
     pairs: dict[str, tuple[str, str] | list[str]],
     timeout: int,
     health_attestation: dict[str, Any],
+    request_controls: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    request_payload = _prefix_attestation_request(model, prompts, pairs)
+    request_payload = _prefix_attestation_request(
+        model,
+        prompts,
+        pairs,
+        request_controls=request_controls,
+    )
     try:
         contract = _json_post(
             f"{base_url}/v1/cache/prefix-attestation",
@@ -2946,7 +2992,12 @@ def _l2_identity_prompts(
 ) -> dict[str, str]:
     prompts: dict[str, str] = {}
     for identity in ("old", "recent"):
-        prefix = _common_prefix(f"{nonce}-l2-{identity}", records)
+        prefix = "\n".join(
+            [
+                f"CACHE-IDENTITY {nonce}-l2-{identity}",
+                _common_prefix(f"{nonce}-l2-{identity}", records),
+            ]
+        )
         stem = (
             f"{prefix}\nThe following selector is outside the shared cache "
             f"prefix. Reply exactly CACHE-HIERARCHY-{nonce}-L2-"
@@ -2964,7 +3015,13 @@ def _l2_filler_prompt(
     index: int,
 ) -> tuple[str, str]:
     marker = f"CACHE-HIERARCHY-{nonce}-FILLER-{index:03d}"
-    prefix = _common_prefix(f"{nonce}-l2-filler-{index:03d}", records)
+    identity = f"{nonce}-l2-filler-{index:03d}"
+    prefix = "\n".join(
+        [
+            f"CACHE-IDENTITY {identity}",
+            _common_prefix(identity, records),
+        ]
+    )
     return f"{prefix}\nReply exactly {marker}", marker
 
 
@@ -2977,13 +3034,14 @@ def _run_response_observation(
     expected_marker: str,
     artifact_dir: Path,
     timeout: int,
+    request_controls: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     before = _json_get(f"{base_url}/health", timeout)
     before_path = artifact_dir / f"{tag}.health-before.json"
     before_path.write_text(
         json.dumps(before, indent=2, sort_keys=True) + "\n"
     )
-    payload = _payload(model, prompt)
+    payload = _payload(model, prompt, request_controls=request_controls)
     request_path = artifact_dir / f"{tag}.request.json"
     raw_path = artifact_dir / f"{tag}.sse"
     request_path.write_text(
@@ -3104,6 +3162,7 @@ def _wait_for_prefix_access_touch(
     health_attestation: dict[str, Any],
     timeout_s: float,
     poll_interval_s: float,
+    request_controls: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     deadline = time.monotonic() + max(0.0, timeout_s)
     previous_l2 = previous_binding.get("l2")
@@ -3121,6 +3180,7 @@ def _wait_for_prefix_access_touch(
             pairs=pairs,
             timeout=timeout,
             health_attestation=health_attestation,
+            request_controls=request_controls,
         )
         last_contract = contract
         last_failures = failures
@@ -3270,6 +3330,7 @@ def _run_store_evict_refault_scenario(
         "old": ("old_store", "old_probe"),
         "recent": ("recent_store", "recent_probe"),
     }
+    request_controls = _l2_scenario_request_controls()
     health_after: dict[str, Any] = {}
 
     for identity in ("old", "recent"):
@@ -3284,6 +3345,7 @@ def _run_store_evict_refault_scenario(
             expected_marker=marker,
             artifact_dir=artifact_dir,
             timeout=timeout,
+            request_controls=request_controls,
         )
         rows.append(row)
         durability, durable_health = _scenario_request_durability(
@@ -3308,6 +3370,7 @@ def _run_store_evict_refault_scenario(
         pairs=pairs,
         timeout=timeout,
         health_attestation=health_attestation,
+        request_controls=request_controls,
     )
     failures.extend(before_failures)
     _write_path_free_attestation(
@@ -3361,6 +3424,7 @@ def _run_store_evict_refault_scenario(
             expected_marker=marker,
             artifact_dir=artifact_dir,
             timeout=timeout,
+            request_controls=request_controls,
         )
         rows.append(row)
         durability, durable_health = _scenario_request_durability(
@@ -3388,6 +3452,7 @@ def _run_store_evict_refault_scenario(
                 pairs=pairs,
                 timeout=timeout,
                 health_attestation=health_attestation,
+                request_controls=request_controls,
             )
         )
         failures.extend(attestation_failures)
@@ -3449,6 +3514,7 @@ def _run_store_evict_refault_scenario(
         expected_marker=f"CACHE-HIERARCHY-{nonce}-L2-RECENT-PROBE",
         artifact_dir=artifact_dir,
         timeout=timeout,
+        request_controls=request_controls,
     )
     rows.append(refault_row)
     post_refault_contract, touch_failures = _wait_for_prefix_access_touch(
@@ -3462,6 +3528,7 @@ def _run_store_evict_refault_scenario(
         health_attestation=health_attestation,
         timeout_s=durability_timeout,
         poll_interval_s=durability_poll_interval,
+        request_controls=request_controls,
     )
     failures.extend(touch_failures)
     _write_path_free_attestation(
@@ -3502,6 +3569,7 @@ def _run_store_evict_refault_scenario(
             expected_marker=marker,
             artifact_dir=artifact_dir,
             timeout=timeout,
+            request_controls=request_controls,
         )
         rows.append(row)
         durability, durable_health = _scenario_request_durability(
@@ -3528,6 +3596,7 @@ def _run_store_evict_refault_scenario(
             pairs=pairs,
             timeout=timeout,
             health_attestation=health_attestation,
+            request_controls=request_controls,
         )
         failures.extend(attestation_failures)
         old_final = _prefix_binding(final_contract, "old")
@@ -3650,6 +3719,7 @@ def _run_restart_restore_scenario(
     pairs: dict[str, tuple[str, str]] = {
         "recent": ("recent_store", "recent_restart")
     }
+    request_controls = _l2_scenario_request_controls()
     pre_contract, pre_failures = _fetch_prefix_attestation(
         base_url=base_url,
         model=model,
@@ -3657,6 +3727,7 @@ def _run_restart_restore_scenario(
         pairs=pairs,
         timeout=timeout,
         health_attestation=health_attestation,
+        request_controls=request_controls,
     )
     failures.extend(pre_failures)
     _write_path_free_attestation(
@@ -3673,6 +3744,7 @@ def _run_restart_restore_scenario(
         expected_marker=f"CACHE-HIERARCHY-{nonce}-L2-RECENT-RESTART",
         artifact_dir=artifact_dir,
         timeout=timeout,
+        request_controls=request_controls,
     )
     post_contract, touch_failures = _wait_for_prefix_access_touch(
         base_url=base_url,
@@ -3685,6 +3757,7 @@ def _run_restart_restore_scenario(
         health_attestation=health_attestation,
         timeout_s=durability_timeout,
         poll_interval_s=durability_poll_interval,
+        request_controls=request_controls,
     )
     failures.extend(touch_failures)
     _write_path_free_attestation(

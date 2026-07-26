@@ -739,6 +739,8 @@ const ownedRunIntentTopLevelFields = [
   'harnesses',
   'l2_size_eviction_requirements',
   'nonce',
+  'native_direct_base_url',
+  'native_direct_health_url',
   'phase_plan',
   'run_id',
   'schema',
@@ -888,6 +890,47 @@ function strictHttpUrl(value) {
     return parsed
   } catch {
     return null
+  }
+}
+
+function strictLoopbackHttpOrigin(value) {
+  const parsed = strictHttpUrl(value)
+  if (
+    !parsed
+    || parsed.protocol !== 'http:'
+    || !['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)
+    || !parsed.port
+    || parsed.pathname !== '/'
+    || value !== parsed.origin
+  ) {
+    return null
+  }
+  return parsed
+}
+
+function strictLoopbackHealthUrl(value, expectedOrigin) {
+  const parsed = strictHttpUrl(value)
+  if (
+    !parsed
+    || parsed.protocol !== 'http:'
+    || !['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)
+    || !parsed.port
+    || parsed.origin !== expectedOrigin
+    || parsed.pathname !== '/health'
+    || value !== `${expectedOrigin}/health`
+  ) {
+    return null
+  }
+  return parsed
+}
+
+function ownedRunIntentDirectEndpoint(value, activePhaseIndex) {
+  const native = activePhaseIndex === 5
+  return {
+    baseUrl: native ? value.native_direct_base_url : value.direct_base_url,
+    healthUrl: native
+      ? value.native_direct_health_url
+      : value.direct_health_url,
   }
 }
 
@@ -1053,30 +1096,48 @@ export function validateOwnedRunIntent(
     }
   }
 
-  const directBase = strictHttpUrl(value.direct_base_url)
-  const gatewayBase = strictHttpUrl(value.gateway_base_url)
-  const directHealth = strictHttpUrl(value.direct_health_url)
-  const gatewayHealth = strictHttpUrl(value.gateway_health_url)
+  const directBase = strictLoopbackHttpOrigin(value.direct_base_url)
+  const nativeDirectBase = strictLoopbackHttpOrigin(
+    value.native_direct_base_url,
+  )
+  const gatewayBase = strictLoopbackHttpOrigin(value.gateway_base_url)
+  const directHealth = strictLoopbackHealthUrl(
+    value.direct_health_url,
+    directBase?.origin,
+  )
+  const nativeDirectHealth = strictLoopbackHealthUrl(
+    value.native_direct_health_url,
+    nativeDirectBase?.origin,
+  )
+  const gatewayHealth = strictLoopbackHealthUrl(
+    value.gateway_health_url,
+    gatewayBase?.origin,
+  )
+  const activeDirect = ownedRunIntentDirectEndpoint(value, activePhaseIndex)
   if (
     !directBase
+    || !nativeDirectBase
     || !gatewayBase
     || !directHealth
+    || !nativeDirectHealth
     || !gatewayHealth
-    || value.direct_base_url !== directBase.origin
-    || value.gateway_base_url !== gatewayBase.origin
-    || directHealth.origin !== directBase.origin
-    || gatewayHealth.origin !== gatewayBase.origin
     || directBase.origin === gatewayBase.origin
+    || directBase.origin === nativeDirectBase.origin
+    || nativeDirectBase.origin === gatewayBase.origin
     || (
       expectedDirectBaseUrl
-      && directBase.origin !== strictHttpUrl(expectedDirectBaseUrl)?.origin
+      && activeDirect.baseUrl
+        !== strictLoopbackHttpOrigin(expectedDirectBaseUrl)?.origin
     )
     || (
       expectedGatewayBaseUrl
-      && gatewayBase.origin !== strictHttpUrl(expectedGatewayBaseUrl)?.origin
+      && gatewayBase.origin
+        !== strictLoopbackHttpOrigin(expectedGatewayBaseUrl)?.origin
     )
   ) {
-    failures.push('owned run intent direct/gateway origin binding is invalid')
+    failures.push(
+      'owned run intent primary/native/gateway endpoint binding is invalid',
+    )
   }
 
   if (
@@ -8110,7 +8171,10 @@ async function main() {
           activeReleasePhase.bundle_fingerprint_sha256,
         backend_pid: backendPid,
         gateway_pid: releaseGatewayPid,
-        direct_base_url: ownedRunIntent.value.direct_base_url,
+        direct_base_url: ownedRunIntentDirectEndpoint(
+          ownedRunIntent.value,
+          activeReleasePhase.phase_index,
+        ).baseUrl,
         gateway_base_url: ownedRunIntent.value.gateway_base_url,
         electron_pid: electronPid,
         cdp_origin: attachCdp.origin,

@@ -3314,10 +3314,14 @@ def test_r18_v5_main_owned_children_fail_closed_on_unowned_release_rows(
                     args.native_model,
                     "--direct-base-url",
                     args.direct_base_url,
+                    "--native-direct-base-url",
+                    args.native_direct_base_url,
                     "--gateway-base-url",
                     args.gateway_base_url,
                     "--health-url",
                     args.health_url,
+                    "--native-health-url",
+                    args.native_health_url,
                     "--gateway-health-url",
                     args.gateway_health_url,
                     "--cdp-url",
@@ -3376,7 +3380,11 @@ def test_r18_v5_main_owned_children_fail_closed_on_unowned_release_rows(
         }
 
     def listener_observer(host: str, port: int) -> dict:
-        owner = current_backend_pid["value"] if port == 8001 else 9002
+        owner = (
+            current_backend_pid["value"]
+            if port in {8001, 8002}
+            else 9002
+        )
         return {"host": host, "port": port, "owner_pid": owner}
 
     def raw_runtime_observer(args, observed, snapshot) -> dict:
@@ -3452,10 +3460,14 @@ def test_r18_v5_main_owned_children_fail_closed_on_unowned_release_rows(
         "fixture-minimax-m3",
         "--direct-base-url",
         "http://127.0.0.1:8001",
+        "--native-direct-base-url",
+        "http://127.0.0.1:8002",
         "--gateway-base-url",
         "http://127.0.0.1:8080",
         "--health-url",
         "http://127.0.0.1:8001/health",
+        "--native-health-url",
+        "http://127.0.0.1:8002/health",
         "--gateway-health-url",
         "http://127.0.0.1:8080/health",
         "--cdp-url",
@@ -3748,15 +3760,15 @@ def test_r18_v5_run_intent_is_canonical_ordered_and_non_circular(
     common = {
         "source_commit": "a" * 40,
         "source_tree": "b" * 40,
-        "direct_base_url": "http://127.0.0.1:8001",
         "gateway_base_url": "http://127.0.0.1:8080",
-        "health_url": "http://127.0.0.1:8001/health",
-        "direct_health_url": "http://127.0.0.1:8001/health",
         "gateway_health_url": "http://127.0.0.1:8080/health",
     }
     expected = {
         module.V5_PRIMARY_REPRESENTATIVE_ID: {
             **common,
+            "direct_base_url": "http://127.0.0.1:8001",
+            "health_url": "http://127.0.0.1:8001/health",
+            "direct_health_url": "http://127.0.0.1:8001/health",
             "model": "fixture-model",
             "model_bundle_path": bundle["model_bundle_path"],
             "bundle_fingerprint_sha256": bundle["fingerprint_sha256"],
@@ -3764,6 +3776,9 @@ def test_r18_v5_run_intent_is_canonical_ordered_and_non_circular(
         },
         module.V5_NATIVE_REPRESENTATIVE_ID: {
             **common,
+            "direct_base_url": "http://127.0.0.1:8002",
+            "health_url": "http://127.0.0.1:8002/health",
+            "direct_health_url": "http://127.0.0.1:8002/health",
             "model": "fixture-native-model",
             "model_bundle_path": native_bundle["model_bundle_path"],
             "bundle_fingerprint_sha256": native_bundle[
@@ -3781,6 +3796,11 @@ def test_r18_v5_run_intent_is_canonical_ordered_and_non_circular(
     module._v5_validate_run_intent(intent, run_context, expected)
     assert intent["schema"] == module.V5_RUN_INTENT_SCHEMA
     assert intent["created_at"] == STAMP
+    assert intent["direct_base_url"] == "http://127.0.0.1:8001"
+    assert intent["native_direct_base_url"] == "http://127.0.0.1:8002"
+    assert intent["native_direct_health_url"] == (
+        "http://127.0.0.1:8002/health"
+    )
     assert set(intent["harnesses"]) == {"ui", "api", "cache", "semantic"}
     assert all(
         set(row) == {"relative_path", "sha256"}
@@ -3854,6 +3874,26 @@ def test_r18_v5_run_intent_is_canonical_ordered_and_non_circular(
     tampered["phase_plan"][4]["tq_policy"] = "q4-required"
     with pytest.raises(RuntimeError, match="canonical plan"):
         module._v5_validate_run_intent(tampered, run_context, expected)
+
+    same_origin = deepcopy(expected)
+    same_origin[module.V5_NATIVE_REPRESENTATIVE_ID]["direct_base_url"] = (
+        "http://127.0.0.1:8001"
+    )
+    same_origin[module.V5_NATIVE_REPRESENTATIVE_ID]["health_url"] = (
+        "http://127.0.0.1:8001/health"
+    )
+    same_origin[module.V5_NATIVE_REPRESENTATIVE_ID]["direct_health_url"] = (
+        "http://127.0.0.1:8001/health"
+    )
+    with pytest.raises(ValueError, match="origins must be distinct"):
+        module._v5_build_run_intent(run_context, same_origin)
+
+    invalid_health = deepcopy(expected)
+    invalid_health[module.V5_NATIVE_REPRESENTATIVE_ID][
+        "direct_health_url"
+    ] = "http://127.0.0.1:8003/health"
+    with pytest.raises(ValueError, match="exact /health"):
+        module._v5_build_run_intent(run_context, invalid_health)
 
 
 def test_r18_v5_cache_gate_scenarios_bind_strict_l2_phase_pair():
@@ -4480,10 +4520,14 @@ def _fixture_orchestration(
                 "fixture-native-model",
                 "--direct-base-url",
                 "http://127.0.0.1:8001",
+                "--native-direct-base-url",
+                "http://127.0.0.1:8002",
                 "--gateway-base-url",
                 "http://127.0.0.1:8080",
                 "--health-url",
                 "http://127.0.0.1:8001/health",
+                "--native-health-url",
+                "http://127.0.0.1:8002/health",
                 "--gateway-health-url",
                 "http://127.0.0.1:8080/health",
                 "--cdp-url",
@@ -4507,10 +4551,7 @@ def _fixture_orchestration(
     common_expected = {
         "source_commit": source["source_commit"],
         "source_tree": source["source_tree"],
-        "direct_base_url": "http://127.0.0.1:8001",
         "gateway_base_url": "http://127.0.0.1:8080",
-        "health_url": "http://127.0.0.1:8001/health",
-        "direct_health_url": "http://127.0.0.1:8001/health",
         "gateway_health_url": "http://127.0.0.1:8080/health",
         "cdp_url": "http://127.0.0.1:9335",
         "electron_pid": 9003,
@@ -4519,6 +4560,9 @@ def _fixture_orchestration(
     expected = {
         module.V5_PRIMARY_REPRESENTATIVE_ID: {
             **common_expected,
+            "direct_base_url": "http://127.0.0.1:8001",
+            "health_url": "http://127.0.0.1:8001/health",
+            "direct_health_url": "http://127.0.0.1:8001/health",
             "model": "fixture-model",
             "model_bundle_path": bundle["model_bundle_path"],
             "bundle_fingerprint_sha256": bundle["fingerprint_sha256"],
@@ -4526,6 +4570,9 @@ def _fixture_orchestration(
         },
         module.V5_NATIVE_REPRESENTATIVE_ID: {
             **common_expected,
+            "direct_base_url": "http://127.0.0.1:8002",
+            "health_url": "http://127.0.0.1:8002/health",
+            "direct_health_url": "http://127.0.0.1:8002/health",
             "model": "fixture-native-model",
             "model_bundle_path": native_bundle["model_bundle_path"],
             "bundle_fingerprint_sha256": native_bundle["fingerprint_sha256"],
@@ -4597,6 +4644,21 @@ def test_r18_v5_concurrent_producers_are_held_until_both_children_finish(
     assert final_cache_phase < events.index("cache_capture_complete")
     assert result["ui"]["capture"]["phase_count"] == 6
     assert result["api"]["capture"]["phase_count"] == 6
+    held = [row["binding"] for row in result["ui"]["hold_phases"]]
+    assert {row["direct_base_url"] for row in held[:5]} == {
+        "http://127.0.0.1:8001"
+    }
+    assert held[5]["direct_base_url"] == "http://127.0.0.1:8002"
+    assert held[5]["session_id"] != held[0]["session_id"]
+    assert {row["gateway_base_url"] for row in held} == {
+        "http://127.0.0.1:8080"
+    }
+    assert {row["cdp_url"] for row in held} == {
+        "http://127.0.0.1:9335"
+    }
+    assert {row["source_commit"] for row in held} == {
+        source_payload()["source_commit"]
+    }
 
 
 def test_r18_v5_cache_worker_uses_prior_backend_pid_for_restart_phases(
@@ -4634,6 +4696,12 @@ def test_r18_v5_cache_worker_uses_prior_backend_pid_for_restart_phases(
         bundle_root = native_root if is_native else primary_root
         fingerprint = native_fingerprint if is_native else primary_fingerprint
         paths = module._v5_existing_phase_paths(control_dir, phase)
+        direct_base_url = (
+            "http://127.0.0.1:8023"
+            if is_native
+            else "http://127.0.0.1:8022"
+        )
+        health_url = f"{direct_base_url}/health"
         binding = {
             "schema": module.V5_SESSION_BINDING_SCHEMA,
             "run_id": run_id,
@@ -4645,10 +4713,10 @@ def test_r18_v5_cache_worker_uses_prior_backend_pid_for_restart_phases(
             "model_bundle_path": str(bundle_root.resolve()),
             "bundle_fingerprint_sha256": fingerprint,
             "session_id": session_id,
-            "direct_base_url": "http://127.0.0.1:8022",
+            "direct_base_url": direct_base_url,
             "gateway_base_url": "http://127.0.0.1:8080",
-            "health_url": "http://127.0.0.1:8022/health",
-            "direct_health_url": "http://127.0.0.1:8022/health",
+            "health_url": health_url,
+            "direct_health_url": health_url,
             "gateway_health_url": "http://127.0.0.1:8080/health",
             "cdp_url": "http://127.0.0.1:9355",
             "backend_pid": backend_pid,
@@ -4771,8 +4839,10 @@ def test_r18_v5_cache_worker_uses_prior_backend_pid_for_restart_phases(
         v5_ready_path=control_dir / "unused.ready.json",
         v5_release_path=control_dir / "unused.release.json",
         direct_base_url="http://127.0.0.1:8022",
+        native_direct_base_url="http://127.0.0.1:8023",
         gateway_base_url="http://127.0.0.1:8080",
         health_url="http://127.0.0.1:8022/health",
+        native_health_url="http://127.0.0.1:8023/health",
         gateway_health_url="http://127.0.0.1:8080/health",
         cdp_url="http://127.0.0.1:9355",
         electron_pid=75096,
@@ -5410,8 +5480,10 @@ def _v5_fixture_child(argv: list[str]) -> int:
     parser.add_argument("--model")
     parser.add_argument("--native-model")
     parser.add_argument("--direct-base-url")
+    parser.add_argument("--native-direct-base-url")
     parser.add_argument("--gateway-base-url")
     parser.add_argument("--health-url")
+    parser.add_argument("--native-health-url")
     parser.add_argument("--gateway-health-url")
     parser.add_argument("--cdp-url")
     parser.add_argument("--backend-pid", type=int)
@@ -5530,10 +5602,18 @@ def _v5_fixture_child(argv: list[str]) -> int:
                 "model_bundle_path": str(phase_bundle_root.resolve()),
                 "bundle_fingerprint_sha256": phase_bundle_fingerprint,
                 "session_id": session_id,
-                "direct_base_url": args.direct_base_url,
+                "direct_base_url": (
+                    args.native_direct_base_url
+                    if is_native
+                    else args.direct_base_url
+                ),
                 "gateway_base_url": args.gateway_base_url,
-                "health_url": args.health_url,
-                "direct_health_url": args.health_url,
+                "health_url": (
+                    args.native_health_url if is_native else args.health_url
+                ),
+                "direct_health_url": (
+                    args.native_health_url if is_native else args.health_url
+                ),
                 "gateway_health_url": args.gateway_health_url,
                 "cdp_url": args.cdp_url,
                 "backend_pid": backend_pid,
@@ -5637,7 +5717,11 @@ def _v5_fixture_child(argv: list[str]) -> int:
                 "bundle_fingerprint_sha256": phase_bundle_fingerprint,
                 "backend_pid": backend_pid,
                 "gateway_pid": args.gateway_pid,
-                "direct_base_url": args.direct_base_url,
+                "direct_base_url": (
+                    args.native_direct_base_url
+                    if is_native
+                    else args.direct_base_url
+                ),
                 "gateway_base_url": args.gateway_base_url,
                 "electron_pid": args.electron_pid,
                 "cdp_origin": args.cdp_url,
@@ -5736,10 +5820,22 @@ def _v5_fixture_child(argv: list[str]) -> int:
                     "model_bundle_path": str(phase_bundle_root.resolve()),
                     "bundle_fingerprint_sha256": phase_bundle_fingerprint,
                     "session_id": phase_session_id,
-                    "direct_base_url": args.direct_base_url,
+                    "direct_base_url": (
+                        args.native_direct_base_url
+                        if is_native
+                        else args.direct_base_url
+                    ),
                     "gateway_base_url": args.gateway_base_url,
-                    "health_url": args.health_url,
-                    "direct_health_url": args.health_url,
+                    "health_url": (
+                        args.native_health_url
+                        if is_native
+                        else args.health_url
+                    ),
+                    "direct_health_url": (
+                        args.native_health_url
+                        if is_native
+                        else args.health_url
+                    ),
                     "gateway_health_url": args.gateway_health_url,
                     "cdp_url": args.cdp_url,
                     "backend_pid": backend_pid,

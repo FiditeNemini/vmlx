@@ -5034,13 +5034,69 @@ def _v5_independent_runtime_observation(
 
 def _v5_host_port(base_url: str) -> tuple[str, int]:
     parsed = urlsplit(base_url)
+    host = parsed.hostname
+    canonical_host = f"[{host}]" if host and ":" in host else host
+    canonical_origin = (
+        f"http://{canonical_host}:{parsed.port}"
+        if canonical_host is not None and parsed.port is not None
+        else ""
+    )
+    if (
+        parsed.scheme != "http"
+        or host not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.port is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != ""
+        or parsed.query
+        or parsed.fragment
+        or base_url != canonical_origin
+    ):
+        raise ValueError(f"invalid loopback base URL: {base_url}")
+    return str(host), int(parsed.port)
+
+
+def _v5_validate_endpoint_pair(
+    base_url: str,
+    health_url: str,
+    *,
+    label: str,
+) -> tuple[str, str]:
+    _v5_host_port(base_url)
+    if health_url != f"{base_url}/health":
+        raise ValueError(f"{label} health URL is not the exact /health endpoint")
+    parsed = urlsplit(health_url)
     if (
         parsed.scheme != "http"
         or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
         or parsed.port is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/health"
+        or parsed.query
+        or parsed.fragment
     ):
-        raise ValueError(f"invalid loopback base URL: {base_url}")
-    return str(parsed.hostname), int(parsed.port)
+        raise ValueError(f"invalid {label} health URL: {health_url}")
+    return base_url, health_url
+
+
+def _v5_representative_direct_endpoints(
+    args: argparse.Namespace,
+    representative_id: str,
+) -> tuple[str, str]:
+    if representative_id == V5_PRIMARY_REPRESENTATIVE_ID:
+        return _v5_validate_endpoint_pair(
+            args.direct_base_url,
+            args.health_url,
+            label="primary direct",
+        )
+    if representative_id == V5_NATIVE_REPRESENTATIVE_ID:
+        return _v5_validate_endpoint_pair(
+            args.native_direct_base_url,
+            args.native_health_url,
+            label="native direct",
+        )
+    raise ValueError(f"unknown representative ID: {representative_id}")
 
 
 def _v5_collect_owned_captures(
@@ -7823,10 +7879,14 @@ def _v5_default_producer_plans(
         str(args.native_bundle_root),
         "--direct-base-url",
         args.direct_base_url,
+        "--native-direct-base-url",
+        args.native_direct_base_url,
         "--gateway-base-url",
         args.gateway_base_url,
         "--health-url",
         args.health_url,
+        "--native-health-url",
+        args.native_health_url,
         "--gateway-health-url",
         args.gateway_health_url,
         "--cdp-url",
@@ -8409,28 +8469,47 @@ def _v5_build_run_intent(
 ) -> dict[str, Any]:
     if set(expected_binding) != set(V5_REPRESENTATIVE_IDS):
         raise ValueError("run intent representative set is incomplete")
-    common_values = {
+    shared_values = {
         (
             row.get("source_commit"),
             row.get("source_tree"),
-            row.get("direct_base_url"),
             row.get("gateway_base_url"),
-            row.get("direct_health_url"),
             row.get("gateway_health_url"),
         )
         for row in expected_binding.values()
         if isinstance(row, dict)
     }
-    if len(common_values) != 1:
+    if len(shared_values) != 1:
         raise ValueError("run intent representatives do not share one source")
     (
         source_commit,
         source_tree,
-        direct_base_url,
         gateway_base_url,
-        direct_health_url,
         gateway_health_url,
-    ) = next(iter(common_values))
+    ) = next(iter(shared_values))
+    primary = expected_binding[V5_PRIMARY_REPRESENTATIVE_ID]
+    native = expected_binding[V5_NATIVE_REPRESENTATIVE_ID]
+    direct_base_url, direct_health_url = _v5_validate_endpoint_pair(
+        str(primary.get("direct_base_url") or ""),
+        str(primary.get("direct_health_url") or ""),
+        label="primary direct",
+    )
+    native_direct_base_url, native_direct_health_url = (
+        _v5_validate_endpoint_pair(
+            str(native.get("direct_base_url") or ""),
+            str(native.get("direct_health_url") or ""),
+            label="native direct",
+        )
+    )
+    gateway_base_url, gateway_health_url = _v5_validate_endpoint_pair(
+        str(gateway_base_url or ""),
+        str(gateway_health_url or ""),
+        label="gateway",
+    )
+    if len({direct_base_url, native_direct_base_url, gateway_base_url}) != 3:
+        raise ValueError(
+            "run intent primary, native, and gateway origins must be distinct"
+        )
     if (
         not re.fullmatch(r"[0-9a-f]{40}", str(source_commit or ""))
         or not re.fullmatch(r"[0-9a-f]{40}", str(source_tree or ""))
@@ -8455,8 +8534,10 @@ def _v5_build_run_intent(
         "source_tree": source_tree,
         "harnesses": harnesses,
         "direct_base_url": direct_base_url,
+        "native_direct_base_url": native_direct_base_url,
         "gateway_base_url": gateway_base_url,
         "direct_health_url": direct_health_url,
+        "native_direct_health_url": native_direct_health_url,
         "gateway_health_url": gateway_health_url,
         "l2_size_eviction_requirements": dict(
             V5_L2_SIZE_EVICTION_REQUIREMENTS
@@ -8501,9 +8582,7 @@ def _v5_execute_producers(
         (
             row.get("source_commit"),
             row.get("source_tree"),
-            row.get("direct_base_url"),
             row.get("gateway_base_url"),
-            row.get("direct_health_url"),
             row.get("gateway_health_url"),
             row.get("cdp_url"),
             row.get("electron_pid"),
@@ -8514,6 +8593,38 @@ def _v5_execute_producers(
     }
     if len(source_identities) != 1:
         raise ValueError("owned representatives do not share one runtime source")
+    primary_endpoint = _v5_validate_endpoint_pair(
+        str(
+            expected_binding[V5_PRIMARY_REPRESENTATIVE_ID].get(
+                "direct_base_url"
+            )
+            or ""
+        ),
+        str(
+            expected_binding[V5_PRIMARY_REPRESENTATIVE_ID].get(
+                "direct_health_url"
+            )
+            or ""
+        ),
+        label="primary direct",
+    )
+    native_endpoint = _v5_validate_endpoint_pair(
+        str(
+            expected_binding[V5_NATIVE_REPRESENTATIVE_ID].get(
+                "direct_base_url"
+            )
+            or ""
+        ),
+        str(
+            expected_binding[V5_NATIVE_REPRESENTATIVE_ID].get(
+                "direct_health_url"
+            )
+            or ""
+        ),
+        label="native direct",
+    )
+    if primary_endpoint[0] == native_endpoint[0]:
+        raise ValueError("owned representatives share one direct origin")
     plans = {
         name: {
             **spec,
@@ -9899,6 +10010,12 @@ def _v5_ui_worker_capture(
         if phase["representative_id"] == V5_PRIMARY_REPRESENTATIVE_ID
         else args.native_model
     )
+    active_direct_base_url, active_health_url = (
+        _v5_representative_direct_endpoints(
+            args,
+            phase["representative_id"],
+        )
+    )
     node, tool_pins = _v5_prepare_fixed_node_path(
         run_root,
         phase_index=args.v5_active_phase_index,
@@ -9915,7 +10032,7 @@ def _v5_ui_worker_capture(
         run_root,
         f"ui-harness.phase-{phase['index']:02d}.stderr",
     )
-    direct_port = _v5_host_port(args.direct_base_url)[1]
+    direct_port = _v5_host_port(active_direct_base_url)[1]
     fixed_bin = (
         run_root
         / f"fixed-node-bin-phase-{args.v5_active_phase_index:02d}"
@@ -10012,7 +10129,7 @@ def _v5_ui_worker_capture(
             harness_binding.get("run_id") != args.v5_run_id
             or harness_binding.get("source_commit") != source["commit"]
             or harness_binding.get("source_tree") != source["tree"]
-            or harness_binding.get("base_url") != args.direct_base_url
+            or harness_binding.get("base_url") != active_direct_base_url
             or harness_binding.get("served_model") != active_model
             or harness_binding.get("model_bundle_fingerprint_sha256")
             != bundle["fingerprint_sha256"]
@@ -10033,10 +10150,10 @@ def _v5_ui_worker_capture(
             "model_bundle_path": bundle["model_bundle_path"],
             "bundle_fingerprint_sha256": bundle["fingerprint_sha256"],
             "session_id": session_id,
-            "direct_base_url": args.direct_base_url,
+            "direct_base_url": active_direct_base_url,
             "gateway_base_url": args.gateway_base_url,
-            "health_url": args.health_url,
-            "direct_health_url": args.health_url,
+            "health_url": active_health_url,
+            "direct_health_url": active_health_url,
             "gateway_health_url": args.gateway_health_url,
             "cdp_url": cdp_url,
             "backend_pid": backend_pid,
@@ -10658,6 +10775,10 @@ def _v5_worker_session_binding(
         if phase["representative_id"] == V5_PRIMARY_REPRESENTATIVE_ID
         else args.native_model
     )
+    direct_base_url, health_url = _v5_representative_direct_endpoints(
+        args,
+        phase["representative_id"],
+    )
     required_binding = {
         "schema": V5_SESSION_BINDING_SCHEMA,
         "run_id": args.v5_run_id,
@@ -10667,10 +10788,10 @@ def _v5_worker_session_binding(
         "model": expected_model,
         "model_bundle_path": bundle["model_bundle_path"],
         "bundle_fingerprint_sha256": bundle["fingerprint_sha256"],
-        "direct_base_url": args.direct_base_url,
+        "direct_base_url": direct_base_url,
         "gateway_base_url": args.gateway_base_url,
-        "health_url": args.health_url,
-        "direct_health_url": args.health_url,
+        "health_url": health_url,
+        "direct_health_url": health_url,
         "gateway_health_url": args.gateway_health_url,
         "cdp_url": args.cdp_url,
         "electron_pid": args.electron_pid,
@@ -10769,8 +10890,10 @@ def _v5_worker_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bundle-root", type=Path, required=True)
     parser.add_argument("--native-bundle-root", type=Path, required=True)
     parser.add_argument("--direct-base-url", required=True)
+    parser.add_argument("--native-direct-base-url", required=True)
     parser.add_argument("--gateway-base-url", required=True)
     parser.add_argument("--health-url", required=True)
+    parser.add_argument("--native-health-url", required=True)
     parser.add_argument("--gateway-health-url", required=True)
     parser.add_argument("--cdp-url", required=True)
     parser.add_argument("--electron-pid", type=int, required=True)
@@ -10917,10 +11040,7 @@ def _v5_owned_worker_main(argv: list[str]) -> int:
     common_expected = {
         "source_commit": args.v5_source_commit,
         "source_tree": args.v5_source_tree,
-        "direct_base_url": args.direct_base_url,
         "gateway_base_url": args.gateway_base_url,
-        "health_url": args.health_url,
-        "direct_health_url": args.health_url,
         "gateway_health_url": args.gateway_health_url,
         "cdp_url": args.cdp_url,
         "electron_pid": args.electron_pid,
@@ -10929,6 +11049,9 @@ def _v5_owned_worker_main(argv: list[str]) -> int:
     worker_representatives = {
         V5_PRIMARY_REPRESENTATIVE_ID: {
             **common_expected,
+            "direct_base_url": args.direct_base_url,
+            "health_url": args.health_url,
+            "direct_health_url": args.health_url,
             "model": args.model,
             "model_bundle_path": bundles[V5_PRIMARY_REPRESENTATIVE_ID][
                 "model_bundle_path"
@@ -10942,6 +11065,9 @@ def _v5_owned_worker_main(argv: list[str]) -> int:
         },
         V5_NATIVE_REPRESENTATIVE_ID: {
             **common_expected,
+            "direct_base_url": args.native_direct_base_url,
+            "health_url": args.native_health_url,
+            "direct_health_url": args.native_health_url,
             "model": args.native_model,
             "model_bundle_path": bundles[V5_NATIVE_REPRESENTATIVE_ID][
                 "model_bundle_path"
@@ -12510,8 +12636,10 @@ def _v5_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", required=True)
     parser.add_argument("--native-model", required=True)
     parser.add_argument("--direct-base-url", required=True)
+    parser.add_argument("--native-direct-base-url", required=True)
     parser.add_argument("--gateway-base-url", required=True)
     parser.add_argument("--health-url", required=True)
+    parser.add_argument("--native-health-url", required=True)
     parser.add_argument("--gateway-health-url", required=True)
     parser.add_argument("--cdp-url", required=True)
     parser.add_argument("--backend-pid", type=int, required=True)
@@ -12662,10 +12790,7 @@ def _v5_run(
     common_expected = {
         "source_commit": before_source["commit"],
         "source_tree": before_source["tree"],
-        "direct_base_url": args.direct_base_url,
         "gateway_base_url": args.gateway_base_url,
-        "health_url": args.health_url,
-        "direct_health_url": args.health_url,
         "gateway_health_url": args.gateway_health_url,
         "cdp_url": args.cdp_url,
         "electron_pid": args.electron_pid,
@@ -12678,6 +12803,21 @@ def _v5_run(
         expected_binding={
             representative_id: {
                 **common_expected,
+                "direct_base_url": (
+                    args.direct_base_url
+                    if representative_id == V5_PRIMARY_REPRESENTATIVE_ID
+                    else args.native_direct_base_url
+                ),
+                "health_url": (
+                    args.health_url
+                    if representative_id == V5_PRIMARY_REPRESENTATIVE_ID
+                    else args.native_health_url
+                ),
+                "direct_health_url": (
+                    args.health_url
+                    if representative_id == V5_PRIMARY_REPRESENTATIVE_ID
+                    else args.native_health_url
+                ),
                 "model": representative["model"],
                 "model_bundle_path": representative["bundle"][
                     "model_bundle_path"

@@ -562,8 +562,10 @@ function ownedRunIntent(
     source_tree: "4".repeat(40),
     harnesses,
     direct_base_url: "http://127.0.0.1:8001",
+    native_direct_base_url: "http://127.0.0.1:8002",
     gateway_base_url: "http://127.0.0.1:8088",
     direct_health_url: "http://127.0.0.1:8001/health",
+    native_direct_health_url: "http://127.0.0.1:8002/health",
     gateway_health_url: "http://127.0.0.1:8088/health",
     l2_size_eviction_requirements: {
       disk_bytes_within_saved_limit: true,
@@ -3000,6 +3002,13 @@ describe("real UI model proof harness", () => {
         expectedGatewayBaseUrl: "http://127.0.0.1:8088",
       };
       expect(validateOwnedRunIntent(opened, options)).toEqual([]);
+      expect(validateOwnedRunIntent(opened, {
+        ...options,
+        activePhaseIndex: 5,
+        activeModel: "native-model",
+        activeModelBundlePath: nativeBundle,
+        expectedDirectBaseUrl: "http://127.0.0.1:8002",
+      })).toEqual([]);
 
       const reordered = structuredClone(value);
       [
@@ -3041,7 +3050,32 @@ describe("real UI model proof harness", () => {
       expect(validateOwnedRunIntent(
         { ...opened, value: crossOrigin },
         options,
-      ).join("\n")).toMatch(/direct\/gateway origin binding is invalid/);
+      ).join("\n")).toMatch(/primary\/native\/gateway endpoint binding is invalid/);
+
+      const sharedDirect = structuredClone(value);
+      sharedDirect.native_direct_base_url = sharedDirect.direct_base_url;
+      sharedDirect.native_direct_health_url = sharedDirect.direct_health_url;
+      sharedDirect.canonical_sha256 = canonicalHash(
+        Object.fromEntries(
+          Object.entries(sharedDirect).filter(([key]) => key !== "canonical_sha256"),
+        ),
+      );
+      expect(validateOwnedRunIntent(
+        { ...opened, value: sharedDirect },
+        options,
+      ).join("\n")).toMatch(/primary\/native\/gateway endpoint binding is invalid/);
+
+      const nativePath = structuredClone(value);
+      nativePath.native_direct_base_url = "http://127.0.0.1:8002/extra";
+      nativePath.canonical_sha256 = canonicalHash(
+        Object.fromEntries(
+          Object.entries(nativePath).filter(([key]) => key !== "canonical_sha256"),
+        ),
+      );
+      expect(validateOwnedRunIntent(
+        { ...opened, value: nativePath },
+        options,
+      ).join("\n")).toMatch(/primary\/native\/gateway endpoint binding is invalid/);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

@@ -29,6 +29,7 @@ import {
   privateCacheAttestationSessionArgs,
   readPrivateExternalJson,
   resolveIndependentBundleGenerationDefaults,
+  upsertBoundedDomSample,
   uniqueProofBasename,
   validateExactToolLoopEvidence,
   validateAttachOnlyLifecycle,
@@ -293,6 +294,91 @@ describe("generated CDP expression syntax", () => {
     expect(harnessSource).toContain("input.click();");
     expect(harnessSource).toContain("'visible Working Directory input'");
     expect(harnessSource).not.toContain("checkedSetter.call(");
+  });
+
+  it("keeps streaming proof capture linear and bounds full DOM samples", () => {
+    const harnessSource = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+
+    expect(harnessSource).toContain("const maxDomSamplesPerMessage = 24;");
+    expect(harnessSource).toContain("const streamTraceState = new Map();");
+    expect(harnessSource).toContain(
+      "const upsertBoundedDomSample = ${upsertBoundedDomSample.toString()}",
+    );
+    expect(harnessSource).toContain(
+      "fullContentLength: data.fullContent.length",
+    );
+    expect(harnessSource).toContain(
+      "scheduleDomSample(messageId, event + ':' + channel, event !== 'stream')",
+    );
+    expect(harnessSource).not.toContain("payload: data,\n          });");
+  });
+
+  it("preserves the terminal DOM state without ever exceeding the hard sample cap", () => {
+    const samples: Array<Record<string, unknown>> = [];
+    const state = {
+      count: 0,
+      lastSignature: "",
+      lastStoredIndex: -1,
+    };
+    for (let index = 1; index <= 30; index += 1) {
+      upsertBoundedDomSample(
+        samples,
+        state,
+        {
+          messageId: "assistant-1",
+          answerText: "x".repeat(index),
+          reasoningText: "r",
+          katexCount: 0,
+          toolCards: [],
+        },
+        24,
+      );
+    }
+    expect(samples).toHaveLength(24);
+    expect(state.count).toBe(24);
+
+    upsertBoundedDomSample(
+      samples,
+      state,
+      {
+        messageId: "assistant-1",
+        answerText: "terminal answer",
+        reasoningText: "terminal reasoning",
+        katexCount: 1,
+        toolCards: [{ phase: "result" }],
+      },
+      24,
+      true,
+    );
+    expect(samples).toHaveLength(24);
+    expect(samples.at(-1)?.answerText).toBe("terminal answer");
+  });
+
+  it("stages and attests each V5 cache phase before the real Start click", () => {
+    const harnessSource = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+    const preflightSource = readFileSync(
+      path.resolve("scripts/scoped-release-preflight-18.py"),
+      "utf8",
+    );
+
+    expect(harnessSource).toContain(
+      "usePagedCache: Boolean(activeReleasePhase.paged_ram)",
+    );
+    expect(harnessSource).toContain(
+      "kvCacheQuantization: String(activeReleasePhase.kv_cache_quantization || 'none')",
+    );
+    expect(preflightSource).toContain(
+      '"VMLINUX_REAL_UI_EXPECT_PAGED_CACHE": (',
+    );
+    expect(preflightSource).toContain(
+      '"VMLINUX_REAL_UI_MAX_TOKENS": "2048"',
+    );
   });
 });
 
@@ -2318,12 +2404,50 @@ describe("real UI model proof harness", () => {
   it("rejects cumulative resets, transient parser markers, and final/persisted mismatch", () => {
     const result = structuredClone(goodResult());
     result.messageEventTrace[0].events[1].cumulativeReset = true;
-    result.messageEventTrace[1].events[0].payload.fullContent = "<thi";
-    result.messageEventTrace[2].events.at(-2).payload.fullContent =
-      "different final";
+    result.messageEventTrace[1].events[0].delta = "<thi";
+    result.messageEventTrace[2].events.at(-2).delta += " different final";
+    result.messageEventTrace[2].events.at(-2).payload.fullContentLength =
+      result.messageEventTrace[2].events.at(-2).payload.fullContent.length
+      + " different final".length;
     expect(validateReasoningEvidence(result, "required").join("\n")).toMatch(
       /stream reset or shrank|transient reasoning stream|does not equal persisted final/,
     );
+  });
+
+  it.each([
+    ["<t", "hink>"],
+    ["[T", "HINK]"],
+    ["<m", "m:think>"],
+  ])("rejects parser markers split across stream boundaries", (first, second) => {
+    const result = structuredClone(goodResult());
+    const reasoningEvents = result.messageEventTrace[0].events.filter(
+      (event: Record<string, unknown>) => event.event === "stream" && event.channel === "reasoning",
+    );
+    reasoningEvents[0].delta = first;
+    reasoningEvents[0].payload.fullContentLength = first.length;
+    delete reasoningEvents[0].payload.fullContent;
+    reasoningEvents[1].delta = second;
+    reasoningEvents[1].payload.fullContentLength = first.length + second.length;
+    delete reasoningEvents[1].payload.fullContent;
+    result.persistedReasoningByMessage[0] = [{ text: first + second }];
+
+    expect(validateReasoningEvidence(result, "required").join("\n")).toMatch(
+      /parser markers across reasoning stream boundaries/,
+    );
+  });
+
+  it("accepts compact stream events without retaining cumulative payload text", () => {
+    const result = structuredClone(goodResult());
+    for (const trace of result.messageEventTrace) {
+      for (const event of trace.events) {
+        if (event.event !== "stream") continue;
+        event.payload.fullContentLength = event.payload.fullContent.length;
+        delete event.payload.fullContent;
+      }
+    }
+
+    expect(validateRenderedDomEvidence(result)).toEqual([]);
+    expect(validateReasoningEvidence(result, "required")).toEqual([]);
   });
 
   it("rejects duplicate/error tool records and missing probe cleanup", () => {

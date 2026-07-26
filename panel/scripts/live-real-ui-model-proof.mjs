@@ -2540,10 +2540,11 @@ export function validateRenderedDomEvidence(result) {
         `assistant message ${messageId} normalized visible answer is not linked to persisted content`,
       )
     }
-    const finalContentEvent = (traceById.get(String(messageId))?.events || [])
-      .filter((event) => event?.event === 'stream' && event?.channel === 'content')
-      .at(-1)
-    if (String(finalContentEvent?.payload?.fullContent || '') !== persisted) {
+    const finalContent = traceChannelText(
+      traceById.get(String(messageId))?.events || [],
+      'content',
+    )
+    if (finalContent !== persisted) {
       failures.push(`assistant message ${messageId} final stream does not equal persisted content`)
     }
     if (!traceIds.has(String(messageId))) {
@@ -2621,6 +2622,41 @@ export function validateRenderedDomEvidence(result) {
   return failures
 }
 
+function traceChannelText(events, channel) {
+  return (Array.isArray(events) ? events : [])
+    .filter((event) => event?.event === 'stream' && event?.channel === channel)
+    .map((event) => String(event?.delta || ''))
+    .join('')
+}
+
+export function upsertBoundedDomSample(samples, state, sample, maxSamples, force = false) {
+  if (!Array.isArray(samples) || !state || !sample) return false
+  const limit = Math.max(1, Number.parseInt(String(maxSamples), 10) || 1)
+  const signature = [
+    String(sample.answerText || '').length,
+    String(sample.reasoningText || '').length,
+    Number(sample.katexCount || 0),
+    Array.isArray(sample.toolCards) ? sample.toolCards.length : 0,
+  ].join(':')
+  if (!force && signature === state.lastSignature) return false
+  if (state.count < limit) {
+    samples.push(sample)
+    state.count += 1
+    state.lastStoredIndex = samples.length - 1
+  } else if (
+    force
+    && Number.isInteger(state.lastStoredIndex)
+    && state.lastStoredIndex >= 0
+    && state.lastStoredIndex < samples.length
+  ) {
+    samples[state.lastStoredIndex] = sample
+  } else {
+    return false
+  }
+  state.lastSignature = signature
+  return true
+}
+
 export function validateReasoningEvidence(result, expectation = 'optional') {
   const failures = []
   const expectedTurns = expectedUiTurnCount(result)
@@ -2654,11 +2690,9 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
     const contentEvents = events.filter(
       (event) => event?.event === 'stream' && event?.channel === 'content',
     )
-    const contentStates = new Set(
-      contentEvents
-        .map((event) => String(event?.payload?.fullContent || ''))
-        .filter(Boolean),
-    )
+    const progressiveContentDeltaCount = contentEvents
+      .filter((event) => String(event?.delta || '').length > 0)
+      .length
     const messageDomSamples = domSamples.filter(
       (sample) => String(sample?.messageId || '') === String(row?.messageId || ''),
     )
@@ -2673,27 +2707,40 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
       failures.push(`message ${row?.messageId || 'unknown'} event sequence is not strictly monotonic`)
     }
     for (const channel of ['reasoning', 'content']) {
-      let previous = ''
+      let previousLength = 0
       const channelEvents = events.filter(
         (event) => event?.event === 'stream' && event?.channel === channel,
       )
       for (const event of channelEvents) {
-        const full = String(event?.payload?.fullContent || '')
-        if (event?.cumulativeReset === true || (previous && !full.startsWith(previous))) {
+        const delta = String(event?.delta || '')
+        const retainedFullContent = event?.payload?.fullContent
+        const fullContentLength = Number(
+          event?.payload?.fullContentLength
+            ?? (typeof retainedFullContent === 'string'
+              ? retainedFullContent.length
+              : Number.NaN),
+        )
+        if (
+          event?.cumulativeReset === true
+          || !Number.isFinite(fullContentLength)
+          || fullContentLength !== previousLength + delta.length
+        ) {
           failures.push(`message ${row?.messageId || 'unknown'} ${channel} stream reset or shrank`)
           break
         }
         if (
-          containsTransientProtocolMarker(full)
-          || containsTransientProtocolMarker(event?.delta)
+          containsTransientProtocolMarker(delta)
         ) {
           failures.push(`message ${row?.messageId || 'unknown'} leaked parser markers in transient ${channel} stream`)
           break
         }
-        previous = full
+        previousLength = fullContentLength
+      }
+      if (containsTransientProtocolMarker(traceChannelText(channelEvents, channel))) {
+        failures.push(`message ${row?.messageId || 'unknown'} leaked parser markers across ${channel} stream boundaries`)
       }
     }
-    if (contentStates.size < 2) {
+    if (progressiveContentDeltaCount < 2) {
       failures.push(`message ${row?.messageId || 'unknown'} content was not progressively streamed`)
     }
     if (renderedAnswerStates.size < 2) {
@@ -2719,21 +2766,19 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
       .map(String)
       .indexOf(String(row?.messageId || ''))
     const persistedContent = String(result?.assistantRecords?.[assistantIndex]?.content || '')
-    const finalContent = String(contentEvents.at(-1)?.payload?.fullContent || '')
+    const finalContent = traceChannelText(events, 'content')
     if (finalContent !== persistedContent) {
       failures.push(`message ${row?.messageId || 'unknown'} final content stream does not equal persisted final`)
     }
     if (!reasoningEvents.length) continue
     reasoningMessageCount += 1
-    const reasoningStates = new Set(
-      reasoningEvents
-        .map((event) => String(event?.payload?.fullContent || ''))
-        .filter(Boolean),
-    )
-    if (reasoningStates.size < 2) {
+    const progressiveReasoningDeltaCount = reasoningEvents
+      .filter((event) => String(event?.delta || '').length > 0)
+      .length
+    if (progressiveReasoningDeltaCount < 2) {
       failures.push(`message ${row.messageId} reasoning was not progressively streamed`)
     }
-    if (contentStates.size < 2) {
+    if (progressiveContentDeltaCount < 2) {
       failures.push(`message ${row.messageId} visible content was not progressively streamed`)
     }
     if (reasoningEvents.some((event) => event?.payload?.isReasoning !== true)) {
@@ -2758,7 +2803,7 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
       .map((segment) => String(segment?.text || ''))
       .filter(Boolean)
       .join('\n')
-    const finalReasoning = String(reasoningEvents.at(-1)?.payload?.fullContent || '')
+    const finalReasoning = traceChannelText(events, 'reasoning')
     if (finalReasoning !== persistedReasoning) {
       failures.push(`message ${row.messageId} final reasoning stream does not equal persisted reasoning`)
     }
@@ -6211,6 +6256,10 @@ async function main() {
             && rect.height > 0;
         };
         const domSamples = [];
+        const domSampleState = new Map();
+        const maxDomSamplesPerMessage = 24;
+        const minDomSampleIntervalMs = 125;
+        const upsertBoundedDomSample = ${upsertBoundedDomSample.toString()};
         const transientAlerts = [];
         const observedAlertText = new Set();
         const captureAlerts = () => {
@@ -6282,22 +6331,60 @@ async function main() {
             toolCards,
           };
         };
-        const scheduleDomSample = (messageId, cause) => {
+        const scheduleDomSample = (messageId, cause, force = false) => {
+          const key = String(messageId || 'unknown');
+          const now = performance.now();
+          const state = domSampleState.get(key) || {
+            count: 0,
+            pending: false,
+            forcePending: false,
+            lastScheduledAt: -Infinity,
+            lastSignature: '',
+            lastStoredIndex: -1,
+          };
+          if (state.pending) {
+            if (force) state.forcePending = true;
+            domSampleState.set(key, state);
+            return;
+          }
+          if (
+            !force
+            && (
+              state.count >= maxDomSamplesPerMessage
+              || now - state.lastScheduledAt < minDomSampleIntervalMs
+            )
+          ) return;
+          state.pending = true;
+          state.lastScheduledAt = now;
+          domSampleState.set(key, state);
           requestAnimationFrame(() => requestAnimationFrame(() => {
+            state.pending = false;
+            const captureAsFinal = force || state.forcePending;
+            state.forcePending = false;
             const sample = snapshotMessage(messageId, cause);
-            if (sample) domSamples.push(sample);
+            if (sample) {
+              upsertBoundedDomSample(
+                domSamples,
+                state,
+                sample,
+                maxDomSamplesPerMessage,
+                captureAsFinal,
+              );
+            }
             captureAlerts();
           }));
         };
         await window.api.engine.checkInstallation().catch(() => null);
         await window.api.chat.clearAllLocks().catch(() => null);
         const events = { stream: [], tool: [], reasoningDone: [], complete: [] };
+        const eventCounts = { stream: 0, tool: 0, reasoningDone: 0, complete: 0 };
+        const streamTraceState = new Map();
         const eventTrace = [];
         const priorFullContent = new Map();
         let eventSequence = 0;
         const recordEvent = (bucket, event, data) => {
           const captured = { t: performance.now(), ...data };
-          events[bucket].push(captured);
+          eventCounts[bucket] += 1;
           const messageId = data?.messageId || 'unknown';
           const channel = event === 'stream'
             ? (data?.isReasoning ? 'reasoning' : 'content')
@@ -6308,6 +6395,7 @@ async function main() {
                 : 'terminal';
           let delta = null;
           let cumulativeReset = false;
+          let tracePayload = data;
           if (event === 'stream' && typeof data?.fullContent === 'string') {
             const key = messageId + ':' + channel;
             const previous = priorFullContent.get(key) || '';
@@ -6318,6 +6406,38 @@ async function main() {
               delta = data.fullContent;
             }
             priorFullContent.set(key, data.fullContent);
+            tracePayload = {
+              messageId: data?.messageId || null,
+              isReasoning: data?.isReasoning === true,
+              metrics: data?.metrics || null,
+              fullContentLength: data.fullContent.length,
+            };
+            const summary = streamTraceState.get(messageId) || {
+              messageId,
+              count: 0,
+              firstFullContent: '',
+              lastFullContent: '',
+              firstReasoningContent: '',
+              lastReasoningContent: '',
+              firstMetrics: null,
+              lastMetrics: null,
+            };
+            summary.count += 1;
+            if (data.fullContent && !summary.firstFullContent) {
+              summary.firstFullContent = data.fullContent;
+            }
+            if (data.fullContent) summary.lastFullContent = data.fullContent;
+            if (data.isReasoning && data.fullContent && !summary.firstReasoningContent) {
+              summary.firstReasoningContent = data.fullContent;
+            }
+            if (data.isReasoning && data.fullContent) {
+              summary.lastReasoningContent = data.fullContent;
+            }
+            if (data?.metrics && !summary.firstMetrics) summary.firstMetrics = data.metrics;
+            if (data?.metrics) summary.lastMetrics = data.metrics;
+            streamTraceState.set(messageId, summary);
+          } else {
+            events[bucket].push(captured);
           }
           eventTrace.push({
             sequence: ++eventSequence,
@@ -6327,9 +6447,9 @@ async function main() {
             messageId,
             delta,
             cumulativeReset,
-            payload: data,
+            payload: tracePayload,
           });
-          scheduleDomSample(messageId, event + ':' + channel);
+          scheduleDomSample(messageId, event + ':' + channel, event !== 'stream');
         };
         const cleanup = [
           window.api.chat.onStream((data) => recordEvent('stream', 'stream', data)),
@@ -6363,6 +6483,12 @@ async function main() {
             port: ${JSON.stringify(serverPort)},
             servedModelName: servedModel,
             logLevel: 'INFO',
+            ...(${JSON.stringify(activeReleasePhase ? {
+              enablePrefixCache: true,
+              usePagedCache: Boolean(activeReleasePhase.paged_ram),
+              enableBlockDiskCache: true,
+              kvCacheQuantization: String(activeReleasePhase.kv_cache_quantization || 'none'),
+            } : {})}),
             ...(privateCacheAttestationArgs
               ? { additionalArgs: privateCacheAttestationArgs }
               : {}),
@@ -6472,6 +6598,27 @@ async function main() {
             && sessionBeforeStart?.id !== requestedReuseSessionId
           ) {
             throw new Error('Visible restart selected a different local session');
+          }
+          if (requestedReuseSessionId) {
+            const releasePhaseSessionConfig = ${JSON.stringify(activeReleasePhase ? {
+              enablePrefixCache: true,
+              usePagedCache: Boolean(activeReleasePhase.paged_ram),
+              enableBlockDiskCache: true,
+              kvCacheQuantization: String(activeReleasePhase.kv_cache_quantization || 'none'),
+            } : {})};
+            if (Object.keys(releasePhaseSessionConfig).length) {
+              const phaseConfigUpdate = await window.api.sessions.update(
+                created.session.id,
+                releasePhaseSessionConfig,
+              );
+              if (!phaseConfigUpdate?.success) {
+                throw new Error(
+                  phaseConfigUpdate?.error
+                    || 'Failed to stage the release phase cache policy',
+                );
+              }
+              sessionBeforeStart = await window.api.sessions.get(created.session.id);
+            }
           }
           if (privateCacheAttestationArgs) {
             const launchAdditionalArgs = [
@@ -7214,30 +7361,7 @@ async function main() {
           const persistedTools = persistedToolsByMessage.flat();
           const allAssistantText = assistants.map((m) => m.content || '').join('\\n');
           const visible = allAssistantText;
-          const streamTraceByMessage = Object.values(events.stream.reduce((acc, event) => {
-            const key = event?.messageId || 'unknown';
-            const row = acc[key] || {
-              messageId: key,
-              count: 0,
-              firstFullContent: '',
-              lastFullContent: '',
-              firstReasoningContent: '',
-              lastReasoningContent: '',
-              firstMetrics: null,
-              lastMetrics: null,
-            };
-            row.count += 1;
-            const fullContent = typeof event?.fullContent === 'string' ? event.fullContent : '';
-            const reasoningContent = event?.isReasoning && fullContent ? fullContent : '';
-            if (fullContent && !row.firstFullContent) row.firstFullContent = fullContent;
-            if (fullContent) row.lastFullContent = fullContent;
-            if (reasoningContent && !row.firstReasoningContent) row.firstReasoningContent = reasoningContent;
-            if (reasoningContent) row.lastReasoningContent = reasoningContent;
-            if (event?.metrics && !row.firstMetrics) row.firstMetrics = event.metrics;
-            if (event?.metrics) row.lastMetrics = event.metrics;
-            acc[key] = row;
-            return acc;
-          }, {}));
+          const streamTraceByMessage = [...streamTraceState.values()];
           const messageEventTrace = Object.values(eventTrace.reduce((acc, event) => {
             const key = event.messageId || 'unknown';
             const row = acc[key] || { messageId: key, events: [] };
@@ -7252,7 +7376,7 @@ async function main() {
             .map((segment) => typeof segment?.text === 'string' ? segment.text : '')
             .filter(Boolean)
             .join('\\n');
-          const rawParserLeakRegex = /<think>|<\\/think>|<tool_call>|<\\/tool_call>|<function>|<invoke>|<minimax:tool_call>|<zyphra_tool_call>|<\\|point_start\\|>|<\\|point_end\\|>|<\\|box_start\\|>|<\\|box_end\\|>|<\\|tool_call_start\\|>|<\\|tool_call_end\\|>/;
+          const rawParserLeakRegex = /<think>|<\\/think>|<tool_call>|<\\/tool_call>|<function>|<invoke>|<minimax:tool_call>|<zyphra_tool_call>|<\\|point_start\\|>|<\\|point_end\\|>|<\\|box_start\\|>|<\\|box_end\\|>|<\\|tool_call_start\\|>|<\\|tool_call_end\\|>|\\[THINK\\]|\\[\\/THINK\\]|<mm:think>|<\\/mm:think>/i;
           const countRegex = (text, regex) => (text.match(regex) || []).length;
           const numericRunRegex = /(?:^|[\\s([{,;:])(?:\\d{1,4}[\\s,;:|\\-/.]+){8,}\\d{1,4}(?=$|[\\s)\\]},;:.])/gm;
           const contentPartsByMessage = messages.map((m) => {
@@ -7345,10 +7469,10 @@ async function main() {
             cacheBefore,
             cacheAfter: cacheAfterSettled,
             eventCounts: {
-              stream: events.stream.length,
-              tool: events.tool.length,
-              reasoningDone: events.reasoningDone.length,
-              complete: events.complete.length,
+              stream: eventCounts.stream,
+              tool: eventCounts.tool,
+              reasoningDone: eventCounts.reasoningDone,
+              complete: eventCounts.complete,
             },
           };
         } finally {

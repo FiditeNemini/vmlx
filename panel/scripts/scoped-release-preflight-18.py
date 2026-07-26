@@ -9731,6 +9731,10 @@ def _v5_ui_worker_capture(
                 else ""
             ),
             "VMLINUX_REAL_UI_CHECK_SERVER_CACHE_CONTROLS": "1",
+            "VMLINUX_REAL_UI_EXPECT_PAGED_CACHE": (
+                "1" if phase["paged_ram"] else "0"
+            ),
+            "VMLINUX_REAL_UI_MAX_TOKENS": "2048",
             "VMLINUX_REAL_UI_BUILTIN_TOOLS": "1",
             "VMLINUX_REAL_UI_ALLOW_FAIL": "1",
         }

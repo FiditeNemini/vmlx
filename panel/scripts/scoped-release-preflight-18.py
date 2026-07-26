@@ -8604,6 +8604,27 @@ def _v5_execute_producers(
                     output_basename="cache.producer.json",
                 )
                 active_handles.append(cache_handle)
+            if ui_handle["process"].poll() is not None:
+                raise RuntimeError(
+                    f"UI producer exited during cache phase {phase['name']}"
+                )
+            if cache_handle is None:
+                raise RuntimeError("cache producer did not start with phase zero")
+            done, done_bytes = _v5_wait_for_cache_phase_done(
+                cache_handle,
+                paths["cache_done"],
+                run_context=run_context,
+                phase=phase,
+                binding=binding,
+                binding_sha256=binding_digest,
+                timeout=float(
+                    plans["cache"].get("producer_timeout_seconds") or 7_200
+                ),
+            )
+            if paths["release"].exists() or paths["release"].is_symlink():
+                raise RuntimeError(
+                    "UI phase release appeared before paired API proof completion"
+                )
             api_handle = _v5_start_owned_child(
                 "api",
                 plans["api"],
@@ -8631,27 +8652,6 @@ def _v5_execute_producers(
                 phase=phase,
             )
             api_results.append(api_result)
-            if ui_handle["process"].poll() is not None:
-                raise RuntimeError(
-                    f"UI producer exited during cache phase {phase['name']}"
-                )
-            if cache_handle is None:
-                raise RuntimeError("cache producer did not start with phase zero")
-            done, done_bytes = _v5_wait_for_cache_phase_done(
-                cache_handle,
-                paths["cache_done"],
-                run_context=run_context,
-                phase=phase,
-                binding=binding,
-                binding_sha256=binding_digest,
-                timeout=float(
-                    plans["cache"].get("producer_timeout_seconds") or 7_200
-                ),
-            )
-            if paths["release"].exists() or paths["release"].is_symlink():
-                raise RuntimeError(
-                    "UI phase release appeared before cache proof completion"
-                )
             _, attestation_bytes = _v5_wait_for_ui_session_attestation(
                 ui_handle,
                 paths["ui_attestation"],

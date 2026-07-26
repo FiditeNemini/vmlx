@@ -2135,6 +2135,18 @@ const rendererProofModulePaths = [
   'src/renderer/src/components/chat/ToolCallStatus.tsx',
 ]
 
+export function viteRawRendererModulePath(relativePath, runId) {
+  const rendererRootPrefix = 'src/renderer/'
+  if (!relativePath.startsWith(rendererRootPrefix)) {
+    throw new Error(`Renderer proof module is outside the Vite renderer root: ${relativePath}`)
+  }
+  const servedPath = relativePath.slice(rendererRootPrefix.length)
+  if (!servedPath || servedPath.startsWith('/') || servedPath.includes('..')) {
+    throw new Error(`Renderer proof module has an unsafe served path: ${relativePath}`)
+  }
+  return `/${servedPath}?raw&vmlx_proof=${encodeURIComponent(runId)}`
+}
+
 export function localRendererModuleEvidence() {
   return rendererProofModulePaths.map((relativePath) => {
     const absolutePath = path.join(panelDir, relativePath)
@@ -5995,19 +6007,21 @@ async function main() {
         || '',
     })`)
     if (app.uiLaunchMode === 'electron-dev') {
+      const servedModuleRequests = rendererProofModulePaths.map((relativePath) => ({
+        relativePath,
+        requestPath: viteRawRendererModulePath(relativePath, runId),
+      }))
       const servedModules = await evaluate(cdp, `
         (async () => {
-          const paths = ${JSON.stringify(rendererProofModulePaths)};
+          const modules = ${JSON.stringify(servedModuleRequests)};
           const records = [];
-          for (const relativePath of paths) {
-            const module = await import(
-              '/' + relativePath + '?raw&vmlx_proof=' + ${JSON.stringify(runId)}
-            );
+          for (const record of modules) {
+            const module = await import(record.requestPath);
             if (typeof module.default !== 'string') {
-              throw new Error('Vite raw renderer module did not return source text: ' + relativePath);
+              throw new Error('Vite raw renderer module did not return source text: ' + record.relativePath);
             }
             records.push({
-              relative_path: relativePath,
+              relative_path: record.relativePath,
               source_text: module.default,
             });
           }

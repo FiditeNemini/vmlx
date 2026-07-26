@@ -42,6 +42,7 @@ import {
   validateRequestCorrelatedCacheEvidence,
   validateServerCacheEvidence,
   validateUiRuntimeProvenance,
+  viteRawRendererModulePath,
   waitForOwnedUiReleaseSentinel,
   writePrivateArtifactFile,
 } from "../scripts/live-real-ui-model-proof.mjs";
@@ -1637,6 +1638,32 @@ function rewriteRawCaptureMetadata(
 }
 
 describe("real UI model proof harness", () => {
+  it("maps repository renderer paths to the actual Electron-Vite renderer root", () => {
+    expect(
+      viteRawRendererModulePath(
+        "src/renderer/src/main.tsx",
+        "r18 proof/one",
+      ),
+    ).toBe("/src/main.tsx?raw&vmlx_proof=r18%20proof%2Fone");
+    expect(
+      viteRawRendererModulePath(
+        "src/renderer/src/components/chat/ReasoningBox.tsx",
+        "r18-two",
+      ),
+    ).toBe(
+      "/src/components/chat/ReasoningBox.tsx?raw&vmlx_proof=r18-two",
+    );
+  });
+
+  it("rejects renderer proof paths outside the served renderer root", () => {
+    expect(() => viteRawRendererModulePath("src/main.tsx", "r18")).toThrow(
+      /outside the Vite renderer root/,
+    );
+    expect(() =>
+      viteRawRendererModulePath("src/renderer/../main.tsx", "r18"),
+    ).toThrow(/unsafe served path/);
+  });
+
   it("uses only a validated private token-file path in session launch args", () => {
     const root = mkdtempSync(path.join(tmpdir(), "vmlx-private-proof-"));
     try {

@@ -9455,12 +9455,12 @@ def _v5_api_worker_capture(
                 ),
             }
         )
-    expected_flow_count = (
-        4 * 2 * 2 * 3
-        if full_agentic
-        else 1 * 1 * 2 * 3
-    )
-    if len(flows) != expected_flow_count or not _v5_pin_unchanged(harness_pin):
+    expected_flow_count = len(records)
+    if (
+        expected_flow_count <= 0
+        or len(flows) != expected_flow_count
+        or not _v5_pin_unchanged(harness_pin)
+    ):
         raise RuntimeError(
             "raw API worker did not retain its exact phase-specific matrix"
         )

@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import vm from 'node:vm'
 
 const panelDir = path.resolve(new URL('..', import.meta.url).pathname)
 const repoDir = path.resolve(panelDir, '..')
@@ -2104,7 +2105,21 @@ async function waitForTarget(debugPort, appLogs) {
   throw new Error(`Timed out waiting for DevTools target on ${debugPort}`)
 }
 
+export function assertCdpExpressionSyntax(expression, label = 'cdp-evaluate') {
+  if (typeof expression !== 'string' || !expression.trim()) {
+    throw new TypeError(`${label} expression must be a non-empty string`)
+  }
+  try {
+    new vm.Script(expression, { filename: `${label}.generated.js` })
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new SyntaxError(`${label} generated an invalid CDP expression: ${detail}`)
+  }
+  return expression
+}
+
 async function evaluate(cdp, expression, timeoutMs = 120_000) {
+  assertCdpExpressionSyntax(expression)
   const result = await cdp.send('Runtime.evaluate', {
     expression,
     awaitPromise: true,
@@ -6396,7 +6411,7 @@ async function main() {
               panel: 'session',
               sessionId: created.session.id,
             },
-          });
+          }));
           let sessionBeforeStart = await window.api.sessions.get(created.session.id);
           let sessionConfigBeforeProof = {};
           try {

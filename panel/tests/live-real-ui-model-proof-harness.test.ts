@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyAssertionFailureStatus,
   applyTopLevelCorrelationStatus,
+  assertCdpExpressionSyntax,
   captureBundleGenerationContract,
   deriveProvenSurfaces,
   correlateTerminalResponseToCacheExecution,
@@ -114,6 +115,37 @@ const modelBundleAttestation = {
   aggregate_sha256: sha,
   fingerprint_sha256: sha,
 };
+
+describe("generated CDP expression syntax", () => {
+  it("accepts the renderer navigation expression used by the live UI worker", () => {
+    const expression = `
+      (async () => {
+        const created = { session: { id: "session-1" } };
+        window.dispatchEvent(new CustomEvent("vmlx:navigate", {
+          detail: {
+            mode: "server",
+            panel: "session",
+            sessionId: created.session.id,
+          },
+        }));
+      })()
+    `;
+
+    expect(assertCdpExpressionSyntax(expression, "renderer-real-ui-chat"))
+      .toBe(expression);
+  });
+
+  it("rejects the missing dispatchEvent close that broke the release gate", () => {
+    const malformed = `
+      window.dispatchEvent(new CustomEvent("vmlx:navigate", {
+        detail: { mode: "server" },
+      });
+    `;
+
+    expect(() => assertCdpExpressionSyntax(malformed, "renderer-real-ui-chat"))
+      .toThrow(/generated an invalid CDP expression/);
+  });
+});
 
 function canonicalJson(value: unknown): string {
   const normalize = (node: unknown): unknown => {

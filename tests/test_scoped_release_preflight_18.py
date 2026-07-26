@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1109,12 +1110,39 @@ def load_module():
     return module
 
 
+def _fixture_v5_jang_source(tmp_path: Path) -> Path:
+    root = tmp_path / "jang-source"
+    package = root / "jang_tools"
+    tests = root / "tests"
+    package.mkdir(parents=True)
+    tests.mkdir()
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "jang"\nversion = "2.5.34"\n',
+        encoding="utf-8",
+    )
+    (package / "__init__.py").write_text(
+        '__version__ = "2.5.34"\n',
+        encoding="utf-8",
+    )
+    (tests / "test_laguna_jang_affine_policy.py").write_text(
+        "def test_fixture():\n    assert True\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "add", "pyproject.toml", "jang_tools", "tests"],
+        check=True,
+    )
+    return root
+
+
 def test_v5_jang_import_uses_public_distribution_metadata_name(tmp_path: Path):
     module = load_module()
     (tmp_path / "run").mkdir()
+    jang_source = _fixture_v5_jang_source(tmp_path)
     plans = module._v5_default_owned_check_plans(
         tmp_path / "run",
-        tmp_path / "jang-source",
+        jang_source,
     )
     command = next(
         row
@@ -1124,6 +1152,355 @@ def test_v5_jang_import_uses_public_distribution_metadata_name(tmp_path: Path):
     import_script = command["argv"][-1]
     assert "metadata.version('jang')" in import_script
     assert "metadata.version('jang-tools')" not in import_script
+
+
+def test_v5_canonical_json_bytes_are_stable_and_callable():
+    module = load_module()
+    assert module._canonical_json_bytes({"z": 1, "a": "value"}) == (
+        b'{"a":"value","z":1}'
+    )
+
+
+def test_v5_panel_owned_plans_launch_pinned_node_with_pinned_npm_cli(
+    tmp_path: Path,
+):
+    module = load_module()
+    (tmp_path / "run").mkdir()
+    jang_source = _fixture_v5_jang_source(tmp_path)
+    plans = module._v5_default_owned_check_plans(
+        tmp_path / "run",
+        jang_source,
+    )
+    expected_node = str(Path(shutil.which("node") or "").resolve())
+    expected_npm_cli = str(Path(shutil.which("npm") or "").resolve())
+    assert expected_node and expected_npm_cli
+    for check_name in ("full_panel_suite", "typecheck", "production_build"):
+        command = plans[check_name]["commands"][0]
+        assert command["argv"][:2] == [expected_node, expected_npm_cli]
+        fixed_bin = Path(command["path_prefix"])
+        assert fixed_bin.parent == (tmp_path / "run")
+        assert (fixed_bin / "node").is_file()
+        assert (fixed_bin / "npm").is_file()
+        assert str(fixed_bin / "node") in command["tool_files"]
+        assert str(fixed_bin / "npm") in command["tool_files"]
+    production = plans["production_build"]["commands"][0]
+    assert production["env"]["VMLX_RELEASE_SCOPE"] == "r18_production"
+    assert production["env"]["VMLX_JANG_TOOLS_SOURCE"] == str(
+        jang_source.resolve()
+    )
+    assert production["env"]["VMLX_BUNDLE_MLX_PLATFORM"] == "compat"
+    assert (
+        production["env"]["VMLX_EXPECTED_MLX_WHEEL_PLATFORM"]
+        == "macosx_14_0_arm64"
+    )
+    for name in ("NODE", "GIT", "SHASUM", "AWK", "FIND"):
+        assert production["env"][f"VMLX_R18_TOOL_{name}_REALPATH"]
+        assert len(production["env"][f"VMLX_R18_TOOL_{name}_SHA256"]) == 64
+
+
+def test_v5_jang_tests_use_installed_wheel_and_compare_package_manifest(
+    tmp_path: Path,
+):
+    module = load_module()
+    (tmp_path / "run").mkdir()
+    jang_source = _fixture_v5_jang_source(tmp_path)
+    plans = module._v5_default_owned_check_plans(
+        tmp_path / "run",
+        jang_source,
+    )
+    test_command = next(
+        row
+        for row in plans["jang_runtime_provenance"]["commands"]
+        if row["command_id"] == "jang_test"
+    )
+    assert test_command["argv"][0] == str(ROOT / ".venv/bin/python")
+    assert test_command["argv"][1:3] == ["-I", "-c"]
+    test_script = test_command["argv"][test_command["argv"].index("-c") + 1]
+    assert test_script.index("sys.path.insert") < test_script.index(
+        "import jang_tools"
+    )
+    assert "VMLINUX_TEST_IMPORT=" in test_script
+    assert "source_manifest_sha256" in test_script
+    assert "installed_manifest_sha256" in test_script
+    assert "laguna_mixed_affine_shape_bits" in test_script
+    assert "test_laguna_jang_affine_policy.py" in test_script
+    assert "--import-mode=importlib" in test_script
+    pinned_test_files = set(test_command["tool_files"])
+    assert str((ROOT / "tests/test_laguna_loader.py").resolve()) in pinned_test_files
+    assert str((jang_source / "jang_tools/__init__.py").resolve()) in pinned_test_files
+
+
+def test_v5_owned_command_preserves_authoritative_venv_invocation(tmp_path: Path):
+    module = load_module()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    python = ROOT / ".venv/bin/python"
+    result = module._v5_run_command(
+        "jang_runtime_provenance",
+        {
+            "command_id": "venv-python",
+            "argv": [
+                str(python),
+                "-I",
+                "-c",
+                "import numpy,sys;print(sys.executable);print(numpy.__file__)",
+            ],
+            "cwd": tmp_path,
+            "env": {},
+        },
+        {"run_id": "venv-python", "nonce": "5" * 32},
+        run_dir,
+    )
+    assert result["exit_code"] == 0
+    assert result["executable_invocation"]["path"] == str(python)
+    assert str(ROOT / ".venv/lib") in result["__stdout_bytes"].decode()
+
+
+def test_v5_owned_command_pins_executable_script_argument_even_when_mode_0755(
+    tmp_path: Path,
+):
+    module = load_module()
+    node = Path(shutil.which("node") or "").resolve()
+    assert node.is_file()
+    script = tmp_path / "npm-cli.js"
+    script.write_text("console.log('owned npm cli')\n", encoding="utf-8")
+    script.chmod(0o755)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    result = module._v5_run_command(
+        "full_panel_suite",
+        {
+            "command_id": "node-script-identity",
+            "argv": [str(node), str(script)],
+            "cwd": tmp_path,
+            "env": {},
+        },
+        {"run_id": "node-script", "nonce": "1" * 32},
+        run_dir,
+    )
+    assert result["exit_code"] == 0
+    assert result["executable"]["path"] == str(node)
+    assert [row["path"] for row in result["scripts"]] == [str(script)]
+    assert b"owned npm cli" in result["__stdout_bytes"]
+
+
+def test_v5_pin_accepts_readonly_system_hardlink_only_with_explicit_policy():
+    module = load_module()
+    system_tool = Path("/usr/bin/git")
+    assert system_tool.stat().st_nlink > 1
+    assert os.statvfs(system_tool).f_flag & os.ST_RDONLY
+    with pytest.raises(ValueError, match="unsafe pinned file"):
+        module._v5_pin_regular_file(system_tool, executable=True)
+    pin = module._v5_pin_regular_file(
+        system_tool,
+        executable=True,
+        allow_readonly_system_hardlink=True,
+    )
+    assert pin["readonly_system_hardlink"] is True
+    assert module._v5_pin_unchanged(pin, executable=True) is True
+
+
+def test_v5_owned_command_can_pin_readonly_system_tool_file(tmp_path: Path):
+    module = load_module()
+    node = Path(shutil.which("node") or "").resolve()
+    assert node.is_file()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    result = module._v5_run_command(
+        "production_build",
+        {
+            "command_id": "readonly-system-tool",
+            "argv": [str(node), "-e", "process.stdout.write('ok')"],
+            "cwd": tmp_path,
+            "env": {},
+            "tool_files": ["/usr/bin/git"],
+        },
+        {"run_id": "readonly-system-tool", "nonce": "4" * 32},
+        run_dir,
+    )
+    assert result["exit_code"] == 0
+    system_pin = next(
+        row for row in result["scripts"] if row["path"] == "/usr/bin/git"
+    )
+    assert system_pin["readonly_system_hardlink"] is True
+
+
+def test_v5_pin_rejects_writable_hardlink_even_with_system_policy(tmp_path: Path):
+    module = load_module()
+    source = tmp_path / "tool"
+    alias = tmp_path / "tool-alias"
+    source.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    source.chmod(0o700)
+    os.link(source, alias)
+    with pytest.raises(ValueError, match="unsafe pinned file"):
+        module._v5_pin_regular_file(
+            alias,
+            executable=True,
+            allow_readonly_system_hardlink=True,
+        )
+
+
+def test_v5_owned_command_rejects_executable_script_tampering(
+    tmp_path: Path,
+):
+    module = load_module()
+    node = Path(shutil.which("node") or "").resolve()
+    assert node.is_file()
+    script = tmp_path / "npm-cli.js"
+    script.write_text(
+        "require('fs').appendFileSync(__filename, '\\n// changed')\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    with pytest.raises(RuntimeError, match="executable or script changed"):
+        module._v5_run_command(
+            "full_panel_suite",
+            {
+                "command_id": "node-script-tamper",
+                "argv": [str(node), str(script)],
+                "cwd": tmp_path,
+                "env": {},
+            },
+            {"run_id": "node-script", "nonce": "2" * 32},
+            run_dir,
+        )
+
+
+def test_v5_owned_node_path_supports_nested_env_node_without_ambient_path(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    node_value = shutil.which("node")
+    npm_value = shutil.which("npm")
+    assert node_value and npm_value
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    node, npm_cli, fixed_bin, toolchain_pins = (
+        module._v5_prepare_node_toolchain(
+            run_dir,
+            node_path=Path(node_value),
+            npm_cli_path=Path(npm_value),
+            bin_name="nested-node-bin",
+        )
+    )
+    package = tmp_path / "package"
+    probe = package / "node_modules/.bin/probe"
+    probe.parent.mkdir(parents=True)
+    probe.write_text(
+        "#!/usr/bin/env node\n"
+        "setTimeout(() => console.log('nested env node passed'), 500)\n",
+        encoding="utf-8",
+    )
+    probe.chmod(0o755)
+    (package / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "v5-node-probe",
+                "version": "1.0.0",
+                "scripts": {"probe": "probe"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    poison = tmp_path / "poison"
+    poison.mkdir()
+    (poison / "node").write_text("poisoned\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(poison))
+    result = module._v5_run_command(
+        "full_panel_suite",
+        {
+            "command_id": "nested-env-node",
+            "argv": [str(node), str(npm_cli), "run", "probe"],
+            "cwd": package,
+            "env": {},
+            "path_prefix": str(fixed_bin),
+            "tool_files": [pin["path"] for pin in toolchain_pins],
+        },
+        {"run_id": "nested-env-node", "nonce": "3" * 32},
+        run_dir,
+    )
+    assert result["exit_code"] == 0
+    assert b"nested env node passed" in result["__stdout_bytes"]
+    recorded = {row["path"] for row in result["scripts"]}
+    assert str((fixed_bin / "node").resolve()) in recorded
+    assert str((fixed_bin / "npm").resolve()) in recorded
+
+
+def test_v5_panel_summary_accepts_green_accounting_with_failure_words_in_logs():
+    module = load_module()
+    output = (
+        b"target failed preflight during the expected negative fixture\n"
+        b"Failed to start session; proxy error shown to user\n"
+        b"\x1b[2m Test Files \x1b[22m \x1b[32m91 passed\x1b[39m (91)\n"
+        b"\x1b[2m Tests \x1b[22m \x1b[32m2631 passed\x1b[39m | "
+        b"\x1b[33m3 skipped\x1b[39m (2634)\n"
+    )
+    facts, _ = module._v5_owned_check_facts(
+        "full_panel_suite",
+        [{"exit_code": 0, "__stdout_bytes": output, "__stderr_bytes": b""}],
+        {},
+        {},
+    )
+    assert facts == set(module.V5_RELEASE_ASSERTIONS["full_panel_suite"])
+
+
+def test_v5_panel_summary_rejects_terminal_failure_and_bad_skip_accounting():
+    module = load_module()
+
+    def facts_for(summary: bytes) -> set[str]:
+        facts, _ = module._v5_owned_check_facts(
+            "full_panel_suite",
+            [{"exit_code": 0, "__stdout_bytes": summary, "__stderr_bytes": b""}],
+            {},
+            {},
+        )
+        return facts
+
+    assert not facts_for(
+        b"Test Files 1 failed | 90 passed (91)\n"
+        b"Tests 1 failed | 2630 passed | 3 skipped (2634)\n"
+    )
+    assert not facts_for(
+        b"Test Files 91 passed (91)\n"
+        b"Tests 2631 passed | 3 skipped (2633)\n"
+    )
+
+
+def test_v5_production_build_accepts_actual_electron_vite_contract(
+    tmp_path: Path,
+):
+    module = load_module()
+    output_root = tmp_path / "electron-build"
+    for relative in (
+        "main/index.mjs",
+        "preload/index.js",
+        "renderer/index.html",
+    ):
+        path = output_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"fixture {relative}\n", encoding="utf-8")
+    terminal = (
+        b"ok bundled JANG provenance matches source (2.5.34 @ f7583e4)\n"
+        b"bundled-python: all critical imports ok\n"
+    )
+    facts, details = module._v5_owned_check_facts(
+        "production_build",
+        [{"exit_code": 0, "__stdout_bytes": terminal, "__stderr_bytes": b""}],
+        {
+            "output_root": str(output_root),
+            "required_outputs": (
+                "main/index.mjs",
+                "preload/index.js",
+                "renderer/index.html",
+            ),
+        },
+        {},
+    )
+    assert facts == set(module.V5_RELEASE_ASSERTIONS["production_build"])
+    assert details["output"]["tree_sha256"]
 
 
 def source_payload() -> dict[str, str]:
@@ -2461,7 +2838,7 @@ def test_r18_v5_main_owned_children_fail_closed_on_unowned_release_rows(
                 ],
                 "output_root": str(build_root),
                 "required_outputs": (
-                    "main/index.js",
+                    "main/index.mjs",
                     "preload/index.js",
                     "renderer/index.html",
                 ),
@@ -2487,7 +2864,12 @@ def test_r18_v5_main_owned_children_fail_closed_on_unowned_release_rows(
                         "--isolated-venv",
                         str(isolated),
                     ),
-                    fixture_command("jang_test", "jang_test"),
+                    fixture_command(
+                        "jang_test",
+                        "jang_test",
+                        "--isolated-venv",
+                        str(isolated),
+                    ),
                 ],
                 "distribution_root": str(distribution_root),
                 "isolated_venv": str(isolated),
@@ -5056,23 +5438,22 @@ def _v5_fixture_child(argv: list[str]) -> int:
         print("collected 1000 items")
         print("1000 passed in 1.00s")
     elif command == "full_panel_suite":
-        print("Test Files 5 passed")
-        print("Tests 50 passed")
+        print("Test Files 5 passed (5)")
+        print("Tests 50 passed (50)")
     elif command == "typecheck":
         print("typecheck complete")
     elif command == "production_build":
         assert args.output_root
         for relative in (
-            "main/index.js",
+            "main/index.mjs",
             "preload/index.js",
             "renderer/index.html",
         ):
             path = args.output_root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"fixture {relative}\n", encoding="utf-8")
-        print("build the electron main process successfully")
-        print("build the preload scripts successfully")
-        print("build the renderer process successfully")
+        print("ok bundled JANG provenance matches source (2.5.34 @ f7583e4)")
+        print("bundled-python: all critical imports ok")
     elif command == "jang_build":
         assert args.distribution_root
         args.distribution_root.mkdir(parents=True, exist_ok=True)
@@ -5104,6 +5485,25 @@ def _v5_fixture_child(argv: list[str]) -> int:
             )
         )
     elif command == "jang_test":
+        assert args.isolated_venv
+        package = (
+            args.isolated_venv
+            / "lib/python3.13/site-packages/jang_tools/__init__.py"
+        )
+        print(
+            "VMLINUX_TEST_IMPORT="
+            + json.dumps(
+                {
+                    "file": str(package),
+                    "version": "2.5.34",
+                    "source_manifest_sha256": "a" * 64,
+                    "installed_manifest_sha256": "a" * 64,
+                    "package_file_count": 1,
+                    "laguna_mixed_affine_shape_bits": [6, 6],
+                },
+                sort_keys=True,
+            )
+        )
         print("collected 3 items")
         print("3 passed")
     return 0

@@ -1618,15 +1618,17 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
 def _canonical_json_sha256(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
 
 
 def _validated_bundle_attestation(
@@ -3747,7 +3749,12 @@ def _v5_encode_bytes(value: bytes) -> str:
     return base64.b64encode(value).decode("ascii")
 
 
-def _v5_pin_regular_file(path: Path, *, executable: bool = False) -> dict[str, Any]:
+def _v5_pin_regular_file(
+    path: Path,
+    *,
+    executable: bool = False,
+    allow_readonly_system_hardlink: bool = False,
+) -> dict[str, Any]:
     """Open and hash one path without following links.
 
     This is an operational stale/replacement guard, not a defense against a
@@ -3759,10 +3766,17 @@ def _v5_pin_regular_file(path: Path, *, executable: bool = False) -> dict[str, A
     if not absolute.is_absolute():
         raise ValueError(f"pinned path is not absolute: {path}")
     before = absolute.lstat()
+    resolved = absolute.resolve()
+    readonly_system_hardlink = bool(
+        allow_readonly_system_hardlink
+        and before.st_nlink > 1
+        and path_within(resolved, Path("/usr/bin"))
+        and os.statvfs(resolved).f_flag & os.ST_RDONLY
+    )
     if (
         stat.S_ISLNK(before.st_mode)
         or not stat.S_ISREG(before.st_mode)
-        or before.st_nlink != 1
+        or (before.st_nlink != 1 and not readonly_system_hardlink)
         or (executable and not os.access(absolute, os.X_OK))
     ):
         raise ValueError(f"unsafe pinned file: {absolute}")
@@ -3781,12 +3795,13 @@ def _v5_pin_regular_file(path: Path, *, executable: bool = False) -> dict[str, A
     finally:
         os.close(fd)
     return {
-        "path": str(absolute.resolve()),
+        "path": str(resolved),
         "device": opened.st_dev,
         "inode": opened.st_ino,
         "size": opened.st_size,
         "mtime_ns": opened.st_mtime_ns,
         "sha256": digest.hexdigest(),
+        "readonly_system_hardlink": readonly_system_hardlink,
     }
 
 
@@ -3795,8 +3810,56 @@ def _v5_pin_unchanged(pin: dict[str, Any], *, executable: bool = False) -> bool:
         return _v5_pin_regular_file(
             Path(str(pin.get("path") or "")),
             executable=executable,
+            allow_readonly_system_hardlink=bool(
+                pin.get("readonly_system_hardlink")
+            ),
         ) == pin
     except (OSError, ValueError):
+        return False
+
+
+def _v5_pin_executable_invocation(
+    path: Path,
+    run_dir: Path,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Pin an executable plus an allowed venv symlink invocation path."""
+
+    absolute = path.expanduser()
+    observed = absolute.lstat()
+    if not stat.S_ISLNK(observed.st_mode):
+        return _v5_pin_regular_file(absolute, executable=True), None
+    allowed = path_within(absolute, ROOT / ".venv/bin") or path_within(
+        absolute,
+        run_dir,
+    )
+    if not allowed:
+        raise ValueError(f"unsafe executable symlink: {absolute}")
+    target = absolute.resolve(strict=True)
+    executable_pin = _v5_pin_regular_file(target, executable=True)
+    return executable_pin, {
+        "path": str(absolute),
+        "target": os.readlink(absolute),
+        "resolved_path": executable_pin["path"],
+        "identity": list(_stable_file_identity(observed)),
+    }
+
+
+def _v5_executable_invocation_unchanged(
+    invocation: dict[str, Any] | None,
+) -> bool:
+    if invocation is None:
+        return True
+    path = Path(str(invocation.get("path") or ""))
+    try:
+        observed = path.lstat()
+        return bool(
+            stat.S_ISLNK(observed.st_mode)
+            and list(_stable_file_identity(observed))
+            == invocation.get("identity")
+            and os.readlink(path) == invocation.get("target")
+            and str(path.resolve(strict=True)) == invocation.get("resolved_path")
+        )
+    except OSError:
         return False
 
 
@@ -4031,7 +4094,10 @@ def _v5_start_owned_child(
     argv = [str(value) for value in spec["argv"]]
     if not argv:
         raise ValueError(f"{name} has no argv")
-    executable_pin = _v5_pin_regular_file(Path(argv[0]), executable=True)
+    executable_pin, executable_invocation = _v5_pin_executable_invocation(
+        Path(argv[0]),
+        run_dir,
+    )
     script_pins = [
         _v5_pin_regular_file(Path(value))
         for value in argv[1:]
@@ -4092,6 +4158,7 @@ def _v5_start_owned_child(
         "cwd": str(Path(spec["cwd"]).resolve()),
         "started_at": started_at,
         "executable": executable_pin,
+        "executable_invocation": executable_invocation,
         "scripts": script_pins,
         "process_observation": observation,
     }
@@ -4137,19 +4204,25 @@ def _v5_finish_owned_child(
         os.close(output_fd)
         handle.pop("output_fd", None)
     executable_pin = handle["executable"]
+    executable_invocation = handle.get("executable_invocation")
     script_pins = handle["scripts"]
     executable_stable = _v5_pin_unchanged(executable_pin, executable=True)
+    invocation_stable = _v5_executable_invocation_unchanged(
+        executable_invocation
+    )
     scripts_stable = all(_v5_pin_unchanged(pin) for pin in script_pins)
     if (
         process.returncode != 0
         or not capture
         or not executable_stable
+        or not invocation_stable
         or not scripts_stable
     ):
         raise RuntimeError(
             f"{name} owned producer failed or changed "
             f"(exit={process.returncode}, capture_bytes={len(capture)}, "
             f"executable_stable={executable_stable}, "
+            f"invocation_stable={invocation_stable}, "
             f"scripts_stable={scripts_stable}, stderr_sha256="
             f"{hashlib.sha256(stderr).hexdigest()})"
         )
@@ -4181,6 +4254,7 @@ def _v5_finish_owned_child(
         "ended_at": ended_at,
         "exit_code": process.returncode,
         "executable": executable_pin,
+        "executable_invocation": executable_invocation,
         "scripts": script_pins,
         "process_observation": handle["process_observation"],
         "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
@@ -4541,7 +4615,7 @@ def _v5_cdp_dom_snapshot(cdp_base_url: str, *, timeout: float = 10.0) -> bytes:
             "prior": prior_metrics,
             "restored": restored_metrics,
         }
-        return canonical_json_bytes(snapshot)
+        return _canonical_json_bytes(snapshot)
     finally:
         stream.close()
 
@@ -6738,15 +6812,47 @@ def _v5_run_command(
     run_dir: Path,
 ) -> dict[str, Any]:
     argv = [str(value) for value in spec["argv"]]
-    executable_pin = _v5_pin_regular_file(Path(argv[0]), executable=True)
-    script_pins = [
-        _v5_pin_regular_file(Path(value))
+    executable_pin, executable_invocation = _v5_pin_executable_invocation(
+        Path(argv[0]),
+        run_dir,
+    )
+    # Pin every absolute regular-file argument, including executable scripts.
+    # npm-cli.js is commonly mode 0755 but is still interpreted by Node; its
+    # bytes are therefore part of the owned command identity, not the process
+    # executable identity.
+    script_pins_by_path = {
+        str(Path(value).resolve()): _v5_pin_regular_file(Path(value))
         for value in argv[1:]
-        if value.startswith("/")
-        and Path(value).is_file()
-        and not os.access(value, os.X_OK)
+        if value.startswith("/") and Path(value).is_file()
+    }
+    for value in spec.get("tool_files", []):
+        value = str(value)
+        if not value.startswith("/") or not Path(value).is_file():
+            continue
+        script_pins_by_path[str(Path(value).resolve())] = _v5_pin_regular_file(
+            Path(value),
+            allow_readonly_system_hardlink=True,
+        )
+    script_pins = [
+        script_pins_by_path[path] for path in sorted(script_pins_by_path)
     ]
     env = _v5_minimal_env(run_dir, dict(spec.get("env") or {}))
+    path_prefix_value = spec.get("path_prefix")
+    if path_prefix_value is not None:
+        path_prefix = Path(str(path_prefix_value))
+        try:
+            path_prefix_stat = path_prefix.lstat()
+            path_prefix = path_prefix.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError("owned command PATH prefix is unavailable") from exc
+        if (
+            not path_prefix.is_absolute()
+            or not path_within(path_prefix, run_dir.resolve())
+            or stat.S_ISLNK(path_prefix_stat.st_mode)
+            or not stat.S_ISDIR(path_prefix_stat.st_mode)
+        ):
+            raise ValueError("owned command PATH prefix is unsafe")
+        env["PATH"] = f"{path_prefix}:{env['PATH']}"
     started_at = _iso_now()
     process = subprocess.Popen(  # noqa: S603 - source-owned static plan
         argv,
@@ -6765,6 +6871,7 @@ def _v5_run_command(
     ended_at = _iso_now()
     if (
         not _v5_pin_unchanged(executable_pin, executable=True)
+        or not _v5_executable_invocation_unchanged(executable_invocation)
         or any(not _v5_pin_unchanged(pin) for pin in script_pins)
     ):
         raise RuntimeError(f"{check_name} executable or script changed")
@@ -6782,12 +6889,82 @@ def _v5_run_command(
         "ended_at": ended_at,
         "exit_code": process.returncode,
         "executable": executable_pin,
+        "executable_invocation": executable_invocation,
         "scripts": script_pins,
         "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
         "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
         "__stdout_bytes": stdout,
         "__stderr_bytes": stderr,
     }
+
+
+def _v5_write_executable_wrapper(path: Path, payload: str) -> dict[str, Any]:
+    """Create and pin one private, non-symlink executable wrapper."""
+
+    descriptor = os.open(
+        path,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o700,
+    )
+    try:
+        raw = payload.encode("utf-8")
+        view = memoryview(raw)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise RuntimeError("could not write fixed tool wrapper")
+            view = view[written:]
+        os.fchmod(descriptor, 0o700)
+        os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    observed = path.lstat()
+    if (
+        not stat.S_ISREG(observed.st_mode)
+        or observed.st_nlink != 1
+        or _stable_file_identity(opened) != _stable_file_identity(observed)
+    ):
+        raise RuntimeError("fixed tool wrapper was replaced")
+    return _v5_pin_regular_file(path, executable=True)
+
+
+def _v5_prepare_node_toolchain(
+    run_root: Path,
+    *,
+    node_path: Path,
+    npm_cli_path: Path,
+    bin_name: str,
+) -> tuple[Path, Path, Path, list[dict[str, Any]]]:
+    """Pin Node/npm and expose only private wrappers to nested shebangs."""
+
+    if not re.fullmatch(r"[a-z0-9_.-]+", bin_name):
+        raise ValueError("fixed Node toolchain directory name is unsafe")
+    node_pin = _v5_pin_regular_file(node_path.resolve(strict=True), executable=True)
+    npm_pin = _v5_pin_regular_file(npm_cli_path.resolve(strict=True))
+    shell_pin = _v5_pin_regular_file(Path("/bin/sh"), executable=True)
+    bin_dir = run_root / bin_name
+    bin_dir.mkdir(mode=0o700)
+    node_wrapper = _v5_write_executable_wrapper(
+        bin_dir / "node",
+        "#!/bin/sh\n"
+        f"exec {shlex.quote(node_pin['path'])} \"$@\"\n",
+    )
+    npm_wrapper = _v5_write_executable_wrapper(
+        bin_dir / "npm",
+        "#!/bin/sh\n"
+        f"exec {shlex.quote(node_pin['path'])} "
+        f"{shlex.quote(npm_pin['path'])} \"$@\"\n",
+    )
+    return (
+        Path(node_pin["path"]),
+        Path(npm_pin["path"]),
+        bin_dir,
+        [node_pin, npm_pin, shell_pin, node_wrapper, npm_wrapper],
+    )
 
 
 def _v5_hash_output_tree(
@@ -6824,6 +7001,42 @@ def _v5_hash_output_tree(
         "files": rows,
         "tree_sha256": _canonical_json_sha256(rows),
     }
+
+
+def _v5_parse_vitest_terminal_summary(text: str) -> dict[str, Any] | None:
+    """Parse only Vitest's terminal accounting, never arbitrary test logs."""
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+    def parse_line(label: str) -> dict[str, Any] | None:
+        pattern = re.compile(
+            rf"\b{re.escape(label)}\s+(.+?)\s+\((\d+)\)\s*$"
+        )
+        matches = [
+            match
+            for line in plain.splitlines()
+            if (match := pattern.search(line)) is not None
+        ]
+        if not matches:
+            return None
+        match = matches[-1]
+        counts: dict[str, int] = {}
+        for raw_count, raw_label in re.findall(
+            r"\b(\d+)\s+(passed|failed|skipped|todo|errors?)\b",
+            match.group(1),
+        ):
+            name = "error" if raw_label in {"error", "errors"} else raw_label
+            counts[name] = counts.get(name, 0) + int(raw_count)
+        total = int(match.group(2))
+        if not counts or sum(counts.values()) != total:
+            return None
+        return {"counts": counts, "total": total}
+
+    files = parse_line("Test Files")
+    tests = parse_line("Tests")
+    if files is None or tests is None:
+        return None
+    return {"files": files, "tests": tests}
 
 
 def _v5_owned_check_facts(
@@ -6901,16 +7114,20 @@ def _v5_owned_check_facts(
                 return set(V5_RELEASE_ASSERTIONS[check_name]), {}
             return set(), {}
         else:
-            tests = re.search(r"\bTests\s+(\d+)\s+passed\b", text)
-            files = re.search(r"\bTest Files\s+(\d+)\s+passed\b", text)
+            summary = _v5_parse_vitest_terminal_summary(text)
             baseline = OWNED_SUITE_BASELINES[check_name]
             valid = bool(
-                tests
-                and files
-                and int(tests.group(1)) >= baseline["passed"]
-                and int(files.group(1)) >= baseline["files"]
+                summary
+                and summary["tests"]["counts"].get("passed", 0)
+                >= baseline["passed"]
+                and summary["files"]["counts"].get("passed", 0)
+                >= baseline["files"]
+                and summary["tests"]["counts"].get("failed", 0) == 0
+                and summary["tests"]["counts"].get("error", 0) == 0
+                and summary["files"]["counts"].get("failed", 0) == 0
+                and summary["files"]["counts"].get("error", 0) == 0
             )
-        if valid and not re.search(r"\b(?:failed|error)\b", text):
+        if valid:
             return set(V5_RELEASE_ASSERTIONS[check_name]), {}
         return set(), {}
     if check_name == "typecheck":
@@ -6925,9 +7142,8 @@ def _v5_owned_check_facts(
             tuple(spec["required_outputs"]),
         )
         required_log = (
-            "build the electron main process successfully",
-            "build the preload scripts successfully",
-            "build the renderer process successfully",
+            "bundled JANG provenance matches source",
+            "bundled-python: all critical imports ok",
         )
         return (
             (set(V5_RELEASE_ASSERTIONS[check_name]), {"output": output})
@@ -6946,6 +7162,11 @@ def _v5_owned_check_facts(
             text,
             re.MULTILINE,
         )
+        test_import_match = re.search(
+            r"^VMLINUX_TEST_IMPORT=(\{.*\})$",
+            text,
+            re.MULTILINE,
+        )
         if (
             len(wheels) != 1
             or len(sdists) != 1
@@ -6956,14 +7177,25 @@ def _v5_owned_check_facts(
             or {row.get("command_id") for row in executions}
             != {"jang_build", "jang_venv", "jang_install", "jang_import", "jang_test"}
             or import_match is None
+            or test_import_match is None
         ):
             return set(), {}
         imported = json.loads(import_match.group(1))
+        test_imported = json.loads(test_import_match.group(1))
         installed_root = Path(spec["isolated_venv"]).resolve()
         imported_path = Path(str(imported.get("file") or "")).resolve()
+        test_imported_path = Path(str(test_imported.get("file") or "")).resolve()
         if (
             not path_within(imported_path, installed_root)
+            or not path_within(test_imported_path, installed_root)
+            or test_imported_path != imported_path
             or imported.get("version") != JANG_VERSION
+            or test_imported.get("version") != JANG_VERSION
+            or test_imported.get("source_manifest_sha256")
+            != test_imported.get("installed_manifest_sha256")
+            or not isinstance(test_imported.get("package_file_count"), int)
+            or test_imported["package_file_count"] <= 0
+            or test_imported.get("laguna_mixed_affine_shape_bits") != [6, 6]
             or jang_state.get("version") != JANG_VERSION
             or jang_state.get("commit") != JANG_COMMIT
             or jang_state.get("tree") != JANG_TREE
@@ -6986,27 +7218,156 @@ def _v5_default_owned_check_plans(
     run_dir: Path,
     jang_root: Path,
 ) -> dict[str, dict[str, Any]]:
-    python = (ROOT / ".venv/bin/python").resolve()
+    python = ROOT / ".venv/bin/python"
+    node_value = shutil.which("node")
     npm_value = shutil.which("npm")
-    if not python.is_file() or not npm_value:
-        raise RuntimeError("release Python or npm executable is unavailable")
-    npm = Path(npm_value).resolve()
+    uv_value = shutil.which("uv")
+    if not python.is_file() or not node_value or not npm_value or not uv_value:
+        raise RuntimeError(
+            "release Python, Node, npm, or uv executable is unavailable"
+        )
+    uv = Path(uv_value).resolve(strict=True)
+    node, npm_cli, fixed_bin, toolchain_pins = _v5_prepare_node_toolchain(
+        run_dir,
+        node_path=Path(node_value),
+        npm_cli_path=Path(npm_value),
+        bin_name="owned-node-bin",
+    )
+    release_verifier_pins = {
+        "NODE": _v5_pin_regular_file(node, executable=True),
+        **{
+            name: _v5_pin_regular_file(
+                path,
+                executable=True,
+                allow_readonly_system_hardlink=True,
+            )
+            for name, path in {
+                "GIT": Path("/usr/bin/git"),
+                "SHASUM": Path("/usr/bin/shasum"),
+                "AWK": Path("/usr/bin/awk"),
+                "FIND": Path("/usr/bin/find"),
+            }.items()
+        },
+    }
+    toolchain_files = sorted(
+        {
+            *(pin["path"] for pin in toolchain_pins),
+            *(pin["path"] for pin in release_verifier_pins.values()),
+        }
+    )
+    production_env = {
+        "VMLX_RELEASE_SCOPE": SCOPE,
+        "VMLX_JANG_TOOLS_SOURCE": str(jang_root.resolve()),
+        "VMLX_BUNDLE_MLX_PLATFORM": "compat",
+        "VMLX_EXPECTED_MLX_WHEEL_PLATFORM": "macosx_14_0_arm64",
+    }
+    for name, pin in release_verifier_pins.items():
+        production_env[f"VMLX_R18_TOOL_{name}_REALPATH"] = pin["path"]
+        production_env[f"VMLX_R18_TOOL_{name}_SHA256"] = pin["sha256"]
+    production_tool_files = sorted(
+        {
+            *toolchain_files,
+            str((ROOT / "panel/package.json").resolve(strict=True)),
+            str((ROOT / "panel/scripts/bundle-python.sh").resolve(strict=True)),
+            str(
+                (ROOT / "panel/scripts/verify-bundled-python.sh").resolve(
+                    strict=True
+                )
+            ),
+            str((ROOT / "panel/electron.vite.config.ts").resolve(strict=True)),
+            str(
+                (
+                    ROOT
+                    / "panel/node_modules/electron-vite/bin/electron-vite.js"
+                ).resolve(strict=True)
+            ),
+        }
+    )
     build_root = run_dir / "electron-build"
     build_root.mkdir(mode=0o700)
     jang_dist = run_dir / "jang-dist"
     jang_dist.mkdir(mode=0o700)
     jang_venv = run_dir / "jang-installed"
-    test_manifest = (
-        "tests/test_laguna_loader.py",
-        "tests/test_jang_affine_storage.py",
-        "tests/test_jang_loader.py",
+    isolated_site_packages = (
+        jang_venv
+        / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
     )
+    test_manifest = (
+        str((ROOT / "tests/test_laguna_loader.py").resolve(strict=True)),
+        str((ROOT / "tests/test_jang_affine_storage.py").resolve(strict=True)),
+        str((ROOT / "tests/test_jang_loader.py").resolve(strict=True)),
+        str(jang_root.resolve() / "tests/test_laguna_jang_affine_policy.py"),
+    )
+    tracked_jang_files = tuple(
+        line
+        for line in run_git_in(jang_root, "ls-files", "jang_tools").splitlines()
+        if line.startswith("jang_tools/")
+    )
+    if not tracked_jang_files:
+        raise RuntimeError("clean JANG source has no tracked package files")
+    jang_source_files = [
+        str((jang_root / relative).resolve(strict=True))
+        for relative in tracked_jang_files
+    ]
+    jang_test_files = [
+        *test_manifest,
+        str((ROOT / "pytest.ini").resolve(strict=True)),
+        str((jang_root / "pyproject.toml").resolve(strict=True)),
+        *jang_source_files,
+    ]
     import_script = (
-        "import importlib.metadata,json,jang_tools;"
+        "import importlib.metadata,json,sys,time;"
+        f"sys.path.insert(0,{str(isolated_site_packages)!r});"
+        "import jang_tools;"
         "print('VMLINUX_INSTALLED_IMPORT='+json.dumps({"
         "'file':jang_tools.__file__,"
         "'version':importlib.metadata.version('jang')"
-        "},sort_keys=True))"
+        "},sort_keys=True),flush=True);"
+        "time.sleep(0.2)"
+    )
+    test_import_script = (
+        "import hashlib,importlib.metadata,json,pathlib,runpy,sys,zipfile;"
+        "wheel_path=pathlib.Path(sys.argv[1]).resolve(strict=True);"
+        f"sys.path.insert(0,{str(isolated_site_packages)!r});"
+        "import jang_tools;"
+        "from jang_tools.laguna.runtime import infer_affine_bits_from_shapes;"
+        "shape_results=["
+        "infer_affine_bits_from_shapes((1,576),(1,48),group_size=64,fallback_bits=8),"
+        "infer_affine_bits_from_shapes((1,384),(1,32),group_size=64,fallback_bits=8)];"
+        "assert shape_results==[6,6],shape_results;"
+        f"source_root=pathlib.Path({str((jang_root / 'jang_tools').resolve())!r});"
+        "installed_root=pathlib.Path(jang_tools.__file__).resolve().parent;"
+        "archive=zipfile.ZipFile(wheel_path);"
+        "wheel_files={name.removeprefix('jang_tools/'):archive.read(name)"
+        " for name in archive.namelist()"
+        " if name.startswith('jang_tools/') and not name.endswith('/')};"
+        "archive.close();"
+        "assert wheel_files;"
+        "rows=[];missing=[];mismatched=[];"
+        "installed_files={path.relative_to(installed_root).as_posix()"
+        " for path in installed_root.rglob('*') if path.is_file()"
+        " and '__pycache__' not in path.parts and path.suffix!='.pyc'};"
+        "assert installed_files==set(wheel_files),(installed_files^set(wheel_files));"
+        "[(missing.append(rel) if not (source_root/rel).is_file()"
+        " or not (installed_root/rel).is_file() else"
+        " (mismatched.append(rel) if (source_root/rel).read_bytes()!=data"
+        " or (installed_root/rel).read_bytes()!=data else"
+        " rows.append([rel,hashlib.sha256(data).hexdigest()])))"
+        " for rel,data in sorted(wheel_files.items())];"
+        "assert not missing,missing;assert not mismatched,mismatched;"
+        "source_manifest=hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest();"
+        "installed_manifest=source_manifest;"
+        "print('VMLINUX_TEST_IMPORT='+json.dumps({"
+        "'file':jang_tools.__file__,"
+        "'version':importlib.metadata.version('jang'),"
+        "'source_manifest_sha256':source_manifest,"
+        "'installed_manifest_sha256':installed_manifest,"
+        "'package_file_count':len(rows),"
+        "'laguna_mixed_affine_shape_bits':shape_results"
+        "},sort_keys=True),flush=True);"
+        f"sys.path.append({str(ROOT.resolve())!r});"
+        f"sys.argv={['pytest', '-s', '-p', 'no:cacheprovider', '--import-mode=importlib', '--rootdir', str(ROOT.resolve()), '-c', str((ROOT / 'pytest.ini').resolve(strict=True)), *test_manifest]!r};"
+        "runpy.run_module('pytest',run_name='__main__')"
     )
     return {
         "full_python_suite": {
@@ -7030,9 +7391,11 @@ def _v5_default_owned_check_plans(
             "commands": [
                 {
                     "command_id": "full_panel_suite",
-                    "argv": [str(npm), "test"],
+                    "argv": [str(node), str(npm_cli), "test"],
                     "cwd": ROOT / "panel",
                     "env": {},
+                    "path_prefix": str(fixed_bin),
+                    "tool_files": toolchain_files,
                 }
             ]
         },
@@ -7040,9 +7403,11 @@ def _v5_default_owned_check_plans(
             "commands": [
                 {
                     "command_id": "typecheck",
-                    "argv": [str(npm), "run", "typecheck"],
+                    "argv": [str(node), str(npm_cli), "run", "typecheck"],
                     "cwd": ROOT / "panel",
                     "env": {},
+                    "path_prefix": str(fixed_bin),
+                    "tool_files": toolchain_files,
                 }
             ]
         },
@@ -7051,7 +7416,8 @@ def _v5_default_owned_check_plans(
                 {
                     "command_id": "production_build",
                     "argv": [
-                        str(npm),
+                        str(node),
+                        str(npm_cli),
                         "run",
                         "build",
                         "--",
@@ -7059,12 +7425,14 @@ def _v5_default_owned_check_plans(
                         str(build_root),
                     ],
                     "cwd": ROOT / "panel",
-                    "env": {},
+                    "env": production_env,
+                    "path_prefix": str(fixed_bin),
+                    "tool_files": production_tool_files,
                 }
             ],
             "output_root": str(build_root),
             "required_outputs": (
-                "main/index.js",
+                "main/index.mjs",
                 "preload/index.js",
                 "renderer/index.html",
             ),
@@ -7074,17 +7442,21 @@ def _v5_default_owned_check_plans(
                 {
                     "command_id": "jang_build",
                     "argv": [
-                        str(python),
-                        "-m",
+                        str(uv),
                         "build",
-                        "--wheel",
-                        "--sdist",
-                        "--no-isolation",
-                        "--outdir",
+                        "--python",
+                        str(python.resolve(strict=True)),
+                        "--no-python-downloads",
+                        "--out-dir",
                         str(jang_dist),
+                        str(jang_root),
                     ],
-                    "cwd": jang_root,
+                    "cwd": run_dir,
                     "env": {},
+                    "tool_files": [
+                        str((jang_root / "pyproject.toml").resolve(strict=True)),
+                        *jang_source_files,
+                    ],
                 },
                 {
                     "command_id": "jang_venv",
@@ -7116,27 +7488,28 @@ def _v5_default_owned_check_plans(
                 {
                     "command_id": "jang_import",
                     "argv": [
-                        str(jang_venv / "bin/python"),
+                        str(python),
                         "-I",
                         "-c",
                         import_script,
                     ],
                     "cwd": run_dir,
                     "env": {},
+                    "tool_files": jang_source_files,
                 },
                 {
                     "command_id": "jang_test",
                     "argv": [
                         str(python),
-                        "-m",
-                        "pytest",
-                        "-s",
-                        "-p",
-                        "no:cacheprovider",
-                        *test_manifest,
+                        "-I",
+                        "-c",
+                        test_import_script,
+                        str(jang_dist / "*.whl"),
                     ],
                     "cwd": ROOT,
                     "env": {},
+                    "tool_files": jang_test_files,
+                    "expand_single_glob": True,
                 },
             ],
             "distribution_root": str(jang_dist),
@@ -7153,7 +7526,7 @@ def _v5_expand_owned_spec(spec: dict[str, Any]) -> dict[str, Any]:
     argv = list(spec["argv"])
     expanded: list[str] = []
     for value in argv:
-        if "*" not in value:
+        if "*" not in value or not Path(value).is_absolute():
             expanded.append(value)
             continue
         matches = sorted(Path(value).parent.glob(Path(value).name))
@@ -7203,7 +7576,7 @@ def _v5_execute_owned_release_checks(
 def _v5_default_producer_plans(
     args: argparse.Namespace,
 ) -> dict[str, dict[str, Any]]:
-    python = (ROOT / ".venv/bin/python").resolve()
+    python = ROOT / ".venv/bin/python"
     common = [
         str(python),
         str(Path(__file__).resolve()),
@@ -8383,14 +8756,7 @@ def _v5_protocol_output_tokens(protocol: str, raw: bytes) -> int:
                     if isinstance(usage, dict)
                     else 0
                 )
-            elif protocol == "responses":
-                usage = whole.get("usage")
-                candidate = (
-                    usage.get("output_tokens")
-                    if isinstance(usage, dict)
-                    else 0
-                )
-            elif protocol == "anthropic":
+            elif protocol in {"responses", "anthropic"}:
                 usage = whole.get("usage")
                 candidate = (
                     usage.get("output_tokens")
@@ -8976,28 +9342,15 @@ def _v5_prepare_fixed_node_path(
         try:
             node = node_link.resolve(strict=True)
             npm = npm_link.resolve(strict=True)
-            node_pin = _v5_pin_regular_file(node, executable=True)
-            npm_pin = _v5_pin_regular_file(npm, executable=True)
-            shell_pin = _v5_pin_regular_file(Path("/bin/sh"), executable=True)
+            node, npm, bin_dir, tool_pins = _v5_prepare_node_toolchain(
+                run_root,
+                node_path=node,
+                npm_cli_path=npm,
+                bin_name=f"fixed-node-bin-phase-{phase_index:02d}",
+            )
         except (OSError, ValueError):
             continue
-        bin_dir = run_root / f"fixed-node-bin-phase-{phase_index:02d}"
-        bin_dir.mkdir(mode=0o700)
-        wrapper = bin_dir / "npm"
-        script = (
-            "#!/bin/sh\n"
-            f"exec {shlex.quote(node_pin['path'])} "
-            f"{shlex.quote(npm_pin['path'])} \"$@\"\n"
-        )
-        wrapper.write_text(script, encoding="utf-8")
-        wrapper.chmod(0o700)
-        wrapper_pin = _v5_pin_regular_file(wrapper, executable=True)
-        return Path(node_pin["path"]), [
-            node_pin,
-            npm_pin,
-            shell_pin,
-            wrapper_pin,
-        ]
+        return node, tool_pins
     raise RuntimeError("no pinned Node/npm toolchain is available")
 
 
@@ -10907,7 +11260,7 @@ def _owned_execution_facts(
     if check_name == "production_build":
         required = (
             "build the electron main process successfully",
-            "build the preload scripts successfully",
+            "build the electron preload files successfully",
             "build the renderer process successfully",
         )
         return (
@@ -10989,13 +11342,13 @@ def _observe_process(pid: int) -> dict[str, Any] | None:
         return None
     try:
         started = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "lstart="],
+            ["/bin/ps", "-p", str(pid), "-o", "lstart="],
             capture_output=True,
             text=True,
             check=False,
         )
         command = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["/bin/ps", "-p", str(pid), "-o", "command="],
             capture_output=True,
             text=True,
             check=False,
@@ -11033,7 +11386,7 @@ def _observe_listener(host: str, port: int) -> dict[str, Any] | None:
     try:
         completed = subprocess.run(
             [
-                "lsof",
+                "/usr/sbin/lsof",
                 "-nP",
                 f"-iTCP@{host}:{port}",
                 "-sTCP:LISTEN",

@@ -503,6 +503,57 @@ class TestHealthEndpoint:
             contract["prompts"]["B"]["cache_prompt_token_count"],
         )
 
+    def test_mllm_cache_token_contract_uses_production_n_minus_one_boundary(
+        self,
+    ):
+        """MLLM private cache attestations must match scheduler store/fetch keys."""
+        from vmlx_engine import server
+
+        class FakeEngine:
+            is_mllm = True
+
+            def build_cache_contract_prompt_identity(
+                self,
+                messages,
+                tools=None,
+                *,
+                enable_thinking=True,
+                extra_template_kwargs=None,
+                prompt_suffix=None,
+                skip_generation_prompt=False,
+            ):
+                del messages, tools, enable_thinking, extra_template_kwargs
+                del prompt_suffix, skip_generation_prompt
+                return {
+                    "token_ids": [10, 11, 12, 13, 14, 90, 91],
+                    "production_cache_key_token_ids": [10, 11, 12, 13],
+                    "cache_key_boundary": "mllm_re_feed_n_minus_one",
+                    "generation_prompt_suffix_tokens": 2,
+                    "cache_extra_keys": {"generation_prompt": "assistant-suffix"},
+                    "tokenizer_source": "fake_mllm_tokenizer",
+                    "tokenizer_class": "FakeTokenizer",
+                }
+
+        row, token_vector, cache_extra_keys = server._cache_contract_render_and_tokenize(
+            engine=FakeEngine(),
+            prompt="private prompt body",
+            model="fake/mllm",
+            request_controls={
+                "enable_thinking": False,
+                "instructions": None,
+                "tools": [],
+            },
+        )
+
+        assert token_vector == [10, 11, 12, 13]
+        assert cache_extra_keys == {"generation_prompt": "assistant-suffix"}
+        assert row["cache_prompt_token_count"] == 4
+        assert row["full_cache_prompt_token_count"] == 5
+        assert row["cache_key_boundary"] == "mllm_re_feed_n_minus_one"
+        assert row["cache_key_boundary_removed_tokens"] == 1
+        assert len(row["cache_prompt_token_ids_sha256"]) == 64
+        assert len(row["full_cache_prompt_token_ids_sha256"]) == 64
+
     def test_cache_prefix_attestation_binds_exact_path_free_l1_l2_identity(
         self,
         tmp_path,

@@ -10985,6 +10985,8 @@ def _cache_contract_render_and_tokenize(
     cache_extra_keys: dict[str, str] | None = None
     tokenizer_source: str | None = None
     tokenizer_class: str | None = None
+    production_cache_key_token_ids: list[int] | None = None
+    cache_key_boundary = "full_cache_prompt"
     identity_builder = getattr(engine, "build_cache_contract_prompt_identity", None)
     if callable(identity_builder):
         try:
@@ -11001,6 +11003,18 @@ def _cache_contract_render_and_tokenize(
             ):
                 raise ValueError("cache contract helper returned invalid token ids")
             token_ids = list(raw_token_ids)
+            raw_production_ids = identity.get("production_cache_key_token_ids")
+            if raw_production_ids is not None:
+                if not isinstance(raw_production_ids, list) or any(
+                    not isinstance(token, int) for token in raw_production_ids
+                ):
+                    raise ValueError(
+                        "cache contract helper returned invalid production key ids"
+                    )
+                production_cache_key_token_ids = list(raw_production_ids)
+            raw_boundary = identity.get("cache_key_boundary")
+            if raw_boundary is not None:
+                cache_key_boundary = str(raw_boundary)
             gen_prompt_len = max(
                 0,
                 min(
@@ -11117,17 +11131,42 @@ def _cache_contract_render_and_tokenize(
     cache_prompt_token_ids = (
         token_ids[:-gen_prompt_len] if gen_prompt_len > 0 else token_ids
     )
+    full_cache_prompt_token_ids = list(cache_prompt_token_ids)
+    if production_cache_key_token_ids is None:
+        production_cache_key_token_ids = list(cache_prompt_token_ids)
+        if (
+            bool(getattr(engine, "is_mllm", False) or getattr(engine, "_is_mllm", False))
+            and len(production_cache_key_token_ids) > 1
+        ):
+            production_cache_key_token_ids = production_cache_key_token_ids[:-1]
+            cache_key_boundary = "mllm_re_feed_n_minus_one"
+    if len(production_cache_key_token_ids) > len(full_cache_prompt_token_ids):
+        raise RuntimeError("production cache-key boundary exceeds rendered prompt")
     token_digest = hashlib.sha256(
         json.dumps(
-            cache_prompt_token_ids,
+            production_cache_key_token_ids,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+    full_token_digest = hashlib.sha256(
+        json.dumps(
+            full_cache_prompt_token_ids,
             separators=(",", ":"),
             ensure_ascii=True,
         ).encode()
     ).hexdigest()
     return {
         "input_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
-        "cache_prompt_token_count": len(cache_prompt_token_ids),
+        "cache_prompt_token_count": len(production_cache_key_token_ids),
         "cache_prompt_token_ids_sha256": token_digest,
+        "full_cache_prompt_token_count": len(full_cache_prompt_token_ids),
+        "full_cache_prompt_token_ids_sha256": full_token_digest,
+        "cache_key_boundary": cache_key_boundary,
+        "cache_key_boundary_removed_tokens": max(
+            0,
+            len(full_cache_prompt_token_ids) - len(production_cache_key_token_ids),
+        ),
         "generation_prompt_suffix_tokens": gen_prompt_len,
         "generation_prompt_discriminator_present": cache_extra_keys is not None,
         "generation_prompt_discriminator_sha256": (
@@ -11145,7 +11184,7 @@ def _cache_contract_render_and_tokenize(
         ),
         "tokenizer_source": tokenizer_source,
         "tokenizer_class": tokenizer_class,
-    }, cache_prompt_token_ids, cache_extra_keys
+    }, production_cache_key_token_ids, cache_extra_keys
 
 
 def _cache_prefix_chain_hashes(

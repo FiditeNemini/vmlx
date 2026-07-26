@@ -1538,8 +1538,23 @@ class BatchedEngine(BaseEngine):
 
         token_ids = list(self._encode_rendered_prompt(enc, prompt))
         gen_prompt_len = max(0, min(int(gen_prompt_len or 0), len(token_ids)))
+        cache_prompt_token_ids = (
+            token_ids[:-gen_prompt_len] if gen_prompt_len > 0 else token_ids
+        )
+        production_cache_key_token_ids = list(cache_prompt_token_ids)
+        cache_key_boundary = "full_cache_prompt"
+        # The MLLM scheduler stores text-prefix blocks at the N-1 prompt
+        # boundary, then re-feeds the final prompt token on a cache hit to
+        # obtain logits.  The private release attestation must hash/count the
+        # same reusable key boundary as production store/fetch, while still
+        # exposing the full rendered cache-prompt count as provenance.
+        if self._is_mllm and len(production_cache_key_token_ids) > 1:
+            production_cache_key_token_ids = production_cache_key_token_ids[:-1]
+            cache_key_boundary = "mllm_re_feed_n_minus_one"
         return {
             "token_ids": token_ids,
+            "production_cache_key_token_ids": production_cache_key_token_ids,
+            "cache_key_boundary": cache_key_boundary,
             "generation_prompt_suffix_tokens": gen_prompt_len,
             "cache_extra_keys": cache_extra_keys,
             "tokenizer_source": tokenizer_source,

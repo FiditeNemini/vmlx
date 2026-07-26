@@ -10980,46 +10980,45 @@ def _cache_contract_render_and_tokenize(
     thinking_enabled = True if dry_request.enable_thinking is None else bool(
         dry_request.enable_thinking
     )
-    renderer = getattr(engine, "_apply_chat_template", None)
-    if not callable(renderer):
-        raise HTTPException(
-            status_code=501,
-            detail="loaded engine does not expose dry chat-template rendering",
-        )
-    rendered = renderer(
-        messages,
-        template_tools,
-        num_images=0,
-        num_videos=0,
-        num_audio=0,
-        enable_thinking=thinking_enabled,
-        extra_template_kwargs=ct_kwargs,
-        skip_generation_prompt=False,
-    )
-
-    tokenizer = _cache_contract_tokenizer(engine)
-    if tokenizer is None:
-        raise HTTPException(
-            status_code=501,
-            detail="loaded engine does not expose a prompt tokenizer",
-        )
-    token_ids = _cache_contract_encode(tokenizer, rendered)
+    token_ids: list[int]
     gen_prompt_len = 0
     cache_extra_keys: dict[str, str] | None = None
-    compute_gen_prompt = getattr(engine, "_compute_gen_prompt_cache_context", None)
-    if callable(compute_gen_prompt):
+    tokenizer_source: str | None = None
+    tokenizer_class: str | None = None
+    identity_builder = getattr(engine, "build_cache_contract_prompt_identity", None)
+    if callable(identity_builder):
         try:
-            computed_len, computed_extra_keys = compute_gen_prompt(
+            identity = identity_builder(
                 messages,
                 template_tools,
-                0,
-                thinking_enabled,
-                ct_kwargs,
-                rendered,
-                num_videos=0,
-                num_audio=0,
+                enable_thinking=thinking_enabled,
+                extra_template_kwargs=ct_kwargs,
+                skip_generation_prompt=False,
             )
-            gen_prompt_len = max(0, min(int(computed_len or 0), len(token_ids)))
+            raw_token_ids = identity.get("token_ids")
+            if not isinstance(raw_token_ids, list) or any(
+                not isinstance(token, int) for token in raw_token_ids
+            ):
+                raise ValueError("cache contract helper returned invalid token ids")
+            token_ids = list(raw_token_ids)
+            gen_prompt_len = max(
+                0,
+                min(
+                    int(identity.get("generation_prompt_suffix_tokens") or 0),
+                    len(token_ids),
+                ),
+            )
+            computed_extra_keys = identity.get("cache_extra_keys")
+            tokenizer_source = (
+                str(identity.get("tokenizer_source"))
+                if identity.get("tokenizer_source") is not None
+                else None
+            )
+            tokenizer_class = (
+                str(identity.get("tokenizer_class"))
+                if identity.get("tokenizer_class") is not None
+                else None
+            )
             if computed_extra_keys is not None:
                 if (
                     not isinstance(computed_extra_keys, dict)
@@ -11038,14 +11037,75 @@ def _cache_contract_render_and_tokenize(
                     "generation_prompt": computed_extra_keys["generation_prompt"]
                 }
         except Exception as exc:
-            logger.debug("cache token-contract gen-prompt derivation failed: %s", exc)
-            raise RuntimeError(
-                "cache generation-prompt discriminator is unavailable"
-            ) from exc
-    elif rendered:
-        raise RuntimeError(
-            "loaded engine does not expose generation-prompt cache context"
+            logger.debug("cache token-contract production identity failed: %s", exc)
+            raise RuntimeError("cache token-contract production identity failed") from exc
+    else:
+        renderer = getattr(engine, "_apply_chat_template", None)
+        if not callable(renderer):
+            raise HTTPException(
+                status_code=501,
+                detail="loaded engine does not expose dry chat-template rendering",
+            )
+        rendered = renderer(
+            messages,
+            template_tools,
+            num_images=0,
+            num_videos=0,
+            num_audio=0,
+            enable_thinking=thinking_enabled,
+            extra_template_kwargs=ct_kwargs,
+            skip_generation_prompt=False,
         )
+
+        tokenizer = _cache_contract_tokenizer(engine)
+        if tokenizer is None:
+            raise HTTPException(
+                status_code=501,
+                detail="loaded engine does not expose a prompt tokenizer",
+            )
+        tokenizer_source = "server_fallback"
+        tokenizer_class = type(tokenizer).__name__
+        token_ids = _cache_contract_encode(tokenizer, rendered)
+        compute_gen_prompt = getattr(engine, "_compute_gen_prompt_cache_context", None)
+        if callable(compute_gen_prompt):
+            try:
+                computed_len, computed_extra_keys = compute_gen_prompt(
+                    messages,
+                    template_tools,
+                    0,
+                    thinking_enabled,
+                    ct_kwargs,
+                    rendered,
+                    num_videos=0,
+                    num_audio=0,
+                )
+                gen_prompt_len = max(0, min(int(computed_len or 0), len(token_ids)))
+                if computed_extra_keys is not None:
+                    if (
+                        not isinstance(computed_extra_keys, dict)
+                        or set(computed_extra_keys) != {"generation_prompt"}
+                        or not isinstance(
+                            computed_extra_keys.get("generation_prompt"),
+                            str,
+                        )
+                        or not computed_extra_keys["generation_prompt"]
+                    ):
+                        raise ValueError(
+                            "text-only cache contract received non-generation "
+                            "cache side keys"
+                        )
+                    cache_extra_keys = {
+                        "generation_prompt": computed_extra_keys["generation_prompt"]
+                    }
+            except Exception as exc:
+                logger.debug("cache token-contract gen-prompt derivation failed: %s", exc)
+                raise RuntimeError(
+                    "cache generation-prompt discriminator is unavailable"
+                ) from exc
+        elif rendered:
+            raise RuntimeError(
+                "loaded engine does not expose generation-prompt cache context"
+            )
     if gen_prompt_len <= 0 and cache_extra_keys is not None:
         raise RuntimeError(
             "generation-prompt discriminator exists without a stripped suffix"
@@ -11080,6 +11140,11 @@ def _cache_contract_render_and_tokenize(
             if cache_extra_keys is not None
             else None
         ),
+        "prompt_identity_source": (
+            "engine_production_helper" if callable(identity_builder) else "server_fallback"
+        ),
+        "tokenizer_source": tokenizer_source,
+        "tokenizer_class": tokenizer_class,
     }, cache_prompt_token_ids, cache_extra_keys
 
 

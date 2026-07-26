@@ -309,6 +309,7 @@ class TestHealthEndpoint:
             is_mllm = False
             tokenizer = FakeTokenizer()
             _tokenizer = tokenizer
+            helper_calls = 0
 
             def get_stats(self):
                 return {"engine_type": "fake"}
@@ -373,6 +374,45 @@ class TestHealthEndpoint:
                     tokens_with_generation=tokens_with,
                     tokens_without_generation=tokens_without,
                 )
+
+            def build_cache_contract_prompt_identity(
+                self,
+                messages,
+                tools=None,
+                *,
+                enable_thinking=True,
+                extra_template_kwargs=None,
+                prompt_suffix=None,
+                skip_generation_prompt=False,
+            ):
+                self.helper_calls += 1
+                rendered = self._apply_chat_template(
+                    messages,
+                    tools,
+                    enable_thinking=enable_thinking,
+                    extra_template_kwargs=extra_template_kwargs,
+                    skip_generation_prompt=skip_generation_prompt,
+                )
+                gen_len, cache_extra_keys = self._compute_gen_prompt_cache_context(
+                    messages,
+                    tools,
+                    0,
+                    enable_thinking,
+                    extra_template_kwargs,
+                    rendered,
+                )
+                if prompt_suffix:
+                    rendered += prompt_suffix
+                return {
+                    "token_ids": self.tokenizer.encode(
+                        rendered,
+                        add_special_tokens=False,
+                    ),
+                    "generation_prompt_suffix_tokens": gen_len,
+                    "cache_extra_keys": cache_extra_keys,
+                    "tokenizer_source": "fake_production_tokenizer",
+                    "tokenizer_class": type(self.tokenizer).__name__,
+                }
 
         config = tmp_path / "config.json"
         config.write_text('{"model_type":"fake"}\n')
@@ -449,6 +489,15 @@ class TestHealthEndpoint:
             contract["longest_common_prefix_tokens"]["A:A"]
             == contract["prompts"]["A"]["cache_prompt_token_count"]
         )
+        assert fake_engine.helper_calls == 2
+        assert {
+            contract["prompts"][label]["prompt_identity_source"]
+            for label in ("A", "B")
+        } == {"engine_production_helper"}
+        assert {
+            contract["prompts"][label]["tokenizer_source"]
+            for label in ("A", "B")
+        } == {"fake_production_tokenizer"}
         assert 1 < contract["longest_common_prefix_tokens"]["A:B"] < min(
             contract["prompts"]["A"]["cache_prompt_token_count"],
             contract["prompts"]["B"]["cache_prompt_token_count"],

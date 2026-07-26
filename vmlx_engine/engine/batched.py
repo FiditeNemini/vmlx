@@ -1461,6 +1461,91 @@ class BatchedEngine(BaseEngine):
         except TypeError:
             return enc(prompt)
 
+    def build_cache_contract_prompt_identity(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None = None,
+        *,
+        enable_thinking: bool = True,
+        extra_template_kwargs: dict | None = None,
+        prompt_suffix: str | None = None,
+        skip_generation_prompt: bool = False,
+    ) -> dict[str, Any]:
+        """Return the production prompt/cache-key token identity without generating.
+
+        Private cache attestations need the same rendered prompt and tokenizer
+        owner as ``chat()``/``stream_chat()``.  Keeping that logic here prevents
+        the HTTP layer from independently guessing which wrapper/processor
+        should tokenize a source-matched request.
+        """
+        messages = self._video_frame_fallback_messages(messages)
+        _, extracted_images, extracted_videos = extract_multimodal_content(messages)
+        extracted_audio = self._extract_audio_content(messages)
+        if extracted_images or extracted_videos or extracted_audio:
+            raise ValueError("cache token-contract is text-only")
+
+        template_tools = convert_tools_for_template(tools) if tools else None
+        thinking_enabled = bool(enable_thinking)
+        prompt = self._apply_chat_template(
+            messages,
+            template_tools,
+            num_images=0,
+            num_videos=0,
+            num_audio=0,
+            enable_thinking=thinking_enabled,
+            extra_template_kwargs=extra_template_kwargs,
+            skip_generation_prompt=skip_generation_prompt,
+        )
+
+        gen_prompt_len = 0
+        cache_extra_keys = None
+        if not skip_generation_prompt:
+            gen_prompt_len, cache_extra_keys = self._compute_gen_prompt_cache_context(
+                messages,
+                template_tools,
+                0,
+                thinking_enabled,
+                extra_template_kwargs,
+                prompt,
+                num_videos=0,
+                num_audio=0,
+            )
+
+        if prompt_suffix:
+            prompt += prompt_suffix
+
+        tokenizer_source = "engine_tokenizer"
+        if self._is_mllm and self._processor is not None:
+            tokenizer = getattr(self._processor, "tokenizer", self._processor)
+            tokenizer_source = "mllm_processor_tokenizer"
+        else:
+            scheduler = getattr(getattr(self, "_engine", None), "scheduler", None)
+            tokenizer = getattr(scheduler, "tokenizer", None) or self.tokenizer
+            if getattr(scheduler, "tokenizer", None) is not None:
+                tokenizer_source = "llm_scheduler_tokenizer"
+        if tokenizer is None:
+            raise ValueError("loaded engine does not expose a prompt tokenizer")
+
+        if hasattr(tokenizer, "encode"):
+            enc = tokenizer.encode
+        elif hasattr(tokenizer, "tokenizer") and hasattr(tokenizer.tokenizer, "encode"):
+            enc = tokenizer.tokenizer.encode
+            tokenizer_source = f"{tokenizer_source}.tokenizer"
+        else:
+            raise ValueError(
+                f"Tokenizer {type(tokenizer).__name__} has no encode method"
+            )
+
+        token_ids = list(self._encode_rendered_prompt(enc, prompt))
+        gen_prompt_len = max(0, min(int(gen_prompt_len or 0), len(token_ids)))
+        return {
+            "token_ids": token_ids,
+            "generation_prompt_suffix_tokens": gen_prompt_len,
+            "cache_extra_keys": cache_extra_keys,
+            "tokenizer_source": tokenizer_source,
+            "tokenizer_class": type(tokenizer).__name__,
+        }
+
     def _compute_segment_boundaries(
         self,
         messages: list[dict[str, Any]],

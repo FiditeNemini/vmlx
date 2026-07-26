@@ -2264,6 +2264,38 @@ def test_r18_v5_runtime_bundle_attestation_requires_production_nested_shape(
     )
 
 
+def test_r18_v5_runtime_source_attestation_requires_path_free_health_shape():
+    module = load_module()
+    runtime = {
+        "package_init_relpath": "vmlx_engine/__init__.py",
+        "package_init_sha256": "1" * 64,
+        "server_module_relpath": "vmlx_engine/server.py",
+        "server_module_sha256": "2" * 64,
+        "python_source_tree_sha256": "3" * 64,
+        "python_source_file_count": 270,
+        "python_source_read_error_count": 0,
+        "python_executable_fingerprint_sha256": "4" * 64,
+    }
+    assert module._v5_runtime_source_attestation(runtime) == {
+        key: runtime[key]
+        for key in (
+            "package_init_sha256",
+            "server_module_sha256",
+            "python_source_tree_sha256",
+            "python_executable_fingerprint_sha256",
+            "python_source_file_count",
+            "python_source_read_error_count",
+        )
+    }
+    with_private_path = deepcopy(runtime)
+    with_private_path.pop("package_init_relpath")
+    with_private_path["package_init_path"] = "/private/stale/vmlx_engine/__init__.py"
+    assert module._v5_runtime_source_attestation(with_private_path) is None
+    unreadable = deepcopy(runtime)
+    unreadable["python_source_read_error_count"] = 1
+    assert module._v5_runtime_source_attestation(unreadable) is None
+
+
 def test_r18_bundle_attestation_rejects_symlink_and_hardlink_files(
     tmp_path: Path,
 ):
@@ -3114,12 +3146,28 @@ def test_r18_v5_main_owned_children_fail_closed_on_unowned_release_rows(
         del observed
         current_backend_pid["value"] = args.backend_pid
         bundle_provenance = deepcopy(snapshot["health_attestation"])
+        executable_fingerprint = hashlib.sha256(
+            str(Path(executable["path"]).absolute()).encode()
+        ).hexdigest()
         health = {
             "model_bundle_provenance": bundle_provenance,
             "runtime_provenance": {
-                "package_init_path": str(
-                    (runtime_package / "__init__.py").resolve()
-                ),
+                "package_init_relpath": "vmlx_engine/__init__.py",
+                "package_init_sha256": source_attestation[
+                    "package_init_sha256"
+                ],
+                "server_module_relpath": "vmlx_engine/server.py",
+                "server_module_sha256": source_attestation[
+                    "server_module_sha256"
+                ],
+                "python_source_tree_sha256": source_attestation[
+                    "python_source_tree_sha256"
+                ],
+                "python_source_file_count": source_attestation[
+                    "python_source_file_count"
+                ],
+                "python_source_read_error_count": 0,
+                "python_executable_fingerprint_sha256": executable_fingerprint,
                 "model_bundle_provenance": deepcopy(bundle_provenance),
             },
         }

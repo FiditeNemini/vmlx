@@ -4806,6 +4806,41 @@ def _v5_hash_python_runtime(imported_init: Path) -> dict[str, Any] | None:
     }
 
 
+def _v5_runtime_source_attestation(
+    runtime: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Validate the path-free import-time source hashes published by /health."""
+
+    if (
+        runtime.get("package_init_relpath") != "vmlx_engine/__init__.py"
+        or runtime.get("server_module_relpath") != "vmlx_engine/server.py"
+        or not isinstance(runtime.get("python_source_file_count"), int)
+        or runtime.get("python_source_file_count", 0) <= 0
+        or runtime.get("python_source_read_error_count") != 0
+    ):
+        return None
+    fields = (
+        "package_init_sha256",
+        "server_module_sha256",
+        "python_source_tree_sha256",
+        "python_executable_fingerprint_sha256",
+    )
+    if any(
+        not isinstance(runtime.get(field), str)
+        or re.fullmatch(r"[0-9a-f]{64}", runtime[field]) is None
+        for field in fields
+    ):
+        return None
+    return {
+        field: runtime[field]
+        for field in (
+            *fields,
+            "python_source_file_count",
+            "python_source_read_error_count",
+        )
+    }
+
+
 def _v5_validate_runtime_bundle_attestation(
     health: dict[str, Any],
     runtime: dict[str, Any],
@@ -4863,10 +4898,9 @@ def _v5_independent_runtime_observation(
     runtime = health.get("runtime_provenance")
     if not isinstance(runtime, dict):
         raise RuntimeError("health has no runtime provenance")
-    imported_init = Path(str(runtime.get("package_init_path") or ""))
-    runtime_hashes = _v5_hash_python_runtime(imported_init)
+    runtime_hashes = _v5_runtime_source_attestation(runtime)
     if runtime_hashes is None:
-        raise RuntimeError("cannot independently hash imported Python runtime")
+        raise RuntimeError("health runtime source provenance is incomplete")
     process_observer = (hooks or {}).get("process_observer", _observe_process)
     listener_observer = (hooks or {}).get("listener_observer")
     backend = process_observer(int(raw.get("backend_pid") or 0))
@@ -4905,6 +4939,11 @@ def _v5_independent_runtime_observation(
         != expected["python_source_tree_sha256"]
         or runtime_hashes["python_source_file_count"]
         != expected["python_source_file_count"]
+        or runtime_hashes["python_source_read_error_count"] != 0
+        or runtime_hashes["python_executable_fingerprint_sha256"]
+        != hashlib.sha256(
+            str(Path(backend["executable_path"]).absolute()).encode()
+        ).hexdigest()
         or dom.get("sourceCommit") != source.get("commit")
         or not _v5_validate_runtime_bundle_attestation(
             health,

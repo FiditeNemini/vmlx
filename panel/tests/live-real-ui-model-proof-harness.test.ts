@@ -145,6 +145,61 @@ describe("generated CDP expression syntax", () => {
     expect(() => assertCdpExpressionSyntax(malformed, "renderer-real-ui-chat"))
       .toThrow(/generated an invalid CDP expression/);
   });
+
+  it("keeps private cache attestation cleanup state in finally scope", async () => {
+    const cleanupValues: string[] = [];
+    const expression = `
+      (async () => {
+        let proofSessionId = "session-1";
+        let privateConfigRestoreAdditionalArgs = "--existing";
+        const privateCacheAttestationArgs = "--private-proof";
+        try {
+          throw new Error("body failed");
+        } finally {
+          if (
+            proofSessionId
+            && privateConfigRestoreAdditionalArgs !== null
+            && privateCacheAttestationArgs
+          ) {
+            cleanupValues.push(privateCacheAttestationArgs);
+          }
+        }
+      })()
+    `;
+
+    assertCdpExpressionSyntax(expression, "renderer-real-ui-chat");
+    await expect(eval(expression)).rejects.toThrow("body failed");
+    expect(cleanupValues).toEqual(["--private-proof"]);
+  });
+
+  it("declares the production worker attestation value before its try/finally", () => {
+    const harnessSource = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+    const workerScopeStart = harnessSource.indexOf(
+      "        let proofSessionId = null;",
+    );
+    const declarationIndex = harnessSource.indexOf(
+      "        const privateCacheAttestationArgs = ${JSON.stringify(privateCacheAttestationArgs)};",
+      workerScopeStart,
+    );
+    const tryIndex = harnessSource.indexOf("        try {", workerScopeStart);
+    const finallyIndex = harnessSource.indexOf(
+      "        } finally {",
+      workerScopeStart,
+    );
+    const cleanupReadIndex = harnessSource.indexOf(
+      "            && privateCacheAttestationArgs",
+      finallyIndex,
+    );
+
+    expect(workerScopeStart).toBeGreaterThan(-1);
+    expect(declarationIndex).toBeGreaterThan(workerScopeStart);
+    expect(declarationIndex).toBeLessThan(tryIndex);
+    expect(tryIndex).toBeLessThan(finallyIndex);
+    expect(cleanupReadIndex).toBeGreaterThan(finallyIndex);
+  });
 });
 
 function canonicalJson(value: unknown): string {

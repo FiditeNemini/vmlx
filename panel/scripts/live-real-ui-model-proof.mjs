@@ -6339,8 +6339,8 @@ async function main() {
         ];
         let proofSessionId = null;
         let privateConfigRestoreAdditionalArgs = null;
+        const privateCacheAttestationArgs = ${JSON.stringify(privateCacheAttestationArgs)};
         try {
-          const privateCacheAttestationArgs = ${JSON.stringify(privateCacheAttestationArgs)};
           const stripPrivateCacheAttestationArgs = (raw) => {
             const tokens = String(raw || '').trim().split(/\s+/).filter(Boolean);
             const kept = [];

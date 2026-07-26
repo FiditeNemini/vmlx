@@ -55,12 +55,12 @@ PRIVATE_CACHE_ATTESTATION_TOKEN_FILE_ENV = (
     "VMLINUX_PRIVATE_CACHE_ATTESTATION_TOKEN_FILE"
 )
 OWNED_EXECUTION_SCHEMA = "vmlx-r18-owned-execution-v1"
-API_CAPTURE_LAYER = "requests.decompressed_iter_lines_input"
+API_CAPTURE_LAYER = "requests.decompressed_response_parser_input"
 API_CAPTURE_SEMANTICS = (
-    "Exact decompressed streaming response-body bytes delivered to "
-    "requests.iter_lines before line splitting, Unicode decoding, or protocol "
-    "parsing; excludes nonstream responses, HTTP transfer framing, and "
-    "compressed transport octets."
+    "Exact decompressed response-body bytes delivered to protocol parsers: "
+    "streaming bytes before requests.iter_lines line splitting or Unicode "
+    "decoding, and nonstream response bytes before JSON decoding; excludes "
+    "HTTP transfer framing and compressed transport octets."
 )
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 CONTROL_MARKER_RE = re.compile(

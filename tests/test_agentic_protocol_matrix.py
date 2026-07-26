@@ -1714,6 +1714,8 @@ def test_run_matrix_fails_closed_before_generation_on_unobserved_source_identity
             str(repo_root),
             "--output",
             str(tmp_path / "result.json"),
+            "--raw-artifact-dir",
+            str(tmp_path / "private-captures"),
             "--source-head",
             declared_head,
             "--run-id",
@@ -1783,6 +1785,8 @@ def test_run_matrix_fails_closed_when_direct_and_gateway_are_different_backends(
             str(repo_root),
             "--output",
             str(tmp_path / "result.json"),
+            "--raw-artifact-dir",
+            str(tmp_path / "private-captures"),
             "--source-head",
             source["head"],
             "--run-id",
@@ -1888,6 +1892,8 @@ def test_run_matrix_rejects_cross_surface_identity_substitution(
             str(repo_root),
             "--output",
             str(tmp_path / f"{failure_mode}.json"),
+            "--raw-artifact-dir",
+            str(tmp_path / f"{failure_mode}-private-captures"),
             "--source-head",
             source["head"],
             "--run-id",
@@ -2007,6 +2013,8 @@ def test_run_matrix_rejects_result_output_inside_git_worktree(
             str(repo_root),
             "--output",
             str(output),
+            "--raw-artifact-dir",
+            str(tmp_path / "private-captures"),
             "--source-head",
             source["head"],
             "--run-id",
@@ -2392,7 +2400,7 @@ def test_stream_matrix_requires_private_raw_capture(tmp_path: Path):
         matrix.run_matrix(args)
 
 
-def test_responses_nonstream_matrix_requires_private_raw_capture(tmp_path: Path):
+def test_nonstream_matrix_requires_private_raw_capture(tmp_path: Path):
     package_json = tmp_path / matrix.FILE_INFO_PATH
     package_json.parent.mkdir(parents=True)
     package_json.write_text("{}\n")
@@ -2405,64 +2413,86 @@ def test_responses_nonstream_matrix_requires_private_raw_capture(tmp_path: Path)
         allow_single_base=False,
         health_url=[],
         repo_root=str(tmp_path),
-        protocol=["responses"],
+        protocol=["chat"],
         mode=["nonstream"],
         raw_artifact_dir=None,
     )
 
     with pytest.raises(
         ValueError,
-        match="Responses nonstream mode is requested",
+        match="nonstream mode is requested",
     ):
         matrix.run_matrix(args)
 
 
-def test_run_matrix_rejects_nonstream_nonresponses_capture_before_creation(
+def test_expected_parser_input_routes_include_nonresponses_nonstream():
+    routes = matrix.expected_parser_input_capture_routes(
+        ["direct", "gateway"],
+        ["chat"],
+        ["nonstream"],
+        skip_cancellation=True,
+    )
+    assert routes == [
+        ("direct", "chat", "nonstream-flow-round1"),
+        ("direct", "chat", "nonstream-flow-round2"),
+        ("direct", "chat", "nonstream-flow-round3"),
+        ("gateway", "chat", "nonstream-flow-round1"),
+        ("gateway", "chat", "nonstream-flow-round2"),
+        ("gateway", "chat", "nonstream-flow-round3"),
+    ]
+
+
+def test_nonstream_chat_capture_preserves_parser_input_bytes(
+    monkeypatch,
     tmp_path: Path,
 ):
-    repo_root = tmp_path / "repo"
-    package_json = repo_root / matrix.FILE_INFO_PATH
-    package_json.parent.mkdir(parents=True)
-    package_json.write_text("{}\n")
-    subprocess.run(
-        ["git", "init", "-q", str(repo_root)],
-        check=True,
-        capture_output=True,
-    )
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
     raw_root = tmp_path / "private-captures"
-    args = matrix.build_parser().parse_args(
-        [
-            "--base-url",
-            "direct=http://direct.invalid",
-            "--base-url",
-            "gateway=http://gateway.invalid",
-            "--model",
-            "served-model",
-            "--bundle-root",
-            str(tmp_path),
-            "--repo-root",
-            str(repo_root),
-            "--output",
-            str(tmp_path / "result.json"),
-            "--mode",
-            "nonstream",
-            "--protocol",
-            "chat",
-            "--raw-artifact-dir",
-            str(raw_root),
-            "--source-head",
-            "not-observed-because-mode-validation-runs-first",
-            "--run-id",
-            "nonstream-capture-rejection",
-        ]
+    payload = {
+        "model": "served-model",
+        "messages": [{"role": "user", "content": "private prompt"}],
+        "stream": False,
+        "max_tokens": 32,
+    }
+    response_body = (
+        b'{"id":"chatcmpl_1","choices":[{"message":{"role":"assistant",'
+        b'"reasoning_content":"private","content":"done"},'
+        b'"finish_reason":"stop"}],"usage":{"completion_tokens":7}}'
+    )
+    prepared = requests.Request(
+        "POST",
+        "http://127.0.0.1:8000/v1/chat/completions",
+        json=payload,
+    ).prepare()
+    response = requests.Response()
+    response.status_code = 200
+    response.reason = "OK"
+    response._content = response_body
+    response.request = prepared
+    response.encoding = "utf-8"
+
+    monkeypatch.setattr(matrix.requests, "post", lambda *_args, **_kwargs: response)
+    recorder = matrix.DecompressedParserInputCaptureRecorder(
+        raw_root,
+        worktree,
+        run_id="nonstream-chat",
+    )
+    recorder.configure_expected([("direct", "chat", "nonstream-round1")])
+    client = matrix.ProtocolClient(
+        "http://127.0.0.1:8000",
+        None,
+        30,
+        base_label="direct",
+        raw_recorder=recorder,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="request --mode stream or --protocol responses",
-    ):
-        matrix.run_matrix(args)
-    assert not raw_root.exists()
-    assert "--protocol responses --mode nonstream" in (
-        matrix.build_parser().format_help()
-    )
+    result = client.send("chat", payload, False, capture_label="nonstream-round1")
+
+    assert result["content"] == "done"
+    manifest = recorder.finalize()
+    body_path = next(recorder.run_dir.glob("*.decompressed-parser-input.bin"))
+    assert body_path.read_bytes() == response_body
+    assert manifest["complete"] is True
+    assert manifest["routes"][0]["protocol"] == "chat"
+    assert manifest["routes"][0]["capture_label"] == "nonstream-round1"

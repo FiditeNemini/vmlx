@@ -93,7 +93,7 @@ CAPTURE_LAYER = "requests.decompressed_response_parser_input"
 CAPTURE_SEMANTICS = (
     "Exact decompressed response-body bytes delivered to protocol parsers: "
     "streaming bytes before requests.iter_lines line splitting or Unicode "
-    "decoding, and Responses nonstream bytes before JSON decoding; excludes "
+    "decoding, and nonstream response bytes before JSON decoding; excludes "
     "HTTP transfer framing and compressed transport octets."
 )
 OUTPUT_SCHEMA = "vmlx-agentic-protocol-matrix-v2"
@@ -2413,7 +2413,7 @@ class ProtocolClient:
             capture_error_type: str | None = None
             completed_ms = 0.0
             try:
-                if protocol == "responses" and self.raw_recorder is not None:
+                if self.raw_recorder is not None:
                     capture = self.raw_recorder.begin(
                         base_label=self.base_label,
                         protocol=protocol,
@@ -3334,9 +3334,10 @@ def expected_parser_input_capture_routes(
                 for protocol in protocol_list
                 for capture_label in labels
             )
-        if "nonstream" in mode_set and "responses" in protocol_list:
+        if "nonstream" in mode_set:
             routes.extend(
-                (base_label, "responses", f"nonstream-flow-round{round_number}")
+                (base_label, protocol, f"nonstream-flow-round{round_number}")
+                for protocol in protocol_list
                 for round_number in (1, 2, 3)
             )
     return routes
@@ -3667,20 +3668,17 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
     protocols = args.protocol or list(PROTOCOLS)
     modes = args.mode or list(MODES)
     raw_artifact_dir = getattr(args, "raw_artifact_dir", None)
-    capture_required = (
-        "stream" in modes
-        or ("responses" in protocols and "nonstream" in modes)
-    )
+    capture_required = "stream" in modes or "nonstream" in modes
     if capture_required and raw_artifact_dir is None:
         raise ValueError(
             "--raw-artifact-dir is required whenever stream mode or "
-            "Responses nonstream mode is requested"
+            "nonstream mode is requested"
         )
     if raw_artifact_dir is not None and not capture_required:
         raise ValueError(
             "--raw-artifact-dir captures streaming parser-input bytes and "
-            "Responses nonstream JSON parser-input bytes; request --mode "
-            "stream or --protocol responses --mode nonstream"
+            "nonstream JSON parser-input bytes; request --mode stream or "
+            "--mode nonstream"
         )
     git_worktree = _git_worktree_root(repo_root)
     _validate_private_result_destination(Path(args.output), git_worktree)
@@ -4017,9 +4015,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "Private root required for exact decompressed streaming and "
-            "Responses nonstream parser-input response bytes with "
-            "safe-allowlisted metadata; requires --mode stream or --protocol "
-            "responses --mode nonstream and must resolve outside every Git "
+            "nonstream parser-input response bytes with safe-allowlisted "
+            "metadata; requires --mode stream or --mode nonstream and must "
+            "resolve outside every Git "
             "worktree"
         ),
     )

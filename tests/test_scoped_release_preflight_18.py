@@ -4439,6 +4439,210 @@ def test_r18_v5_concurrent_producers_are_held_until_both_children_finish(
     assert result["api"]["capture"]["phase_count"] == 6
 
 
+def test_r18_v5_cache_worker_uses_prior_backend_pid_for_restart_phases(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    run_id = "restart-pid-chain"
+    nonce = "n" * 32
+    source_commit = "c" * 40
+    source_tree = "d" * 40
+    run_root = tmp_path / "run"
+    control_dir = run_root / "control"
+    artifact_root = run_root / "cache-artifacts"
+    run_root.mkdir()
+    control_dir.mkdir()
+    primary_root = tmp_path / "primary-model"
+    native_root = tmp_path / "native-model"
+    primary_root.mkdir()
+    native_root.mkdir()
+    primary_fingerprint = "a" * 64
+    native_fingerprint = "b" * 64
+    primary_session = "primary-session"
+    native_session = "native-session"
+    previous_backend_pid = None
+    backend_pids: list[int] = []
+    for phase in module.V5_CACHE_PHASES:
+        is_native = (
+            phase["representative_id"] == module.V5_NATIVE_REPRESENTATIVE_ID
+        )
+        backend_pid = 2000 + phase["index"]
+        backend_pids.append(backend_pid)
+        session_id = native_session if is_native else primary_session
+        model = "fixture-native-model" if is_native else "fixture-model"
+        bundle_root = native_root if is_native else primary_root
+        fingerprint = native_fingerprint if is_native else primary_fingerprint
+        paths = module._v5_existing_phase_paths(control_dir, phase)
+        binding = {
+            "schema": module.V5_SESSION_BINDING_SCHEMA,
+            "run_id": run_id,
+            "nonce": nonce,
+            "ui_producer_pid": 999,
+            "source_commit": source_commit,
+            "source_tree": source_tree,
+            "model": model,
+            "model_bundle_path": str(bundle_root.resolve()),
+            "bundle_fingerprint_sha256": fingerprint,
+            "session_id": session_id,
+            "direct_base_url": "http://127.0.0.1:8022",
+            "gateway_base_url": "http://127.0.0.1:8080",
+            "health_url": "http://127.0.0.1:8022/health",
+            "direct_health_url": "http://127.0.0.1:8022/health",
+            "gateway_health_url": "http://127.0.0.1:8080/health",
+            "cdp_url": "http://127.0.0.1:9355",
+            "backend_pid": backend_pid,
+            "previous_backend_pid": previous_backend_pid,
+            "session_start_ordinal": phase["index"] + 1,
+            "gateway_pid": 75096,
+            "electron_pid": 75096,
+            "phase_index": phase["index"],
+            "phase_name": phase["name"],
+            "representative_id": phase["representative_id"],
+            "bundle_role": phase["bundle_role"],
+            "cache_policy": phase["cache_policy"],
+            "kv_cache_quantization": phase["kv_cache_quantization"],
+            "tq_policy": phase["tq_policy"],
+            "session_policy": phase["session_policy"],
+            "ui_action_profile": phase["ui_action_profile"],
+            "ui_turn_count": phase["ui_turn_count"],
+            "api_action_profile": phase["api_action_profile"],
+            "paged_ram": phase["paged_ram"],
+        }
+        binding_bytes = json.dumps(
+            binding,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        paths["binding"].write_bytes(binding_bytes)
+        ready = {
+            "schema": module.V5_UI_READY_SCHEMA,
+            "run_id": run_id,
+            "nonce": nonce,
+            "ui_producer_pid": 999,
+            "session_id": session_id,
+            "binding_sha256": hashlib.sha256(binding_bytes).hexdigest(),
+            "held": True,
+            "phase_index": phase["index"],
+            "phase_name": phase["name"],
+            "representative_id": phase["representative_id"],
+            "bundle_role": phase["bundle_role"],
+            "cache_policy": phase["cache_policy"],
+            "kv_cache_quantization": phase["kv_cache_quantization"],
+            "tq_policy": phase["tq_policy"],
+            "session_policy": phase["session_policy"],
+            "ui_action_profile": phase["ui_action_profile"],
+            "ui_turn_count": phase["ui_turn_count"],
+            "api_action_profile": phase["api_action_profile"],
+            "paged_ram": phase["paged_ram"],
+            "ready_at": module._iso_now(),
+        }
+        paths["ready"].write_text(
+            json.dumps(ready, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        previous_backend_pid = backend_pid
+
+    observed_previous_backend_pids: list[int] = []
+
+    def fake_cache_phase(
+        phase_args,
+        binding,
+        _run_root,
+        phase,
+        *,
+        store_summary_path,
+    ):
+        observed_previous_backend_pids.append(
+            phase_args.v5_previous_backend_pid
+        )
+        if module._v5_cache_gate_operation(phase) == "probe":
+            assert store_summary_path is not None
+        summary_bytes = json.dumps(
+            {
+                "phase": phase["index"],
+                "identity": {
+                    "observed_engine": {"pid": binding["backend_pid"]},
+                    "model_bundle_provenance": {
+                        "fingerprint_sha256": binding[
+                            "bundle_fingerprint_sha256"
+                        ],
+                    },
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        phase_root = artifact_root / f"{phase['index']:02d}-{phase['name']}"
+        phase_root.mkdir(parents=True, exist_ok=True)
+        summary_path = phase_root / "summary.json"
+        summary_path.write_bytes(summary_bytes)
+        return (
+            {
+                "phase_index": phase["index"],
+                "summary_b64": _fixture_b64(summary_bytes),
+            },
+            summary_path,
+            summary_bytes,
+        )
+
+    monkeypatch.setattr(module, "_observe_process", lambda _pid: {"pid": 999})
+    monkeypatch.setattr(module, "_v5_cache_worker_phase", fake_cache_phase)
+    monkeypatch.setattr(
+        module,
+        "_v5_wait_for_phase_release",
+        lambda *_args, **_kwargs: b"release",
+    )
+    monkeypatch.setattr(
+        module,
+        "_v5_derive_l2_size_eviction_attestation",
+        lambda **_kwargs: {"schema": "fixture-l2-attestation"},
+    )
+    args = argparse.Namespace(
+        v5_cache_artifact_root=artifact_root,
+        v5_phase_control_dir=control_dir,
+        v5_previous_backend_pid=0,
+        v5_run_id=run_id,
+        v5_nonce=nonce,
+        v5_source_commit=source_commit,
+        v5_source_tree=source_tree,
+        v5_run_intent_sha256="e" * 64,
+        v5_session_binding_path=control_dir / "unused.session.json",
+        v5_ready_path=control_dir / "unused.ready.json",
+        v5_release_path=control_dir / "unused.release.json",
+        direct_base_url="http://127.0.0.1:8022",
+        gateway_base_url="http://127.0.0.1:8080",
+        health_url="http://127.0.0.1:8022/health",
+        gateway_health_url="http://127.0.0.1:8080/health",
+        cdp_url="http://127.0.0.1:9355",
+        electron_pid=75096,
+        gateway_pid=75096,
+        model="fixture-model",
+        native_model="fixture-native-model",
+    )
+    bundles = {
+        module.V5_PRIMARY_REPRESENTATIVE_ID: {
+            "model_bundle_path": str(primary_root.resolve()),
+            "fingerprint_sha256": primary_fingerprint,
+        },
+        module.V5_NATIVE_REPRESENTATIVE_ID: {
+            "model_bundle_path": str(native_root.resolve()),
+            "fingerprint_sha256": native_fingerprint,
+        },
+    }
+
+    module._v5_cache_worker_capture(args, bundles, run_root)
+
+    assert observed_previous_backend_pids == [
+        0,
+        backend_pids[0],
+        backend_pids[1],
+        backend_pids[2],
+        backend_pids[3],
+        backend_pids[4],
+    ]
+
+
 @pytest.mark.parametrize(
     ("ui_mode", "message"),
     [

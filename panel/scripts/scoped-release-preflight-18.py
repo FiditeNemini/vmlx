@@ -10436,12 +10436,18 @@ def _v5_cache_worker_capture(
     for phase in V5_CACHE_PHASES:
         gate_operation = _v5_cache_gate_operation(phase)
         paths = _v5_existing_phase_paths(args.v5_phase_control_dir, phase)
+        phase_previous_backend_pid = (
+            int(last_binding["backend_pid"])
+            if last_binding is not None
+            else int(args.v5_previous_backend_pid)
+        )
         phase_args = argparse.Namespace(
             **{
                 **vars(args),
                 "v5_session_binding_path": paths["binding"],
                 "v5_ready_path": paths["ready"],
                 "v5_release_path": paths["release"],
+                "v5_previous_backend_pid": phase_previous_backend_pid,
             }
         )
         binding, binding_bytes, _ = _v5_wait_for_worker_phase_binding(

@@ -9172,7 +9172,7 @@ def _v5_api_sampling_capture(
                 }
             ],
             "stream": False,
-            "max_tokens": 2,
+            "max_tokens": 16,
             "enable_thinking": False,
             **override,
         }
@@ -12852,7 +12852,12 @@ def main(
     except Exception as exc:  # noqa: BLE001 - release gate fails closed
         if (_test_hooks or {}).get("raise_exceptions") is True:
             raise
-        print(f"v5 preflight failed before manifest completion: {type(exc).__name__}")
+        message = str(exc).strip()
+        detail = f": {message}" if message else ""
+        print(
+            "v5 preflight failed before manifest completion: "
+            f"{type(exc).__name__}{detail}"
+        )
         return 1
     print(args.out)
     print(f"scope={SCOPE}")

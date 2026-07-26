@@ -2116,6 +2116,38 @@ def test_store_durability_barrier_accepts_full_capacity_replacement(
     assert final_health == _disk_health(writes=11, blocks=5, evictions=1)
 
 
+def test_store_durability_barrier_is_request_correlated_not_scheduler_global(
+    monkeypatch,
+):
+    baseline = _health_cache_counters(
+        _disk_health(writes=10, blocks=5, reconciliation_generation=0)
+    )
+    first_health = _disk_health(writes=11, blocks=6)
+    first_health["scheduler"] = {"num_waiting": 1, "num_running": 1}
+    final_health = _disk_health(writes=11, blocks=6)
+    final_health["scheduler"] = {"num_waiting": 2, "num_running": 3}
+    health_responses = iter([first_health, final_health])
+    monkeypatch.setattr(
+        gate,
+        "_json_get",
+        lambda _url, _timeout: next(health_responses),
+    )
+
+    durability, final_health = _wait_for_store_durability(
+        base_url="http://127.0.0.1:8001",
+        request_timeout=1,
+        request_id="resp-cold_a",
+        baseline_counters=baseline,
+        timeout_s=1.0,
+        poll_interval_s=0.001,
+    )
+
+    assert durability["ok"] is True
+    assert durability["stable_observations"] == 2
+    assert durability["matching_fence"]["request_id"] == "resp-cold_a"
+    assert final_health["scheduler"] == {"num_waiting": 2, "num_running": 3}
+
+
 def test_store_durability_barrier_rejects_aggregate_write_without_request_fence(
     monkeypatch,
 ):

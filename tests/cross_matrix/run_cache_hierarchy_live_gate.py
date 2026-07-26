@@ -1536,7 +1536,15 @@ def _wait_for_store_durability(
     timeout_s: float,
     poll_interval_s: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Wait for one request's post-eviction write fence to settle twice."""
+    """Wait for one request's post-eviction write fence to settle twice.
+
+    Scheduler occupancy is intentionally observational here.  A terminal
+    response is dispatched before architecture-native prompt-cache cleanup,
+    and a later request may therefore be running while this request's exact
+    physical write fence is already sealed and durable.  Requiring global
+    scheduler idleness turns a request-correlated durability proof into a
+    false failure for slow deferred-cleanup families such as MiniMax M3.
+    """
     started = time.monotonic()
     deadline = started + max(0.0, timeout_s)
     polls = 0
@@ -1678,10 +1686,6 @@ def _wait_for_store_durability(
             contract_failures.append("block-disk writes are still in flight")
         if pipeline_snapshot.get("writer_alive") is not True:
             contract_failures.append("block-disk writer is not alive")
-        if _integer(scheduler.get("num_waiting")) != 0:
-            contract_failures.append("scheduler still has waiting requests")
-        if _integer(scheduler.get("num_running")) != 0:
-            contract_failures.append("scheduler still has running requests")
         if _integer(deltas.get("block_disk_cache.disk_writes")) <= 0:
             contract_failures.append(
                 "block-disk committed-write counter did not increase"
@@ -1696,8 +1700,6 @@ def _wait_for_store_durability(
                 "disk_writes": final_counters.get("block_disk_cache.disk_writes"),
                 "disk_evictions": final_counters.get("block_disk_cache.disk_evictions"),
                 "global_budget": global_budget,
-                "scheduler_num_waiting": scheduler.get("num_waiting"),
-                "scheduler_num_running": scheduler.get("num_running"),
             },
             sort_keys=True,
         )

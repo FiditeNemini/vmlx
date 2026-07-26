@@ -2191,6 +2191,45 @@ def test_r18_health_family_contract_requires_actual_bundle_path_and_hashes(
     assert module._health_family_contract(changed) is None
 
 
+def test_r18_bundle_attestation_accepts_production_path_free_health_shape(
+    tmp_path: Path,
+):
+    module = load_module()
+    root = tmp_path / "model"
+    bundle_attestation(module, root)
+    snapshot = module._read_bundle_directory_snapshot(root.resolve())
+    assert snapshot is not None
+    health_attestation = snapshot["health_attestation"]
+    hashes = module._validated_bundle_attestation(
+        str(root.resolve()),
+        health_attestation,
+    )
+    assert hashes == {
+        name: row["sha256"] for name, row in snapshot["files"].items()
+    }
+    assert snapshot["fingerprint_sha256"] == health_attestation[
+        "fingerprint_sha256"
+    ]
+    assert snapshot["directory_fingerprint_sha256"] != snapshot[
+        "fingerprint_sha256"
+    ]
+    legacy_v2 = {
+        key: snapshot[key]
+        for key in (
+            "schema",
+            "model_bundle_path",
+            "directory_identity",
+            "files",
+            "derived",
+        )
+    }
+    legacy_v2["fingerprint_sha256"] = "f" * 64
+    assert module._validated_bundle_attestation(
+        str(root.resolve()),
+        legacy_v2,
+    ) is None
+
+
 def test_r18_bundle_attestation_rejects_symlink_and_hardlink_files(
     tmp_path: Path,
 ):

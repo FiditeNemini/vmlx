@@ -1409,10 +1409,27 @@ def _read_bundle_directory_snapshot(bundle_path_value: Any) -> dict[str, Any] | 
             },
             "files": files,
         }
-        fingerprint = _canonical_json_sha256(observed)
+        # The directory fingerprint is intentionally stronger than the
+        # path-free content attestation exposed by /health.  Keep both: the
+        # former validates legacy private v2 records, while the latter is the
+        # value that can be compared to the running engine without publishing
+        # local paths or inode metadata.
+        directory_fingerprint = _canonical_json_sha256(observed)
+        health_observed = {
+            "schema": "vmlx-bundle-config-v1",
+            "directory_state": "available",
+            "files": files,
+        }
+        content_fingerprint = _canonical_json_sha256(health_observed)
         return {
             **observed,
-            "fingerprint_sha256": fingerprint,
+            "fingerprint_sha256": content_fingerprint,
+            "directory_fingerprint_sha256": directory_fingerprint,
+            "health_attestation": {
+                **health_observed,
+                "aggregate_sha256": content_fingerprint,
+                "fingerprint_sha256": content_fingerprint,
+            },
             "parsed": parsed,
             "derived": _derive_bundle_facts(parsed),
         }
@@ -1642,17 +1659,36 @@ def _validated_bundle_attestation(
         return None
     if not isinstance(health_attestation, dict):
         return None
-    if (
-        health_attestation.get("schema") != "vmlx-bundle-config-v2"
-        or health_attestation.get("model_bundle_path")
-        != snapshot["model_bundle_path"]
-        or health_attestation.get("directory_identity")
-        != snapshot["directory_identity"]
-        or health_attestation.get("files") != snapshot["files"]
-        or health_attestation.get("fingerprint_sha256")
-        != snapshot["fingerprint_sha256"]
-        or health_attestation.get("derived") != snapshot["derived"]
-    ):
+    schema = health_attestation.get("schema")
+    if schema == "vmlx-bundle-config-v1":
+        expected = snapshot["health_attestation"]
+        if (
+            health_attestation.get("directory_state") != "available"
+            or health_attestation.get("files") != expected["files"]
+            or health_attestation.get("aggregate_sha256")
+            != expected["aggregate_sha256"]
+            or health_attestation.get("fingerprint_sha256")
+            != expected["fingerprint_sha256"]
+        ):
+            return None
+    elif schema == "vmlx-bundle-config-v2":
+        # Retain compatibility with already-recorded private V5 fixtures while
+        # production /health continues to expose only the path-free v1 shape.
+        if (
+            health_attestation.get("model_bundle_path")
+            != snapshot["model_bundle_path"]
+            or health_attestation.get("directory_identity")
+            != snapshot["directory_identity"]
+            or health_attestation.get("files") != snapshot["files"]
+            or health_attestation.get("fingerprint_sha256")
+            not in {
+                snapshot["directory_fingerprint_sha256"],
+                snapshot["fingerprint_sha256"],
+            }
+            or health_attestation.get("derived") != snapshot["derived"]
+        ):
+            return None
+    else:
         return None
     return {
         name: str(snapshot["files"][name]["sha256"])

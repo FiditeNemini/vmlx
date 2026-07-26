@@ -844,6 +844,7 @@ def serve_command(args):
             logger.error("Invalid private cache attestation token file: %s", exc)
             sys.exit(1)
         server._private_cache_attestation_enabled = True
+        os.environ["VMLINUX_STRICT_BLOCK_DISK_WRITE_FENCE"] = "1"
     if args.timeout <= 0:
         logger.error(f"--timeout must be positive, got {args.timeout}")
         sys.exit(1)

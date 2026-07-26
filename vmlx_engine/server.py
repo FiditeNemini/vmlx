@@ -24407,6 +24407,7 @@ Examples:
         except (OSError, ValueError) as exc:
             parser.error(f"invalid private cache attestation token file: {exc}")
         _private_cache_attestation_enabled = True
+        os.environ["VMLINUX_STRICT_BLOCK_DISK_WRITE_FENCE"] = "1"
     _default_timeout = args.timeout
     if getattr(args, "inference_endpoints", None):
         _inference_endpoints = [

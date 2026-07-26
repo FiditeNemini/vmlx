@@ -2264,6 +2264,72 @@ def test_r18_v5_runtime_bundle_attestation_requires_production_nested_shape(
     )
 
 
+def test_r18_v5_hold_observation_accepts_path_free_nested_bundle_health(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    root = tmp_path / "model"
+    bundle_attestation(module, root)
+    snapshot = module._read_bundle_directory_snapshot(root.resolve())
+    assert snapshot is not None
+    provenance = deepcopy(snapshot["health_attestation"])
+    binding = {
+        "health_url": "http://127.0.0.1:8022/health",
+        "cdp_url": "http://127.0.0.1:9355",
+        "backend_pid": 1201,
+        "gateway_pid": 1202,
+        "electron_pid": 1202,
+        "direct_base_url": "http://127.0.0.1:8022",
+        "gateway_base_url": "http://127.0.0.1:8080",
+        "model_bundle_path": snapshot["model_bundle_path"],
+        "bundle_fingerprint_sha256": snapshot["fingerprint_sha256"],
+        "source_commit": "b" * 40,
+        "session_id": "session-path-free-health",
+    }
+    health = {
+        "status": "healthy",
+        "model_loaded": True,
+        "model_bundle_provenance": provenance,
+        "runtime_provenance": {
+            "model_bundle_provenance": deepcopy(provenance),
+        },
+    }
+    dom = {
+        "sourceCommit": binding["source_commit"],
+        "session_ids": [binding["session_id"]],
+    }
+
+    monkeypatch.setattr(
+        module,
+        "_v5_loopback_http_get",
+        lambda _url: json.dumps(health).encode(),
+    )
+    monkeypatch.setattr(
+        module,
+        "_v5_cdp_dom_snapshot",
+        lambda _url: json.dumps(dom).encode(),
+    )
+    monkeypatch.setattr(
+        module,
+        "_observe_process",
+        lambda pid: {"pid": pid, "command": f"proc-{pid}"},
+    )
+    monkeypatch.setattr(
+        module,
+        "_observe_listener",
+        lambda host, port: {
+            "host": host,
+            "port": port,
+            "owner_pid": 1201 if port == 8022 else 1202,
+        },
+    )
+
+    observation = module._v5_default_hold_observation(binding)
+    assert observation["backend"]["pid"] == 1201
+    assert observation["gateway_listener"]["owner_pid"] == 1202
+
+
 def test_r18_v5_runtime_source_attestation_requires_path_free_health_shape():
     module = load_module()
     runtime = {

@@ -7895,6 +7895,12 @@ def _v5_default_hold_observation(binding: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("held UI runtime returned malformed observation") from exc
     if not isinstance(health, dict) or not isinstance(dom, dict):
         raise RuntimeError("held UI runtime observation is not object JSON")
+    runtime = health.get("runtime_provenance")
+    bundle_snapshot = _read_bundle_directory_snapshot(
+        binding.get("model_bundle_path")
+    )
+    if not isinstance(runtime, dict) or bundle_snapshot is None:
+        raise RuntimeError("held UI runtime source/model/session mismatch")
     backend = _observe_process(int(binding["backend_pid"]))
     gateway = _observe_process(int(binding["gateway_pid"]))
     electron = _observe_process(int(binding["electron_pid"]))
@@ -7913,9 +7919,13 @@ def _v5_default_hold_observation(binding: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("held UI runtime listener ownership mismatch")
     sessions = dom.get("session_ids")
     if (
-        health.get("model_bundle_path") != binding["model_bundle_path"]
-        or health.get("bundle_fingerprint_sha256")
+        bundle_snapshot.get("fingerprint_sha256")
         != binding["bundle_fingerprint_sha256"]
+        or not _v5_validate_runtime_bundle_attestation(
+            health,
+            runtime,
+            bundle_snapshot,
+        )
         or dom.get("sourceCommit") != binding["source_commit"]
         or not isinstance(sessions, list)
         or binding["session_id"] not in sessions

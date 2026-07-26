@@ -25,6 +25,7 @@ import {
   isCacheRequestCorrelationVerified,
   isServerRequestCorrelationVerified,
   localRendererModuleEvidence,
+  ownedUiProducerPid,
   parseResolvedSamplingKwargs,
   privateCacheAttestationSessionArgs,
   readPrivateExternalJson,
@@ -82,6 +83,29 @@ const renderedContents = [
   persistedContents[1],
   "$43 and 47 × 19 = 893 < 920 = 46 × 20",
 ];
+
+describe("owned UI producer identity", () => {
+  it("binds orchestrated attestations to the directly observed parent worker", () => {
+    expect(ownedUiProducerPid({
+      orchestrated: true,
+      harnessPid: 65680,
+      parentPid: 65667,
+    })).toBe(65667);
+    expect(ownedUiProducerPid({
+      orchestrated: false,
+      harnessPid: 65680,
+      parentPid: 65667,
+    })).toBe(65680);
+  });
+
+  it("fails closed when the orchestrated parent PID is unavailable", () => {
+    expect(() => ownedUiProducerPid({
+      orchestrated: true,
+      harnessPid: 65680,
+      parentPid: 1,
+    })).toThrow(/producer PID is invalid/);
+  });
+});
 const defaults = {
   temperature: 0.7,
   topP: 0.9,

@@ -154,6 +154,18 @@ export function uniqueProofBasename({
   return `${prefix.slice(0, 240 - suffix.length - 1)}-${suffix}`
 }
 
+export function ownedUiProducerPid({
+  orchestrated = false,
+  harnessPid = process.pid,
+  parentPid = process.ppid,
+} = {}) {
+  const pid = orchestrated ? Number(parentPid) : Number(harnessPid)
+  if (!Number.isInteger(pid) || pid <= 1) {
+    throw new Error('Owned UI producer PID is invalid')
+  }
+  return pid
+}
+
 const proofBasename = uniqueProofBasename({
   requested: requestedProofBasename,
   model: servedModel,
@@ -8039,7 +8051,12 @@ async function main() {
         ui_action_profile: activeReleasePhase.ui_action_profile,
         ui_turn_count: activeReleasePhase.ui_turn_count,
         api_action_profile: activeReleasePhase.api_action_profile,
-        ui_producer_pid: process.pid,
+        // The Python worker is the process owned and observed by the release
+        // orchestrator. This Node harness is its directly spawned child, so
+        // bind the independently written attestation to the worker's
+        // kernel-observed PID rather than claiming the harness PID is the
+        // orchestrator-owned producer.
+        ui_producer_pid: ownedUiProducerPid({ orchestrated: true }),
         session_id: sessionId,
         model: activeReleasePhase.model,
         model_bundle_path: intentBundle,

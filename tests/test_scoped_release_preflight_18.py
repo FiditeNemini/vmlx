@@ -4806,6 +4806,77 @@ def test_r18_v5_packaging_consumer_revalidates_exact_source_and_jang(
     assert json.loads(output.read_text(encoding="utf-8")) == manifest
 
 
+def test_r18_v5_ui_attestation_binds_parent_owned_worker_pid():
+    module = load_module()
+    phase = module.V5_CACHE_PHASES[0]
+    binding = {
+        "ui_producer_pid": 4101,
+        "session_id": "owned-session",
+        "model": "owned-model",
+        "model_bundle_path": "/private/model",
+        "bundle_fingerprint_sha256": "a" * 64,
+        "backend_pid": 4201,
+        "gateway_pid": 4301,
+        "direct_base_url": "http://127.0.0.1:8010",
+        "gateway_base_url": "http://127.0.0.1:8081",
+        "electron_pid": 4401,
+        "cdp_url": "http://127.0.0.1:9345",
+        "source_commit": "b" * 40,
+        "source_tree": "c" * 40,
+        "harness_binding_sha256": "d" * 64,
+    }
+    run_context = {"run_id": "owned-run", "nonce": "owned-nonce"}
+    attestation = {
+        "schema": module.V5_UI_SESSION_ATTESTATION_SCHEMA,
+        "run_id": run_context["run_id"],
+        "nonce": run_context["nonce"],
+        "run_intent_sha256": "e" * 64,
+        "phase_index": phase["index"],
+        "phase_name": phase["name"],
+        "representative_id": phase["representative_id"],
+        "bundle_role": phase["bundle_role"],
+        "cache_policy": phase["cache_policy"],
+        "paged_ram": phase["paged_ram"],
+        "ui_action_profile": phase["ui_action_profile"],
+        "ui_turn_count": phase["ui_turn_count"],
+        "api_action_profile": phase["api_action_profile"],
+        "ui_producer_pid": binding["ui_producer_pid"],
+        "session_id": binding["session_id"],
+        "model": binding["model"],
+        "model_bundle_path": binding["model_bundle_path"],
+        "bundle_fingerprint_sha256": binding["bundle_fingerprint_sha256"],
+        "backend_pid": binding["backend_pid"],
+        "gateway_pid": binding["gateway_pid"],
+        "direct_base_url": binding["direct_base_url"],
+        "gateway_base_url": binding["gateway_base_url"],
+        "electron_pid": binding["electron_pid"],
+        "cdp_origin": binding["cdp_url"],
+        "lifecycle_owner": "parent",
+        "source_commit": binding["source_commit"],
+        "source_tree": binding["source_tree"],
+        "renderer_source_sha256": "f" * 64,
+        "session_binding_sha256": binding["harness_binding_sha256"],
+        "created_at": module._iso_now(),
+    }
+    module._v5_validate_ui_session_attestation(
+        attestation,
+        run_context=run_context,
+        run_intent_sha256="e" * 64,
+        phase=phase,
+        binding=binding,
+    )
+
+    harness_pid_attestation = {**attestation, "ui_producer_pid": 4102}
+    with pytest.raises(RuntimeError, match="attestation binding mismatch"):
+        module._v5_validate_ui_session_attestation(
+            harness_pid_attestation,
+            run_context=run_context,
+            run_intent_sha256="e" * 64,
+            phase=phase,
+            binding=binding,
+        )
+
+
 def _v5_fixture_child(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)

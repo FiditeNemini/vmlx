@@ -159,6 +159,10 @@ class CacheBlock:
     block_id: int
     ref_count: int = 0
     block_hash: Optional[BlockHash] = None
+    # Immediate predecessor in the content-addressed chain.  Persisted L2
+    # eviction needs this independently of any request-scoped block table so it
+    # can retain a restorable root-to-tail prefix across RAM eviction/restart.
+    parent_hash: Optional[BlockHash] = None
 
     # Doubly linked list pointers for FreeKVCacheBlockQueue
     prev_free_block: Optional["CacheBlock"] = None
@@ -199,6 +203,7 @@ class CacheBlock:
     def reset_hash(self) -> None:
         """Reset block hash when evicted from cache."""
         self.block_hash = None
+        self.parent_hash = None
         self.hash_value = None
         self.cache_data_from_disk = False
         # Protection is scoped to the native composite payload currently held
@@ -774,7 +779,10 @@ class PagedCacheManager:
             # Persist to disk L2 before freeing tensor memory
             if self._disk_store is not None and block.cache_data is not None:
                 self._disk_store.write_block_async(
-                    block.block_hash, block.cache_data, block.token_count
+                    block.block_hash,
+                    block.cache_data,
+                    block.token_count,
+                    parent_hash=block.parent_hash,
                 )
 
             # Also remove from legacy hash index
@@ -1122,6 +1130,7 @@ class PagedCacheManager:
                     extra_keys=extra_keys,
                 )
                 block.block_hash = block_hash
+                block.parent_hash = parent_hash
                 block.token_count = len(block_tokens)
 
                 # Add to cache
@@ -1187,7 +1196,10 @@ class PagedCacheManager:
                         cached_block = self.cached_block_hash_to_block.get_block(block_hash)
                         if cached_block is None:
                             promoted = self._promote_from_disk(
-                                block_hash, disk_data, len(block_tokens)
+                                block_hash,
+                                disk_data,
+                                len(block_tokens),
+                                parent_hash=parent_hash,
                             )
                             if promoted is not None:
                                 cached_block = promoted
@@ -1240,6 +1252,7 @@ class PagedCacheManager:
                                         partial_hash,
                                         disk_data,
                                         partial_size,
+                                        parent_hash=parent_hash,
                                     )
                                     if partial_block is not None:
                                         self.stats.disk_hits += 1
@@ -1303,7 +1316,10 @@ class PagedCacheManager:
                             cached_block = self.cached_block_hash_to_block.get_block(block_hash)
                             if cached_block is None:
                                 promoted = self._promote_from_disk(
-                                    block_hash, disk_data, size
+                                    block_hash,
+                                    disk_data,
+                                    size,
+                                    parent_hash=parent_hash,
                                 )
                                 if promoted is not None:
                                     cached_block = promoted
@@ -1329,6 +1345,8 @@ class PagedCacheManager:
         block_hash: BlockHash,
         cache_data: List[Tuple[Any, ...]],
         token_count: int,
+        *,
+        parent_hash: Optional[BlockHash] = None,
     ) -> Optional[CacheBlock]:
         """
         Promote a block from disk L2 into L1 RAM.
@@ -1380,7 +1398,10 @@ class PagedCacheManager:
             # Persist to disk L2 before discarding tensor memory
             if self._disk_store is not None and block.cache_data is not None:
                 self._disk_store.write_block_async(
-                    block.block_hash, block.cache_data, block.token_count
+                    block.block_hash,
+                    block.cache_data,
+                    block.token_count,
+                    parent_hash=block.parent_hash,
                 )
             if block.hash_value and block.hash_value in self.hash_to_block:
                 if self.hash_to_block[block.hash_value] == block.block_id:
@@ -1394,6 +1415,7 @@ class PagedCacheManager:
         # Populate
         block.ref_count = 1
         block.block_hash = block_hash
+        block.parent_hash = parent_hash
         block.cache_data = cache_data
         block.cache_data_from_disk = True
         block.token_count = token_count

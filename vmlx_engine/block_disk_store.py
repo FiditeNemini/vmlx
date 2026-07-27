@@ -418,9 +418,14 @@ class BlockDiskStore:
         conn = sqlite3.connect(str(self._db_path))
         try:
             conn.execute("PRAGMA journal_mode=WAL")
+            # Serialize schema discovery + ALTER across concurrent processes
+            # opening the same model namespace for the first time.
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS blocks (
                     block_hash    TEXT PRIMARY KEY,
+                    parent_hash   TEXT,
+                    ancestry_known INTEGER NOT NULL DEFAULT 1,
                     file_name     TEXT NOT NULL,
                     num_tokens    INTEGER NOT NULL,
                     num_layers    INTEGER NOT NULL,
@@ -431,8 +436,26 @@ class BlockDiskStore:
                     access_count  INTEGER DEFAULT 0
                 )
             """)
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(blocks)").fetchall()
+            }
+            if "parent_hash" not in columns:
+                conn.execute("ALTER TABLE blocks ADD COLUMN parent_hash TEXT")
+            if "ancestry_known" not in columns:
+                # Existing rows predate persisted chain ancestry.  ``NULL`` is
+                # ambiguous there: it can mean either a real root or unknown
+                # ancestry, so never silently promote legacy rows to roots.
+                conn.execute(
+                    "ALTER TABLE blocks ADD COLUMN ancestry_known "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_blocks_lru ON blocks(last_accessed ASC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_blocks_parent "
+                "ON blocks(parent_hash)"
             )
             conn.commit()
         finally:
@@ -1163,6 +1186,7 @@ class BlockDiskStore:
         cache_data: List[Tuple],
         token_count: int,
         *,
+        parent_hash: Optional[bytes] = None,
         request_id: Optional[str] = None,
         fence_id: Optional[str] = None,
     ) -> bool:
@@ -1175,6 +1199,7 @@ class BlockDiskStore:
                 block_hash,
                 cache_data,
                 token_count,
+                parent_hash=parent_hash,
                 request_id=request_id,
                 fence_id=fence_id,
             )
@@ -1187,6 +1212,7 @@ class BlockDiskStore:
         cache_data: List[Tuple],
         token_count: int,
         *,
+        parent_hash: Optional[bytes] = None,
         request_id: Optional[str] = None,
         fence_id: Optional[str] = None,
     ) -> bool:
@@ -1207,6 +1233,8 @@ class BlockDiskStore:
             block_hash: Chain hash (BlockHash bytes)
             cache_data: CacheBlock.cache_data — list of typed tuples per layer
             token_count: Number of tokens in this block
+            parent_hash: Chain hash of the immediately preceding block, or
+                ``None`` only for a known chain root.
             request_id: Scheduler request ID associated with ``fence_id``.
             fence_id: Opaque ID returned by :meth:`begin_write_fence`.
         """
@@ -1336,6 +1364,7 @@ class BlockDiskStore:
                 dtype,
                 num_layers,
                 token_count,
+                parent_hash,
                 fence_id,
                 reserved_bytes,
             )
@@ -1500,6 +1529,7 @@ class BlockDiskStore:
                 dtype,
                 num_layers,
                 token_count,
+                parent_hash,
                 fence_id,
                 reserved_bytes,
             ) = item
@@ -1527,6 +1557,7 @@ class BlockDiskStore:
                         dtype,
                         num_layers,
                         token_count,
+                        parent_hash,
                         fence_id,
                         len(payload),
                     )
@@ -1561,8 +1592,8 @@ class BlockDiskStore:
                 if not locked:
                     for item in block_items:
                         fence_id = (
-                            str(item[5])
-                            if len(item) > 5 and item[5] is not None
+                            str(item[6])
+                            if len(item) > 6 and item[6] is not None
                             else None
                         )
                         self._write_fence_completion(fence_id, failed=True)
@@ -1595,6 +1626,7 @@ class BlockDiskStore:
                                 dtype,
                                 num_layers,
                                 token_count,
+                                parent_hash,
                                 *metadata,
                             ) = item
                             fence_id = (
@@ -1609,6 +1641,7 @@ class BlockDiskStore:
                                 dtype,
                                 num_layers,
                                 token_count,
+                                parent_hash,
                             )
                             net_payload_bytes += written_bytes
                             if written_bytes > 0:
@@ -1713,8 +1746,8 @@ class BlockDiskStore:
                     self._fail_write_fence(fence_id, str(exc))
         finally:
             for item in block_items:
-                if len(item) > 6:
-                    self._release_pending_write_bytes(item[6])
+                if len(item) > 7:
+                    self._release_pending_write_bytes(item[7])
             with self._stats_lock:
                 self._write_inflight = max(
                     0,
@@ -1791,24 +1824,98 @@ class BlockDiskStore:
         conn.commit()
 
     def _cleanup_entry(self, conn: sqlite3.Connection, hash_hex: str) -> int:
-        """Remove a stale index entry and its file (background thread only)."""
+        """Remove an entry without leaving indexed descendants unrestorable.
+
+        Known chains are deleted from the requested node through every branch
+        below it.  A pre-migration row has ambiguous ``NULL`` ancestry, so an
+        exact cleanup of one such row invalidates the complete legacy set in
+        that namespace rather than pretending the other legacy rows are roots.
+        """
         row = conn.execute(
-            "SELECT file_name FROM blocks WHERE block_hash = ?", (hash_hex,)
+            "SELECT ancestry_known FROM blocks WHERE block_hash = ?",
+            (hash_hex,),
         ).fetchone()
-        if row:
-            file_path = self.cache_dir / row[0]
-            try:
-                removed_bytes = max(0, int(file_path.stat().st_size))
-            except FileNotFoundError:
-                removed_bytes = 0
-            try:
-                file_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            conn.execute("DELETE FROM blocks WHERE block_hash = ?", (hash_hex,))
+        if row is not None and int(row[0] or 0) == 0:
+            starting_hashes = {
+                str(item[0])
+                for item in conn.execute(
+                    "SELECT block_hash FROM blocks WHERE ancestry_known = 0"
+                ).fetchall()
+            }
+        else:
+            # Include the requested hash even when its own row is already gone:
+            # a failed/partial publication may still have left known children.
+            starting_hashes = {str(hash_hex)}
+
+        targets = set(starting_hashes)
+        frontier = set(starting_hashes)
+        while frontier:
+            next_frontier: set[str] = set()
+            frontier_list = sorted(frontier)
+            for start in range(0, len(frontier_list), 500):
+                chunk = frontier_list[start : start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                child_rows = conn.execute(
+                    f"SELECT block_hash FROM blocks "
+                    f"WHERE ancestry_known = 1 "
+                    f"AND parent_hash IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                next_frontier.update(str(item[0]) for item in child_rows)
+            next_frontier.difference_update(targets)
+            targets.update(next_frontier)
+            frontier = next_frontier
+
+        if not targets:
+            return 0
+
+        rows: list[tuple[str, str]] = []
+        target_list = sorted(targets)
+        for start in range(0, len(target_list), 500):
+            chunk = target_list[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(
+                (str(block_hash), str(file_name))
+                for block_hash, file_name in conn.execute(
+                    f"SELECT block_hash, file_name FROM blocks "
+                    f"WHERE block_hash IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            )
+        if not rows:
+            return 0
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for start in range(0, len(target_list), 500):
+                chunk = target_list[start : start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                conn.execute(
+                    f"DELETE FROM blocks WHERE block_hash IN ({placeholders})",
+                    chunk,
+                )
             conn.commit()
-            return removed_bytes
-        return 0
+        except Exception:
+            conn.rollback()
+            raise
+
+        removed_bytes = 0
+        for _block_hash, file_name in rows:
+            relative = Path(file_name)
+            if relative.is_absolute() or ".." in relative.parts:
+                continue
+            file_path = self.cache_dir / relative
+            try:
+                file_size = max(0, int(file_path.stat().st_size))
+                file_path.unlink()
+                removed_bytes += file_size
+            except FileNotFoundError:
+                continue
+            except OSError:
+                # The row is already unreachable.  A later root scan counts the
+                # surviving payload as an orphan and removes it safely.
+                continue
+        return removed_bytes
 
     @staticmethod
     def _write_payload_file(path: Path, payload: bytes) -> None:
@@ -1843,6 +1950,34 @@ class BlockDiskStore:
         finally:
             os.close(fd)
 
+    def _indexed_payload_is_readable(self, file_name: str) -> bool:
+        """Validate one finalized index path without following symlinks."""
+        relative = Path(str(file_name))
+        if relative.is_absolute() or ".." in relative.parts:
+            return False
+        file_path = self.cache_dir / relative
+        if file_path.is_symlink():
+            return False
+        try:
+            resolved = file_path.resolve(strict=True)
+            cache_root = self.cache_dir.resolve(strict=True)
+        except OSError:
+            return False
+        if not resolved.is_relative_to(cache_root) or not resolved.is_file():
+            return False
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(resolved, flags)
+        except OSError:
+            return False
+        else:
+            os.close(fd)
+            return True
+
     def _write_block(
         self,
         conn: sqlite3.Connection,
@@ -1851,15 +1986,58 @@ class BlockDiskStore:
         dtype: str,
         num_layers: int,
         token_count: int,
+        parent_hash: Optional[bytes],
     ) -> int:
         """Write and publish a frozen block (background writer thread only)."""
         hash_hex = block_hash.hex()
+        parent_hex = parent_hash.hex() if parent_hash is not None else None
 
-        # Skip if already on disk
+        # A child is publishable only when its immediate parent is already a
+        # known-ancestry row.  The queue is ordered root-to-tail, so a failed
+        # parent publication makes every dependent child fail closed instead of
+        # creating an indexed but unrestorable suffix.
+        if parent_hex is not None:
+            parent = conn.execute(
+                "SELECT ancestry_known, file_name FROM blocks "
+                "WHERE block_hash = ?",
+                (parent_hex,),
+            ).fetchone()
+            if (
+                parent is None
+                or int(parent[0] or 0) != 1
+                or not self._indexed_payload_is_readable(str(parent[1]))
+            ):
+                if parent is not None:
+                    self._cleanup_entry(conn, parent_hex)
+                raise ValueError(
+                    "cannot publish block whose parent ancestry is unavailable"
+                )
+
+        # Skip if already on disk, but allow an ordered current write-through to
+        # upgrade a legacy row after its parent chain has been established.
         exists = conn.execute(
-            "SELECT 1 FROM blocks WHERE block_hash = ?", (hash_hex,)
+            "SELECT parent_hash, ancestry_known, file_name "
+            "FROM blocks WHERE block_hash = ?",
+            (hash_hex,),
         ).fetchone()
         if exists:
+            existing_parent, ancestry_known, existing_file = exists
+            if not self._indexed_payload_is_readable(str(existing_file)):
+                self._cleanup_entry(conn, hash_hex)
+                exists = None
+        if exists:
+            existing_parent, ancestry_known, _existing_file = exists
+            if int(ancestry_known or 0) == 0:
+                conn.execute(
+                    "UPDATE blocks SET parent_hash = ?, ancestry_known = 1 "
+                    "WHERE block_hash = ? AND ancestry_known = 0",
+                    (parent_hex, hash_hex),
+                )
+                conn.commit()
+            elif existing_parent != parent_hex:
+                raise ValueError(
+                    "block hash already exists with different parent ancestry"
+                )
             return 0
 
         file_path = self._hash_to_path(hash_hex)
@@ -1888,10 +2066,11 @@ class BlockDiskStore:
 
         conn.execute(
             """INSERT OR IGNORE INTO blocks
-               (block_hash, file_name, num_tokens, num_layers, dtype,
+               (block_hash, parent_hash, ancestry_known,
+                file_name, num_tokens, num_layers, dtype,
                 file_size, created_at, last_accessed)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (hash_hex, str(rel_path), token_count, num_layers, dtype,
+               VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)""",
+            (hash_hex, parent_hex, str(rel_path), token_count, num_layers, dtype,
              file_size, now, now)
         )
         conn.commit()

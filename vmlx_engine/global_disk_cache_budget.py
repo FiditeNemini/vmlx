@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import atexit
 import fcntl
+import heapq
 import json
 import logging
 import os
@@ -168,6 +169,8 @@ class _BudgetCandidate:
     database: Path | None = None
     block_hash: str | None = None
     indexed_file_name: str | None = None
+    parent_hash: str | None = None
+    ancestry_known: bool = False
 
 
 @dataclass(frozen=True)
@@ -901,14 +904,44 @@ class GlobalDiskCacheBudget:
             namespace = database.parent.resolve()
             conn = sqlite3.connect(str(database), timeout=1.0)
             try:
-                rows = conn.execute(
-                    "SELECT block_hash, file_name, last_accessed FROM blocks"
-                ).fetchall()
+                columns = {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(blocks)").fetchall()
+                }
+                has_ancestry = {
+                    "parent_hash",
+                    "ancestry_known",
+                }.issubset(columns)
+                if has_ancestry:
+                    rows = conn.execute(
+                        "SELECT block_hash, file_name, last_accessed, "
+                        "parent_hash, ancestry_known FROM blocks"
+                    ).fetchall()
+                else:
+                    # A legacy NULL cannot be assumed to mean chain root.
+                    rows = [
+                        (block_hash, file_name, last_accessed, None, 0)
+                        for block_hash, file_name, last_accessed in conn.execute(
+                            "SELECT block_hash, file_name, last_accessed "
+                            "FROM blocks"
+                        ).fetchall()
+                    ]
             except sqlite3.Error as exc:
                 raise OSError(f"cannot inspect block index {database}: {exc}") from exc
             finally:
                 conn.close()
-            for block_hash, file_name, last_accessed in rows:
+
+            indexed_rows: dict[
+                str,
+                tuple[Path, Path, int, int, str | None, bool],
+            ] = {}
+            for (
+                block_hash,
+                file_name,
+                last_accessed,
+                parent_hash,
+                ancestry_known,
+            ) in rows:
                 relative = Path(str(file_name))
                 if relative.is_absolute() or ".." in relative.parts:
                     raise OSError(f"unsafe block index path in {database}")
@@ -925,22 +958,77 @@ class GlobalDiskCacheBudget:
                     0,
                     int(float(last_accessed or 0.0) * 1_000_000_000),
                 )
+                indexed_rows[str(block_hash)] = (
+                    resolved,
+                    relative,
+                    max(0, int(size)),
+                    max(indexed_access_ns, block_stat.st_mtime_ns),
+                    str(parent_hash) if parent_hash is not None else None,
+                    bool(ancestry_known),
+                )
+
+            # Validate that every "known" row reaches an explicit known root in
+            # this same namespace. Missing parents and cycles are fail-closed
+            # legacy/invalid sets; they are never considered independent roots.
+            # Walk iteratively: a 512K context at 64-token blocks is 8192 nodes,
+            # far beyond Python's recursion limit.
+            ancestry_valid: dict[str, bool] = {}
+
+            def _valid_ancestry(block_hash: str) -> bool:
+                cached = ancestry_valid.get(block_hash)
+                if cached is not None:
+                    return cached
+                path: list[str] = []
+                visiting: set[str] = set()
+                current = block_hash
+                valid = False
+                while True:
+                    cached = ancestry_valid.get(current)
+                    if cached is not None:
+                        valid = cached
+                        break
+                    if current in visiting:
+                        valid = False
+                        break
+                    row = indexed_rows.get(current)
+                    if row is None or not row[5]:
+                        valid = False
+                        break
+                    visiting.add(current)
+                    path.append(current)
+                    parent_hash = row[4]
+                    if parent_hash is None:
+                        valid = True
+                        break
+                    current = parent_hash
+                for visited_hash in path:
+                    ancestry_valid[visited_hash] = valid
+                return valid
+
+            for block_hash, (
+                resolved,
+                relative,
+                size_bytes,
+                last_accessed_ns,
+                parent_hash,
+                _declared_known,
+            ) in indexed_rows.items():
+                valid_ancestry = _valid_ancestry(block_hash)
                 candidates.append(
                     _BudgetCandidate(
                         kind="block",
-                        size_bytes=max(0, int(size)),
+                        size_bytes=size_bytes,
                         # A successful read touches the finalized payload under
                         # a shared root lock before returning.  This durable FS
                         # signal keeps global LRU correct even if the optional
                         # async SQLite access update queue is saturated.
-                        last_accessed_ns=max(
-                            indexed_access_ns,
-                            block_stat.st_mtime_ns,
-                        ),
+                        last_accessed_ns=last_accessed_ns,
                         paths=(resolved,),
                         database=database,
                         block_hash=str(block_hash),
                         indexed_file_name=str(relative),
+                        parent_hash=parent_hash,
+                        ancestry_known=valid_ancestry,
                     )
                 )
 
@@ -1047,24 +1135,48 @@ class GlobalDiskCacheBudget:
         return candidates, total, protected_recent_orphans
 
     def _evict_block_locked(self, candidate: _BudgetCandidate) -> int:
-        if candidate.database is None or candidate.block_hash is None:
+        if (
+            candidate.database is None
+            or candidate.block_hash is None
+            or not candidate.ancestry_known
+        ):
             return 0
         conn = sqlite3.connect(str(candidate.database), timeout=1.0)
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT file_name, last_accessed FROM blocks WHERE block_hash = ?",
+                "SELECT file_name, last_accessed, parent_hash, ancestry_known "
+                "FROM blocks WHERE block_hash = ?",
                 (candidate.block_hash,),
             ).fetchone()
             if row is None:
                 conn.rollback()
                 return 0
-            file_name, last_accessed = row
+            file_name, last_accessed, parent_hash, ancestry_known = row
             current_access_ns = max(
                 0,
                 int(float(last_accessed or 0.0) * 1_000_000_000),
             )
             if str(file_name) != candidate.indexed_file_name:
+                conn.rollback()
+                return 0
+            if (
+                int(ancestry_known or 0) != 1
+                or (
+                    str(parent_hash) if parent_hash is not None else None
+                )
+                != candidate.parent_hash
+            ):
+                conn.rollback()
+                return 0
+            # A parent with any live child is never independently evictable.
+            # The caller makes leaves eligible dynamically, and this transaction
+            # re-check closes the race with a stale scan.
+            if conn.execute(
+                "SELECT 1 FROM blocks WHERE ancestry_known = 1 "
+                "AND parent_hash = ? LIMIT 1",
+                (candidate.block_hash,),
+            ).fetchone() is not None:
                 conn.rollback()
                 return 0
             try:
@@ -1097,6 +1209,100 @@ class GlobalDiskCacheBudget:
             return 0
         finally:
             conn.close()
+
+    def _evict_invalid_block_set_locked(
+        self,
+        database: Path,
+        block_hashes: set[str],
+    ) -> tuple[int, int]:
+        """Invalidate one complete legacy/broken ancestry set atomically.
+
+        Pre-migration NULL ancestry cannot distinguish roots from unknown
+        parents.  When cap pressure requires reclaiming such rows, deleting a
+        subset could recreate the head-loss defect, so the caller passes the
+        complete invalid set for this namespace.
+        """
+        if not block_hashes:
+            return 0, 0
+        conn = sqlite3.connect(str(database), timeout=1.0)
+        try:
+            current_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(blocks)").fetchall()
+            }
+            rows: list[tuple[str, str]] = []
+            hashes = sorted(block_hashes)
+            for start in range(0, len(hashes), 500):
+                chunk = hashes[start : start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows.extend(
+                    (str(block_hash), str(file_name))
+                    for block_hash, file_name in conn.execute(
+                        f"SELECT block_hash, file_name FROM blocks "
+                        f"WHERE block_hash IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                )
+            if not rows:
+                return 0, 0
+
+            # If ancestry columns appeared/changed after the scan, abandon the
+            # invalid-set deletion and let the next reconciled scan decide.
+            has_ancestry = {
+                "parent_hash",
+                "ancestry_known",
+            }.issubset(current_columns)
+            if has_ancestry:
+                current_invalid = {
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT block_hash FROM blocks "
+                        "WHERE ancestry_known = 0"
+                    ).fetchall()
+                }
+                # Broken declared-known descendants are included by the scan,
+                # so only require every still-legacy row to be covered.
+                if not current_invalid.issubset(block_hashes):
+                    return 0, 0
+
+            conn.execute("BEGIN IMMEDIATE")
+            for start in range(0, len(hashes), 500):
+                chunk = hashes[start : start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                conn.execute(
+                    f"DELETE FROM blocks WHERE block_hash IN ({placeholders})",
+                    chunk,
+                )
+            conn.commit()
+        except sqlite3.Error:
+            with suppress(sqlite3.Error):
+                conn.rollback()
+            return 0, 0
+        finally:
+            conn.close()
+
+        namespace = database.parent.resolve()
+        evicted_entries = 0
+        freed = 0
+        for _block_hash, file_name in rows:
+            relative = Path(file_name)
+            if relative.is_absolute() or ".." in relative.parts:
+                continue
+            path = self._safe_resolved_file(namespace / relative)
+            if path is None:
+                continue
+            try:
+                size = path.stat().st_size
+                path.unlink()
+                freed += max(0, int(size))
+                evicted_entries += 1
+            except FileNotFoundError:
+                evicted_entries += 1
+            except OSError:
+                # The committed row deletion leaves a counted orphan for the
+                # next reconciled trim rather than a retrievable broken chain.
+                continue
+        return evicted_entries, freed
 
     @staticmethod
     def _evict_paths_locked(candidate: _BudgetCandidate) -> int:
@@ -1272,28 +1478,151 @@ class GlobalDiskCacheBudget:
                 if total > max_size_bytes
                 else max_size_bytes
             )
-            for candidate in sorted(
-                candidates,
-                key=lambda item: (
-                    item.last_accessed_ns,
-                    item.kind,
-                    str(item.paths[0]),
-                ),
-            ):
-                if total <= trim_target:
-                    break
+
+            # Legacy rows and declared-known rows whose ancestry does not reach
+            # a readable root are an indivisible invalid set per namespace.
+            # They enter the same LRU heap below as one conservative candidate
+            # timestamped by the newest member; partial deletion would preserve
+            # arbitrary suffixes.
+            invalid_by_database: dict[Path, list[_BudgetCandidate]] = {}
+            for candidate in candidates:
+                if (
+                    candidate.kind == "block"
+                    and candidate.database is not None
+                    and not candidate.ancestry_known
+                ):
+                    invalid_by_database.setdefault(
+                        candidate.database,
+                        [],
+                    ).append(candidate)
+            # Known blocks are a forest. Only leaves enter the LRU heap; after a
+            # leaf is removed its parent becomes eligible. This gives true
+            # suffix-first trimming while preserving shared prefixes and
+            # branches. Non-block cache records retain ordinary global LRU.
+            known_blocks: dict[
+                tuple[Path, str],
+                _BudgetCandidate,
+            ] = {}
+            child_counts: dict[tuple[Path, str], int] = {}
+            for candidate in candidates:
+                if (
+                    candidate.kind != "block"
+                    or candidate.database is None
+                    or candidate.block_hash is None
+                    or not candidate.ancestry_known
+                ):
+                    continue
+                key = (candidate.database, candidate.block_hash)
+                known_blocks[key] = candidate
+                child_counts.setdefault(key, 0)
+            for key, candidate in known_blocks.items():
+                if candidate.parent_hash is None:
+                    continue
+                parent_key = (key[0], candidate.parent_hash)
+                if parent_key in known_blocks:
+                    child_counts[parent_key] = child_counts.get(parent_key, 0) + 1
+
+            eligible: list[
+                tuple[int, str, str, int, _BudgetCandidate]
+            ] = []
+            sequence = 0
+
+            def _push(candidate: _BudgetCandidate) -> None:
+                nonlocal sequence
+                heapq.heappush(
+                    eligible,
+                    (
+                        candidate.last_accessed_ns,
+                        candidate.kind,
+                        str(candidate.paths[0]),
+                        sequence,
+                        candidate,
+                    ),
+                )
+                sequence += 1
+
+            for key, candidate in known_blocks.items():
+                if child_counts.get(key, 0) == 0:
+                    _push(candidate)
+            for candidate in candidates:
                 if candidate.kind in {
+                    "block",
                     "recent_orphan",
                     "protected_temp",
                     "protected_metadata",
                 }:
                     continue
+                _push(candidate)
+            invalid_hashes: dict[Path, set[str]] = {}
+            for database, invalid_candidates in invalid_by_database.items():
+                hashes = {
+                    str(candidate.block_hash)
+                    for candidate in invalid_candidates
+                    if candidate.block_hash is not None
+                }
+                if not hashes:
+                    continue
+                invalid_hashes[database] = hashes
+                _push(
+                    _BudgetCandidate(
+                        kind="invalid_block_set",
+                        size_bytes=sum(
+                            candidate.size_bytes
+                            for candidate in invalid_candidates
+                        ),
+                        last_accessed_ns=max(
+                            candidate.last_accessed_ns
+                            for candidate in invalid_candidates
+                        ),
+                        paths=(database,),
+                        database=database,
+                    )
+                )
+
+            remaining_blocks = set(known_blocks)
+            while total > trim_target and eligible:
+                _, _, _, _, candidate = heapq.heappop(eligible)
                 if candidate.kind == "block":
+                    assert candidate.database is not None
+                    assert candidate.block_hash is not None
+                    key = (candidate.database, candidate.block_hash)
+                    if (
+                        key not in remaining_blocks
+                        or child_counts.get(key, 0) != 0
+                    ):
+                        continue
                     freed = self._evict_block_locked(candidate)
+                    if freed <= 0:
+                        continue
+                    remaining_blocks.remove(key)
+                    if candidate.parent_hash is not None:
+                        parent_key = (
+                            candidate.database,
+                            candidate.parent_hash,
+                        )
+                        if parent_key in remaining_blocks:
+                            child_counts[parent_key] = max(
+                                0,
+                                child_counts.get(parent_key, 0) - 1,
+                            )
+                            if child_counts[parent_key] == 0:
+                                _push(known_blocks[parent_key])
+                elif candidate.kind == "invalid_block_set":
+                    assert candidate.database is not None
+                    removed_count, freed = self._evict_invalid_block_set_locked(
+                        candidate.database,
+                        invalid_hashes.get(candidate.database, set()),
+                    )
+                    if removed_count <= 0:
+                        continue
+                    total = max(0, total - freed)
+                    evicted_entries += removed_count
+                    evicted_bytes += freed
+                    continue
                 else:
                     freed = self._evict_paths_locked(candidate)
-                if freed <= 0:
-                    continue
+                    if freed <= 0:
+                        continue
                 total = max(0, total - freed)
                 evicted_entries += 1
                 evicted_bytes += freed

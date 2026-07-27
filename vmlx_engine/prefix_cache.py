@@ -2614,6 +2614,7 @@ class BlockAwarePrefixCache:
             block_hash: bytes,
             block_data: List[Tuple[Any, ...]],
             token_count: int,
+            block_parent_hash: Optional[bytes],
         ) -> bool:
             if disk_store is None:
                 return False
@@ -2628,6 +2629,7 @@ class BlockAwarePrefixCache:
                     block_hash,
                     block_data,
                     token_count,
+                    parent_hash=block_parent_hash,
                     **fence_kwargs,
                 )
             )
@@ -2904,6 +2906,7 @@ class BlockAwarePrefixCache:
                                 # Set chain hash on the existing block if it doesn't have one
                                 if existing_block.block_hash is None:
                                     existing_block.block_hash = block_chain_hash
+                                    existing_block.parent_hash = parent_hash
                                     self.paged_cache.cached_block_hash_to_block.insert(
                                         block_chain_hash, existing_block
                                     )
@@ -2965,6 +2968,7 @@ class BlockAwarePrefixCache:
 
             # Set chain hash on the block (for L1 dedup and L2 disk addressing)
             block.block_hash = block_chain_hash
+            block.parent_hash = parent_hash
 
             # Extract and store actual tensor slices for this block
             if is_tensor_data and HAS_MLX:
@@ -3112,6 +3116,7 @@ class BlockAwarePrefixCache:
                                     block_chain_hash,
                                     np_block,
                                     len(block_tokens),
+                                    parent_hash,
                                 ):
                                     disk_only_queued_hashes.add(block_chain_hash)
                             else:
@@ -3121,7 +3126,12 @@ class BlockAwarePrefixCache:
                                     f"{len(block_tokens)} tokens)"
                                 )
                                 pending_disk_writes.append(
-                                    (block_chain_hash, np_block, len(block_tokens))
+                                    (
+                                        block_chain_hash,
+                                        np_block,
+                                        len(block_tokens),
+                                        parent_hash,
+                                    )
                                 )
                         else:
                             logger.warning(
@@ -3160,9 +3170,19 @@ class BlockAwarePrefixCache:
             logger.debug(
                 f"Block disk: writing {len(pending_disk_writes)} blocks to SSD"
             )
-            for block_hash, block_data, tok_count in pending_disk_writes:
+            for (
+                block_hash,
+                block_data,
+                tok_count,
+                block_parent_hash,
+            ) in pending_disk_writes:
                 try:
-                    if _write_block_to_disk(block_hash, block_data, tok_count):
+                    if _write_block_to_disk(
+                        block_hash,
+                        block_data,
+                        tok_count,
+                        block_parent_hash,
+                    ):
                         disk_only_queued_hashes.add(block_hash)
                 except Exception as _wbe:
                     logger.warning(

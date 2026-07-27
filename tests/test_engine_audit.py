@@ -12422,7 +12422,13 @@ class TestTurboQuantKVTelemetry:
                 self.blocks = {}
                 self.reads = 0
 
-            def write_block_async(self, block_hash, cache_data, token_count):
+            def write_block_async(
+                self,
+                block_hash,
+                cache_data,
+                token_count,
+                **_kwargs,
+            ):
                 self.blocks[block_hash] = cache_data
 
             def read_block(self, block_hash):

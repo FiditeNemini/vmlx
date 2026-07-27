@@ -1,4 +1,5 @@
 import mlx.core as mx
+import sqlite3
 import time
 
 
@@ -655,6 +656,22 @@ def test_tq_paged_numpy_disk_path_keeps_native_entries(tmp_path):
         assert stats["blocks_on_disk"] == 2
         assert stats["tq_native_writes"] == 2
         table = cache._request_tables["write"].block_table
+        table_blocks = [
+            manager.allocated_blocks[block_id]
+            for block_id in table.block_ids
+        ]
+        with sqlite3.connect(str(store._db_path)) as connection:
+            ancestry = {
+                str(block_hash): (parent_hash, int(ancestry_known))
+                for block_hash, parent_hash, ancestry_known in connection.execute(
+                    "SELECT block_hash, parent_hash, ancestry_known FROM blocks"
+                ).fetchall()
+            }
+        assert ancestry[table_blocks[0].block_hash.hex()] == (None, 1)
+        assert ancestry[table_blocks[1].block_hash.hex()] == (
+            table_blocks[0].block_hash.hex(),
+            1,
+        )
         for block_id in table.block_ids:
             block = manager.allocated_blocks[block_id]
             restored = store.read_block(block.block_hash)
@@ -680,8 +697,23 @@ def test_tq_paged_disk_writes_are_bounded_per_extracted_block(monkeypatch):
     events = []
 
     class _RecordingDiskStore:
-        def write_block_async(self, block_hash, cache_data, token_count):
-            events.append(("write", token_count, len(cache_data)))
+        def write_block_async(
+            self,
+            block_hash,
+            cache_data,
+            token_count,
+            *,
+            parent_hash=None,
+        ):
+            events.append(
+                (
+                    "write",
+                    token_count,
+                    len(cache_data),
+                    parent_hash,
+                    block_hash,
+                )
+            )
 
     manager = PagedCacheManager(block_size=16, max_blocks=16)
     manager._disk_store = _RecordingDiskStore()
@@ -710,6 +742,9 @@ def test_tq_paged_disk_writes_are_bounded_per_extracted_block(monkeypatch):
         "write",
     ]
     assert [event[1] for event in events if event[0] == "write"] == [16, 16]
+    writes = [event for event in events if event[0] == "write"]
+    assert writes[0][3] is None
+    assert writes[1][3] == writes[0][4]
 
 
 def test_tq_paged_disk_none_mode_skips_existing_native_blocks(tmp_path):

@@ -4165,6 +4165,31 @@ def _v5_process_matches_pin(
     )
 
 
+def _v5_observe_matching_process(
+    pid: int,
+    executable_pin: dict[str, Any],
+    *,
+    attempts: int = 25,
+    delay_seconds: float = 0.01,
+) -> dict[str, Any] | None:
+    """Observe a newly spawned child without accepting a transient mismatch.
+
+    macOS process metadata can briefly be unavailable or can still describe the
+    spawn transition when a busy test run immediately calls ``ps`` after
+    ``Popen``.  Retrying only until the exact pinned executable is observed
+    keeps the check fail-closed while removing that observation race.
+    """
+
+    last_observation: dict[str, Any] | None = None
+    for attempt in range(max(1, attempts)):
+        last_observation = _observe_process(pid)
+        if _v5_process_matches_pin(last_observation, executable_pin):
+            return last_observation
+        if attempt + 1 < attempts:
+            time.sleep(max(0.0, delay_seconds))
+    return last_observation
+
+
 def _v5_start_owned_child(
     name: str,
     spec: dict[str, Any],
@@ -4227,7 +4252,7 @@ def _v5_start_owned_child(
         os.close(output_fd)
         output_path.unlink(missing_ok=True)
         raise
-    observation = _observe_process(process.pid)
+    observation = _v5_observe_matching_process(process.pid, executable_pin)
     if not _v5_process_matches_pin(observation, executable_pin):
         process.kill()
         process.wait()
@@ -7186,7 +7211,10 @@ def _v5_run_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    process_observation = _observe_process(process.pid)
+    process_observation = _v5_observe_matching_process(
+        process.pid,
+        executable_pin,
+    )
     if not _v5_process_matches_pin(process_observation, executable_pin):
         process.kill()
         process.wait()

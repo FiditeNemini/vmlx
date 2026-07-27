@@ -1529,6 +1529,66 @@ def test_v5_owned_node_path_supports_nested_env_node_without_ambient_path(
     assert str((fixed_bin / "npm").resolve()) in recorded
 
 
+def test_v5_process_observation_retries_only_until_exact_pin(monkeypatch):
+    module = load_module()
+    expected = {
+        "path": "/opt/tool/node",
+        "sha256": "a" * 64,
+    }
+    exact = {
+        "pid": 123,
+        "start_identity": "stable-start",
+        "executable_path": expected["path"],
+        "executable_sha256": expected["sha256"],
+    }
+    observations = iter(
+        [
+            None,
+            {
+                "pid": 123,
+                "start_identity": "spawn-transition",
+                "executable_path": "/usr/bin/false",
+                "executable_sha256": "b" * 64,
+            },
+            exact,
+        ]
+    )
+    monkeypatch.setattr(module, "_observe_process", lambda _pid: next(observations))
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    assert (
+        module._v5_observe_matching_process(
+            123,
+            expected,
+            attempts=3,
+            delay_seconds=0,
+        )
+        == exact
+    )
+
+
+def test_v5_process_observation_stays_fail_closed_after_retry(monkeypatch):
+    module = load_module()
+    mismatch = {
+        "pid": 123,
+        "start_identity": "wrong-start",
+        "executable_path": "/usr/bin/false",
+        "executable_sha256": "b" * 64,
+    }
+    monkeypatch.setattr(module, "_observe_process", lambda _pid: mismatch)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    assert (
+        module._v5_observe_matching_process(
+            123,
+            {"path": "/opt/tool/node", "sha256": "a" * 64},
+            attempts=3,
+            delay_seconds=0,
+        )
+        == mismatch
+    )
+
+
 def test_v5_panel_summary_accepts_green_accounting_with_failure_words_in_logs():
     module = load_module()
     output = (

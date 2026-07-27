@@ -2980,6 +2980,7 @@ def run_bound_tool_action(
                 action_argv[action],
                 cwd=action_cwd,
                 text=True,
+                errors="surrogateescape",
                 capture_output=capture_output,
                 check=False,
             )
@@ -3010,9 +3011,13 @@ def run_bound_tool_action(
         ) from invocation_error
     assert completed is not None
     if completed.returncode != 0:
+        safe_stderr = (completed.stderr or "").encode(
+            "utf-8",
+            errors="backslashreplace",
+        ).decode("utf-8")
         detail = (
-            f": {(completed.stderr or '').strip()}"
-            if capture_output and completed.stderr
+            f": {safe_stderr.strip()}"
+            if capture_output and safe_stderr
             else ""
         )
         raise ArtifactChainError(

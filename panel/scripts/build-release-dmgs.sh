@@ -520,7 +520,7 @@ capture_bound_release_action() {
   # Stream it over stdin so verification remains bounded by memory, not argv.
   printf '%s' "$payload" |
     run_release_python -I -c \
-      'import json,sys; print(json.load(sys.stdin)["stdout"], end="")'
+      'import json,sys; sys.stdout.buffer.write(json.load(sys.stdin)["stdout"].encode("utf-8", "surrogateescape"))'
 }
 
 run_toolchain_action() {

@@ -2224,6 +2224,67 @@ def test_r18_bound_tool_action_rechecks_document_and_complete_toolchain(tmp_path
     assert marker.read_text(encoding="utf-8") == "ran\n"
 
 
+def test_r18_bound_tool_action_preserves_non_utf8_output_through_json(tmp_path):
+    toolchain = {}
+    for name in runner.R18_PINNED_TOOL_NAMES:
+        tool = tmp_path / name
+        output = (r"printf 'Mach-O \251 signed\n'" + "\n") if name == "file" else ""
+        tool.write_text(f"#!/bin/sh\n{output}exit 0\n", encoding="utf-8")
+        tool.chmod(0o700)
+        record, _ = runner._read_regular_file(
+            tool,
+            label=f"fake pinned {name}",
+            require_single_link=False,
+        )
+        toolchain[name] = {
+            "path": str(tool),
+            "realpath": str(tool.resolve(strict=True)),
+            "sha256": record["sha256"],
+        }
+
+    manifest = tmp_path / "tool-manifest.json"
+    _seal_json(manifest, {"toolchain": toolchain})
+    manifest_record, _ = runner._read_regular_file(
+        manifest,
+        label="tool manifest",
+    )
+    result = runner.run_bound_tool_action(
+        document_path=manifest,
+        expected_document_sha256=manifest_record["sha256"],
+        binding_kind="manifest",
+        action="file",
+        arguments=[],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+
+    expected = b"Mach-O \xa9 signed\n"
+    assert result["stdout"].encode("utf-8", "surrogateescape") == expected
+    encoded = json.dumps(result, sort_keys=True)
+    assert encoded.isascii()
+    assert (
+        json.loads(encoded)["stdout"].encode("utf-8", "surrogateescape")
+        == expected
+    )
+    restored = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            (
+                'import json,sys; sys.stdout.buffer.write('
+                'json.load(sys.stdin)["stdout"].encode("utf-8", "surrogateescape"))'
+            ),
+        ],
+        input=encoded,
+        text=True,
+        capture_output=True,
+        check=True,
+        errors="surrogateescape",
+    )
+    assert restored.stdout.encode("utf-8", "surrogateescape") == expected
+
+
 @pytest.mark.parametrize("action", ("git", "shasum", "awk", "file", "find"))
 def test_r18_bound_tool_action_detects_each_residual_tool_swap(
     tmp_path,

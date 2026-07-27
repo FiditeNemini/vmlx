@@ -397,6 +397,23 @@ describe("generated CDP expression syntax", () => {
     expect(harnessSource).toContain(
       "kvCacheQuantization: String(activeReleasePhase.kv_cache_quantization || 'none')",
     );
+    expect(harnessSource).toContain(
+      "const releasePagedCacheMemoryPercent = activeReleasePhase?.paged_ram",
+    );
+    expect(harnessSource).toMatch(
+      /const releasePagedCacheMemoryPercent = activeReleasePhase\?\.paged_ram\s+\? 10\s+: null/,
+    );
+    expect(harnessSource).toContain(
+      "{ cacheMemoryPercent: releasePagedCacheMemoryPercent }",
+    );
+    expect(
+      harnessSource.match(
+        /cacheMemoryPercent: releasePagedCacheMemoryPercent/g,
+      ),
+    ).toHaveLength(2);
+    expect(harnessSource).not.toContain(
+      "const releasePagedCacheMemoryPercent =\n          ${",
+    );
     expect(preflightSource).toContain(
       '"VMLINUX_REAL_UI_EXPECT_PAGED_CACHE": (',
     );

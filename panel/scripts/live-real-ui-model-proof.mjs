@@ -6047,6 +6047,16 @@ async function main() {
   const uiTurnCount = Number(activeReleasePhase?.ui_turn_count || 3)
   const apiActionProfile = activeReleasePhase?.api_action_profile
     || 'full-agentic'
+  // Keep the release proof's paged-RAM tier below its fixed 10 GiB SSD tier.
+  // MiniMax M2.7's model-safe q8 cache uses enough bytes per block that the
+  // normal 15% session default made L1 larger than L2 on the release M5 Max.
+  // In that topology the bounded SSD store evicted the recent target before
+  // RAM pressure could refault it, so the phase-2 survival assertion was
+  // unreachable. This is proof-session configuration only; product defaults
+  // and user-created sessions remain unchanged.
+  const releasePagedCacheMemoryPercent = activeReleasePhase?.paged_ram
+    ? 10
+    : null
   const releaseBlockDiskCacheAnchorPhase = (() => {
     if (!activeReleasePhase) return null
     if (activeReleasePhase.operation !== 'probe') return activeReleasePhase
@@ -6593,6 +6603,9 @@ async function main() {
               enableBlockDiskCache: true,
               kvCacheQuantization: String(activeReleasePhase.kv_cache_quantization || 'none'),
               blockDiskCacheDir: releaseBlockDiskCacheDir,
+              ...(releasePagedCacheMemoryPercent == null
+                ? {}
+                : { cacheMemoryPercent: releasePagedCacheMemoryPercent }),
             } : {})}),
             ...(privateCacheAttestationArgs
               ? { additionalArgs: privateCacheAttestationArgs }
@@ -6720,6 +6733,9 @@ async function main() {
               enableBlockDiskCache: true,
               kvCacheQuantization: String(activeReleasePhase.kv_cache_quantization || 'none'),
               blockDiskCacheDir: releaseBlockDiskCacheDir,
+              ...(releasePagedCacheMemoryPercent == null
+                ? {}
+                : { cacheMemoryPercent: releasePagedCacheMemoryPercent }),
             } : {})};
             if (Object.keys(releasePhaseSessionConfig).length) {
               const phaseConfigUpdate = await window.api.sessions.update(

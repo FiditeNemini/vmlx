@@ -1979,7 +1979,8 @@ class BlockAwarePrefixCache:
 
         Ref ownership:
             get_computed_blocks() increments request refs through touch();
-            fallback prefix-index matches call increment_ref explicitly.
+            fallback prefix-index matching validates and pins refs atomically
+            under the paged-cache lock.
             Every returned table is registered in _request_tables so the
             scheduler's normal completion cleanup can release those refs.
         """
@@ -2043,26 +2044,33 @@ class BlockAwarePrefixCache:
             tokens,
             cache_extra_keys=cache_extra_keys,
         )
-        if cached_blocks and best_match and len(best_match[0]) > num_cached:
-            try:
-                self.paged_cache.release_request_refs(
-                    BlockTable(
-                        request_id=request_id,
-                        block_ids=[b.block_id for b in cached_blocks],
-                        num_tokens=num_cached,
+        if cached_blocks and best_match:
+            if len(best_match[0]) > num_cached:
+                try:
+                    self.paged_cache.release_request_refs(
+                        BlockTable(
+                            request_id=request_id,
+                            block_ids=[b.block_id for b in cached_blocks],
+                            num_tokens=num_cached,
+                        )
                     )
+                except Exception:
+                    pass
+                logger.info(
+                    "Prefix index exact-partial match for %s extends paged hit "
+                    "from %d to %d tokens",
+                    request_id,
+                    num_cached,
+                    len(best_match[0]),
                 )
-            except Exception:
-                pass
-            logger.info(
-                "Prefix index exact-partial match for %s extends paged hit "
-                "from %d to %d tokens",
-                request_id,
-                num_cached,
-                len(best_match[0]),
-            )
-            cached_blocks = []
-            num_cached = 0
+                cached_blocks = []
+                num_cached = 0
+            else:
+                # _find_best_prefix_match() already owns one ref per indexed
+                # block. The authoritative chain-hash candidate wins ties and
+                # longer matches, so release the unused fallback ownership.
+                self._release_pinned_prefix_match(request_id, best_match)
+                best_match = None
         if cached_blocks:
             _disk_store = getattr(self.paged_cache, "_disk_store", None)
             if self._rotating_l2_chain_missing_terminal_state(
@@ -2163,12 +2171,21 @@ class BlockAwarePrefixCache:
                 for block_id in matched_block_ids
             ]
             matched_blocks = [b for b in matched_blocks if b is not None]
+            pinned_table = BlockTable(
+                request_id=request_id,
+                block_ids=list(matched_block_ids),
+                num_tokens=sum(
+                    int(getattr(block, "token_count", 0) or 0)
+                    for block in matched_blocks
+                ),
+            )
             _disk_store = getattr(self.paged_cache, "_disk_store", None)
             if self._rotating_l2_chain_missing_terminal_state(
                 matched_blocks,
                 target_tokens=len(matched_tokens),
                 disk_store=_disk_store,
             ):
+                self.paged_cache.release_request_refs(pinned_table)
                 logger.info(
                     "Ignoring mixed-SWA prefix-index candidate for %s at %d "
                     "tokens: the matched boundary has no exact RotatingKV "
@@ -2179,6 +2196,7 @@ class BlockAwarePrefixCache:
                 self._misses += 1
                 return None, tokens
             if self._dsv4_l2_chain_missing_terminal_state(matched_blocks, _disk_store):
+                self.paged_cache.release_request_refs(pinned_table)
                 logger.warning(
                     "Ignoring DSV4 prefix-index hit for %s: matched blocks "
                     "contain DeepseekV4Cache pending markers but no terminal "
@@ -2188,6 +2206,7 @@ class BlockAwarePrefixCache:
                 self._misses += 1
                 return None, tokens
             if self._zaya_l2_chain_missing_terminal_state(matched_blocks, _disk_store):
+                self.paged_cache.release_request_refs(pinned_table)
                 logger.warning(
                     "Ignoring ZAYA prefix-index hit for %s: matched blocks "
                     "contain zaya_cca KV pages but no terminal CCA state.",
@@ -2196,14 +2215,9 @@ class BlockAwarePrefixCache:
                 self._misses += 1
                 return None, tokens
 
-            # Fork the matched blocks
-            block_table = self.paged_cache.create_block_table(request_id)
-            for block_id in matched_block_ids:
-                self.paged_cache.increment_ref(block_id)
-                block = self.paged_cache.allocated_blocks.get(block_id)
-                if block:
-                    block_table.block_ids.append(block_id)
-                    block_table.num_tokens += block.token_count
+            # The index lookup pinned this exact chain before releasing the
+            # paged-cache lock, so no second increment is needed here.
+            block_table = pinned_table
 
             remaining = tokens[len(matched_tokens) :]
             self._hits += 1
@@ -2229,6 +2243,21 @@ class BlockAwarePrefixCache:
         self._misses += 1
         logger.debug(f"Cache miss for {request_id}")
         return None, tokens
+
+    def _release_pinned_prefix_match(
+        self,
+        request_id: str,
+        match: Tuple[List[int], List[int]],
+    ) -> None:
+        """Release ownership acquired by an unused prefix-index candidate."""
+        matched_tokens, block_ids = match
+        self.paged_cache.release_request_refs(
+            BlockTable(
+                request_id=request_id,
+                block_ids=list(block_ids),
+                num_tokens=len(matched_tokens),
+            )
+        )
 
     @staticmethod
     def _iter_terminal_check_entries(block: Any, disk_store: Optional[Any] = None):
@@ -5099,70 +5128,141 @@ class BlockAwarePrefixCache:
         tokens: List[int],
         cache_extra_keys: Optional[Any] = None,
     ) -> Optional[Tuple[List[int], List[int]]]:
-        """Find best matching prefix in the index."""
-        best_match = None
-        best_len = 0
-        extra_marker = self._prefix_index_extra_marker(cache_extra_keys)
+        """Find and pin the best matching prefix-index entry atomically."""
+        with self.paged_cache._lock:
+            best_match = None
+            best_len = 0
+            extra_marker = self._prefix_index_extra_marker(cache_extra_keys)
 
-        # Try progressively longer prefixes
-        for num_blocks in range(1, len(tokens) // self.block_size + 1):
-            prefix_len = num_blocks * self.block_size
-            if prefix_len > len(tokens):
-                break
+            # Try progressively longer prefixes
+            for num_blocks in range(1, len(tokens) // self.block_size + 1):
+                prefix_len = num_blocks * self.block_size
+                if prefix_len > len(tokens):
+                    break
 
-            prefix_tokens = tokens[:prefix_len]
-            prefix_hash = self._prefix_index_hash(
-                prefix_tokens,
-                cache_extra_keys=cache_extra_keys,
-            )
+                prefix_tokens = tokens[:prefix_len]
+                prefix_hash = self._prefix_index_hash(
+                    prefix_tokens,
+                    cache_extra_keys=cache_extra_keys,
+                )
 
-            if prefix_hash in self._prefix_index:
-                entry = self._prefix_index[prefix_hash]
+                if prefix_hash in self._prefix_index:
+                    entry = self._prefix_index[prefix_hash]
+                    cached_tokens, block_ids = entry[:2]
+                    cached_extra = entry[2] if len(entry) > 2 else None
+                    if cached_extra != extra_marker:
+                        continue
+                    if cached_tokens == prefix_tokens and len(cached_tokens) > best_len:
+                        valid = self._prefix_index_blocks_are_current(
+                            cached_tokens,
+                            block_ids,
+                            cache_extra_keys=cache_extra_keys,
+                        )
+                        if valid:
+                            best_match = (cached_tokens, block_ids)
+                            best_len = len(cached_tokens)
+                        elif self._prefix_index.get(prefix_hash) is entry:
+                            # Delete only the entry which was validated. A
+                            # concurrent store may have replaced this key with
+                            # a fresh chain while the old candidate was stale.
+                            del self._prefix_index[prefix_hash]
+
+            # _update_prefix_index() also records the terminal partial prefix for a
+            # cached request. A later request can have that exact partial prefix
+            # plus a long tail, so the block-aligned loop above will never probe
+            # its hash. Scan indexed entries by exact token-prefix equality and
+            # blocks that still own the exact expected chain hashes; this preserves
+            # chain-hash safety and avoids the legacy content-only block hash path.
+            for prefix_hash, entry in list(self._prefix_index.items()):
                 cached_tokens, block_ids = entry[:2]
                 cached_extra = entry[2] if len(entry) > 2 else None
                 if cached_extra != extra_marker:
                     continue
-                if cached_tokens == prefix_tokens and len(cached_tokens) > best_len:
-                    # Validate that all referenced blocks still exist
-                    valid = all(
-                        bid in self.paged_cache.allocated_blocks
-                        for bid in block_ids
+                cached_len = len(cached_tokens)
+                if cached_len <= best_len or cached_len > len(tokens):
+                    continue
+                if tokens[:cached_len] != cached_tokens:
+                    continue
+
+                valid = self._prefix_index_blocks_are_current(
+                    cached_tokens,
+                    block_ids,
+                    cache_extra_keys=cache_extra_keys,
+                )
+                if valid:
+                    best_match = (cached_tokens, block_ids)
+                    best_len = cached_len
+                elif self._prefix_index.get(prefix_hash) is entry:
+                    del self._prefix_index[prefix_hash]
+
+            if best_match is None:
+                return None
+
+            # Pin all validated blocks before releasing the lock. Allocation,
+            # eviction, hash replacement, and ref-count changes use this same
+            # RLock, so the caller receives ownership of the exact chain it
+            # validated rather than recycled numeric IDs.
+            pinned_ids: List[int] = []
+            for block_id in best_match[1]:
+                if not self.paged_cache.increment_ref(block_id):
+                    self.paged_cache.release_request_refs(
+                        BlockTable(
+                            request_id="prefix-index-pin-rollback",
+                            block_ids=pinned_ids,
+                            num_tokens=0,
+                        )
                     )
-                    if valid:
-                        best_match = (cached_tokens, block_ids)
-                        best_len = len(cached_tokens)
-                    else:
-                        # Stale entry — remove it
-                        del self._prefix_index[prefix_hash]
+                    return None
+                pinned_ids.append(block_id)
+            return best_match
 
-        # _update_prefix_index() also records the terminal partial prefix for a
-        # cached request. A later request can have that exact partial prefix
-        # plus a long tail, so the block-aligned loop above will never probe
-        # its hash. Scan indexed entries by exact token-prefix equality and
-        # live block IDs only; this preserves chain-hash safety and avoids the
-        # legacy content-only block hash path.
-        for prefix_hash, entry in list(self._prefix_index.items()):
-            cached_tokens, block_ids = entry[:2]
-            cached_extra = entry[2] if len(entry) > 2 else None
-            if cached_extra != extra_marker:
-                continue
-            cached_len = len(cached_tokens)
-            if cached_len <= best_len or cached_len > len(tokens):
-                continue
-            if tokens[:cached_len] != cached_tokens:
-                continue
+    def _prefix_index_blocks_are_current(
+        self,
+        cached_tokens: List[int],
+        block_ids: List[int],
+        *,
+        cache_extra_keys: Optional[Any] = None,
+    ) -> bool:
+        """Validate that an index entry still owns its exact paged block chain.
 
-            valid = all(
-                bid in self.paged_cache.allocated_blocks
-                for bid in block_ids
+        Numeric block IDs are recycled after paged-cache eviction.  Existence in
+        ``allocated_blocks`` therefore does not prove that an ID still contains
+        the prefix which originally created the index entry.  Recompute the
+        chain hashes and exact per-block token counts before allowing the
+        fallback prefix index to bypass the authoritative paged hash lookup.
+        """
+        if not cached_tokens or not block_ids:
+            return False
+
+        expected_block_count = (
+            len(cached_tokens) + self.block_size - 1
+        ) // self.block_size
+        if len(block_ids) != expected_block_count:
+            return False
+
+        parent_hash = None
+        for ordinal, block_id in enumerate(block_ids):
+            start = ordinal * self.block_size
+            block_tokens = cached_tokens[start : start + self.block_size]
+            if not block_tokens:
+                return False
+
+            expected_hash = compute_block_hash(
+                parent_hash,
+                block_tokens,
+                extra_keys=cache_extra_keys,
             )
-            if valid:
-                best_match = (cached_tokens, block_ids)
-                best_len = cached_len
-            else:
-                del self._prefix_index[prefix_hash]
+            block = self.paged_cache.allocated_blocks.get(block_id)
+            if (
+                block is None
+                or block.block_hash != expected_hash
+                or int(getattr(block, "token_count", 0) or 0)
+                != len(block_tokens)
+            ):
+                return False
+            parent_hash = expected_hash
 
-        return best_match
+        return True
 
     @staticmethod
     def _prefix_index_extra_marker(cache_extra_keys: Optional[Any]) -> Optional[str]:
@@ -5196,19 +5296,20 @@ class BlockAwarePrefixCache:
     ) -> None:
         """Update prefix index with new token sequence."""
         extra_marker = self._prefix_index_extra_marker(cache_extra_keys)
-        # Index block-aligned prefixes
-        for i in range(1, len(block_ids) + 1):
-            prefix_len = min(i * self.block_size, len(tokens))
-            prefix_tokens = tokens[:prefix_len]
-            prefix_hash = self._prefix_index_hash(
-                prefix_tokens,
-                cache_extra_keys=cache_extra_keys,
-            )
-            self._prefix_index[prefix_hash] = (
-                prefix_tokens,
-                block_ids[:i],
-                extra_marker,
-            )
+        with self.paged_cache._lock:
+            # Index block-aligned prefixes
+            for i in range(1, len(block_ids) + 1):
+                prefix_len = min(i * self.block_size, len(tokens))
+                prefix_tokens = tokens[:prefix_len]
+                prefix_hash = self._prefix_index_hash(
+                    prefix_tokens,
+                    cache_extra_keys=cache_extra_keys,
+                )
+                self._prefix_index[prefix_hash] = (
+                    prefix_tokens,
+                    block_ids[:i],
+                    extra_marker,
+                )
 
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
@@ -5268,7 +5369,8 @@ class BlockAwarePrefixCache:
     def clear(self) -> None:
         """Clear all cached data."""
         self._request_tables.clear()
-        self._prefix_index.clear()
+        with self.paged_cache._lock:
+            self._prefix_index.clear()
         for d in self._entries_by_type.values():
             d.clear()
         self.paged_cache.clear()

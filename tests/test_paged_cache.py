@@ -3,6 +3,7 @@
 
 import platform
 import sys
+import threading
 import time
 
 import pytest
@@ -694,6 +695,250 @@ class TestBlockAwarePrefixCache:
         assert block_table is not None
         assert block_table.num_tokens == len(prefix_tokens)
         assert remaining == long_tail
+
+    def test_prefix_index_rejects_block_ids_reused_for_another_chain(self):
+        """A fallback prefix entry must not follow recycled paged block IDs."""
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        paged = PagedCacheManager(block_size=4, max_blocks=3)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+        original_tokens = [1, 2, 3, 4, 5, 6]
+
+        original = cache.store_cache(
+            "original",
+            original_tokens,
+            ["original-state"],
+        )
+        assert original is not None
+        original_block_ids = list(original.block_ids)
+        assert cache._prefix_index_blocks_are_current(
+            original_tokens,
+            original_block_ids,
+        )
+
+        terminal = paged.allocated_blocks[original_block_ids[-1]]
+        original_terminal_count = terminal.token_count
+        terminal.token_count = original_terminal_count - 1
+        assert not cache._prefix_index_blocks_are_current(
+            original_tokens,
+            original_block_ids,
+        )
+        terminal.token_count = original_terminal_count
+
+        original_entry = cache._request_tables.pop("original")
+        assert paged.release_request_refs(original_entry.block_table) == 2
+        paged.detach_request("original")
+
+        replacement = cache.store_cache(
+            "replacement",
+            [20, 21, 22, 23, 24, 25],
+            ["replacement-state"],
+        )
+        assert replacement is not None
+        assert set(replacement.block_ids) == set(original_block_ids)
+        assert not cache._prefix_index_blocks_are_current(
+            original_tokens,
+            original_block_ids,
+        )
+
+        requested = original_tokens + [99]
+        hit, remaining = cache.fetch_cache("reader", requested)
+
+        assert hit is None
+        assert remaining == requested
+        assert (
+            cache._prefix_index_hash(original_tokens)
+            not in cache._prefix_index
+        )
+
+    def test_prefix_index_validation_pins_before_concurrent_reallocation(
+        self,
+        monkeypatch,
+    ):
+        """Validation and ref pinning must share one paged-cache lock hold."""
+        from vmlx_engine.paged_cache import BlockTable, PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        paged = PagedCacheManager(block_size=4, max_blocks=3)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+        tokens = [1, 2, 3, 4, 5, 6]
+        stored = cache.store_cache("writer", tokens, ["state"])
+        assert stored is not None
+        block_ids = list(stored.block_ids)
+
+        writer_entry = cache._request_tables.pop("writer")
+        assert paged.release_request_refs(writer_entry.block_table) == 2
+        paged.detach_request("writer")
+        assert [paged.blocks[block_id].ref_count for block_id in block_ids] == [0, 0]
+
+        validation_entered = threading.Event()
+        allow_validation_to_return = threading.Event()
+        contender_started = threading.Event()
+        contender_acquired_lock = threading.Event()
+        results = {}
+        original_validator = cache._prefix_index_blocks_are_current
+
+        def blocking_validator(
+            cached_tokens,
+            candidate_block_ids,
+            *,
+            cache_extra_keys=None,
+        ):
+            valid = original_validator(
+                cached_tokens,
+                candidate_block_ids,
+                cache_extra_keys=cache_extra_keys,
+            )
+            validation_entered.set()
+            if not allow_validation_to_return.wait(timeout=2):
+                raise AssertionError("timed out waiting to release validation")
+            return valid
+
+        monkeypatch.setattr(
+            cache,
+            "_prefix_index_blocks_are_current",
+            blocking_validator,
+        )
+
+        def lookup():
+            try:
+                results["match"] = cache._find_best_prefix_match(tokens + [99])
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                results["lookup_error"] = exc
+
+        def contend_for_reallocation():
+            contender_started.set()
+            with paged._lock:
+                contender_acquired_lock.set()
+                results["refs_seen_by_contender"] = [
+                    paged.blocks[block_id].ref_count for block_id in block_ids
+                ]
+
+        lookup_thread = threading.Thread(target=lookup)
+        lookup_thread.start()
+        assert validation_entered.wait(timeout=2)
+
+        contender_thread = threading.Thread(target=contend_for_reallocation)
+        contender_thread.start()
+        assert contender_started.wait(timeout=2)
+        assert not contender_acquired_lock.wait(timeout=0.05)
+
+        allow_validation_to_return.set()
+        lookup_thread.join(timeout=2)
+        contender_thread.join(timeout=2)
+
+        assert not lookup_thread.is_alive()
+        assert not contender_thread.is_alive()
+        assert "lookup_error" not in results
+        assert results["match"] == (tokens, block_ids)
+        assert results["refs_seen_by_contender"] == [1, 1]
+
+        assert paged.release_request_refs(
+            BlockTable(
+                request_id="reader",
+                block_ids=block_ids,
+                num_tokens=len(tokens),
+            )
+        ) == 2
+
+    def test_stale_prefix_cleanup_does_not_delete_concurrent_replacement(
+        self,
+        monkeypatch,
+    ):
+        """A serialized fresh index write must survive stale-entry cleanup."""
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        paged = PagedCacheManager(block_size=4, max_blocks=3)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+        stale_tokens = [1, 2, 3, 4, 5, 6]
+        stored = cache.store_cache("stale", stale_tokens, ["stale-state"])
+        assert stored is not None
+        stale_key = cache._prefix_index_hash(stale_tokens)
+        stale_entry = cache._prefix_index[stale_key]
+
+        stale_request = cache._request_tables.pop("stale")
+        assert paged.release_request_refs(stale_request.block_table) == 2
+        paged.detach_request("stale")
+        replacement = cache.store_cache(
+            "replacement-blocks",
+            [20, 21, 22, 23, 24, 25],
+            ["replacement-state"],
+        )
+        assert replacement is not None
+        assert not cache._prefix_index_blocks_are_current(
+            stale_tokens,
+            list(stale_entry[1]),
+        )
+
+        validation_entered = threading.Event()
+        allow_cleanup = threading.Event()
+        writer_started = threading.Event()
+        writer_finished = threading.Event()
+        results = {}
+        original_validator = cache._prefix_index_blocks_are_current
+        fresh_entry = (
+            list(stale_tokens),
+            list(replacement.block_ids),
+            "fresh-replacement-sentinel",
+        )
+
+        def blocking_validator(
+            cached_tokens,
+            candidate_block_ids,
+            *,
+            cache_extra_keys=None,
+        ):
+            valid = original_validator(
+                cached_tokens,
+                candidate_block_ids,
+                cache_extra_keys=cache_extra_keys,
+            )
+            if list(cached_tokens) == stale_tokens:
+                validation_entered.set()
+                if not allow_cleanup.wait(timeout=2):
+                    raise AssertionError("timed out waiting to release cleanup")
+            return valid
+
+        monkeypatch.setattr(
+            cache,
+            "_prefix_index_blocks_are_current",
+            blocking_validator,
+        )
+
+        def lookup():
+            try:
+                results["match"] = cache._find_best_prefix_match(
+                    stale_tokens + [99]
+                )
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                results["lookup_error"] = exc
+
+        def replace_index_entry():
+            writer_started.set()
+            with paged._lock:
+                cache._prefix_index[stale_key] = fresh_entry
+            writer_finished.set()
+
+        lookup_thread = threading.Thread(target=lookup)
+        lookup_thread.start()
+        assert validation_entered.wait(timeout=2)
+
+        writer_thread = threading.Thread(target=replace_index_entry)
+        writer_thread.start()
+        assert writer_started.wait(timeout=2)
+        assert not writer_finished.wait(timeout=0.05)
+
+        allow_cleanup.set()
+        lookup_thread.join(timeout=2)
+        writer_thread.join(timeout=2)
+
+        assert not lookup_thread.is_alive()
+        assert not writer_thread.is_alive()
+        assert "lookup_error" not in results
+        assert results["match"] is None
+        assert cache._prefix_index[stale_key] is fresh_entry
 
     def test_restart_restores_short_partial_prefix_for_longer_prompt(self):
         """L2 must discover a short root partial after process restart."""

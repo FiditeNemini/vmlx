@@ -1035,9 +1035,14 @@ def test_successful_block_read_refreshes_cross_namespace_global_lru(tmp_path):
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             pipeline = first.get_stats()["write_pipeline"]
-            if pipeline["queue_depth"] == 0 and pipeline["inflight"] == 0:
+            if (
+                pipeline["queue_depth"] == 0
+                and pipeline["inflight"] == 0
+                and pipeline["pending_items"] == 0
+            ):
                 break
             time.sleep(0.01)
+        assert pipeline["pending_items"] == 0
 
         total = first.global_budget.enforce(force=True).bytes_after
         second_size = second_path.stat().st_size

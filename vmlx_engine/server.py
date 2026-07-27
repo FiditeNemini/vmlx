@@ -2756,6 +2756,15 @@ def _log_resolved_sampling_kwargs(
         )
 
 
+def _request_header_value(request: Any, name: str) -> str:
+    """Read an optional FastAPI request header for diagnostics only."""
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return ""
+    value = headers.get(name, "")
+    return value if isinstance(value, str) else ""
+
+
 def _compute_bypass_prefix_cache(request_obj) -> bool:
     """Read request-level cache bypass flag.
 
@@ -15825,12 +15834,12 @@ async def create_chat_completion(
         "/v1/chat/completions",
         _model_path or _model_name or request.model,
         chat_kwargs,
-        proof_request_id=fastapi_request.headers.get(
+        proof_request_id=_request_header_value(
+            fastapi_request,
             "x-vmlx-proof-request-id",
-            "",
         ),
-        request_id=fastapi_request.headers.get("x-vmlx-request-id", ""),
-        message_id=fastapi_request.headers.get("x-vmlx-message-id", ""),
+        request_id=_request_header_value(fastapi_request, "x-vmlx-request-id"),
+        message_id=_request_header_value(fastapi_request, "x-vmlx-message-id"),
     )
 
     # Add multimodal content
@@ -18843,12 +18852,12 @@ async def create_response(
         "/v1/responses",
         _model_path or _model_name or request.model,
         chat_kwargs,
-        proof_request_id=fastapi_request.headers.get(
+        proof_request_id=_request_header_value(
+            fastapi_request,
             "x-vmlx-proof-request-id",
-            "",
         ),
-        request_id=fastapi_request.headers.get("x-vmlx-request-id", ""),
-        message_id=fastapi_request.headers.get("x-vmlx-message-id", ""),
+        request_id=_request_header_value(fastapi_request, "x-vmlx-request-id"),
+        message_id=_request_header_value(fastapi_request, "x-vmlx-message-id"),
     )
 
     # Video processing controls (MLLM models)

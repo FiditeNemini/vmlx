@@ -1344,6 +1344,30 @@ class BlockDiskStore:
         ready: set[bytes] = set()
         deadline = time.monotonic() + max(0.0, float(timeout))
 
+        if not self._allow_tq_native:
+            # An explicit TQ-Off run can replace a TQ-native record under the
+            # same content hash.  The cleanup and plain-KV publication are
+            # ordered on the background queue, but the old finalized row is
+            # still index-readable until that queue settles.  Counting that
+            # stale row as durable would drop the caller's RAM fallback and a
+            # subsequent read would correctly reject it as TQ, producing a
+            # false cache miss.  Wait on the authoritative lifecycle counter
+            # before testing path/index readability in this replacement mode.
+            with self._write_lifecycle:
+                while (
+                    self._active_write_producers > 0
+                    or self._pending_write_items > 0
+                ):
+                    if (
+                        self._pending_write_items > 0
+                        and not self._writer_thread.is_alive()
+                    ):
+                        return set()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return set()
+                    self._write_lifecycle.wait(timeout=remaining)
+
         while True:
             remaining_hex = [
                 hash_hex

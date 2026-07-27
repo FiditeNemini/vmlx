@@ -59,7 +59,13 @@ GEMMA4_CURRENT_INSTALLED_SPEED_ARTIFACT = Path(
     "build/current-runtime-memory-stress-gemma4-26b-jang4m-chat-thinkingoff-speed-floor-issue115-installed-app-20260601.json"
 )
 GEMMA4_CURRENT_MEMORY_STRESS_ARTIFACT = Path(
-    "docs/internal/release-gates/20260718_gemma4_mixed_swa_checkpoint/live-gate.json"
+    "build/private-evidence/current-gemma4-mixed-swa-live-gate.json"
+)
+GEMMA4_CURRENT_API_PROOF = Path(
+    "build/private-evidence/current-gemma4-mixed-swa-api-proof.json"
+)
+GEMMA4_CURRENT_UI_PROOF = Path(
+    "build/private-evidence/current-gemma4-mixed-swa-ui-proof.json"
 )
 QWEN35_INSTALLED_SPEED_ARTIFACT = Path(
     "build/current-decode-speed-live-qwen35-4bit-issue115-installed-app-after-decode-position-20260601.json"
@@ -782,14 +788,8 @@ def _gemma26_current_memory_stress_gate(root: Path) -> dict[str, bool]:
 
 def _issue119_checks(root: Path) -> dict[str, bool]:
     memory_gate = _gemma26_current_memory_stress_gate(root)
-    gemma_responses = (
-        root
-        / "docs/internal/release-gates/20260718_gemma4_mixed_swa_checkpoint/api-proof.json"
-    )
-    gemma_cache = (
-        root
-        / "docs/internal/release-gates/20260718_gemma4_mixed_swa_checkpoint/ui-proof.json"
-    )
+    gemma_responses = root / GEMMA4_CURRENT_API_PROOF
+    gemma_cache = root / GEMMA4_CURRENT_UI_PROOF
     response_surfaces = _surfaces(gemma_responses)
     cache_surfaces = _surfaces(gemma_cache)
     objective = _read(root / "tests/cross_matrix/summarize_objective_proof.py")
@@ -1054,6 +1054,7 @@ def build_audit(root: Path) -> dict[str, Any]:
                     "gemma26_memory_stress_artifact_present",
                     "gemma26_memory_stress_native_cache_health",
                     "gemma26_memory_stress_mixed_swa_cache_hits",
+                    "gemma26_real_ui_artifacts_indexed",
                 },
             }[number]
             required_source_checks = {

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import queue
 import sqlite3
 import threading
@@ -100,27 +99,31 @@ def test_block_disk_slow_file_io_is_off_caller_and_fence_is_durable(
         store.shutdown()
 
 
-def test_block_disk_freezes_bfloat16_on_caller_before_immutable_queue(
+def test_block_disk_detaches_bfloat16_then_encodes_off_caller(
     monkeypatch,
     tmp_path,
 ):
-    import vmlx_engine.block_disk_store as block_module
+    import numpy as np
 
     store = BlockDiskStore(str(tmp_path), max_size_gb=0)
     save_threads: list[str] = []
-    save_targets: list[object] = []
-    original_save = block_module.mx.save_safetensors
+    save_inputs: list[dict] = []
+    original_save = store._freeze_numpy_safetensors_bytes
 
-    def observed_save(target, tensors, metadata=None):
+    def observed_save(tensors):
         save_threads.append(threading.current_thread().name)
-        save_targets.append(target)
-        return original_save(target, tensors, metadata)
+        save_inputs.append(tensors)
+        assert all(isinstance(value, np.ndarray) for value in tensors.values())
+        assert all(not value.flags.writeable for value in tensors.values())
+        time.sleep(0.35)
+        return original_save(tensors)
 
-    monkeypatch.setattr(block_module.mx, "save_safetensors", observed_save)
+    monkeypatch.setattr(store, "_freeze_numpy_safetensors_bytes", observed_save)
     block_hash = b"f" * 32
     fence_id = store.begin_write_fence("bf16-freeze")
     try:
         source = _block(65536.0, dtype=mx.bfloat16)
+        started = time.perf_counter()
         assert store.write_block_async(
             block_hash,
             source,
@@ -128,6 +131,7 @@ def test_block_disk_freezes_bfloat16_on_caller_before_immutable_queue(
             request_id="bf16-freeze",
             fence_id=fence_id,
         )
+        assert time.perf_counter() - started < 0.20
         assert store.seal_write_fence(fence_id)
         _wait_for_fence(store, fence_id)
 
@@ -135,9 +139,49 @@ def test_block_disk_freezes_bfloat16_on_caller_before_immutable_queue(
         assert restored is not None
         assert restored[0][1].dtype == mx.bfloat16
         assert restored[0][1].tolist() == source[0][1].tolist()
-        assert save_threads == [threading.current_thread().name]
-        assert len(save_targets) == 1
-        assert isinstance(save_targets[0], io.BytesIO)
+        assert save_threads == ["block-disk-writer"]
+        assert len(save_inputs) == 1
+        pipeline = store.get_stats()["write_pipeline"]
+        assert pipeline["offthread_serializations_queued"] == 1
+        assert pipeline["offthread_serializations_completed"] == 1
+        assert pipeline["offthread_serialization_failures"] == 0
+    finally:
+        store.shutdown()
+
+
+def test_block_disk_background_serialization_failure_settles_fence(
+    monkeypatch,
+    tmp_path,
+):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+
+    def fail_serialization(_tensors):
+        raise RuntimeError("injected CPU encoding failure")
+
+    monkeypatch.setattr(
+        store,
+        "_freeze_numpy_safetensors_bytes",
+        fail_serialization,
+    )
+    fence_id = store.begin_write_fence("encoding-failure")
+    try:
+        assert store.write_block_async(
+            b"e" * 32,
+            _block(),
+            8,
+            request_id="encoding-failure",
+            fence_id=fence_id,
+        )
+        assert store.seal_write_fence(fence_id)
+        fence = _wait_for_fence(store, fence_id)
+        pipeline = store.get_stats()["write_pipeline"]
+        assert fence["completed"] == 0
+        assert fence["failed"] == 1
+        assert fence["retained"] == 0
+        assert pipeline["pending_bytes"] == 0
+        assert pipeline["offthread_serializations_queued"] == 1
+        assert pipeline["offthread_serializations_completed"] == 0
+        assert pipeline["offthread_serialization_failures"] == 1
     finally:
         store.shutdown()
 
@@ -270,22 +314,22 @@ def test_ssm_shutdown_drains_queued_publication(tmp_path):
     assert not store.store(key, [state], True, [4], 1)
 
 
-def test_block_disk_shutdown_rejects_producer_paused_during_freeze(
+def test_block_disk_shutdown_rejects_producer_paused_during_detach(
     monkeypatch,
     tmp_path,
 ):
     store = BlockDiskStore(str(tmp_path), max_size_gb=0)
-    freeze_entered = threading.Event()
-    release_freeze = threading.Event()
+    detach_entered = threading.Event()
+    release_detach = threading.Event()
     producer_done = threading.Event()
     producer_result: list[bool] = []
-    original_freeze = store._freeze_safetensors_bytes
+    original_detach = store._detach_safetensors_tensors
     lease_path = store.global_budget._lease_path()
 
-    def paused_freeze(tensors):
-        freeze_entered.set()
-        assert release_freeze.wait(timeout=5.0)
-        return original_freeze(tensors)
+    def paused_detach(tensors):
+        detach_entered.set()
+        assert release_detach.wait(timeout=5.0)
+        return original_detach(tensors)
 
     def produce() -> None:
         try:
@@ -295,11 +339,11 @@ def test_block_disk_shutdown_rejects_producer_paused_during_freeze(
         finally:
             producer_done.set()
 
-    monkeypatch.setattr(store, "_freeze_safetensors_bytes", paused_freeze)
+    monkeypatch.setattr(store, "_detach_safetensors_tensors", paused_detach)
     store._writer_shutdown_timeout_seconds = 0.05
     producer = threading.Thread(target=produce, name="paused-block-producer")
     producer.start()
-    assert freeze_entered.wait(timeout=5.0)
+    assert detach_entered.wait(timeout=5.0)
 
     # Shutdown closes admission before waiting for the already-admitted
     # producer.  It must not stop/release the writer lease and then let this
@@ -310,7 +354,7 @@ def test_block_disk_shutdown_rejects_producer_paused_during_freeze(
     assert lease_path.exists()
     assert not store.write_block_async(b"y" * 32, _block(2.0), 8)
 
-    release_freeze.set()
+    release_detach.set()
     producer.join(timeout=5.0)
     assert producer_done.is_set()
     assert producer_result == [False]

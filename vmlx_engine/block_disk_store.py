@@ -46,7 +46,6 @@ Supported cache_data tuple types (from prefix_cache.py):
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import os
@@ -285,6 +284,9 @@ class BlockDiskStore:
         self._write_fence_seq = 0
         self._write_completion_generation = 0
         self._write_inflight = 0
+        self._offthread_serializations_queued = 0
+        self._offthread_serializations_completed = 0
+        self._offthread_serialization_failures = 0
         self._pending_write_bytes = 0
         self._pending_write_byte_drops = 0
         self._max_pending_write_bytes = (
@@ -310,8 +312,12 @@ class BlockDiskStore:
         self._ensure_read_conn()
 
         # Background writer thread
-        # Queue items contain an immutable in-memory safetensors image, never
-        # live MLX arrays:
+        # Queue items contain either detached, read-only NumPy tensors awaiting
+        # CPU safetensors encoding or an immutable safetensors image. Live MLX
+        # arrays never cross the queue boundary:
+        # ("__numpy_block__", block_hash, tensor_dict, dtype, num_layers,
+        #  token_count, fence_id, reserved_bytes)
+        # or
         # (block_hash, payload_bytes, dtype, num_layers, token_count,
         #  fence_id, reserved_bytes)
         # or special commands: ("__access__", ...) or ("__cleanup__", ...)
@@ -871,21 +877,57 @@ class BlockDiskStore:
             )
 
     @staticmethod
-    def _freeze_safetensors_bytes(
+    def _detach_safetensors_tensors(
         tensors: Dict[str, Any],
-        metadata: Optional[Dict[str, str]] = None,
-    ) -> bytes:
-        """Freeze materialized MLX tensors into immutable in-memory bytes.
+    ) -> Dict[str, Any]:
+        """Copy a flat tensor map into immutable, CPU-owned NumPy arrays.
 
-        ``mx.save_safetensors`` supports a file-like target.  Keeping it on the
-        model-owning caller preserves Metal thread affinity and native BF16
-        bits, while the returned ``bytes`` object is safe to hand to the disk
-        writer thread.
+        MLX evaluation and unified-memory copies must remain on the
+        model-owning thread. The returned arrays have no live Metal dependency,
+        are C-contiguous, and cannot be mutated by the producer after enqueue.
+        BF16 is copied through FP32 because NumPy/safetensors support varies;
+        block metadata records the original dtype for exact restore casting.
         """
 
-        buffer = io.BytesIO()
-        mx.save_safetensors(buffer, tensors, metadata)
-        return buffer.getvalue()
+        import numpy as np
+
+        pending_mlx: list[tuple[str, Any]] = []
+        detached: Dict[str, Any] = {}
+        for name, value in tensors.items():
+            if isinstance(value, mx.array):
+                materialized = value
+                if "bfloat16" in str(value.dtype):
+                    materialized = value.astype(mx.float32)
+                materialized = mx.contiguous(materialized)
+                pending_mlx.append((name, materialized))
+                continue
+            if isinstance(value, np.ndarray):
+                array = value
+                if "bfloat16" in str(array.dtype):
+                    array = array.astype(np.float32)
+                copied = np.array(array, copy=True, order="C")
+                copied.setflags(write=False)
+                detached[name] = copied
+                continue
+            raise TypeError(
+                f"safetensors value {name!r} is not an MLX/NumPy array"
+            )
+
+        if pending_mlx:
+            mx.eval(*(value for _, value in pending_mlx))
+        for name, value in pending_mlx:
+            copied = np.array(value, copy=True, order="C")
+            copied.setflags(write=False)
+            detached[name] = copied
+        return detached
+
+    @staticmethod
+    def _freeze_numpy_safetensors_bytes(tensors: Dict[str, Any]) -> bytes:
+        """Encode detached NumPy tensors without touching Metal."""
+
+        from safetensors.numpy import save as numpy_safetensors_save
+
+        return numpy_safetensors_save(tensors)
 
     def _disable_global_budget_writes(self) -> None:
         self._global_budget_write_enabled = False
@@ -1149,16 +1191,17 @@ class BlockDiskStore:
         fence_id: Optional[str] = None,
     ) -> bool:
         """
-        Freeze a block on the model-owning thread and queue disk publication.
+        Detach a block on the model-owning thread and queue disk publication.
 
         ALL MLX operations happen on the calling (main) thread:
         - Serialize cache_data to flat tensor dict
         - Materialize lazy arrays with mx.eval()
-        - Encode safetensors into an in-memory ``bytes`` image
+        - Copy tensors into immutable CPU-owned NumPy arrays
 
-        The background thread performs every filesystem operation: temporary
-        write, fsync, atomic publish, SQLite index/accounting, and eviction.
-        No live MLX array crosses the queue boundary.
+        The background thread performs CPU safetensors encoding and every
+        filesystem operation: temporary write, fsync, atomic publish, SQLite
+        index/accounting, and eviction. No live MLX array crosses the queue
+        boundary.
 
         Args:
             block_hash: Chain hash (BlockHash bytes)
@@ -1246,8 +1289,8 @@ class BlockDiskStore:
 
         hash_hex = block_hash.hex()
 
-        payload: bytes
-        # Serialize to immutable memory on the calling/model-owning thread.
+        # Flatten and detach on the calling/model-owning thread. The expensive
+        # CPU safetensors encoding runs on the background writer.
         try:
             tensors, dtype, num_layers = _serialize_block(cache_data)
             if num_layers == 0:
@@ -1255,48 +1298,41 @@ class BlockDiskStore:
                 self._write_fence_queue_result(fence_id, failed=True)
                 return False
 
-            # Normalize all tensors to MLX arrays that mx.save_safetensors
-            # can handle: numpy ndarrays (from numpy-sliced block data) are
-            # converted to mx. bfloat16 is stored NATIVELY — mx safetensors
-            # round-trips bf16 losslessly, and the historical bf16→fp16 cast
-            # was lossy (fp16 max ~65504: bf16 values like 65536.0 became
-            # inf, and mantissa drift caused warm-vs-warm divergence — F21 /
-            # 2026-07-10 audit High-3). The load path's recorded
-            # original-dtype restore remains as a no-op for new blocks and a
-            # compatibility cast for blocks written by older builds.
-            import numpy as np
-            for k, v in tensors.items():
-                if isinstance(v, np.ndarray):
-                    tensors[k] = mx.array(v)
-
-            # Materialize all lazy MLX arrays on the calling thread.
-            arrays_to_eval = [v for v in tensors.values() if isinstance(v, mx.array)]
-            if arrays_to_eval:
-                mx.eval(*arrays_to_eval)  # noqa: S307 — mlx tensor materialization
-
-            payload = self._freeze_safetensors_bytes(tensors)
+            tensors = self._detach_safetensors_tensors(tensors)
+            detached_bytes = (
+                sum(max(0, int(value.nbytes)) for value in tensors.values())
+                + 65536
+                + len(tensors) * 1024
+            )
             if not self._resize_pending_write_reservation(
-                reserved_bytes, len(payload)
+                reserved_bytes, detached_bytes
             ):
                 self._write_fence_queue_result(fence_id, dropped=True)
                 logger.warning(
-                    "BlockDiskStore frozen payload exceeded pending-write "
+                    "BlockDiskStore detached payload exceeded pending-write "
                     "byte budget (%d bytes)",
                     self._max_pending_write_bytes,
                 )
                 return False
-            reserved_bytes = len(payload)
+            reserved_bytes = detached_bytes
         except Exception as e:
             self._release_pending_write_bytes(reserved_bytes)
-            logger.debug(f"Pre-serialize failed for block {hash_hex[:12]}: {e}")
+            logger.debug(f"Pre-detach failed for block {hash_hex[:12]}: {e}")
             self._write_fence_queue_result(fence_id, failed=True)
             return False
 
-        # Queue only immutable bytes. No MLX object is reachable from the item.
+        # Queue only immutable CPU arrays. No MLX object is reachable from the
+        # item; the writer will replace this item with immutable bytes before
+        # taking the aggregate publication lock.
+        with self._stats_lock:
+            # Increment before publication so a fast writer can never make
+            # completed temporarily exceed queued in /health telemetry.
+            self._offthread_serializations_queued += 1
         enqueue_result = self._try_enqueue_write_item(
             (
+                "__numpy_block__",
                 block_hash,
-                payload,
+                tensors,
                 dtype,
                 num_layers,
                 token_count,
@@ -1310,6 +1346,11 @@ class BlockDiskStore:
                 with self._stats_lock:
                     self.tq_native_writes += 1
             return True
+        with self._stats_lock:
+            self._offthread_serializations_queued = max(
+                0,
+                self._offthread_serializations_queued - 1,
+            )
         self._release_pending_write_bytes(reserved_bytes)
         self._write_fence_queue_result(fence_id, dropped=True)
         if enqueue_result == "full":
@@ -1440,19 +1481,74 @@ class BlockDiskStore:
         batch: List[Tuple[Any, ...]],
     ) -> None:
         """Persist one drained batch and settle fences after aggregate eviction."""
+        original_batch_count = len(batch)
+        with self._stats_lock:
+            # Count CPU encoding as in-flight writer work too. Durability
+            # waiters also observe _pending_write_items, but /health must not
+            # report an idle writer while it is encoding a large page.
+            self._write_inflight += original_batch_count
+
+        prepared_batch: List[Tuple[Any, ...]] = []
+        for item in batch:
+            if not item or item[0] != "__numpy_block__":
+                prepared_batch.append(item)
+                continue
+            (
+                _,
+                block_hash,
+                tensors,
+                dtype,
+                num_layers,
+                token_count,
+                fence_id,
+                reserved_bytes,
+            ) = item
+            try:
+                payload = self._freeze_numpy_safetensors_bytes(tensors)
+                if not self._resize_pending_write_reservation(
+                    reserved_bytes,
+                    len(payload),
+                ):
+                    self._write_fence_completion(fence_id, failed=True)
+                    with self._stats_lock:
+                        self._offthread_serialization_failures += 1
+                    logger.warning(
+                        "BlockDiskStore encoded payload exceeded pending-write "
+                        "byte budget (%d bytes)",
+                        self._max_pending_write_bytes,
+                    )
+                    continue
+                with self._stats_lock:
+                    self._offthread_serializations_completed += 1
+                prepared_batch.append(
+                    (
+                        block_hash,
+                        payload,
+                        dtype,
+                        num_layers,
+                        token_count,
+                        fence_id,
+                        len(payload),
+                    )
+                )
+            except Exception as exc:
+                self._release_pending_write_bytes(reserved_bytes)
+                self._write_fence_completion(fence_id, failed=True)
+                with self._stats_lock:
+                    self._offthread_serialization_failures += 1
+                logger.warning(
+                    "Background block serialization failed (%s): %s",
+                    bytes(block_hash).hex()[:12],
+                    exc,
+                )
+
+        batch = prepared_batch
         block_items = [
             item
             for item in batch
             if item
             and not isinstance(item[0], str)
         ]
-        with self._stats_lock:
-            # Include metadata/fence commands as well as payload writes.  A
-            # dequeued access update is still active filesystem/index work;
-            # reporting inflight=0 before it commits makes durability/LRU
-            # waiters race the writer.
-            self._write_inflight += len(batch)
-
         fences_to_finalize: List[str] = []
         net_payload_bytes = 0
         new_block_hashes: list[bytes] = []
@@ -1622,7 +1718,7 @@ class BlockDiskStore:
             with self._stats_lock:
                 self._write_inflight = max(
                     0,
-                    self._write_inflight - len(batch),
+                    self._write_inflight - original_batch_count,
                 )
 
     def _finalize_write_fence(
@@ -1877,6 +1973,15 @@ class BlockDiskStore:
                     "pending_bytes": self._pending_write_bytes,
                     "max_pending_bytes": self._max_pending_write_bytes,
                     "byte_budget_drops": self._pending_write_byte_drops,
+                    "offthread_serializations_queued": (
+                        self._offthread_serializations_queued
+                    ),
+                    "offthread_serializations_completed": (
+                        self._offthread_serializations_completed
+                    ),
+                    "offthread_serialization_failures": (
+                        self._offthread_serialization_failures
+                    ),
                     "writer_alive": self._writer_thread.is_alive(),
                     "completion_generation": self._write_completion_generation,
                     "recent_fences": recent_write_fences,

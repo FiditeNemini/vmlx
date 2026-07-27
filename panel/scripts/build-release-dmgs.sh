@@ -515,9 +515,12 @@ capture_bound_release_action() {
       --capture-output \
       -- "$@"
   )"
-  run_release_python -I -c \
-    'import json,sys; print(json.loads(sys.argv[1])["stdout"], end="")' \
-    "$payload"
+  # Captured `find` output can describe thousands of bundled files. Passing
+  # the JSON envelope as a command-line argument can exceed macOS ARG_MAX.
+  # Stream it over stdin so verification remains bounded by memory, not argv.
+  printf '%s' "$payload" |
+    run_release_python -I -c \
+      'import json,sys; print(json.load(sys.stdin)["stdout"], end="")'
 }
 
 run_toolchain_action() {

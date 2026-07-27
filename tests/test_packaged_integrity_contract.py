@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import plistlib
@@ -30,6 +31,29 @@ def test_packaged_integrity_hashes_cache_ipc_guard_source():
     assert "tests/test_packaged_integrity_contract.py" in runner.SOURCE_HASH_FILES
     assert "panel/scripts/electron-builder-before-pack.cjs" in runner.SOURCE_HASH_FILES
     assert "panel/tests/release-packaging.test.ts" in runner.SOURCE_HASH_FILES
+
+
+def test_tree_parity_and_payload_records_accept_empty_regular_files(tmp_path):
+    source = tmp_path / "source"
+    packaged = tmp_path / "packaged"
+    source.mkdir()
+    packaged.mkdir()
+    (source / "__init__.py").write_bytes(b"")
+    (packaged / "__init__.py").write_bytes(b"")
+
+    parity = runner._require_tree_parity(
+        source,
+        packaged,
+        label="empty package marker",
+    )
+    payload = runner._tree_payload_records(
+        packaged,
+        label="empty package payload",
+    )
+
+    assert parity["file_count"] == 1
+    assert payload["entries"]["__init__.py"]["size"] == 0
+    assert payload["entries"]["__init__.py"]["sha256"] == hashlib.sha256(b"").hexdigest()
 
 
 def _result(name: str, returncode: int, stdout_tail: list[str], passed: int | None = None):

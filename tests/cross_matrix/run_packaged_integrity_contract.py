@@ -2643,7 +2643,14 @@ def _tree_file_records(
             raise ArtifactChainError(f"{label} contains a symlink: {relative}")
         if path.is_dir():
             continue
-        record = _safe_regular_file(path, label=f"{label}/{relative}")
+        # Empty tracked files (notably package __init__.py markers) are valid
+        # tree members. Tree parity records their size and SHA-256, so allowing
+        # them does not weaken equality or substitution checks.
+        record = _safe_regular_file(
+            path,
+            label=f"{label}/{relative}",
+            require_nonempty=False,
+        )
         records[relative.as_posix()] = {
             "sha256": record["sha256"],
             "size": record["size"],
@@ -2712,7 +2719,11 @@ def _tree_payload_records(root: Path, *, label: str) -> dict[str, Any]:
         elif stat.S_ISDIR(metadata.st_mode):
             entries[relative] = {"kind": "directory", "mode": mode}
         elif stat.S_ISREG(metadata.st_mode):
-            record = _safe_regular_file(path, label=f"{label}/{relative}")
+            record = _safe_regular_file(
+                path,
+                label=f"{label}/{relative}",
+                require_nonempty=False,
+            )
             entries[relative] = {
                 "kind": "file",
                 "sha256": record["sha256"],

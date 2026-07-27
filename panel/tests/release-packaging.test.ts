@@ -236,6 +236,10 @@ describe("release packaging", () => {
       'sign_remaining_app_macho_leaves "$app_path" "$identity"',
     );
     expect(source).toContain('verify_release_macho_leaves "$app_path"');
+    expect(source).toContain("json.load(sys.stdin)");
+    expect(source).not.toContain(
+      'json.loads(sys.argv[1])["stdout"]',
+    );
   });
 
   it("parses every package entrypoint and supported artifact hook through electron-builder", async () => {

@@ -787,7 +787,7 @@ const ownedRunIntentPhaseContract = [
     operation: 'store',
     restart_required: false,
     session_policy: 'primary_stable_session',
-    kv_cache_quantization: 'q4',
+    kv_cache_quantization: 'auto',
     tq_policy: 'q4-required',
     ui_action_profile: 'primary-reasoning-render-store',
     ui_turn_count: 1,
@@ -803,7 +803,7 @@ const ownedRunIntentPhaseContract = [
     operation: 'probe',
     restart_required: true,
     session_policy: 'primary_stable_session',
-    kv_cache_quantization: 'q4',
+    kv_cache_quantization: 'auto',
     tq_policy: 'q4-required',
     ui_action_profile: 'primary-tool-restart-probe',
     ui_turn_count: 1,
@@ -819,7 +819,7 @@ const ownedRunIntentPhaseContract = [
     operation: 'store-evict-refault',
     restart_required: true,
     session_policy: 'primary_stable_session',
-    kv_cache_quantization: 'q4',
+    kv_cache_quantization: 'auto',
     tq_policy: 'q4-required',
     ui_action_profile: 'primary-history-paged-evict-refault',
     ui_turn_count: 1,
@@ -835,7 +835,7 @@ const ownedRunIntentPhaseContract = [
     operation: 'probe',
     restart_required: true,
     session_policy: 'primary_stable_session',
-    kv_cache_quantization: 'q4',
+    kv_cache_quantization: 'auto',
     tq_policy: 'q4-required',
     ui_action_profile: 'primary-restart-followup',
     ui_turn_count: 1,
@@ -1168,20 +1168,9 @@ export function validateOwnedRunIntent(
         || !validSha256(phase.bundle_fingerprint_sha256)
         || typeof phase.native_cache_policy !== 'string'
         || !phase.native_cache_policy
+        || phase.native_cache_policy === 'generic-kv-tq'
       ) {
         failures.push(`owned run intent phase ${index} model/bundle policy is invalid`)
-      }
-      if (
-        index < 5
-        && phase.native_cache_policy !== 'generic-kv-tq'
-      ) {
-        failures.push(`owned run intent phase ${index} primary native cache policy is invalid`)
-      }
-      if (
-        index === 5
-        && phase.native_cache_policy === 'generic-kv-tq'
-      ) {
-        failures.push('owned run intent native-exception phase is not bundle-grounded')
       }
     }
     const primary = value.phase_plan[0]
@@ -1201,6 +1190,7 @@ export function validateOwnedRunIntent(
     if (
       native.model_bundle_path === primary.model_bundle_path
       || native.bundle_fingerprint_sha256 === primary.bundle_fingerprint_sha256
+      || native.native_cache_policy === primary.native_cache_policy
     ) {
       failures.push('owned run intent native-exception representative is not distinct')
     }
@@ -2872,8 +2862,14 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
     if (renderedReasoningStates.size < 2) {
       failures.push(`message ${row.messageId} visible reasoning rail was not progressively updated`)
     }
-    const persistedReasoning = (result?.persistedReasoningByMessage?.[assistantIndex] || [])
-      .map((segment) => String(segment?.text || ''))
+    const persistedReasoningSegments = (
+      result?.persistedReasoningByMessage?.[assistantIndex] || []
+    )
+    if (persistedReasoningSegments.some((segment) => typeof segment !== 'string')) {
+      failures.push(`message ${row.messageId} persisted reasoning segments are not strings`)
+    }
+    const persistedReasoning = persistedReasoningSegments
+      .filter((segment) => typeof segment === 'string')
       .filter(Boolean)
       .join('\n')
     const finalReasoning = traceChannelText(events, 'reasoning')
@@ -7491,8 +7487,10 @@ async function main() {
             ...row,
             events: row.events.slice().sort((left, right) => left.sequence - right.sequence),
           }));
+          const persistedReasoningSchemaValid = persistedReasoningSegments
+            .every((segment) => typeof segment === 'string');
           const reasoningText = persistedReasoningSegments
-            .map((segment) => typeof segment?.text === 'string' ? segment.text : '')
+            .filter((segment) => typeof segment === 'string')
             .filter(Boolean)
             .join('\\n');
           const rawParserLeakRegex = /<think>|<\\/think>|<tool_call>|<\\/tool_call>|<function>|<invoke>|<minimax:tool_call>|<zyphra_tool_call>|<\\|point_start\\|>|<\\|point_end\\|>|<\\|box_start\\|>|<\\|box_end\\|>|<\\|tool_call_start\\|>|<\\|tool_call_end\\|>|\\[THINK\\]|\\[\\/THINK\\]|<mm:think>|<\\/mm:think>/i;
@@ -7574,6 +7572,7 @@ async function main() {
             persistedOaiResultsByMessage,
             persistedReasoningText: reasoningText,
             persistedReasoningCount: persistedReasoningSegments.length,
+            persistedReasoningSchemaValid,
             persistedToolCount: persistedTools.length,
             streamTraceByMessage,
             messageEventTrace,

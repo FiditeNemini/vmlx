@@ -584,7 +584,7 @@ V5_CACHE_PHASES = (
         "representative_id": V5_PRIMARY_REPRESENTATIVE_ID,
         "bundle_role": "primary",
         "cache_policy": "q4",
-        "kv_cache_quantization": "q4",
+        "kv_cache_quantization": "auto",
         "tq_policy": "q4-required",
         "session_policy": "primary_stable_session",
         "paged_ram": False,
@@ -600,7 +600,7 @@ V5_CACHE_PHASES = (
         "representative_id": V5_PRIMARY_REPRESENTATIVE_ID,
         "bundle_role": "primary",
         "cache_policy": "q4",
-        "kv_cache_quantization": "q4",
+        "kv_cache_quantization": "auto",
         "tq_policy": "q4-required",
         "session_policy": "primary_stable_session",
         "paged_ram": False,
@@ -616,7 +616,7 @@ V5_CACHE_PHASES = (
         "representative_id": V5_PRIMARY_REPRESENTATIVE_ID,
         "bundle_role": "primary",
         "cache_policy": "q4",
-        "kv_cache_quantization": "q4",
+        "kv_cache_quantization": "auto",
         "tq_policy": "q4-required",
         "session_policy": "primary_stable_session",
         "paged_ram": True,
@@ -632,7 +632,7 @@ V5_CACHE_PHASES = (
         "representative_id": V5_PRIMARY_REPRESENTATIVE_ID,
         "bundle_role": "primary",
         "cache_policy": "q4",
-        "kv_cache_quantization": "q4",
+        "kv_cache_quantization": "auto",
         "tq_policy": "q4-required",
         "session_policy": "primary_stable_session",
         "paged_ram": True,
@@ -2443,7 +2443,39 @@ def _parse_raw_protocol_nonstream_v5(
             return None
     else:
         return None
-    if CONTROL_MARKER_RE.search(json.dumps(value, sort_keys=True)):
+    visible_parts: list[str] = []
+    if protocol == "chat":
+        content = value["choices"][0]["message"].get("content")
+        if isinstance(content, str):
+            visible_parts.append(content)
+        elif isinstance(content, list):
+            visible_parts.extend(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict)
+                and part.get("type") in {"text", "output_text"}
+            )
+    elif protocol == "responses":
+        for item in value.get("output") or []:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            for part in item.get("content") or []:
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") in {"text", "output_text"}
+                ):
+                    visible_parts.append(str(part.get("text") or ""))
+    elif protocol == "anthropic":
+        visible_parts.extend(
+            str(part.get("text") or "")
+            for part in value.get("content") or []
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    else:
+        message = value.get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            visible_parts.append(message["content"])
+    if CONTROL_MARKER_RE.search("\n".join(visible_parts)):
         return None
     return value
 
@@ -4605,6 +4637,13 @@ def _v5_cdp_dom_snapshot(cdp_base_url: str, *, timeout: float = 10.0) -> bytes:
             "}"
             "const sessions=await globalThis.api?.sessions?.list?.()||"
             "await globalThis.window?.api?.sessions?.list?.()||[];"
+            "for(const rail of document.querySelectorAll("
+            "'[data-vmlx-proof-reasoning-rail=\"true\"]')){"
+            "if(!rail.querySelector("
+            "'[data-vmlx-proof-reasoning-content=\"true\"]'))"
+            "rail.querySelector('button')?.click();"
+            "}"
+            "await wait(100);"
             "const messageRoots=[...document.querySelectorAll("
             "'[data-vmlx-proof-message-role=\"assistant\"]')].slice(-3);"
             "const messages=messageRoots.map((root)=>{"
@@ -5425,10 +5464,10 @@ def _v5_ui_facts(
             or not isinstance(source_cache_row, dict)
         ):
             return set(), []
+        if any(not isinstance(row, str) for row in source_reasoning_rows):
+            return set(), []
         source_reasoning = "\n".join(
-            str(row.get("text") or "")
-            for row in source_reasoning_rows
-            if isinstance(row, dict) and str(row.get("text") or "")
+            row for row in source_reasoning_rows if row
         )
         expected = _expected_visible_final(request)
         terminal_response_id = next(
@@ -8481,11 +8520,7 @@ def _v5_run_intent_phase_plan(
         representative = expected_binding.get(phase["representative_id"])
         if not isinstance(representative, dict):
             raise ValueError("run intent representative set is incomplete")
-        native_cache_policy = (
-            "generic-kv-tq"
-            if phase["representative_id"] == V5_PRIMARY_REPRESENTATIVE_ID
-            else representative.get("native_cache_policy")
-        )
+        native_cache_policy = representative.get("native_cache_policy")
         if (
             not isinstance(native_cache_policy, str)
             or not native_cache_policy

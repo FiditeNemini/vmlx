@@ -465,7 +465,7 @@ function ownedRunIntent(
     model: "primary-model",
     model_bundle_path: primaryBundlePath,
     bundle_fingerprint_sha256: "1".repeat(64),
-    native_cache_policy: "generic-kv-tq",
+    native_cache_policy: "standard_kv",
   };
   const phasePlan = [
     {
@@ -475,7 +475,7 @@ function ownedRunIntent(
       paged_ram: false,
       operation: "store",
       restart_required: false,
-      kv_cache_quantization: "q4",
+      kv_cache_quantization: "auto",
       tq_policy: "q4-required",
       ui_action_profile: "primary-reasoning-render-store",
       ui_turn_count: 1,
@@ -488,7 +488,7 @@ function ownedRunIntent(
       paged_ram: false,
       operation: "probe",
       restart_required: true,
-      kv_cache_quantization: "q4",
+      kv_cache_quantization: "auto",
       tq_policy: "q4-required",
       ui_action_profile: "primary-tool-restart-probe",
       ui_turn_count: 1,
@@ -501,7 +501,7 @@ function ownedRunIntent(
       paged_ram: true,
       operation: "store-evict-refault",
       restart_required: true,
-      kv_cache_quantization: "q4",
+      kv_cache_quantization: "auto",
       tq_policy: "q4-required",
       ui_action_profile: "primary-history-paged-evict-refault",
       ui_turn_count: 1,
@@ -514,7 +514,7 @@ function ownedRunIntent(
       paged_ram: true,
       operation: "probe",
       restart_required: true,
-      kv_cache_quantization: "q4",
+      kv_cache_quantization: "auto",
       tq_policy: "q4-required",
       ui_action_profile: "primary-restart-followup",
       ui_turn_count: 1,
@@ -758,7 +758,7 @@ function goodResult(): Record<string, any> {
     assistantMessageIds: assistantIds,
     assistantRecords: records,
     persistedReasoningByMessage: assistantIds.map(() => [
-      { text: "Reason carefully" },
+      "Reason carefully",
     ]),
     messageEventTrace: assistantIds.map((messageId, index) =>
       primaryTrace(
@@ -2456,7 +2456,7 @@ describe("real UI model proof harness", () => {
     reasoningEvents[1].delta = second;
     reasoningEvents[1].payload.fullContentLength = first.length + second.length;
     delete reasoningEvents[1].payload.fullContent;
-    result.persistedReasoningByMessage[0] = [{ text: first + second }];
+    result.persistedReasoningByMessage[0] = [first + second];
 
     expect(validateReasoningEvidence(result, "required").join("\n")).toMatch(
       /parser markers across reasoning stream boundaries/,

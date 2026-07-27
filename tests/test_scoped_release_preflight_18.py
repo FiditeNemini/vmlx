@@ -680,7 +680,7 @@ def _fixture_ui_capture(
             }
         )
         source_records.append({"id": f"m{turn}", "content": content})
-        source_reasoning.append([{"text": reasoning}])
+        source_reasoning.append([reasoning])
         source_ui_turns.append(
             {
                 "turn": turn,
@@ -3938,6 +3938,9 @@ def test_r18_v5_run_intent_is_canonical_ordered_and_non_circular(
     assert intent["l2_size_eviction_requirements"] == (
         module.V5_L2_SIZE_EVICTION_REQUIREMENTS
     )
+    assert intent["phase_plan"][0]["native_cache_policy"] == (
+        bundle["derived"]["native_cache"]
+    )
     assert intent["phase_plan"][-1]["native_cache_policy"] == (
         "minimax_m3_sparse"
     )
@@ -4445,6 +4448,47 @@ def test_r18_v5_rejects_non_success_protocol_terminals(
     assert old in valid
     invalid = valid.replace(old, new, 1)
     assert module._parse_raw_protocol_stream_v5(protocol, invalid) is None
+
+
+def test_r18_v5_nonstream_responses_checks_only_visible_control_markup():
+    module = load_module()
+    reasoning_marker = (
+        "Privately prepare one native <tool_call><function=run_command>."
+    )
+    tool_response = {
+        "status": "completed",
+        "output": [
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": reasoning_marker}],
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run_command",
+                "arguments": '{"command":"pwd"}',
+            },
+        ],
+    }
+    assert module._parse_raw_protocol_nonstream_v5(
+        "responses",
+        json.dumps(tool_response).encode(),
+    ) == tool_response
+
+    visible_leak = deepcopy(tool_response)
+    visible_leak["output"].append(
+        {
+            "type": "message",
+            "content": [{"type": "output_text", "text": reasoning_marker}],
+        }
+    )
+    assert (
+        module._parse_raw_protocol_nonstream_v5(
+            "responses",
+            json.dumps(visible_leak).encode(),
+        )
+        is None
+    )
 
 
 def test_r18_v5_child_environment_is_fixed_and_rejects_injection(

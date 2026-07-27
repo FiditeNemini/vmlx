@@ -7681,6 +7681,12 @@ def _v5_default_owned_check_plans(
                     "env": {
                         "VMLX_JANG_TOOLS_SOURCE": str(jang_root.resolve()),
                         "VMLINUX_JANG_TOOLS_SOURCE": str(jang_root.resolve()),
+                        # The suite itself exercises the V5 owned-command
+                        # helpers.  Preserve the exact executable identities
+                        # behind the PATH wrappers so those self-tests do not
+                        # mistake a shebang wrapper for the process image.
+                        "VMLINUX_R18_PINNED_NODE_REALPATH": str(node),
+                        "VMLINUX_R18_PINNED_NPM_CLI_REALPATH": str(npm_cli),
                     },
                     # A small number of Python contract tests inspect the
                     # packaged Electron renderer with the pinned Node binary.

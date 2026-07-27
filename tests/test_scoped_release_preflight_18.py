@@ -35,6 +35,13 @@ SCRIPT = ROOT / "panel/scripts/scoped-release-preflight-18.py"
 STAMP = "2026-07-25T00:00:00Z"
 
 
+def _v5_pinned_tool_path(name: str, env_key: str) -> Path:
+    value = os.environ.get(env_key) or shutil.which(name) or ""
+    path = Path(value).resolve()
+    assert path.is_file()
+    return path
+
+
 def _fixture_b64(value: bytes) -> str:
     return base64.b64encode(value).decode("ascii")
 
@@ -1251,6 +1258,8 @@ def test_v5_panel_owned_plans_launch_pinned_node_with_pinned_npm_cli(
     assert python_suite["env"] == {
         "VMLX_JANG_TOOLS_SOURCE": str(jang_source.resolve()),
         "VMLINUX_JANG_TOOLS_SOURCE": str(jang_source.resolve()),
+        "VMLINUX_R18_PINNED_NODE_REALPATH": expected_node,
+        "VMLINUX_R18_PINNED_NPM_CLI_REALPATH": expected_npm_cli,
     }
     production = plans["production_build"]["commands"][0]
     assert production["env"]["VMLX_RELEASE_SCOPE"] == "r18_production"
@@ -1332,8 +1341,10 @@ def test_v5_owned_command_pins_executable_script_argument_even_when_mode_0755(
     tmp_path: Path,
 ):
     module = load_module()
-    node = Path(shutil.which("node") or "").resolve()
-    assert node.is_file()
+    node = _v5_pinned_tool_path(
+        "node",
+        "VMLINUX_R18_PINNED_NODE_REALPATH",
+    )
     script = tmp_path / "npm-cli.js"
     script.write_text("console.log('owned npm cli')\n", encoding="utf-8")
     script.chmod(0o755)
@@ -1374,8 +1385,10 @@ def test_v5_pin_accepts_readonly_system_hardlink_only_with_explicit_policy():
 
 def test_v5_owned_command_can_pin_readonly_system_tool_file(tmp_path: Path):
     module = load_module()
-    node = Path(shutil.which("node") or "").resolve()
-    assert node.is_file()
+    node = _v5_pinned_tool_path(
+        "node",
+        "VMLINUX_R18_PINNED_NODE_REALPATH",
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir(mode=0o700)
     result = module._v5_run_command(
@@ -1416,8 +1429,10 @@ def test_v5_owned_command_rejects_executable_script_tampering(
     tmp_path: Path,
 ):
     module = load_module()
-    node = Path(shutil.which("node") or "").resolve()
-    assert node.is_file()
+    node = _v5_pinned_tool_path(
+        "node",
+        "VMLINUX_R18_PINNED_NODE_REALPATH",
+    )
     script = tmp_path / "npm-cli.js"
     script.write_text(
         "require('fs').appendFileSync(__filename, '\\n// changed')\n",
@@ -1445,16 +1460,21 @@ def test_v5_owned_node_path_supports_nested_env_node_without_ambient_path(
     monkeypatch,
 ):
     module = load_module()
-    node_value = shutil.which("node")
-    npm_value = shutil.which("npm")
-    assert node_value and npm_value
+    node_value = _v5_pinned_tool_path(
+        "node",
+        "VMLINUX_R18_PINNED_NODE_REALPATH",
+    )
+    npm_value = _v5_pinned_tool_path(
+        "npm",
+        "VMLINUX_R18_PINNED_NPM_CLI_REALPATH",
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir(mode=0o700)
     node, npm_cli, fixed_bin, toolchain_pins = (
         module._v5_prepare_node_toolchain(
             run_dir,
-            node_path=Path(node_value),
-            npm_cli_path=Path(npm_value),
+            node_path=node_value,
+            npm_cli_path=npm_value,
             bin_name="nested-node-bin",
         )
     )

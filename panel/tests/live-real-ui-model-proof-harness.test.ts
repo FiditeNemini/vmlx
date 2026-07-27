@@ -2306,8 +2306,9 @@ describe("real UI model proof harness", () => {
     expect(chatSource).toContain('"X-vMLX-Message-ID": assistantMessageId');
     expect(chatSource.match(/nextLocalRequestCorrelationHeaders\(\)/g)).toHaveLength(3);
     expect(chatSource.match(/requestIds: \[\.\.\.wireRequestIds\]/g)).toHaveLength(2);
+    expect(serverSource).toContain("def _request_header_value(request: Any, name: str)");
     expect(
-      serverSource.match(/proof_request_id=fastapi_request\.headers\.get\(/g),
+      serverSource.match(/proof_request_id=_request_header_value\(/g),
     ).toHaveLength(2);
   });
 

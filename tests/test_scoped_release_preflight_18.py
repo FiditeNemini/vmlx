@@ -1231,6 +1231,13 @@ def test_v5_panel_owned_plans_launch_pinned_node_with_pinned_npm_cli(
         assert (fixed_bin / "npm").is_file()
         assert str(fixed_bin / "node") in command["tool_files"]
         assert str(fixed_bin / "npm") in command["tool_files"]
+    python_suite = plans["full_python_suite"]["commands"][0]
+    assert python_suite["path_prefix"] == plans["full_panel_suite"]["commands"][
+        0
+    ]["path_prefix"]
+    assert str(Path(python_suite["path_prefix"]) / "node") in python_suite[
+        "tool_files"
+    ]
     production = plans["production_build"]["commands"][0]
     assert production["env"]["VMLX_RELEASE_SCOPE"] == "r18_production"
     assert production["env"]["VMLX_JANG_TOOLS_SOURCE"] == str(

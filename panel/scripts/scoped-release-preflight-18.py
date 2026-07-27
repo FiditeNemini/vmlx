@@ -7639,6 +7639,13 @@ def _v5_default_owned_check_plans(
                     ],
                     "cwd": ROOT,
                     "env": {},
+                    # A small number of Python contract tests inspect the
+                    # packaged Electron renderer with the pinned Node binary.
+                    # Keep that subprocess lookup inside the same owned
+                    # toolchain instead of the intentionally minimal system
+                    # PATH used for all V5 children.
+                    "path_prefix": str(fixed_bin),
+                    "tool_files": toolchain_files,
                 }
             ]
         },

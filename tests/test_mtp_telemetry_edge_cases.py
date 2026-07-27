@@ -30,8 +30,161 @@ Fix: see `vmlx_engine/server.py::_model_mtp_status` — added
 issue list.
 """
 
+import ast
 import json
+from pathlib import Path
 import pytest
+
+
+def test_native_mtp_cache_snapshot_is_bounded_and_never_reads_tensor_properties():
+    from vmlx_engine.native_mtp_cache_telemetry import (
+        MAX_MTP_CACHE_LAYERS_SCANNED,
+        native_mtp_cache_snapshot,
+    )
+
+    class _KVCache:
+        def __init__(self, offset, max_size=None):
+            self.offset = offset
+            if max_size is not None:
+                self.max_size = max_size
+
+    class _TensorOffsetTrap:
+        @property
+        def offset(self):
+            raise AssertionError("telemetry must not read tensor-like properties")
+
+        def size(self):
+            raise AssertionError("telemetry must not call cache size()")
+
+    uniform = native_mtp_cache_snapshot([_KVCache(17), _KVCache(17)])
+    assert uniform == {
+        "layers": 2,
+        "layers_scanned": 2,
+        "introspectable_layers": 2,
+        "truncated": False,
+        "offset": 17,
+        "offset_min": 17,
+        "offset_max": 17,
+        "length": 17,
+        "length_min": 17,
+        "length_max": 17,
+    }
+
+    rotating = native_mtp_cache_snapshot([_KVCache(80, max_size=32)])
+    assert rotating["offset"] == 80
+    assert rotating["length"] == 32
+
+    bounded = native_mtp_cache_snapshot(
+        [_KVCache(index) for index in range(MAX_MTP_CACHE_LAYERS_SCANNED + 7)]
+        + [_TensorOffsetTrap()]
+    )
+    assert bounded["layers"] == MAX_MTP_CACHE_LAYERS_SCANNED + 8
+    assert bounded["layers_scanned"] == MAX_MTP_CACHE_LAYERS_SCANNED
+    assert bounded["introspectable_layers"] == MAX_MTP_CACHE_LAYERS_SCANNED
+    assert bounded["truncated"] is True
+    assert all(not isinstance(value, (list, tuple)) for value in bounded.values())
+
+    unknown = native_mtp_cache_snapshot([_TensorOffsetTrap()])
+    assert unknown["introspectable_layers"] == 0
+    assert unknown["offset"] is None
+    assert unknown["length"] is None
+
+
+def test_native_mtp_cache_lifecycle_metrics_are_scalar_and_bounded():
+    from vmlx_engine.native_mtp_cache_telemetry import (
+        MAX_MTP_CACHE_METRIC_VALUE,
+        native_mtp_cache_lifecycle_snapshot,
+    )
+
+    lifecycle = native_mtp_cache_lifecycle_snapshot(
+        head_cache={
+            "layers": MAX_MTP_CACHE_METRIC_VALUE + 100,
+            "layers_scanned": MAX_MTP_CACHE_METRIC_VALUE + 100,
+            "introspectable_layers": MAX_MTP_CACHE_METRIC_VALUE + 100,
+            "truncated": True,
+            "offset": MAX_MTP_CACHE_METRIC_VALUE + 100,
+            "length": -1,
+            "offset_min": {"nested": ["must", "be", "dropped"]},
+            "length_max": ["must", "be", "dropped"],
+            "unexpected": {"unbounded": ["payload"] * 1000},
+        },
+        recreated_on_rejects=MAX_MTP_CACHE_METRIC_VALUE + 100,
+        retained_on_rejects=-10,
+    )
+
+    assert lifecycle["recreated_on_rejects"] == MAX_MTP_CACHE_METRIC_VALUE
+    assert lifecycle["retained_on_rejects"] == 0
+    assert lifecycle["head_cache"]["layers"] == MAX_MTP_CACHE_METRIC_VALUE
+    assert lifecycle["head_cache"]["layers_scanned"] == 32
+    assert lifecycle["head_cache"]["introspectable_layers"] == 32
+    assert lifecycle["head_cache"]["truncated"] is True
+    assert lifecycle["head_cache"]["offset"] == MAX_MTP_CACHE_METRIC_VALUE
+    assert lifecycle["head_cache"]["offset_min"] is None
+    assert lifecycle["head_cache"]["length"] == 0
+    assert lifecycle["head_cache"]["length_max"] is None
+    assert "unexpected" not in lifecycle["head_cache"]
+    assert set(lifecycle["head_cache"]) == {
+        "layers",
+        "layers_scanned",
+        "introspectable_layers",
+        "truncated",
+        "offset",
+        "offset_min",
+        "offset_max",
+        "length",
+        "length_min",
+        "length_max",
+    }
+    assert all(
+        value is None or isinstance(value, (bool, int))
+        for value in lifecycle["head_cache"].values()
+    )
+    assert len(json.dumps(lifecycle)) < 512
+    assert set(lifecycle) == {
+        "head_cache",
+        "recreated_on_rejects",
+        "retained_on_rejects",
+    }
+
+
+def test_native_mtp_cache_snapshot_stays_off_the_draft_cycle_hot_path():
+    """The bounded cache scan belongs only to terminal telemetry publication."""
+
+    roots = {
+        Path("vmlx_engine/patches/mlx_lm_mtp/batch_generator.py"): {
+            "_log_mtp_stats"
+        },
+        Path("vmlx_engine/mllm_batch_generator.py"): {
+            "_native_mtp_log_stats",
+            "_native_mtp_capture_head_cache_before_discard",
+        },
+    }
+
+    class _SnapshotCallVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.functions = []
+            self.calls = []
+
+        def visit_FunctionDef(self, node):
+            self.functions.append(node.name)
+            self.generic_visit(node)
+            self.functions.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "native_mtp_cache_snapshot"
+            ):
+                self.calls.append(self.functions[-1] if self.functions else None)
+            self.generic_visit(node)
+
+    for path, expected_functions in roots.items():
+        visitor = _SnapshotCallVisitor()
+        visitor.visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        assert set(visitor.calls) == expected_functions
+        assert len(visitor.calls) == len(expected_functions)
 
 
 def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings():
@@ -56,6 +209,19 @@ def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings():
     stats.restore_ms = 3.0
     stats.replay_ms = 22.0
     stats.materialize_ms = 4.0
+    stats.mtp_cache_recreated_on_rejects = 4
+    stats.mtp_head_cache = {
+        "layers": 1,
+        "layers_scanned": 1,
+        "introspectable_layers": 1,
+        "truncated": False,
+        "offset": 9,
+        "offset_min": 9,
+        "offset_max": 9,
+        "length": 9,
+        "length_min": 9,
+        "length_max": 9,
+    }
 
     snapshot = stats.to_dict(
         request_id="req-test",
@@ -84,7 +250,73 @@ def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings():
     }
     assert snapshot["timings_ms"]["total"] == pytest.approx(200.0)
     assert snapshot["timings_ms"]["avg_cycle"] == pytest.approx(20.0)
+    assert snapshot["cache_lifecycle"] == {
+        "head_cache": stats.mtp_head_cache,
+        "recreated_on_rejects": 4,
+        "retained_on_rejects": 0,
+    }
     assert snapshot["fallback_reason"] == "d3_acceptance=0.429<min=0.850"
+
+
+def test_mllm_adaptive_discard_preserves_last_head_cache_snapshot():
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMNativeMTPStats,
+        _native_mtp_capture_head_cache_before_discard,
+        _native_mtp_log_stats,
+    )
+
+    class _KVCache:
+        def __init__(self, offset):
+            self.offset = offset
+
+    stats = MLLMNativeMTPStats()
+    cache = [_KVCache(41)]
+    _native_mtp_capture_head_cache_before_discard(stats, cache)
+    _native_mtp_log_stats("fallback-row", stats, "fallback_to_ar", None)
+
+    assert stats.mtp_head_cache["offset"] == 41
+    assert stats.mtp_head_cache["length"] == 41
+
+
+def test_mllm_remove_publishes_active_mtp_cancellation_once():
+    from types import SimpleNamespace
+
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchGenerator,
+        MLLMBatchStats,
+        MLLMNativeMTPState,
+    )
+
+    class _KVCache:
+        def __init__(self, offset):
+            self.offset = offset
+
+    state = MLLMNativeMTPState(
+        mtp_cache=[_KVCache(23)],
+        depth=1,
+    )
+    request = SimpleNamespace(
+        uid=7,
+        request_id="cancel-mtp-row",
+        _native_mtp_state=state,
+    )
+    generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    generator.active_batch = SimpleNamespace(
+        uids=[7],
+        requests=[request],
+    )
+    generator.unprocessed_requests = []
+    generator._stats = MLLMBatchStats()
+
+    generator.remove([7])
+
+    assert generator.active_batch is None
+    assert not hasattr(request, "_native_mtp_state")
+    assert generator._stats.last_native_mtp["finish_reason"] == "cancelled"
+    assert (
+        generator._stats.last_native_mtp["cache_lifecycle"]["head_cache"]["offset"]
+        == 23
+    )
 
 
 def test_native_mtp_light_timing_records_without_sync_trace(monkeypatch):
@@ -131,6 +363,19 @@ def test_omlx_native_mtp_stats_publish_acceptance_depth_and_forwards():
         mtp_head_ms=5.0,
         sample_ms=2.0,
         cache_ops_ms=1.0,
+        mtp_cache_retained_on_rejects=2,
+        mtp_head_cache={
+            "layers": 1,
+            "layers_scanned": 1,
+            "introspectable_layers": 1,
+            "truncated": False,
+            "offset": 7,
+            "offset_min": 7,
+            "offset_max": 7,
+            "length": 7,
+            "length_min": 7,
+            "length_max": 7,
+        },
     )
 
     published = _publish_native_mtp_stats("hy3-test", stats, "stop")
@@ -153,9 +398,38 @@ def test_omlx_native_mtp_stats_publish_acceptance_depth_and_forwards():
         "mtp": 6,
     }
     assert published["timings_ms"]["total"] == pytest.approx(28.0)
+    assert published["cache_lifecycle"] == {
+        "head_cache": stats.mtp_head_cache,
+        "recreated_on_rejects": 0,
+        "retained_on_rejects": 2,
+    }
     assert snapshot["last_native_mtp"] == published
     assert snapshot["native_mtp_totals"]["requests"] >= 1
     assert snapshot["native_mtp_totals"]["accepted_tokens"] >= 3
+    assert snapshot["native_mtp_totals"]["mtp_cache_retained_on_rejects"] >= 2
+
+
+def test_mllm_batch_stats_projects_mtp_cache_lifecycle_to_scheduler_stats():
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchStats,
+        MLLMNativeMTPStats,
+    )
+
+    batch_stats = MLLMBatchStats()
+    mtp_stats = MLLMNativeMTPStats(
+        rejects=2,
+        mtp_cache_recreated_on_rejects=2,
+    )
+    batch_stats.record_native_mtp(
+        request_id="qwen-vl",
+        stats=mtp_stats,
+        finish_reason="stop",
+        final_depth=1,
+    )
+
+    lifecycle = batch_stats.to_dict()["last_native_mtp"]["cache_lifecycle"]
+    assert lifecycle["recreated_on_rejects"] == 2
+    assert lifecycle["retained_on_rejects"] == 0
 
 
 class TestMtpTelemetryEdgeCases:

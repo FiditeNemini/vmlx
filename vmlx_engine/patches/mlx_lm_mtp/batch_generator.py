@@ -77,6 +77,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, List, Optional, Tuple
 
+from ...native_mtp_cache_telemetry import (
+    native_mtp_cache_lifecycle_snapshot,
+    native_mtp_cache_snapshot,
+)
+
 logger = logging.getLogger(__name__)
 
 _PATCHED = False
@@ -103,6 +108,8 @@ _NATIVE_MTP_TOTALS = {
     "cycles": 0,
     "drafted_tokens": 0,
     "accepted_tokens": 0,
+    "mtp_cache_recreated_on_rejects": 0,
+    "mtp_cache_retained_on_rejects": 0,
 }
 
 
@@ -174,6 +181,22 @@ def apply() -> bool:
                     logger.debug(
                         "MTP next() fallback to standard step: %s", exc
                     )
+                    try:
+                        _log_mtp_stats(
+                            (
+                                getattr(self, "uids", ["?"])[0]
+                                if getattr(self, "uids", None)
+                                else "?"
+                            ),
+                            state.stats,
+                            "fallback_to_ar",
+                            state.mtp_cache,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "MTP fallback telemetry publication failed",
+                            exc_info=True,
+                        )
                     # Best-effort: drop state so subsequent calls don't try
                     # to resume a half-built MTP cycle from a stale snapshot.
                     if hasattr(self, "_omlx_mtp_state"):
@@ -215,7 +238,10 @@ def apply() -> bool:
             # Batch is now empty — log + drop state.
             try:
                 _log_mtp_stats(
-                    "?", state.stats, getattr(state, "_finish_reason", "external")
+                    "?",
+                    state.stats,
+                    getattr(state, "_finish_reason", "external"),
+                    state.mtp_cache,
                 )
             except Exception:
                 pass
@@ -326,6 +352,12 @@ class _MtpStats:
     mtp_head_ms: float = 0.0  # cumulative time inside MTP-head forwards
     sample_ms: float = 0.0  # cumulative time in sampling + acceptance check
     cache_ops_ms: float = 0.0  # cumulative time in trim / rollback restore
+    # MTP-head cache lifecycle. These are observability-only counters; text
+    # GenerationBatch deliberately retains its loose-history head cache after
+    # verifier rejection.
+    mtp_cache_recreated_on_rejects: int = 0
+    mtp_cache_retained_on_rejects: int = 0
+    mtp_head_cache: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -415,6 +447,11 @@ def _native_mtp_payload(
             "mtp": int(stats.mtp_forwards),
         },
         "timings_ms": timings,
+        "cache_lifecycle": native_mtp_cache_lifecycle_snapshot(
+            head_cache=stats.mtp_head_cache,
+            recreated_on_rejects=stats.mtp_cache_recreated_on_rejects,
+            retained_on_rejects=stats.mtp_cache_retained_on_rejects,
+        ),
         "profiled_phase_timing": bool(_MTP_PROFILE),
         "published_at": time.time(),
         "fallback_reason": None,
@@ -436,6 +473,12 @@ def _publish_native_mtp_stats(
         )
         _NATIVE_MTP_TOTALS["accepted_tokens"] += int(
             stats.draft_tokens_accepted
+        )
+        _NATIVE_MTP_TOTALS["mtp_cache_recreated_on_rejects"] += int(
+            stats.mtp_cache_recreated_on_rejects
+        )
+        _NATIVE_MTP_TOTALS["mtp_cache_retained_on_rejects"] += int(
+            stats.mtp_cache_retained_on_rejects
         )
     return payload
 
@@ -738,7 +781,12 @@ def _mtp_next(gen_batch: Any, state: _MtpState) -> Any:
     return _emit_response(gen_batch, token_id, logprobs_1d, state.stats)
 
 
-def _log_mtp_stats(uid: Any, stats: "_MtpStats", finish_reason: str) -> None:
+def _log_mtp_stats(
+    uid: Any,
+    stats: "_MtpStats",
+    finish_reason: str,
+    mtp_cache: Any = None,
+) -> None:
     """Emit a one-line summary of MTP draft/verify activity for a finished sequence.
 
     Format chosen to make wall-clock vs. accept-rate gaps debuggable:
@@ -746,6 +794,7 @@ def _log_mtp_stats(uid: Any, stats: "_MtpStats", finish_reason: str) -> None:
         emits[init=<i>,draft=<d>,bonus=<b>,verify=<v>]
         timing[backbone=<X>ms mtp=<Y>ms sample=<S>ms cache=<C>ms]
     """
+    stats.mtp_head_cache = native_mtp_cache_snapshot(mtp_cache)
     payload = _publish_native_mtp_stats(uid, stats, finish_reason)
     total_emits = (
         stats.init_emits + stats.draft_emits + stats.bonus_emits + stats.verify_emits
@@ -921,6 +970,7 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
             if procs is not None:
                 _trim_token_buffer(gen_batch, n - k)
             raise _MtpStepFallback("cache layer rejects rollback")
+        state.stats.mtp_cache_retained_on_rejects += 1
         if procs is not None:
             _trim_token_buffer(gen_batch, n - k)
     state.stats.cache_ops_ms += (time.perf_counter() - t0) * 1000
@@ -1105,7 +1155,13 @@ def _emit_response(
             all_tokens=all_tokens,
         )
         if stats is not None:
-            _log_mtp_stats(gen_batch.uids[0], stats, finish_reason)
+            state = getattr(gen_batch, "_omlx_mtp_state", None)
+            _log_mtp_stats(
+                gen_batch.uids[0],
+                stats,
+                finish_reason,
+                getattr(state, "mtp_cache", None),
+            )
         # Drop state *before* filter([]) so the patched_filter epilogue
         # doesn't double-log when the standard finish path already logged.
         if hasattr(gen_batch, "_omlx_mtp_state"):

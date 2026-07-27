@@ -127,6 +127,10 @@ from .utils.memory_limits import (
     get_metal_ws_guard_threshold,
 )
 from .mlx_memory import clear_mlx_memory_cache
+from .native_mtp_cache_telemetry import (
+    native_mtp_cache_lifecycle_snapshot,
+    native_mtp_cache_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 _MIMO_AUDIO_TOKENIZER_CACHE: Dict[str, Any] = {}
@@ -2435,6 +2439,11 @@ class MLLMNativeMTPStats:
     verify_main_forwards: int = 0
     replay_main_forwards: int = 0
     mtp_forwards: int = 0
+    # MLLM native MTP recreates the head cache after verifier rejection.
+    # This deliberately does not claim to count every cache discard/reset.
+    mtp_cache_recreated_on_rejects: int = 0
+    mtp_cache_retained_on_rejects: int = 0
+    mtp_head_cache: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(
         self,
@@ -2503,6 +2512,11 @@ class MLLMNativeMTPStats:
                 "mtp": int(self.mtp_forwards),
             },
             "timings_ms": timings,
+            "cache_lifecycle": native_mtp_cache_lifecycle_snapshot(
+                head_cache=self.mtp_head_cache,
+                recreated_on_rejects=self.mtp_cache_recreated_on_rejects,
+                retained_on_rejects=self.mtp_cache_retained_on_rejects,
+            ),
             "fallback_reason": fallback_reason,
         }
 
@@ -3147,7 +3161,17 @@ def _native_mtp_bump_emit(state: MLLMNativeMTPState, source: str) -> None:
         state.stats.verify_emits += 1
 
 
-def _native_mtp_log_stats(request_id: str, stats: MLLMNativeMTPStats, reason: str) -> None:
+def _native_mtp_log_stats(
+    request_id: str,
+    stats: MLLMNativeMTPStats,
+    reason: str,
+    mtp_cache: Any = None,
+) -> None:
+    # Capture the head-cache shape only at terminal publication. Keeping this
+    # out of the per-draft cycle is important: this telemetry exists to
+    # diagnose MTP overhead and must not itself add Python work to every token.
+    if mtp_cache is not None or not stats.mtp_head_cache:
+        stats.mtp_head_cache = native_mtp_cache_snapshot(mtp_cache)
     rate = (stats.accepted_tokens / stats.drafted_tokens * 100.0) if stats.drafted_tokens else 0.0
     logger.info(
         "MLLM MTP[%s] finish=%s cycles=%d accepted=%d/%d (%.1f%%) "
@@ -3204,6 +3228,15 @@ def _native_mtp_log_stats(request_id: str, stats: MLLMNativeMTPStats, reason: st
             stats.materialize_ms,
             avg_cycle,
         )
+
+
+def _native_mtp_capture_head_cache_before_discard(
+    stats: MLLMNativeMTPStats,
+    mtp_cache: Any,
+) -> None:
+    """Preserve one bounded snapshot before adaptive AR frees the head cache."""
+
+    stats.mtp_head_cache = native_mtp_cache_snapshot(mtp_cache)
 
 
 def _native_mtp_debug_enabled() -> bool:
@@ -4650,6 +4683,36 @@ class MLLMBatchGenerator:
 
         # Remove from active batch
         if self.active_batch is not None:
+            for index, uid in enumerate(self.active_batch.uids):
+                if uid not in uid_set:
+                    continue
+                request = self.active_batch.requests[index]
+                mtp_state = getattr(request, "_native_mtp_state", None)
+                if mtp_state is None:
+                    continue
+                try:
+                    _native_mtp_log_stats(
+                        request.request_id,
+                        mtp_state.stats,
+                        "cancelled",
+                        mtp_state.mtp_cache,
+                    )
+                    self._stats.record_native_mtp(
+                        request_id=request.request_id,
+                        stats=mtp_state.stats,
+                        finish_reason="cancelled",
+                        final_depth=mtp_state.depth,
+                        fallback_reason=mtp_state.ar_fallback_reason,
+                    )
+                except Exception:
+                    logger.debug(
+                        "MLLM MTP cancellation telemetry publication failed",
+                        exc_info=True,
+                    )
+                try:
+                    delattr(request, "_native_mtp_state")
+                except AttributeError:
+                    pass
             keep_idx = [
                 i for i, uid in enumerate(self.active_batch.uids) if uid not in uid_set
             ]
@@ -8389,6 +8452,10 @@ class MLLMBatchGenerator:
             next_hidden = hidden[:, depth : depth + 1, :]
             state.next_main = bonus_tok
             if state.ar_fallback_pending:
+                _native_mtp_capture_head_cache_before_discard(
+                    state.stats,
+                    state.mtp_cache,
+                )
                 state.mtp_cache = None
                 state.drafts = []
                 state.draft_lps = []
@@ -8431,12 +8498,17 @@ class MLLMBatchGenerator:
         _native_mtp_trace_stop(state.stats, "replay_ms", trace_t0)
         state.next_main = correction
         if state.ar_fallback_pending:
+            _native_mtp_capture_head_cache_before_discard(
+                state.stats,
+                state.mtp_cache,
+            )
             state.mtp_cache = None
             state.drafts = []
             state.draft_lps = []
             state.draft_ids = []
             return
         state.mtp_cache = self.language_model.make_mtp_cache()
+        state.stats.mtp_cache_recreated_on_rejects += 1
         state.drafts, state.draft_lps, state.draft_ids = self._draft_native_mtp_tokens(
             request,
             replay_hidden,
@@ -8697,6 +8769,7 @@ class MLLMBatchGenerator:
                         batch.requests[0].request_id,
                         mtp_state.stats,
                         "fallback_to_ar",
+                        mtp_state.mtp_cache,
                     )
                     self._stats.record_native_mtp(
                         request_id=batch.requests[0].request_id,
@@ -8722,6 +8795,7 @@ class MLLMBatchGenerator:
                     batch.requests[0].request_id,
                     mtp_state.stats,
                     "error",
+                    mtp_state.mtp_cache,
                 )
                 self._stats.record_native_mtp(
                     request_id=batch.requests[0].request_id,
@@ -8830,6 +8904,7 @@ class MLLMBatchGenerator:
                         request_id,
                         mtp_state_for_finish.stats,
                         finish_reason,
+                        mtp_state_for_finish.mtp_cache,
                     )
                     self._stats.record_native_mtp(
                         request_id=request_id,

@@ -391,6 +391,70 @@ def _run_fake(monkeypatch, depth: int, wrong_from_step=None, max_tokens=18,
 class TestMtpAcceptPathWithOracleDrafts:
     """Force 100% acceptance so the accept branch is actually covered."""
 
+    def test_cache_snapshot_runs_once_at_terminal_not_per_cycle(self, monkeypatch):
+        import vmlx_engine.patches.mlx_lm_mtp.batch_generator as mtp_batch
+
+        original_snapshot = mtp_batch.native_mtp_cache_snapshot
+        snapshot_calls = []
+
+        def snapshot_spy(cache):
+            snapshot_calls.append(cache)
+            return original_snapshot(cache)
+
+        monkeypatch.setattr(
+            mtp_batch,
+            "native_mtp_cache_snapshot",
+            snapshot_spy,
+        )
+
+        _out, stats, _cache = _run_fake(
+            monkeypatch,
+            depth=3,
+            max_tokens=18,
+        )
+
+        assert stats is not None
+        assert stats.cycles > 1
+        assert stats.mtp_forwards > 1
+        assert len(snapshot_calls) == 1
+
+    def test_failed_rollback_publishes_fallback_without_false_retention(
+        self, monkeypatch
+    ):
+        import vmlx_engine.patches.mlx_lm_mtp.batch_generator as mtp_batch
+
+        original_snapshot = mtp_batch.native_mtp_cache_snapshot
+        snapshot_calls = []
+
+        def snapshot_spy(cache):
+            snapshot_calls.append(cache)
+            return original_snapshot(cache)
+
+        monkeypatch.setattr(
+            mtp_batch,
+            "native_mtp_cache_snapshot",
+            snapshot_spy,
+        )
+        monkeypatch.setattr(
+            mtp_batch,
+            "_restore_or_trim_caches",
+            lambda *_args, **_kwargs: False,
+        )
+
+        _out, stats, _cache = _run_fake(
+            monkeypatch,
+            depth=1,
+            wrong_from_step=1,
+            max_tokens=8,
+        )
+        published = mtp_batch.native_mtp_stats_snapshot()["last_native_mtp"]
+
+        assert stats is not None
+        assert stats.rejects == 1
+        assert stats.mtp_cache_retained_on_rejects == 0
+        assert published["finish_reason"] == "fallback_to_ar"
+        assert len(snapshot_calls) == 1
+
     def test_oracle_draft_accepts_every_cycle_and_matches_baseline(self, monkeypatch):
         # Ground truth: the successor rule, applied from the prompt token.
         expected, t = [], 3
@@ -475,6 +539,8 @@ class TestMtpAcceptPathWithOracleDrafts:
         # Exactly one draft token accepted per cycle (d1 always right).
         assert stats.draft_tokens_accepted == stats.cycles
         assert stats.draft_tokens_proposed == stats.cycles * 3
+        assert stats.mtp_cache_recreated_on_rejects == 0
+        assert stats.mtp_cache_retained_on_rejects == stats.rejects
         # Cache must sit at the confirmed frontier: 1 prompt token + emits.
         for c in cache:
             assert int(c.offset.tolist()[0]) == 1 + len(got)

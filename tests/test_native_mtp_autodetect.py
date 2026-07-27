@@ -2041,6 +2041,7 @@ class TestNativeMtpAutodetect:
     def test_mllm_generator_runs_depth3_native_mtp_verify_cycle(self, monkeypatch):
         import mlx.core as mx
 
+        import vmlx_engine.mllm_batch_generator as mbg
         from vmlx_engine.mllm_batch_generator import (
             MLLMBatch,
             MLLMBatchGenerator,
@@ -2049,6 +2050,14 @@ class TestNativeMtpAutodetect:
         )
 
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", "3")
+        original_snapshot = mbg.native_mtp_cache_snapshot
+        snapshot_calls = []
+
+        def snapshot_spy(cache):
+            snapshot_calls.append(cache)
+            return original_snapshot(cache)
+
+        monkeypatch.setattr(mbg, "native_mtp_cache_snapshot", snapshot_spy)
         vocab_size = 16
 
         def logits_for(targets):
@@ -2154,6 +2163,8 @@ class TestNativeMtpAutodetect:
             first_token,
             first_logprobs,
         )
+        state = req._native_mtp_state
+        assert snapshot_calls == []
 
         tokens = [generator._next()[0].token for _ in range(6)]
 
@@ -2161,6 +2172,8 @@ class TestNativeMtpAutodetect:
         assert language_model.calls[:2] == [([2], 0), ([3, 4, 5, 6], 0)]
         assert language_model.mtp_calls[:3] == [3, 4, 5]
         assert req.output_tokens == [2, 3, 4, 5, 6, 7]
+        assert state.stats.mtp_forwards > 3
+        assert snapshot_calls == [state.mtp_cache]
 
     def test_depth3_reject_does_not_commit_correction_before_next_verify(
         self, monkeypatch
@@ -2445,6 +2458,8 @@ class TestNativeMtpAutodetect:
         assert cache.position == 4
         assert cache.conv_state == 4
         assert cache.ssm_state == 4
+        assert state.stats.mtp_cache_recreated_on_rejects == 1
+        assert state.stats.mtp_cache_retained_on_rejects == 0
 
     def test_native_mtp_greedy_sampler_uses_logits_fast_path(self, monkeypatch):
         import mlx.core as mx

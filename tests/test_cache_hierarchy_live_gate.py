@@ -45,6 +45,11 @@ TOKEN_CONTRACT = {
             "input_sha256": hashlib.sha256(f"prompt-{label}".encode()).hexdigest(),
             "cache_prompt_token_count": 128,
             "cache_prompt_token_ids_sha256": label.lower() * 64,
+            "full_cache_prompt_token_count": 128,
+            "full_cache_prompt_token_ids_sha256": "e" * 64,
+            "cache_key_boundary": "full_cache_prompt",
+            "cache_key_boundary_removed_tokens": 0,
+            "generation_prompt_suffix_tokens": 0,
             "generation_prompt_discriminator_present": True,
             "generation_prompt_discriminator_sha256": "9" * 64,
         }
@@ -454,6 +459,7 @@ def test_cache_scenario_keeps_instructions_and_tool_schema_stable():
     assert controls["instructions"] == generated["instructions"]
     assert controls["tools"] == generated["tools"]
     assert controls["tools"][0]["name"] == "cache_contract_unused"
+    assert generated["max_output_tokens"] == 256
     assert "cache_salt" not in controls
     assert "media_salt" not in controls
 
@@ -1010,10 +1016,156 @@ def test_store_contract_accepts_cold_warm_and_longest_partial_prefix():
     assert rows[2]["last_cache_execution"]["prefill_tokens"] == 16
 
 
+def test_standard_scheduler_execution_count_includes_attested_generation_suffix():
+    token_contract = deepcopy(TOKEN_CONTRACT)
+    for prompt in token_contract["prompts"].values():
+        prompt["generation_prompt_suffix_tokens"] = 5
+    rows = _valid_store_rows()
+    for row in rows:
+        execution = row["last_cache_execution"]
+        execution["prompt_tokens"] = 133
+        execution["uncached_prompt_tokens"] = 133 - execution["cached_tokens"]
+        execution["prefill_tokens"] = execution["uncached_prompt_tokens"]
+
+    assert _validate_rows(
+        "store",
+        rows,
+        token_contract=token_contract,
+    ) == []
+    assert rows[1]["last_cache_execution"]["prefill_tokens"] == 6
+    assert rows[2]["last_cache_execution"]["prefill_tokens"] == 21
+    assert rows[2]["expected_shared_prefix_floor_tokens"] == 112
+
+    for bad_count in (132, 134):
+        changed = deepcopy(rows)
+        changed[1]["last_cache_execution"]["prompt_tokens"] = bad_count
+        assert any(
+            "independent tokenizer count=133" in failure
+            for failure in _validate_rows(
+                "store",
+                changed,
+                token_contract=token_contract,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("cache_prompt_token_count", "128", "cache-prompt token count is invalid"),
+        (
+            "full_cache_prompt_token_count",
+            True,
+            "full cache-prompt token count is invalid",
+        ),
+        (
+            "generation_prompt_suffix_tokens",
+            "not-an-int",
+            "generation-prompt suffix token count is invalid",
+        ),
+        (
+            "cache_key_boundary_removed_tokens",
+            False,
+            "cache-key boundary removal count is invalid",
+        ),
+    ],
+)
+def test_token_contract_counts_reject_coerced_or_boolean_integers(
+    field,
+    value,
+    expected,
+):
+    prompt = deepcopy(TOKEN_CONTRACT["prompts"]["A"])
+    prompt[field] = value
+
+    _, _, _, failures = gate._token_contract_prompt_counts(
+        prompt,
+        tag="strict-counts",
+    )
+
+    assert any(expected in failure for failure in failures)
+
+
+@pytest.mark.parametrize("boundary", [None, "bogus"])
+def test_token_contract_rejects_missing_or_unknown_cache_key_boundary(boundary):
+    prompt = deepcopy(TOKEN_CONTRACT["prompts"]["A"])
+    if boundary is None:
+        prompt.pop("cache_key_boundary")
+    else:
+        prompt["cache_key_boundary"] = boundary
+
+    _, _, _, failures = gate._token_contract_prompt_counts(
+        prompt,
+        tag="strict-boundary",
+    )
+
+    assert any("cache-key boundary is invalid" in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    ("boundary", "removed_tokens"),
+    [
+        ("full_cache_prompt", 1),
+        ("mllm_re_feed_n_minus_one", 0),
+    ],
+)
+def test_token_contract_boundary_requires_exact_removal_count(
+    boundary,
+    removed_tokens,
+):
+    prompt = deepcopy(TOKEN_CONTRACT["prompts"]["A"])
+    prompt["cache_key_boundary"] = boundary
+    prompt["cache_key_boundary_removed_tokens"] = removed_tokens
+
+    _, _, _, failures = gate._token_contract_prompt_counts(
+        prompt,
+        tag="strict-boundary",
+    )
+
+    assert any("requires removed_tokens" in failure for failure in failures)
+
+
+@pytest.mark.parametrize("value", ["not-an-int", True, -1])
+def test_execution_suffix_rejects_malformed_mllm_domain_discriminator(value):
+    prompt = deepcopy(TOKEN_CONTRACT["prompts"]["A"])
+    execution = {"generation_prompt_suffix_tokens": value}
+
+    _, failures = gate._expected_execution_prompt_tokens(
+        prompt,
+        execution,
+        tag="strict-execution",
+    )
+
+    assert any(
+        "execution generation-prompt suffix token count is invalid" in failure
+        for failure in failures
+    )
+
+
+@pytest.mark.parametrize(("pair", "value"), [("A:A", "128"), ("A:B", True)])
+def test_token_contract_rejects_coerced_or_boolean_lcp_counts(pair, value):
+    prompts = {label: f"prompt-{label}" for label in ("A", "B", "C")}
+    request = gate._token_contract_request(MODEL, prompts)
+    contract = deepcopy(TOKEN_CONTRACT)
+    contract["request_sha256"] = gate._canonical_sha256(request)
+    contract["longest_common_prefix_tokens"][pair] = value
+    health_attestation, health_failures = _health_attestation_snapshot(_health())
+    assert health_failures == []
+
+    failures = gate._validate_tokenizer_lcp_contract(
+        contract,
+        request_payload=request,
+        health_attestation=health_attestation,
+    )
+
+    assert any(f"{pair} LCP count is invalid" in failure for failure in failures)
+
+
 def test_minimax_m3_native_profile_accepts_stable_offset_and_block_floors():
     token_contract = deepcopy(TOKEN_CONTRACT)
     for prompt in token_contract["prompts"].values():
         prompt["cache_prompt_token_count"] = 130
+        prompt["full_cache_prompt_token_count"] = 130
         prompt["generation_prompt_suffix_tokens"] = 4
     token_contract["longest_common_prefix_tokens"]["A:A"] = 130
     token_contract["longest_common_prefix_tokens"]["A:B"] = 127
@@ -1125,7 +1277,12 @@ def test_standard_scheduler_prefill_does_not_require_generation_suffix_field():
 
 
 def test_mllm_prefill_includes_generation_prompt_suffix_tokens():
+    token_contract = deepcopy(TOKEN_CONTRACT)
+    for prompt in token_contract["prompts"].values():
+        prompt["generation_prompt_suffix_tokens"] = 3
     rows = _valid_store_rows()
+    rows[0]["last_cache_execution"]["generation_prompt_suffix_tokens"] = 3
+    rows[0]["last_cache_execution"]["prefill_tokens"] = 131
     rows[1] = _hit_row(
         "warm_a",
         cached_tokens=127,
@@ -1138,7 +1295,7 @@ def test_mllm_prefill_includes_generation_prompt_suffix_tokens():
     )
 
     assert rows[2]["last_cache_execution"]["prefill_tokens"] == 19
-    assert _validate_rows("store", rows) == []
+    assert _validate_rows("store", rows, token_contract=token_contract) == []
 
 
 def test_store_contract_accepts_direct_memory_and_prefix_reuse_without_rebuild():

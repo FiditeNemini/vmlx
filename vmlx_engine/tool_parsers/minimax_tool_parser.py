@@ -108,6 +108,15 @@ class MiniMaxToolParser(ToolParser):
         re.DOTALL,
     )
 
+    # MiniMax M2.7 can emit request-schema property names as direct children
+    # of <invoke>, e.g. <value>...</value>, instead of wrapping each argument
+    # in <parameter name="value">. This dialect is accepted only when every
+    # direct child names a property advertised for that exact request tool.
+    DIRECT_SCHEMA_ARG_PATTERN = re.compile(
+        r"<([A-Za-z_][A-Za-z0-9_.-]*)>(.*?)</\1>",
+        re.DOTALL,
+    )
+
     # Fallback: <func_name>content</func_name> (no invoke wrapper)
     XML_FUNC_PATTERN = re.compile(
         r"<([a-zA-Z_]\w*)>(.*?)</\1>",
@@ -181,6 +190,7 @@ class MiniMaxToolParser(ToolParser):
                     invoke_match.group(1),
                     invoke_match.group(2),
                     lenient=False,
+                    request=request,
                 )
                 if tool_call:
                     tool_calls.append(tool_call)
@@ -197,6 +207,7 @@ class MiniMaxToolParser(ToolParser):
                         invoke_match.group(1),
                         invoke_match.group(2),
                         lenient=True,
+                        request=request,
                     )
                     if tool_call:
                         tool_calls.append(tool_call)
@@ -214,6 +225,7 @@ class MiniMaxToolParser(ToolParser):
                         invoke_match.group(1),
                         invoke_match.group(2),
                         lenient=True,
+                        request=request,
                     )
                     if tool_call:
                         tool_calls.append(tool_call)
@@ -245,6 +257,7 @@ class MiniMaxToolParser(ToolParser):
         invoke_content: str,
         *,
         lenient: bool,
+        request: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         func_name = _extract_name(raw_func_name)
         params = (
@@ -265,6 +278,18 @@ class MiniMaxToolParser(ToolParser):
                 "id": generate_tool_id(),
                 "name": func_name,
                 "arguments": json.dumps(arguments, ensure_ascii=False),
+            }
+
+        direct_arguments = self._direct_schema_arguments(
+            func_name,
+            invoke_content,
+            request,
+        )
+        if direct_arguments is not None:
+            return {
+                "id": generate_tool_id(),
+                "name": func_name,
+                "arguments": json.dumps(direct_arguments, ensure_ascii=False),
             }
 
         raw_content = invoke_content.strip()
@@ -296,6 +321,40 @@ class MiniMaxToolParser(ToolParser):
             "name": func_name,
             "arguments": "{}",
         }
+
+    @classmethod
+    def _direct_schema_arguments(
+        cls,
+        func_name: str,
+        invoke_content: str,
+        request: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        schema = cls._function_schema_for_tool(request, func_name)
+        if not isinstance(schema, dict):
+            return None
+        properties = schema.get("properties")
+        required = schema.get("required") or []
+        if not isinstance(properties, dict) or not isinstance(required, list):
+            return None
+
+        arguments: dict[str, Any] = {}
+        cursor = 0
+        for match in cls.DIRECT_SCHEMA_ARG_PATTERN.finditer(invoke_content):
+            # Only accept immediate sibling tags. Nested wrappers or prose
+            # around the tags retain the established raw-content behavior.
+            if invoke_content[cursor : match.start()].strip():
+                return None
+            name = match.group(1)
+            if name not in properties or name in arguments:
+                return None
+            arguments[name] = _convert_param_value(match.group(2))
+            cursor = match.end()
+
+        if not arguments or invoke_content[cursor:].strip():
+            return None
+        if any(isinstance(name, str) and name not in arguments for name in required):
+            return None
+        return arguments
 
     @staticmethod
     def _unterminated_tool_call_blocks(text: str) -> list[str]:
@@ -419,7 +478,7 @@ class MiniMaxToolParser(ToolParser):
 
         # Tool call block just completed — parse the full accumulated text
         if "</minimax:tool_call>" in delta_text:
-            result = self.extract_tool_calls(current_text)
+            result = self.extract_tool_calls(current_text, request=request)
             if result.tools_called:
                 return {
                     "tool_calls": [

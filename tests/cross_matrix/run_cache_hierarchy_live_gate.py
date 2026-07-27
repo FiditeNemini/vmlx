@@ -249,6 +249,124 @@ def _integer(value: Any) -> int:
         return 0
 
 
+def _exact_nonnegative_integer(value: Any) -> int | None:
+    """Accept only an attested JSON integer, never a bool or coercible string."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _token_contract_prompt_counts(
+    prompt: dict[str, Any],
+    *,
+    tag: str,
+) -> tuple[int, int, int, list[str]]:
+    """Return cache-key, full-cache, and generation-suffix token counts.
+
+    The private token contract exposes two deliberately different domains:
+    ``cache_prompt_token_count`` is the production lookup/store key after any
+    N-1 boundary and generation-prompt stripping, while
+    ``full_cache_prompt_token_count`` is the rendered prompt before the
+    generation suffix is appended back for execution.
+    """
+    failures: list[str] = []
+    cache_value = _exact_nonnegative_integer(
+        prompt.get("cache_prompt_token_count")
+    )
+    full_cache_value = _exact_nonnegative_integer(
+        prompt.get("full_cache_prompt_token_count")
+    )
+    suffix_value = _exact_nonnegative_integer(
+        prompt.get("generation_prompt_suffix_tokens")
+    )
+    removed_value = _exact_nonnegative_integer(
+        prompt.get("cache_key_boundary_removed_tokens")
+    )
+    cache_tokens = cache_value if cache_value is not None else 0
+    full_cache_tokens = (
+        full_cache_value if full_cache_value is not None else 0
+    )
+    suffix_tokens = suffix_value if suffix_value is not None else 0
+    removed_tokens = removed_value if removed_value is not None else 0
+
+    if cache_value is None or cache_tokens <= 1:
+        failures.append(f"{tag}: cache-prompt token count is invalid")
+    if full_cache_value is None or full_cache_tokens <= 1:
+        failures.append(f"{tag}: full cache-prompt token count is invalid")
+    if suffix_value is None:
+        failures.append(f"{tag}: generation-prompt suffix token count is invalid")
+    if removed_value is None:
+        failures.append(f"{tag}: cache-key boundary removal count is invalid")
+
+    boundary = prompt.get("cache_key_boundary")
+    expected_removed = {
+        "full_cache_prompt": 0,
+        "mllm_re_feed_n_minus_one": 1,
+    }.get(boundary)
+    if expected_removed is None:
+        failures.append(f"{tag}: cache-key boundary is invalid")
+    elif removed_value is not None and removed_tokens != expected_removed:
+        failures.append(
+            f"{tag}: cache-key boundary={boundary} requires "
+            f"removed_tokens={expected_removed}, got {removed_tokens}"
+        )
+
+    if (
+        cache_value is not None
+        and full_cache_value is not None
+        and full_cache_tokens < cache_tokens
+    ):
+        failures.append(
+            f"{tag}: full cache-prompt count={full_cache_tokens} is smaller than "
+            f"cache-key count={cache_tokens}"
+        )
+    elif (
+        cache_value is not None
+        and full_cache_value is not None
+        and removed_value is not None
+        and full_cache_tokens - cache_tokens != removed_tokens
+    ):
+        failures.append(
+            f"{tag}: full/cache-key count difference="
+            f"{full_cache_tokens - cache_tokens} does not match attested "
+            f"boundary removal={removed_tokens}"
+        )
+    return cache_tokens, full_cache_tokens, suffix_tokens, failures
+
+
+def _expected_execution_prompt_tokens(
+    prompt: dict[str, Any],
+    execution: dict[str, Any],
+    *,
+    tag: str,
+) -> tuple[int, list[str]]:
+    """Translate the token contract into the scheduler telemetry domain."""
+    _, full_cache_tokens, suffix_tokens, failures = (
+        _token_contract_prompt_counts(prompt, tag=tag)
+    )
+    if "generation_prompt_suffix_tokens" in execution:
+        # MLLM telemetry counts the cache-prompt tokens and reports the
+        # template-owned suffix separately.
+        execution_suffix_value = _exact_nonnegative_integer(
+            execution.get("generation_prompt_suffix_tokens")
+        )
+        if execution_suffix_value is None:
+            failures.append(
+                f"{tag}: execution generation-prompt suffix token count is invalid"
+            )
+            return full_cache_tokens + suffix_tokens, failures
+        execution_suffix = execution_suffix_value
+        if execution_suffix != suffix_tokens:
+            failures.append(
+                f"{tag}: execution generation-prompt suffix={execution_suffix} "
+                f"does not match independent tokenizer suffix={suffix_tokens}"
+            )
+        return full_cache_tokens, failures
+    # The standard Scheduler reports Request.num_prompt_tokens, which includes
+    # the same independently attested generation suffix.
+    return full_cache_tokens + suffix_tokens, failures
+
+
 def _health_cache_counters(health: dict[str, Any]) -> dict[str, int]:
     """Return monotonic cache counters needed to prove request-local deltas."""
     scheduler = health.get("scheduler")
@@ -410,6 +528,11 @@ def _validate_tokenizer_lcp_contract(
             failures.append(
                 f"token contract: prompt {label} cache token count is not usable"
             )
+        _, _, _, count_failures = _token_contract_prompt_counts(
+            row,
+            tag=f"token contract: prompt {label}",
+        )
+        failures.extend(count_failures)
         token_sha = str(row.get("cache_prompt_token_ids_sha256") or "")
         if len(token_sha) != 64 or any(
             character not in "0123456789abcdef"
@@ -417,6 +540,16 @@ def _validate_tokenizer_lcp_contract(
         ):
             failures.append(
                 f"token contract: prompt {label} token-ID digest is invalid"
+            )
+        full_token_sha = str(
+            row.get("full_cache_prompt_token_ids_sha256") or ""
+        )
+        if len(full_token_sha) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in full_token_sha.lower()
+        ):
+            failures.append(
+                f"token contract: prompt {label} full token-ID digest is invalid"
             )
         discriminator_present = row.get(
             "generation_prompt_discriminator_present"
@@ -446,30 +579,45 @@ def _validate_tokenizer_lcp_contract(
             "token contract: longest_common_prefix_tokens are missing"
         ]
     a_row = rows.get("A") if isinstance(rows, dict) else None
-    a_count = (
-        _integer(a_row.get("cache_prompt_token_count"))
+    a_count_value = (
+        _exact_nonnegative_integer(a_row.get("cache_prompt_token_count"))
         if isinstance(a_row, dict)
-        else 0
+        else None
     )
-    if _integer(lcp.get("A:A")) != a_count:
+    a_count = a_count_value if a_count_value is not None else 0
+    exact_a_value = _exact_nonnegative_integer(lcp.get("A:A"))
+    if exact_a_value is None:
+        failures.append("token contract: A:A LCP count is invalid")
+    elif exact_a_value != a_count:
         failures.append(
             "token contract: A:A LCP does not equal the independently tokenized "
             "A prompt length"
         )
     for label in sorted(expected_labels - {"A"}):
         pair = f"A:{label}"
-        value = _integer(lcp.get(pair))
+        value_attested = _exact_nonnegative_integer(lcp.get(pair))
+        value = value_attested if value_attested is not None else 0
         other = rows.get(label)
-        other_count = (
-            _integer(other.get("cache_prompt_token_count"))
+        other_count_value = (
+            _exact_nonnegative_integer(other.get("cache_prompt_token_count"))
             if isinstance(other, dict)
-            else 0
+            else None
         )
-        if value <= 1:
+        other_count = (
+            other_count_value if other_count_value is not None else 0
+        )
+        if value_attested is None:
+            failures.append(f"token contract: {pair} LCP count is invalid")
+        elif value <= 1:
             failures.append(
                 f"token contract: {pair} does not prove a multi-token prefix"
             )
-        if a_count > 0 and other_count > 0 and value >= min(a_count, other_count):
+        if (
+            value_attested is not None
+            and a_count > 0
+            and other_count > 0
+            and value >= min(a_count, other_count)
+        ):
             failures.append(
                 f"token contract: {pair} must leave a tokenizer-visible "
                 "differing tail"
@@ -2131,18 +2279,36 @@ def validate_cache_rows(
                     if isinstance(prompt_row, dict)
                     else 0
                 )
+                expected_execution_tokens = 0
+                count_failures: list[str] = []
                 if expected_prompt_tokens <= 1:
                     row_failures.append(
                         f"{tag}: independent tokenizer prompt count is missing"
                     )
-                elif _integer(execution.get("prompt_tokens")) != (
-                    expected_prompt_tokens + prompt_offset
+                elif native_sparse:
+                    expected_execution_tokens = (
+                        expected_prompt_tokens + prompt_offset
+                    )
+                    count_failures = []
+                else:
+                    expected_execution_tokens, count_failures = (
+                        _expected_execution_prompt_tokens(
+                            prompt_row,
+                            execution,
+                            tag=tag,
+                        )
+                    )
+                row_failures.extend(count_failures)
+                if (
+                    expected_prompt_tokens > 1
+                    and _integer(execution.get("prompt_tokens"))
+                    != expected_execution_tokens
                 ):
                     row_failures.append(
                         f"{tag}: execution prompt_tokens="
                         f"{_integer(execution.get('prompt_tokens'))} does not "
-                        "match independent tokenizer count plus attested offset="
-                        f"{expected_prompt_tokens + prompt_offset}"
+                        "match independent tokenizer execution count="
+                        f"{expected_execution_tokens}"
                     )
         else:
             selector = "A"
@@ -2162,17 +2328,29 @@ def validate_cache_rows(
                 token_contract=token_contract,
                 exact_complete_block_floor=native_sparse,
             )
+            execution_count_failures: list[str] = []
+            if native_sparse:
+                expected_execution_tokens = expected_prompt_tokens + prompt_offset
+            else:
+                expected_execution_tokens, execution_count_failures = (
+                    _expected_execution_prompt_tokens(
+                        (token_contract.get("prompts") or {}).get(selector) or {},
+                        row.get("last_cache_execution") or {},
+                        tag=tag,
+                    )
+                )
             row_failures = _validate_hit_row(
                 row,
                 require_partial=requirement in {"partial", "disk_partial"},
                 require_disk_origin=requirement == "disk_partial",
                 minimum_cached_tokens=minimum_cached_tokens,
                 maximum_cached_tokens=independent_lcp_tokens,
-                expected_prompt_tokens=expected_prompt_tokens + prompt_offset,
+                expected_prompt_tokens=expected_execution_tokens,
                 # Standard scheduler/TQ hits may be direct memory/prefix reuse.
                 # Only restart-C must prove worker reconstruction from disk.
                 allow_direct_reuse=requirement != "disk_partial",
             )
+            row_failures.extend(execution_count_failures)
             row_failures.extend(floor_failures)
             row["expected_shared_prefix_floor_tokens"] = minimum_cached_tokens
             row["independent_longest_common_prefix_tokens"] = (
@@ -3082,8 +3260,9 @@ def _payload(
         # truncate the marker itself on normal byte-fragmenting tokenizers and
         # turn a healthy cache hit into response.incomplete. Keep the cap small
         # enough to preserve the transport-only nature of the probe, but large
-        # enough to allow the full marker plus EOS.
-        "max_output_tokens": 96,
+        # enough to allow the full marker plus EOS. A retained MiniMax-M2.7
+        # exact-source falsifier completed at 256 after truncating at 96.
+        "max_output_tokens": 256,
         "temperature": 0.0,
         "top_p": 1.0,
         "top_k": 20,

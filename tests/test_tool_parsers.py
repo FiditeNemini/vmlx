@@ -1411,6 +1411,109 @@ class TestMiniMaxToolParser:
         assert args["location"] == "San Francisco"
         assert args["unit"] == "celsius"
 
+    def test_direct_schema_child_uses_advertised_responses_argument(self, parser):
+        """M2.7 may name the advertised argument directly inside invoke."""
+        text = """<minimax:tool_call>
+<invoke name="cache_contract_unused">
+<value>CACHE-HIERARCHY-27dceffd73d18486b68655370c10f59e-A</value>
+</invoke>
+</minimax:tool_call>"""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "cache_contract_unused",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                    },
+                }
+            ]
+        }
+
+        result = parser.extract_tool_calls(text, request=request)
+
+        assert result.tools_called
+        assert result.content is None
+        assert result.tool_calls[0]["name"] == "cache_contract_unused"
+        assert json.loads(result.tool_calls[0]["arguments"]) == {
+            "value": "CACHE-HIERARCHY-27dceffd73d18486b68655370c10f59e-A"
+        }
+
+    def test_direct_schema_child_streaming_keeps_request_schema(self, parser):
+        text = """<minimax:tool_call>
+<invoke name="file_info">
+<path>panel/package.json</path>
+</invoke>
+</minimax:tool_call>"""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+
+        result = parser.extract_tool_calls_streaming(
+            previous_text=text[: -len("</minimax:tool_call>")],
+            current_text=text,
+            delta_text="</minimax:tool_call>",
+            request=request,
+        )
+
+        assert result is not None
+        call = result["tool_calls"][0]
+        assert call["function"]["name"] == "file_info"
+        assert json.loads(call["function"]["arguments"]) == {
+            "path": "panel/package.json"
+        }
+
+    @pytest.mark.parametrize(
+        "parser_request",
+        [
+            None,
+            {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "file_info",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                                "required": ["path"],
+                            },
+                        },
+                    }
+                ]
+            },
+        ],
+    )
+    def test_direct_child_without_matching_schema_keeps_raw_behavior(
+        self, parser, parser_request
+    ):
+        text = """<minimax:tool_call>
+<invoke name="cache_contract_unused">
+<value>do-not-promote-without-matching-schema</value>
+</invoke>
+</minimax:tool_call>"""
+
+        result = parser.extract_tool_calls(text, request=parser_request)
+
+        assert result.tools_called
+        assert json.loads(result.tool_calls[0]["arguments"]) == {
+            "raw": "<value>do-not-promote-without-matching-schema</value>"
+        }
+
     def test_multiple_invocations(self, parser):
         """Test multiple <invoke> blocks within a single tool_call."""
         text = """<minimax:tool_call>

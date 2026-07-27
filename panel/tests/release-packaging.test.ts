@@ -1252,6 +1252,84 @@ describe("release packaging", () => {
     }
   });
 
+  it("keeps codesign authority distinct from the prefix-free electron-builder selector", () => {
+    const beforePack = requireCjs(
+      join(repo, "scripts/electron-builder-before-pack.cjs"),
+    );
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-signing-selector-"));
+    const fullIdentity =
+      "Developer ID Application: ShieldStack LLC (55KGF2S5AY)";
+    const selector = "ShieldStack LLC (55KGF2S5AY)";
+    const envNames = [
+      "VMLX_RELEASE_SCOPE",
+      "VMLX_R19_OFFICIAL_PACKAGING",
+      "VMLX_R19_EXPECTED_TEAM_ID",
+      "VMLX_R19_EXPECTED_CODESIGN_IDENTITY",
+      "CSC_NAME",
+    ];
+    const previous = Object.fromEntries(
+      envNames.map((name) => [name, process.env[name]]),
+    );
+
+    try {
+      writeFileSync(
+        join(temp, "package.json"),
+        JSON.stringify({
+          version: "1.6.19",
+          build: { mac: { notarize: { teamId: "55KGF2S5AY" } } },
+        }),
+      );
+      process.env.VMLX_RELEASE_SCOPE = "r19_production";
+      process.env.VMLX_R19_OFFICIAL_PACKAGING = "1";
+      process.env.VMLX_R19_EXPECTED_TEAM_ID = "55KGF2S5AY";
+      process.env.VMLX_R19_EXPECTED_CODESIGN_IDENTITY = fullIdentity;
+
+      expect(beforePack.R19_CODESIGN_IDENTITY).toBe(fullIdentity);
+      expect(beforePack.R19_CSC_NAME).toBe(selector);
+      expect(beforePack.R19_CSC_NAME).not.toBe(
+        beforePack.R19_CODESIGN_IDENTITY,
+      );
+      expect(beforePack.R19_CSC_NAME).not.toMatch(
+        /^Developer ID Application:/,
+      );
+
+      for (const invalidSelector of [
+        fullIdentity,
+        ` ${selector}`,
+        `${selector} `,
+        "55KGF2S5AY",
+        "",
+      ]) {
+        process.env.CSC_NAME = invalidSelector;
+        expect(() =>
+          beforePack.verifyR19PackagingContext(temp, {}),
+        ).toThrow(`packaging requires CSC_NAME=${selector}`);
+      }
+
+      process.env.CSC_NAME = selector;
+      expect(() =>
+        beforePack.verifyR19PackagingContext(temp, {}),
+      ).toThrow("requires the official prepackage manifest");
+
+      process.env.VMLX_R19_EXPECTED_CODESIGN_IDENTITY = selector;
+      expect(() =>
+        beforePack.verifyR19PackagingContext(temp, {}),
+      ).toThrow(
+        `packaging requires VMLX_R19_EXPECTED_CODESIGN_IDENTITY=${fullIdentity}`,
+      );
+    } finally {
+      for (const name of envNames) {
+        const value = previous[name];
+        if (value === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = value;
+        }
+      }
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
   it("pins the production release driver, hygiene, signing team, and dual flavors", () => {
     const pkg = JSON.parse(read("package.json"));
     const source = read("scripts/build-release-dmgs.sh");
@@ -1295,6 +1373,9 @@ describe("release packaging", () => {
     );
     expect(beforePackSource).toContain(
       'requireExactEnv("CSC_NAME", R19_CSC_NAME)',
+    );
+    expect(beforePackSource).toContain(
+      "module.exports.R19_CSC_NAME = R19_CSC_NAME",
     );
     expect(source).toContain(
       "production packaging must build both Sequoia and Tahoe via flavor=all",

@@ -1233,6 +1233,7 @@ module.exports.emitR19CompletionAttestation = emitR19CompletionAttestation;
 module.exports.runR19ReleasePythonAction = runR19ReleasePythonAction;
 module.exports.treePayload = treePayload;
 module.exports.R19_CODESIGN_IDENTITY = R19_CODESIGN_IDENTITY;
+module.exports.R19_CSC_NAME = R19_CSC_NAME;
 module.exports.R19_TEAM_ID = R19_TEAM_ID;
 
 if (require.main === module) {

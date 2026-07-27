@@ -1631,9 +1631,9 @@ def validate_jang_source(failures: list[str]) -> dict[str, Any]:
         failures,
         "live JANG origin/main does not match the pinned release source",
     )
-    require(commit == JANG_COMMIT, failures, "JANG source commit is not the .18 pin")
-    require(tree == JANG_TREE, failures, "JANG source tree is not the .18 pin")
-    require(version == JANG_VERSION, failures, "JANG source version is not the .18 pin")
+    require(commit == JANG_COMMIT, failures, "JANG source commit is not the release pin")
+    require(tree == JANG_TREE, failures, "JANG source tree is not the release pin")
+    require(version == JANG_VERSION, failures, "JANG source version is not the release pin")
     return {
         "commit": commit,
         "tree": tree,

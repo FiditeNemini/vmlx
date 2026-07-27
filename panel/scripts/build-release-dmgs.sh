@@ -772,7 +772,7 @@ case "$RELEASE_SCOPE" in
         VMLX_ALLOW_PYPI_JANG VMLINUX_ALLOW_PYPI_JANG \
         VMLX_ALLOW_MISSING_JANG_SOURCE_HASH VMLINUX_ALLOW_MISSING_JANG_SOURCE_HASH; do
         if [[ "${!bypass:-0}" == "1" ]]; then
-          echo "ERROR: $bypass=1 is forbidden for the .18 production release" >&2
+          echo "ERROR: $bypass=1 is forbidden for the .19 production release" >&2
           exit 1
         fi
       done

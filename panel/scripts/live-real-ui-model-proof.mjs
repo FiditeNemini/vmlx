@@ -14,6 +14,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   rmSync,
@@ -28,6 +29,7 @@ import vm from 'node:vm'
 const panelDir = path.resolve(new URL('..', import.meta.url).pathname)
 const repoDir = path.resolve(panelDir, '..')
 const proofFormat = 'vmlx-electron-ui-proof-v2'
+const executableIdentityMaxBytes = 512 * 1024 * 1024
 const proofDirInput = process.env.VMLINUX_REAL_UI_PROOF_DIR
   || process.env.VMLX_REAL_UI_PROOF_DIR
   || process.env.VMLX_PRIVATE_EVIDENCE_ROOT
@@ -608,6 +610,7 @@ function readExternalFileBytes(
     requirePrivate = false,
     requireSingleLink = false,
     allowInsideRepo = true,
+    retainRaw = true,
   } = {},
 ) {
   const absolute = path.resolve(filePath)
@@ -632,6 +635,8 @@ function readExternalFileBytes(
   let fd
   let openedStat
   let raw
+  let bytesRead = 0
+  let sha256
   try {
     fd = openSync(canonical, fsConstants.O_RDONLY | noFollow)
     openedStat = fstatSync(fd)
@@ -654,20 +659,56 @@ function readExternalFileBytes(
     if (openedStat.size > maxBytes) {
       throw new Error(`${label} exceeds the ${maxBytes}-byte safety limit`)
     }
-    raw = readFileSync(fd)
+    if (retainRaw) {
+      raw = readFileSync(fd)
+      bytesRead = raw.length
+      sha256 = crypto.createHash('sha256').update(raw).digest('hex')
+    } else {
+      const digest = crypto.createHash('sha256')
+      const chunk = Buffer.allocUnsafe(1024 * 1024)
+      while (true) {
+        const count = readSync(fd, chunk, 0, chunk.length, null)
+        if (count === 0) break
+        bytesRead += count
+        if (bytesRead > openedStat.size) {
+          throw new Error(`${label} grew while hashing`)
+        }
+        digest.update(chunk.subarray(0, count))
+      }
+      if (bytesRead !== openedStat.size) {
+        throw new Error(`${label} changed size while hashing`)
+      }
+      sha256 = digest.digest('hex')
+    }
+    const afterReadStat = fstatSync(fd)
+    if (
+      afterReadStat.dev !== openedStat.dev
+      || afterReadStat.ino !== openedStat.ino
+      || afterReadStat.size !== openedStat.size
+      || afterReadStat.mtimeMs !== openedStat.mtimeMs
+      || afterReadStat.ctimeMs !== openedStat.ctimeMs
+    ) {
+      throw new Error(`${label} changed identity while reading`)
+    }
   } finally {
     if (fd != null) closeSync(fd)
   }
-  const sha256 = crypto.createHash('sha256').update(raw).digest('hex')
   return {
     path: canonical,
     sha256,
-    bytes: raw.length,
+    bytes: bytesRead,
     mode: openedStat.mode & 0o777,
     nlink: openedStat.nlink,
     opened_nofollow: true,
-    raw,
+    ...(retainRaw ? { raw } : {}),
   }
+}
+
+function readExternalExecutableIdentity(filePath, label) {
+  return readExternalFileBytes(filePath, label, {
+    maxBytes: executableIdentityMaxBytes,
+    retainRaw: false,
+  })
 }
 
 function readPrivateExternalBytes(filePath, label, maxBytes = 64 * 1024 * 1024) {
@@ -3682,7 +3723,7 @@ export function validateUiRuntimeProvenance(result) {
   const cdp = provenance.cdp_process_binding || {}
   const backend = provenance.backend_python_process_binding || {}
   try {
-    const electron = readExternalFileBytes(
+    const electron = readExternalExecutableIdentity(
       provenance.electron_executable,
       'Electron runtime executable',
     )
@@ -3698,7 +3739,7 @@ export function validateUiRuntimeProvenance(result) {
     failures.push(String(error?.message || error))
   }
   try {
-    const python = readExternalFileBytes(
+    const python = readExternalExecutableIdentity(
       backend.executable_path,
       'Python backend runtime executable',
     )
@@ -4706,7 +4747,7 @@ function validateMatrixIdentity(value, result) {
         runnerBefore.producer_harness_path,
         'Paired API producer harness',
       )
-      const executable = readExternalFileBytes(
+      const executable = readExternalExecutableIdentity(
         runnerBefore.producer_executable_path,
         'Paired API producer executable',
       )

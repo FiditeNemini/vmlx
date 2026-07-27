@@ -3786,25 +3786,39 @@ class TestPagedCacheBoundaries:
         )
 
     def test_block_aware_fetch_cache_increments_ref(self):
-        """BlockAwarePrefixCache.fetch_cache must call
-        paged_cache.increment_ref for each shared block. Without this,
-        concurrent requests could evict a block mid-use."""
-        import vmlx_engine.prefix_cache as pc
-        src = Path(pc.__file__).read_text()
-        # Target BlockAwarePrefixCache (the paged one). Its fetch_cache
-        # lives inside the class body — the legacy in-memory
-        # PrefixCacheManager.fetch_cache returns MLX-immutable refs
-        # and doesn't need ref counts (MLX arrays can't be mutated).
-        cls_idx = src.find("class BlockAwarePrefixCache")
-        assert cls_idx > 0, "BlockAwarePrefixCache class required"
-        cls_body = src[cls_idx:cls_idx + 30000]
-        fc_idx = cls_body.find("def fetch_cache")
-        assert fc_idx > 0, "BlockAwarePrefixCache.fetch_cache required"
-        fc_body = cls_body[fc_idx:fc_idx + 3000]
-        assert "increment_ref" in fc_body, (
-            "BlockAwarePrefixCache.fetch_cache must increment refs so "
-            "concurrent clients don't race to evict shared blocks"
-        )
+        """A fetched block chain stays pinned until request cleanup.
+
+        The primary lookup now acquires ownership through
+        PagedCacheManager.get_computed_blocks()/touch(), while the fallback
+        index pins atomically under the same manager lock. Assert the runtime
+        ownership invariant instead of requiring one obsolete method name in
+        the first few source lines.
+        """
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        paged = PagedCacheManager(block_size=4, max_blocks=4)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+        tokens = list(range(8))
+
+        stored = cache.store_cache("writer", tokens, ["cache-data"])
+        assert stored is not None
+        writer = cache._request_tables.pop("writer")
+        assert paged.release_request_refs(writer.block_table) == 2
+        paged.detach_request("writer")
+        assert [paged.blocks[i].ref_count for i in stored.block_ids] == [0, 0]
+
+        hit, remaining = cache.fetch_cache("reader", tokens + [99])
+
+        assert hit is not None
+        assert remaining == [99]
+        assert cache._request_tables["reader"].block_table is hit
+        assert [paged.blocks[i].ref_count for i in hit.block_ids] == [1, 1]
+
+        reader = cache._request_tables.pop("reader")
+        assert paged.release_request_refs(reader.block_table) == 2
+        paged.detach_request("reader")
+        assert [paged.blocks[i].ref_count for i in hit.block_ids] == [0, 0]
 
     def test_unusable_paged_hit_rollback_symmetric_with_fetch(self):
         """Every fetch_cache path must have an unusable-hit rollback path,

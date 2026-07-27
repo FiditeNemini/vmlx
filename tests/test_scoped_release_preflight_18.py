@@ -1346,7 +1346,10 @@ def test_v5_owned_command_pins_executable_script_argument_even_when_mode_0755(
         "VMLINUX_R18_PINNED_NODE_REALPATH",
     )
     script = tmp_path / "npm-cli.js"
-    script.write_text("console.log('owned npm cli')\n", encoding="utf-8")
+    script.write_text(
+        "console.log('owned npm cli'); setTimeout(() => {}, 500)\n",
+        encoding="utf-8",
+    )
     script.chmod(0o755)
     run_dir = tmp_path / "run"
     run_dir.mkdir(mode=0o700)
@@ -1395,7 +1398,11 @@ def test_v5_owned_command_can_pin_readonly_system_tool_file(tmp_path: Path):
         "production_build",
         {
             "command_id": "readonly-system-tool",
-            "argv": [str(node), "-e", "process.stdout.write('ok')"],
+            "argv": [
+                str(node),
+                "-e",
+                "process.stdout.write('ok'); setTimeout(() => {}, 500)",
+            ],
             "cwd": tmp_path,
             "env": {},
             "tool_files": ["/usr/bin/git"],
@@ -1435,7 +1442,8 @@ def test_v5_owned_command_rejects_executable_script_tampering(
     )
     script = tmp_path / "npm-cli.js"
     script.write_text(
-        "require('fs').appendFileSync(__filename, '\\n// changed')\n",
+        "require('fs').appendFileSync(__filename, '\\n// changed'); "
+        "setTimeout(() => {}, 500)\n",
         encoding="utf-8",
     )
     script.chmod(0o755)

@@ -459,9 +459,9 @@ def test_cache_scenario_keeps_instructions_and_tool_schema_stable():
     assert controls["instructions"] == generated["instructions"]
     assert controls["tools"] == generated["tools"]
     assert controls["tools"][0]["name"] == "cache_contract_unused"
-    assert controls["tool_choice"] == "none"
-    assert generated["tool_choice"] == "none"
-    assert generated["max_output_tokens"] == 256
+    assert "tool_choice" not in controls
+    assert "tool_choice" not in generated
+    assert generated["max_output_tokens"] == 512
     assert "cache_salt" not in controls
     assert "media_salt" not in controls
 
@@ -1358,6 +1358,13 @@ def test_main_fails_when_only_http_output_and_terminal_contracts_pass(
         "_post_sse",
         lambda _url, _payload, _timeout: (200, "raw-sse", 0.01),
     )
+    marker_outputs = iter(
+        (
+            "CACHE-HIERARCHY-http-only-A",
+            "CACHE-HIERARCHY-http-only-A",
+            "CACHE-HIERARCHY-http-only-B",
+        )
+    )
     monkeypatch.setattr(
         gate,
         "_summarize",
@@ -1366,7 +1373,7 @@ def test_main_fails_when_only_http_output_and_terminal_contracts_pass(
             "elapsed_s": 0.01,
             "event_counts": {"response.completed": 1},
             "terminal_events": ["response.completed"],
-            "output_text": ("CACHE-HIERARCHY-http-only-A CACHE-HIERARCHY-http-only-B"),
+            "output_text": next(marker_outputs),
             "reasoning_text": "",
             "usage": {},
             "cached_tokens": 0,
@@ -1676,6 +1683,109 @@ def test_responses_sse_id_is_bound_to_scheduler_execution_request_id():
     assert summary["response_id"] == "resp-live"
     assert summary["response_id_consistent"] is True
     assert summary["response_ids"] == ["resp-live"]
+
+
+def test_cache_marker_accepts_only_exact_visible_text():
+    marker = "CACHE-HIERARCHY-exact-A"
+
+    assert gate._exact_cache_marker_observed(
+        {"output_text": marker, "function_calls": []},
+        marker,
+    )
+    assert not gate._exact_cache_marker_observed(
+        {"output_text": f"prefix {marker}", "function_calls": []},
+        marker,
+    )
+    assert not gate._exact_cache_marker_observed(
+        {
+            "output_text": marker,
+            "function_calls": [
+                {
+                    "name": "other_tool",
+                    "status": "completed",
+                    "arguments": "{}",
+                }
+            ],
+        },
+        marker,
+    )
+    assert not gate._exact_cache_marker_observed(
+        {
+            "output_text": marker,
+            "reasoning_text": "<think>leaked</think>",
+            "function_calls": [],
+        },
+        marker,
+    )
+
+
+def test_cache_marker_accepts_one_exact_completed_schema_call():
+    marker = "CACHE-HIERARCHY-exact-A"
+    summary = {
+        "output_text": "",
+        "function_calls": [
+            {
+                "name": "cache_contract_unused",
+                "status": "completed",
+                "arguments": json.dumps({"value": marker}),
+            }
+        ],
+    }
+
+    assert gate._exact_cache_marker_observed(summary, marker)
+    with_reasoning = deepcopy(summary)
+    with_reasoning["reasoning_text"] = "private reasoning leaked"
+    assert not gate._exact_cache_marker_observed(with_reasoning, marker)
+
+    for change in (
+        {"name": "other_tool"},
+        {"status": "in_progress"},
+        {"arguments": json.dumps({"value": marker, "extra": True})},
+        {"arguments": "<value>raw-native-markup</value>"},
+    ):
+        changed = deepcopy(summary)
+        changed["function_calls"][0].update(change)
+        assert not gate._exact_cache_marker_observed(changed, marker)
+
+    duplicated = deepcopy(summary)
+    duplicated["function_calls"].append(deepcopy(summary["function_calls"][0]))
+    assert not gate._exact_cache_marker_observed(duplicated, marker)
+
+
+def test_sse_summary_retains_completed_function_call_for_cache_contract():
+    marker = "CACHE-HIERARCHY-exact-A"
+    raw = "\n\n".join(
+        [
+            (
+                "event: response.output_item.done\n"
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.output_item.done",
+                        "item": {
+                            "type": "function_call",
+                            "status": "completed",
+                            "name": "cache_contract_unused",
+                            "arguments": json.dumps({"value": marker}),
+                        },
+                    }
+                )
+            ),
+            'event: response.completed\ndata: {"response":{"id":"resp-tool"}}',
+            "",
+        ]
+    )
+
+    summary = _summarize(raw, 0.1, 200)
+
+    assert gate._exact_cache_marker_observed(summary, marker)
+    assert summary["function_calls"] == [
+        {
+            "name": "cache_contract_unused",
+            "arguments": json.dumps({"value": marker}),
+            "status": "completed",
+        }
+    ]
 
 
 def test_cache_contract_rejects_response_id_execution_mismatch():

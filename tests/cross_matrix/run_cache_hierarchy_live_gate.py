@@ -67,10 +67,6 @@ def _cache_scenario_request_controls() -> dict[str, Any]:
         "enable_thinking": False,
         "instructions": CACHE_SCENARIO_INSTRUCTIONS,
         "tools": [dict(tool) for tool in CACHE_SCENARIO_TOOLS],
-        # The stable schema must participate in the rendered cache identity,
-        # but this transport-only probe must not ask the model to execute it.
-        # Prompt text alone is not an API-level tool prohibition.
-        "tool_choice": "none",
     }
 
 
@@ -228,6 +224,26 @@ def _summarize(raw: str, elapsed_s: float, status_code: int) -> dict[str, Any]:
         if response_id:
             response_ids.append(response_id)
     unique_response_ids = list(dict.fromkeys(response_ids))
+    function_calls: list[dict[str, Any]] = []
+    for item in events:
+        if item["event"] != "response.output_item.done":
+            continue
+        data = item["data"]
+        if not isinstance(data, dict):
+            continue
+        output_item = data.get("item")
+        if (
+            not isinstance(output_item, dict)
+            or output_item.get("type") != "function_call"
+        ):
+            continue
+        function_calls.append(
+            {
+                "name": output_item.get("name"),
+                "arguments": output_item.get("arguments"),
+                "status": output_item.get("status"),
+            }
+        )
     return {
         "status_code": status_code,
         "elapsed_s": round(elapsed_s, 3),
@@ -243,7 +259,40 @@ def _summarize(raw: str, elapsed_s: float, status_code: int) -> dict[str, Any]:
         ),
         "response_ids": unique_response_ids,
         "response_id_consistent": len(unique_response_ids) == 1,
+        "function_calls": function_calls,
     }
+
+
+def _exact_cache_marker_observed(
+    summary: dict[str, Any],
+    expected_marker: str,
+) -> bool:
+    """Accept exactly one clean marker shape with no reasoning leakage."""
+    if str(summary.get("reasoning_text") or "").strip():
+        return False
+    output_text = str(summary.get("output_text") or "").strip()
+    calls = summary.get("function_calls", [])
+    if not isinstance(calls, list):
+        return False
+    if output_text == expected_marker:
+        return not calls
+    if output_text:
+        return False
+    if len(calls) != 1:
+        return False
+    call = calls[0]
+    if (
+        not isinstance(call, dict)
+        or call.get("name") != "cache_contract_unused"
+        or call.get("status") != "completed"
+        or not isinstance(call.get("arguments"), str)
+    ):
+        return False
+    try:
+        arguments = json.loads(call["arguments"])
+    except json.JSONDecodeError:
+        return False
+    return arguments == {"value": expected_marker}
 
 
 def _integer(value: Any) -> int:
@@ -3264,10 +3313,10 @@ def _payload(
         # truncate the marker itself on normal byte-fragmenting tokenizers and
         # turn a healthy cache hit into response.incomplete. Keep the cap small
         # enough to preserve the transport-only nature of the probe, but large
-        # enough to allow the full marker plus EOS. A retained MiniMax-M2.7
-        # exact-source falsifier completed at 256 with the transport-level
-        # tool prohibition after truncating at 96.
-        "max_output_tokens": 256,
+        # enough to allow the full marker or schema-valid tool call plus EOS.
+        # A retained MiniMax-M2.7 warm-cache falsifier reached its correct
+        # closing XML just beyond the 256-token cap.
+        "max_output_tokens": 512,
         "temperature": 0.0,
         "top_p": 1.0,
         "top_k": 20,
@@ -3379,7 +3428,10 @@ def _run_response_observation(
             ),
         }
     )
-    summary["marker_ok"] = expected_marker in summary["output_text"]
+    summary["marker_ok"] = _exact_cache_marker_observed(
+        summary,
+        expected_marker,
+    )
     summary["terminal_ok"] = summary["terminal_events"] == [
         "response.completed"
     ]
@@ -4402,7 +4454,10 @@ def main() -> int:
                 ),
             }
         )
-        summary["marker_ok"] = summary["expected_marker"] in summary["output_text"]
+        summary["marker_ok"] = _exact_cache_marker_observed(
+            summary,
+            summary["expected_marker"],
+        )
         summary["terminal_ok"] = summary["terminal_events"] == ["response.completed"]
         rows.append(summary)
         print(

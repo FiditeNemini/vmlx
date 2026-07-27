@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER = 0
 UNCALIBRATED_AUTO_TQ_BITS = 4
 BONSAI_UNCALIBRATED_AUTO_TQ_BITS = 8
+MINIMAX_M2_UNCALIBRATED_AUTO_TQ_BITS = 8
 MIXED_SWA_AUTO_TQ_BITS = 4
 HY3_FULL_KV_AUTO_TQ_BITS = 4
 # Compatibility name retained for downstream tests/imports.  The safety rule is
@@ -65,6 +66,11 @@ def _is_bonsai_config(model_config: dict | None) -> bool:
         for candidate in candidates
         for field in identity_fields
     )
+
+
+def _is_minimax_m2_config(model_config: dict | None) -> bool:
+    """Identify MiniMax M2.x full-KV models requiring the q8 safety policy."""
+    return bool(_model_types(model_config) & {"minimax", "minimax_m2"})
 
 
 def _is_qwen_hybrid_attention_config(
@@ -119,12 +125,14 @@ def apply_uncalibrated_auto_tq_policy(
     use q4 stored attention KV. Full-KV Qwen uses q4 bulk layers with q8 first/
     last-six critical layers because uniform q4 failed live semantic restore and
     the narrower first/last-three boundary still had a strict-format miss.
-    Bonsai alone keeps q8 on every compatible KV layer because its repeated
-    agent-loop proof established that boundary. HY3's
-    plain full-KV runtime also uses q4. Cumulative SSM/GatedDelta companions
-    remain native and are never assigned fake TQ slots. A bundle-owned
-    calibrated ``turboquant`` block or explicit operator settings remain
-    authoritative.
+    Bonsai keeps q8 on every compatible KV layer because its repeated
+    agent-loop proof established that boundary. MiniMax M2.x also uses q8
+    throughout: an exact 16,763-token cold/bypass versus q4 L2-refault A/B
+    showed visible deterministic-output drift after an otherwise exact native
+    TQ page/disk round-trip. HY3's plain full-KV runtime continues to use q4.
+    Cumulative SSM/GatedDelta companions remain native and are never assigned
+    fake TQ slots. A bundle-owned calibrated ``turboquant`` block or explicit
+    operator settings remain authoritative.
     """
     resolved = dict(tq_cfg)
     from .hybrid_tq_cache import classify_qwen_cache_architecture
@@ -144,9 +152,12 @@ def apply_uncalibrated_auto_tq_policy(
         len(attention_layers) == len(layer_types)
     )
     bonsai = _is_bonsai_config(model_config)
+    minimax_m2 = _is_minimax_m2_config(model_config)
     storage_bits = (
         BONSAI_UNCALIBRATED_AUTO_TQ_BITS
         if bonsai
+        else MINIMAX_M2_UNCALIBRATED_AUTO_TQ_BITS
+        if minimax_m2
         else HY3_FULL_KV_AUTO_TQ_BITS
         if hy3_full_kv
         else UNCALIBRATED_AUTO_TQ_BITS
@@ -169,6 +180,8 @@ def apply_uncalibrated_auto_tq_policy(
         )
     elif hy3_full_kv:
         auto_policy = "hy3_full_kv_storage_tq4"
+    elif minimax_m2 and len(attention_layers) == len(layer_types):
+        auto_policy = "minimax_m2_full_kv_storage_tq8"
     elif len(attention_layers) == len(layer_types):
         auto_policy = "uncalibrated_full_kv_storage_tq4"
     else:

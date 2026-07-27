@@ -67,6 +67,10 @@ def _cache_scenario_request_controls() -> dict[str, Any]:
         "enable_thinking": False,
         "instructions": CACHE_SCENARIO_INSTRUCTIONS,
         "tools": [dict(tool) for tool in CACHE_SCENARIO_TOOLS],
+        # The stable schema must participate in the rendered cache identity,
+        # but this transport-only probe must not ask the model to execute it.
+        # Prompt text alone is not an API-level tool prohibition.
+        "tool_choice": "none",
     }
 
 
@@ -3261,7 +3265,8 @@ def _payload(
         # turn a healthy cache hit into response.incomplete. Keep the cap small
         # enough to preserve the transport-only nature of the probe, but large
         # enough to allow the full marker plus EOS. A retained MiniMax-M2.7
-        # exact-source falsifier completed at 256 after truncating at 96.
+        # exact-source falsifier completed at 256 with the transport-level
+        # tool prohibition after truncating at 96.
         "max_output_tokens": 256,
         "temperature": 0.0,
         "top_p": 1.0,

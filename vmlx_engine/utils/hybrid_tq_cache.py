@@ -214,8 +214,12 @@ def build_hybrid_turboquant_make_cache(
     path-dependent hybrid companion state keeps its original class and
     initialization contract.
     """
-    from .turboquant_config import install_turboquant_live_telemetry
+    from .turboquant_config import (
+        install_turboquant_batch_deepcopy,
+        install_turboquant_live_telemetry,
+    )
 
+    install_turboquant_batch_deepcopy()
     install_turboquant_live_telemetry()
     from jang_tools.turboquant.cache import TurboQuantKVCache
 

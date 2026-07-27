@@ -720,6 +720,81 @@ def test_turboquant_batch_cache_deepcopy_preserves_dtype_and_array_ownership():
     assert cache._idx == 1
 
 
+def test_hybrid_builder_installs_dtype_safe_batch_cache_deepcopy(monkeypatch):
+    """Selective hybrid TQ must install the same copy contract as full-KV TQ."""
+    import mlx.core as mx
+    from jang_tools.turboquant.cache import TurboQuantKVCache
+    from mlx_lm.generate import PromptProcessingBatch
+    from mlx_lm.models.cache import ArraysCache, KVCache
+
+    from vmlx_engine.utils.hybrid_tq_cache import (
+        build_hybrid_turboquant_make_cache,
+    )
+    from vmlx_engine.utils.turboquant_config import TurboQuantConfig
+
+    # Simulate a fresh engine process.  Before the regression fix the hybrid
+    # builder skipped this installer, so its first post-prefill batch split
+    # reached Python's default object copier and tried to pickle mlx.core.Dtype.
+    monkeypatch.delattr(TurboQuantKVCache, "__deepcopy__", raising=False)
+    monkeypatch.delattr(
+        TurboQuantKVCache, "_vmlx_batch_deepcopy_installed", raising=False
+    )
+
+    config = TurboQuantConfig(
+        n_layers=2,
+        default_key_bits=4,
+        default_value_bits=4,
+        critical_key_bits=4,
+        critical_value_bits=4,
+        critical_layers=[1],
+        sink_tokens=0,
+        seed=42,
+        compress_after=0,
+    )
+
+    def native_make_cache():
+        return [ArraysCache(size=2), KVCache()]
+
+    make_cache = build_hybrid_turboquant_make_cache(
+        native_make_cache,
+        config,
+        key_dim=8,
+        val_dim=8,
+        layer_types=["ssm", "attention"],
+    )
+    cache = make_cache()
+    ssm = cache[0]
+    tq = cache[1]
+    tq.prepare(left_padding=[0])
+    keys = mx.arange(8, dtype=mx.float16).reshape(1, 1, 1, 8)
+    values = (keys + 10).astype(mx.bfloat16)
+    tq.update_and_fetch(keys, values)
+
+    # Exercise the exact mlx-lm call site from the live failure, not just a
+    # standalone copy.  PromptProcessingBatch.split() invokes _copy(), which
+    # deep-copies the mixed prompt cache before filtering the old/new batches.
+    batch = PromptProcessingBatch.__new__(PromptProcessingBatch)
+    batch.model = object()
+    batch.uids = [1]
+    batch.prompt_cache = cache
+    batch.tokens = [[1]]
+    batch.prefill_step_size = 16
+    batch.samplers = [None]
+    batch.fallback_sampler = lambda logits: logits
+    batch.logits_processors = [[]]
+    batch.state_machines = [object()]
+    batch.max_tokens = [8]
+
+    clone = batch.split([0]).prompt_cache
+
+    assert clone[0] is not ssm
+    assert clone[1] is not tq
+    assert clone[1]._vmlx_tq_key_dtype == mx.float16
+    assert clone[1]._vmlx_tq_value_dtype == mx.bfloat16
+    assert clone[1].keys is not tq.keys
+    assert clone[1].values is not tq.values
+
+
 def test_native_cache_status_reports_hybrid_live_attention_tq():
     from vmlx_engine.server import _native_cache_status
 

@@ -387,7 +387,7 @@ describe("generated CDP expression syntax", () => {
       "utf8",
     );
     const preflightSource = readFileSync(
-      path.resolve("scripts/scoped-release-preflight-18.py"),
+      path.resolve("scripts/scoped-release-preflight-19.py"),
       "utf8",
     );
 
@@ -456,7 +456,7 @@ function ownedRunIntent(
     ui: "panel/scripts/live-real-ui-model-proof.mjs",
     api: "tests/cross_matrix/run_agentic_protocol_matrix.py",
     cache: "tests/cross_matrix/run_cache_hierarchy_live_gate.py",
-    semantic: "panel/scripts/scoped-release-preflight-18.py",
+    semantic: "panel/scripts/scoped-release-preflight-19.py",
   };
   const harnesses = Object.fromEntries(
     Object.entries(harnessPaths).map(([name, relativePath]) => {
@@ -572,7 +572,7 @@ function ownedRunIntent(
     bundle_fingerprint_sha256: "2".repeat(64),
   });
   const intent: Record<string, unknown> = {
-    schema: "vmlx-r18-owned-run-intent-v5",
+    schema: "vmlx-r19-owned-run-intent-v5",
     run_id: "run",
     nonce: "nonce",
     source_commit: "3".repeat(40),
@@ -1953,27 +1953,27 @@ describe("real UI model proof harness", () => {
     expect(
       viteRawRendererModulePath(
         "src/renderer/src/main.tsx",
-        "r18 proof/one",
+        "r19 proof/one",
       ),
     ).toBe(
-      `/@fs${panelRoot}/src/renderer/src/main.tsx?raw&vmlx_proof=r18%20proof%2Fone`,
+      `/@fs${panelRoot}/src/renderer/src/main.tsx?raw&vmlx_proof=r19%20proof%2Fone`,
     );
     expect(
       viteRawRendererModulePath(
         "src/renderer/src/components/chat/ReasoningBox.tsx",
-        "r18-two",
+        "r19-two",
       ),
     ).toBe(
-      `/@fs${panelRoot}/src/renderer/src/components/chat/ReasoningBox.tsx?raw&vmlx_proof=r18-two`,
+      `/@fs${panelRoot}/src/renderer/src/components/chat/ReasoningBox.tsx?raw&vmlx_proof=r19-two`,
     );
   });
 
   it("rejects renderer proof paths outside the served renderer root", () => {
-    expect(() => viteRawRendererModulePath("src/main.tsx", "r18")).toThrow(
+    expect(() => viteRawRendererModulePath("src/main.tsx", "r19")).toThrow(
       /outside the Vite renderer root/,
     );
     expect(() =>
-      viteRawRendererModulePath("src/renderer/../main.tsx", "r18"),
+      viteRawRendererModulePath("src/renderer/../main.tsx", "r19"),
     ).toThrow(/unsafe served path/);
   });
 
@@ -2347,7 +2347,7 @@ describe("real UI model proof harness", () => {
       },
       bundled_provenance_sha256: sha,
       bundled_provenance: {
-        vmlx: { commit: result.gitProvenance.after.commit, version: "1.6.18" },
+        vmlx: { commit: result.gitProvenance.after.commit, version: "1.6.19" },
       },
       bundled_source: {
         server_module_sha256: sha,
@@ -3129,7 +3129,7 @@ describe("real UI model proof harness", () => {
         nlink: 1,
         mode: 0o600,
         value: {
-          schema: "vmlx-r18-owned-ui-session-attestation-v5",
+          schema: "vmlx-r19-owned-ui-session-attestation-v5",
           run_id: options.runId,
           nonce: options.nonce,
           run_intent_sha256: options.runIntentSha256,
@@ -3191,7 +3191,7 @@ describe("real UI model proof harness", () => {
       nlink: 1,
       mode: 0o600,
       value: {
-        schema: "vmlx-r18-owned-ui-release-v5",
+        schema: "vmlx-r19-owned-ui-release-v5",
         run_id: "run",
         nonce: "nonce",
         session_id: "session",

@@ -28,17 +28,17 @@ const {
   runPinnedReleasePythonAction,
 } = require("./release-python-action.cjs");
 
-const R18_VERSION = "1.6.18";
-const R18_SCOPE = "r18_production";
-const R18_TEAM_ID = "55KGF2S5AY";
-const R18_CODESIGN_IDENTITY =
+const R19_VERSION = "1.6.19";
+const R19_SCOPE = "r19_production";
+const R19_TEAM_ID = "55KGF2S5AY";
+const R19_CODESIGN_IDENTITY =
   "Developer ID Application: ShieldStack LLC (55KGF2S5AY)";
 // electron-builder's CSC_NAME is a certificate selector, not the full
 // codesign Authority value. Newer electron-builder releases reject selectors
 // that include the "Developer ID Application:" certificate-type prefix.
-const R18_CSC_NAME = "ShieldStack LLC (55KGF2S5AY)";
-const R18_FIXED_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-const R18_RUNTIME_CONTRACTS = {
+const R19_CSC_NAME = "ShieldStack LLC (55KGF2S5AY)";
+const R19_FIXED_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+const R19_RUNTIME_CONTRACTS = {
   sequoia: {
     mlx_wheel_platform: "macosx_14_0_arm64",
     minimum_system_version: "14.5.0",
@@ -48,7 +48,7 @@ const R18_RUNTIME_CONTRACTS = {
     minimum_system_version: "26.0.0",
   },
 };
-const R18_PINNED_TOOL_NAMES = [
+const R19_PINNED_TOOL_NAMES = [
   "git",
   "node",
   "npm",
@@ -262,7 +262,7 @@ function wheelDistributionRecord(sitePackages, distribution, expectedPlatform) {
     .map((entry) => join(sitePackages, entry.name));
   if (candidates.length !== 1) {
     throw new Error(
-      `vMLX ${R18_VERSION} bundled runtime must contain one ${distribution} dist-info`,
+      `vMLX ${R19_VERSION} bundled runtime must contain one ${distribution} dist-info`,
     );
   }
   const distInfo = candidates[0];
@@ -296,7 +296,7 @@ function wheelDistributionRecord(sitePackages, distribution, expectedPlatform) {
     !platforms.has(expectedPlatform)
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} bundled ${distribution} wheel identity is not ${expectedPlatform}`,
+      `vMLX ${R19_VERSION} bundled ${distribution} wheel identity is not ${expectedPlatform}`,
     );
   }
   return {
@@ -309,10 +309,10 @@ function wheelDistributionRecord(sitePackages, distribution, expectedPlatform) {
   };
 }
 
-function inspectBundleRuntimeContract(bundleRoot, flavor, version = R18_VERSION) {
-  const expected = R18_RUNTIME_CONTRACTS[flavor];
+function inspectBundleRuntimeContract(bundleRoot, flavor, version = R19_VERSION) {
+  const expected = R19_RUNTIME_CONTRACTS[flavor];
   if (!expected) {
-    throw new Error(`vMLX ${R18_VERSION} unsupported runtime flavor ${flavor}`);
+    throw new Error(`vMLX ${R19_VERSION} unsupported runtime flavor ${flavor}`);
   }
   const pythonLib = join(bundleRoot, "python", "lib");
   const siteCandidates = readdirSync(pythonLib, { withFileTypes: true })
@@ -326,7 +326,7 @@ function inspectBundleRuntimeContract(bundleRoot, flavor, version = R18_VERSION)
     .map((entry) => join(pythonLib, entry.name, "site-packages"));
   if (siteCandidates.length !== 1) {
     throw new Error(
-      `vMLX ${R18_VERSION} ${flavor} runtime must contain one site-packages`,
+      `vMLX ${R19_VERSION} ${flavor} runtime must contain one site-packages`,
     );
   }
   const provenancePath = join(bundleRoot, "vmlx-bundle-provenance.json");
@@ -344,7 +344,7 @@ function inspectBundleRuntimeContract(bundleRoot, flavor, version = R18_VERSION)
     provenance.mlx_wheel_platform !== expected.mlx_wheel_platform
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} ${flavor} bundle provenance is invalid`,
+      `vMLX ${R19_VERSION} ${flavor} bundle provenance is invalid`,
     );
   }
   const distributions = {
@@ -361,7 +361,7 @@ function inspectBundleRuntimeContract(bundleRoot, flavor, version = R18_VERSION)
   };
   if (distributions.mlx.version !== distributions["mlx-metal"].version) {
     throw new Error(
-      `vMLX ${R18_VERSION} ${flavor} mlx wheel versions differ`,
+      `vMLX ${R19_VERSION} ${flavor} mlx wheel versions differ`,
     );
   }
   return {
@@ -376,7 +376,7 @@ function inspectBundleRuntimeContract(bundleRoot, flavor, version = R18_VERSION)
 }
 
 function inspectAppRuntimeContract(app, flavor) {
-  const expected = R18_RUNTIME_CONTRACTS[flavor];
+  const expected = R19_RUNTIME_CONTRACTS[flavor];
   const infoPath = join(app, "Contents", "Info.plist");
   const infoIdentity = fileIdentity(infoPath);
   const info = readFileSync(infoPath, "utf8");
@@ -390,12 +390,12 @@ function inspectAppRuntimeContract(app, flavor) {
   if (
     !expected ||
     plistString("CFBundleIdentifier") !== "net.vmlx.app" ||
-    plistString("CFBundleShortVersionString") !== R18_VERSION ||
-    plistString("CFBundleVersion") !== R18_VERSION ||
+    plistString("CFBundleShortVersionString") !== R19_VERSION ||
+    plistString("CFBundleVersion") !== R19_VERSION ||
     plistString("LSMinimumSystemVersion") !== expected.minimum_system_version
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} ${flavor} app identity/version/minimum-system contract is not exact`,
+      `vMLX ${R19_VERSION} ${flavor} app identity/version/minimum-system contract is not exact`,
     );
   }
   return {
@@ -408,7 +408,7 @@ function inspectAppRuntimeContract(app, flavor) {
 }
 
 function validatePlanBundleRuntime(plan) {
-  const expected = R18_RUNTIME_CONTRACTS[plan.current_flavor];
+  const expected = R19_RUNTIME_CONTRACTS[plan.current_flavor];
   if (
     !expected ||
     !exactObjectKeys(plan.flavor_contract, [
@@ -420,22 +420,22 @@ function validatePlanBundleRuntime(plan) {
     !/^[0-9a-f]{64}$/.test(plan.bundle_runtime.sha256 || "")
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} release plan runtime contract is invalid`,
+      `vMLX ${R19_VERSION} release plan runtime contract is invalid`,
     );
   }
   const boundRuntime = readBoundJson(
     plan.bundle_runtime.path,
     plan.bundle_runtime.sha256,
-    `vMLX ${R18_VERSION} sealed bundle runtime`,
+    `vMLX ${R19_VERSION} sealed bundle runtime`,
   );
   const record = boundRuntime.record;
   const payload = boundRuntime.value;
   if (
     record.sha256 !== plan.bundle_runtime.sha256 ||
     payload?.schema_version !== 1 ||
-    payload?.scope !== R18_SCOPE ||
+    payload?.scope !== R19_SCOPE ||
     payload?.stage !== "bundle_runtime" ||
-    payload?.version !== R18_VERSION ||
+    payload?.version !== R19_VERSION ||
     payload?.flavor !== plan.current_flavor ||
     payload?.source?.commit !== plan.source_commit ||
     payload?.source?.tree !== plan.source_tree ||
@@ -446,7 +446,7 @@ function validatePlanBundleRuntime(plan) {
       })
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} sealed bundle runtime does not match the release plan`,
+      `vMLX ${R19_VERSION} sealed bundle runtime does not match the release plan`,
     );
   }
   return payload;
@@ -454,18 +454,18 @@ function validatePlanBundleRuntime(plan) {
 
 function verifyPinnedToolchain(plan) {
   if (
-    plan.fixed_path !== R18_FIXED_PATH ||
+    plan.fixed_path !== R19_FIXED_PATH ||
     process.env.PATH !== plan.fixed_path ||
-    process.env.VMLX_R18_FIXED_PATH !== plan.fixed_path ||
+    process.env.VMLX_R19_FIXED_PATH !== plan.fixed_path ||
     !plan.tools ||
     Object.keys(plan.tools).sort().join(",") !==
-      [...R18_PINNED_TOOL_NAMES].sort().join(",")
+      [...R19_PINNED_TOOL_NAMES].sort().join(",")
   ) {
-    throw new Error(`vMLX ${R18_VERSION} release toolchain or fixed PATH changed`);
+    throw new Error(`vMLX ${R19_VERSION} release toolchain or fixed PATH changed`);
   }
-  for (const name of R18_PINNED_TOOL_NAMES) {
+  for (const name of R19_PINNED_TOOL_NAMES) {
     const tool = plan.tools[name];
-    const envPrefix = `VMLX_R18_TOOL_${name.toUpperCase()}`;
+    const envPrefix = `VMLX_R19_TOOL_${name.toUpperCase()}`;
     if (
       !tool ||
       process.env[`${envPrefix}_PATH`] !== tool.path ||
@@ -476,7 +476,7 @@ function verifyPinnedToolchain(plan) {
       fileIdentity(tool.realpath, false).sha256 !== tool.sha256 ||
       (statSync(tool.realpath).mode & 0o111) === 0
     ) {
-      throw new Error(`vMLX ${R18_VERSION} pinned ${name} identity changed`);
+      throw new Error(`vMLX ${R19_VERSION} pinned ${name} identity changed`);
     }
   }
   return true;
@@ -484,13 +484,13 @@ function verifyPinnedToolchain(plan) {
 
 function readBoundReleasePlanForAction(panelDir, expectedPlanSha256) {
   const rootDir = resolve(panelDir, "..");
-  const planPath = join(rootDir, "build", "r18-release-driver-plan.json");
-  requireExactEnv("VMLX_R18_RELEASE_PLAN", planPath);
-  requireExactEnv("VMLX_R18_RELEASE_PLAN_SHA256", expectedPlanSha256);
+  const planPath = join(rootDir, "build", "r19-release-driver-plan.json");
+  requireExactEnv("VMLX_R19_RELEASE_PLAN", planPath);
+  requireExactEnv("VMLX_R19_RELEASE_PLAN_SHA256", expectedPlanSha256);
   const bound = readBoundJson(
     planPath,
     expectedPlanSha256,
-    `vMLX ${R18_VERSION} release-driver plan`,
+    `vMLX ${R19_VERSION} release-driver plan`,
   );
   verifyPinnedToolchain(bound.value);
   return { ...bound, planPath };
@@ -520,7 +520,7 @@ function runPlanToolAction(
   };
   const command = actionCommands[action];
   if (!command) {
-    throw new Error(`unsupported vMLX ${R18_VERSION} pinned-tool action: ${action}`);
+    throw new Error(`unsupported vMLX ${R19_VERSION} pinned-tool action: ${action}`);
   }
 
   let proc;
@@ -541,7 +541,7 @@ function runPlanToolAction(
       before.record.sha256 !== after.record.sha256
     ) {
       throw new Error(
-        `vMLX ${R18_VERSION} release-driver plan identity changed across pinned-tool action`,
+        `vMLX ${R19_VERSION} release-driver plan identity changed across pinned-tool action`,
       );
     }
   }
@@ -551,7 +551,7 @@ function runPlanToolAction(
   }
   if (!proc || proc.status !== 0) {
     throw new Error(
-      `vMLX ${R18_VERSION} pinned-tool action ${action} failed with exit ${
+      `vMLX ${R19_VERSION} pinned-tool action ${action} failed with exit ${
         proc ? proc.status : "unknown"
       }: ${proc && proc.stderr ? proc.stderr.trim() : ""}`,
     );
@@ -670,41 +670,41 @@ function requireExactEnv(name, expected) {
   const actual = process.env[name];
   if (actual !== expected) {
     throw new Error(
-      `vMLX ${R18_VERSION} packaging requires ${name}=${expected}`,
+      `vMLX ${R19_VERSION} packaging requires ${name}=${expected}`,
     );
   }
 }
 
-function verifyR18ReleasePlan(
+function verifyR19ReleasePlan(
   rootDir,
   manifestSha256,
   sourceCommit,
   sourceTree,
   context,
 ) {
-  const planPath = join(rootDir, "build", "r18-release-driver-plan.json");
-  requireExactEnv("VMLX_R18_RELEASE_PLAN", planPath);
-  const expectedPlanHash = process.env.VMLX_R18_RELEASE_PLAN_SHA256;
+  const planPath = join(rootDir, "build", "r19-release-driver-plan.json");
+  requireExactEnv("VMLX_R19_RELEASE_PLAN", planPath);
+  const expectedPlanHash = process.env.VMLX_R19_RELEASE_PLAN_SHA256;
   if (!expectedPlanHash || !/^[0-9a-f]{64}$/.test(expectedPlanHash)) {
     throw new Error(
-      `vMLX ${R18_VERSION} packaging requires a hashed release-driver plan`,
+      `vMLX ${R19_VERSION} packaging requires a hashed release-driver plan`,
     );
   }
   const boundPlan = readBoundJson(
     planPath,
     expectedPlanHash,
-    `vMLX ${R18_VERSION} release-driver plan`,
+    `vMLX ${R19_VERSION} release-driver plan`,
   );
   const plan = boundPlan.value;
-  const driverPid = Number(process.env.VMLX_R18_RELEASE_DRIVER_PID);
+  const driverPid = Number(process.env.VMLX_R19_RELEASE_DRIVER_PID);
   const expectedArtifact = resolve(
-    process.env.VMLX_R18_RELEASE_EXPECTED_ARTIFACT || "",
+    process.env.VMLX_R19_RELEASE_EXPECTED_ARTIFACT || "",
   );
-  const expectedFlavor = process.env.VMLX_R18_RELEASE_CURRENT_FLAVOR;
-  const expectedPhase = process.env.VMLX_R18_RELEASE_PHASE;
-  const expectedNonce = process.env.VMLX_R18_RELEASE_DRIVER_NONCE;
+  const expectedFlavor = process.env.VMLX_R19_RELEASE_CURRENT_FLAVOR;
+  const expectedPhase = process.env.VMLX_R19_RELEASE_PHASE;
+  const expectedNonce = process.env.VMLX_R19_RELEASE_DRIVER_NONCE;
   const hookDirectory = resolve(
-    process.env.VMLX_R18_HOOK_ATTESTATION_DIR || "",
+    process.env.VMLX_R19_HOOK_ATTESTATION_DIR || "",
   );
   const expectedStagedApp =
     expectedPhase === "stage"
@@ -723,13 +723,13 @@ function verifyR18ReleasePlan(
     hookDirectory,
     `${expectedFlavor}.bundle-runtime.json`,
   );
-  requireExactEnv("VMLX_R18_RELEASE_REQUESTED_FLAVOR", "all");
+  requireExactEnv("VMLX_R19_RELEASE_REQUESTED_FLAVOR", "all");
   if (
     !Number.isSafeInteger(driverPid) ||
     driverPid <= 1 ||
     plan.schema_version !== 3 ||
-    plan.scope !== R18_SCOPE ||
-    plan.version !== R18_VERSION ||
+    plan.scope !== R19_SCOPE ||
+    plan.version !== R19_VERSION ||
     plan.source_commit !== sourceCommit ||
     plan.source_tree !== sourceTree ||
     plan.manifest_sha256 !== manifestSha256 ||
@@ -747,7 +747,7 @@ function verifyR18ReleasePlan(
     !/^[0-9a-f]{64}$/.test(plan.nonce || "")
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} release-driver plan does not match this artifact phase`,
+      `vMLX ${R19_VERSION} release-driver plan does not match this artifact phase`,
     );
   }
   verifyPinnedToolchain(plan);
@@ -755,7 +755,7 @@ function verifyR18ReleasePlan(
   try {
     process.kill(driverPid, 0);
   } catch {
-    throw new Error(`vMLX ${R18_VERSION} release-driver process is not active`);
+    throw new Error(`vMLX ${R19_VERSION} release-driver process is not active`);
   }
 
   const isPackContext =
@@ -790,7 +790,7 @@ function verifyR18ReleasePlan(
   ].filter(Boolean);
   if (matchedContextKinds.length !== 1) {
     throw new Error(
-      `vMLX ${R18_VERSION} release-driver received an unrecognized or ambiguous electron-builder hook context`,
+      `vMLX ${R19_VERSION} release-driver received an unrecognized or ambiguous electron-builder hook context`,
     );
   }
 
@@ -800,7 +800,7 @@ function verifyR18ReleasePlan(
       resolve(context.outDir) !== expectedArtifact
     ) {
       throw new Error(
-        `vMLX ${R18_VERSION} app staging is outside the release-driver plan`,
+        `vMLX ${R19_VERSION} app staging is outside the release-driver plan`,
       );
     }
   } else if (matchedContextKinds[0] === "artifactBuildStarted") {
@@ -810,7 +810,7 @@ function verifyR18ReleasePlan(
       resolve(context.file) !== expectedArtifact
     ) {
       throw new Error(
-        `vMLX ${R18_VERSION} artifact build is outside the release-driver plan`,
+        `vMLX ${R19_VERSION} artifact build is outside the release-driver plan`,
       );
     }
   } else {
@@ -818,7 +818,7 @@ function verifyR18ReleasePlan(
       expectedPhase === "stage" ? expectedArtifact : dirname(expectedArtifact);
     if (resolve(context.outDir) !== expectedOutDir) {
       throw new Error(
-        `vMLX ${R18_VERSION} completed output directory is outside the release-driver plan`,
+        `vMLX ${R19_VERSION} completed output directory is outside the release-driver plan`,
       );
     }
     assertExactResolvedPathSet(
@@ -826,21 +826,21 @@ function verifyR18ReleasePlan(
       expectedPhase === "stage"
         ? []
         : [expectedArtifact, `${expectedArtifact}.blockmap`],
-      `vMLX ${R18_VERSION} completed artifacts do not exactly match the release-driver plan`,
+      `vMLX ${R19_VERSION} completed artifacts do not exactly match the release-driver plan`,
     );
   }
 
   return plan;
 }
 
-function emitR18CompletionAttestation(panelDir, plan, planSha256) {
+function emitR19CompletionAttestation(panelDir, plan, planSha256) {
   if (plan.phase !== "dmg") {
     return null;
   }
   const outputPath = resolve(plan.hook_attestation);
   const outputDirectory = dirname(outputPath);
   const configuredDirectory = resolve(
-    process.env.VMLX_R18_HOOK_ATTESTATION_DIR || "",
+    process.env.VMLX_R19_HOOK_ATTESTATION_DIR || "",
   );
   if (
     outputDirectory !== configuredDirectory ||
@@ -850,7 +850,7 @@ function emitR18CompletionAttestation(panelDir, plan, planSha256) {
     (statSync(outputDirectory).mode & 0o077) !== 0
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} hook attestation output is reused or not private`,
+      `vMLX ${R19_VERSION} hook attestation output is reused or not private`,
     );
   }
   const app = resolve(plan.staged_app);
@@ -861,7 +861,7 @@ function emitR18CompletionAttestation(panelDir, plan, planSha256) {
     lstatSync(app).isSymbolicLink() ||
     !existsSync(join(app, "Contents", "Resources", "app.asar"))
   ) {
-    throw new Error(`vMLX ${R18_VERSION} staged application is missing or wrong`);
+    throw new Error(`vMLX ${R19_VERSION} staged application is missing or wrong`);
   }
   const extracted = mkdtempSync(
     join(outputDirectory, `.${plan.current_flavor}.asar.`),
@@ -886,14 +886,14 @@ function emitR18CompletionAttestation(panelDir, plan, planSha256) {
       canonicalJson(bundleRuntime.runtime_contract)
     ) {
       throw new Error(
-        `vMLX ${R18_VERSION} staged runtime differs from sealed bundle provenance`,
+        `vMLX ${R19_VERSION} staged runtime differs from sealed bundle provenance`,
       );
     }
     const payload = {
       schema_version: 1,
-      scope: R18_SCOPE,
+      scope: R19_SCOPE,
       stage: "electron_builder_completion",
-      version: R18_VERSION,
+      version: R19_VERSION,
       flavor: plan.current_flavor,
       source: {
         commit: plan.source_commit,
@@ -901,7 +901,7 @@ function emitR18CompletionAttestation(panelDir, plan, planSha256) {
       },
       preflight_sha256: plan.manifest_sha256,
       plan: {
-        path: resolve(process.env.VMLX_R18_RELEASE_PLAN || ""),
+        path: resolve(process.env.VMLX_R19_RELEASE_PLAN || ""),
         sha256: planSha256,
         nonce: plan.nonce,
         driver_pid: plan.driver_pid,
@@ -931,72 +931,72 @@ function emitR18CompletionAttestation(panelDir, plan, planSha256) {
   }
 }
 
-function verifyR18PackagingContext(panelDir, context) {
+function verifyR19PackagingContext(panelDir, context) {
   const packagePath = join(panelDir, "package.json");
   if (!existsSync(packagePath)) {
     throw new Error(`Missing package metadata: ${packagePath}`);
   }
   const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
-  if (packageJson.version !== R18_VERSION) {
+  if (packageJson.version !== R19_VERSION) {
     if (
-      process.env.VMLX_RELEASE_SCOPE === R18_SCOPE ||
-      process.env.VMLINUX_RELEASE_SCOPE === R18_SCOPE ||
-      process.env.VMLX_R18_OFFICIAL_PACKAGING === "1"
+      process.env.VMLX_RELEASE_SCOPE === R19_SCOPE ||
+      process.env.VMLINUX_RELEASE_SCOPE === R19_SCOPE ||
+      process.env.VMLX_R19_OFFICIAL_PACKAGING === "1"
     ) {
       throw new Error(
-        `VMLX_RELEASE_SCOPE=${R18_SCOPE} requires package version ${R18_VERSION}, found ${packageJson.version}`,
+        `VMLX_RELEASE_SCOPE=${R19_SCOPE} requires package version ${R19_VERSION}, found ${packageJson.version}`,
       );
     }
     return { guarded: false, version: packageJson.version };
   }
 
   const rootDir = resolve(panelDir, "..");
-  requireExactEnv("VMLX_RELEASE_SCOPE", R18_SCOPE);
-  requireExactEnv("VMLX_R18_OFFICIAL_PACKAGING", "1");
-  requireExactEnv("VMLX_R18_EXPECTED_TEAM_ID", R18_TEAM_ID);
-  requireExactEnv("VMLX_R18_EXPECTED_CODESIGN_IDENTITY", R18_CODESIGN_IDENTITY);
-  requireExactEnv("CSC_NAME", R18_CSC_NAME);
+  requireExactEnv("VMLX_RELEASE_SCOPE", R19_SCOPE);
+  requireExactEnv("VMLX_R19_OFFICIAL_PACKAGING", "1");
+  requireExactEnv("VMLX_R19_EXPECTED_TEAM_ID", R19_TEAM_ID);
+  requireExactEnv("VMLX_R19_EXPECTED_CODESIGN_IDENTITY", R19_CODESIGN_IDENTITY);
+  requireExactEnv("CSC_NAME", R19_CSC_NAME);
 
   const configuredTeam = packageJson?.build?.mac?.notarize?.teamId;
-  if (configuredTeam !== R18_TEAM_ID) {
+  if (configuredTeam !== R19_TEAM_ID) {
     throw new Error(
-      `vMLX ${R18_VERSION} package notarization team must be ${R18_TEAM_ID}`,
+      `vMLX ${R19_VERSION} package notarization team must be ${R19_TEAM_ID}`,
     );
   }
 
-  const manifestPathRaw = process.env.VMLX_R18_PREPACKAGE_MANIFEST;
-  const expectedManifestHash = process.env.VMLX_R18_PREPACKAGE_MANIFEST_SHA256;
+  const manifestPathRaw = process.env.VMLX_R19_PREPACKAGE_MANIFEST;
+  const expectedManifestHash = process.env.VMLX_R19_PREPACKAGE_MANIFEST_SHA256;
   if (!manifestPathRaw || !expectedManifestHash) {
     throw new Error(
-      `vMLX ${R18_VERSION} packaging requires the official prepackage manifest and SHA-256`,
+      `vMLX ${R19_VERSION} packaging requires the official prepackage manifest and SHA-256`,
     );
   }
   const manifestPath = resolve(manifestPathRaw);
   const boundManifest = readBoundJson(
     manifestPath,
     expectedManifestHash,
-    `vMLX ${R18_VERSION} prepackage manifest`,
+    `vMLX ${R19_VERSION} prepackage manifest`,
   );
   const actualManifestHash = boundManifest.record.sha256;
   const manifest = boundManifest.value;
   if (
     manifest.status !== "pass" ||
-    manifest.scope !== R18_SCOPE ||
-    manifest.version !== R18_VERSION
+    manifest.scope !== R19_SCOPE ||
+    manifest.version !== R19_VERSION
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} prepackage manifest is not a passing ${R18_SCOPE} manifest`,
+      `vMLX ${R19_VERSION} prepackage manifest is not a passing ${R19_SCOPE} manifest`,
     );
   }
 
-  const plan = verifyR18ReleasePlan(
+  const plan = verifyR19ReleasePlan(
     rootDir,
     actualManifestHash,
     manifest?.source?.commit,
     manifest?.source?.tree,
     context,
   );
-  const planSha256 = process.env.VMLX_R18_RELEASE_PLAN_SHA256;
+  const planSha256 = process.env.VMLX_R19_RELEASE_PLAN_SHA256;
   const runPinnedGit = (args) =>
     runPlanToolAction(panelDir, planSha256, "git", args, {
       cwd: rootDir,
@@ -1013,18 +1013,18 @@ function verifyR18PackagingContext(panelDir, context) {
   ]);
   if (manifest?.source?.commit !== head || manifest?.source?.tree !== tree) {
     throw new Error(
-      `vMLX ${R18_VERSION} prepackage manifest is not bound to the packaging source`,
+      `vMLX ${R19_VERSION} prepackage manifest is not bound to the packaging source`,
     );
   }
   if (dirty) {
     throw new Error(
-      `vMLX ${R18_VERSION} packaging source has uncommitted or untracked files`,
+      `vMLX ${R19_VERSION} packaging source has uncommitted or untracked files`,
     );
   }
   const upstream = runPinnedGit(["-C", rootDir, "rev-parse", "@{upstream}"]);
   if (upstream !== head || manifest?.source?.upstream_commit !== upstream) {
     throw new Error(
-      `vMLX ${R18_VERSION} packaging source is not the attested pushed revision`,
+      `vMLX ${R19_VERSION} packaging source is not the attested pushed revision`,
     );
   }
   const origin = runPinnedGit(["-C", rootDir, "remote", "get-url", "origin"]);
@@ -1034,7 +1034,7 @@ function verifyR18PackagingContext(panelDir, context) {
     manifest?.source?.remote_identity !== originIdentity
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} packaging source is not the canonical HTTPS/SSH repository`,
+      `vMLX ${R19_VERSION} packaging source is not the canonical HTTPS/SSH repository`,
     );
   }
   const remoteMainOutput = runPinnedGit([
@@ -1051,11 +1051,11 @@ function verifyR18PackagingContext(panelDir, context) {
     manifest?.source?.remote_main_commit !== remoteMain
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} packaging source is not the live canonical main revision`,
+      `vMLX ${R19_VERSION} packaging source is not the live canonical main revision`,
     );
   }
   const authoritativePython = join(rootDir, ".venv", "bin", "python");
-  requireExactEnv("VMLX_R18_RELEASE_PYTHON", authoritativePython);
+  requireExactEnv("VMLX_R19_RELEASE_PYTHON", authoritativePython);
   if (!existsSync(authoritativePython)) {
     throw new Error(
       `Missing authoritative release Python: ${authoritativePython}`,
@@ -1083,7 +1083,7 @@ function verifyR18PackagingContext(panelDir, context) {
     "}))",
   ].join("\n");
   const probe = JSON.parse(
-    runR18ReleasePythonAction(["-I", "-c", probeSource], {
+    runR19ReleasePythonAction(["-I", "-c", probeSource], {
       cwd: rootDir,
       capture: true,
     }),
@@ -1100,21 +1100,21 @@ function verifyR18PackagingContext(panelDir, context) {
     resolve(probe.server_path) !== expectedServer
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} release Python does not import the packaging source`,
+      `vMLX ${R19_VERSION} release Python does not import the packaging source`,
     );
   }
   const initHash = sha256File(expectedInit);
   const serverHash = sha256File(expectedServer);
   if (
-    process.env.VMLX_R18_RELEASE_PYTHON_EXECUTABLE_SHA256 !==
+    process.env.VMLX_R19_RELEASE_PYTHON_EXECUTABLE_SHA256 !==
       pythonPlan.source.sha256 ||
-    process.env.VMLX_R18_RELEASE_PYTHON_PYVENV_SHA256 !==
+    process.env.VMLX_R19_RELEASE_PYTHON_PYVENV_SHA256 !==
       pythonPlan.pyvenv.sha256 ||
-    process.env.VMLX_R18_RELEASE_PYTHON_INIT_SHA256 !== initHash ||
-    process.env.VMLX_R18_RELEASE_PYTHON_SERVER_SHA256 !== serverHash
+    process.env.VMLX_R19_RELEASE_PYTHON_INIT_SHA256 !== initHash ||
+    process.env.VMLX_R19_RELEASE_PYTHON_SERVER_SHA256 !== serverHash
   ) {
     throw new Error(
-      `vMLX ${R18_VERSION} release Python source hashes do not match`,
+      `vMLX ${R19_VERSION} release Python source hashes do not match`,
     );
   }
 
@@ -1139,16 +1139,16 @@ function verifyR18PackagingContext(panelDir, context) {
       canonicalJson(sealedBundle.runtime_contract)
     ) {
       throw new Error(
-        `vMLX ${R18_VERSION} staged runtime differs from sealed bundle provenance`,
+        `vMLX ${R19_VERSION} staged runtime differs from sealed bundle provenance`,
       );
     }
   }
   const completionAttestation =
     isBuildResult && plan.phase === "dmg"
-      ? emitR18CompletionAttestation(
+      ? emitR19CompletionAttestation(
           panelDir,
           plan,
-          process.env.VMLX_R18_RELEASE_PLAN_SHA256,
+          process.env.VMLX_R19_RELEASE_PLAN_SHA256,
         )
       : null;
 
@@ -1167,7 +1167,7 @@ function verifyR18PackagingContext(panelDir, context) {
   };
 }
 
-function runR18ReleasePythonAction(args, options = {}) {
+function runR19ReleasePythonAction(args, options = {}) {
   return runPinnedReleasePythonAction(args, options);
 }
 
@@ -1182,7 +1182,7 @@ async function beforePack(context) {
     : process.cwd();
 
   const packaging = isElectronBuilderPack
-    ? verifyR18PackagingContext(panelDir, context)
+    ? verifyR19PackagingContext(panelDir, context)
     : { guarded: false };
 
   const verifyScript = join(panelDir, "scripts", "verify-bundled-python.sh");
@@ -1205,7 +1205,7 @@ async function beforePack(context) {
   if (packaging.guarded) {
     runPlanToolAction(
       panelDir,
-      process.env.VMLX_R18_RELEASE_PLAN_SHA256,
+      process.env.VMLX_R19_RELEASE_PLAN_SHA256,
       "npx",
       ["--no-install", "electron-vite", "build"],
       { cwd: panelDir },
@@ -1223,17 +1223,17 @@ module.exports = beforePack;
 module.exports.assertExactResolvedPathSet = assertExactResolvedPathSet;
 module.exports.canonicalGitHubRepo = canonicalGitHubRepo;
 module.exports.verifyExactDmgDirectory = verifyExactDmgDirectory;
-module.exports.verifyR18ReleasePlan = verifyR18ReleasePlan;
-module.exports.verifyR18PackagingContext = verifyR18PackagingContext;
+module.exports.verifyR19ReleasePlan = verifyR19ReleasePlan;
+module.exports.verifyR19PackagingContext = verifyR19PackagingContext;
 module.exports.verifyPinnedToolchain = verifyPinnedToolchain;
 module.exports.runPlanToolAction = runPlanToolAction;
 module.exports.inspectBundleRuntimeContract = inspectBundleRuntimeContract;
 module.exports.inspectAppRuntimeContract = inspectAppRuntimeContract;
-module.exports.emitR18CompletionAttestation = emitR18CompletionAttestation;
-module.exports.runR18ReleasePythonAction = runR18ReleasePythonAction;
+module.exports.emitR19CompletionAttestation = emitR19CompletionAttestation;
+module.exports.runR19ReleasePythonAction = runR19ReleasePythonAction;
 module.exports.treePayload = treePayload;
-module.exports.R18_CODESIGN_IDENTITY = R18_CODESIGN_IDENTITY;
-module.exports.R18_TEAM_ID = R18_TEAM_ID;
+module.exports.R19_CODESIGN_IDENTITY = R19_CODESIGN_IDENTITY;
+module.exports.R19_TEAM_ID = R19_TEAM_ID;
 
 if (require.main === module) {
   beforePack().catch((error) => {

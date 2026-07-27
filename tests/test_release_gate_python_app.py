@@ -950,7 +950,7 @@ def test_electron_builder_before_pack_hook_rejects_skip_vite_in_pack_context(tmp
     assert "only allowed for direct hook smoke tests" in proc.stderr
 
 
-def test_electron_builder_before_pack_rejects_direct_r18_packaging_before_verifier(
+def test_electron_builder_before_pack_rejects_direct_r19_packaging_before_verifier(
     tmp_path,
 ):
     scripts = tmp_path / "scripts"
@@ -958,7 +958,7 @@ def test_electron_builder_before_pack_rejects_direct_r18_packaging_before_verifi
     (tmp_path / "package.json").write_text(
         json.dumps(
             {
-                "version": "1.6.18",
+                "version": "1.6.19",
                 "build": {
                     "mac": {
                         "notarize": {
@@ -987,9 +987,9 @@ def test_electron_builder_before_pack_rejects_direct_r18_packaging_before_verifi
     env = dict(os.environ)
     for name in (
         "VMLX_RELEASE_SCOPE",
-        "VMLX_R18_OFFICIAL_PACKAGING",
-        "VMLX_R18_EXPECTED_TEAM_ID",
-        "VMLX_R18_EXPECTED_CODESIGN_IDENTITY",
+        "VMLX_R19_OFFICIAL_PACKAGING",
+        "VMLX_R19_EXPECTED_TEAM_ID",
+        "VMLX_R19_EXPECTED_CODESIGN_IDENTITY",
         "CSC_NAME",
     ):
         env.pop(name, None)
@@ -1003,11 +1003,11 @@ def test_electron_builder_before_pack_rejects_direct_r18_packaging_before_verifi
     )
 
     assert proc.returncode == 3
-    assert "requires VMLX_RELEASE_SCOPE=r18_production" in proc.stderr
+    assert "requires VMLX_RELEASE_SCOPE=r19_production" in proc.stderr
     assert not (tmp_path / "verify-ran").exists()
 
 
-def test_r18_release_builder_rejects_single_flavor_python_override_and_wrong_team(
+def test_r19_release_builder_rejects_single_flavor_python_override_and_wrong_team(
     tmp_path,
 ):
     panel = tmp_path / "panel"
@@ -1033,7 +1033,7 @@ def test_r18_release_builder_rejects_single_flavor_python_override_and_wrong_tea
     (panel / "package.json").write_text(
         json.dumps(
             {
-                "version": "1.6.18",
+                "version": "1.6.19",
                 "build": {
                     "mac": {
                         "notarize": {
@@ -1057,7 +1057,7 @@ def test_r18_release_builder_rejects_single_flavor_python_override_and_wrong_tea
         "CSC_NAME",
     ):
         base_env.pop(name, None)
-    base_env["VMLX_RELEASE_SCOPE"] = "r18_production"
+    base_env["VMLX_RELEASE_SCOPE"] = "r19_production"
 
     single = subprocess.run(
         [str(builder), "sequoia"],
@@ -1124,7 +1124,7 @@ def test_r18_release_builder_rejects_single_flavor_python_override_and_wrong_tea
     )
     assert wrong_version.returncode == 1
     assert (
-        "VMLX_RELEASE_SCOPE=r18_production requires package version 1.6.18"
+        "VMLX_RELEASE_SCOPE=r19_production requires package version 1.6.19"
         in wrong_version.stderr
     )
     generic_wrong_version = subprocess.run(
@@ -1141,7 +1141,7 @@ def test_r18_release_builder_rejects_single_flavor_python_override_and_wrong_tea
         in generic_wrong_version.stderr
     )
 
-    package["version"] = "1.6.18"
+    package["version"] = "1.6.19"
     (panel / "package.json").write_text(json.dumps(package), encoding="utf-8")
     release_python.unlink()
     release_python.symlink_to(sys._base_executable)

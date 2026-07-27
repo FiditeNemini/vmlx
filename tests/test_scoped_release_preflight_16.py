@@ -42,6 +42,6 @@ def test_build_release_dmgs_exposes_r16_parser_cache_scope() -> None:
     assert "r16_parser_cache)" in source
     assert "panel/scripts/scoped-release-preflight-16.py" in source
     assert (
-        "Supported scoped release values: r18_production, r17_consolidation, "
+        "Supported scoped release values: r19_production, r17_consolidation, "
         "r16_parser_cache, mm3_gemma_vl, codex_ui_only"
     ) in source

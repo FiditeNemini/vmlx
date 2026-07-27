@@ -197,7 +197,7 @@ describe('i18n locale consistency', () => {
       'utf8',
     )
     const preflight = readFileSync(
-      resolve(__dirname, '..', 'scripts', 'scoped-release-preflight-18.py'),
+      resolve(__dirname, '..', 'scripts', 'scoped-release-preflight-19.py'),
       'utf8',
     )
     expect(Object.keys(flat.en)).toContain('common.stream')

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
-R18_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-export PATH="$R18_FIXED_PATH"
+R19_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$R19_FIXED_PATH"
 
 # Build the two public macOS DMG flavors for the same source checkout.
 #
@@ -71,8 +71,8 @@ fi
 VERSION="$("$NODE_BIN" -p "require('./package.json').version")"
 if [[ "$REQUESTED_RELEASE_SCOPE" == "production" ]]; then
   case "$VERSION" in
-    1.6.18)
-      RELEASE_SCOPE="r18_production"
+    1.6.19)
+      RELEASE_SCOPE="r19_production"
       ;;
     *)
       echo "ERROR: public production packaging is not implemented for package version $VERSION" >&2
@@ -81,13 +81,13 @@ if [[ "$REQUESTED_RELEASE_SCOPE" == "production" ]]; then
   esac
 fi
 
-if [[ "$RELEASE_SCOPE" == "r18_production" ]]; then
+if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
   if [[ "$REQUESTED_FLAVOR" != "all" ]]; then
-    echo "ERROR: vMLX 1.6.18 production packaging must build both Sequoia and Tahoe via flavor=all" >&2
+    echo "ERROR: vMLX 1.6.19 production packaging must build both Sequoia and Tahoe via flavor=all" >&2
     exit 1
   fi
   if [[ -n "${VMLX_RELEASE_OUTPUT_DIR:-}" || -n "${VMLINUX_RELEASE_OUTPUT_DIR:-}" ]]; then
-    echo "ERROR: vMLX 1.6.18 production output is fixed at $PANEL_DIR/release; release output overrides are forbidden" >&2
+    echo "ERROR: vMLX 1.6.19 production output is fixed at $PANEL_DIR/release; release output overrides are forbidden" >&2
     exit 1
   fi
   DIST_DIR="$PANEL_DIR/release"
@@ -120,8 +120,8 @@ if [[ "$NODE_MODULES_REAL" != "$PANEL_DIR/node_modules" ]]; then
 fi
 
 PREPACKAGE_READY_MANIFEST_OUT="${VMLX_PREPACKAGE_READY_MANIFEST_OUT:-${VMLINUX_PREPACKAGE_READY_MANIFEST_OUT:-$ROOT_DIR/build/current-release-regression-manifest-pre-dmg-release-build.json}}"
-PRIVATE_EVIDENCE_ROOT="${VMLX_R18_PRIVATE_EVIDENCE_ROOT:-${VMLINUX_R18_PRIVATE_EVIDENCE_ROOT:-}}"
-R18_PRE_NOTARY_MANIFEST_OUT="${VMLX_R18_PRE_NOTARY_MANIFEST_OUT:-${VMLINUX_R18_PRE_NOTARY_MANIFEST_OUT:-}}"
+PRIVATE_EVIDENCE_ROOT="${VMLX_R19_PRIVATE_EVIDENCE_ROOT:-${VMLINUX_R19_PRIVATE_EVIDENCE_ROOT:-}}"
+R19_PRE_NOTARY_MANIFEST_OUT="${VMLX_R19_PRE_NOTARY_MANIFEST_OUT:-${VMLINUX_R19_PRE_NOTARY_MANIFEST_OUT:-}}"
 EXPECTED_APPLE_TEAM_ID="55KGF2S5AY"
 EXPECTED_CODESIGN_IDENTITY="Developer ID Application: ShieldStack LLC (55KGF2S5AY)"
 EXPECTED_CSC_NAME="ShieldStack LLC (55KGF2S5AY)"
@@ -148,47 +148,47 @@ assert_unshadowed_tool() {
 assert_unshadowed_tool codesign "$APPLE_CODESIGN"
 assert_unshadowed_tool hdiutil "$APPLE_HDIUTIL"
 
-if [[ -n "${VMLX_R18_PRE_NOTARY_MANIFEST_OUT:-}" ]] \
-  && [[ -n "${VMLINUX_R18_PRE_NOTARY_MANIFEST_OUT:-}" ]] \
-  && [[ "$VMLX_R18_PRE_NOTARY_MANIFEST_OUT" != "$VMLINUX_R18_PRE_NOTARY_MANIFEST_OUT" ]]; then
-  echo "ERROR: VMLX_R18_PRE_NOTARY_MANIFEST_OUT and VMLINUX_R18_PRE_NOTARY_MANIFEST_OUT disagree" >&2
+if [[ -n "${VMLX_R19_PRE_NOTARY_MANIFEST_OUT:-}" ]] \
+  && [[ -n "${VMLINUX_R19_PRE_NOTARY_MANIFEST_OUT:-}" ]] \
+  && [[ "$VMLX_R19_PRE_NOTARY_MANIFEST_OUT" != "$VMLINUX_R19_PRE_NOTARY_MANIFEST_OUT" ]]; then
+  echo "ERROR: VMLX_R19_PRE_NOTARY_MANIFEST_OUT and VMLINUX_R19_PRE_NOTARY_MANIFEST_OUT disagree" >&2
   exit 1
 fi
-if [[ -n "${VMLX_R18_PRIVATE_EVIDENCE_ROOT:-}" ]] \
-  && [[ -n "${VMLINUX_R18_PRIVATE_EVIDENCE_ROOT:-}" ]] \
-  && [[ "$VMLX_R18_PRIVATE_EVIDENCE_ROOT" != "$VMLINUX_R18_PRIVATE_EVIDENCE_ROOT" ]]; then
-  echo "ERROR: VMLX_R18_PRIVATE_EVIDENCE_ROOT and VMLINUX_R18_PRIVATE_EVIDENCE_ROOT disagree" >&2
+if [[ -n "${VMLX_R19_PRIVATE_EVIDENCE_ROOT:-}" ]] \
+  && [[ -n "${VMLINUX_R19_PRIVATE_EVIDENCE_ROOT:-}" ]] \
+  && [[ "$VMLX_R19_PRIVATE_EVIDENCE_ROOT" != "$VMLINUX_R19_PRIVATE_EVIDENCE_ROOT" ]]; then
+  echo "ERROR: VMLX_R19_PRIVATE_EVIDENCE_ROOT and VMLINUX_R19_PRIVATE_EVIDENCE_ROOT disagree" >&2
   exit 1
 fi
 export VMLX_RELEASE_SCOPE="$RELEASE_SCOPE"
 
-if [[ "$RELEASE_SCOPE" == "r18_production" ]]; then
-  if [[ "$VERSION" != "1.6.18" ]]; then
-    echo "ERROR: VMLX_RELEASE_SCOPE=r18_production requires package version 1.6.18, found $VERSION" >&2
+if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
+  if [[ "$VERSION" != "1.6.19" ]]; then
+    echo "ERROR: VMLX_RELEASE_SCOPE=r19_production requires package version 1.6.19, found $VERSION" >&2
     exit 1
   fi
   if [[ -n "${PYTHON:-}" || -n "${PYTHONHOME:-}" || -n "${PYTHONPATH:-}" ]]; then
-    echo "ERROR: vMLX 1.6.18 release Python cannot be overridden by PYTHON, PYTHONHOME, or PYTHONPATH" >&2
+    echo "ERROR: vMLX 1.6.19 release Python cannot be overridden by PYTHON, PYTHONHOME, or PYTHONPATH" >&2
     exit 1
   fi
   if [[ -n "${VIRTUAL_ENV:-}" && "$VIRTUAL_ENV" != "$ROOT_DIR/.venv" ]]; then
-    echo "ERROR: vMLX 1.6.18 release VIRTUAL_ENV is not the authoritative repository venv" >&2
+    echo "ERROR: vMLX 1.6.19 release VIRTUAL_ENV is not the authoritative repository venv" >&2
     exit 1
   fi
   if [[ ! -x "$AUTHORITATIVE_PYTHON" ]]; then
-    echo "ERROR: missing authoritative vMLX 1.6.18 release Python: $AUTHORITATIVE_PYTHON" >&2
+    echo "ERROR: missing authoritative vMLX 1.6.19 release Python: $AUTHORITATIVE_PYTHON" >&2
     exit 1
   fi
   PYTHON_BIN="$AUTHORITATIVE_PYTHON"
   if [[ "$RELEASE_CODESIGN_IDENTITY" != "$EXPECTED_CODESIGN_IDENTITY" ]]; then
-    echo "ERROR: vMLX 1.6.18 production packaging requires $EXPECTED_CODESIGN_IDENTITY" >&2
+    echo "ERROR: vMLX 1.6.19 production packaging requires $EXPECTED_CODESIGN_IDENTITY" >&2
     exit 1
   fi
   CONFIGURED_APPLE_TEAM_ID="$(
     "$NODE_BIN" -p "require('./package.json').build.mac.notarize.teamId"
   )"
   if [[ "$CONFIGURED_APPLE_TEAM_ID" != "$EXPECTED_APPLE_TEAM_ID" ]]; then
-    echo "ERROR: vMLX 1.6.18 package notarization team must be $EXPECTED_APPLE_TEAM_ID" >&2
+    echo "ERROR: vMLX 1.6.19 package notarization team must be $EXPECTED_APPLE_TEAM_ID" >&2
     exit 1
   fi
   # electron-builder treats CSC_NAME as a certificate selector and rejects the
@@ -201,14 +201,14 @@ else
   fi
 fi
 
-if [[ "$VERSION" == "1.6.18" && "$RELEASE_SCOPE" != "r18_production" ]]; then
-  echo "ERROR: vMLX 1.6.18 may only be packaged with VMLX_RELEASE_SCOPE=r18_production" >&2
-  echo "       Legacy, empty, and codex_ui_only scopes cannot certify the .18 release." >&2
+if [[ "$VERSION" == "1.6.19" && "$RELEASE_SCOPE" != "r19_production" ]]; then
+  echo "ERROR: vMLX 1.6.19 may only be packaged with VMLX_RELEASE_SCOPE=r19_production" >&2
+  echo "       Legacy, empty, and codex_ui_only scopes cannot certify the .19 release." >&2
   exit 1
 fi
 
 bind_release_python_action() {
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     return 0
   fi
   if [[ ! -f "$PYTHON_ACTION_HELPER" ]]; then
@@ -217,32 +217,32 @@ bind_release_python_action() {
   fi
   local binding
   binding="$("$NODE_BIN" "$PYTHON_ACTION_HELPER" bind --python "$AUTHORITATIVE_PYTHON")"
-  export VMLX_R18_RELEASE_PYTHON_PLAN="$(
+  export VMLX_R19_RELEASE_PYTHON_PLAN="$(
     "$NODE_BIN" -e 'process.stdout.write(JSON.parse(process.argv[1]).planPath)' "$binding"
   )"
-  export VMLX_R18_RELEASE_PYTHON_PLAN_SHA256="$(
+  export VMLX_R19_RELEASE_PYTHON_PLAN_SHA256="$(
     "$NODE_BIN" -e 'process.stdout.write(JSON.parse(process.argv[1]).planSha256)' "$binding"
   )"
-  export VMLX_R18_RELEASE_PYTHON_ACTION="$(
+  export VMLX_R19_RELEASE_PYTHON_ACTION="$(
     "$NODE_BIN" -e 'process.stdout.write(JSON.parse(process.argv[1]).actionPath)' "$binding"
   )"
-  export VMLX_R18_RELEASE_PYTHON_SOURCE_SHA256="$(
+  export VMLX_R19_RELEASE_PYTHON_SOURCE_SHA256="$(
     "$NODE_BIN" -e 'process.stdout.write(JSON.parse(process.argv[1]).sourceSha256)' "$binding"
   )"
-  export VMLX_R18_RELEASE_PYTHON_PYVENV_SHA256="$(
+  export VMLX_R19_RELEASE_PYTHON_PYVENV_SHA256="$(
     "$NODE_BIN" -e 'process.stdout.write(JSON.parse(process.argv[1]).pyvenvSha256)' "$binding"
   )"
-  export VMLX_R18_RELEASE_PYTHON="$AUTHORITATIVE_PYTHON"
-  if [[ ! "$VMLX_R18_RELEASE_PYTHON_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-    || [[ ! "$VMLX_R18_RELEASE_PYTHON_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-    || [[ ! "$VMLX_R18_RELEASE_PYTHON_PYVENV_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  export VMLX_R19_RELEASE_PYTHON="$AUTHORITATIVE_PYTHON"
+  if [[ ! "$VMLX_R19_RELEASE_PYTHON_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || [[ ! "$VMLX_R19_RELEASE_PYTHON_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || [[ ! "$VMLX_R19_RELEASE_PYTHON_PYVENV_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "ERROR: independent release Python binding is malformed" >&2
     exit 1
   fi
 }
 
 run_release_python() {
-  if [[ "$RELEASE_SCOPE" == "r18_production" ]]; then
+  if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
     "$NODE_BIN" "$PYTHON_ACTION_HELPER" run --cwd "$PWD" -- "$@"
   else
     "$PYTHON_BIN" "$@"
@@ -250,20 +250,20 @@ run_release_python() {
 }
 
 cleanup_release_python_action() {
-  if [[ "$RELEASE_SCOPE" == "r18_production" ]] \
-    && [[ -n "${VMLX_R18_RELEASE_PYTHON_PLAN:-}" ]] \
-    && [[ -n "${VMLX_R18_RELEASE_PYTHON_PLAN_SHA256:-}" ]]; then
+  if [[ "$RELEASE_SCOPE" == "r19_production" ]] \
+    && [[ -n "${VMLX_R19_RELEASE_PYTHON_PLAN:-}" ]] \
+    && [[ -n "${VMLX_R19_RELEASE_PYTHON_PLAN_SHA256:-}" ]]; then
     "$NODE_BIN" "$PYTHON_ACTION_HELPER" cleanup >/dev/null 2>&1 || true
   fi
 }
 
 bind_release_python_action
-if [[ "$RELEASE_SCOPE" == "r18_production" ]]; then
+if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
   trap cleanup_release_python_action EXIT
 fi
 
-assert_r18_release_output_safe() {
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+assert_r19_release_output_safe() {
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     return 0
   fi
   run_release_python -I - "$ROOT_DIR" "$PANEL_DIR" "$DIST_DIR" <<'PY'
@@ -294,12 +294,12 @@ if output.exists() or output.is_symlink():
 PY
 }
 
-assert_r18_release_output_safe
+assert_r19_release_output_safe
 
-R18_RELEASE_PYTHON_INIT_SHA256=""
-R18_RELEASE_PYTHON_SERVER_SHA256=""
-R18_RELEASE_PYTHON_EXECUTABLE_SHA256=""
-R18_RELEASE_PYTHON_PYVENV_SHA256=""
+R19_RELEASE_PYTHON_INIT_SHA256=""
+R19_RELEASE_PYTHON_SERVER_SHA256=""
+R19_RELEASE_PYTHON_EXECUTABLE_SHA256=""
+R19_RELEASE_PYTHON_PYVENV_SHA256=""
 GIT_REALPATH="$GIT_BIN"
 GIT_SHA256=""
 NODE_REALPATH="$NODE_BIN"
@@ -322,12 +322,12 @@ APP_BUILDER_REALPATH="$APP_BUILDER_BIN"
 APP_BUILDER_SHA256=""
 ELECTRON_BUILDER_REALPATH="$ELECTRON_BUILDER_BIN"
 ELECTRON_BUILDER_SHA256=""
-R18_TOOLCHAIN_PLAN_PATH="$ROOT_DIR/build/r18-release-toolchain-plan.json"
-R18_TOOLCHAIN_PLAN_SHA256=""
-R18_BUILD_PLAN_PATH="$ROOT_DIR/build/r18-release-driver-plan.json"
+R19_TOOLCHAIN_PLAN_PATH="$ROOT_DIR/build/r19-release-toolchain-plan.json"
+R19_TOOLCHAIN_PLAN_SHA256=""
+R19_BUILD_PLAN_PATH="$ROOT_DIR/build/r19-release-driver-plan.json"
 
-establish_r18_build_toolchain_provenance() {
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+establish_r19_build_toolchain_provenance() {
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     return 0
   fi
 
@@ -364,9 +364,9 @@ PY
     fi
     printf -v "${name}_REALPATH" '%s' "$realpath"
     printf -v "${name}_SHA256" '%s' "$digest"
-    export "VMLX_R18_TOOL_${name}_PATH=$path"
-    export "VMLX_R18_TOOL_${name}_REALPATH=$realpath"
-    export "VMLX_R18_TOOL_${name}_SHA256=$digest"
+    export "VMLX_R19_TOOL_${name}_PATH=$path"
+    export "VMLX_R19_TOOL_${name}_REALPATH=$realpath"
+    export "VMLX_R19_TOOL_${name}_SHA256=$digest"
   done <<EOF
 GIT	$GIT_BIN
 NODE	$NODE_BIN
@@ -380,12 +380,12 @@ ASAR	$ASAR_BIN
 APP_BUILDER	$APP_BUILDER_BIN
 ELECTRON_BUILDER	$ELECTRON_BUILDER_BIN
 EOF
-  export VMLX_R18_FIXED_PATH="$R18_FIXED_PATH"
+  export VMLX_R19_FIXED_PATH="$R19_FIXED_PATH"
 }
 
-assert_r18_tool_identity() {
+assert_r19_tool_identity() {
   local name="$1"
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     return 0
   fi
   local realpath_var="${name}_REALPATH"
@@ -417,23 +417,23 @@ if digest.hexdigest() != expected_sha256:
 PY
 }
 
-assert_r18_toolchain_identity() {
+assert_r19_toolchain_identity() {
   local name
   for name in \
     GIT NODE NPM NPX SHASUM AWK FILE FIND \
     ASAR APP_BUILDER ELECTRON_BUILDER; do
-    assert_r18_tool_identity "$name"
+    assert_r19_tool_identity "$name"
   done
 }
 
-write_r18_toolchain_plan() {
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+write_r19_toolchain_plan() {
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     return 0
   fi
-  mkdir -p "$(dirname "$R18_TOOLCHAIN_PLAN_PATH")"
-  rm -f "$R18_TOOLCHAIN_PLAN_PATH"
-  R18_TOOLCHAIN_PLAN_SHA256="$(
-    run_release_python -I - "$R18_TOOLCHAIN_PLAN_PATH" "$VERSION" <<'PY'
+  mkdir -p "$(dirname "$R19_TOOLCHAIN_PLAN_PATH")"
+  rm -f "$R19_TOOLCHAIN_PLAN_PATH"
+  R19_TOOLCHAIN_PLAN_SHA256="$(
+    run_release_python -I - "$R19_TOOLCHAIN_PLAN_PATH" "$VERSION" <<'PY'
 import hashlib
 import json
 import os
@@ -448,14 +448,14 @@ tool_names = (
 )
 payload = {
     "schema_version": 1,
-    "scope": "r18_production_toolchain",
+    "scope": "r19_production_toolchain",
     "version": version,
-    "fixed_path": os.environ["VMLX_R18_FIXED_PATH"],
+    "fixed_path": os.environ["VMLX_R19_FIXED_PATH"],
     "tools": {
         name.lower(): {
-            "path": os.environ[f"VMLX_R18_TOOL_{name}_PATH"],
-            "realpath": os.environ[f"VMLX_R18_TOOL_{name}_REALPATH"],
-            "sha256": os.environ[f"VMLX_R18_TOOL_{name}_SHA256"],
+            "path": os.environ[f"VMLX_R19_TOOL_{name}_PATH"],
+            "realpath": os.environ[f"VMLX_R19_TOOL_{name}_REALPATH"],
+            "sha256": os.environ[f"VMLX_R19_TOOL_{name}_SHA256"],
         }
         for name in tool_names
     },
@@ -477,8 +477,8 @@ finally:
 print(hashlib.sha256(encoded).hexdigest())
 PY
   )"
-  if [[ ! "$R18_TOOLCHAIN_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "ERROR: vMLX 1.6.18 toolchain plan hash is invalid" >&2
+  if [[ ! "$R19_TOOLCHAIN_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: vMLX 1.6.19 toolchain plan hash is invalid" >&2
     exit 1
   fi
 }
@@ -526,7 +526,7 @@ capture_bound_release_action() {
 run_toolchain_action() {
   local action="$1"
   shift
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     case "$action" in
       npm) "$NPM_BIN" "$@" ;;
       find) "$FIND_BIN" "$@" ;;
@@ -538,8 +538,8 @@ run_toolchain_action() {
     return
   fi
   run_bound_release_action \
-    "$R18_TOOLCHAIN_PLAN_PATH" \
-    "$R18_TOOLCHAIN_PLAN_SHA256" \
+    "$R19_TOOLCHAIN_PLAN_PATH" \
+    "$R19_TOOLCHAIN_PLAN_SHA256" \
     "$action" \
     "$@"
 }
@@ -547,7 +547,7 @@ run_toolchain_action() {
 capture_toolchain_action() {
   local action="$1"
   shift
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     case "$action" in
       git) "$GIT_BIN" "$@" ;;
       shasum) "$SHASUM_BIN" "$@" ;;
@@ -562,8 +562,8 @@ capture_toolchain_action() {
     return
   fi
   capture_bound_release_action \
-    "$R18_TOOLCHAIN_PLAN_PATH" \
-    "$R18_TOOLCHAIN_PLAN_SHA256" \
+    "$R19_TOOLCHAIN_PLAN_PATH" \
+    "$R19_TOOLCHAIN_PLAN_SHA256" \
     "$action" \
     "$@"
 }
@@ -586,35 +586,35 @@ run_driver_plan_action() {
   local action="$1"
   shift
   if [[ -n "${USE_SYSTEM_APP_BUILDER:-}" ]]; then
-    echo "ERROR: vMLX 1.6.18 production packaging forbids USE_SYSTEM_APP_BUILDER" >&2
+    echo "ERROR: vMLX 1.6.19 production packaging forbids USE_SYSTEM_APP_BUILDER" >&2
     exit 1
   fi
   run_bound_release_action \
-    "$R18_BUILD_PLAN_PATH" \
-    "${VMLX_R18_RELEASE_PLAN_SHA256:?missing release-driver plan digest}" \
+    "$R19_BUILD_PLAN_PATH" \
+    "${VMLX_R19_RELEASE_PLAN_SHA256:?missing release-driver plan digest}" \
     "$action" \
     "$@"
 }
 
 run_electron_builder_action() {
-  if [[ "$RELEASE_SCOPE" == "r18_production" ]]; then
+  if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
     run_driver_plan_action electron-builder "$@"
   else
     "$NODE_BIN" "$ELECTRON_BUILDER_BIN" "$@"
   fi
 }
 
-cleanup_r18_release_plans() {
-  if [[ "$RELEASE_SCOPE" == "r18_production" ]]; then
-    rm -f "$R18_TOOLCHAIN_PLAN_PATH" "$R18_BUILD_PLAN_PATH"
-    if [[ -n "${R18_ATTESTATION_EXTRACT_ROOT:-}" ]]; then
-      rm -rf "$R18_ATTESTATION_EXTRACT_ROOT"
+cleanup_r19_release_plans() {
+  if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
+    rm -f "$R19_TOOLCHAIN_PLAN_PATH" "$R19_BUILD_PLAN_PATH"
+    if [[ -n "${R19_ATTESTATION_EXTRACT_ROOT:-}" ]]; then
+      rm -rf "$R19_ATTESTATION_EXTRACT_ROOT"
     fi
   fi
 }
 
-establish_r18_release_python_provenance() {
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+establish_r19_release_python_provenance() {
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     return 0
   fi
 
@@ -675,34 +675,34 @@ PY
     echo "ERROR: release Python import/prefix attestation is not source-exact" >&2
     exit 1
   fi
-  R18_RELEASE_PYTHON_INIT_SHA256="$(toolchain_sha256 "$init_path")"
-  R18_RELEASE_PYTHON_SERVER_SHA256="$(toolchain_sha256 "$server_path")"
-  R18_RELEASE_PYTHON_EXECUTABLE_SHA256="$VMLX_R18_RELEASE_PYTHON_SOURCE_SHA256"
-  R18_RELEASE_PYTHON_PYVENV_SHA256="$VMLX_R18_RELEASE_PYTHON_PYVENV_SHA256"
-  if [[ ! "$R18_RELEASE_PYTHON_INIT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-    || [[ ! "$R18_RELEASE_PYTHON_SERVER_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-    || [[ ! "$R18_RELEASE_PYTHON_EXECUTABLE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-    || [[ ! "$R18_RELEASE_PYTHON_PYVENV_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "ERROR: vMLX 1.6.18 release Python provenance hashes are invalid" >&2
+  R19_RELEASE_PYTHON_INIT_SHA256="$(toolchain_sha256 "$init_path")"
+  R19_RELEASE_PYTHON_SERVER_SHA256="$(toolchain_sha256 "$server_path")"
+  R19_RELEASE_PYTHON_EXECUTABLE_SHA256="$VMLX_R19_RELEASE_PYTHON_SOURCE_SHA256"
+  R19_RELEASE_PYTHON_PYVENV_SHA256="$VMLX_R19_RELEASE_PYTHON_PYVENV_SHA256"
+  if [[ ! "$R19_RELEASE_PYTHON_INIT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || [[ ! "$R19_RELEASE_PYTHON_SERVER_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || [[ ! "$R19_RELEASE_PYTHON_EXECUTABLE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || [[ ! "$R19_RELEASE_PYTHON_PYVENV_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: vMLX 1.6.19 release Python provenance hashes are invalid" >&2
     exit 1
   fi
-  export VMLX_R18_RELEASE_PYTHON="$AUTHORITATIVE_PYTHON"
-  export VMLX_R18_RELEASE_PYTHON_INIT_SHA256
-  export VMLX_R18_RELEASE_PYTHON_SERVER_SHA256
-  export VMLX_R18_RELEASE_PYTHON_EXECUTABLE_SHA256
-  export VMLX_R18_RELEASE_PYTHON_PYVENV_SHA256
+  export VMLX_R19_RELEASE_PYTHON="$AUTHORITATIVE_PYTHON"
+  export VMLX_R19_RELEASE_PYTHON_INIT_SHA256
+  export VMLX_R19_RELEASE_PYTHON_SERVER_SHA256
+  export VMLX_R19_RELEASE_PYTHON_EXECUTABLE_SHA256
+  export VMLX_R19_RELEASE_PYTHON_PYVENV_SHA256
 }
 
-establish_r18_build_toolchain_provenance
-assert_r18_toolchain_identity
-write_r18_toolchain_plan
-establish_r18_release_python_provenance
-if [[ "$RELEASE_SCOPE" == "r18_production" ]]; then
-  cleanup_r18_release_state() {
-    cleanup_r18_release_plans
+establish_r19_build_toolchain_provenance
+assert_r19_toolchain_identity
+write_r19_toolchain_plan
+establish_r19_release_python_provenance
+if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
+  cleanup_r19_release_state() {
+    cleanup_r19_release_plans
     cleanup_release_python_action
   }
-  trap cleanup_r18_release_state EXIT
+  trap cleanup_r19_release_state EXIT
 fi
 
 echo "==> Checking pre-package release ledger before public DMG build"
@@ -750,15 +750,15 @@ case "$RELEASE_SCOPE" in
         --out "$PREPACKAGE_READY_MANIFEST_OUT"
     )
     ;;
-  r18_production)
+  r19_production)
     (
       cd "$ROOT_DIR"
-      if [[ -z "${VMLX_R18_RELEASE_ATTESTATION:-}" ]]; then
-        echo "ERROR: VMLX_R18_RELEASE_ATTESTATION must point to the external private release attestation" >&2
+      if [[ -z "${VMLX_R19_RELEASE_ATTESTATION:-}" ]]; then
+        echo "ERROR: VMLX_R19_RELEASE_ATTESTATION must point to the external private release attestation" >&2
         exit 1
       fi
       if [[ -z "$PRIVATE_EVIDENCE_ROOT" ]]; then
-        echo "ERROR: VMLX_R18_PRIVATE_EVIDENCE_ROOT must identify the external private evidence root" >&2
+        echo "ERROR: VMLX_R19_PRIVATE_EVIDENCE_ROOT must identify the external private evidence root" >&2
         exit 1
       fi
       if [[ -z "${VMLX_JANG_TOOLS_SOURCE:-}" ]]; then
@@ -776,11 +776,11 @@ case "$RELEASE_SCOPE" in
           exit 1
         fi
       done
-      run_release_python "panel/scripts/scoped-release-preflight-18.py" \
+      run_release_python "panel/scripts/scoped-release-preflight-19.py" \
         --consume-v5-manifest \
         --expected-version "$VERSION" \
-        --manifest "$VMLX_R18_RELEASE_ATTESTATION" \
-        --private-evidence-root "$VMLX_R18_PRIVATE_EVIDENCE_ROOT" \
+        --manifest "$VMLX_R19_RELEASE_ATTESTATION" \
+        --private-evidence-root "$VMLX_R19_PRIVATE_EVIDENCE_ROOT" \
         --out "$PREPACKAGE_READY_MANIFEST_OUT"
     )
     ;;
@@ -794,37 +794,37 @@ case "$RELEASE_SCOPE" in
     ;;
   *)
     echo "ERROR: unsupported release scope: $RELEASE_SCOPE" >&2
-    echo "Set VMLX_RELEASE_SCOPE=r18_production for the 1.6.18 production checkpoint," >&2
+    echo "Set VMLX_RELEASE_SCOPE=r19_production for the 1.6.19 production checkpoint," >&2
     echo "or VMLX_RELEASE_SCOPE=r17_consolidation for the 1.6.17 usable checkpoint," >&2
     echo "or VMLX_RELEASE_SCOPE=r16_parser_cache for the 1.6.16 emergency parser/cache scope," >&2
     echo "or VMLX_RELEASE_SCOPE=mm3_gemma_vl (or VMLINUX_RELEASE_SCOPE=mm3_gemma_vl)," >&2
     echo "or VMLX_RELEASE_SCOPE=codex_ui_only for Codex-driven UI validation flow." >&2
-    echo "Supported scoped release values: r18_production, r17_consolidation, r16_parser_cache, mm3_gemma_vl, codex_ui_only" >&2
+    echo "Supported scoped release values: r19_production, r17_consolidation, r16_parser_cache, mm3_gemma_vl, codex_ui_only" >&2
     exit 2
     ;;
 esac
 
-R18_EXPECTED_VMLX_COMMIT=""
-R18_EXPECTED_VMLX_TREE=""
-R18_EXPECTED_VMLX_UPSTREAM_COMMIT=""
-R18_EXPECTED_VMLX_REMOTE_MAIN_COMMIT=""
-R18_EXPECTED_VMLX_REMOTE_IDENTITY=""
-R18_EXPECTED_JANG_COMMIT=""
-R18_EXPECTED_JANG_TREE=""
-R18_EXPECTED_JANG_UPSTREAM_COMMIT=""
-R18_EXPECTED_JANG_REMOTE_MAIN_COMMIT=""
-R18_EXPECTED_JANG_REMOTE_IDENTITY=""
-R18_PREFLIGHT_MANIFEST_SHA256=""
-R18_BUILD_DRIVER_NONCE=""
-R18_BUILD_ATTESTATION_OUT=""
-R18_ATTESTATION_EXTRACT_ROOT=""
-R18_HOOK_ATTESTATION_DIR=""
-R18_CURRENT_BUNDLE_RUNTIME_PATH=""
-R18_CURRENT_BUNDLE_RUNTIME_SHA256=""
-R18_CURRENT_MLX_WHEEL_PLATFORM=""
-R18_CURRENT_MINIMUM_SYSTEM_VERSION=""
+R19_EXPECTED_VMLX_COMMIT=""
+R19_EXPECTED_VMLX_TREE=""
+R19_EXPECTED_VMLX_UPSTREAM_COMMIT=""
+R19_EXPECTED_VMLX_REMOTE_MAIN_COMMIT=""
+R19_EXPECTED_VMLX_REMOTE_IDENTITY=""
+R19_EXPECTED_JANG_COMMIT=""
+R19_EXPECTED_JANG_TREE=""
+R19_EXPECTED_JANG_UPSTREAM_COMMIT=""
+R19_EXPECTED_JANG_REMOTE_MAIN_COMMIT=""
+R19_EXPECTED_JANG_REMOTE_IDENTITY=""
+R19_PREFLIGHT_MANIFEST_SHA256=""
+R19_BUILD_DRIVER_NONCE=""
+R19_BUILD_ATTESTATION_OUT=""
+R19_ATTESTATION_EXTRACT_ROOT=""
+R19_HOOK_ATTESTATION_DIR=""
+R19_CURRENT_BUNDLE_RUNTIME_PATH=""
+R19_CURRENT_BUNDLE_RUNTIME_SHA256=""
+R19_CURRENT_MLX_WHEEL_PLATFORM=""
+R19_CURRENT_MINIMUM_SYSTEM_VERSION=""
 
-read_r18_manifest_value() {
+read_r19_manifest_value() {
   local dotted_path="$1"
   run_release_python - "$PREPACKAGE_READY_MANIFEST_OUT" "$dotted_path" <<'PY'
 import json
@@ -835,17 +835,17 @@ manifest_path = Path(sys.argv[1])
 dotted_path = sys.argv[2]
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 if manifest.get("status") != "pass":
-    raise SystemExit("ERROR: vMLX 1.6.18 preflight manifest status is not pass")
+    raise SystemExit("ERROR: vMLX 1.6.19 preflight manifest status is not pass")
 value = manifest
 for component in dotted_path.split("."):
     if not isinstance(value, dict) or component not in value:
         raise SystemExit(
-            f"ERROR: vMLX 1.6.18 preflight manifest is missing {dotted_path}"
+            f"ERROR: vMLX 1.6.19 preflight manifest is missing {dotted_path}"
         )
     value = value[component]
 if not isinstance(value, str) or not value.strip():
     raise SystemExit(
-        f"ERROR: vMLX 1.6.18 preflight manifest has invalid {dotted_path}"
+        f"ERROR: vMLX 1.6.19 preflight manifest has invalid {dotted_path}"
     )
 print(value)
 PY
@@ -916,105 +916,105 @@ live_origin_main_commit() {
   printf '%s\n' "$remote_commit"
 }
 
-if [[ "$RELEASE_SCOPE" == "r18_production" ]]; then
-  R18_PREFLIGHT_MANIFEST_SHA256="$(toolchain_sha256 "$PREPACKAGE_READY_MANIFEST_OUT")"
-  R18_EXPECTED_VMLX_COMMIT="$(read_r18_manifest_value source.commit)"
-  R18_EXPECTED_VMLX_TREE="$(read_r18_manifest_value source.tree)"
-  R18_EXPECTED_VMLX_UPSTREAM_COMMIT="$(
-    read_r18_manifest_value source.upstream_commit
+if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
+  R19_PREFLIGHT_MANIFEST_SHA256="$(toolchain_sha256 "$PREPACKAGE_READY_MANIFEST_OUT")"
+  R19_EXPECTED_VMLX_COMMIT="$(read_r19_manifest_value source.commit)"
+  R19_EXPECTED_VMLX_TREE="$(read_r19_manifest_value source.tree)"
+  R19_EXPECTED_VMLX_UPSTREAM_COMMIT="$(
+    read_r19_manifest_value source.upstream_commit
   )"
-  R18_EXPECTED_VMLX_REMOTE_MAIN_COMMIT="$(
-    read_r18_manifest_value source.remote_main_commit
+  R19_EXPECTED_VMLX_REMOTE_MAIN_COMMIT="$(
+    read_r19_manifest_value source.remote_main_commit
   )"
-  R18_EXPECTED_VMLX_REMOTE_IDENTITY="$(
-    read_r18_manifest_value source.remote_identity
+  R19_EXPECTED_VMLX_REMOTE_IDENTITY="$(
+    read_r19_manifest_value source.remote_identity
   )"
-  R18_EXPECTED_JANG_COMMIT="$(read_r18_manifest_value jang.commit)"
-  R18_EXPECTED_JANG_TREE="$(read_r18_manifest_value jang.tree)"
-  R18_EXPECTED_JANG_UPSTREAM_COMMIT="$(
-    read_r18_manifest_value jang.upstream_commit
+  R19_EXPECTED_JANG_COMMIT="$(read_r19_manifest_value jang.commit)"
+  R19_EXPECTED_JANG_TREE="$(read_r19_manifest_value jang.tree)"
+  R19_EXPECTED_JANG_UPSTREAM_COMMIT="$(
+    read_r19_manifest_value jang.upstream_commit
   )"
-  R18_EXPECTED_JANG_REMOTE_MAIN_COMMIT="$(
-    read_r18_manifest_value jang.remote_main_commit
+  R19_EXPECTED_JANG_REMOTE_MAIN_COMMIT="$(
+    read_r19_manifest_value jang.remote_main_commit
   )"
-  R18_EXPECTED_JANG_REMOTE_IDENTITY="$(
-    read_r18_manifest_value jang.remote_identity
+  R19_EXPECTED_JANG_REMOTE_IDENTITY="$(
+    read_r19_manifest_value jang.remote_identity
   )"
-  if [[ "$(toolchain_sha256 "$PREPACKAGE_READY_MANIFEST_OUT")" != "$R18_PREFLIGHT_MANIFEST_SHA256" ]]; then
-    echo "ERROR: vMLX 1.6.18 preflight manifest changed while its identity was read" >&2
+  if [[ "$(toolchain_sha256 "$PREPACKAGE_READY_MANIFEST_OUT")" != "$R19_PREFLIGHT_MANIFEST_SHA256" ]]; then
+    echo "ERROR: vMLX 1.6.19 preflight manifest changed while its identity was read" >&2
     exit 1
   fi
-  if [[ "$R18_EXPECTED_VMLX_REMOTE_IDENTITY" != "jjang-ai/vmlx" ]] \
-    || [[ "$R18_EXPECTED_JANG_REMOTE_IDENTITY" != "jjang-ai/jangq" ]]; then
-    echo "ERROR: vMLX 1.6.18 preflight manifest does not attest canonical release repositories" >&2
+  if [[ "$R19_EXPECTED_VMLX_REMOTE_IDENTITY" != "jjang-ai/vmlx" ]] \
+    || [[ "$R19_EXPECTED_JANG_REMOTE_IDENTITY" != "jjang-ai/jangq" ]]; then
+    echo "ERROR: vMLX 1.6.19 preflight manifest does not attest canonical release repositories" >&2
     exit 1
   fi
-  if [[ -z "$R18_PRE_NOTARY_MANIFEST_OUT" ]]; then
-    R18_PRE_NOTARY_MANIFEST_OUT="$PRIVATE_EVIDENCE_ROOT/artifact-handoffs/vMLX-${VERSION}-${R18_EXPECTED_VMLX_COMMIT:0:12}-pre-notary.json"
+  if [[ -z "$R19_PRE_NOTARY_MANIFEST_OUT" ]]; then
+    R19_PRE_NOTARY_MANIFEST_OUT="$PRIVATE_EVIDENCE_ROOT/artifact-handoffs/vMLX-${VERSION}-${R19_EXPECTED_VMLX_COMMIT:0:12}-pre-notary.json"
   fi
-  R18_BUILD_DRIVER_NONCE="$(
+  R19_BUILD_DRIVER_NONCE="$(
     run_release_python -I -c 'import secrets; print(secrets.token_hex(32))'
   )"
-  if [[ ! "$R18_BUILD_DRIVER_NONCE" =~ ^[0-9a-f]{64}$ ]]; then
+  if [[ ! "$R19_BUILD_DRIVER_NONCE" =~ ^[0-9a-f]{64}$ ]]; then
     echo "ERROR: could not create unpredictable release build-driver nonce" >&2
     exit 1
   fi
-  R18_BUILD_ATTESTATION_OUT="$PRIVATE_EVIDENCE_ROOT/artifact-handoffs/vMLX-${VERSION}-${R18_EXPECTED_VMLX_COMMIT:0:12}-build-driver.json"
-  R18_HOOK_ATTESTATION_DIR="$PRIVATE_EVIDENCE_ROOT/hook-completions/vMLX-${VERSION}-${R18_EXPECTED_VMLX_COMMIT:0:12}"
-  if [[ -e "$R18_HOOK_ATTESTATION_DIR" || -L "$R18_HOOK_ATTESTATION_DIR" ]]; then
-    echo "ERROR: refusing reused r18 hook-completion attestation directory" >&2
+  R19_BUILD_ATTESTATION_OUT="$PRIVATE_EVIDENCE_ROOT/artifact-handoffs/vMLX-${VERSION}-${R19_EXPECTED_VMLX_COMMIT:0:12}-build-driver.json"
+  R19_HOOK_ATTESTATION_DIR="$PRIVATE_EVIDENCE_ROOT/hook-completions/vMLX-${VERSION}-${R19_EXPECTED_VMLX_COMMIT:0:12}"
+  if [[ -e "$R19_HOOK_ATTESTATION_DIR" || -L "$R19_HOOK_ATTESTATION_DIR" ]]; then
+    echo "ERROR: refusing reused r19 hook-completion attestation directory" >&2
     exit 1
   fi
-  mkdir -p "$R18_HOOK_ATTESTATION_DIR"
-  chmod 0700 "$R18_HOOK_ATTESTATION_DIR"
-  export VMLX_R18_OFFICIAL_PACKAGING="1"
-  export VMLX_R18_EXPECTED_TEAM_ID="$EXPECTED_APPLE_TEAM_ID"
-  export VMLX_R18_EXPECTED_CODESIGN_IDENTITY="$EXPECTED_CODESIGN_IDENTITY"
-  export VMLX_R18_PREPACKAGE_MANIFEST="$PREPACKAGE_READY_MANIFEST_OUT"
-  export VMLX_R18_PREPACKAGE_MANIFEST_SHA256="$R18_PREFLIGHT_MANIFEST_SHA256"
-  export VMLX_R18_RELEASE_DRIVER_PID="$$"
-  export VMLX_R18_RELEASE_DRIVER_NONCE="$R18_BUILD_DRIVER_NONCE"
-  export VMLX_R18_RELEASE_REQUESTED_FLAVOR="$REQUESTED_FLAVOR"
-  export VMLX_R18_HOOK_ATTESTATION_DIR="$R18_HOOK_ATTESTATION_DIR"
+  mkdir -p "$R19_HOOK_ATTESTATION_DIR"
+  chmod 0700 "$R19_HOOK_ATTESTATION_DIR"
+  export VMLX_R19_OFFICIAL_PACKAGING="1"
+  export VMLX_R19_EXPECTED_TEAM_ID="$EXPECTED_APPLE_TEAM_ID"
+  export VMLX_R19_EXPECTED_CODESIGN_IDENTITY="$EXPECTED_CODESIGN_IDENTITY"
+  export VMLX_R19_PREPACKAGE_MANIFEST="$PREPACKAGE_READY_MANIFEST_OUT"
+  export VMLX_R19_PREPACKAGE_MANIFEST_SHA256="$R19_PREFLIGHT_MANIFEST_SHA256"
+  export VMLX_R19_RELEASE_DRIVER_PID="$$"
+  export VMLX_R19_RELEASE_DRIVER_NONCE="$R19_BUILD_DRIVER_NONCE"
+  export VMLX_R19_RELEASE_REQUESTED_FLAVOR="$REQUESTED_FLAVOR"
+  export VMLX_R19_HOOK_ATTESTATION_DIR="$R19_HOOK_ATTESTATION_DIR"
 fi
 
-write_r18_build_plan() {
+write_r19_build_plan() {
   local flavor="$1"
   local phase="$2"
   local expected_artifact="$3"
   local plan_hash
   local staged_app="$DIST_DIR/${flavor}-app/mac-arm64/vMLX.app"
-  local hook_attestation="$R18_HOOK_ATTESTATION_DIR/${flavor}.completion.json"
+  local hook_attestation="$R19_HOOK_ATTESTATION_DIR/${flavor}.completion.json"
 
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     return 0
   fi
-  if [[ "$R18_CURRENT_BUNDLE_RUNTIME_PATH" != "$R18_HOOK_ATTESTATION_DIR/${flavor}.bundle-runtime.json" ]] \
-    || [[ ! "$R18_CURRENT_BUNDLE_RUNTIME_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  if [[ "$R19_CURRENT_BUNDLE_RUNTIME_PATH" != "$R19_HOOK_ATTESTATION_DIR/${flavor}.bundle-runtime.json" ]] \
+    || [[ ! "$R19_CURRENT_BUNDLE_RUNTIME_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "ERROR: ${flavor} build plan is missing sealed bundle runtime provenance" >&2
     exit 1
   fi
 
-  mkdir -p "$(dirname "$R18_BUILD_PLAN_PATH")"
-  rm -f "$R18_BUILD_PLAN_PATH"
+  mkdir -p "$(dirname "$R19_BUILD_PLAN_PATH")"
+  rm -f "$R19_BUILD_PLAN_PATH"
   plan_hash="$(
     run_release_python -I - \
-      "$R18_BUILD_PLAN_PATH" \
+      "$R19_BUILD_PLAN_PATH" \
       "$VERSION" \
-      "$R18_EXPECTED_VMLX_COMMIT" \
-      "$R18_EXPECTED_VMLX_TREE" \
-      "$R18_PREFLIGHT_MANIFEST_SHA256" \
+      "$R19_EXPECTED_VMLX_COMMIT" \
+      "$R19_EXPECTED_VMLX_TREE" \
+      "$R19_PREFLIGHT_MANIFEST_SHA256" \
       "$REQUESTED_FLAVOR" \
       "$flavor" \
       "$phase" \
       "$expected_artifact" \
       "$staged_app" \
       "$hook_attestation" \
-      "$R18_CURRENT_BUNDLE_RUNTIME_PATH" \
-      "$R18_CURRENT_BUNDLE_RUNTIME_SHA256" \
-      "$R18_CURRENT_MLX_WHEEL_PLATFORM" \
-      "$R18_CURRENT_MINIMUM_SYSTEM_VERSION" \
-      "$R18_BUILD_DRIVER_NONCE" \
+      "$R19_CURRENT_BUNDLE_RUNTIME_PATH" \
+      "$R19_CURRENT_BUNDLE_RUNTIME_SHA256" \
+      "$R19_CURRENT_MLX_WHEEL_PLATFORM" \
+      "$R19_CURRENT_MINIMUM_SYSTEM_VERSION" \
+      "$R19_BUILD_DRIVER_NONCE" \
       "$$" <<'PY'
 import hashlib
 import json
@@ -1052,15 +1052,15 @@ tool_names = (
 )
 tools = {
     name.lower(): {
-        "path": os.environ[f"VMLX_R18_TOOL_{name}_PATH"],
-        "realpath": os.environ[f"VMLX_R18_TOOL_{name}_REALPATH"],
-        "sha256": os.environ[f"VMLX_R18_TOOL_{name}_SHA256"],
+        "path": os.environ[f"VMLX_R19_TOOL_{name}_PATH"],
+        "realpath": os.environ[f"VMLX_R19_TOOL_{name}_REALPATH"],
+        "sha256": os.environ[f"VMLX_R19_TOOL_{name}_SHA256"],
     }
     for name in tool_names
 }
 payload = {
     "schema_version": 3,
-    "scope": "r18_production",
+    "scope": "r19_production",
     "version": version,
     "source_commit": source_commit,
     "source_tree": source_tree,
@@ -1081,7 +1081,7 @@ payload = {
     },
     "driver_pid": int(driver_pid_raw),
     "nonce": driver_nonce,
-    "fixed_path": os.environ["VMLX_R18_FIXED_PATH"],
+    "fixed_path": os.environ["VMLX_R19_FIXED_PATH"],
     "tools": tools,
 }
 encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -1102,59 +1102,59 @@ print(hashlib.sha256(encoded).hexdigest())
 PY
   )"
   if [[ ! "$plan_hash" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "ERROR: vMLX 1.6.18 release driver plan hash is invalid" >&2
+    echo "ERROR: vMLX 1.6.19 release driver plan hash is invalid" >&2
     exit 1
   fi
-  export VMLX_R18_RELEASE_PLAN="$R18_BUILD_PLAN_PATH"
-  export VMLX_R18_RELEASE_PLAN_SHA256="$plan_hash"
-  export VMLX_R18_RELEASE_CURRENT_FLAVOR="$flavor"
-  export VMLX_R18_RELEASE_PHASE="$phase"
-  export VMLX_R18_RELEASE_EXPECTED_ARTIFACT="$(
+  export VMLX_R19_RELEASE_PLAN="$R19_BUILD_PLAN_PATH"
+  export VMLX_R19_RELEASE_PLAN_SHA256="$plan_hash"
+  export VMLX_R19_RELEASE_CURRENT_FLAVOR="$flavor"
+  export VMLX_R19_RELEASE_PHASE="$phase"
+  export VMLX_R19_RELEASE_EXPECTED_ARTIFACT="$(
     run_release_python -I -c \
       'import pathlib, sys; print(pathlib.Path(sys.argv[1]).absolute())' \
       "$expected_artifact"
   )"
 }
 
-assert_r18_source_identity() {
+assert_r19_source_identity() {
   local phase="$1"
   local vmlx_remote_identity
   local vmlx_remote_main_commit
   local jang_remote_identity
   local jang_remote_main_commit
   local env_name
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     return 0
   fi
-  if [[ "$(toolchain_sha256 "$PREPACKAGE_READY_MANIFEST_OUT")" != "$R18_PREFLIGHT_MANIFEST_SHA256" ]]; then
-    echo "ERROR: vMLX 1.6.18 preflight manifest changed ${phase}" >&2
+  if [[ "$(toolchain_sha256 "$PREPACKAGE_READY_MANIFEST_OUT")" != "$R19_PREFLIGHT_MANIFEST_SHA256" ]]; then
+    echo "ERROR: vMLX 1.6.19 preflight manifest changed ${phase}" >&2
     exit 1
   fi
-  if [[ "$(capture_toolchain_action git -C "$ROOT_DIR" rev-parse HEAD)" != "$R18_EXPECTED_VMLX_COMMIT" ]] \
-    || [[ "$(capture_toolchain_action git -C "$ROOT_DIR" rev-parse HEAD^{tree})" != "$R18_EXPECTED_VMLX_TREE" ]] \
-    || [[ "$(capture_toolchain_action git -C "$ROOT_DIR" rev-parse '@{upstream}')" != "$R18_EXPECTED_VMLX_UPSTREAM_COMMIT" ]] \
+  if [[ "$(capture_toolchain_action git -C "$ROOT_DIR" rev-parse HEAD)" != "$R19_EXPECTED_VMLX_COMMIT" ]] \
+    || [[ "$(capture_toolchain_action git -C "$ROOT_DIR" rev-parse HEAD^{tree})" != "$R19_EXPECTED_VMLX_TREE" ]] \
+    || [[ "$(capture_toolchain_action git -C "$ROOT_DIR" rev-parse '@{upstream}')" != "$R19_EXPECTED_VMLX_UPSTREAM_COMMIT" ]] \
     || [[ -n "$(capture_toolchain_action git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; then
     echo "ERROR: vMLX source identity changed ${phase}" >&2
     exit 1
   fi
   vmlx_remote_identity="$(canonical_origin_identity "$ROOT_DIR")"
   vmlx_remote_main_commit="$(live_origin_main_commit "$ROOT_DIR")"
-  if [[ "$vmlx_remote_identity" != "$R18_EXPECTED_VMLX_REMOTE_IDENTITY" ]] \
-    || [[ "$vmlx_remote_main_commit" != "$R18_EXPECTED_VMLX_REMOTE_MAIN_COMMIT" ]]; then
+  if [[ "$vmlx_remote_identity" != "$R19_EXPECTED_VMLX_REMOTE_IDENTITY" ]] \
+    || [[ "$vmlx_remote_main_commit" != "$R19_EXPECTED_VMLX_REMOTE_MAIN_COMMIT" ]]; then
     echo "ERROR: live canonical vMLX origin/main changed ${phase}" >&2
     exit 1
   fi
-  if [[ "$(capture_toolchain_action git -C "$VMLX_JANG_TOOLS_SOURCE" rev-parse HEAD)" != "$R18_EXPECTED_JANG_COMMIT" ]] \
-    || [[ "$(capture_toolchain_action git -C "$VMLX_JANG_TOOLS_SOURCE" rev-parse HEAD^{tree})" != "$R18_EXPECTED_JANG_TREE" ]] \
-    || [[ "$(capture_toolchain_action git -C "$VMLX_JANG_TOOLS_SOURCE" rev-parse '@{upstream}')" != "$R18_EXPECTED_JANG_UPSTREAM_COMMIT" ]] \
+  if [[ "$(capture_toolchain_action git -C "$VMLX_JANG_TOOLS_SOURCE" rev-parse HEAD)" != "$R19_EXPECTED_JANG_COMMIT" ]] \
+    || [[ "$(capture_toolchain_action git -C "$VMLX_JANG_TOOLS_SOURCE" rev-parse HEAD^{tree})" != "$R19_EXPECTED_JANG_TREE" ]] \
+    || [[ "$(capture_toolchain_action git -C "$VMLX_JANG_TOOLS_SOURCE" rev-parse '@{upstream}')" != "$R19_EXPECTED_JANG_UPSTREAM_COMMIT" ]] \
     || [[ -n "$(capture_toolchain_action git -C "$VMLX_JANG_TOOLS_SOURCE" status --porcelain --untracked-files=all)" ]]; then
     echo "ERROR: JANG source identity changed ${phase}" >&2
     exit 1
   fi
   jang_remote_identity="$(canonical_origin_identity "$VMLX_JANG_TOOLS_SOURCE")"
   jang_remote_main_commit="$(live_origin_main_commit "$VMLX_JANG_TOOLS_SOURCE")"
-  if [[ "$jang_remote_identity" != "$R18_EXPECTED_JANG_REMOTE_IDENTITY" ]] \
-    || [[ "$jang_remote_main_commit" != "$R18_EXPECTED_JANG_REMOTE_MAIN_COMMIT" ]]; then
+  if [[ "$jang_remote_identity" != "$R19_EXPECTED_JANG_REMOTE_IDENTITY" ]] \
+    || [[ "$jang_remote_main_commit" != "$R19_EXPECTED_JANG_REMOTE_MAIN_COMMIT" ]]; then
     echo "ERROR: live canonical JANG origin/main changed ${phase}" >&2
     exit 1
   fi
@@ -1176,26 +1176,26 @@ assert_r18_source_identity() {
   done < <(compgen -e)
 }
 
-if [[ "$RELEASE_SCOPE" == "r18_production" ]]; then
-  assert_r18_source_identity "before npm ci"
+if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
+  assert_r19_source_identity "before npm ci"
   echo "==> Verifying public-repository hygiene on the attested release head"
   "$ROOT_DIR/scripts/check-public-repo-hygiene.sh"
-  assert_r18_source_identity "after public-repository hygiene check"
+  assert_r19_source_identity "after public-repository hygiene check"
   echo "==> Reinstalling exact panel dependencies from package-lock.json"
   run_toolchain_action npm ci
-  assert_r18_source_identity "after npm ci"
+  assert_r19_source_identity "after npm ci"
   echo "==> Running complete Python source suite on the attested release head"
   (
     cd "$ROOT_DIR"
     run_release_python -m pytest -s -p no:cacheprovider
   )
-  assert_r18_source_identity "after complete Python source suite"
+  assert_r19_source_identity "after complete Python source suite"
   echo "==> Running complete panel suite on the attested release head"
   run_toolchain_action npm test
-  assert_r18_source_identity "after complete panel suite"
+  assert_r19_source_identity "after complete panel suite"
   echo "==> Running panel typecheck on the attested release head"
   run_toolchain_action npm run typecheck
-  assert_r18_source_identity "after panel typecheck"
+  assert_r19_source_identity "after panel typecheck"
 fi
 
 is_macho_file() {
@@ -1304,7 +1304,7 @@ finalize_release_app_signature() {
   local identity="${2:-$RELEASE_CODESIGN_IDENTITY}"
   local entitlements="$PANEL_DIR/build/entitlements.mac.plist"
 
-  assert_r18_release_output_safe
+  assert_r19_release_output_safe
   if [[ ! -d "$app_path" ]]; then
     echo "ERROR: missing staged app at $app_path" >&2
     exit 1
@@ -1353,10 +1353,10 @@ seal_current_bundle_runtime() {
   local flavor="$1"
   local wheel_platform="$2"
   local minimum_system_version="$3"
-  local output="$R18_HOOK_ATTESTATION_DIR/${flavor}.bundle-runtime.json"
+  local output="$R19_HOOK_ATTESTATION_DIR/${flavor}.bundle-runtime.json"
   local result
 
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     return 0
   fi
   result="$(
@@ -1368,13 +1368,13 @@ seal_current_bundle_runtime() {
       --flavor "$flavor" \
       --out "$output"
   )"
-  R18_CURRENT_BUNDLE_RUNTIME_PATH="$output"
-  R18_CURRENT_BUNDLE_RUNTIME_SHA256="$(
+  R19_CURRENT_BUNDLE_RUNTIME_PATH="$output"
+  R19_CURRENT_BUNDLE_RUNTIME_SHA256="$(
     artifact_json_field "$result" sha256
   )"
-  R18_CURRENT_MLX_WHEEL_PLATFORM="$wheel_platform"
-  R18_CURRENT_MINIMUM_SYSTEM_VERSION="$minimum_system_version"
-  if [[ ! "$R18_CURRENT_BUNDLE_RUNTIME_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  R19_CURRENT_MLX_WHEEL_PLATFORM="$wheel_platform"
+  R19_CURRENT_MINIMUM_SYSTEM_VERSION="$minimum_system_version"
+  if [[ ! "$R19_CURRENT_BUNDLE_RUNTIME_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "ERROR: ${flavor} bundle runtime attestation digest is invalid" >&2
     exit 1
   fi
@@ -1385,7 +1385,7 @@ verify_staged_app_parity() {
   local staged_output="$2"
   local app_path
 
-  if [[ "$RELEASE_SCOPE" != "r18_production" ]]; then
+  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
     return 0
   fi
   app_path="$(find_staged_app "$staged_output")"
@@ -1414,8 +1414,8 @@ write_mounted_dmg_payload_parity() (
   set -euo pipefail
   local flavor="$1"
   local dmg="$DIST_DIR/vMLX-${VERSION}-${flavor}-arm64.dmg"
-  local hook_attestation="$R18_HOOK_ATTESTATION_DIR/${flavor}.completion.json"
-  local parity_attestation="$R18_HOOK_ATTESTATION_DIR/${flavor}.dmg-parity.json"
+  local hook_attestation="$R19_HOOK_ATTESTATION_DIR/${flavor}.completion.json"
+  local parity_attestation="$R19_HOOK_ATTESTATION_DIR/${flavor}.dmg-parity.json"
   local hook_record
   local dmg_record
   local operation_root
@@ -1475,7 +1475,7 @@ write_mounted_dmg_payload_parity() (
     --flavor "$flavor" \
     --hook-attestation "$hook_attestation" \
     --expected-hook-sha256 "$(artifact_json_field "$hook_record" sha256)" \
-    --expected-nonce "$R18_BUILD_DRIVER_NONCE" \
+    --expected-nonce "$R19_BUILD_DRIVER_NONCE" \
     --expected-driver-pid "$$" \
     --mounted-app "$mount_dir/vMLX.app" \
     --extracted-asar "$extracted_asar" \
@@ -1510,15 +1510,15 @@ build_one() {
       ;;
   esac
 
-  assert_r18_source_identity "before ${flavor} bundle"
+  assert_r19_source_identity "before ${flavor} bundle"
   echo "==> Building vMLX ${VERSION} ${flavor} DMG (${wheel_tag})"
   VMLX_BUNDLE_MLX_PLATFORM="$platform" ./scripts/bundle-python.sh
   VMLX_EXPECTED_MLX_WHEEL_PLATFORM="$wheel_tag" \
     ./scripts/verify-bundled-python.sh
-  assert_r18_source_identity "after ${flavor} Python bundle verification"
+  assert_r19_source_identity "after ${flavor} Python bundle verification"
   seal_current_bundle_runtime \
     "$flavor" "$wheel_tag" "$minimum_system_version"
-  assert_r18_release_output_safe
+  assert_r19_release_output_safe
   rm -rf "$staged_output"
   # Let electron-builder perform its proven inside-out Developer-ID signing of
   # Electron and Squirrel framework leaves. Its mandatory beforePack hook owns
@@ -1526,16 +1526,16 @@ build_one() {
   # renderer a second time. The controlled finalizer below then re-signs bundled
   # Python, repairs any remaining ad-hoc Mach-O leaves, audits every leaf, and
   # applies the final outer app seal.
-  write_r18_build_plan "$flavor" "stage" "$staged_output"
+  write_r19_build_plan "$flavor" "stage" "$staged_output"
   run_electron_builder_action --mac --dir \
     --config.directories.output="$staged_output" \
     --config.mac.minimumSystemVersion="$minimum_system_version"
-  assert_r18_source_identity "after ${flavor} app staging"
+  assert_r19_source_identity "after ${flavor} app staging"
   app_path="$(find_staged_app "$staged_output")"
   finalize_release_app_signature "$app_path" "$RELEASE_CODESIGN_IDENTITY"
   verify_staged_app_parity "$flavor" "$staged_output"
-  assert_r18_source_identity "after ${flavor} staged app parity"
-  write_r18_build_plan "$flavor" "dmg" "$dmg_path"
+  assert_r19_source_identity "after ${flavor} staged app parity"
+  write_r19_build_plan "$flavor" "dmg" "$dmg_path"
   run_electron_builder_action --mac dmg \
     --prepackaged "$app_path" \
     --config.directories.output="$DIST_DIR" \
@@ -1546,12 +1546,12 @@ build_one() {
     exit 1
   fi
   verify_release_signature_identity "$dmg_path"
-  assert_r18_source_identity "after ${flavor} DMG"
+  assert_r19_source_identity "after ${flavor} DMG"
 }
 
 case "$REQUESTED_FLAVOR" in
   all)
-    assert_r18_release_output_safe
+    assert_r19_release_output_safe
     rm -rf "$DIST_DIR"
     build_one "sequoia" "compat"
     build_one "tahoe" "native"
@@ -1568,11 +1568,11 @@ case "$REQUESTED_FLAVOR" in
     ;;
 esac
 
-if [[ "$RELEASE_SCOPE" == "r18_production" ]]; then
+if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
   expected_sequoia="$DIST_DIR/vMLX-${VERSION}-sequoia-arm64.dmg"
   expected_tahoe="$DIST_DIR/vMLX-${VERSION}-tahoe-arm64.dmg"
   if [[ ! -s "$expected_sequoia" || ! -s "$expected_tahoe" ]]; then
-    echo "ERROR: vMLX 1.6.18 production packaging did not produce both required DMGs" >&2
+    echo "ERROR: vMLX 1.6.19 production packaging did not produce both required DMGs" >&2
     exit 1
   fi
   run_driver_plan_action node - "$DIST_DIR" "$expected_sequoia" "$expected_tahoe" <<'NODE'
@@ -1584,7 +1584,7 @@ const [distDirRaw, ...expected] = process.argv.slice(2);
 verifyExactDmgDirectory(
   distDirRaw,
   expected,
-  "vMLX 1.6.18 production packaging produced an unexpected DMG set",
+  "vMLX 1.6.19 production packaging produced an unexpected DMG set",
 );
 NODE
   # Re-run exact-one staged-app and full source/runtime/renderer parity after
@@ -1597,44 +1597,44 @@ NODE
   sequoia_hook_sha256="$(
     artifact_json_field "$(
       artifact_chain_build file-record \
-        --path "$R18_HOOK_ATTESTATION_DIR/sequoia.completion.json" \
+        --path "$R19_HOOK_ATTESTATION_DIR/sequoia.completion.json" \
         --label "sequoia hook completion"
     )" sha256
   )"
   tahoe_hook_sha256="$(
     artifact_json_field "$(
       artifact_chain_build file-record \
-        --path "$R18_HOOK_ATTESTATION_DIR/tahoe.completion.json" \
+        --path "$R19_HOOK_ATTESTATION_DIR/tahoe.completion.json" \
         --label "tahoe hook completion"
     )" sha256
   )"
   sequoia_parity_sha256="$(
     artifact_json_field "$(
       artifact_chain_build file-record \
-        --path "$R18_HOOK_ATTESTATION_DIR/sequoia.dmg-parity.json" \
+        --path "$R19_HOOK_ATTESTATION_DIR/sequoia.dmg-parity.json" \
         --label "sequoia DMG parity"
     )" sha256
   )"
   tahoe_parity_sha256="$(
     artifact_json_field "$(
       artifact_chain_build file-record \
-        --path "$R18_HOOK_ATTESTATION_DIR/tahoe.dmg-parity.json" \
+        --path "$R19_HOOK_ATTESTATION_DIR/tahoe.dmg-parity.json" \
         --label "tahoe DMG parity"
     )" sha256
   )"
-  assert_r18_source_identity "before pre-notary artifact manifest"
-  R18_ATTESTATION_EXTRACT_ROOT="$(
+  assert_r19_source_identity "before pre-notary artifact manifest"
+  R19_ATTESTATION_EXTRACT_ROOT="$(
     mktemp -d "$PRIVATE_EVIDENCE_ROOT/.build-attestation-asar.XXXXXX"
   )"
-  chmod 0700 "$R18_ATTESTATION_EXTRACT_ROOT"
+  chmod 0700 "$R19_ATTESTATION_EXTRACT_ROOT"
   sequoia_app="$(find_staged_app "$DIST_DIR/sequoia-app")"
   tahoe_app="$(find_staged_app "$DIST_DIR/tahoe-app")"
   run_driver_plan_action asar extract \
     "$sequoia_app/Contents/Resources/app.asar" \
-    "$R18_ATTESTATION_EXTRACT_ROOT/sequoia"
+    "$R19_ATTESTATION_EXTRACT_ROOT/sequoia"
   run_driver_plan_action asar extract \
     "$tahoe_app/Contents/Resources/app.asar" \
-    "$R18_ATTESTATION_EXTRACT_ROOT/tahoe"
+    "$R19_ATTESTATION_EXTRACT_ROOT/tahoe"
   echo "==> Writing no-clobber build-driver attestation"
   build_attestation_result="$(
     artifact_chain_build write-build-attestation \
@@ -1643,20 +1643,20 @@ NODE
       --version "$VERSION" \
       --preflight "$PREPACKAGE_READY_MANIFEST_OUT" \
       --private-root "$PRIVATE_EVIDENCE_ROOT" \
-      --out "$R18_BUILD_ATTESTATION_OUT" \
-      --nonce "$R18_BUILD_DRIVER_NONCE" \
+      --out "$R19_BUILD_ATTESTATION_OUT" \
+      --nonce "$R19_BUILD_DRIVER_NONCE" \
       --driver-pid "$$" \
       --sequoia-staged-output "$DIST_DIR/sequoia-app" \
-      --sequoia-extracted-asar "$R18_ATTESTATION_EXTRACT_ROOT/sequoia" \
-      --sequoia-hook-attestation "$R18_HOOK_ATTESTATION_DIR/sequoia.completion.json" \
+      --sequoia-extracted-asar "$R19_ATTESTATION_EXTRACT_ROOT/sequoia" \
+      --sequoia-hook-attestation "$R19_HOOK_ATTESTATION_DIR/sequoia.completion.json" \
       --sequoia-hook-attestation-sha256 "$sequoia_hook_sha256" \
-      --sequoia-dmg-parity-attestation "$R18_HOOK_ATTESTATION_DIR/sequoia.dmg-parity.json" \
+      --sequoia-dmg-parity-attestation "$R19_HOOK_ATTESTATION_DIR/sequoia.dmg-parity.json" \
       --sequoia-dmg-parity-attestation-sha256 "$sequoia_parity_sha256" \
       --tahoe-staged-output "$DIST_DIR/tahoe-app" \
-      --tahoe-extracted-asar "$R18_ATTESTATION_EXTRACT_ROOT/tahoe" \
-      --tahoe-hook-attestation "$R18_HOOK_ATTESTATION_DIR/tahoe.completion.json" \
+      --tahoe-extracted-asar "$R19_ATTESTATION_EXTRACT_ROOT/tahoe" \
+      --tahoe-hook-attestation "$R19_HOOK_ATTESTATION_DIR/tahoe.completion.json" \
       --tahoe-hook-attestation-sha256 "$tahoe_hook_sha256" \
-      --tahoe-dmg-parity-attestation "$R18_HOOK_ATTESTATION_DIR/tahoe.dmg-parity.json" \
+      --tahoe-dmg-parity-attestation "$R19_HOOK_ATTESTATION_DIR/tahoe.dmg-parity.json" \
       --tahoe-dmg-parity-attestation-sha256 "$tahoe_parity_sha256"
   )"
   build_attestation_sha256="$(
@@ -1669,24 +1669,24 @@ NODE
     --dist "$DIST_DIR" \
     --version "$VERSION" \
     --private-root "$PRIVATE_EVIDENCE_ROOT" \
-    --build-attestation "$R18_BUILD_ATTESTATION_OUT" \
+    --build-attestation "$R19_BUILD_ATTESTATION_OUT" \
     --expected-build-attestation-sha256 "$build_attestation_sha256" \
-    --expected-nonce "$R18_BUILD_DRIVER_NONCE" \
+    --expected-nonce "$R19_BUILD_DRIVER_NONCE" \
     --expected-driver-pid "$$" \
-    --out "$R18_PRE_NOTARY_MANIFEST_OUT"
+    --out "$R19_PRE_NOTARY_MANIFEST_OUT"
   )"
-  rm -rf "$R18_ATTESTATION_EXTRACT_ROOT"
-  R18_ATTESTATION_EXTRACT_ROOT=""
-  assert_r18_source_identity "after pre-notary artifact manifest"
+  rm -rf "$R19_ATTESTATION_EXTRACT_ROOT"
+  R19_ATTESTATION_EXTRACT_ROOT=""
+  assert_r19_source_identity "after pre-notary artifact manifest"
   pre_notary_sha256="$(artifact_json_field "$pre_notary_result" sha256)"
   echo "==> Private no-clobber pre-notary artifact handoff"
-  printf 'VMLX_R18_PRE_NOTARY_MANIFEST=%s\n' "$R18_PRE_NOTARY_MANIFEST_OUT"
-  printf 'VMLX_R18_PRE_NOTARY_MANIFEST_SHA256=%s\n' "$pre_notary_sha256"
-  printf 'VMLX_R18_BUILD_ATTESTATION=%s\n' "$R18_BUILD_ATTESTATION_OUT"
-  printf 'VMLX_R18_BUILD_ATTESTATION_SHA256=%s\n' "$build_attestation_sha256"
-  printf 'VMLX_R18_EXPECTED_SOURCE_COMMIT=%s\n' "$R18_EXPECTED_VMLX_COMMIT"
-  printf 'VMLX_R18_EXPECTED_SOURCE_TREE=%s\n' "$R18_EXPECTED_VMLX_TREE"
-  printf 'VMLX_R18_EXPECTED_PREFLIGHT_SHA256=%s\n' "$R18_PREFLIGHT_MANIFEST_SHA256"
+  printf 'VMLX_R19_PRE_NOTARY_MANIFEST=%s\n' "$R19_PRE_NOTARY_MANIFEST_OUT"
+  printf 'VMLX_R19_PRE_NOTARY_MANIFEST_SHA256=%s\n' "$pre_notary_sha256"
+  printf 'VMLX_R19_BUILD_ATTESTATION=%s\n' "$R19_BUILD_ATTESTATION_OUT"
+  printf 'VMLX_R19_BUILD_ATTESTATION_SHA256=%s\n' "$build_attestation_sha256"
+  printf 'VMLX_R19_EXPECTED_SOURCE_COMMIT=%s\n' "$R19_EXPECTED_VMLX_COMMIT"
+  printf 'VMLX_R19_EXPECTED_SOURCE_TREE=%s\n' "$R19_EXPECTED_VMLX_TREE"
+  printf 'VMLX_R19_EXPECTED_PREFLIGHT_SHA256=%s\n' "$R19_PREFLIGHT_MANIFEST_SHA256"
 fi
 
 echo "==> Built DMG artifacts:"

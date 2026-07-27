@@ -1044,7 +1044,7 @@ export function validateOwnedRunIntent(
     return failures
   }
   if (
-    value.schema !== 'vmlx-r18-owned-run-intent-v5'
+    value.schema !== 'vmlx-r19-owned-run-intent-v5'
     || value.run_id !== expectedRunId
     || value.nonce !== nonce
   ) {
@@ -1314,7 +1314,7 @@ export function validateOwnedUiReleaseSentinel(
   if (
     !exactObjectFields(value, expectedFields)
     ||
-    value.schema !== 'vmlx-r18-owned-ui-release-v5'
+    value.schema !== 'vmlx-r19-owned-ui-release-v5'
     || value.run_id !== expectedRunId
     || value.nonce !== nonce
     || String(value.session_id || '') !== String(sessionId || '')
@@ -1414,7 +1414,7 @@ export function validateOwnedReuseSessionAttestation(
   if (
     !activePhase
     || ![1, 2, 3, 4].includes(activePhase.phase_index)
-    || value.schema !== 'vmlx-r18-owned-ui-session-attestation-v5'
+    || value.schema !== 'vmlx-r19-owned-ui-session-attestation-v5'
     || value.run_id !== expectedRunId
     || value.nonce !== nonce
     || value.run_intent_sha256 !== runIntentSha256
@@ -6134,7 +6134,7 @@ async function main() {
     chmodSync(releaseBlockDiskCacheDir, 0o700)
   }
   const primarySharedPrefix = [
-    'R18_PRIMARY_SHARED_PREFIX',
+    'R19_PRIMARY_SHARED_PREFIX',
     'cache-anchor-9f4b7d2a',
     'Keep the response coherent and finite.',
   ].join(' ')
@@ -6143,7 +6143,7 @@ async function main() {
       primarySharedPrefix,
       'Do not call tools.',
       'Privately compare 47 times 19 with 46 times 20.',
-      'Reply exactly two lines: R18-PRIMARY-STORE-DONE and',
+      'Reply exactly two lines: R19-PRIMARY-STORE-DONE and',
       'The literal currency string is $43 and \\(47 \\times 19 = 893 < 920 = 46 \\times 20\\).',
     ].join(' '),
     'primary-tool-restart-probe': [
@@ -6156,17 +6156,17 @@ async function main() {
     'primary-history-paged-evict-refault': [
       primarySharedPrefix,
       'Do not call tools.',
-      'Reply exactly R18-PRIMARY-EVICT-REFAULT-DONE.',
+      'Reply exactly R19-PRIMARY-EVICT-REFAULT-DONE.',
     ].join(' '),
     'primary-restart-followup': [
       primarySharedPrefix,
       'Do not call tools.',
-      'Reply exactly R18-PRIMARY-RESTART-FOLLOWUP-DONE.',
+      'Reply exactly R19-PRIMARY-RESTART-FOLLOWUP-DONE.',
     ].join(' '),
     'primary-tq-off-probe': [
       primarySharedPrefix,
       'Do not call tools.',
-      'Reply exactly R18-PRIMARY-TQ-OFF-DONE.',
+      'Reply exactly R19-PRIMARY-TQ-OFF-DONE.',
     ].join(' '),
   }[uiActionProfile]
   const selectedPromptOne = promptOneOverride || profilePromptOne || promptOne
@@ -8201,7 +8201,7 @@ async function main() {
         throw new Error('Owned UI session attestation has incomplete PID/session binding')
       }
       const attestationValue = {
-        schema: 'vmlx-r18-owned-ui-session-attestation-v5',
+        schema: 'vmlx-r19-owned-ui-session-attestation-v5',
         run_id: runId,
         nonce: releaseSentinelNonce,
         run_intent_sha256: releaseRunIntentSha256,

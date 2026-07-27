@@ -54,6 +54,6 @@ def test_build_release_dmgs_exposes_r17_consolidation_scope() -> None:
     assert "r17_consolidation)" in source
     assert "panel/scripts/scoped-release-preflight-17.py" in source
     assert (
-        "Supported scoped release values: r18_production, r17_consolidation, "
+        "Supported scoped release values: r19_production, r17_consolidation, "
         "r16_parser_cache, mm3_gemma_vl, codex_ui_only"
     ) in source

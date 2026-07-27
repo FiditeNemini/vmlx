@@ -1,10 +1,10 @@
 const {
-  verifyR18PackagingContext,
+  verifyR19PackagingContext,
 } = require("./electron-builder-before-pack.cjs");
 const { resolve } = require("node:path");
 
 function createReleaseArtifactLifecycleHook(
-  verifyPackagingContext = verifyR18PackagingContext,
+  verifyPackagingContext = verifyR19PackagingContext,
 ) {
   return async function releaseArtifactLifecycleHook(context) {
   // Electron-builder's BuildResult intentionally has no packager/projectDir.

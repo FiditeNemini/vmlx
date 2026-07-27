@@ -577,6 +577,12 @@ V5_L2_SIZE_EVICTION_REQUIREMENTS = {
     "restart_restore_required": True,
     "counter_only_evidence_allowed": False,
 }
+# Phase 2 serializes hundreds of native TQ cache blocks after the Responses
+# terminal.  The live M2.7 release representative needed more than the cache
+# harness's generic 30-second durability window while its exact request fence
+# continued making forward progress.  Keep the longer bound scoped to the
+# bounded store/evict/refault phase instead of weakening fence validation.
+V5_PHASE2_DURABILITY_TIMEOUT_SECONDS = 300
 V5_CACHE_PHASES = (
     {
         "index": 0,
@@ -709,6 +715,17 @@ def _v5_cache_gate_scenario(phase: dict[str, Any]) -> str:
     if phase_index == 3 and operation == "probe":
         return "restart-restore"
     return "standard"
+
+
+def _v5_cache_gate_extra_args(phase: dict[str, Any]) -> tuple[str, ...]:
+    """Return release-phase-specific cache harness timing controls."""
+
+    if _v5_cache_gate_scenario(phase) == "store-evict-refault":
+        return (
+            "--durability-timeout",
+            str(V5_PHASE2_DURABILITY_TIMEOUT_SECONDS),
+        )
+    return ()
 
 
 def _v5_derive_l2_size_eviction_attestation(
@@ -10468,6 +10485,7 @@ def _v5_cache_worker_phase(
         "--cache-scenario",
         _v5_cache_gate_scenario(phase),
     ]
+    command.extend(_v5_cache_gate_extra_args(phase))
     if gate_operation == "probe":
         if store_summary_path is None:
             raise RuntimeError("cache probe phase has no linked store summary")

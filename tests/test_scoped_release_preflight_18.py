@@ -4992,6 +4992,25 @@ def test_r18_v5_cache_worker_uses_prior_backend_pid_for_restart_phases(
     ]
 
 
+def test_r18_v5_phase2_extends_only_the_long_tq_durability_window():
+    module = load_module()
+    phase2 = next(
+        phase
+        for phase in module.V5_CACHE_PHASES
+        if phase["index"] == 2
+    )
+
+    assert module._v5_cache_gate_extra_args(phase2) == (
+        "--durability-timeout",
+        "300",
+    )
+    assert all(
+        module._v5_cache_gate_extra_args(phase) == ()
+        for phase in module.V5_CACHE_PHASES
+        if phase["index"] != 2
+    )
+
+
 @pytest.mark.parametrize(
     ("ui_mode", "message"),
     [

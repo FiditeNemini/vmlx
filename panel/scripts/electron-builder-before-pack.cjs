@@ -33,6 +33,10 @@ const R18_SCOPE = "r18_production";
 const R18_TEAM_ID = "55KGF2S5AY";
 const R18_CODESIGN_IDENTITY =
   "Developer ID Application: ShieldStack LLC (55KGF2S5AY)";
+// electron-builder's CSC_NAME is a certificate selector, not the full
+// codesign Authority value. Newer electron-builder releases reject selectors
+// that include the "Developer ID Application:" certificate-type prefix.
+const R18_CSC_NAME = "ShieldStack LLC (55KGF2S5AY)";
 const R18_FIXED_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 const R18_RUNTIME_CONTRACTS = {
   sequoia: {
@@ -951,7 +955,7 @@ function verifyR18PackagingContext(panelDir, context) {
   requireExactEnv("VMLX_R18_OFFICIAL_PACKAGING", "1");
   requireExactEnv("VMLX_R18_EXPECTED_TEAM_ID", R18_TEAM_ID);
   requireExactEnv("VMLX_R18_EXPECTED_CODESIGN_IDENTITY", R18_CODESIGN_IDENTITY);
-  requireExactEnv("CSC_NAME", R18_CODESIGN_IDENTITY);
+  requireExactEnv("CSC_NAME", R18_CSC_NAME);
 
   const configuredTeam = packageJson?.build?.mac?.notarize?.teamId;
   if (configuredTeam !== R18_TEAM_ID) {

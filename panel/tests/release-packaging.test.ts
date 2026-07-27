@@ -1282,6 +1282,17 @@ describe("release packaging", () => {
       'EXPECTED_CODESIGN_IDENTITY="Developer ID Application: ShieldStack LLC (55KGF2S5AY)"',
     );
     expect(source).toContain(
+      'EXPECTED_CSC_NAME="ShieldStack LLC (55KGF2S5AY)"',
+    );
+    expect(source).toContain('export CSC_NAME="$EXPECTED_CSC_NAME"');
+    expect(source).not.toContain('export CSC_NAME="$EXPECTED_CODESIGN_IDENTITY"');
+    expect(beforePackSource).toContain(
+      'const R18_CSC_NAME = "ShieldStack LLC (55KGF2S5AY)"',
+    );
+    expect(beforePackSource).toContain(
+      'requireExactEnv("CSC_NAME", R18_CSC_NAME)',
+    );
+    expect(source).toContain(
       "production packaging must build both Sequoia and Tahoe via flavor=all",
     );
     expect(source).toContain("vMLX-${VERSION}-sequoia-arm64.dmg");

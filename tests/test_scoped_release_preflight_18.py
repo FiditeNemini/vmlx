@@ -3894,10 +3894,10 @@ def test_r18_v5_run_intent_is_canonical_ordered_and_non_circular(
     assert [
         row["tq_policy"] for row in intent["phase_plan"]
     ] == [
-        "q4-required",
-        "q4-required",
-        "q4-required",
-        "q4-required",
+        "auto-model-safe-required",
+        "auto-model-safe-required",
+        "auto-model-safe-required",
+        "auto-model-safe-required",
         "explicit-off",
         "native-suppressed",
     ]

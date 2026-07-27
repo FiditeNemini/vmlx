@@ -591,7 +591,7 @@ V5_CACHE_PHASES = (
         "bundle_role": "primary",
         "cache_policy": "q4",
         "kv_cache_quantization": "auto",
-        "tq_policy": "q4-required",
+        "tq_policy": "auto-model-safe-required",
         "session_policy": "primary_stable_session",
         "paged_ram": False,
         "operation": "store",
@@ -607,7 +607,7 @@ V5_CACHE_PHASES = (
         "bundle_role": "primary",
         "cache_policy": "q4",
         "kv_cache_quantization": "auto",
-        "tq_policy": "q4-required",
+        "tq_policy": "auto-model-safe-required",
         "session_policy": "primary_stable_session",
         "paged_ram": False,
         "operation": "probe",
@@ -623,7 +623,7 @@ V5_CACHE_PHASES = (
         "bundle_role": "primary",
         "cache_policy": "q4",
         "kv_cache_quantization": "auto",
-        "tq_policy": "q4-required",
+        "tq_policy": "auto-model-safe-required",
         "session_policy": "primary_stable_session",
         "paged_ram": True,
         "operation": "store-evict-refault",
@@ -639,7 +639,7 @@ V5_CACHE_PHASES = (
         "bundle_role": "primary",
         "cache_policy": "q4",
         "kv_cache_quantization": "auto",
-        "tq_policy": "q4-required",
+        "tq_policy": "auto-model-safe-required",
         "session_policy": "primary_stable_session",
         "paged_ram": True,
         "operation": "probe",
@@ -6839,14 +6839,27 @@ def _v5_cache_facts(
             else None
         )
         if cache_policy == "q4":
+            primary_identity = str(
+                bundle_snapshot.get("derived", {}).get("identity") or ""
+            )
+            minimax_m2_auto_q8 = any(
+                token in primary_identity
+                for token in ("minimax_m2", "minimax-m2")
+            )
+            expected_storage_bits = 8 if minimax_m2_auto_q8 else 4
             if (
                 not isinstance(configured, dict)
                 or configured.get("kv_cache_quantization") != "q4"
                 or configured.get("kv_cache_quantization_explicit") is not False
                 or not isinstance(tq, dict)
                 or tq.get("enabled") is not True
-                or integer(tq.get("storage_key_bits")) != 4
-                or integer(tq.get("storage_value_bits")) != 4
+                or integer(tq.get("storage_key_bits")) != expected_storage_bits
+                or integer(tq.get("storage_value_bits")) != expected_storage_bits
+                or (
+                    minimax_m2_auto_q8
+                    and tq.get("auto_policy")
+                    != "minimax_m2_full_kv_storage_tq8"
+                )
             ):
                 return set(), []
             telemetry = tq.get("storage_encode_telemetry")

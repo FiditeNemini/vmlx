@@ -1229,8 +1229,12 @@ def test_v5_panel_owned_plans_launch_pinned_node_with_pinned_npm_cli(
         assert fixed_bin.parent == (tmp_path / "run")
         assert (fixed_bin / "node").is_file()
         assert (fixed_bin / "npm").is_file()
+        assert (fixed_bin / "npx").is_file()
+        assert (fixed_bin / "uv").is_file()
         assert str(fixed_bin / "node") in command["tool_files"]
         assert str(fixed_bin / "npm") in command["tool_files"]
+        assert str(fixed_bin / "npx") in command["tool_files"]
+        assert str(fixed_bin / "uv") in command["tool_files"]
     python_suite = plans["full_python_suite"]["commands"][0]
     assert python_suite["path_prefix"] == plans["full_panel_suite"]["commands"][
         0
@@ -1238,9 +1242,22 @@ def test_v5_panel_owned_plans_launch_pinned_node_with_pinned_npm_cli(
     assert str(Path(python_suite["path_prefix"]) / "node") in python_suite[
         "tool_files"
     ]
+    assert str(Path(python_suite["path_prefix"]) / "npx") in python_suite[
+        "tool_files"
+    ]
+    assert str(Path(python_suite["path_prefix"]) / "uv") in python_suite[
+        "tool_files"
+    ]
+    assert python_suite["env"] == {
+        "VMLX_JANG_TOOLS_SOURCE": str(jang_source.resolve()),
+        "VMLINUX_JANG_TOOLS_SOURCE": str(jang_source.resolve()),
+    }
     production = plans["production_build"]["commands"][0]
     assert production["env"]["VMLX_RELEASE_SCOPE"] == "r18_production"
     assert production["env"]["VMLX_JANG_TOOLS_SOURCE"] == str(
+        jang_source.resolve()
+    )
+    assert production["env"]["VMLINUX_JANG_TOOLS_SOURCE"] == str(
         jang_source.resolve()
     )
     assert production["env"]["VMLX_BUNDLE_MLX_PLATFORM"] == "compat"

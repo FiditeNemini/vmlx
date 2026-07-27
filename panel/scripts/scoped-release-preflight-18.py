@@ -7192,9 +7192,11 @@ def _v5_prepare_node_toolchain(
     *,
     node_path: Path,
     npm_cli_path: Path,
+    npx_cli_path: Path | None = None,
+    uv_path: Path | None = None,
     bin_name: str,
 ) -> tuple[Path, Path, Path, list[dict[str, Any]]]:
-    """Pin Node/npm and expose only private wrappers to nested shebangs."""
+    """Pin release tools and expose only private wrappers to nested children."""
 
     if not re.fullmatch(r"[a-z0-9_.-]+", bin_name):
         raise ValueError("fixed Node toolchain directory name is unsafe")
@@ -7214,11 +7216,39 @@ def _v5_prepare_node_toolchain(
         f"exec {shlex.quote(node_pin['path'])} "
         f"{shlex.quote(npm_pin['path'])} \"$@\"\n",
     )
+    extra_pins: list[dict[str, Any]] = []
+    if npx_cli_path is not None:
+        npx_pin = _v5_pin_regular_file(npx_cli_path.resolve(strict=True))
+        npx_wrapper = _v5_write_executable_wrapper(
+            bin_dir / "npx",
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(node_pin['path'])} "
+            f"{shlex.quote(npx_pin['path'])} \"$@\"\n",
+        )
+        extra_pins.extend((npx_pin, npx_wrapper))
+    if uv_path is not None:
+        uv_pin = _v5_pin_regular_file(
+            uv_path.resolve(strict=True),
+            executable=True,
+        )
+        uv_wrapper = _v5_write_executable_wrapper(
+            bin_dir / "uv",
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(uv_pin['path'])} \"$@\"\n",
+        )
+        extra_pins.extend((uv_pin, uv_wrapper))
     return (
         Path(node_pin["path"]),
         Path(npm_pin["path"]),
         bin_dir,
-        [node_pin, npm_pin, shell_pin, node_wrapper, npm_wrapper],
+        [
+            node_pin,
+            npm_pin,
+            shell_pin,
+            node_wrapper,
+            npm_wrapper,
+            *extra_pins,
+        ],
     )
 
 
@@ -7476,16 +7506,25 @@ def _v5_default_owned_check_plans(
     python = ROOT / ".venv/bin/python"
     node_value = shutil.which("node")
     npm_value = shutil.which("npm")
+    npx_value = shutil.which("npx")
     uv_value = shutil.which("uv")
-    if not python.is_file() or not node_value or not npm_value or not uv_value:
+    if (
+        not python.is_file()
+        or not node_value
+        or not npm_value
+        or not npx_value
+        or not uv_value
+    ):
         raise RuntimeError(
-            "release Python, Node, npm, or uv executable is unavailable"
+            "release Python, Node, npm, npx, or uv executable is unavailable"
         )
     uv = Path(uv_value).resolve(strict=True)
     node, npm_cli, fixed_bin, toolchain_pins = _v5_prepare_node_toolchain(
         run_dir,
         node_path=Path(node_value),
         npm_cli_path=Path(npm_value),
+        npx_cli_path=Path(npx_value),
+        uv_path=Path(uv_value),
         bin_name="owned-node-bin",
     )
     release_verifier_pins = {
@@ -7513,6 +7552,7 @@ def _v5_default_owned_check_plans(
     production_env = {
         "VMLX_RELEASE_SCOPE": SCOPE,
         "VMLX_JANG_TOOLS_SOURCE": str(jang_root.resolve()),
+        "VMLINUX_JANG_TOOLS_SOURCE": str(jang_root.resolve()),
         "VMLX_BUNDLE_MLX_PLATFORM": "compat",
         "VMLX_EXPECTED_MLX_WHEEL_PLATFORM": "macosx_14_0_arm64",
     }
@@ -7638,7 +7678,10 @@ def _v5_default_owned_check_plans(
                         "no:cacheprovider",
                     ],
                     "cwd": ROOT,
-                    "env": {},
+                    "env": {
+                        "VMLX_JANG_TOOLS_SOURCE": str(jang_root.resolve()),
+                        "VMLINUX_JANG_TOOLS_SOURCE": str(jang_root.resolve()),
+                    },
                     # A small number of Python contract tests inspect the
                     # packaged Electron renderer with the pinned Node binary.
                     # Keep that subprocess lookup inside the same owned

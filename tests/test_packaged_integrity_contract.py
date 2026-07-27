@@ -6,6 +6,7 @@ import plistlib
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1389,6 +1390,10 @@ def _r18_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
         "dist": dist,
         "preflight": preflight,
         "private_root": tmp_path / "private-evidence",
+        # The pytest process is the fixture's build driver.  Do not use its
+        # ambient parent: detached full-suite runners can legitimately reparent
+        # pytest to launchd (PID 1) before these late-running tests execute.
+        "driver_pid": os.getpid(),
         "pre_manifest": tmp_path
         / "private-evidence"
         / "handoffs"
@@ -1427,6 +1432,7 @@ def _write_hook_and_parity_attestations(
     paths: dict[str, object],
 ) -> tuple[dict[str, tuple[Path, str]], dict[str, tuple[Path, str]]]:
     nonce = "a" * 64
+    driver_pid = int(paths["driver_pid"])
     private_root = runner.ensure_private_evidence_root(paths["private_root"])
     hook_dir = private_root / "hook-completions"
     if hook_dir.exists():
@@ -1526,7 +1532,7 @@ def _write_hook_and_parity_attestations(
                 "path": str(paths["root"] / "build/r18-release-driver-plan.json"),
                 "sha256": ("b" if flavor == "sequoia" else "c") * 64,
                 "nonce": nonce,
-                "driver_pid": os.getppid(),
+                "driver_pid": driver_pid,
             },
             "fixed_path": "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "tools": tools,
@@ -1568,7 +1574,7 @@ def _write_hook_and_parity_attestations(
             hook_attestation_path=hook_path,
             expected_hook_sha256=hook_sha256,
             expected_nonce=nonce,
-            expected_driver_pid=os.getppid(),
+            expected_driver_pid=driver_pid,
             mounted_app=app,
             extracted_asar=extracted,
             output_path=parity_path,
@@ -1581,20 +1587,69 @@ def _write_hook_and_parity_attestations(
 def _write_build_attestation(paths: dict[str, Path]) -> dict[str, object]:
     nonce = "a" * 64
     hooks, parity = _write_hook_and_parity_attestations(paths)
-    return runner.write_build_driver_attestation(
-        root=paths["root"],
-        dist_dir=paths["dist"],
-        version="1.6.18",
-        preflight_path=paths["preflight"],
-        private_root=paths["private_root"],
-        output_path=paths["build_attestation"],
-        nonce=nonce,
-        driver_pid=os.getppid(),
-        staged_outputs=paths["staged_outputs"],
-        extracted_asars=paths["extracted_asars"],
-        hook_attestations=hooks,
-        dmg_parity_attestations=parity,
+    driver_pid = int(paths["driver_pid"])
+    command = [
+        sys.executable,
+        str(Path(runner.__file__).resolve()),
+        "artifact-chain",
+        "write-build-attestation",
+        "--root",
+        str(paths["root"]),
+        "--dist",
+        str(paths["dist"]),
+        "--version",
+        "1.6.18",
+        "--preflight",
+        str(paths["preflight"]),
+        "--private-root",
+        str(paths["private_root"]),
+        "--out",
+        str(paths["build_attestation"]),
+        "--nonce",
+        nonce,
+        "--driver-pid",
+        str(driver_pid),
+    ]
+    for flavor in runner.R18_ARTIFACT_CHAIN_FLAVORS:
+        hook_path, hook_sha256 = hooks[flavor]
+        parity_path, parity_sha256 = parity[flavor]
+        command.extend(
+            [
+                f"--{flavor}-staged-output",
+                str(paths["staged_outputs"][flavor]),
+                f"--{flavor}-extracted-asar",
+                str(paths["extracted_asars"][flavor]),
+                f"--{flavor}-hook-attestation",
+                str(hook_path),
+                f"--{flavor}-hook-attestation-sha256",
+                hook_sha256,
+                f"--{flavor}-dmg-parity-attestation",
+                str(parity_path),
+                f"--{flavor}-dmg-parity-attestation-sha256",
+                parity_sha256,
+            ]
+        )
+    result = subprocess.run(
+        command,
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    if result.returncode != 0:
+        message = result.stderr.strip()
+        if message.startswith("ERROR: "):
+            message = message.removeprefix("ERROR: ")
+        raise runner.ArtifactChainError(message or "build-driver attestation failed")
+    payload = runner._read_json_object(
+        paths["build_attestation"],
+        label="fixture build-driver attestation",
+    )
+    return {
+        "attestation": str(paths["build_attestation"]),
+        "sha256": runner._sha256(paths["build_attestation"]),
+        "payload": payload,
+    }
 
 
 def _write_pre_manifest(paths: dict[str, Path]) -> dict[str, object]:
@@ -1609,7 +1664,7 @@ def _write_pre_manifest(paths: dict[str, Path]) -> dict[str, object]:
         build_attestation_path=paths["build_attestation"],
         expected_build_attestation_sha256=str(attestation["sha256"]),
         expected_nonce=nonce,
-        expected_driver_pid=os.getppid(),
+        expected_driver_pid=int(paths["driver_pid"]),
     )
 
 
@@ -1721,6 +1776,15 @@ def test_r18_production_cli_has_no_direct_self_certifying_write_pre():
     )
 
 
+def test_r18_fixture_uses_a_live_child_when_pytest_is_orphaned(tmp_path, monkeypatch):
+    paths = _r18_artifact_chain_fixture(tmp_path)
+    monkeypatch.setattr(os, "getppid", lambda: 1)
+
+    result = _write_pre_manifest(paths)
+
+    assert result["payload"]["build_attestation"]["driver_pid"] == os.getpid()
+
+
 def test_r18_pre_notary_manifest_binds_source_preflight_and_exact_artifacts(tmp_path):
     paths = _r18_artifact_chain_fixture(tmp_path)
     result = _write_pre_manifest(paths)
@@ -1765,7 +1829,7 @@ def test_r18_v4_rejects_same_version_mounted_dmg_payload_mismatch(tmp_path):
             hook_attestation_path=hook_path,
             expected_hook_sha256=hook_sha256,
             expected_nonce="a" * 64,
-            expected_driver_pid=os.getppid(),
+            expected_driver_pid=int(paths["driver_pid"]),
             mounted_app=mounted_app,
             extracted_asar=extracted_asar,
             output_path=paths["private_root"]
@@ -2648,7 +2712,7 @@ def test_r18_caller_cannot_pair_substituted_attestation_with_own_digest(tmp_path
             build_attestation_path=paths["build_attestation"],
             expected_build_attestation_sha256="f" * 64,
             expected_nonce="a" * 64,
-            expected_driver_pid=os.getppid(),
+            expected_driver_pid=int(paths["driver_pid"]),
         )
     assert attestation["sha256"] != "f" * 64
 

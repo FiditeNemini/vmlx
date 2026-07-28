@@ -103,6 +103,15 @@ const expectedElectronPidRaw = (
 const expectedElectronPid = expectedElectronPidRaw === ''
   ? null
   : Number(expectedElectronPidRaw)
+const releaseRetainedPidsRaw = (
+  process.env.VMLINUX_REAL_UI_RETAINED_PIDS
+  || process.env.VMLX_REAL_UI_RETAINED_PIDS
+  || ''
+).trim()
+const releaseRetainedPids = parseExplicitPidList(
+  releaseRetainedPidsRaw,
+  'Real UI retained PIDs',
+)
 const lifecycleOwner = (
   process.env.VMLINUX_REAL_UI_LIFECYCLE_OWNER
   || process.env.VMLX_REAL_UI_LIFECYCLE_OWNER
@@ -219,6 +228,20 @@ export function parseOptionalPort(value, label) {
   return port
 }
 
+export function parseExplicitPidList(value, label = 'PID list') {
+  const raw = String(value ?? '').trim()
+  if (!raw) return []
+  const parts = raw.split(/[\s,]+/).filter(Boolean)
+  const pids = parts.map((part) => Number(part))
+  if (pids.some((pid) => !Number.isInteger(pid) || pid <= 1)) {
+    throw new Error(`${label} must contain only integer PIDs greater than 1`)
+  }
+  if (new Set(pids).size !== pids.length) {
+    throw new Error(`${label} must not contain duplicate PIDs`)
+  }
+  return pids
+}
+
 const requestedCdpPort = parseOptionalPort(
   process.env.VMLINUX_REAL_UI_CDP_PORT
     || process.env.VMLX_REAL_UI_CDP_PORT,
@@ -258,11 +281,11 @@ const defaultPromptThree = builtinToolsEnabled
       'Do not call another tool.',
       'Using the prior tool results, reply briefly in English and include REAL_UI_LIVE_TOOL_ONE and REAL_UI_LIVE_TOOL_TWO once each.',
       'Mention that this is the third UI turn.',
-      'Also include the literal currency string $43 and this exact inline TeX expression: \\(47 \\times 19 = 893 < 920 = 46 \\times 20\\).',
+      'Also include the literal currency string $43 and this exact inline TeX expression: $47 \\times 19 = 893 < 920 = 46 \\times 20$.',
     ].join(' ')
   : [
       'Repeat the phrase REAL_UI_LIVE once and mention that this is the third UI turn.',
-      'Also include the literal currency string $43 and this exact inline TeX expression: \\(47 \\times 19 = 893 < 920 = 46 \\times 20\\).',
+      'Also include the literal currency string $43 and this exact inline TeX expression: $47 \\times 19 = 893 < 920 = 46 \\times 20$.',
     ].join(' ')
 const promptOne = promptOneOverride || defaultPromptOne
 const promptTwo = promptTwoOverride || defaultPromptTwo
@@ -1766,6 +1789,177 @@ async function listenerPidForPort(port) {
   return pids[0]
 }
 
+async function listenerPidsForPort(port) {
+  let stdout = ''
+  try {
+    ;({ stdout } = await execFileAsync(
+      'lsof',
+      ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fp'],
+      { encoding: 'utf8' },
+    ))
+  } catch (error) {
+    if (Number(error?.code) === 1 && !String(error?.stdout || '').trim()) {
+      return []
+    }
+    throw error
+  }
+  return [...new Set(
+    String(stdout)
+      .split(/\r?\n/)
+      .filter((line) => /^p\d+$/.test(line))
+      .map((line) => Number(line.slice(1)))
+      .filter((pid) => Number.isInteger(pid) && pid > 0),
+  )]
+}
+
+async function exactPidIsAlive(pid) {
+  let stdout = ''
+  try {
+    ;({ stdout } = await execFileAsync(
+      'ps',
+      ['-p', String(Number(pid)), '-o', 'pid='],
+      { encoding: 'utf8' },
+    ))
+  } catch (error) {
+    if (Number(error?.code) === 1 && !String(error?.stdout || '').trim()) {
+      return false
+    }
+    throw error
+  }
+  return String(stdout)
+    .split(/\s+/)
+    .filter(Boolean)
+    .some((value) => Number(value) === Number(pid))
+}
+
+async function waitForExactProofBackendTeardown({
+  backendPid,
+  port,
+  timeoutMs = 120_000,
+  pollMs = 100,
+}) {
+  const expectedPid = Number(backendPid)
+  const expectedPort = Number(port)
+  if (
+    !Number.isInteger(expectedPid)
+    || expectedPid <= 0
+    || !Number.isInteger(expectedPort)
+    || expectedPort <= 0
+  ) {
+    throw new Error('Final proof-session teardown requires one exact backend PID and port')
+  }
+  const started = Date.now()
+  let lastAlive = true
+  let lastListenerPids = []
+  while (Date.now() - started < timeoutMs) {
+    lastAlive = await exactPidIsAlive(expectedPid)
+    lastListenerPids = await listenerPidsForPort(expectedPort)
+    const unexpected = lastListenerPids.filter((pid) => pid !== expectedPid)
+    if (unexpected.length) {
+      throw new Error(
+        `Final proof port ${expectedPort} was rebound by unexpected PID(s): ${unexpected.join(',')}`,
+      )
+    }
+    if (!lastAlive && lastListenerPids.length === 0) {
+      return {
+        backend_pid: expectedPid,
+        port: expectedPort,
+        backend_process_gone: true,
+        listener_gone: true,
+        observed_listener_pids: [],
+        elapsed_ms: Date.now() - started,
+      }
+    }
+    await sleep(pollMs)
+  }
+  throw new Error(
+    'Timed out waiting for the exact proof backend to stop: '
+    + `pid=${expectedPid} alive=${lastAlive} port=${expectedPort} `
+    + `listeners=${lastListenerPids.join(',') || 'none'}`,
+  )
+}
+
+export async function runPostSentinelWorkWithCleanup({
+  work,
+  cleanup,
+}) {
+  let value
+  let originalError = null
+  let cleanupError = null
+  try {
+    value = await work()
+  } catch (error) {
+    originalError = error
+  } finally {
+    try {
+      await cleanup()
+    } catch (error) {
+      cleanupError = error
+    }
+  }
+  if (originalError) {
+    if (cleanupError && typeof originalError === 'object') {
+      try {
+        originalError.cleanupError = cleanupError
+      } catch {}
+    }
+    throw originalError
+  }
+  if (cleanupError) throw cleanupError
+  return value
+}
+
+async function attestExactSurvivorPids({
+  backendPid,
+  electronPid,
+  gatewayPid,
+  retainedPids,
+  stage,
+}) {
+  const expected = [
+    { role: 'parent_electron', pid: Number(electronPid) },
+    { role: 'parent_gateway', pid: Number(gatewayPid) },
+    ...retainedPids.map((pid, index) => ({
+      role: `explicit_retained_${index + 1}`,
+      pid: Number(pid),
+    })),
+  ]
+  const pids = expected.map((entry) => entry.pid)
+  const explicitPids = retainedPids.map(Number)
+  const parentPid = Number(electronPid)
+  const proofBackendPid = Number(backendPid)
+  if (
+    expected.some((entry) => !Number.isInteger(entry.pid) || entry.pid <= 1)
+    || !Number.isInteger(proofBackendPid)
+    || proofBackendPid <= 1
+    || parentPid !== Number(gatewayPid)
+    || new Set(explicitPids).size !== explicitPids.length
+    || explicitPids.includes(parentPid)
+    || pids.includes(proofBackendPid)
+  ) {
+    throw new Error(
+      `Final proof-session ${stage} survivor attestation requires one shared `
+      + 'Electron/gateway PID and disjoint explicit/backend PIDs',
+    )
+  }
+  const observed = await Promise.all(expected.map(async (entry) => ({
+    ...entry,
+    alive: await exactPidIsAlive(entry.pid),
+  })))
+  const missing = observed.filter((entry) => entry.alive !== true)
+  if (missing.length) {
+    throw new Error(
+      `Final proof-session ${stage} survivor PID(s) are not alive: `
+      + missing.map((entry) => `${entry.role}=${entry.pid}`).join(','),
+    )
+  }
+  return {
+    stage,
+    expected_retained_pids: [...retainedPids],
+    processes: observed,
+  }
+}
+
 async function executablePathForPid(pid) {
   try {
     const { stdout: commandLine } = await execFileAsync(
@@ -2784,14 +2978,10 @@ export function validateRenderedDomEvidence(result) {
     const persistedMathSource = String(
       persistedById.get(String(assistantIds[renderingPromptIndex] || '')) || '',
     )
-    const sourceSpellings = [
-      `\\(${expectedTex}\\)`,
-      `\\[${expectedTex}\\]`,
-      `$$${expectedTex}$$`,
-    ]
-    if (!sourceSpellings.some((source) => persistedMathSource.includes(source))) {
+    const exactSingleDollarSource = `$${expectedTex}$`
+    if (!persistedMathSource.includes(exactSingleDollarSource)) {
       failures.push(
-        'persisted answer does not attest the exact TeX source rendered by KaTeX',
+        'persisted answer does not attest the exact single-dollar TeX source rendered by KaTeX',
       )
     }
     const expectedVisibleMath = normalizeProofText(
@@ -5590,6 +5780,197 @@ export function applyAssertionFailureStatus(result, error) {
   return result
 }
 
+export function validateGatewaySingleModelEvidence(result) {
+  if (!result?.ownedRunIntent) return []
+  const failures = []
+  const evidence = result.gatewaySingleModelMode || {}
+  const serverControl = evidence.serverSettingsControl || {}
+  const toggleControl = evidence.toggleControl || {}
+  const statusAfter = evidence.gatewayStatusAfterToggle || {}
+  const statusBeforeStart = evidence.gatewayStatusImmediatelyBeforeStart || {}
+  const persistedSetting =
+    evidence.persistedSettingImmediatelyBeforeStart || {}
+  if (
+    serverControl.selector !== '[data-vmlx-control="server-settings"]'
+    || serverControl.visible !== true
+    || serverControl.ariaPressedAfterOpen !== 'true'
+    || serverControl.ariaPressedAfterClose !== 'false'
+  ) {
+    failures.push(
+      'V5 Single model evidence did not visibly open and close the real Server settings control',
+    )
+  }
+  if (
+    toggleControl.selector
+      !== '[data-vmlx-control="gateway-single-model-mode"]'
+    || toggleControl.visible !== true
+    || toggleControl.ariaPressedAfter !== 'true'
+  ) {
+    failures.push(
+      'V5 Single model evidence did not attest the visible Server settings toggle as enabled',
+    )
+  }
+  const alreadyOnPath = (
+    toggleControl.ariaPressedBefore === 'true'
+    && toggleControl.observedAlreadyOn === true
+    && toggleControl.clickedToEnable === false
+  )
+  const enabledByClickPath = (
+    toggleControl.ariaPressedBefore !== 'true'
+    && toggleControl.observedAlreadyOn === false
+    && toggleControl.clickedToEnable === true
+  )
+  if (!alreadyOnPath && !enabledByClickPath) {
+    failures.push(
+      'V5 Single model evidence did not truthfully distinguish already-on state from a visible enable click',
+    )
+  }
+  if (
+    statusAfter.running !== true
+    || statusAfter.singleModelMode !== true
+    || statusBeforeStart.running !== true
+    || statusBeforeStart.singleModelMode !== true
+  ) {
+    failures.push(
+      'V5 Single model evidence did not bind the enabled DOM toggle to live gateway status before Start',
+    )
+  }
+  if (
+    persistedSetting.key !== 'gateway_single_model_mode'
+    || persistedSetting.source !== 'window.api.settings.get'
+    || persistedSetting.value !== 'true'
+  ) {
+    failures.push(
+      'V5 Single model evidence did not independently read the persisted gateway setting before Start',
+    )
+  }
+  return failures
+}
+
+export function validateFinalPhaseStopEvidence(result) {
+  const phaseIndex = Number(result?.ownedRunIntent?.phase_index)
+  const finalPhaseRequired = phaseIndex === 5 && Boolean(result?.releaseEvidence)
+  if (!finalPhaseRequired) return []
+  const failures = []
+  const evidence = result.finalPhaseStopEvidence || {}
+  const visibleControl = evidence.visibleControl || {}
+  const session = evidence.session || {}
+  const backend = evidence.backend || {}
+  const survivors = evidence.survivors || {}
+  let expectedBackendPort = null
+  try {
+    expectedBackendPort = Number(new URL(result?.baseUrl || '').port)
+  } catch {}
+  if (
+    evidence.releaseSentinelConsumed !== true
+    || evidence.phaseIndex !== 5
+  ) {
+    failures.push('final V5 proof-session Stop did not follow phase-5 sentinel consumption')
+  }
+  if (
+    visibleControl.selector !== '[data-vmlx-control="session-stop"]'
+    || visibleControl.clicked !== true
+    || typeof visibleControl.label !== 'string'
+    || !visibleControl.label.trim()
+    || visibleControl.sessionId !== result?.session?.id
+    || visibleControl.exactSelector
+      !== (
+        '[data-vmlx-control="session-stop"]'
+        + `[data-vmlx-session-id="${result?.session?.id || ''}"]`
+      )
+  ) {
+    failures.push('final V5 proof session was not stopped through its exact visible Stop control')
+  }
+  const before = session.before || {}
+  const after = session.after || {}
+  if (
+    session.id !== result?.session?.id
+    || !['running', 'standby'].includes(before.status)
+    || before.pid !== result?.backend?.pid
+    || before.port !== expectedBackendPort
+    || after.status !== 'stopped'
+    || after.pid !== null
+    || after.port !== expectedBackendPort
+    || session.pidClearSemantics !== 'nullable_pid_cleared'
+    || session.portClearSemantics !== 'non_nullable_endpoint_retained'
+  ) {
+    failures.push(
+      'final V5 proof-session database state was not bound to the backend PID/port and durably stopped',
+    )
+  }
+  if (
+    backend.backend_pid !== result?.backend?.pid
+    || !Number.isInteger(expectedBackendPort)
+    || expectedBackendPort <= 0
+    || backend.port !== expectedBackendPort
+    || backend.backend_process_gone !== true
+    || backend.listener_gone !== true
+    || !Array.isArray(backend.observed_listener_pids)
+    || backend.observed_listener_pids.length !== 0
+  ) {
+    failures.push('final V5 proof backend process/listener teardown was not exactly attested')
+  }
+  const expectedRetainedPids = Array.isArray(result?.requestedRetainedPids)
+    ? result.requestedRetainedPids
+    : []
+  const expectedElectronPid = Number(result?.uiBackendBinding?.electron_pid)
+  const expectedGatewayPid = Number(
+    result?.uiSessionAttestation?.value?.gateway_pid
+    ?? result?.uiBackendBinding?.gateway_process_binding?.listener_pid,
+  )
+  const validateSnapshot = (snapshot, stage) => {
+    if (
+      snapshot?.stage !== stage
+      || JSON.stringify(snapshot?.expected_retained_pids || [])
+        !== JSON.stringify(expectedRetainedPids)
+      || !Array.isArray(snapshot?.processes)
+    ) return false
+    const expected = [
+      ['parent_electron', expectedElectronPid],
+      ['parent_gateway', expectedGatewayPid],
+      ...expectedRetainedPids.map((pid, index) => [
+        `explicit_retained_${index + 1}`,
+        Number(pid),
+      ]),
+    ]
+    return (
+      snapshot.processes.length === expected.length
+      && expected.every(([role, pid]) =>
+        snapshot.processes.some((process) =>
+          process?.role === role
+          && process?.pid === pid
+          && process?.alive === true
+        )
+      )
+    )
+  }
+  if (
+    expectedRetainedPids.length === 0
+    || expectedRetainedPids.some((pid) =>
+      !Number.isInteger(Number(pid)) || Number(pid) <= 1
+    )
+    || new Set(expectedRetainedPids.map(Number)).size
+      !== expectedRetainedPids.length
+    || !Number.isInteger(expectedElectronPid)
+    || expectedElectronPid <= 1
+    || !Number.isInteger(expectedGatewayPid)
+    || expectedGatewayPid <= 1
+    || expectedElectronPid !== expectedGatewayPid
+    || expectedRetainedPids.map(Number).some((pid) =>
+      pid === expectedElectronPid
+      || pid === expectedGatewayPid
+      || pid === Number(result?.backend?.pid)
+    )
+    || !validateSnapshot(survivors.before, 'before_visible_stop')
+    || !validateSnapshot(survivors.after, 'after_backend_teardown')
+  ) {
+    failures.push(
+      'final V5 cleanup did not attest parent Electron, gateway, and explicit retained PIDs before and after Stop',
+    )
+  }
+  return failures
+}
+
 function assertResult(result) {
   const failures = []
   const chat = result.chat || {}
@@ -5614,10 +5995,41 @@ function assertResult(result) {
   }
   if (!result.run_id) failures.push('stable run_id was not recorded')
   if (result.uiStartControl?.clicked !== true) failures.push('session was not started through the visible Electron local Start control')
-  if (result.uiStartControl?.label !== 'Start') failures.push('clicked control was not the local-session Start control')
+  if (
+    result.uiStartControl?.selector !== '[data-vmlx-control="session-start"]'
+    || result.uiStartControl?.sessionId !== result?.session?.id
+    || result.uiStartControl?.exactSelector
+      !== (
+        '[data-vmlx-control="session-start"]'
+        + `[data-vmlx-session-id="${result?.session?.id || ''}"]`
+      )
+  ) {
+    failures.push('clicked control was not the exact session-bound local Start control')
+  }
+  if (
+    result.preStartStopControl
+    && (
+      result.preStartStopControl.selector
+        !== '[data-vmlx-control="session-stop"]'
+      || result.preStartStopControl.sessionId !== result?.session?.id
+      || result.preStartStopControl.exactSelector
+        !== (
+          '[data-vmlx-control="session-stop"]'
+          + `[data-vmlx-session-id="${result?.session?.id || ''}"]`
+        )
+      || result.preStartStopControl.clicked !== true
+      || result.preStartStopControl.statusAfter !== 'stopped'
+    )
+  ) {
+    failures.push(
+      'pre-Start active session was not stopped through its exact session-bound visible Stop/Cancel control',
+    )
+  }
   if (result.uiStartControl?.sessionStatusAfter !== 'running') {
     failures.push(`UI-started session did not reach running state: ${result.uiStartControl?.sessionStatusAfter || 'unknown'}`)
   }
+  failures.push(...validateGatewaySingleModelEvidence(result))
+  failures.push(...validateFinalPhaseStopEvidence(result))
   if (!result.server?.models?.data?.length) failures.push('real server /v1/models returned no models')
   if (result.localSessionStarted !== true) failures.push('local model session did not start through the Electron UI control')
   if (!chat.turns?.some((m) => m.role === 'assistant' && m.content)) failures.push('assistant content is empty')
@@ -5809,6 +6221,19 @@ export function deriveProvenSurfaces(result) {
   const surfaces = new Set()
   const chat = result.chat || {}
   const health = result.server?.health || {}
+  if (
+    result?.ownedRunIntent
+    && validateGatewaySingleModelEvidence(result).length === 0
+  ) {
+    surfaces.add('gateway_single_model_visible_ui')
+  }
+  if (
+    result?.ownedRunIntent?.phase_index === 5
+    && result?.releaseEvidence
+    && validateFinalPhaseStopEvidence(result).length === 0
+  ) {
+    surfaces.add('final_proof_session_visible_stop')
+  }
   if (
     result.uiLaunchMode === 'installed-app'
     && validateUiRuntimeProvenance(result).length === 0
@@ -6292,8 +6717,17 @@ async function main() {
       || !releaseSessionAttestationPath
       || !Number.isInteger(releaseGatewayPid)
       || releaseGatewayPid <= 0
+      || releaseGatewayPid !== expectedElectronPid
       || !releaseGatewayBaseUrl
       || !pairedCacheArtifactPath
+      || (
+        releaseActivePhaseIndex === 5
+        && (
+          releaseRetainedPids.length === 0
+          || releaseRetainedPids.includes(expectedElectronPid)
+          || releaseRetainedPids.includes(releaseGatewayPid)
+        )
+      )
       || attachLifecycleFailures.length > 0
     )
   ) {
@@ -6304,6 +6738,8 @@ async function main() {
       + 'VMLINUX_REAL_UI_GATEWAY_PID, VMLINUX_REAL_UI_GATEWAY_BASE_URL, '
       + 'VMLINUX_REAL_UI_PAIRED_CACHE_ARTIFACT, '
       + 'VMLINUX_REAL_UI_ATTACH_CDP_URL, VMLINUX_REAL_UI_EXPECTED_ELECTRON_PID, '
+      + 'VMLINUX_REAL_UI_RETAINED_PIDS for phase 5, '
+      + 'matching Electron/gateway PIDs with disjoint retained PIDs, '
       + 'VMLINUX_REAL_UI_LIFECYCLE_OWNER=parent, and VMLINUX_REAL_UI_ALLOW_TEARDOWN=0'
       + (
         attachLifecycleFailures.length
@@ -6530,7 +6966,7 @@ async function main() {
       'Do not call tools.',
       'Privately compare 47 times 19 with 46 times 20.',
       'Reply exactly two lines: R19-PRIMARY-STORE-DONE and',
-      'The literal currency string is $43 and \\(47 \\times 19 = 893 < 920 = 46 \\times 20\\).',
+      'The literal currency string is $43 and $47 \\times 19 = 893 < 920 = 46 \\times 20$.',
     ].join(' '),
     'primary-tool-restart-probe': [
       primarySharedPrefix,
@@ -6592,6 +7028,18 @@ async function main() {
       expectedHealthPid: null,
       kind: 'electron-cdp',
     })
+    if (
+      releaseSentinelPath
+      && (
+        releaseGatewayPid !== expectedElectronPid
+        || cdpProcessBinding.listener_pid !== expectedElectronPid
+      )
+    ) {
+      throw new Error(
+        'Owned release proof requires the gateway PID, expected Electron PID, '
+        + 'and CDP-bound Electron PID to be identical',
+      )
+    }
     cdp = await CdpSocket.connect(target.webSocketDebuggerUrl)
     await cdp.send('Runtime.enable')
     await cdp.send('Page.enable')
@@ -7155,26 +7603,26 @@ async function main() {
           // return an already-active row even for the first phase of a proof run.
           // Stop every active state through the visible UI before requiring the
           // Start control, so the proof still attests a real user-driven restart.
+          let preStartStopControl = null;
           if (['running', 'loading', 'standby'].includes(sessionBeforeStart?.status)) {
-            const stopControlLabel = sessionBeforeStart?.status === 'loading'
-              ? 'Cancel'
-              : 'Stop';
+            const statusBeforeVisibleStop = sessionBeforeStart.status;
+            const exactStopSelector =
+              '[data-vmlx-control="session-stop"][data-vmlx-session-id="'
+              + CSS.escape(created.session.id)
+              + '"]';
             const stopButton = await new Promise((resolve, reject) => {
               const started = Date.now();
               const check = () => {
-                const candidate = [...document.querySelectorAll('button')]
-                  .find((button) => {
-                    const label = (button.textContent || '')
-                      .replace(/\\s+/g, ' ')
-                      .trim();
-                    return label === stopControlLabel && !button.disabled;
-                  });
-                if (candidate) return resolve(candidate);
+                const candidate = document.querySelector(exactStopSelector);
+                if (
+                  candidate instanceof HTMLButtonElement
+                  && isVisible(candidate)
+                  && !candidate.disabled
+                ) return resolve(candidate);
                 if (Date.now() - started > 30000) {
                   return reject(new Error(
-                    'Timed out waiting for the visible '
-                    + stopControlLabel + ' control '
-                    + 'for the active local session',
+                    'Timed out waiting for the exact session-bound visible '
+                    + 'Stop/Cancel control for the active local session',
                   ));
                 }
                 setTimeout(check, 100);
@@ -7192,8 +7640,7 @@ async function main() {
                 if (current?.status === 'stopped') return resolve(current);
                 if (!current || current.status === 'error') {
                   return reject(new Error(
-                    'Visible ' + stopControlLabel
-                    + ' left the active local session missing '
+                    'Visible Stop/Cancel left the active local session missing '
                     + 'or errored',
                   ));
                 }
@@ -7206,6 +7653,16 @@ async function main() {
               };
               check();
             });
+            preStartStopControl = {
+              selector: '[data-vmlx-control="session-stop"]',
+              exactSelector: exactStopSelector,
+              sessionId: created.session.id,
+              label: (stopButton.textContent || '').replace(/\\s+/g, ' ').trim(),
+              statusBefore: statusBeforeVisibleStop,
+              statusAfter: sessionBeforeStart.status,
+              visible: true,
+              clicked: true,
+            };
           }
           if (
             requestedReuseSessionId
@@ -7255,20 +7712,152 @@ async function main() {
             }
             sessionBeforeStart = await window.api.sessions.get(created.session.id);
           }
+          const serverSettingsControl = await waitFor(() => {
+            return [...document.querySelectorAll(
+              '[data-vmlx-control="server-settings"]'
+            )].find((button) =>
+              button instanceof HTMLButtonElement && isVisible(button)
+            ) || null;
+          }, 'visible Server settings control before Start');
+          const serverSettingsAriaBefore =
+            serverSettingsControl.getAttribute('aria-pressed');
+          if (serverSettingsAriaBefore !== 'true') {
+            serverSettingsControl.scrollIntoView({ block: 'center' });
+            serverSettingsControl.click();
+          }
+          await waitFor(() => {
+            const drawer = document.querySelector(
+              '[data-vmlx-surface="server-settings"]'
+            );
+            return (
+              serverSettingsControl.getAttribute('aria-pressed') === 'true'
+              && drawer instanceof HTMLElement
+              && isVisible(drawer)
+            ) ? drawer : null;
+          }, 'visibly open Server settings drawer before Start');
+          const singleModelToggle = await waitFor(() => {
+            const candidate = document.querySelector(
+              '[data-vmlx-control="gateway-single-model-mode"]'
+            );
+            return candidate instanceof HTMLButtonElement && isVisible(candidate)
+              ? candidate
+              : null;
+          }, 'visible Gateway Single model toggle before Start');
+          const gatewayStatusBeforeToggle = await window.api.gateway.getStatus();
+          const toggleAriaBefore =
+            singleModelToggle.getAttribute('aria-pressed');
+          const observedAlreadyOn = toggleAriaBefore === 'true';
+          let clickedToEnable = false;
+          if (!observedAlreadyOn) {
+            singleModelToggle.scrollIntoView({ block: 'center' });
+            singleModelToggle.click();
+            clickedToEnable = true;
+          }
+          const enabledGatewayState = await new Promise((resolve, reject) => {
+            const started = Date.now();
+            const check = async () => {
+              const visibleToggle = document.querySelector(
+                '[data-vmlx-control="gateway-single-model-mode"]'
+              );
+              const [status, persistedSetting] = await Promise.all([
+                window.api.gateway.getStatus().catch(() => null),
+                window.api.settings.get('gateway_single_model_mode')
+                  .catch(() => null),
+              ]);
+              if (
+                visibleToggle instanceof HTMLButtonElement
+                && isVisible(visibleToggle)
+                && visibleToggle.getAttribute('aria-pressed') === 'true'
+                && status?.running === true
+                && status?.singleModelMode === true
+                && persistedSetting === 'true'
+              ) {
+                resolve({ status, persistedSetting });
+                return;
+              }
+              if (Date.now() - started > 30000) {
+                reject(new Error(
+                  'Timed out binding the visible Gateway Single model toggle '
+                  + 'to live gateway status before Start'
+                ));
+                return;
+              }
+              setTimeout(check, 100);
+            };
+            check();
+          });
+          const gatewayStatusAfterToggle = enabledGatewayState.status;
+          const toggleAriaAfter =
+            singleModelToggle.getAttribute('aria-pressed');
+          const toggleVisibleAfter = isVisible(singleModelToggle);
+          serverSettingsControl.click();
+          await waitFor(
+            () => serverSettingsControl.getAttribute('aria-pressed') === 'false',
+            'visibly closed Server settings drawer before Start',
+          );
+          const [
+            gatewayStatusImmediatelyBeforeStart,
+            persistedGatewaySingleModelModeImmediatelyBeforeStart,
+          ] = await Promise.all([
+            window.api.gateway.getStatus(),
+            window.api.settings.get('gateway_single_model_mode'),
+          ]);
+          if (
+            gatewayStatusImmediatelyBeforeStart?.running !== true
+            || gatewayStatusImmediatelyBeforeStart?.singleModelMode !== true
+            || persistedGatewaySingleModelModeImmediatelyBeforeStart !== 'true'
+          ) {
+            throw new Error(
+              'Gateway Single model mode was not independently persisted '
+              + 'and live immediately before Start'
+            );
+          }
+          const gatewaySingleModelMode = {
+            requested: true,
+            serverSettingsControl: {
+              selector: '[data-vmlx-control="server-settings"]',
+              visible: isVisible(serverSettingsControl),
+              ariaPressedBefore: serverSettingsAriaBefore,
+              ariaPressedAfterOpen: 'true',
+              ariaPressedAfterClose:
+                serverSettingsControl.getAttribute('aria-pressed'),
+            },
+            toggleControl: {
+              selector:
+                '[data-vmlx-control="gateway-single-model-mode"]',
+              visible: toggleVisibleAfter,
+              ariaPressedBefore: toggleAriaBefore,
+              ariaPressedAfter: toggleAriaAfter,
+              observedAlreadyOn,
+              clickedToEnable,
+            },
+            gatewayStatusBeforeToggle,
+            gatewayStatusAfterToggle,
+            gatewayStatusImmediatelyBeforeStart,
+            persistedSettingImmediatelyBeforeStart: {
+              key: 'gateway_single_model_mode',
+              value:
+                persistedGatewaySingleModelModeImmediatelyBeforeStart,
+              source: 'window.api.settings.get',
+            },
+          };
+          const exactStartSelector =
+            '[data-vmlx-control="session-start"][data-vmlx-session-id="'
+            + CSS.escape(created.session.id)
+            + '"]';
           const startButton = await new Promise((resolve, reject) => {
             const started = Date.now();
             const check = () => {
-              const buttons = [...document.querySelectorAll('button')];
-              const candidate = buttons.find((button) => {
-                const label = (button.textContent || '').replace(/\\s+/g, ' ').trim();
-                return label === 'Start'
-                  && button.classList.contains('bg-success')
-                  && !button.disabled;
-              });
-              if (candidate) return resolve(candidate);
+              const candidate = document.querySelector(exactStartSelector);
+              if (
+                candidate instanceof HTMLButtonElement
+                && isVisible(candidate)
+                && !candidate.disabled
+              ) return resolve(candidate);
               if (Date.now() - started > 30000) {
                 return reject(new Error(
-                  'Timed out waiting for the visible local-session Start control: '
+                  'Timed out waiting for the exact session-bound visible '
+                  + 'local-session Start control: '
                   + document.body.innerText.slice(0, 4000)
                 ));
               }
@@ -7277,6 +7866,9 @@ async function main() {
             check();
           });
           const uiStartControl = {
+            selector: '[data-vmlx-control="session-start"]',
+            exactSelector: exactStartSelector,
+            sessionId: created.session.id,
             label: (startButton.textContent || '').replace(/\\s+/g, ' ').trim(),
             clicked: false,
             sessionStatusBefore: sessionBeforeStart?.status || null,
@@ -8047,7 +8639,9 @@ async function main() {
             sessionType: created.session.type,
             effectiveSessionConfig,
             sessionLogs,
+            preStartStopControl,
             uiStartControl,
+            gatewaySingleModelMode,
             chatId: chat.id,
             chatOverrides,
             rendererGenerationDefaults,
@@ -8120,6 +8714,10 @@ async function main() {
       })()
     `, 1_200_000)
       healthBefore = rendererResult.preloadHealthBefore || {}
+      proofGatewayStatus =
+        rendererResult.gatewaySingleModelMode
+          ?.gatewayStatusImmediatelyBeforeStart
+        || proofGatewayStatus
       serverModels = await requestJson(`${baseUrl}/v1/models`, 5000)
     } catch (error) {
       const healthAfter = await requestJson(`${baseUrl}/health`, 5000)
@@ -8739,6 +9337,7 @@ async function main() {
           uiSessionAttestation?.path || null,
         expected_ui_session_attestation_sha256:
           uiSessionAttestation?.sha256 || null,
+        expected_retained_pids: releaseRetainedPids,
         release_phase: activeReleasePhase,
         required_separate_api_artifact: true,
         hold_seconds: pairedApiHoldSeconds,
@@ -8768,20 +9367,183 @@ async function main() {
         await sleep(pairedApiHoldSeconds * 1000)
       }
     }
-    const pairedApiArtifact = pairedApiArtifactPath
-      ? readPrivateExternalJson(
-          pairedApiArtifactPath,
-          'Paired raw API proof artifact',
-        )
-      : null
-    if (
+    let finalPhaseStopEvidence = null
+    const finalPhaseStopRequired = Boolean(
       releaseEvidence
-      && pairedApiArtifact?.sha256 !== releaseEvidence.api_capture_sha256
-    ) {
-      throw new Error(
-        'paired API artifact changed after the owned release sentinel was consumed',
-      )
-    }
+      && activeReleasePhase?.phase_index === 5
+      && releaseActivePhaseIndex === 5
+    )
+    const pairedApiArtifact = await runPostSentinelWorkWithCleanup({
+      work: async () => {
+        const artifact = pairedApiArtifactPath
+          ? readPrivateExternalJson(
+              pairedApiArtifactPath,
+              'Paired raw API proof artifact',
+            )
+          : null
+        if (
+          releaseEvidence
+          && artifact?.sha256 !== releaseEvidence.api_capture_sha256
+        ) {
+          throw new Error(
+            'paired API artifact changed after the owned release sentinel was consumed',
+          )
+        }
+        return artifact
+      },
+      cleanup: async () => {
+        if (!finalPhaseStopRequired) return
+        const sessionId = String(rendererResult.localSessionId || '')
+        const backendPid = Number(healthProvenance.after.binding.backend_pid)
+        let survivorsBefore = null
+        await runPostSentinelWorkWithCleanup({
+          work: async () => {
+            survivorsBefore = await attestExactSurvivorPids({
+              backendPid,
+              electronPid: expectedElectronPid,
+              gatewayPid: releaseGatewayPid,
+              retainedPids: releaseRetainedPids,
+              stage: 'before_visible_stop',
+            })
+          },
+          cleanup: async () => {
+            const visibleStop = await evaluate(cdp, `
+          (async () => {
+            const sessionId = ${JSON.stringify(String(rendererResult.localSessionId || ''))};
+            const expectedBackendPid = ${JSON.stringify(Number(healthProvenance.after.binding.backend_pid))};
+            const expectedBackendPort = ${JSON.stringify(Number(serverPort))};
+            const isVisible = (element) => {
+              if (!(element instanceof HTMLElement)) return false;
+              const style = getComputedStyle(element);
+              const rect = element.getBoundingClientRect();
+              return style.display !== 'none'
+                && style.visibility !== 'hidden'
+                && Number(style.opacity || 1) !== 0
+                && rect.width > 0
+                && rect.height > 0;
+            };
+            const waitFor = (predicate, label, timeoutMs = 120000) =>
+              new Promise((resolve, reject) => {
+                const started = Date.now();
+                const check = async () => {
+                  try {
+                    const value = await predicate();
+                    if (value) {
+                      resolve(value);
+                      return;
+                    }
+                  } catch (_) {}
+                  if (Date.now() - started > timeoutMs) {
+                    reject(new Error('Timed out waiting for ' + label));
+                    return;
+                  }
+                  setTimeout(check, 100);
+                };
+                check();
+              });
+            window.dispatchEvent(new CustomEvent('vmlx:navigate', {
+              detail: {
+                mode: 'server',
+                panel: 'session',
+                sessionId,
+              },
+            }));
+            const before = await window.api.sessions.get(sessionId);
+            if (
+              !before
+              || !['running', 'standby'].includes(before.status)
+              || Number(before.pid) !== expectedBackendPid
+              || Number(before.port) !== expectedBackendPort
+            ) {
+              throw new Error(
+                'Final V5 visible Stop requires the exact proof session '
+                + 'to be running or standby and bound to its health PID/port'
+              );
+            }
+            const exactSelector =
+              '[data-vmlx-control="session-stop"][data-vmlx-session-id="'
+              + CSS.escape(sessionId)
+              + '"]';
+            const control = await waitFor(() => {
+              const candidate = document.querySelector(exactSelector);
+              return candidate instanceof HTMLButtonElement && isVisible(candidate)
+                ? candidate
+                : null;
+            }, 'the exact proof session visible Stop control');
+            const label = (control.textContent || '').replace(/\\s+/g, ' ').trim();
+            control.scrollIntoView({ block: 'center' });
+            control.click();
+            const after = await waitFor(async () => {
+              const current = await window.api.sessions.get(sessionId);
+              return current?.status === 'stopped' ? current : null;
+            }, 'the exact proof session database state to become stopped');
+            if (
+              after.pid != null
+              || Number(after.port) !== expectedBackendPort
+            ) {
+              throw new Error(
+                'Final V5 stopped session did not clear its nullable PID '
+                + 'while retaining its non-null endpoint port'
+              );
+            }
+            return {
+              visibleControl: {
+                selector: '[data-vmlx-control="session-stop"]',
+                exactSelector,
+                sessionId,
+                label,
+                visible: true,
+                clicked: true,
+              },
+              session: {
+                id: sessionId,
+                before: {
+                  status: before.status,
+                  pid: Number(before.pid),
+                  port: Number(before.port),
+                },
+                after: {
+                  status: after.status,
+                  pid: after.pid ?? null,
+                  port: Number(after.port),
+                },
+                pidClearSemantics: 'nullable_pid_cleared',
+                portClearSemantics: 'non_nullable_endpoint_retained',
+              },
+            };
+          })()
+        `, 180_000)
+        if (
+          visibleStop?.session?.id !== sessionId
+          || visibleStop?.session?.after?.status !== 'stopped'
+        ) {
+          throw new Error('Final V5 visible Stop did not attest the exact proof session')
+        }
+        const backendTeardown = await waitForExactProofBackendTeardown({
+          backendPid,
+          port: serverPort,
+        })
+        const survivorsAfter = await attestExactSurvivorPids({
+          backendPid,
+          electronPid: expectedElectronPid,
+          gatewayPid: releaseGatewayPid,
+          retainedPids: releaseRetainedPids,
+          stage: 'after_backend_teardown',
+        })
+            finalPhaseStopEvidence = {
+              releaseSentinelConsumed: true,
+              phaseIndex: 5,
+              ...visibleStop,
+              backend: backendTeardown,
+              survivors: {
+                before: survivorsBefore,
+                after: survivorsAfter,
+              },
+            }
+          },
+        })
+      },
+    })
     const result = {
       format: proofFormat,
       run_id: runId,
@@ -8805,6 +9567,7 @@ async function main() {
       requestedServerCacheControls: checkServerCacheControls,
       requestedMedia: checkMedia,
       requestedVideo: checkVideo,
+      requestedRetainedPids: releaseRetainedPids,
       requestContract: {
         uiActionProfile,
         uiTurnCount,
@@ -8902,6 +9665,7 @@ async function main() {
           }
         : null,
       releaseEvidence,
+      finalPhaseStopEvidence,
       pairedApiArtifact,
       session: {
         id: rendererResult.localSessionId || null,

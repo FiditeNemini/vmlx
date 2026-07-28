@@ -447,6 +447,8 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
               {t('sessions.view.chatLabel')}
             </button>
             <button
+              data-vmlx-control="server-settings"
+              aria-pressed={showServerSettings}
               onClick={() => { setShowServerSettings(!showServerSettings); setShowChatSettings(false) }}
               className={`flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors ${
                 showServerSettings ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'

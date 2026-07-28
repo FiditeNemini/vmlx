@@ -313,6 +313,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
             </button>
           )}
           <button
+            data-vmlx-control="server-settings"
+            aria-pressed={showServerSettings}
             onClick={() => { setShowServerSettings(!showServerSettings); if (!showServerSettings) { setShowSettings(false); setShowCache(false); setShowBenchmark(false); setShowEmbeddings(false); setShowPerformance(false); setShowLogs(false) } }}
             className={`text-sm px-2 py-1 rounded flex items-center gap-1 ${showServerSettings ? 'bg-accent' : 'hover:bg-accent'}`}
             title={isRemote ? t('sessions.view.connectionTitle') : t('sessions.view.serverSettingsTitle')}
@@ -368,6 +370,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
                 </span>
               )}
               <button
+                data-vmlx-control="session-stop"
+                data-vmlx-session-id={session.id}
                 onClick={handleStop}
                 className="text-xs px-2 py-1 bg-destructive text-destructive-foreground rounded hover:bg-destructive/90"
               >
@@ -389,6 +393,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
                 {t('sessions.view.wake')}
               </button>
               <button
+                data-vmlx-control="session-stop"
+                data-vmlx-session-id={session.id}
                 onClick={handleStop}
                 className="text-xs px-2 py-1 border border-border text-muted-foreground rounded hover:bg-destructive hover:text-destructive-foreground"
               >
@@ -402,6 +408,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
                 <span className="text-xs text-destructive font-medium px-1">{t('sessions.view.disconnected')}</span>
               )}
               <button
+                data-vmlx-control="session-start"
+                data-vmlx-session-id={session.id}
                 onClick={handleStart}
                 className="text-xs px-2 py-1 bg-success text-success-foreground rounded hover:bg-success/90"
               >
@@ -417,6 +425,8 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
                 {isRemote ? t('common.connecting') : t('common.starting')}
               </span>
               <button
+                data-vmlx-control="session-stop"
+                data-vmlx-session-id={session.id}
                 onClick={handleStop}
                 className="text-xs px-2 py-1 border border-destructive/40 text-destructive rounded hover:bg-destructive/10"
               >

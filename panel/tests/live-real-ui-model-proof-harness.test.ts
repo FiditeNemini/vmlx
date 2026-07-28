@@ -28,14 +28,18 @@ import {
   isServerRequestCorrelationVerified,
   localRendererModuleEvidence,
   ownedUiProducerPid,
+  parseExplicitPidList,
   parseOptionalPort,
   parseResolvedSamplingKwargs,
   privateCacheAttestationSessionArgs,
   readPrivateExternalJson,
+  runPostSentinelWorkWithCleanup,
   resolveIndependentBundleGenerationDefaults,
   upsertBoundedDomSample,
   uniqueProofBasename,
   validateExactToolLoopEvidence,
+  validateFinalPhaseStopEvidence,
+  validateGatewaySingleModelEvidence,
   validateAttachOnlyLifecycle,
   validateGenerationDefaultsEvidence,
   validateFrozenChatParity,
@@ -77,12 +81,12 @@ const assistantIds = ["assistant-1", "assistant-2", "assistant-3"];
 const prompts = [
   "First bound prompt",
   "Second bound prompt",
-  "Preserve $43 and render \\(47 \\times 19 = 893 < 920 = 46 \\times 20\\).",
+  "Preserve $43 and render $47 \\times 19 = 893 < 920 = 46 \\times 20$.",
 ];
 const persistedContents = [
   "REAL_UI_LIVE_TOOL_ONE Answer complete",
   "REAL_UI_LIVE_TOOL_TWO Answer complete",
-  "$43 and \\(47 \\times 19 = 893 < 920 = 46 \\times 20\\)",
+  "$43 and $47 \\times 19 = 893 < 920 = 46 \\times 20$",
 ];
 const renderedContents = [
   persistedContents[0],
@@ -2936,9 +2940,9 @@ describe("real UI model proof harness", () => {
     expect(validateRenderedDomEvidence(valid)).toEqual([]);
 
     valid.assistantRecords[2].content =
-      "$43 and \\(47 \\times 19 = 894 < 920 = 46 \\times 20\\)";
+      "$43 and $47 \\times 19 = 894 < 920 = 46 \\times 20$";
     expect(validateRenderedDomEvidence(valid).join("\n")).toMatch(
-      /does not attest the exact TeX source/,
+      /does not attest the exact single-dollar TeX source/,
     );
   });
 
@@ -3644,6 +3648,343 @@ describe("real UI model proof harness", () => {
     }).join("\n")).toMatch(
       /not an exact loopback origin|PID is invalid|not parent-owned|allowed to tear down/,
     );
+  });
+
+  it("binds V5 Single model proof to visible DOM controls and live gateway status", () => {
+    const result = {
+      ownedRunIntent: { phase_index: 0 },
+      gatewaySingleModelMode: {
+        serverSettingsControl: {
+          selector: '[data-vmlx-control="server-settings"]',
+          visible: true,
+          ariaPressedAfterOpen: "true",
+          ariaPressedAfterClose: "false",
+        },
+        toggleControl: {
+          selector: '[data-vmlx-control="gateway-single-model-mode"]',
+          visible: true,
+          ariaPressedBefore: "true",
+          ariaPressedAfter: "true",
+          observedAlreadyOn: true,
+          clickedToEnable: false,
+        },
+        gatewayStatusAfterToggle: {
+          running: true,
+          singleModelMode: true,
+        },
+        gatewayStatusImmediatelyBeforeStart: {
+          running: true,
+          singleModelMode: true,
+        },
+        persistedSettingImmediatelyBeforeStart: {
+          key: "gateway_single_model_mode",
+          value: "true",
+          source: "window.api.settings.get",
+        },
+      },
+    };
+    expect(validateGatewaySingleModelEvidence(result)).toEqual([]);
+
+    const enabledByClick = structuredClone(result);
+    enabledByClick.gatewaySingleModelMode.toggleControl.ariaPressedBefore =
+      "false";
+    enabledByClick.gatewaySingleModelMode.toggleControl.observedAlreadyOn =
+      false;
+    enabledByClick.gatewaySingleModelMode.toggleControl.clickedToEnable = true;
+    expect(validateGatewaySingleModelEvidence(enabledByClick)).toEqual([]);
+
+    const staleDom = structuredClone(result);
+    staleDom.gatewaySingleModelMode.toggleControl.ariaPressedAfter = "false";
+    expect(validateGatewaySingleModelEvidence(staleDom).join("\n")).toMatch(
+      /visible Server settings toggle/,
+    );
+
+    const staleGateway = structuredClone(result);
+    staleGateway.gatewaySingleModelMode.gatewayStatusImmediatelyBeforeStart
+      .singleModelMode = false;
+    expect(validateGatewaySingleModelEvidence(staleGateway).join("\n")).toMatch(
+      /live gateway status before Start/,
+    );
+
+    const selfDerivedOnly = structuredClone(result);
+    delete (selfDerivedOnly.gatewaySingleModelMode as any)
+      .persistedSettingImmediatelyBeforeStart;
+    expect(validateGatewaySingleModelEvidence(selfDerivedOnly).join("\n"))
+      .toMatch(/independently read the persisted gateway setting/);
+  });
+
+  it("requires exact phase-5 visible Stop and proof-backend teardown evidence", () => {
+    const result = {
+      baseUrl: "http://127.0.0.1:8017",
+      backend: { pid: 4201 },
+      ownedRunIntent: { phase_index: 5 },
+      releaseEvidence: { phase_index: 5 },
+      requestedRetainedPids: [7101, 7102],
+      uiBackendBinding: { electron_pid: 4301 },
+      uiSessionAttestation: { value: { gateway_pid: 4301 } },
+      session: { id: "owned-proof-session" },
+      finalPhaseStopEvidence: {
+        releaseSentinelConsumed: true,
+        phaseIndex: 5,
+        visibleControl: {
+          selector: '[data-vmlx-control="session-stop"]',
+          exactSelector:
+            '[data-vmlx-control="session-stop"]'
+            + '[data-vmlx-session-id="owned-proof-session"]',
+          clicked: true,
+          label: "Stop",
+          sessionId: "owned-proof-session",
+        },
+        session: {
+          id: "owned-proof-session",
+          before: { status: "running", pid: 4201, port: 8017 },
+          after: { status: "stopped", pid: null, port: 8017 },
+          pidClearSemantics: "nullable_pid_cleared",
+          portClearSemantics: "non_nullable_endpoint_retained",
+        },
+        backend: {
+          backend_pid: 4201,
+          port: 8017,
+          backend_process_gone: true,
+          listener_gone: true,
+          observed_listener_pids: [],
+        },
+        survivors: {
+          before: {
+            stage: "before_visible_stop",
+            expected_retained_pids: [7101, 7102],
+            processes: [
+              { role: "parent_electron", pid: 4301, alive: true },
+              { role: "parent_gateway", pid: 4301, alive: true },
+              { role: "explicit_retained_1", pid: 7101, alive: true },
+              { role: "explicit_retained_2", pid: 7102, alive: true },
+            ],
+          },
+          after: {
+            stage: "after_backend_teardown",
+            expected_retained_pids: [7101, 7102],
+            processes: [
+              { role: "parent_electron", pid: 4301, alive: true },
+              { role: "parent_gateway", pid: 4301, alive: true },
+              { role: "explicit_retained_1", pid: 7101, alive: true },
+              { role: "explicit_retained_2", pid: 7102, alive: true },
+            ],
+          },
+        },
+      },
+    };
+    expect(validateFinalPhaseStopEvidence(result)).toEqual([]);
+    expect(validateFinalPhaseStopEvidence({
+      ...result,
+      ownedRunIntent: { phase_index: 4 },
+      releaseEvidence: null,
+      finalPhaseStopEvidence: null,
+    })).toEqual([]);
+
+    const retained = structuredClone(result);
+    retained.finalPhaseStopEvidence.backend.backend_process_gone = false;
+    expect(validateFinalPhaseStopEvidence(retained).join("\n")).toMatch(
+      /backend process\/listener teardown/,
+    );
+
+    const wrongDbBinding = structuredClone(result);
+    wrongDbBinding.finalPhaseStopEvidence.session.before.pid = 9999;
+    expect(validateFinalPhaseStopEvidence(wrongDbBinding).join("\n")).toMatch(
+      /bound to the backend PID\/port/,
+    );
+
+    const parentKilled = structuredClone(result);
+    parentKilled.finalPhaseStopEvidence.survivors.after.processes[0].alive =
+      false;
+    expect(validateFinalPhaseStopEvidence(parentKilled).join("\n")).toMatch(
+      /parent Electron, gateway, and explicit retained PIDs/,
+    );
+
+    const distinctParentPids = structuredClone(result);
+    distinctParentPids.uiSessionAttestation.value.gateway_pid = 4401;
+    for (const snapshot of [
+      distinctParentPids.finalPhaseStopEvidence.survivors.before,
+      distinctParentPids.finalPhaseStopEvidence.survivors.after,
+    ]) {
+      snapshot.processes.find(
+        (process) => process.role === "parent_gateway",
+      )!.pid = 4401;
+    }
+    expect(validateFinalPhaseStopEvidence(distinctParentPids).join("\n"))
+      .toMatch(/parent Electron, gateway, and explicit retained PIDs/);
+
+    const retainedAliasesParent = structuredClone(result);
+    retainedAliasesParent.requestedRetainedPids[0] = 4301;
+    for (const snapshot of [
+      retainedAliasesParent.finalPhaseStopEvidence.survivors.before,
+      retainedAliasesParent.finalPhaseStopEvidence.survivors.after,
+    ]) {
+      snapshot.expected_retained_pids[0] = 4301;
+      snapshot.processes.find(
+        (process) => process.role === "explicit_retained_1",
+      )!.pid = 4301;
+    }
+    expect(validateFinalPhaseStopEvidence(retainedAliasesParent).join("\n"))
+      .toMatch(/parent Electron, gateway, and explicit retained PIDs/);
+
+    const retainedAliasesBackend = structuredClone(result);
+    retainedAliasesBackend.requestedRetainedPids[0] = 4201;
+    for (const snapshot of [
+      retainedAliasesBackend.finalPhaseStopEvidence.survivors.before,
+      retainedAliasesBackend.finalPhaseStopEvidence.survivors.after,
+    ]) {
+      snapshot.expected_retained_pids[0] = 4201;
+      snapshot.processes.find(
+        (process) => process.role === "explicit_retained_1",
+      )!.pid = 4201;
+    }
+    expect(validateFinalPhaseStopEvidence(retainedAliasesBackend).join("\n"))
+      .toMatch(/parent Electron, gateway, and explicit retained PIDs/);
+  });
+
+  it("always runs post-sentinel cleanup and preserves the original work error", async () => {
+    const original = new Error("paired artifact read failed");
+    let cleanupCalls = 0;
+    await expect(runPostSentinelWorkWithCleanup({
+      work: async () => {
+        throw original;
+      },
+      cleanup: async () => {
+        cleanupCalls += 1;
+        throw new Error("cleanup also failed");
+      },
+    })).rejects.toBe(original);
+    expect(cleanupCalls).toBe(1);
+    expect((original as any).cleanupError?.message).toBe(
+      "cleanup also failed",
+    );
+  });
+
+  it("attempts visible Stop cleanup after pre-Stop survivor attestation fails", async () => {
+    const preAttestationError = new Error(
+      "pre-Stop survivor attestation failed",
+    );
+    const events: string[] = [];
+    await expect(runPostSentinelWorkWithCleanup({
+      work: async () => {
+        events.push("pre-survivor-attestation");
+        throw preAttestationError;
+      },
+      cleanup: async () => {
+        events.push("visible-stop");
+        events.push("exact-backend-teardown");
+      },
+    })).rejects.toBe(preAttestationError);
+    expect(events).toEqual([
+      "pre-survivor-attestation",
+      "visible-stop",
+      "exact-backend-teardown",
+    ]);
+  });
+
+  it("parses only explicit unique retained process PIDs", () => {
+    expect(parseExplicitPidList("7101, 7102 7103")).toEqual([
+      7101,
+      7102,
+      7103,
+    ]);
+    expect(() => parseExplicitPidList("7101,7101")).toThrow(/duplicate/);
+    expect(() => parseExplicitPidList("7101,abc")).toThrow(
+      /integer PIDs greater than 1/,
+    );
+  });
+
+  it("uses the real visible settings and Stop controls in the V5 harness", () => {
+    const sessionView = readFileSync(
+      path.resolve("src/renderer/src/components/sessions/SessionView.tsx"),
+      "utf8",
+    );
+    const chatToolbar = readFileSync(
+      path.resolve("src/renderer/src/components/layout/ChatModeToolbar.tsx"),
+      "utf8",
+    );
+    const serverDrawer = readFileSync(
+      path.resolve(
+        "src/renderer/src/components/sessions/ServerSettingsDrawer.tsx",
+      ),
+      "utf8",
+    );
+    const harness = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+    expect(sessionView).toContain('data-vmlx-control="server-settings"');
+    expect(sessionView).toContain("aria-pressed={showServerSettings}");
+    expect(chatToolbar).toContain('data-vmlx-control="server-settings"');
+    expect(serverDrawer).toContain(
+      'data-vmlx-control="gateway-single-model-mode"',
+    );
+    expect(serverDrawer).toContain("aria-pressed={singleModelMode}");
+    expect(sessionView).toContain('data-vmlx-control="session-start"');
+    expect(sessionView).toContain('data-vmlx-control="session-stop"');
+    expect(sessionView).toContain("data-vmlx-session-id={session.id}");
+
+    const enableStart = harness.indexOf(
+      "const serverSettingsControl = await waitFor",
+    );
+    const startControl = harness.indexOf(
+      "const startButton = await new Promise",
+      enableStart,
+    );
+    expect(enableStart).toBeGreaterThan(0);
+    expect(startControl).toBeGreaterThan(enableStart);
+    const enableBlock = harness.slice(enableStart, startControl);
+    expect(enableBlock).toContain(
+      '[data-vmlx-control="gateway-single-model-mode"]',
+    );
+    expect(enableBlock).toContain("singleModelToggle.click()");
+    expect(enableBlock).toContain("window.api.gateway.getStatus()");
+    expect(enableBlock).toContain(
+      "window.api.settings.get('gateway_single_model_mode')",
+    );
+    expect(enableBlock).toContain(
+      "persistedSettingImmediatelyBeforeStart",
+    );
+    expect(harness).toContain(
+      '[data-vmlx-control="session-start"][data-vmlx-session-id="',
+    );
+    expect(harness).toContain(
+      '[data-vmlx-control="session-stop"][data-vmlx-session-id="',
+    );
+    expect(harness).not.toContain(
+      "return label === 'Start'",
+    );
+    expect(harness).toContain(
+      "releaseGatewayPid !== expectedElectronPid",
+    );
+    expect(harness).toContain(
+      "releaseRetainedPids.includes(expectedElectronPid)",
+    );
+    expect(harness).toContain(
+      "cdpProcessBinding.listener_pid !== expectedElectronPid",
+    );
+
+    const finalStopStart = harness.indexOf("let finalPhaseStopEvidence = null");
+    const finalStopEnd = harness.indexOf("const result = {", finalStopStart);
+    const finalStopBlock = harness.slice(finalStopStart, finalStopEnd);
+    expect(finalStopBlock).toContain(
+      "activeReleasePhase?.phase_index === 5",
+    );
+    expect(finalStopBlock).toContain("releaseEvidence");
+    expect(finalStopBlock).toContain(
+      '[data-vmlx-control="session-stop"]',
+    );
+    expect(finalStopBlock).toContain("control.click()");
+    expect(finalStopBlock).toContain("window.api.sessions.get(sessionId)");
+    expect(finalStopBlock).not.toContain("window.api.sessions.stop");
+    expect(finalStopBlock).toContain("waitForExactProofBackendTeardown");
+    expect(finalStopBlock).toContain("runPostSentinelWorkWithCleanup");
+    expect(
+      finalStopBlock.match(/runPostSentinelWorkWithCleanup/g),
+    ).toHaveLength(2);
+    expect(finalStopBlock).toContain("attestExactSurvivorPids");
+    expect(finalStopBlock).toContain("nullable_pid_cleared");
+    expect(finalStopBlock).toContain("non_nullable_endpoint_retained");
   });
 
   it("requires one canonical parent-owned six-phase run intent", () => {

@@ -225,7 +225,7 @@ describe('buildRequestBody — Chat Completions API', () => {
 
     it('persists zero from the chat settings slider instead of converting it to inherit', () => {
         const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
-        expect(source).toContain("onChange={v => update('minP', v)}")
+        expect(source).toContain("update('minP', sanitized)")
         expect(source).not.toContain("update('minP', v === 0 ? undefined : v)")
     })
 

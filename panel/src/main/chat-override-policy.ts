@@ -1,3 +1,12 @@
+import {
+  TOP_K_MAX,
+  sanitizeMinPOverride,
+  sanitizeRepetitionPenaltyOverride,
+  sanitizeTemperatureOverride,
+  sanitizeTopKOverride,
+  sanitizeTopPOverride,
+} from '../shared/samplingParameterDomain'
+
 export interface ChatOverridePolicyInput {
   chatId: string
   temperature?: number
@@ -43,7 +52,30 @@ const NEW_CHAT_TOOL_INHERIT_KEYS = [
   'toolResultMaxChars',
 ] as const
 
-export const CHAT_TOP_K_HARD_MAX = 1_000_000
+const CHAT_OVERRIDE_STRING_KEYS = [
+  'systemPrompt',
+  'stopSequences',
+  'workingDirectory',
+] as const
+
+const CHAT_OVERRIDE_BOOLEAN_KEYS = [
+  'builtinToolsEnabled',
+  'enableThinking',
+  'hideToolStatus',
+  'webSearchEnabled',
+  'braveSearchEnabled',
+  'fetchUrlEnabled',
+  'fileToolsEnabled',
+  'searchToolsEnabled',
+  'shellEnabled',
+  'gitEnabled',
+  'utilityToolsEnabled',
+] as const
+
+const CHAT_OVERRIDE_WIRE_APIS = new Set(['completions', 'responses'])
+const CHAT_OVERRIDE_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
+
+export const CHAT_TOP_K_HARD_MAX = TOP_K_MAX
 
 export function buildNewChatInheritedOverrides<T extends ChatOverridePolicyInput>(
   existing: T,
@@ -77,59 +109,66 @@ const sanitizePositiveInteger = (value: unknown, hi: number): number | undefined
 }
 
 export function sanitizeChatOverrides<T extends ChatOverridePolicyInput>(overrides: T): T {
-  const sanitized: ChatOverridePolicyInput = { ...overrides }
-  if (sanitized.temperature != null) {
-    const value = sanitizeFiniteNumber(sanitized.temperature, 0, 10)
-    if (value == null) delete sanitized.temperature
-    else sanitized.temperature = value
+  const source = overrides as unknown as Record<string, unknown>
+  const sanitized: ChatOverridePolicyInput = { chatId: overrides.chatId }
+  const sanitizedRecord = sanitized as unknown as Record<string, unknown>
+  const assignNumber = (
+    key: keyof ChatOverridePolicyInput,
+    sanitizer: (value: unknown) => number | undefined,
+  ): void => {
+    const value = sanitizer(source[key])
+    if (value != null) sanitizedRecord[key] = value
   }
-  if (sanitized.topP != null) {
-    const value = sanitizeFiniteNumber(sanitized.topP, 0, 1)
-    if (value == null) delete sanitized.topP
-    else sanitized.topP = value
-  }
-  if (sanitized.topK != null) {
-    const value = sanitizeFiniteNumber(sanitized.topK, 0, CHAT_TOP_K_HARD_MAX)
-    if (value == null) delete sanitized.topK
-    else sanitized.topK = value
-  }
-  if (sanitized.minP != null) {
-    const value = sanitizeFiniteNumber(sanitized.minP, 0, 1)
-    if (value == null) delete sanitized.minP
-    else sanitized.minP = value
-  }
-  if (sanitized.maxTokens != null) {
-    const maxTokens = sanitizePositiveInteger(sanitized.maxTokens, 1000000)
-    if (maxTokens == null) {
-      delete sanitized.maxTokens
-    } else {
-      sanitized.maxTokens = maxTokens
+
+  assignNumber('temperature', sanitizeTemperatureOverride)
+  assignNumber('topP', sanitizeTopPOverride)
+  assignNumber('topK', sanitizeTopKOverride)
+  assignNumber('minP', sanitizeMinPOverride)
+  assignNumber('maxTokens', value => sanitizePositiveInteger(value, 1000000))
+  assignNumber('maxThinkingTokens', value => sanitizePositiveInteger(value, 1000000))
+  assignNumber('repeatPenalty', sanitizeRepetitionPenaltyOverride)
+  assignNumber('maxToolIterations', value => sanitizeFiniteNumber(value, 1, 100))
+  assignNumber('toolResultMaxChars', value => sanitizeFiniteNumber(value, 100, 500000))
+
+  for (const key of CHAT_OVERRIDE_STRING_KEYS) {
+    if (typeof source[key] === 'string') {
+      sanitizedRecord[key] = source[key]
     }
   }
-  if (sanitized.maxThinkingTokens != null) {
-    const maxThinkingTokens = sanitizePositiveInteger(sanitized.maxThinkingTokens, 1000000)
-    if (maxThinkingTokens == null) {
-      delete sanitized.maxThinkingTokens
-    } else {
-      sanitized.maxThinkingTokens = maxThinkingTokens
+  for (const key of CHAT_OVERRIDE_BOOLEAN_KEYS) {
+    if (typeof source[key] === 'boolean') {
+      sanitizedRecord[key] = source[key]
     }
   }
-  if (sanitized.repeatPenalty != null) {
-    const value = sanitizeFiniteNumber(sanitized.repeatPenalty, 0, 10)
-    if (value == null) delete sanitized.repeatPenalty
-    else sanitized.repeatPenalty = value
+  if (
+    typeof source.wireApi === 'string' &&
+    CHAT_OVERRIDE_WIRE_APIS.has(source.wireApi)
+  ) {
+    sanitized.wireApi = source.wireApi
   }
-  if (sanitized.maxToolIterations != null) {
-    const value = sanitizeFiniteNumber(sanitized.maxToolIterations, 1, 100)
-    if (value == null) delete sanitized.maxToolIterations
-    else sanitized.maxToolIterations = value
+  if (
+    typeof source.reasoningEffort === 'string' &&
+    CHAT_OVERRIDE_REASONING_EFFORTS.has(source.reasoningEffort)
+  ) {
+    sanitized.reasoningEffort = source.reasoningEffort
   }
-  if (sanitized.toolResultMaxChars != null) {
-    const value = sanitizeFiniteNumber(sanitized.toolResultMaxChars, 100, 500000)
-    if (value == null) delete sanitized.toolResultMaxChars
-    else sanitized.toolResultMaxChars = value
-  }
+
   return sanitized as T
+}
+
+export function sanitizeChatProfileOverrides(value: unknown): Record<string, any> {
+  const record =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, any>
+      : {}
+  const sanitized = sanitizeChatOverrides({
+    ...record,
+    // Profiles have no chat owner. Put the temporary identity after untrusted
+    // profile data so a stale/malicious chatId cannot replace it.
+    chatId: '__profile__',
+  })
+  const { chatId: _profileIdentity, ...profile } = sanitized
+  return profile
 }
 
 export { NEW_CHAT_TOOL_INHERIT_KEYS }

@@ -65,6 +65,7 @@ import {
 import {
   buildNewChatInheritedOverrides,
   sanitizeChatOverrides,
+  sanitizeChatProfileOverrides,
 } from "../chat-override-policy";
 import {
   reasoningParserIsEnabled,
@@ -859,7 +860,7 @@ export function registerChatHandlers(
           // full sampler/reasoning/prompt settings after the user chooses them.
           const merged = buildNewChatInheritedOverrides(
             existing as any,
-            defaultProfile as any,
+            sanitizeChatProfileOverrides(defaultProfile) as any,
           );
           db.setChatOverrides(merged as any);
           console.log(
@@ -1459,8 +1460,16 @@ export function registerChatHandlers(
       // Get messages for context
       const messages = db.getMessages(chatId);
 
-      // Get overrides if any
-      const overrides = db.getChatOverrides(chatId);
+      // Re-validate persisted values at the request boundary. Older database
+      // rows and imported profiles can predate the current Chat/Responses
+      // schema domains; forwarding one of those rows verbatim turns a valid UI
+      // action into a backend 422. Invalid legacy fields revert to inheritance,
+      // exactly like an unset override, rather than being silently clamped to a
+      // different sampler value.
+      const overrides = sanitizeChatOverrides({
+        ...(db.getChatOverrides(chatId) || {}),
+        chatId,
+      });
       if (!isRemote && supportsInstructMode === false && overrides?.enableThinking === false) {
         throw new Error(
           "This model has no native Thinking Off/Instruct mode. Open Chat Settings and choose Auto or On.",
@@ -4923,15 +4932,18 @@ export function registerChatHandlers(
   ipcMain.handle(
     "chat:setOverrides",
     async (_, chatId: string, overrides: any) => {
-      const sanitized = sanitizeChatOverrides({ chatId, ...overrides });
-      db.setChatOverrides({ chatId, ...sanitized });
+      const sanitized = sanitizeChatOverrides({ ...overrides, chatId });
+      db.setChatOverrides({ ...sanitized, chatId });
 
       return { success: true };
     },
   );
 
   ipcMain.handle("chat:getOverrides", async (_, chatId: string) => {
-    return db.getChatOverrides(chatId);
+    return sanitizeChatOverrides({
+      ...(db.getChatOverrides(chatId) || {}),
+      chatId,
+    });
   });
 
   ipcMain.handle("chat:clearOverrides", async (_, chatId: string) => {
@@ -4943,7 +4955,11 @@ export function registerChatHandlers(
   ipcMain.handle(
     "chat:saveProfile",
     async (_, name: string, overrides: any, isDefault?: boolean) => {
-      const id = db.saveChatProfile(name, overrides, isDefault);
+      const id = db.saveChatProfile(
+        name,
+        sanitizeChatProfileOverrides(overrides),
+        isDefault,
+      );
       return { id };
     },
   );
@@ -4957,17 +4973,26 @@ export function registerChatHandlers(
       overrides: any,
       isDefault?: boolean,
     ) => {
-      db.updateChatProfile(id, name, overrides, isDefault);
+      db.updateChatProfile(
+        id,
+        name,
+        sanitizeChatProfileOverrides(overrides),
+        isDefault,
+      );
       return { success: true };
     },
   );
 
   ipcMain.handle("chat:getProfiles", async () => {
-    return db.getChatProfiles();
+    return db.getChatProfiles().map((profile) => ({
+      ...profile,
+      overrides: sanitizeChatProfileOverrides(profile.overrides),
+    }));
   });
 
   ipcMain.handle("chat:getDefaultProfile", async () => {
-    return db.getDefaultChatProfile();
+    const profile = db.getDefaultChatProfile();
+    return profile ? sanitizeChatProfileOverrides(profile) : undefined;
   });
 
   ipcMain.handle("chat:deleteProfile", async (_, id: string) => {

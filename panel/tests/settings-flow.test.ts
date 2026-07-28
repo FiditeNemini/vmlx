@@ -1851,17 +1851,18 @@ describe('Generation Defaults', () => {
         expect(formSource).toContain("hasDeclaredSamplingDefaults ? ((config.defaultTopK ?? 0) > 0 ? `top-k ${Math.floor(config.defaultTopK ?? 0)}` : 'top-k off') : null")
     })
 
-    it('chat settings default to neutral repeat penalty when bundle has no value', () => {
+    it('chat settings do not invent a neutral repeat penalty when the bundle has no value', () => {
         const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
-        expect(source).toContain('value={overrides.repeatPenalty ?? modelDefaults.repeatPenalty ?? 1.0}')
-        expect(source).toContain("onChange={v => update('repeatPenalty', v)}")
+        expect(source).toContain('const displayedRepeatPenalty = displayedOverrides.repeatPenalty ?? displayedModelDefaults.repeatPenalty')
+        expect(source).toContain('displayedRepeatPenalty != null')
+        expect(source).not.toContain('displayedModelDefaults.repeatPenalty ?? 1.0')
         expect(source).not.toContain('value={overrides.repeatPenalty ?? 1.1}')
     })
 
     it('preserves explicit neutral top-k and repetition overrides instead of snapping to bundle defaults', () => {
         const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
-        expect(source).toContain("onChange={v => update('topK', v)}")
-        expect(source).toContain("onChange={v => update('repeatPenalty', v)}")
+        expect(source).toContain("update('topK', sanitized)")
+        expect(source).toContain("update('repeatPenalty', sanitized)")
         expect(source).not.toContain("update('topK', v === 0 ? undefined : v)")
         expect(source).not.toContain("update('repeatPenalty', v === 1.0 ? undefined : v)")
     })
@@ -1900,9 +1901,12 @@ describe('Generation Defaults', () => {
         )
         expect(ensureHandler).toContain('createChatRecord(title, "default", undefined, modelPath)')
         expect(policy).toContain('NEW_CHAT_TOOL_INHERIT_KEYS')
-        expect(policy).not.toContain("'systemPrompt'")
-        expect(policy).not.toContain("'temperature'")
-        expect(policy).not.toContain("'enableThinking'")
+        const inheritanceStart = policy.indexOf('const NEW_CHAT_TOOL_INHERIT_KEYS = [')
+        const inheritanceEnd = policy.indexOf('] as const', inheritanceStart)
+        const inheritedKeys = policy.slice(inheritanceStart, inheritanceEnd)
+        expect(inheritedKeys).not.toContain("'systemPrompt'")
+        expect(inheritedKeys).not.toContain("'temperature'")
+        expect(inheritedKeys).not.toContain("'enableThinking'")
         expect(source).not.toContain('enableThinkingFromReasoningMode')
         expect(createRecord).not.toContain('readGenerationDefaults')
         expect(source).not.toContain('Applied global model settings / generation defaults')
@@ -4350,17 +4354,18 @@ describe('Settings → CLI Round-Trip Completeness', () => {
 
     it('chat settings renders disabled top-k sentinel as Off instead of raw 0 or -1', () => {
         const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
-        expect(source).toContain('formatTopK')
-        expect(source).toContain("return 'Off'")
-        expect(source).toContain('format={formatTopK}')
+        expect(source).toContain("t('chat.settings.topKOff')")
+        expect(source).toContain('Math.round(value) <= 0')
+        expect(source).not.toContain("return 'Off'")
     })
 
     it('chat settings applies only an explicit saved native-MTP override and receives session config', () => {
         const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
+        const hydration = readFileSync('src/shared/chatSettingsHydration.ts', 'utf8')
         const toolbar = readFileSync('src/renderer/src/components/layout/ChatModeToolbar.tsx', 'utf8')
         const sessionView = readFileSync('src/renderer/src/components/sessions/SessionView.tsx', 'utf8')
-        expect(source).toContain('applyEffectiveSessionGenerationDefaults(')
-        expect(source).toContain('detected?.nativeMtp')
+        expect(hydration).toContain('applyEffectiveSessionGenerationDefaults(')
+        expect(hydration).toContain('detected?.nativeMtp')
         expect(source).toContain('session.config')
         expect(toolbar).toContain('config: displaySession.config')
         expect(sessionView).toContain('config: session.config')
@@ -4368,10 +4373,8 @@ describe('Settings → CLI Round-Trip Completeness', () => {
 
     it('chat settings shows max-thinking tokens only for engine-honoring or template-budget families', () => {
         const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
-        expect(source).toContain('nextThinkingBudgetSupported = gen.thinkingBudgetSupported')
-        expect(source).toContain('setThinkingBudgetSupported(nextThinkingBudgetSupported)')
-        expect(source).toContain('nextSupportsThinkingBudget = detected?.supportsThinkingBudget')
-        expect(source).toContain('setSupportsThinkingBudget(nextSupportsThinkingBudget)')
+        expect(source).toContain('setThinkingBudgetSupported(generation?.thinkingBudgetSupported)')
+        expect(source).toContain('setSupportsThinkingBudget(detected?.supportsThinkingBudget)')
         expect(source).toContain('{(supportsThinkingBudget === true || thinkingBudgetSupported === true) && displayedEnableThinking !== false && (')
     })
 

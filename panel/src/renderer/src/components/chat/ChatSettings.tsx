@@ -1,14 +1,29 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { AlertTriangle, X, Save, Trash2, Star } from 'lucide-react'
 import { useToast } from '../Toast'
 import { useTranslation } from '../../i18n'
 import { buildChatSettingsCompatibilityWarnings } from './chatSettingsCompatibility'
 import { buildChatSettingsResetOverrides } from '../../../../shared/chatSettingsResetPolicy'
-import { applyEffectiveSessionGenerationDefaults } from '../../../../shared/effectiveGenerationDefaults'
+import {
+  loadChatSettingsCompatibility,
+  loadChatSettingsHydration,
+  readPersistedSessionGenerationDefaults,
+  type ChatSettingsDefaultsState,
+} from '../../../../shared/chatSettingsHydration'
 import {
   reasoningParserIsEnabled,
   resolveEffectiveReasoningParser,
 } from '../../../../shared/reasoningParserAliases'
+import {
+  TOP_K_MAX,
+  TOP_P_MAX,
+  TOP_P_UI_MIN,
+  sanitizeMinPOverride,
+  sanitizeRepetitionPenaltyOverride,
+  sanitizeTemperatureOverride,
+  sanitizeTopKOverride,
+  sanitizeTopPOverride,
+} from '../../../../shared/samplingParameterDomain'
 
 interface ChatProfile {
   id: string
@@ -67,20 +82,23 @@ interface ChatSettingsProps {
   onOverridesChanged?: () => void
 }
 
-function formatTopK(value: number): string {
-  const rounded = Math.round(value)
-  if (rounded <= 0) return 'Off'
-  return rounded.toString()
-}
-
 const CHAT_TOP_K_SLIDER_DEFAULT_MAX = 200
-const CHAT_TOP_K_HARD_MAX = 1_000_000
-
 export function ChatSettings({ chatId, session, reasoningParser, onClose, onOverridesChanged }: ChatSettingsProps) {
   const { showToast } = useToast()
   const { t } = useTranslation()
+  const persistedModelDefaults = useMemo(
+    () => readPersistedSessionGenerationDefaults(session.config) as Partial<ChatOverrides>,
+    [session.config],
+  )
   const [overrides, setOverrides] = useState<ChatOverrides>({})
-  const [modelDefaults, setModelDefaults] = useState<Partial<ChatOverrides>>({})
+  const [modelDefaults, setModelDefaults] = useState<Partial<ChatOverrides>>(
+    () => persistedModelDefaults,
+  )
+  const [defaultsState, setDefaultsState] = useState<ChatSettingsDefaultsState | 'loading'>('loading')
+  const [settingsHydrationFailure, setSettingsHydrationFailure] = useState(false)
+  const [compatibilityHydrationFailure, setCompatibilityHydrationFailure] = useState(false)
+  const [overridesLoaded, setOverridesLoaded] = useState(false)
+  const [hydratedKey, setHydratedKey] = useState<string | undefined>(undefined)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [profiles, setProfiles] = useState<ChatProfile[]>([])
@@ -97,8 +115,13 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const [savedChatModelPath, setSavedChatModelPath] = useState<string | undefined>(undefined)
   const [messageCount, setMessageCount] = useState(0)
   const loadRequestRef = useRef(0)
+  const hydrationKey = `${chatId}\u0000${session.modelPath}\u0000${session.config || ''}`
+  const hydrationCurrent = hydratedKey === hydrationKey
+  const displayedDefaultsState = hydrationCurrent ? defaultsState : 'loading'
+  const displayedModelDefaults = hydrationCurrent ? modelDefaults : persistedModelDefaults
+  const displayedOverrides = hydrationCurrent ? overrides : {}
   const isRemote = session.type === 'remote'
-  const effectiveWireApi = overrides.wireApi ?? (isRemote ? 'completions' : 'responses')
+  const effectiveWireApi = displayedOverrides.wireApi ?? (isRemote ? 'completions' : 'responses')
   const configuredReasoningParser = (() => {
     try {
       const config = session.config ? JSON.parse(session.config) : {}
@@ -121,12 +144,28 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
     (detectedSupportsThinking !== false && !!effectiveReasoningParser)
   )
   const thinkingOffSupported = detectedSupportsInstructMode !== false
-  const displayedEnableThinking = thinkingSupported ? overrides.enableThinking : undefined
-  const displayedTopK = Math.max(0, Math.round(overrides.topK ?? modelDefaults.topK ?? 0))
+  const displayedEnableThinking = thinkingSupported ? displayedOverrides.enableThinking : undefined
+  const displayedTemperature = displayedOverrides.temperature ?? displayedModelDefaults.temperature
+  const displayedTopP = displayedOverrides.topP ?? displayedModelDefaults.topP
+  const displayedTopKValue = displayedOverrides.topK ?? displayedModelDefaults.topK
+  const displayedTopK = displayedTopKValue == null
+    ? undefined
+    : Math.max(0, Math.round(displayedTopKValue))
+  const displayedMinP = displayedOverrides.minP ?? displayedModelDefaults.minP
+  const displayedRepeatPenalty = displayedOverrides.repeatPenalty ?? displayedModelDefaults.repeatPenalty
   const topKSliderMax = Math.min(
-    CHAT_TOP_K_HARD_MAX,
-    Math.max(CHAT_TOP_K_SLIDER_DEFAULT_MAX, displayedTopK),
+    TOP_K_MAX,
+    Math.max(CHAT_TOP_K_SLIDER_DEFAULT_MAX, displayedTopK ?? 0),
   )
+  const topPSliderMin = displayedTopP == null
+    ? TOP_P_UI_MIN
+    : Math.min(TOP_P_UI_MIN, displayedTopP)
+  const repeatPenaltySliderMin = displayedRepeatPenalty == null
+    ? 1
+    : Math.min(1, displayedRepeatPenalty)
+  const repeatPenaltySliderMax = displayedRepeatPenalty == null
+    ? 2
+    : Math.max(2, displayedRepeatPenalty)
   const thinkingDisabledClass = thinkingSupported ? '' : ' opacity-50 cursor-not-allowed'
   const showReasoningEffort = (detectedReasoningEfforts?.length ?? 0) > 0 || detectedFamily === 'hy3' || effectiveReasoningParser === 'openai_gptoss' || effectiveReasoningParser === 'mistral'
   const showLowEffort = detectedReasoningEfforts ? detectedReasoningEfforts.includes('low') : effectiveReasoningParser !== 'mistral'
@@ -142,88 +181,81 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
     const requestId = ++loadRequestRef.current
     let active = true
     const stillCurrent = () => active && loadRequestRef.current === requestId
-    void (async () => {
-      const saved = await window.api.chat.getOverrides(chatId) as ChatOverrides | null
+    setHydratedKey(undefined)
+    setDefaultsState('loading')
+    setSettingsHydrationFailure(false)
+    setCompatibilityHydrationFailure(false)
+    setOverridesLoaded(false)
+    setModelDefaults(persistedModelDefaults)
+    setOverrides({})
+    setDetectedFamily(undefined)
+    setDetectedToolParser(undefined)
+    setDetectedReasoningParser(undefined)
+    setDetectedSupportsThinking(undefined)
+    setDetectedSupportsInstructMode(undefined)
+    setDetectedReasoningEfforts(undefined)
+    setThinkingBudgetSupported(undefined)
+    setSupportsThinkingBudget(undefined)
+
+    void loadChatSettingsHydration<ChatOverrides>(session.config, {
+      overrides: () => window.api.chat.getOverrides(chatId) as Promise<ChatOverrides | null>,
+      generationDefaults: () => session.modelPath
+        ? window.api.models.getGenerationDefaults(session.modelPath)
+        : Promise.resolve(null),
+      detectedConfig: () => session.modelPath
+        ? window.api.models.detectConfig(session.modelPath)
+        : Promise.resolve(null),
+    }).then((result) => {
       if (!stillCurrent()) return
-      let nextSavedChatModelPath: string | undefined
-      let nextMessageCount = 0
-      try {
-        const [chat, messages] = await Promise.all([
-          window.api.chat.get(chatId),
-          window.api.chat.getMessages(chatId),
-        ])
-        if (!stillCurrent()) return
-        nextSavedChatModelPath = chat?.modelPath
-        nextMessageCount = Array.isArray(messages) ? messages.length : 0
-      } catch (_) {
-        if (!stillCurrent()) return
-      }
-      // Pull recommended defaults from model metadata. If the bundle does not
-      // declare a value, leave it unset so the engine resolves its own fallback.
-      let detectedModelDefaults: Partial<ChatOverrides> = {}
-      let nextThinkingBudgetSupported: boolean | undefined
-      let nextDetectedFamily: string | undefined
-      let nextDetectedToolParser: string | undefined
-      let nextDetectedReasoningParser: string | undefined
-      let nextDetectedSupportsThinking: boolean | undefined
-      let nextDetectedSupportsInstructMode: boolean | undefined
-      let nextDetectedReasoningEfforts: Array<'low' | 'medium' | 'high' | 'max'> | undefined
-      let nextSupportsThinkingBudget: boolean | undefined
-      if (session.modelPath) {
-        try {
-          const gen = await window.api.models.getGenerationDefaults(session.modelPath)
-          if (!stillCurrent()) return
-          if (gen) {
-            if (gen.temperature != null) detectedModelDefaults.temperature = gen.temperature
-            if (gen.topP != null) detectedModelDefaults.topP = gen.topP
-            if (gen.topK != null) detectedModelDefaults.topK = gen.topK
-            if (gen.minP != null) detectedModelDefaults.minP = gen.minP
-            if (gen.repeatPenalty != null) detectedModelDefaults.repeatPenalty = gen.repeatPenalty
-            if (gen.maxNewTokens != null) detectedModelDefaults.maxTokens = gen.maxNewTokens
-            if (gen.maxThinkingTokens != null) detectedModelDefaults.maxThinkingTokens = gen.maxThinkingTokens
-            nextThinkingBudgetSupported = gen.thinkingBudgetSupported
-          }
-        } catch (_) {}
-        try {
-          const detected = await window.api.models.detectConfig(session.modelPath)
-          if (!stillCurrent()) return
-          nextDetectedFamily = detected?.family
-          nextDetectedToolParser = detected?.toolParser
-          nextDetectedReasoningParser = detected?.reasoningParser
-          nextDetectedSupportsThinking = detected?.supportsThinking
-          nextDetectedSupportsInstructMode = detected?.supportsInstructMode
-          nextDetectedReasoningEfforts = detected?.supportedReasoningEfforts
-          nextSupportsThinkingBudget = detected?.supportsThinkingBudget
-          detectedModelDefaults = applyEffectiveSessionGenerationDefaults(
-            detectedModelDefaults,
-            session.config,
-            detected?.nativeMtp,
-          )
-        } catch (_) {}
-      }
-      // Saved non-null overrides win over model defaults. SQL NULL means the
-      // field is unset, not an explicit request to mask the model/app default.
-      const savedExplicit = Object.fromEntries(
-        Object.entries(saved || {}).filter(([, v]) => v !== null && v !== undefined),
-      ) as ChatOverrides
-      if (!stillCurrent()) return
-      setSavedChatModelPath(nextSavedChatModelPath)
-      setMessageCount(nextMessageCount)
-      setThinkingBudgetSupported(nextThinkingBudgetSupported)
-      setDetectedFamily(nextDetectedFamily)
-      setDetectedToolParser(nextDetectedToolParser)
-      setDetectedReasoningParser(nextDetectedReasoningParser)
-      setDetectedSupportsThinking(nextDetectedSupportsThinking)
-      setDetectedSupportsInstructMode(nextDetectedSupportsInstructMode)
-      setDetectedReasoningEfforts(nextDetectedReasoningEfforts)
-      setSupportsThinkingBudget(nextSupportsThinkingBudget)
-      setModelDefaults(detectedModelDefaults)
-      setOverrides(savedExplicit)
+      const generation = result.generationDefaults
+      const detected = result.detectedConfig
+      setThinkingBudgetSupported(generation?.thinkingBudgetSupported)
+      setDetectedFamily(detected?.family)
+      setDetectedToolParser(detected?.toolParser)
+      setDetectedReasoningParser(detected?.reasoningParser)
+      setDetectedSupportsThinking(detected?.supportsThinking)
+      setDetectedSupportsInstructMode(detected?.supportsInstructMode)
+      setDetectedReasoningEfforts(detected?.supportedReasoningEfforts)
+      setSupportsThinkingBudget(detected?.supportsThinkingBudget)
+      setModelDefaults(result.modelDefaults as Partial<ChatOverrides>)
+      setOverrides(result.overrides as ChatOverrides)
+      setDefaultsState(result.defaultsState)
+      setSettingsHydrationFailure(result.partialFailure)
+      setOverridesLoaded(result.overridesLoaded)
+      setHydratedKey(hydrationKey)
       setDirty(false)
-    })()
+    }).catch(() => {
+      if (!stillCurrent()) return
+      setModelDefaults(persistedModelDefaults)
+      setDefaultsState(Object.keys(persistedModelDefaults).length > 0
+        ? 'session-fallback'
+        : 'unavailable')
+      setSettingsHydrationFailure(true)
+      setOverridesLoaded(false)
+      setHydratedKey(hydrationKey)
+    })
+    void loadChatSettingsCompatibility({
+      chat: () => window.api.chat.get(chatId),
+      messages: () => window.api.chat.getMessages(chatId),
+    }).then((result) => {
+      if (!stillCurrent()) return
+      setSavedChatModelPath(result.savedChatModelPath)
+      setMessageCount(result.messageCount)
+      setCompatibilityHydrationFailure(result.partialFailure)
+    }).catch(() => {
+      if (!stillCurrent()) return
+      setCompatibilityHydrationFailure(true)
+    })
     loadProfiles()
     return () => { active = false }
-  }, [chatId, session.modelPath, session.config, loadProfiles])
+  }, [
+    chatId,
+    session.modelPath,
+    session.config,
+    hydrationKey,
+    persistedModelDefaults,
+    loadProfiles,
+  ])
 
   const update = <K extends keyof ChatOverrides>(key: K, value: ChatOverrides[K]) => {
     setOverrides(prev => ({ ...prev, [key]: value }))
@@ -309,11 +341,23 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
     messageCount,
     savedChatModelPath,
     currentModelPath: session.modelPath,
-    overrides,
+    overrides: displayedOverrides,
     reasoningParser: effectiveReasoningParser,
     toolParser: detectedToolParser,
     detectedFamily,
   })
+  const inferenceReady = hydrationCurrent && overridesLoaded
+  const partialHydrationFailure =
+    settingsHydrationFailure || compatibilityHydrationFailure
+  const defaultsNoticeKey = displayedDefaultsState === 'loading'
+    ? 'chat.settings.defaultsLoading'
+    : displayedDefaultsState === 'session-fallback'
+      ? 'chat.settings.defaultsSessionFallback'
+      : displayedDefaultsState === 'engine-fallback'
+        ? 'chat.settings.defaultsEngineFallback'
+        : displayedDefaultsState === 'unavailable'
+          ? 'chat.settings.defaultsUnavailable'
+          : undefined
 
   return (
     <div
@@ -397,7 +441,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
 
         <div className="border-t border-border" />
 
-        {!isImageModel && compatibilityWarnings.length > 0 && (
+        {!isImageModel && inferenceReady && compatibilityWarnings.length > 0 && (
           <div className="rounded border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
             <div className="flex items-start gap-2">
               <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />
@@ -421,6 +465,19 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
         )}
 
         {!isImageModel && <>
+        {(defaultsNoticeKey || (hydrationCurrent && partialHydrationFailure)) && (
+          <div
+            data-vmlx-generation-defaults-state={displayedDefaultsState}
+            role="status"
+            className="rounded border border-border bg-muted/40 p-3 text-xs text-muted-foreground space-y-1.5"
+          >
+            {defaultsNoticeKey && <p>{t(defaultsNoticeKey)}</p>}
+            {hydrationCurrent && partialHydrationFailure && (
+              <p>{t('chat.settings.defaultsPartial')}</p>
+            )}
+          </div>
+        )}
+        {inferenceReady && <>
         {/* Profiles */}
         <div>
           <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">{t('chat.settings.profiles')}</h3>
@@ -505,7 +562,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                   <button
                     onClick={() => updateThinkingMode(undefined, undefined)}
                     className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                      overrides.enableThinking == null
+                      displayedOverrides.enableThinking == null
                         ? 'bg-primary text-primary-foreground'
                         : 'hover:bg-accent text-muted-foreground'
                     }`}
@@ -515,7 +572,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                   <button
                     onClick={() => updateThinkingMode(false, undefined)}
                     className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                      overrides.enableThinking === false
+                      displayedOverrides.enableThinking === false
                         ? 'bg-primary text-primary-foreground'
                         : 'hover:bg-accent text-muted-foreground'
                     }`}
@@ -525,7 +582,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                   <button
                     onClick={() => updateThinkingMode(true, undefined)}
                     className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                      overrides.enableThinking === true && (overrides.reasoningEffort !== 'max' || !dsv4MaxEnabled)
+                      displayedOverrides.enableThinking === true && (displayedOverrides.reasoningEffort !== 'max' || !dsv4MaxEnabled)
                         ? 'bg-primary text-primary-foreground'
                         : 'hover:bg-accent text-muted-foreground'
                     }`}
@@ -537,7 +594,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                     title={undefined}
                     onClick={() => updateThinkingMode(true, 'max')}
                     className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                      overrides.enableThinking === true && overrides.reasoningEffort === 'max' && dsv4MaxEnabled
+                      displayedOverrides.enableThinking === true && displayedOverrides.reasoningEffort === 'max' && dsv4MaxEnabled
                         ? 'bg-primary text-primary-foreground'
                         : dsv4MaxEnabled ? 'hover:bg-accent text-muted-foreground' : 'text-muted-foreground opacity-50 cursor-not-allowed'
                     }`}
@@ -560,7 +617,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                   </button>
                   <button
                     disabled={!thinkingSupported}
-                    onClick={() => updateThinkingMode(true, overrides.reasoningEffort)}
+                    onClick={() => updateThinkingMode(true, displayedOverrides.reasoningEffort)}
                     className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
                       displayedEnableThinking === true
                         ? 'bg-primary text-primary-foreground'
@@ -589,7 +646,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                   ? 'chat.settings.thinkingHelp'
                   : 'chat.settings.thinkingNativeOnlyHelp')}
               </p>
-              {detectedFamily !== 'deepseek-v4' && overrides.enableThinking !== false && showReasoningEffort && (
+              {detectedFamily !== 'deepseek-v4' && displayedOverrides.enableThinking !== false && showReasoningEffort && (
                 <div className="mt-3">
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-xs text-muted-foreground">{t('chat.settings.reasoningEffort')}</span>
@@ -598,7 +655,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                     <button
                       onClick={() => update('reasoningEffort', undefined)}
                       className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                        overrides.reasoningEffort == null
+                        displayedOverrides.reasoningEffort == null
                           ? 'bg-primary text-primary-foreground'
                           : 'hover:bg-accent text-muted-foreground'
                       }`}
@@ -610,7 +667,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                         <button
                           onClick={() => update('reasoningEffort', 'low')}
                           className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                            overrides.reasoningEffort === 'low'
+                            displayedOverrides.reasoningEffort === 'low'
                               ? 'bg-primary text-primary-foreground'
                               : 'hover:bg-accent text-muted-foreground'
                           }`}
@@ -621,7 +678,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                           <button
                             onClick={() => update('reasoningEffort', 'medium')}
                             className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                              overrides.reasoningEffort === 'medium'
+                              displayedOverrides.reasoningEffort === 'medium'
                                 ? 'bg-primary text-primary-foreground'
                                 : 'hover:bg-accent text-muted-foreground'
                             }`}
@@ -635,7 +692,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                       <button
                         onClick={() => update('reasoningEffort', 'high')}
                         className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                          overrides.reasoningEffort === 'high'
+                          displayedOverrides.reasoningEffort === 'high'
                             ? 'bg-primary text-primary-foreground'
                             : 'hover:bg-accent text-muted-foreground'
                         }`}
@@ -652,25 +709,37 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                 </div>
               )}
             </div>
-            <SliderField
-              label={t('chat.settings.temperature')}
-              value={overrides.temperature ?? modelDefaults.temperature ?? 0}
-              onChange={v => update('temperature', v)}
-              min={0} max={2} step={0.05}
-              help={t('chat.settings.temperatureHelp')}
-            />
-            <SliderField
-              label={t('chat.settings.topP')}
-              value={overrides.topP ?? modelDefaults.topP ?? 1}
-              onChange={v => update('topP', v)}
-              min={0} max={1} step={0.05}
-              help={t('chat.settings.topPHelp')}
-            />
+            {displayedTemperature != null && (
+              <SliderField
+                label={t('chat.settings.temperature')}
+                value={displayedTemperature}
+                onChange={v => {
+                  const sanitized = sanitizeTemperatureOverride(v)
+                  if (sanitized != null) update('temperature', sanitized)
+                }}
+                min={0} max={2} step="any"
+                exactInput={{ min: 0, max: 2 }}
+                help={t('chat.settings.temperatureHelp')}
+              />
+            )}
+            {displayedTopP != null && (
+              <SliderField
+                label={t('chat.settings.topP')}
+                value={displayedTopP}
+                onChange={v => {
+                  const sanitized = sanitizeTopPOverride(v)
+                  if (sanitized != null) update('topP', sanitized)
+                }}
+                min={topPSliderMin} max={TOP_P_MAX} step="any"
+                exactInput={{ min: Number.MIN_VALUE, max: TOP_P_MAX }}
+                help={t('chat.settings.topPHelp')}
+              />
+            )}
             <NumberField
               label={t('chat.settings.maxTokens')}
-              value={overrides.maxTokens}
+              value={displayedOverrides.maxTokens}
               onChange={v => update('maxTokens', v)}
-              placeholder={modelDefaults.maxTokens ? `${modelDefaults.maxTokens} (model default)` : t('chat.settings.maxTokensPlaceholder')}
+              placeholder={displayedModelDefaults.maxTokens ? `${displayedModelDefaults.maxTokens} (model default)` : t('chat.settings.maxTokensPlaceholder')}
               help={t('chat.settings.maxTokensHelp')}
             />
             {/* Show ONLY for families whose engine honors a top-level
@@ -683,41 +752,61 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
             {(supportsThinkingBudget === true || thinkingBudgetSupported === true) && displayedEnableThinking !== false && (
               <NumberField
                 label={t('chat.settings.maxThinkingTokens')}
-                value={overrides.maxThinkingTokens}
+                value={displayedOverrides.maxThinkingTokens}
                 onChange={v => update('maxThinkingTokens', v)}
-                placeholder={modelDefaults.maxThinkingTokens ? `${modelDefaults.maxThinkingTokens} (model default)` : t('chat.settings.maxThinkingTokensPlaceholder')}
+                placeholder={displayedModelDefaults.maxThinkingTokens ? `${displayedModelDefaults.maxThinkingTokens} (model default)` : t('chat.settings.maxThinkingTokensPlaceholder')}
                 help={t('chat.settings.maxThinkingTokensHelp')}
               />
             )}
-            <SliderField
-              label={t('chat.settings.topK')}
-              value={displayedTopK}
-              // Zero is an explicit and useful override. Clearing it here made
-              // a bundle top-k default immediately snap back on screen and in
-              // the next request, so users could not actually disable top-k.
-              onChange={v => update('topK', v)}
-              min={0} max={topKSliderMax} step={1}
-              help={t('chat.settings.topKHelp')}
-              format={formatTopK}
-            />
-            <SliderField
-              label={t('chat.settings.minP')}
-              value={overrides.minP ?? modelDefaults.minP ?? 0}
-              // Unlike top-k, zero must remain an explicit override: omitting
-              // min_p lets the server restore a non-zero bundle default.
-              onChange={v => update('minP', v)}
-              min={0} max={1} step={0.01}
-              help={t('chat.settings.minPHelp')}
-            />
-            <SliderField
-              label={t('chat.settings.repetitionPenalty')}
-              value={overrides.repeatPenalty ?? modelDefaults.repeatPenalty ?? 1.0}
-              // 1.0 is an explicit neutral override, distinct from inheriting a
-              // bundle-declared repetition penalty. Reset clears inheritance.
-              onChange={v => update('repeatPenalty', v)}
-              min={1.0} max={2.0} step={0.05}
-              help={t('chat.settings.repetitionPenaltyHelp')}
-            />
+            {displayedTopK != null && (
+              <SliderField
+                label={t('chat.settings.topK')}
+                value={displayedTopK}
+                // Zero is an explicit and useful override. Clearing it here made
+                // a bundle top-k default immediately snap back on screen and in
+                // the next request, so users could not actually disable top-k.
+                onChange={v => {
+                  const sanitized = sanitizeTopKOverride(v)
+                  if (sanitized != null) update('topK', sanitized)
+                }}
+                min={0} max={topKSliderMax} step={1}
+                exactInput={{ min: 0, max: TOP_K_MAX }}
+                help={t('chat.settings.topKHelp')}
+                format={value => Math.round(value) <= 0
+                  ? t('chat.settings.topKOff')
+                  : Math.round(value).toString()}
+              />
+            )}
+            {displayedMinP != null && (
+              <SliderField
+                label={t('chat.settings.minP')}
+                value={displayedMinP}
+                // Unlike top-k, zero must remain an explicit override: omitting
+                // min_p lets the server restore a non-zero bundle default.
+                onChange={v => {
+                  const sanitized = sanitizeMinPOverride(v)
+                  if (sanitized != null) update('minP', sanitized)
+                }}
+                min={0} max={1} step="any"
+                exactInput={{ min: 0, max: 1 }}
+                help={t('chat.settings.minPHelp')}
+              />
+            )}
+            {displayedRepeatPenalty != null && (
+              <SliderField
+                label={t('chat.settings.repetitionPenalty')}
+                value={displayedRepeatPenalty}
+                // 1.0 is an explicit neutral override, distinct from inheriting a
+                // bundle-declared repetition penalty. Reset clears inheritance.
+                onChange={v => {
+                  const sanitized = sanitizeRepetitionPenaltyOverride(v)
+                  if (sanitized != null) update('repeatPenalty', sanitized)
+                }}
+                min={repeatPenaltySliderMin} max={repeatPenaltySliderMax} step={0.05}
+                exactInput={{ min: Number.MIN_VALUE }}
+                help={t('chat.settings.repetitionPenaltyHelp')}
+              />
+            )}
           </div>
         </div>
 
@@ -917,6 +1006,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
           </div>
         </div>
         </>}
+        </>}
       </div>
 
       {/* Footer Actions */}
@@ -925,13 +1015,14 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
           data-vmlx-control="chat-settings-save"
           data-vmlx-state={saving ? 'saving' : dirty ? 'dirty' : 'saved'}
           onClick={handleSave}
-          disabled={!dirty || saving}
+          disabled={!inferenceReady || !dirty || saving}
           className="flex-1 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-40"
         >
           {saving ? t('chat.settings.saving') : t('chat.settings.save')}
         </button>
         <button
           onClick={handleReset}
+          disabled={!inferenceReady}
           className="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent"
         >
           {t('chat.settings.reset')}
@@ -943,16 +1034,38 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
 
 // ─── Helper Components ────────────────────────────────────────────────────────
 
-function SliderField({ label, value, onChange, min, max, step, help, format }: {
+function SliderField({ label, value, onChange, min, max, step, help, format, exactInput }: {
   label: string; value: number; onChange: (v: number) => void
-  min: number; max: number; step: number; help: string
+  min: number; max: number; step: number | 'any'; help: string
   format?: (v: number) => string
+  exactInput?: { min?: number; max?: number }
 }) {
   return (
     <div>
       <div className="flex justify-between text-sm mb-1">
         <span>{label}</span>
-        <span className="text-muted-foreground font-mono text-xs">{format ? format(value) : value.toFixed(2)}</span>
+        <div className="flex items-center gap-1.5">
+        {format && (
+          <span className="text-muted-foreground font-mono text-xs">{format(value)}</span>
+        )}
+        {exactInput ? (
+          <input
+            type="number"
+            aria-label={`${label} exact value`}
+            value={value}
+            min={exactInput.min}
+            max={exactInput.max}
+            step="any"
+            onChange={event => {
+              const next = Number(event.target.value)
+              if (Number.isFinite(next)) onChange(next)
+            }}
+            className="w-24 rounded border border-input bg-background px-1.5 py-0.5 text-right font-mono text-xs text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        ) : (
+          <span className="text-muted-foreground font-mono text-xs">{value.toFixed(2)}</span>
+        )}
+        </div>
       </div>
       <input
         type="range"

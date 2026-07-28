@@ -93,7 +93,7 @@ describe('chat settings cross-family compatibility warnings', () => {
     expect(source).toContain("const thinkingSupported = resolvedReasoningParser !== 'none' && (")
     expect(source).toContain('reasoningParserIsEnabled(resolvedReasoningParser)')
     expect(source).toContain("const showReasoningEffort = (detectedReasoningEfforts?.length ?? 0) > 0")
-    expect(source).toContain('const displayedEnableThinking = thinkingSupported ? overrides.enableThinking : undefined')
+    expect(source).toContain('const displayedEnableThinking = thinkingSupported ? displayedOverrides.enableThinking : undefined')
     expect(source).toContain('disabled={!thinkingSupported}')
   })
 
@@ -112,8 +112,7 @@ describe('chat settings cross-family compatibility warnings', () => {
     expect(source).toContain('const thinkingOffSupported = detectedSupportsInstructMode !== false')
     expect(source).toContain('{thinkingOffSupported && (')
     expect(source).toContain("'chat.settings.thinkingNativeOnlyHelp'")
-    expect(source).toContain('nextDetectedReasoningEfforts = detected?.supportedReasoningEfforts')
-    expect(source).toContain('setDetectedReasoningEfforts(nextDetectedReasoningEfforts)')
+    expect(source).toContain('setDetectedReasoningEfforts(detected?.supportedReasoningEfforts)')
     expect(ipc).toContain('supportsInstructMode === false && overrides?.enableThinking === false')
     expect(ipc).toContain('if (supportsInstructMode === false) return;')
   })
@@ -125,14 +124,14 @@ describe('chat settings cross-family compatibility warnings', () => {
     expect(source).not.toContain("sessionConfig?.dsv4ForceDirect")
     expect(source).not.toContain("sessionConfig?.dsv4RawMax === true")
     expect(source).toContain("disabled={!dsv4MaxEnabled}")
-    expect(source).toContain("overrides.reasoningEffort !== 'max' || !dsv4MaxEnabled")
+    expect(source).toContain("displayedOverrides.reasoningEffort !== 'max' || !dsv4MaxEnabled")
   })
 
   it('keeps DSV4 model-default reasoning visible as a real Auto state', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 
     expect(source).toContain('onClick={() => updateThinkingMode(undefined, undefined)}')
-    expect(source).toContain('overrides.enableThinking == null')
+    expect(source).toContain('displayedOverrides.enableThinking == null')
     expect(source).toContain("{t('chat.settings.thinkingAuto')}")
   })
 
@@ -159,8 +158,7 @@ describe('chat settings cross-family compatibility warnings', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 
     expect(source).toContain('const [supportsThinkingBudget, setSupportsThinkingBudget]')
-    expect(source).toContain('nextSupportsThinkingBudget = detected?.supportsThinkingBudget')
-    expect(source).toContain('setSupportsThinkingBudget(nextSupportsThinkingBudget)')
+    expect(source).toContain('setSupportsThinkingBudget(detected?.supportsThinkingBudget)')
     expect(source).toContain('{(supportsThinkingBudget === true || thinkingBudgetSupported === true) && displayedEnableThinking !== false && (')
   })
 

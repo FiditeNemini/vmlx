@@ -142,6 +142,16 @@ describe('prepareMarkdownWithMath', () => {
     expect(rendered).not.toContain('\\times')
   })
 
+  it('does not pair an unclosed math opener with a later currency amount through prose', () => {
+    const rendered = prepareMarkdownWithMath(
+      'The literal currency string is $43 and $47 \\times 19 = 893 < 920 = 46 \\times 20. This seems to be the second line. There is another literal currency string $43.',
+    )
+
+    expect(rendered).not.toContain('class="katex"')
+    expect(rendered).toContain('$43 and $47 × 19 = 893 < 920 = 46 × 20')
+    expect(rendered).toContain('literal currency string $43')
+  })
+
   it('preserves escaped currency before a later valid single-dollar span', () => {
     const rendered = prepareMarkdownWithMath(
       'Escaped currency is \\$43; math is $6 \\times 7 = 42$.',

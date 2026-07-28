@@ -33,6 +33,26 @@ function looksLikeSingleDollarMath(text: string): boolean {
   // streaming (for example "$5<$10" temporarily matches "$5<$").
   if (/^[+\-*/=<>]/.test(trimmed) || /[+\-*/=<>]$/.test(trimmed)) return false
   if (/^\d+(?:[.,]\d{2})?$/.test(trimmed)) return false
+  // A missing single-dollar closer must never let a later currency amount
+  // terminate a prose-sized span. Strip TeX commands and permit only
+  // single-letter variables or established math function names in the
+  // remaining alphabetic runs. This keeps `$E=mc^2$` and `$47 \times 19$`
+  // valid while rejecting model text such as
+  // `$47 \times 19 ... This seems to be ... $43`.
+  const lexicalView = trimmed
+    .replace(/\\text\s*\{[^{}]*\}/g, '')
+    .replace(/\\[A-Za-z]+/g, '')
+  const proseWords = lexicalView.match(/[A-Za-z]{2,}/g) || []
+  if (
+    proseWords.some(
+      (word) =>
+        !/^(?:sin|cos|tan|cot|sec|csc|log|ln|exp|lim|max|min|mod|gcd|lcm|det)$/i.test(
+          word,
+        ),
+    )
+  ) {
+    return false
+  }
   if (/\\[A-Za-z]+/.test(trimmed)) return true
   if (/[{}_^=<>]/.test(trimmed)) return true
   if (/(?:[\dA-Za-z])\s*[+\-*/]\s*(?:[\dA-Za-z])/.test(trimmed)) return true

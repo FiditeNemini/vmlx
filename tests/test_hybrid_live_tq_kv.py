@@ -299,7 +299,7 @@ def test_uncalibrated_hy3_full_kv_auto_uses_tq4_on_all_attention_slots():
     assert resolved["auto_policy"] == "hy3_full_kv_storage_tq4"
 
 
-def test_uncalibrated_minimax_m2_full_kv_auto_uses_tq8_safety_policy():
+def test_uncalibrated_minimax_m2_full_kv_auto_uses_native_tq4_policy():
     from vmlx_engine.utils.turboquant_config import (
         apply_uncalibrated_auto_tq_policy,
     )
@@ -318,14 +318,14 @@ def test_uncalibrated_minimax_m2_full_kv_auto_uses_tq8_safety_policy():
         layer_types,
     )
 
-    assert resolved["default_key_bits"] == 8
-    assert resolved["default_value_bits"] == 8
-    assert resolved["critical_key_bits"] == 8
-    assert resolved["critical_value_bits"] == 8
+    assert resolved["default_key_bits"] == 4
+    assert resolved["default_value_bits"] == 4
+    assert resolved["critical_key_bits"] == 4
+    assert resolved["critical_value_bits"] == 4
     assert resolved["critical_layers"] == list(range(62))
     assert resolved["sink_tokens"] == 0
     assert resolved["compress_after"] == 0
-    assert resolved["auto_policy"] == "minimax_m2_full_kv_storage_tq8"
+    assert resolved["auto_policy"] == "minimax_m2_full_kv_storage_tq4"
 
 
 def test_tq_codec_signature_separates_bits_and_prefix_cache_namespaces():

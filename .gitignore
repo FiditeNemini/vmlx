@@ -124,10 +124,16 @@ signing-secrets/
 **/*notariz*-profile*.exp
 **/*notary*-auth*.exp
 **/*notariz*-auth*.exp
+**/*notary*-profile*
+**/*notariz*-profile*
+**/*notary*-auth*
+**/*notariz*-auth*
 **/*sign*-local*
 **/*sign*-private*
 **/*signing*-profile*.exp
 **/*signing*-auth*.exp
+**/*signing*-profile*
+**/*signing*-auth*
 **/*codesign*-local*
 **/*codesign*-private*
 **/*release*.local.*
@@ -187,6 +193,8 @@ panel/dist/
 panel/out/
 panel/release/
 panel/bundled-python/
+panel/.bundled-python.staging.*/
+panel/.bundled-python.previous.*/
 panel/.DS_Store
 panel/.env
 

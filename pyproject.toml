@@ -32,8 +32,8 @@ dependencies = [
                        # families: ArraysCache.lengths/advance, SequenceStateMachine,
                        # LRUPromptCache, native Gemma 4 text MoE, and the baseline
                        # model registry that vMLX patches with bailing_hybrid for
-                       # Ling. NOTE: mlx-audio 0.4.1 hard-pins 0.31.1; audio support
-                       # is opt-in via [audio] extra and not in the main bundle.
+                       # Ling. The release app separately pins a compatible
+                       # MLX-Audio build in panel/scripts/bundle-python.sh.
     # MiniCPM-V-4.6 model class added in mlx-vlm 0.5.0; Gemma 4 remains covered.
     # Keep the floor Darwin-specific so optional Linux image-extra resolution
     # does not inherit mlx-vlm's macOS MLX wheel floor.
@@ -52,8 +52,11 @@ dependencies = [
     "pyyaml>=6.0",
     "requests>=2.28.0",
     "tabulate>=0.9.0",
-    # Video processing for VLM (headless — no GUI deps, smaller install)
-    "opencv-python-headless>=4.8.0",
+    # Video processing for VLM and the optional mflux image runtime. Install
+    # exactly one cv2 distribution: mflux requires standard opencv-python, and
+    # co-installing the headless distribution makes the shared namespace
+    # nondeterministic. Pin the newest release with macOS ARM binary wheels.
+    "opencv-python==4.13.0.92",
     # Resource monitoring
     "psutil>=5.9.0",
     # Server
@@ -63,7 +66,7 @@ dependencies = [
     "mcp>=1.0.0",
     # JSON Schema validation for structured output
     "jsonschema>=4.0.0",
-    # Note: mlx-audio moved to optional [audio] deps due to mlx-lm version conflict
+    # Note: mlx-audio remains optional for non-Electron installs.
     "mlx-embeddings>=0.0.5",
     # JANG / MXTQ / JANGTQ runtime — REQUIRED, not optional. Every modern JANG
     # bundle (MiniMax-M2.7-JANGTQ-CRACK, Kimi K2.6, DSV4-Flash, Nemotron-Omni,

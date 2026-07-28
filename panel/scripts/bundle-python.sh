@@ -11,12 +11,42 @@ ARCH="aarch64-apple-darwin"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PANEL_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_DIR="$(dirname "$PANEL_DIR")"
-BUNDLE_DIR="$PANEL_DIR/bundled-python"
+FINAL_BUNDLE_DIR="$PANEL_DIR/bundled-python"
+BUNDLE_DIR="$PANEL_DIR/.bundled-python.staging.$$"
+PREVIOUS_BUNDLE_DIR="$PANEL_DIR/.bundled-python.previous.$$"
+BUNDLE_PUBLISHED=0
+STANDALONE_TARBALL=""
 JANG_LOCAL="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}"
 JANG_MIN_VERSION="2.5.34"
 JANG_SOURCE_COMMIT=""
 JANG_SOURCE_VERSION=""
 VMLX_SOURCE_COMMIT=""
+
+# A host user-site package can make pip report a dependency as satisfied even
+# though it is absent from the relocatable bundle. Keep every install and
+# verification action isolated from the build machine's Python configuration.
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH PYTHONHOME VIRTUAL_ENV
+
+cleanup_bundle_build() {
+  local status=$?
+  trap - EXIT
+  if [ -n "$STANDALONE_TARBALL" ]; then
+    rm -f "$STANDALONE_TARBALL"
+  fi
+  if [ "$BUNDLE_PUBLISHED" -ne 1 ]; then
+    rm -rf "$BUNDLE_DIR"
+  fi
+  if [ -e "$PREVIOUS_BUNDLE_DIR" ]; then
+    if [ ! -e "$FINAL_BUNDLE_DIR" ] && [ ! -L "$FINAL_BUNDLE_DIR" ]; then
+      mv "$PREVIOUS_BUNDLE_DIR" "$FINAL_BUNDLE_DIR" || true
+    else
+      rm -rf "$PREVIOUS_BUNDLE_DIR"
+    fi
+  fi
+  exit "$status"
+}
+trap cleanup_bundle_build EXIT
 
 echo "==> Bundling Python $PYTHON_VERSION for standalone vMLX distribution"
 
@@ -151,15 +181,15 @@ PY
 check_local_vmlx_source_clean
 check_local_jang_source_clean
 
-# Clean previous build
-rm -rf "$BUNDLE_DIR"
+# Build in a private sibling directory. The currently verified bundle remains
+# untouched unless this entire build and verifier both succeed.
+rm -rf "$BUNDLE_DIR" "$PREVIOUS_BUNDLE_DIR"
 mkdir -p "$BUNDLE_DIR"
 
 # Download python-build-standalone (Astral's relocatable Python builds)
 TARBALL="cpython-${PYTHON_VERSION}+${BUILD_DATE}-${ARCH}-install_only.tar.gz"
 URL="https://github.com/astral-sh/python-build-standalone/releases/download/${BUILD_DATE}/${TARBALL}"
 STANDALONE_TARBALL="$(mktemp "${TMPDIR:-/tmp}/vmlx-python-standalone.XXXXXX.tar.gz")"
-trap 'rm -f "$STANDALONE_TARBALL"' EXIT
 
 restore_python_runtime_files() {
   local RESTORE_TMP
@@ -189,13 +219,18 @@ PYTHON="$BUNDLE_DIR/python/bin/python3"
 echo "==> Upgrading pip..."
 "$PYTHON" -m pip install --upgrade pip
 
-# Install ALL dependencies (lean: no gradio, no dev tools, no pytz)
-# Uses opencv-python-headless instead of opencv-python (no GUI deps, smaller)
+# Install ALL dependencies (lean: no gradio, no dev tools, no pytz).
+# mflux requires the standard opencv-python distribution. Install exactly one
+# OpenCV wheel: the 4.13 macOS ARM wheel is available, while the newer 4.14
+# release currently has no macOS ARM wheel and would trigger a non-reproducible
+# source build. OpenCV's packages share the cv2 namespace and must not coexist.
 #
 MLX_VERSION="0.31.2"
 MLX_LM_VERSION="0.31.3"
 MLX_VLM_VERSION="0.5.0"
 MFLUX_VERSION="0.17.5"
+OPENCV_VERSION="4.13.0.92"
+MLX_AUDIO_VERSION="0.4.6"
 
 detect_mlx_wheel_platform() {
   local requested="${VMLX_BUNDLE_MLX_PLATFORM:-${VMLINUX_BUNDLE_MLX_PLATFORM:-compat}}"
@@ -244,11 +279,11 @@ echo "==> Installing MLX $MLX_VERSION wheels for $MLX_WHEEL_PLATFORM..."
 "$PYTHON" -m pip install "$WHEELHOUSE"/mlx-"$MLX_VERSION"-*.whl "$WHEELHOUSE"/mlx_metal-"$MLX_VERSION"-*.whl
 
 echo "==> Installing dependencies..."
-"$PYTHON" -m pip install \
+"$PYTHON" -m pip install --only-binary=:all: \
   "mlx==$MLX_VERSION" "mlx-lm==$MLX_LM_VERSION" "mlx-vlm==$MLX_VLM_VERSION" \
   "transformers>=4.40.0,<5.13" "tokenizers>=0.19.0" "huggingface-hub>=0.23.0" \
   "numpy>=1.24.0" "pillow>=10.0.0" \
-  "opencv-python-headless>=4.8.0" \
+  "opencv-python==$OPENCV_VERSION" \
   "fastapi>=0.100.0" "uvicorn>=0.23.0" \
   "mcp>=1.0.0" "jsonschema>=4.0.0" \
   "psutil>=5.9.0" "tqdm>=4.66.0" "pyyaml>=6.0" \
@@ -271,10 +306,11 @@ if [ ! -x "$PYTHON" ]; then
   exit 1
 fi
 
-# Install mlx-audio for STT/TTS (--no-deps: it pins exact mlx-lm/transformers versions
-# that conflict with ours — we already have all the real deps above)
+# Install the exact MLX-Audio release used by this bundle. Its runtime
+# requirements are already part of the dependency transaction above; --no-deps
+# prevents a second resolver pass from changing the verified MLX stack.
 echo "==> Installing mlx-audio (STT/TTS)..."
-"$PYTHON" -m pip install --no-deps "mlx-audio>=0.2.0"
+"$PYTHON" -m pip install --no-deps "mlx-audio==$MLX_AUDIO_VERSION"
 # Install mlx-audio's transitive deps that we don't already have
 "$PYTHON" -m pip install \
   librosa sounddevice miniaudio pyloudnorm numba
@@ -739,6 +775,7 @@ fi
 # Post-cleanup verification: ensure pip still works (catches vendor stripping bugs)
 echo "==> Verifying pip is functional (needed for engine auto-update)..."
 "$PYTHON" -s -m pip --version > /dev/null 2>&1 || { echo "ERROR: pip is broken after cleanup! Check vendor removals."; exit 1; }
+"$PYTHON" -s -m pip check
 echo "  pip OK"
 
 # The verification imports above run after the first size cleanup and can
@@ -827,5 +864,33 @@ echo ""
 echo "==> Bundle size:"
 du -sh "$BUNDLE_DIR"
 echo ""
-echo "==> Done! Bundled Python ready at: $BUNDLE_DIR"
+echo "==> Running the release verifier against the staged bundle..."
+VMLX_BUNDLED_PYTHON_DIR="$BUNDLE_DIR" \
+VMLX_EXPECTED_MLX_WHEEL_PLATFORM="$MLX_WHEEL_PLATFORM" \
+  "$SCRIPT_DIR/verify-bundled-python.sh"
+
+if [ -L "$FINAL_BUNDLE_DIR" ]; then
+  echo "ERROR: refusing to replace symlinked bundled-Python destination: $FINAL_BUNDLE_DIR" >&2
+  exit 1
+fi
+if [ -e "$FINAL_BUNDLE_DIR" ] && [ ! -d "$FINAL_BUNDLE_DIR" ]; then
+  echo "ERROR: bundled-Python destination is not a directory: $FINAL_BUNDLE_DIR" >&2
+  exit 1
+fi
+
+echo "==> Publishing verified bundled Python..."
+if [ -d "$FINAL_BUNDLE_DIR" ]; then
+  mv "$FINAL_BUNDLE_DIR" "$PREVIOUS_BUNDLE_DIR"
+fi
+if ! mv "$BUNDLE_DIR" "$FINAL_BUNDLE_DIR"; then
+  echo "ERROR: failed to publish verified bundled Python" >&2
+  if [ -d "$PREVIOUS_BUNDLE_DIR" ] && [ ! -e "$FINAL_BUNDLE_DIR" ]; then
+    mv "$PREVIOUS_BUNDLE_DIR" "$FINAL_BUNDLE_DIR" || true
+  fi
+  exit 1
+fi
+BUNDLE_PUBLISHED=1
+rm -rf "$PREVIOUS_BUNDLE_DIR"
+
+echo "==> Done! Bundled Python ready at: $FINAL_BUNDLE_DIR"
 echo "    Next: npm run build && npx electron-builder --mac"

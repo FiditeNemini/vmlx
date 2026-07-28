@@ -474,6 +474,66 @@ def test_bundle_python_rejects_dirty_vmlx_package_source_by_default():
     assert "panel/scripts panel/src" in bundler
 
 
+def test_bundle_python_uses_one_pinned_binary_opencv_distribution():
+    bundler = Path("panel/scripts/bundle-python.sh").read_text()
+    verifier = Path("panel/scripts/verify-bundled-python.sh").read_text()
+    pyproject = Path("pyproject.toml").read_text()
+
+    assert 'OPENCV_VERSION="4.13.0.92"' in bundler
+    assert 'MLX_AUDIO_VERSION="0.4.6"' in bundler
+    assert '"opencv-python==$OPENCV_VERSION"' in bundler
+    assert '"mlx-audio==$MLX_AUDIO_VERSION"' in bundler
+    assert "opencv-python-headless" not in bundler
+    assert '"$PYTHON" -m pip install --only-binary=:all:' in bundler
+    assert '"opencv-python==4.13.0.92"' in pyproject
+    assert "opencv-python-headless" not in pyproject
+    assert 'version("opencv-python")' in verifier
+    assert 'version("opencv-python-headless")' in verifier
+    assert "run_bundled_python -m pip check" in verifier
+
+
+def test_bundle_python_isolates_host_python_and_publishes_only_verified_staging():
+    bundler = Path("panel/scripts/bundle-python.sh").read_text()
+    verifier = Path("panel/scripts/verify-bundled-python.sh").read_text()
+
+    assert "export PYTHONNOUSERSITE=1" in bundler
+    assert "unset PYTHONPATH PYTHONHOME VIRTUAL_ENV" in bundler
+    assert 'BUNDLE_DIR="$PANEL_DIR/.bundled-python.staging.$$"' in bundler
+    assert 'PREVIOUS_BUNDLE_DIR="$PANEL_DIR/.bundled-python.previous.$$"' in bundler
+    verify_idx = bundler.index('VMLX_BUNDLED_PYTHON_DIR="$BUNDLE_DIR"')
+    backup_idx = bundler.index(
+        'mv "$FINAL_BUNDLE_DIR" "$PREVIOUS_BUNDLE_DIR"',
+        verify_idx,
+    )
+    publish_idx = bundler.index(
+        'mv "$BUNDLE_DIR" "$FINAL_BUNDLE_DIR"',
+        backup_idx,
+    )
+    assert verify_idx < backup_idx < publish_idx
+    assert 'mv "$PREVIOUS_BUNDLE_DIR" "$FINAL_BUNDLE_DIR" || true' in bundler
+    assert 'BUNDLE_ROOT="${VMLX_BUNDLED_PYTHON_DIR:-$PANEL/bundled-python}"' in verifier
+    assert "export PYTHONNOUSERSITE=1" in verifier
+    assert "unset PYTHONPATH PYTHONHOME VIRTUAL_ENV" in verifier
+
+
+def test_machine_specific_apple_notary_and_signing_helpers_are_ignored():
+    private_helpers = (
+        "panel/scripts/apple-notary-profile.sh",
+        "panel/scripts/vmlx-notary-auth.py",
+        "panel/scripts/release-signing-profile.zsh",
+        "scripts/check-vmlx-notary-profile.exp",
+    )
+
+    for helper in private_helpers:
+        result = subprocess.run(
+            ["git", "check-ignore", "--quiet", helper],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, helper
+
+
 def test_release_gate_uses_anthropic_native_thinking_disable():
     gate_module = _load_gate_module()
 

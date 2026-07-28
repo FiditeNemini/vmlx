@@ -11,10 +11,26 @@
 set -euo pipefail
 R19_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH="$R19_FIXED_PATH"
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH PYTHONHOME VIRTUAL_ENV
 
 HERE="$(cd -P "$(dirname "$0")" && pwd -P)"
 PANEL="$(cd -P "$HERE/.." && pwd -P)"
-PY="$PANEL/bundled-python/python/bin/python3"
+BUNDLE_ROOT="${VMLX_BUNDLED_PYTHON_DIR:-$PANEL/bundled-python}"
+if [ ! -d "$BUNDLE_ROOT" ]; then
+  echo "❌ bundled-python root missing: $BUNDLE_ROOT"
+  exit 1
+fi
+BUNDLE_ROOT="$(cd -P "$BUNDLE_ROOT" && pwd -P)"
+case "$BUNDLE_ROOT" in
+  "$PANEL/bundled-python"|"$PANEL"/.bundled-python.staging.*)
+    ;;
+  *)
+    echo "❌ RELEASE BLOCKED — bundled-python root is outside the panel: $BUNDLE_ROOT"
+    exit 1
+    ;;
+esac
+PY="$BUNDLE_ROOT/python/bin/python3"
 RELEASE_SCOPE="${VMLX_RELEASE_SCOPE:-${VMLINUX_RELEASE_SCOPE:-}}"
 NODE_BIN="${VMLX_R19_TOOL_NODE_REALPATH:-/opt/homebrew/bin/node}"
 GIT_BIN="${VMLX_R19_TOOL_GIT_REALPATH:-/usr/bin/git}"
@@ -31,6 +47,39 @@ run_bundled_python() {
   cd /tmp
   PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH= "$PY" -B -s "$@"
 }
+
+echo "==> Verifying bundled dependency closure..."
+run_bundled_python -m pip check
+run_bundled_python - <<'PYEOF'
+from importlib.metadata import PackageNotFoundError, version
+
+expected_distribution = "4.13.0.92"
+installed_distribution = version("opencv-python")
+if installed_distribution != expected_distribution:
+    raise SystemExit(
+        "RELEASE BLOCKED — bundled opencv-python version drift: "
+        f"{installed_distribution} != {expected_distribution}"
+    )
+try:
+    headless_version = version("opencv-python-headless")
+except PackageNotFoundError:
+    headless_version = None
+if headless_version is not None:
+    raise SystemExit(
+        "RELEASE BLOCKED — overlapping opencv-python-headless distribution "
+        f"is installed ({headless_version})"
+    )
+import cv2
+
+if not cv2.__version__.startswith("4.13.0"):
+    raise SystemExit(
+        f"RELEASE BLOCKED — bundled cv2 version drift: {cv2.__version__}"
+    )
+print(
+    "  ok   opencv-python 4.13.0.92 is the sole cv2 distribution "
+    f"(cv2 {cv2.__version__})"
+)
+PYEOF
 
 assert_r19_pinned_tool() {
   local name="$1"
@@ -120,7 +169,7 @@ check_console_script_shebangs() {
       | while read -r script; do
           first_line="$(LC_ALL=C head -n 1 "$script" 2>/dev/null || true)"
           if [[ "$first_line" == '#!'*python* ]] \
-            || [[ "$first_line" == *"$PANEL/bundled-python"* ]] \
+            || [[ "$first_line" == *"$BUNDLE_ROOT"* ]] \
             || [[ "$first_line" == *"/Users/"* ]] \
             || [[ "$first_line" == *"/Applications/vMLX.app"* ]]; then
             printf '%s: %s\n' "$script" "$first_line"
@@ -138,7 +187,7 @@ check_console_script_shebangs() {
   echo "  ok   $label console-script shebangs are relocatable"
 }
 
-check_console_script_shebangs "$PANEL/bundled-python/python/bin" "bundled-python"
+check_console_script_shebangs "$BUNDLE_ROOT/python/bin" "bundled-python"
 
 SOURCE_ENGINE_DIR="$PANEL/../vmlx_engine"
 HASH_GATED_ENGINE_FILES=(
@@ -219,7 +268,7 @@ BUNDLED_JANG_TOOLS_DIR="$(run_bundled_python -c 'import pathlib, jang_tools; pri
 JANG_TOOLS_SOURCE_ROOT="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}"
 JANG_TOOLS_SOURCE_DIR="$JANG_TOOLS_SOURCE_ROOT/jang_tools"
 JANG_MIN_VERSION="2.5.34"
-PROVENANCE_FILE="$PANEL/bundled-python/vmlx-bundle-provenance.json"
+PROVENANCE_FILE="$BUNDLE_ROOT/vmlx-bundle-provenance.json"
 HASH_GATED_JANG_TOOLS_FILES=(
   "capabilities.py"
   "convert.py"

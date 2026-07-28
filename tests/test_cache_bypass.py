@@ -1069,8 +1069,21 @@ class TestDeepseekV32AbsorbFp32Patch:
         bundled_python = (
             "panel/bundled-python/python/bin/python3"
         )
-        if not Path(bundled_python).exists():
-            pytest.skip("bundled Python is not present in this source worktree")
+        bundled_module = Path(
+            "panel/bundled-python/python/lib/python3.12/site-packages/"
+            "mlx_lm/models/deepseek_v32.py"
+        )
+        bundle_provenance = Path(
+            "panel/bundled-python/vmlx-bundle-provenance.json"
+        )
+        if (
+            not Path(bundled_python).exists()
+            or not bundled_module.exists()
+            or not bundle_provenance.exists()
+        ):
+            pytest.skip(
+                "complete bundled Python is not present in this source worktree"
+            )
         code = """
 import inspect
 import mlx_lm.models.deepseek_v32 as mod

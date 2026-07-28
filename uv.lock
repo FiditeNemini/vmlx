@@ -4271,7 +4271,7 @@ name = "opencv-python-headless"
 version = "4.13.0.92"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
+    { name = "numpy", marker = "python_full_version < '3.13'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/79/42/2310883be3b8826ac58c3f2787b9358a2d46923d61f88fedf930bc59c60c/opencv_python_headless-4.13.0.92-cp37-abi3-macosx_13_0_arm64.whl", hash = "sha256:1a7d040ac656c11b8c38677cc8cccdc149f98535089dbe5b081e80a4e5903209", size = 46247192, upload-time = "2026-02-05T07:01:35.187Z" },
@@ -7805,7 +7805,7 @@ dependencies = [
     { name = "mlx-vlm", version = "0.4.4", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin'" },
     { name = "mlx-vlm", version = "0.5.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
     { name = "numpy" },
-    { name = "opencv-python-headless" },
+    { name = "opencv-python" },
     { name = "pillow" },
     { name = "psutil" },
     { name = "pyyaml" },
@@ -7905,7 +7905,7 @@ requires-dist = [
     { name = "num2words", marker = "extra == 'audio'", specifier = ">=0.5.0" },
     { name = "numba", marker = "extra == 'audio'", specifier = ">=0.57.0" },
     { name = "numpy", specifier = ">=1.24.0" },
-    { name = "opencv-python-headless", specifier = ">=4.8.0" },
+    { name = "opencv-python", specifier = "==4.13.0.92" },
     { name = "ordered-set", marker = "extra == 'audio'", specifier = ">=4.1.0" },
     { name = "phonemizer", marker = "extra == 'audio'", specifier = ">=3.2.0" },
     { name = "pillow", specifier = ">=10.0.0" },

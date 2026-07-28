@@ -177,6 +177,151 @@ export function ownedUiProducerPid({
   return pid
 }
 
+export function waitForCurrentSessionStart({
+  sessions,
+  sessionId,
+  baselineLastStartedAt = 0,
+  click,
+  timeoutMs = 900_000,
+  pollMs = 100,
+} = {}) {
+  if (
+    !sessions
+    || typeof sessions.get !== 'function'
+    || typeof sessions.getLogs !== 'function'
+    || typeof sessions.onStarting !== 'function'
+    || typeof sessions.onReady !== 'function'
+    || typeof sessions.onError !== 'function'
+    || typeof click !== 'function'
+    || !String(sessionId || '').trim()
+  ) {
+    throw new Error('Current-session Start waiter has an invalid contract')
+  }
+  const baseline = Number.isFinite(Number(baselineLastStartedAt))
+    ? Number(baselineLastStartedAt)
+    : 0
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let currentAttemptObserved = false
+    let pollTimer = null
+    let deadlineTimer = null
+    const unsubs = []
+
+    const cleanup = () => {
+      if (pollTimer != null) clearTimeout(pollTimer)
+      if (deadlineTimer != null) clearTimeout(deadlineTimer)
+      for (const unsubscribe of unsubs.splice(0)) {
+        try {
+          if (typeof unsubscribe === 'function') unsubscribe()
+        } catch {
+          // Cleanup must not replace the authoritative Start result.
+        }
+      }
+    }
+    const startedAt = (session) => {
+      const value = Number(
+        session?.lastStartedAt
+        ?? session?.last_started_at
+        ?? 0,
+      )
+      return Number.isFinite(value) ? value : 0
+    }
+    const isTarget = (data) => String(data?.sessionId || '') === sessionId
+    const resolveCurrent = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      Promise.resolve(sessions.get(sessionId)).then((current) => {
+        if (current?.status !== 'running') {
+          reject(new Error(
+            'Current UI Start emitted ready without a running session row',
+          ))
+          return
+        }
+        resolve(current)
+      }, reject)
+    }
+    const rejectCurrent = (data) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      Promise.resolve(sessions.getLogs(sessionId)).catch(() => []).then((logs) => {
+        reject(new Error(
+          'UI Start control left session in error state: '
+          + JSON.stringify({
+            error: String(data?.error || ''),
+            logs: Array.isArray(logs) ? logs.slice(-80) : [],
+          }),
+        ))
+      })
+    }
+    const check = async () => {
+      if (settled) return
+      try {
+        const current = await sessions.get(sessionId)
+        if (settled) return
+        // Polling may return a snapshot requested just before onStarting.  A
+        // lifecycle event is current-attempt evidence, but it must not relabel
+        // that older snapshot.  The persisted lastStartedAt written with the
+        // loading transition is the polling-path ownership boundary; ready and
+        // error events remain independently authoritative above.
+        const belongsToCurrentAttempt = startedAt(current) > baseline
+        if (belongsToCurrentAttempt && current?.status === 'running') {
+          resolveCurrent()
+          return
+        }
+        if (belongsToCurrentAttempt && current?.status === 'error') {
+          rejectCurrent({ error: 'persisted current-attempt error' })
+          return
+        }
+      } catch (error) {
+        if (!settled) {
+          settled = true
+          cleanup()
+          reject(error)
+        }
+        return
+      }
+      pollTimer = setTimeout(check, pollMs)
+    }
+
+    unsubs.push(
+      sessions.onStarting((data) => {
+        if (isTarget(data)) currentAttemptObserved = true
+      }),
+      sessions.onReady((data) => {
+        if (!isTarget(data)) return
+        currentAttemptObserved = true
+        resolveCurrent()
+      }),
+      sessions.onError((data) => {
+        if (!isTarget(data)) return
+        currentAttemptObserved = true
+        rejectCurrent(data)
+      }),
+    )
+    deadlineTimer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(new Error(
+        'Timed out waiting for the current UI Start lifecycle; sawStarting='
+        + String(currentAttemptObserved),
+      ))
+    }, timeoutMs)
+    try {
+      click()
+    } catch (error) {
+      settled = true
+      cleanup()
+      reject(error)
+      return
+    }
+    void check()
+  })
+}
+
 const proofBasename = uniqueProofBasename({
   requested: requestedProofBasename,
   model: servedModel,
@@ -7927,31 +8072,19 @@ async function main() {
             sessionStatusBefore: sessionBeforeStart?.status || null,
             sessionStatusAfter: null,
           };
-          startButton.scrollIntoView({ block: 'center' });
-          startButton.click();
-          uiStartControl.clicked = true;
-          const startedSession = await new Promise((resolve, reject) => {
-            const started = Date.now();
-            const check = async () => {
-              const current = await window.api.sessions.get(created.session.id);
-              if (current?.status === 'running') return resolve(current);
-              if (current?.status === 'error') {
-                const logs = await window.api.sessions.getLogs(created.session.id)
-                  .catch(() => []);
-                return reject(new Error(
-                  'UI Start control left session in error state: '
-                  + JSON.stringify(logs.slice(-80))
-                ));
-              }
-              if (Date.now() - started > 900000) {
-                return reject(new Error(
-                  'Timed out waiting for UI-started session to run; last status='
-                  + String(current?.status || 'missing')
-                ));
-              }
-              setTimeout(check, 100);
-            };
-            check();
+          const waitForCurrentSessionStart = ${waitForCurrentSessionStart.toString()};
+          const startedSession = await waitForCurrentSessionStart({
+            sessions: window.api.sessions,
+            sessionId: created.session.id,
+            baselineLastStartedAt:
+              sessionBeforeStart?.lastStartedAt
+              ?? sessionBeforeStart?.last_started_at
+              ?? 0,
+            click: () => {
+              startButton.scrollIntoView({ block: 'center' });
+              startButton.click();
+              uiStartControl.clicked = true;
+            },
           });
           uiStartControl.sessionStatusAfter = startedSession.status;
           const preloadHealthBefore = await window.api.performance.health(endpoint)

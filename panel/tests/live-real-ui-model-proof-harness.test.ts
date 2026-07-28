@@ -57,6 +57,7 @@ import {
   uiProfileRequiresPositiveCacheReuse,
   viteRendererSourceSeen,
   viteRawRendererModulePath,
+  waitForCurrentSessionStart,
   waitForOwnedUiReleaseSentinel,
   writePrivateArtifactFile,
 } from "../scripts/live-real-ui-model-proof.mjs";
@@ -89,11 +90,142 @@ const persistedContents = [
   "REAL_UI_LIVE_TOOL_TWO Answer complete",
   "$43 and $47 \\times 19 = 893 < 920 = 46 \\times 20$",
 ];
+
+function startLifecycleHarness(initial: any) {
+  let current = { ...initial };
+  const listeners = {
+    starting: new Set<(data: any) => void>(),
+    ready: new Set<(data: any) => void>(),
+    error: new Set<(data: any) => void>(),
+  };
+  const subscribe = (name: keyof typeof listeners) => (callback: (data: any) => void) => {
+    listeners[name].add(callback);
+    return () => listeners[name].delete(callback);
+  };
+  return {
+    sessions: {
+      get: async () => ({ ...current }),
+      getLogs: async () => ["fresh-current-attempt-log"],
+      onStarting: subscribe("starting"),
+      onReady: subscribe("ready"),
+      onError: subscribe("error"),
+    },
+    update(value: any) {
+      current = { ...current, ...value };
+    },
+    emit(name: keyof typeof listeners, data: any) {
+      for (const callback of [...listeners[name]]) callback(data);
+    },
+  };
+}
 const renderedContents = [
   persistedContents[0],
   persistedContents[1],
   "$43 and 47 × 19 = 893 < 920 = 46 × 20",
 ];
+
+describe("current visible Start lifecycle", () => {
+  it("ignores a reused stale error row and other-session events", async () => {
+    const harness = startLifecycleHarness({
+      id: "target",
+      status: "error",
+      lastStartedAt: 100,
+    });
+    const result = waitForCurrentSessionStart({
+      sessions: harness.sessions,
+      sessionId: "target",
+      baselineLastStartedAt: 100,
+      timeoutMs: 500,
+      pollMs: 1,
+      click: () => {
+        setTimeout(() => {
+          harness.emit("error", { sessionId: "other", error: "ignore me" });
+        }, 1);
+        setTimeout(() => {
+          harness.emit("starting", { sessionId: "target" });
+        }, 2);
+        setTimeout(() => {
+          harness.update({ status: "running", lastStartedAt: 101 });
+          harness.emit("ready", { sessionId: "target", pid: 42 });
+        }, 6);
+      },
+    });
+
+    await expect(result).resolves.toMatchObject({
+      id: "target",
+      status: "running",
+      lastStartedAt: 101,
+    });
+  });
+
+  it("rejects an attributable current-attempt error with current logs", async () => {
+    const harness = startLifecycleHarness({
+      id: "target",
+      status: "error",
+      lastStartedAt: 100,
+    });
+    const result = waitForCurrentSessionStart({
+      sessions: harness.sessions,
+      sessionId: "target",
+      baselineLastStartedAt: 100,
+      timeoutMs: 500,
+      pollMs: 1,
+      click: () => {
+        setTimeout(() => {
+          harness.update({ status: "loading", lastStartedAt: 101 });
+          harness.emit("starting", { sessionId: "target" });
+        }, 1);
+        setTimeout(() => {
+          harness.update({ status: "error", lastStartedAt: 101 });
+          harness.emit("error", {
+            sessionId: "target",
+            error: "fresh-current-attempt-error",
+          });
+        }, 2);
+      },
+    });
+
+    await expect(result).rejects.toThrow(/fresh-current-attempt-log/);
+    await expect(result).rejects.toThrow(/fresh-current-attempt-error/);
+  });
+
+  it("does not relabel a stale persisted error as a new Start failure", async () => {
+    const harness = startLifecycleHarness({
+      id: "target",
+      status: "error",
+      lastStartedAt: 100,
+    });
+    await expect(waitForCurrentSessionStart({
+      sessions: harness.sessions,
+      sessionId: "target",
+      baselineLastStartedAt: 100,
+      timeoutMs: 20,
+      pollMs: 1,
+      click: () => {},
+    })).rejects.toThrow(/current UI Start lifecycle/);
+  });
+
+  it("accepts a newer persisted Start identity as a polling fallback", async () => {
+    const harness = startLifecycleHarness({
+      id: "target",
+      status: "error",
+      lastStartedAt: 100,
+    });
+    const result = waitForCurrentSessionStart({
+      sessions: harness.sessions,
+      sessionId: "target",
+      baselineLastStartedAt: 100,
+      timeoutMs: 500,
+      pollMs: 1,
+      click: () => {
+        setTimeout(() => {
+          harness.update({ status: "running", lastStartedAt: 101 });
+        }, 2);
+      },
+    });
+    await expect(result).resolves.toMatchObject({ status: "running" });
+  });
+});
 
 describe("owned UI producer identity", () => {
   it("binds orchestrated attestations to the directly observed parent worker", () => {

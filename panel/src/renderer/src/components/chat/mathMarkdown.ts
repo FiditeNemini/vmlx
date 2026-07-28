@@ -5,7 +5,7 @@ import { renderToString } from 'katex'
 // rewriting `\times`, `$...$`, or `*` inside a tilde fence corrupts source.
 const CODE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g
 const LITERAL_MARKDOWN_PROTECTED_RE =
-  /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`|\\\[[\s\S]*?\\\]|\\\([^\n]*?\\\)|\$\$[\s\S]*?\$\$|\$[^$\n]+\$/g
+  /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`|\\\[[\s\S]*?\\\]|\\\([^\n]*?\\\)|\$\$[\s\S]*?\$\$/g
 
 const KATEX_OPTIONS = {
   output: 'html' as const,
@@ -38,6 +38,70 @@ function looksLikeSingleDollarMath(text: string): boolean {
   if (/(?:[\dA-Za-z])\s*[+\-*/]\s*(?:[\dA-Za-z])/.test(trimmed)) return true
   if (/^[A-Za-z]$/.test(trimmed)) return true
   return false
+}
+
+function isEscapedAt(text: string, index: number): boolean {
+  let precedingBackslashes = 0
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor--) {
+    precedingBackslashes += 1
+  }
+  return precedingBackslashes % 2 === 1
+}
+
+function findNextSingleDollar(text: string, start: number): number {
+  for (let index = start; index < text.length; index++) {
+    if (text[index] !== '$' || isEscapedAt(text, index)) continue
+    return index
+  }
+  return -1
+}
+
+function replaceSingleDollarMathLine(
+  line: string,
+  renderBody: (body: string) => string,
+): string {
+  let output = ''
+  let unchangedStart = 0
+  let opener = findNextSingleDollar(line, 0)
+
+  while (opener >= 0) {
+    let closer = findNextSingleDollar(line, opener + 1)
+
+    while (closer >= 0) {
+      const body = line.slice(opener + 1, closer)
+      if (looksLikeSingleDollarMath(body)) {
+        output += line.slice(unchangedStart, opener)
+        output += renderBody(body)
+        unchangedStart = closer + 1
+        opener = findNextSingleDollar(line, unchangedStart)
+        break
+      }
+
+      // A rejected pair must not consume the candidate closer. It may be the
+      // valid opener that follows literal currency, as in
+      // `$43 and $47 \times 19 = 893$`.
+      output += line.slice(unchangedStart, opener + 1)
+      unchangedStart = opener + 1
+      opener = closer
+      closer = findNextSingleDollar(line, opener + 1)
+    }
+
+    if (closer < 0) {
+      return output + line.slice(unchangedStart)
+    }
+  }
+
+  return output + line.slice(unchangedStart)
+}
+
+function replaceSingleDollarMath(
+  text: string,
+  renderBody: (body: string) => string,
+): string {
+  return text
+    .split('\n')
+    .map((line) => replaceSingleDollarMathLine(line, renderBody))
+    .join('\n')
 }
 
 function normalizeEscapedUnicodeMath(text: string): string {
@@ -153,14 +217,13 @@ export function prepareStreamingPlainTextMath(markdown: string): string {
   if (!markdown) return ''
   const normalized = normalizeRepeatedMathDelimiters(markdown)
   return normalizeBareLatexCommands(
-    normalized
+    replaceSingleDollarMath(
+      normalized
       .replace(/\\\[([\s\S]*?)(?:\\\]|$)/g, '$1')
       .replace(/\\\(([^\n]*?)(?:\\\)|$)/g, '$1')
-      .replace(/\$\$([\s\S]*?)(?:\$\$|$)/g, '$1')
-      .replace(/(^|[^\\])\$([^$\n]+)\$/g, (match, prefix, body) => {
-        if (!looksLikeSingleDollarMath(body)) return match
-        return `${prefix}${body}`
-      })
+      .replace(/\$\$([\s\S]*?)(?:\$\$|$)/g, '$1'),
+      (body) => body,
+    )
   )
 }
 
@@ -171,10 +234,8 @@ function transformMath(markdown: string): string {
     // Inline math must not consume later paragraphs when a model leaves one
     // opener unmatched in a reasoning stream.
     .replace(/\\\(([^\n]*?)\\\)/g, (_match, body) => renderMath(body, false))
-    .replace(/(^|[^\\])\$([^$\n]+)\$/g, (match, prefix, body) => {
-      if (!looksLikeSingleDollarMath(body)) return match
-      return `${prefix}${renderMath(body, false)}`
-    })
+
+  out = replaceSingleDollarMath(out, (body) => renderMath(body, false))
 
   out = normalizeBareLatexCommands(out)
   return escapeBareArithmeticAsterisks(out)
@@ -214,8 +275,12 @@ export function prepareLiteralMarkdownWithMath(markdown: string): string {
   if (!markdown) return ''
 
   const protectedSegments: string[] = []
-  const protectedMarkdown = markdown.replace(LITERAL_MARKDOWN_PROTECTED_RE, (segment) => {
+  let protectedMarkdown = markdown.replace(LITERAL_MARKDOWN_PROTECTED_RE, (segment) => {
     const index = protectedSegments.push(segment) - 1
+    return `\u0000CHATLITERAL${index}\u0000`
+  })
+  protectedMarkdown = replaceSingleDollarMath(protectedMarkdown, (body) => {
+    const index = protectedSegments.push(`$${body}$`) - 1
     return `\u0000CHATLITERAL${index}\u0000`
   })
   const escapedMarkdown = escapeHtml(protectedMarkdown)

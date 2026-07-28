@@ -129,6 +129,50 @@ describe('prepareMarkdownWithMath', () => {
     expect(rendered).not.toContain('math-inline')
   })
 
+  it('retries a rejected currency closer as the next valid math opener', () => {
+    const rendered = prepareMarkdownWithMath(
+      'The literal currency string is $43 and $47 \\times 19 = 893 < 920 = 46 \\times 20$.',
+    )
+
+    expect(rendered).toContain('$43 and ')
+    expect(rendered).toContain('class="katex"')
+    expect(rendered).toContain('47')
+    expect(rendered).toContain('×')
+    expect(rendered).not.toContain('$47')
+    expect(rendered).not.toContain('\\times')
+  })
+
+  it('preserves escaped currency before a later valid single-dollar span', () => {
+    const rendered = prepareMarkdownWithMath(
+      'Escaped currency is \\$43; math is $6 \\times 7 = 42$.',
+    )
+
+    expect(rendered).toContain('\\$43')
+    expect(rendered).toContain('class="katex"')
+    expect(rendered).toContain('×')
+    expect(rendered).not.toContain('$6')
+  })
+
+  it('keeps the currency/math overlap readable during reasoning streaming', () => {
+    const rendered = prepareStreamingPlainTextMath(
+      'The literal currency string is $43 and $47 \\times 19 = 893$.',
+    )
+
+    expect(rendered).toBe(
+      'The literal currency string is $43 and 47 × 19 = 893.',
+    )
+  })
+
+  it('renders adjacent inline spans without mistaking their boundary for display math', () => {
+    const rendered = marked.parse(
+      prepareAssistantMarkdownWithMath('$x$$y$'),
+    ) as string
+
+    expect(rendered.match(/class="katex"/g)).toHaveLength(2)
+    expect(rendered).not.toContain('$x')
+    expect(rendered).not.toContain('$y')
+  })
+
   it('renders multiplication without letting Markdown create emphasis', () => {
     const rendered = prepareMarkdownWithMath('Product: \\(2 * 3 * 4\\)')
 

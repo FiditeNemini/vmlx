@@ -41,6 +41,24 @@ describe('interleaved reasoning rendered display', () => {
     expect(html).not.toContain('\\(')
   })
 
+  it('renders single-dollar math immediately after literal currency', () => {
+    const html = renderBubble({
+      message: {
+        ...baseMessage,
+        content:
+          'The literal currency string is $43 and $47 \\times 19 = 893 < 920 = 46 \\times 20$.',
+      },
+      isStreaming: false,
+    })
+
+    expect(html).toContain('$43')
+    expect(html).toContain('class="katex"')
+    expect(html).toContain('47')
+    expect(html).toContain('×')
+    expect(html).not.toContain('$47')
+    expect(html).not.toContain('\\times')
+  })
+
   it('shows angle-bracket placeholders in user prompts instead of parsing them as HTML', () => {
     const html = renderBubble({
       message: {

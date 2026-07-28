@@ -15,8 +15,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if sys.path[0] != str(ROOT):
+    sys.path.insert(0, str(ROOT))
+
+from vmlx_engine.native_mtp_examples.mtp_runtime_common import (  # noqa: E402, I001
+    configure_native_mtp_profiling_env,
+)
+
+
 PYTHON = Path(os.environ.get("VMLINUX_BENCH_PYTHON", sys.executable))
 
 
@@ -132,14 +139,10 @@ def build_native_mtp_env(
     if depth is not None:
         env["VMLINUX_NATIVE_MTP_DEPTH"] = str(depth)
         env["VMLX_NATIVE_MTP_DEPTH"] = str(depth)
-    env["VMLINUX_NATIVE_MTP_TRACE"] = (
-        "1"
-        if (
-            bool(getattr(args, "trace_mtp", False))
-            or (mtp_enabled and bool(getattr(args, "mtp_cost_fallback", False)))
-        )
-        else "0"
+    profile_mtp = bool(getattr(args, "trace_mtp", False)) or (
+        mtp_enabled and bool(getattr(args, "mtp_cost_fallback", False))
     )
+    configure_native_mtp_profiling_env(env, enabled=profile_mtp)
     env["VMLINUX_NATIVE_MTP_DEBUG_TOKENS"] = (
         "1" if bool(getattr(args, "debug_mtp_tokens", False)) else "0"
     )

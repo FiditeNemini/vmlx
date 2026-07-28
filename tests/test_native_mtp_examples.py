@@ -55,6 +55,26 @@ def test_common_depth_aliases_clamp_and_default():
     )
 
 
+def test_common_profile_env_sets_or_clears_both_runtime_flags():
+    from vmlx_engine.native_mtp_examples.mtp_runtime_common import (
+        configure_native_mtp_profiling_env,
+    )
+
+    env = configure_native_mtp_profiling_env({}, enabled=True)
+
+    assert env["VMLINUX_NATIVE_MTP_TRACE"] == "1"
+    assert env["VMLX_MTP_PROFILE"] == "1"
+
+    env = {
+        "VMLINUX_NATIVE_MTP_TRACE": "1",
+        "VMLX_MTP_PROFILE": "1",
+    }
+    configure_native_mtp_profiling_env(env, enabled=False)
+
+    assert env["VMLINUX_NATIVE_MTP_TRACE"] == ""
+    assert env["VMLX_MTP_PROFILE"] == ""
+
+
 def test_common_tuning_depth_uses_validated_sidecar(tmp_path):
     from vmlx_engine.native_mtp_examples.mtp_runtime_common import tuning_depth
 

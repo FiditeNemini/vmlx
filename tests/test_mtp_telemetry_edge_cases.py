@@ -187,9 +187,10 @@ def test_native_mtp_cache_snapshot_stays_off_the_draft_cycle_hot_path():
         assert len(visitor.calls) == len(expected_functions)
 
 
-def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings():
+def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings(monkeypatch):
     from vmlx_engine.mllm_batch_generator import MLLMNativeMTPStats
 
+    monkeypatch.delenv("VMLINUX_NATIVE_MTP_TRACE", raising=False)
     stats = MLLMNativeMTPStats()
     stats.cycles = 10
     stats.accepts = 6
@@ -255,7 +256,28 @@ def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings():
         "recreated_on_rejects": 4,
         "retained_on_rejects": 0,
     }
+    assert snapshot["profiled_phase_timing"] is False
     assert snapshot["fallback_reason"] == "d3_acceptance=0.429<min=0.850"
+
+
+def test_mllm_native_mtp_stats_identify_synchronized_phase_timing(monkeypatch):
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchStats,
+        MLLMNativeMTPStats,
+    )
+
+    monkeypatch.setenv("VMLINUX_NATIVE_MTP_TRACE", "1")
+    batch_stats = MLLMBatchStats()
+    batch_stats.record_native_mtp(
+        request_id="profiled-row",
+        stats=MLLMNativeMTPStats(),
+        finish_reason="stop",
+        final_depth=1,
+    )
+
+    snapshot = batch_stats.to_dict()["last_native_mtp"]
+
+    assert snapshot["profiled_phase_timing"] is True
 
 
 def test_mllm_adaptive_discard_preserves_last_head_cache_snapshot():

@@ -2695,6 +2695,7 @@ class MLLMNativeMTPStats:
                 recreated_on_rejects=self.mtp_cache_recreated_on_rejects,
                 retained_on_rejects=self.mtp_cache_retained_on_rejects,
             ),
+            "profiled_phase_timing": _native_mtp_trace_enabled(),
             "fallback_reason": fallback_reason,
         }
 

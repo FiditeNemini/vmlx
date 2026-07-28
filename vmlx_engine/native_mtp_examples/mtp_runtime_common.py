@@ -12,6 +12,7 @@ from typing import Any, Iterable, Sequence
 DEFAULT_NATIVE_MTP_DEPTH = 3
 NATIVE_MTP_DEPTH_ENVS = ("VMLINUX_NATIVE_MTP_DEPTH", "VMLX_NATIVE_MTP_DEPTH")
 NATIVE_MTP_ENABLE_ENVS = ("VMLINUX_NATIVE_MTP", "VMLX_NATIVE_MTP")
+NATIVE_MTP_PROFILE_ENVS = ("VMLINUX_NATIVE_MTP_TRACE", "VMLX_MTP_PROFILE")
 LIVE_RUN_ACK_ENV = "VMLINUX_NATIVE_MTP_LIVE_RUN_ACK"
 LIVE_RUN_ACK_VALUE = "I_UNDERSTAND_THIS_LOADS_MODEL_WEIGHTS"
 LIVE_RUN_WARNING = (
@@ -60,6 +61,23 @@ def effective_depth_from_env(
     return default, "default"
 
 
+def configure_native_mtp_profiling_env(
+    env: dict[str, str],
+    *,
+    enabled: bool,
+) -> dict[str, str]:
+    """Enable synchronized phase timing for both MLLM and text MTP runtimes."""
+    for name in NATIVE_MTP_PROFILE_ENVS:
+        if enabled:
+            env[name] = "1"
+        else:
+            # Keep an explicit false overlay so spawned servers cannot inherit
+            # profiling from the parent process. An empty string is false for
+            # both the text runtime's bool(env) check and the MLLM parser.
+            env[name] = ""
+    return env
+
+
 def build_native_mtp_env(
     *,
     enabled: bool = True,
@@ -77,7 +95,7 @@ def build_native_mtp_env(
     if clamped is not None:
         for name in NATIVE_MTP_DEPTH_ENVS:
             env[name] = str(clamped)
-    env["VMLINUX_NATIVE_MTP_TRACE"] = "1" if trace else "0"
+    configure_native_mtp_profiling_env(env, enabled=trace)
     env["VMLINUX_NATIVE_MTP_DEBUG_TOKENS"] = "1" if debug_tokens else "0"
     env["VMLINUX_NATIVE_MTP_USE_TUNING"] = "1" if use_tuning else "0"
     return env

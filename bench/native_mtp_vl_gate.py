@@ -17,8 +17,15 @@ import zlib
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if sys.path[0] != str(ROOT):
+    sys.path.insert(0, str(ROOT))
+
+from vmlx_engine.native_mtp_examples.mtp_runtime_common import (  # noqa: E402, I001
+    configure_native_mtp_profiling_env,
+)
+
+
 PYTHON = Path(os.environ.get("VMLINUX_BENCH_PYTHON", sys.executable))
 
 
@@ -315,7 +322,7 @@ def build_env(base_env: dict[str, str], *, mode: str, args: argparse.Namespace) 
     trace = bool(getattr(args, "trace_mtp", False)) or (
         mode == "mtp" and bool(getattr(args, "cost_fallback", False))
     )
-    env["VMLINUX_NATIVE_MTP_TRACE"] = "1" if trace else "0"
+    configure_native_mtp_profiling_env(env, enabled=trace)
     if mode == "mtp" and bool(getattr(args, "cost_fallback", False)):
         env["VMLINUX_NATIVE_MTP_COST_FALLBACK"] = "1"
         ar_step_ms = getattr(args, "cost_ar_step_ms", None)

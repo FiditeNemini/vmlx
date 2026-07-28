@@ -177,6 +177,7 @@ def test_build_native_mtp_env_sets_aliases_and_probe_knobs():
     assert env["VMLINUX_NATIVE_MTP_DEPTH"] == "2"
     assert env["VMLX_NATIVE_MTP_DEPTH"] == "2"
     assert env["VMLINUX_NATIVE_MTP_TRACE"] == "1"
+    assert env["VMLX_MTP_PROFILE"] == "1"
     assert env["VMLINUX_NATIVE_MTP_DEBUG_TOKENS"] == "1"
     assert env["VMLINUX_NATIVE_MTP_BURST"] == "0"
 
@@ -199,6 +200,8 @@ def test_build_native_mtp_env_omits_depth_when_unset():
     assert env["VMLX_NATIVE_MTP"] == "1"
     assert "VMLINUX_NATIVE_MTP_DEPTH" not in env
     assert "VMLX_NATIVE_MTP_DEPTH" not in env
+    assert env["VMLINUX_NATIVE_MTP_TRACE"] == ""
+    assert env["VMLX_MTP_PROFILE"] == ""
 
 
 def test_build_native_mtp_env_sets_cost_fallback_calibration():
@@ -216,6 +219,7 @@ def test_build_native_mtp_env_sets_cost_fallback_calibration():
     env = mod.build_native_mtp_env({}, mtp_enabled=True, args=args)
 
     assert env["VMLINUX_NATIVE_MTP_TRACE"] == "1"
+    assert env["VMLX_MTP_PROFILE"] == "1"
     assert env["VMLINUX_NATIVE_MTP_COST_FALLBACK"] == "1"
     assert env["VMLINUX_NATIVE_MTP_AR_STEP_MS"] == "43.210000"
     assert env["VMLINUX_NATIVE_MTP_COST_RATIO_THRESHOLD"] == "0.980000"
@@ -383,6 +387,7 @@ def test_vl_gate_env_sets_native_mtp_and_cost_flags():
     assert env["VMLX_NATIVE_MTP"] == "1"
     assert env["VMLINUX_NATIVE_MTP_DEPTH"] == "3"
     assert env["VMLINUX_NATIVE_MTP_TRACE"] == "1"
+    assert env["VMLX_MTP_PROFILE"] == "1"
     assert env["VMLINUX_NATIVE_MTP_COST_FALLBACK"] == "1"
     assert env["VMLINUX_NATIVE_MTP_AR_STEP_MS"] == "43.400000"
     assert env["VMLINUX_NATIVE_MTP_COST_RATIO_THRESHOLD"] == "0.950000"
@@ -402,6 +407,8 @@ def test_vl_gate_env_can_enable_media_prefix_cache():
     env = mod.build_env({}, mode="mtp", args=args)
 
     assert env["VMLINUX_MLLM_MEDIA_PREFIX_CACHE"] == "1"
+    assert env["VMLINUX_NATIVE_MTP_TRACE"] == ""
+    assert env["VMLX_MTP_PROFILE"] == ""
 
 
 def test_vl_gate_summarize_result_records_checks_and_cache():

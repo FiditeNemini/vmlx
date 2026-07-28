@@ -1519,7 +1519,8 @@ class BatchedEngine(BaseEngine):
             tokenizer = getattr(self._processor, "tokenizer", self._processor)
             tokenizer_source = "mllm_processor_tokenizer"
         else:
-            scheduler = getattr(getattr(self, "_engine", None), "scheduler", None)
+            engine_core = getattr(getattr(self, "_engine", None), "engine", None)
+            scheduler = getattr(engine_core, "scheduler", None)
             tokenizer = getattr(scheduler, "tokenizer", None) or self.tokenizer
             if getattr(scheduler, "tokenizer", None) is not None:
                 tokenizer_source = "llm_scheduler_tokenizer"

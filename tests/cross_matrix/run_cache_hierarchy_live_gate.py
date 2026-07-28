@@ -434,12 +434,24 @@ def _health_cache_counters(health: dict[str, Any]) -> dict[str, int]:
     block_disk_cache = cache.get("block_disk_cache")
     if not isinstance(block_disk_cache, dict):
         block_disk_cache = {}
+    ssm_companion = cache.get("ssm_companion")
+    if not isinstance(ssm_companion, dict):
+        ssm_companion = {}
+    ssm_disk = ssm_companion.get("disk")
+    if not isinstance(ssm_disk, dict):
+        ssm_disk = {}
     global_budget = block_disk_cache.get("global_budget")
     if not isinstance(global_budget, dict):
         global_budget = {}
     return {
         "scheduler.cache_hit_requests": _integer(scheduler.get("cache_hit_requests")),
         "scheduler.cache_hit_tokens": _integer(scheduler.get("cache_hit_tokens")),
+        "scheduler.hybrid_kv_without_ssm_hits": _integer(
+            scheduler.get("hybrid_kv_without_ssm_hits")
+        ),
+        "scheduler.hybrid_kv_without_ssm_tokens": _integer(
+            scheduler.get("hybrid_kv_without_ssm_tokens")
+        ),
         "scheduler_cache.cache_hits": _integer(scheduler_cache.get("cache_hits")),
         "scheduler_cache.cache_misses": _integer(scheduler_cache.get("cache_misses")),
         "scheduler_cache.disk_hits": _integer(scheduler_cache.get("disk_hits")),
@@ -455,6 +467,12 @@ def _health_cache_counters(health: dict[str, Any]) -> dict[str, int]:
         "block_disk_cache.disk_evictions": _integer(
             block_disk_cache.get("disk_evictions")
         ),
+        "block_disk_cache.tq_native_hits": _integer(
+            block_disk_cache.get("tq_native_hits")
+        ),
+        "block_disk_cache.tq_native_writes": _integer(
+            block_disk_cache.get("tq_native_writes")
+        ),
         "block_disk_cache.blocks_on_disk": _integer(
             block_disk_cache.get("blocks_on_disk")
         ),
@@ -464,6 +482,110 @@ def _health_cache_counters(health: dict[str, Any]) -> dict[str, int]:
         "block_disk_cache.global_reconciliation_generation": _integer(
             global_budget.get("reconciliation_generation")
         ),
+        "ssm_companion.disk.hits": _integer(ssm_disk.get("hits")),
+        "ssm_companion.disk.misses": _integer(ssm_disk.get("misses")),
+        "ssm_companion.disk.stores": _integer(ssm_disk.get("stores")),
+    }
+
+
+def _path_free_native_cache(native_cache: Any) -> dict[str, Any]:
+    """Return only typed-cache contract fields; never retain paths or argv."""
+
+    if not isinstance(native_cache, dict):
+        return {}
+    storage_quant = native_cache.get("attention_kv_storage_quantization")
+    if not isinstance(storage_quant, dict):
+        storage_quant = {}
+    generic_tq = native_cache.get("generic_turboquant_kv")
+    if not isinstance(generic_tq, dict):
+        generic_tq = {}
+    components = native_cache.get("components")
+    if not isinstance(components, list):
+        components = []
+    return {
+        key: native_cache.get(key)
+        for key in (
+            "family",
+            "cache_type",
+            "schema",
+            "paged",
+            "block_disk_l2",
+        )
+        if key in native_cache
+    } | {
+        "components": list(components),
+        "attention_kv_storage_quantization": {
+            key: storage_quant.get(key)
+            for key in (
+                "enabled",
+                "mode",
+                "codec",
+                "bits",
+                "value_bits",
+                "applies_to",
+                "ssm_policy",
+                "rederive",
+            )
+            if key in storage_quant
+        },
+        "generic_turboquant_kv": {
+            key: generic_tq.get(key)
+            for key in ("enabled", "reason")
+            if key in generic_tq
+        },
+    }
+
+
+def _path_free_prefix_lookup(last_prefix_lookup: Any) -> dict[str, Any]:
+    """Retain only request-correlated SSM lookup contract fields."""
+
+    if not isinstance(last_prefix_lookup, dict):
+        return {}
+    candidate_lengths = last_prefix_lookup.get("candidate_lengths")
+    if not isinstance(candidate_lengths, list):
+        candidate_lengths = []
+    return {
+        key: last_prefix_lookup.get(key)
+        for key in (
+            "request_id",
+            "max_len",
+            "matched",
+            "checkpoint_tokens",
+            "is_complete",
+            "source",
+        )
+        if key in last_prefix_lookup
+    } | {
+        "candidate_lengths": list(candidate_lengths),
+    }
+
+
+def _health_cache_contract_evidence(health: dict[str, Any]) -> dict[str, Any]:
+    """Retain the explicit path-free typed-cache facts needed by the gate."""
+
+    native_cache = health.get("native_cache")
+    cache = health.get("cache")
+    if not isinstance(cache, dict):
+        cache = {}
+    ssm_companion = cache.get("ssm_companion")
+    if not isinstance(ssm_companion, dict):
+        ssm_companion = {}
+    ssm_disk = ssm_companion.get("disk")
+    if not isinstance(ssm_disk, dict):
+        ssm_disk = {}
+    last_prefix_lookup = ssm_companion.get("last_prefix_lookup")
+    if not isinstance(last_prefix_lookup, dict):
+        last_prefix_lookup = {}
+    return {
+        "native_cache": _path_free_native_cache(native_cache),
+        "ssm_companion": {
+            "last_prefix_lookup": _path_free_prefix_lookup(last_prefix_lookup),
+            "disk": {
+                key: ssm_disk.get(key)
+                for key in ("hits", "misses", "stores")
+                if key in ssm_disk
+            },
+        },
     }
 
 
@@ -2099,6 +2221,241 @@ def _validate_hit_row(
     return failures
 
 
+def _validate_monotonic_counter_deltas(
+    row: dict[str, Any],
+    *,
+    label: str,
+) -> list[str]:
+    """Reject counter resets inside one request-correlated observation."""
+
+    deltas = row.get("health_counter_deltas")
+    if not isinstance(deltas, dict):
+        return []
+    return [
+        f"{label}: monotonic counter {key} has negative delta={value}"
+        for key, value in sorted(deltas.items())
+        if isinstance(value, (int, float)) and value < 0
+    ]
+
+
+def _validate_hybrid_ssm_tq4_hit(
+    row: dict[str, Any],
+    *,
+    require_disk_origin: bool,
+    label: str | None = None,
+) -> list[str]:
+    """Require one accepted Qwen hybrid hit to include KV, SSM, and TQ truth."""
+
+    tag = label or str(row.get("tag") or "<missing-tag>")
+    failures: list[str] = []
+    execution = row.get("last_cache_execution")
+    if not isinstance(execution, dict):
+        return [f"{tag}: hybrid SSM cache execution is missing"]
+
+    response_id = str(row.get("response_id") or "")
+    execution_request_id = str(execution.get("request_id") or "")
+    if (
+        row.get("response_id_consistent") is not True
+        or not response_id
+        or execution_request_id != response_id
+    ):
+        failures.append(
+            f"{tag}: hybrid cache evidence is not request-correlated"
+        )
+
+    native_cache = row.get("native_cache")
+    if not isinstance(native_cache, dict):
+        native_cache = {}
+    if native_cache.get("schema") != "hybrid_ssm_v1":
+        failures.append(f"{tag}: native_cache schema is not hybrid_ssm_v1")
+    if native_cache.get("cache_type") != "hybrid_ssm_typed":
+        failures.append(f"{tag}: native_cache type is not hybrid_ssm_typed")
+    if native_cache.get("paged") is not True:
+        failures.append(f"{tag}: native_cache does not attest paged RAM")
+    if native_cache.get("block_disk_l2") is not True:
+        failures.append(f"{tag}: native_cache does not attest block-disk L2")
+    components = native_cache.get("components")
+    if not isinstance(components, list) or not {
+        "attention_kv",
+        "ssm_companion_state",
+    }.issubset(set(components)):
+        failures.append(
+            f"{tag}: native_cache components do not include attention KV and "
+            "SSM companion state"
+        )
+    storage_quant = native_cache.get("attention_kv_storage_quantization")
+    if not isinstance(storage_quant, dict):
+        storage_quant = {}
+    if (
+        storage_quant.get("enabled") is not True
+        or storage_quant.get("codec") != "turboquant_native"
+        or storage_quant.get("applies_to") != "attention_kv_layers_only"
+        or _integer(storage_quant.get("bits")) != 4
+        or _integer(storage_quant.get("value_bits")) != 4
+    ):
+        failures.append(
+            f"{tag}: native_cache does not attest attention-only TurboQuant q4"
+        )
+    generic_tq = native_cache.get("generic_turboquant_kv")
+    if not isinstance(generic_tq, dict):
+        generic_tq = {}
+    if (
+        generic_tq.get("enabled") is not True
+        or generic_tq.get("reason") != "hybrid_attention_kv_only"
+    ):
+        failures.append(
+            f"{tag}: native_cache does not attest Qwen hybrid-only TurboQuant"
+        )
+
+    cached_tokens = _integer(execution.get("cached_tokens"))
+    attempted_cached_tokens = _integer(execution.get("attempted_cached_tokens"))
+    prompt_tokens = _integer(execution.get("prompt_tokens"))
+    uncached_prompt_tokens = _integer(execution.get("uncached_prompt_tokens"))
+    generation_suffix_tokens = _integer(
+        execution.get("generation_prompt_suffix_tokens")
+    )
+    if (
+        attempted_cached_tokens <= 0
+        or cached_tokens <= 0
+        or cached_tokens > attempted_cached_tokens
+    ):
+        failures.append(
+            f"{tag}: accepted cached tokens are not bound to a positive "
+            "attempted prefix candidate"
+        )
+    if prompt_tokens <= cached_tokens or uncached_prompt_tokens <= 0:
+        failures.append(
+            f"{tag}: hybrid reuse is not partial-prefix reuse with an uncached tail"
+        )
+    if uncached_prompt_tokens != max(prompt_tokens - cached_tokens, 0):
+        failures.append(
+            f"{tag}: hybrid uncached tokens do not equal prompt minus cached"
+        )
+    if _integer(execution.get("prefill_tokens")) != (
+        uncached_prompt_tokens + generation_suffix_tokens
+    ):
+        failures.append(
+            f"{tag}: hybrid prefill does not equal uncached tail plus "
+            "generation-prompt suffix"
+        )
+    ssm_companion = row.get("ssm_companion")
+    if not isinstance(ssm_companion, dict):
+        ssm_companion = {}
+    lookup = ssm_companion.get("last_prefix_lookup")
+    if not isinstance(lookup, dict):
+        lookup = {}
+    lookup_request_id = str(lookup.get("request_id") or "")
+    if (
+        not lookup_request_id
+        or lookup_request_id != response_id
+        or lookup_request_id != execution_request_id
+    ):
+        failures.append(
+            f"{tag}: SSM companion prefix lookup is not request-correlated"
+        )
+    checkpoint_tokens = _integer(lookup.get("checkpoint_tokens"))
+    max_len = _integer(lookup.get("max_len"))
+    candidate_lengths = lookup.get("candidate_lengths")
+    if not isinstance(candidate_lengths, list):
+        candidate_lengths = []
+    if lookup.get("matched") is not True:
+        failures.append(f"{tag}: SSM companion prefix lookup did not match")
+    if lookup.get("is_complete") is not True:
+        failures.append(f"{tag}: SSM companion checkpoint is not complete")
+    if checkpoint_tokens <= 0 or checkpoint_tokens != cached_tokens:
+        failures.append(
+            f"{tag}: SSM checkpoint_tokens={checkpoint_tokens} does not equal "
+            f"accepted cached_tokens={cached_tokens}"
+        )
+    if max_len != attempted_cached_tokens:
+        failures.append(
+            f"{tag}: SSM prefix lookup max_len={max_len} does not equal "
+            f"attempted_cached_tokens={attempted_cached_tokens}"
+        )
+    normalized_candidates = [
+        _integer(candidate) for candidate in candidate_lengths
+    ]
+    if (
+        checkpoint_tokens not in normalized_candidates
+        or not normalized_candidates
+        or normalized_candidates[0] != checkpoint_tokens
+        or any(
+            candidate <= 0 or candidate > attempted_cached_tokens
+            for candidate in normalized_candidates
+        )
+    ):
+        failures.append(
+            f"{tag}: SSM candidate lengths are not bound to the attempted "
+            "prefix and matched checkpoint"
+        )
+    if lookup.get("source") not in {
+        "exact_boundary_l1_or_l2",
+        "l1_or_l2",
+        "partial_boundary_disk_l2",
+    }:
+        failures.append(f"{tag}: SSM companion lookup source is not attested")
+
+    detail = str(execution.get("cache_detail") or "")
+    if str(execution.get("selection") or "").lower() != "paged":
+        failures.append(f"{tag}: hybrid SSM proof did not select paged cache")
+    if "paged+ssm" not in detail.lower():
+        failures.append(f"{tag}: cache_detail does not identify paged+ssm")
+    if "tq-native" not in detail.lower():
+        failures.append(f"{tag}: cache_detail does not identify native TQ blocks")
+    if _integer(execution.get("tq_native_blocks")) <= 0:
+        failures.append(f"{tag}: execution tq_native_blocks must be positive")
+    if execution.get("dequantized") is not True:
+        failures.append(f"{tag}: dequantized is not true")
+    if execution.get("dequantization_ok") is not True:
+        failures.append(f"{tag}: dequantization_ok is not true")
+    if require_disk_origin:
+        if execution.get("disk_hit") is not True:
+            failures.append(f"{tag}: restart hybrid refault disk_hit is not true")
+        if "disk" not in detail.lower():
+            failures.append(
+                f"{tag}: restart hybrid cache_detail does not identify disk"
+            )
+
+    deltas = row.get("health_counter_deltas")
+    if not isinstance(deltas, dict):
+        return failures + [f"{tag}: hybrid cache counter deltas are missing"]
+    for key in (
+        "scheduler.hybrid_kv_without_ssm_hits",
+        "scheduler.hybrid_kv_without_ssm_tokens",
+    ):
+        if key not in deltas:
+            failures.append(f"{tag}: {key} delta is missing")
+        elif _integer(deltas.get(key)) != 0:
+            failures.append(f"{tag}: {key} increased during accepted hybrid reuse")
+    if require_disk_origin:
+        for key in (
+            "block_disk_cache.disk_hits",
+            "block_disk_cache.tq_native_hits",
+            "ssm_companion.disk.hits",
+        ):
+            if key not in deltas:
+                failures.append(f"{tag}: {key} delta is missing")
+            elif _integer(deltas.get(key)) <= 0:
+                failures.append(f"{tag}: {key} did not increase on restart refault")
+        disk_blocks = _integer(execution.get("disk_blocks"))
+        disk_hits = _integer(deltas.get("block_disk_cache.disk_hits"))
+        if disk_blocks > 0 and disk_hits < disk_blocks:
+            failures.append(
+                f"{tag}: block-disk hit delta={disk_hits} is below "
+                f"reconstructed disk_blocks={disk_blocks}"
+            )
+        tq_native_blocks = _integer(execution.get("tq_native_blocks"))
+        tq_native_hits = _integer(
+            deltas.get("block_disk_cache.tq_native_hits")
+        )
+        if tq_native_blocks > 0 and tq_native_hits < tq_native_blocks:
+            failures.append(
+                f"{tag}: TQ-native hit delta={tq_native_hits} is below "
+                f"reconstructed tq_native_blocks={tq_native_blocks}"
+            )
+    return failures
+
+
 def _tokenizer_prefix_floor(
     row: dict[str, Any],
     *,
@@ -2181,6 +2538,15 @@ def _cache_contract_profile_from_health(health: dict[str, Any]) -> str:
     )
     if (
         isinstance(native, dict)
+        and native.get("family") == "qwen3_5"
+        and native.get("schema") == "hybrid_ssm_v1"
+    ):
+        # Family + schema identify the Qwen hybrid contract. Validate all TQ4
+        # and typed-state fields later so malformed intended-Qwen attestations
+        # fail closed instead of silently downgrading to generic KV.
+        return "qwen_hybrid_ssm_tq4"
+    if (
+        isinstance(native, dict)
         and native.get("family") == "minimax_m3"
         and native.get("cache_type") == "native_msa_sparse_kv"
         and native.get("schema") == "minimax_m3_msa_v1"
@@ -2213,9 +2579,14 @@ def validate_cache_rows(
         for row in rows
         if isinstance(row, dict) and row.get("tag")
     }
-    if contract_profile not in {"generic", "minimax_m3_sparse_block"}:
+    if contract_profile not in {
+        "generic",
+        "minimax_m3_sparse_block",
+        "qwen_hybrid_ssm_tq4",
+    }:
         return [f"unsupported cache contract profile: {contract_profile}"]
     native_sparse = contract_profile == "minimax_m3_sparse_block"
+    hybrid_ssm_tq4 = contract_profile == "qwen_hybrid_ssm_tq4"
     requirements = (
         {
             "cold_a": "cold",
@@ -2403,6 +2774,13 @@ def validate_cache_rows(
                 # Only restart-C must prove worker reconstruction from disk.
                 allow_direct_reuse=requirement != "disk_partial",
             )
+            if hybrid_ssm_tq4 and requirement in {"partial", "disk_partial"}:
+                row_failures.extend(
+                    _validate_hybrid_ssm_tq4_hit(
+                        row,
+                        require_disk_origin=requirement == "disk_partial",
+                    )
+                )
             row_failures.extend(execution_count_failures)
             row_failures.extend(floor_failures)
             row["expected_shared_prefix_floor_tokens"] = minimum_cached_tokens
@@ -2410,6 +2788,9 @@ def validate_cache_rows(
                 independent_lcp_tokens
             )
             row["independent_prompt_tokens"] = expected_prompt_tokens
+        row_failures.extend(
+            _validate_monotonic_counter_deltas(row, label=tag)
+        )
         row["cache_contract_required"] = True
         row["cache_contract_profile"] = contract_profile
         if native_sparse:
@@ -2533,6 +2914,7 @@ def _validate_disk_refault_execution(
     execution: Any,
     *,
     label: str,
+    contract_profile: str = "generic",
 ) -> list[str]:
     failures: list[str] = []
     if not isinstance(execution, dict):
@@ -2576,6 +2958,17 @@ def _validate_disk_refault_execution(
     ).lower()
     if "disk" not in origin and "l2" not in origin:
         failures.append(f"{label}: cache origin is not block-disk")
+    failures.extend(
+        _validate_monotonic_counter_deltas(execution, label=label)
+    )
+    if contract_profile == "qwen_hybrid_ssm_tq4":
+        failures.extend(
+            _validate_hybrid_ssm_tq4_hit(
+                execution,
+                require_disk_origin=True,
+                label=label,
+            )
+        )
     return failures
 
 
@@ -2907,6 +3300,9 @@ def validate_l2_size_eviction_observation(
         _validate_disk_refault_execution(
             observation.get("recent_refault_execution"),
             label="L2 size eviction recent refault",
+            contract_profile=_cache_contract_profile_from_health(
+                health_attestation
+            ),
         )
     )
     failures.extend(
@@ -3009,6 +3405,9 @@ def validate_l2_restart_restore_observation(
         _validate_disk_refault_execution(
             observation.get("restart_execution"),
             label="L2 restart restore",
+            contract_profile=_cache_contract_profile_from_health(
+                health_attestation
+            ),
         )
     )
     failures.extend(
@@ -3403,6 +3802,7 @@ def _run_response_observation(
     )
     before_counters = _health_cache_counters(before)
     after_counters = _health_cache_counters(after)
+    cache_contract_evidence = _health_cache_contract_evidence(after)
     summary.update(
         {
             "tag": tag,
@@ -3426,6 +3826,7 @@ def _run_response_observation(
             "block_disk_cache": (
                 (after.get("cache") or {}).get("block_disk_cache") or {}
             ),
+            **cache_contract_evidence,
         }
     )
     summary["marker_ok"] = _exact_cache_marker_observed(
@@ -3459,7 +3860,33 @@ def _path_free_execution(row: dict[str, Any]) -> dict[str, Any]:
     cache_detail = row.get("cache_detail")
     if not isinstance(cache_detail, dict):
         cache_detail = {}
+    native_cache = row.get("native_cache")
+    if not isinstance(native_cache, dict):
+        native_cache = {}
+    ssm_companion = row.get("ssm_companion")
+    if not isinstance(ssm_companion, dict):
+        ssm_companion = {}
+    last_prefix_lookup = ssm_companion.get("last_prefix_lookup")
+    if not isinstance(last_prefix_lookup, dict):
+        last_prefix_lookup = {}
+    ssm_disk = ssm_companion.get("disk")
+    if not isinstance(ssm_disk, dict):
+        ssm_disk = {}
+    deltas = row.get("health_counter_deltas")
+    if not isinstance(deltas, dict):
+        deltas = {}
+    retained_delta_keys = (
+        "block_disk_cache.disk_hits",
+        "block_disk_cache.tq_native_hits",
+        "block_disk_cache.tq_native_writes",
+        "scheduler.hybrid_kv_without_ssm_hits",
+        "scheduler.hybrid_kv_without_ssm_tokens",
+        "ssm_companion.disk.hits",
+        "ssm_companion.disk.misses",
+        "ssm_companion.disk.stores",
+    )
     return {
+        "tag": row.get("tag"),
         "response_id": row.get("response_id"),
         "response_id_consistent": row.get("response_id_consistent"),
         "status_code": row.get("status_code"),
@@ -3477,6 +3904,20 @@ def _path_free_execution(row: dict[str, Any]) -> dict[str, Any]:
             )
             if key in cache_detail
         },
+        "native_cache": _path_free_native_cache(native_cache),
+        "ssm_companion": {
+            "last_prefix_lookup": _path_free_prefix_lookup(last_prefix_lookup),
+            "disk": {
+                key: ssm_disk.get(key)
+                for key in ("hits", "misses", "stores")
+                if key in ssm_disk
+            },
+        },
+        "health_counter_deltas": {
+            key: deltas.get(key)
+            for key in retained_delta_keys
+            if key in deltas
+        },
         "last_cache_execution": {
             key: last.get(key)
             for key in (
@@ -3484,11 +3925,20 @@ def _path_free_execution(row: dict[str, Any]) -> dict[str, Any]:
                 "cache_reuse_applied",
                 "cache_outcome",
                 "cache_detail",
+                "selection",
                 "prompt_tokens",
+                "attempted_cached_tokens",
                 "cached_tokens",
                 "uncached_prompt_tokens",
                 "prefill_tokens",
+                "generation_prompt_suffix_tokens",
+                "reconstructed",
+                "reconstruction_ok",
+                "dequantized",
+                "dequantization_ok",
+                "disk_hit",
                 "disk_blocks",
+                "tq_native_blocks",
             )
             if key in last
         },
@@ -4432,6 +4882,7 @@ def main() -> int:
         health_counter_deltas = _counter_deltas(
             health_counters_before, health_counters_after
         )
+        cache_contract_evidence = _health_cache_contract_evidence(health)
         summary.update(
             {
                 "tag": tag,
@@ -4452,6 +4903,7 @@ def main() -> int:
                 "block_disk_cache": (
                     (health.get("cache") or {}).get("block_disk_cache") or {}
                 ),
+                **cache_contract_evidence,
             }
         )
         summary["marker_ok"] = _exact_cache_marker_observed(

@@ -267,6 +267,18 @@ def _path_free_execution() -> dict:
     }
 
 
+def _hybrid_path_free_execution() -> dict:
+    execution = _path_free_execution()
+    execution["health_counter_deltas"] = {
+        "block_disk_cache.disk_hits": 2,
+    }
+    _hybridize_hit(execution, disk=True)
+    execution["cache_detail"] = {
+        "source": "paged+ssm+disk+tq-native",
+    }
+    return execution
+
+
 def _l2_eviction_observation(*, disk_only: bool = False) -> dict:
     _, old_contract = _prefix_contract(
         chain_fingerprint="2" * 64,
@@ -724,6 +736,94 @@ def test_l2_restart_observation_binds_same_surviving_prefix_and_source():
     assert any("not the stored recent prefix" in failure for failure in failures)
 
 
+def test_generic_l2_refault_keeps_legacy_semantics_outside_qwen_profile():
+    execution = _path_free_execution()
+    execution["last_cache_execution"].update(
+        {
+            "cached_tokens": 35,
+            "uncached_prompt_tokens": 3,
+            "prefill_tokens": 99,
+        }
+    )
+
+    assert gate._validate_disk_refault_execution(
+        execution,
+        label="generic legacy refault",
+        contract_profile="generic",
+    ) == []
+
+
+def test_hybrid_l2_restart_observation_retains_and_validates_typed_refault():
+    store = _l2_eviction_observation()
+    restart = _l2_restart_observation(store)
+    restart["restart_execution"] = _hybrid_path_free_execution()
+
+    failures = gate.validate_l2_restart_restore_observation(
+        restart,
+        store_observation=store,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_hybrid_health_attestation(),
+    )
+
+    assert failures == []
+    execution = restart["restart_execution"]
+    assert execution["native_cache"]["schema"] == "hybrid_ssm_v1"
+    assert (
+        execution["ssm_companion"]["last_prefix_lookup"]["checkpoint_tokens"]
+        == execution["last_cache_execution"]["cached_tokens"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_failure"),
+    (
+        (
+            lambda row: row["ssm_companion"]["last_prefix_lookup"].update(
+                {"matched": False}
+            ),
+            "SSM companion prefix lookup did not match",
+        ),
+        (
+            lambda row: row["health_counter_deltas"].update(
+                {"block_disk_cache.tq_native_hits": 0}
+            ),
+            "block_disk_cache.tq_native_hits did not increase",
+        ),
+        (
+            lambda row: row["health_counter_deltas"].update(
+                {"ssm_companion.disk.hits": 0}
+            ),
+            "ssm_companion.disk.hits did not increase",
+        ),
+        (
+            lambda row: row["health_counter_deltas"].update(
+                {"scheduler.hybrid_kv_without_ssm_tokens": 32}
+            ),
+            "hybrid_kv_without_ssm_tokens increased",
+        ),
+    ),
+)
+def test_hybrid_l2_restart_observation_fails_closed_on_artifact_defects(
+    mutate,
+    expected_failure,
+):
+    store = _l2_eviction_observation()
+    restart = _l2_restart_observation(store)
+    restart["restart_execution"] = _hybrid_path_free_execution()
+    mutate(restart["restart_execution"])
+
+    failures = gate.validate_l2_restart_restore_observation(
+        restart,
+        store_observation=store,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_hybrid_health_attestation(),
+    )
+
+    assert any(expected_failure in failure for failure in failures)
+
+
 def _runtime_provenance(*, pid: int) -> dict:
     source_tree_sha256, source_file_count, source_read_error_count = (
         gate._python_source_tree_digest(GIT_ROOT / "vmlx_engine")
@@ -1007,6 +1107,157 @@ def _valid_probe_rows() -> list[dict]:
     ]
 
 
+def _hybrid_native_cache() -> dict:
+    return {
+        "family": "qwen3_5",
+        "cache_type": "hybrid_ssm_typed",
+        "schema": "hybrid_ssm_v1",
+        "paged": True,
+        "block_disk_l2": True,
+        "components": [
+            "attention_kv",
+            "ssm_companion_state",
+            "async_rederive",
+        ],
+        "attention_kv_storage_quantization": {
+            "enabled": True,
+            "mode": "storage_boundary",
+            "codec": "turboquant_native",
+            "bits": 4,
+            "value_bits": 4,
+            "applies_to": "attention_kv_layers_only",
+            "ssm_policy": "native_companion_state",
+        },
+        "generic_turboquant_kv": {
+            "enabled": True,
+            "reason": "hybrid_attention_kv_only",
+        },
+    }
+
+
+def _hybrid_health(*, pid: int = 1234) -> dict:
+    health = _health(pid=pid)
+    native_cache = _hybrid_native_cache()
+    health["native_cache"] = deepcopy(native_cache)
+    health["cache_topology_provenance"]["configuration"] = {
+        "native_cache": deepcopy(native_cache),
+    }
+    health["scheduler"].update(
+        {
+            "hybrid_kv_without_ssm_hits": 7,
+            "hybrid_kv_without_ssm_tokens": 448,
+        }
+    )
+    health["cache"] = {
+        "block_disk_cache": {
+            "disk_hits": 13,
+            "disk_misses": 3,
+            "disk_writes": 21,
+            "disk_evictions": 2,
+            "tq_native_hits": 11,
+            "tq_native_writes": 19,
+        },
+        "ssm_companion": {
+            "last_prefix_lookup": {
+                "request_id": "resp-health",
+                "max_len": 112,
+                "candidate_lengths": [112],
+                "matched": True,
+                "checkpoint_tokens": 112,
+                "is_complete": True,
+                "source": "exact_boundary_l1_or_l2",
+            },
+            "disk": {
+                "hits": 5,
+                "misses": 2,
+                "stores": 17,
+            },
+        },
+    }
+    return health
+
+
+def _hybridize_hit(
+    row: dict,
+    *,
+    disk: bool,
+) -> dict:
+    execution = row["last_cache_execution"]
+    cached_tokens = execution["cached_tokens"]
+    execution.setdefault("attempted_cached_tokens", cached_tokens)
+    detail = (
+        "paged+ssm+disk+tq-native"
+        if disk
+        else "paged+ssm+tq-native"
+    )
+    row["cache_detail"] = detail
+    execution.update(
+        {
+            "cache_detail": detail,
+            "selection": "paged",
+            "reconstructed": True,
+            "reconstruction_ok": True,
+            "dequantized": True,
+            "dequantization_ok": True,
+            "disk_hit": disk,
+            "tq_native_blocks": max(1, execution.get("disk_blocks", 0)),
+        }
+    )
+    row["native_cache"] = _hybrid_native_cache()
+    row["ssm_companion"] = {
+        "last_prefix_lookup": {
+            "request_id": execution["request_id"],
+            "max_len": cached_tokens,
+            "candidate_lengths": [cached_tokens],
+            "matched": True,
+            "checkpoint_tokens": cached_tokens,
+            "is_complete": True,
+            "source": (
+                "partial_boundary_disk_l2"
+                if disk
+                else "exact_boundary_l1_or_l2"
+            ),
+        },
+        "disk": {
+            "hits": 1 if disk else 0,
+            "misses": 0,
+            "stores": 0,
+        },
+    }
+    row["health_counter_deltas"].update(
+        {
+            "scheduler.hybrid_kv_without_ssm_hits": 0,
+            "scheduler.hybrid_kv_without_ssm_tokens": 0,
+            "block_disk_cache.tq_native_hits": (
+                execution.get("disk_blocks", 0) if disk else 0
+            ),
+            "block_disk_cache.tq_native_writes": 0,
+            "ssm_companion.disk.hits": 1 if disk else 0,
+            "ssm_companion.disk.misses": 0,
+            "ssm_companion.disk.stores": 0,
+        }
+    )
+    return row
+
+
+def _hybrid_store_rows() -> list[dict]:
+    rows = _valid_store_rows()
+    _hybridize_hit(rows[2], disk=False)
+    return rows
+
+
+def _hybrid_probe_rows() -> list[dict]:
+    rows = _valid_probe_rows()
+    _hybridize_hit(rows[0], disk=True)
+    return rows
+
+
+def _hybrid_health_attestation() -> dict:
+    health_attestation, failures = _health_attestation_snapshot(_hybrid_health())
+    assert failures == []
+    return health_attestation
+
+
 def test_store_contract_accepts_cold_warm_and_longest_partial_prefix():
     rows = _valid_store_rows()
 
@@ -1016,6 +1267,186 @@ def test_store_contract_accepts_cold_warm_and_longest_partial_prefix():
     assert all(row["cache_contract_ok"] is True for row in rows)
     assert rows[2]["expected_shared_prefix_floor_tokens"] == 112
     assert rows[2]["last_cache_execution"]["prefill_tokens"] == 16
+
+
+def test_hybrid_health_evidence_retains_typed_lookup_and_monotonic_counters():
+    health = _hybrid_health()
+    health["native_cache"]["model_path"] = "/private/models/qwen"
+    health["native_cache"]["attention_kv_storage_quantization"][
+        "cache_directory"
+    ] = "/private/cache/tq"
+    health["cache"]["ssm_companion"]["last_prefix_lookup"][
+        "debug_path"
+    ] = "/private/cache/ssm-checkpoint"
+
+    evidence = gate._health_cache_contract_evidence(health)
+    counters = _health_cache_counters(health)
+
+    assert evidence["native_cache"]["schema"] == "hybrid_ssm_v1"
+    assert evidence["ssm_companion"]["last_prefix_lookup"] == {
+        "request_id": "resp-health",
+        "max_len": 112,
+        "candidate_lengths": [112],
+        "matched": True,
+        "checkpoint_tokens": 112,
+        "is_complete": True,
+        "source": "exact_boundary_l1_or_l2",
+    }
+    assert evidence["ssm_companion"]["disk"] == {
+        "hits": 5,
+        "misses": 2,
+        "stores": 17,
+    }
+    assert counters["scheduler.hybrid_kv_without_ssm_hits"] == 7
+    assert counters["scheduler.hybrid_kv_without_ssm_tokens"] == 448
+    assert counters["block_disk_cache.tq_native_hits"] == 11
+    assert counters["block_disk_cache.tq_native_writes"] == 19
+    assert counters["ssm_companion.disk.hits"] == 5
+    assert counters["ssm_companion.disk.misses"] == 2
+    assert counters["ssm_companion.disk.stores"] == 17
+    assert "/private/" not in json.dumps(evidence, sort_keys=True)
+    assert "model_path" not in evidence["native_cache"]
+    assert "cache_directory" not in evidence[
+        "native_cache"
+    ]["attention_kv_storage_quantization"]
+    assert "debug_path" not in evidence["ssm_companion"]["last_prefix_lookup"]
+
+
+def test_hybrid_path_free_execution_drops_lookup_debug_paths():
+    row = _hybrid_probe_rows()[0]
+    row["ssm_companion"]["last_prefix_lookup"][
+        "debug_path"
+    ] = "/private/cache/stale-lookup"
+
+    execution = gate._path_free_execution(row)
+    serialized = json.dumps(execution, sort_keys=True)
+
+    assert "/private/" not in serialized
+    assert "debug_path" not in execution["ssm_companion"]["last_prefix_lookup"]
+    assert (
+        execution["ssm_companion"]["last_prefix_lookup"]["request_id"]
+        == execution["response_id"]
+        == execution["last_cache_execution"]["request_id"]
+    )
+
+
+def test_hybrid_store_contract_accepts_only_paged_partial_prefix_with_tq_and_ssm():
+    rows = _hybrid_store_rows()
+
+    failures = _validate_rows(
+        "store",
+        rows,
+        contract_profile="qwen_hybrid_ssm_tq4",
+    )
+
+    assert failures == []
+    partial = rows[2]
+    assert partial["independent_longest_common_prefix_tokens"] == 127
+    assert partial["expected_shared_prefix_floor_tokens"] == 112
+    assert partial["last_cache_execution"]["uncached_prompt_tokens"] == 16
+    assert partial["last_cache_execution"]["prefill_tokens"] == 16
+    assert (
+        partial["ssm_companion"]["last_prefix_lookup"]["checkpoint_tokens"]
+        == partial["last_cache_execution"]["cached_tokens"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_failure"),
+    (
+        (
+            lambda row: row["native_cache"][
+                "attention_kv_storage_quantization"
+            ].update({"bits": 8}),
+            "does not attest attention-only TurboQuant q4",
+        ),
+        (
+            lambda row: row["ssm_companion"].update(
+                {"last_prefix_lookup": {}}
+            ),
+            "SSM companion prefix lookup did not match",
+        ),
+        (
+            lambda row: row["ssm_companion"]["last_prefix_lookup"].update(
+                {"checkpoint_tokens": 96}
+            ),
+            "does not equal accepted cached_tokens",
+        ),
+        (
+            lambda row: row["ssm_companion"]["last_prefix_lookup"].update(
+                {"max_len": 96}
+            ),
+            "does not equal attempted_cached_tokens",
+        ),
+        (
+            lambda row: row["ssm_companion"]["last_prefix_lookup"].update(
+                {"candidate_lengths": [96]}
+            ),
+            "SSM candidate lengths are not bound",
+        ),
+        (
+            lambda row: row.update({"response_id": "resp-other"}),
+            "hybrid cache evidence is not request-correlated",
+        ),
+        (
+            lambda row: row["ssm_companion"]["last_prefix_lookup"].update(
+                {"request_id": "resp-stale"}
+            ),
+            "SSM companion prefix lookup is not request-correlated",
+        ),
+        (
+            lambda row: row["last_cache_execution"].update(
+                {"tq_native_blocks": 0}
+            ),
+            "tq_native_blocks must be positive",
+        ),
+        (
+            lambda row: row["health_counter_deltas"].update(
+                {"scheduler.hybrid_kv_without_ssm_hits": 1}
+            ),
+            "hybrid_kv_without_ssm_hits increased",
+        ),
+        (
+            lambda row: row["health_counter_deltas"].update(
+                {"block_disk_cache.tq_native_writes": -1}
+            ),
+            "monotonic counter block_disk_cache.tq_native_writes has negative",
+        ),
+    ),
+)
+def test_hybrid_partial_prefix_contract_fails_closed_on_artifact_defects(
+    mutate,
+    expected_failure,
+):
+    rows = _hybrid_store_rows()
+    mutate(rows[2])
+
+    failures = _validate_rows(
+        "store",
+        rows,
+        contract_profile="qwen_hybrid_ssm_tq4",
+    )
+
+    assert any(expected_failure in failure for failure in failures)
+
+
+def test_hybrid_partial_prefix_requires_one_source_tokenized_complete_block():
+    token_contract = deepcopy(TOKEN_CONTRACT)
+    token_contract["longest_common_prefix_tokens"]["A:B"] = 15
+    rows = _hybrid_store_rows()
+
+    failures = _validate_rows(
+        "store",
+        rows,
+        token_contract=token_contract,
+        contract_profile="qwen_hybrid_ssm_tq4",
+    )
+
+    assert any(
+        "tokenizer-derived reusable prefix floor=0 is not a meaningful cache proof"
+        in failure
+        for failure in failures
+    )
 
 
 def test_standard_scheduler_execution_count_includes_attested_generation_suffix():
@@ -1269,6 +1700,36 @@ def test_cache_contract_profile_requires_exact_minimax_m3_topology():
             key = path[0]
         node[key]["enabled"] = True
         assert gate._cache_contract_profile_from_health(changed) == "generic"
+
+
+def test_cache_contract_profile_selects_hybrid_schema_before_field_validation():
+    health = _hybrid_health()
+    assert (
+        gate._cache_contract_profile_from_health(health)
+        == "qwen_hybrid_ssm_tq4"
+    )
+
+    malformed = deepcopy(health)
+    malformed["cache_topology_provenance"]["configuration"]["native_cache"][
+        "attention_kv_storage_quantization"
+    ]["bits"] = 8
+    assert (
+        gate._cache_contract_profile_from_health(malformed)
+        == "qwen_hybrid_ssm_tq4"
+    )
+
+    for family in ("lfm2", "nemotron_hybrid"):
+        other = deepcopy(health)
+        other["cache_topology_provenance"]["configuration"]["native_cache"][
+            "family"
+        ] = family
+        assert gate._cache_contract_profile_from_health(other) == "generic"
+
+    other_schema = deepcopy(health)
+    other_schema["cache_topology_provenance"]["configuration"]["native_cache"][
+        "schema"
+    ] = "generic_kv_v1"
+    assert gate._cache_contract_profile_from_health(other_schema) == "generic"
 
 
 def test_standard_scheduler_prefill_does_not_require_generation_suffix_field():
@@ -1609,6 +2070,88 @@ def test_probe_contract_requires_unseen_c_then_allows_ram_exact_a():
     assert rows[1]["health_counter_deltas"]["block_disk_cache.disk_hits"] == 0
     assert "reconstructed" not in rows[1]["last_cache_execution"]
     assert "reconstruction_ok" not in rows[1]["last_cache_execution"]
+
+
+def test_hybrid_probe_contract_requires_tq_and_ssm_disk_refault_deltas():
+    rows = _hybrid_probe_rows()
+
+    failures = _validate_rows(
+        "probe",
+        rows,
+        store_summary=_store_summary(),
+        contract_profile="qwen_hybrid_ssm_tq4",
+    )
+
+    assert failures == []
+    restart_partial = rows[0]
+    execution = restart_partial["last_cache_execution"]
+    assert execution["cache_detail"] == "paged+ssm+disk+tq-native"
+    assert execution["selection"] == "paged"
+    assert execution["disk_hit"] is True
+    assert execution["disk_blocks"] == 7
+    assert execution["tq_native_blocks"] == 7
+    assert (
+        restart_partial["health_counter_deltas"][
+            "block_disk_cache.tq_native_hits"
+        ]
+        == 7
+    )
+    assert (
+        restart_partial["health_counter_deltas"]["ssm_companion.disk.hits"]
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    ("counter", "expected_failure"),
+    (
+        (
+            "block_disk_cache.disk_hits",
+            "block_disk_cache.disk_hits did not increase",
+        ),
+        (
+            "block_disk_cache.tq_native_hits",
+            "block_disk_cache.tq_native_hits did not increase",
+        ),
+        (
+            "ssm_companion.disk.hits",
+            "ssm_companion.disk.hits did not increase",
+        ),
+    ),
+)
+def test_hybrid_probe_contract_rejects_missing_restart_refault_delta(
+    counter,
+    expected_failure,
+):
+    rows = _hybrid_probe_rows()
+    rows[0]["health_counter_deltas"][counter] = 0
+
+    failures = _validate_rows(
+        "probe",
+        rows,
+        store_summary=_store_summary(),
+        contract_profile="qwen_hybrid_ssm_tq4",
+    )
+
+    assert any(expected_failure in failure for failure in failures)
+
+
+def test_hybrid_probe_contract_requires_one_tq_hit_per_reconstructed_tq_block():
+    rows = _hybrid_probe_rows()
+    rows[0]["health_counter_deltas"]["block_disk_cache.tq_native_hits"] = 1
+
+    failures = _validate_rows(
+        "probe",
+        rows,
+        store_summary=_store_summary(),
+        contract_profile="qwen_hybrid_ssm_tq4",
+    )
+
+    assert any(
+        "TQ-native hit delta=1 is below reconstructed tq_native_blocks=7"
+        in failure
+        for failure in failures
+    )
 
 
 def test_probe_contract_still_requires_reconstruction_for_paged_exact_a():

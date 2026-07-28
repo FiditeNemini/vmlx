@@ -102,6 +102,11 @@ notary-results*.json
 notary-info*.json
 notary-log*.json
 notary-submit*.json
+*notary*-result*.json
+*notarytool*-result*.json
+*notarization*-result*.json
+*signing*-result*.json
+*staple*-result*.json
 notary-handoff*.env
 signing-handoff*.env
 build-handoff*.env
@@ -119,8 +124,18 @@ signing-secrets/
 **/*sign*-private*
 **/*codesign*-local*
 **/*codesign*-private*
+**/*release*.local.*
 **/*release*.private.*
 **/*credential*.local.*
+**/*notar*-handoff.*
+**/*sign*-handoff.*
+**/*release*-handoff.*
+**/*notar*-credential*
+**/*apple*sign*-credential*
+**/*sign*-credential*
+**/*keychain*-profile*
+**/*notarytool*-profile*
+**/.notarytool-profile*
 
 # IDE
 .idea/

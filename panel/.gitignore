@@ -9,6 +9,10 @@ bundled-python/
 .env.*
 !.env.example
 !.env.*.example
+.env.signing
+.env.signing.*
+.env.notary
+.env.notary.*
 .claude/
 test-*.js
 theme-preview.html

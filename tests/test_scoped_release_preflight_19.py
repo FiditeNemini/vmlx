@@ -4726,6 +4726,54 @@ def test_r19_v5_child_environment_is_fixed_and_rejects_injection(
             module._v5_minimal_env(tmp_path, {name: "unsafe"})
 
 
+def test_r19_v5_canonicalizes_retained_pids_for_the_ui_worker(monkeypatch):
+    module = load_module()
+    monkeypatch.delenv("VMLINUX_REAL_UI_RETAINED_PIDS", raising=False)
+    monkeypatch.setenv("VMLX_REAL_UI_RETAINED_PIDS", "49053, 61126")
+    assert module._v5_release_retained_pid_environment() == "49053,61126"
+    plans = module._v5_default_producer_plans(
+        argparse.Namespace(
+            bundle_root=Path("/tmp/primary"),
+            native_bundle_root=Path("/tmp/native"),
+            direct_base_url="http://127.0.0.1:18084",
+            native_direct_base_url="http://127.0.0.1:18085",
+            gateway_base_url="http://127.0.0.1:18083",
+            health_url="http://127.0.0.1:18084/health",
+            native_health_url="http://127.0.0.1:18085/health",
+            gateway_health_url="http://127.0.0.1:18083/health",
+            cdp_url="http://127.0.0.1:19357",
+            electron_pid=4728,
+            gateway_pid=4728,
+            model="primary",
+            native_model="native",
+        )
+    )
+    assert plans["ui"]["env"] == {
+        "VMLINUX_REAL_UI_RETAINED_PIDS": "49053,61126"
+    }
+    assert plans["api"]["env"] == {}
+    assert plans["cache"]["env"] == {}
+
+    harness_env = module._v5_ui_harness_environment(
+        Path("/tmp/private-run"),
+        "/tmp/private-run/private-cache-attestation.token",
+    )
+    assert harness_env["VMLINUX_REAL_UI_RETAINED_PIDS"] == "49053,61126"
+    assert harness_env[module.PRIVATE_CACHE_ATTESTATION_TOKEN_FILE_ENV] == (
+        "/tmp/private-run/private-cache-attestation.token"
+    )
+    assert harness_env["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
+
+    monkeypatch.setenv("VMLINUX_REAL_UI_RETAINED_PIDS", "49053 49053")
+    with pytest.raises(RuntimeError, match="unique retained process PIDs"):
+        module._v5_release_retained_pid_environment()
+
+    monkeypatch.setenv("VMLINUX_REAL_UI_RETAINED_PIDS", "")
+    monkeypatch.delenv("VMLX_REAL_UI_RETAINED_PIDS", raising=False)
+    with pytest.raises(RuntimeError, match="unique retained process PIDs"):
+        module._v5_release_retained_pid_environment()
+
+
 def test_r19_v5_owned_producer_rejects_wrong_nonce_and_stale_capture(
     tmp_path: Path,
 ):

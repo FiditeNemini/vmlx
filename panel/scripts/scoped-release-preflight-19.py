@@ -7983,6 +7983,7 @@ def _v5_execute_owned_release_checks(
 def _v5_default_producer_plans(
     args: argparse.Namespace,
 ) -> dict[str, dict[str, Any]]:
+    retained_pids = _v5_release_retained_pid_environment()
     python = ROOT / ".venv/bin/python"
     common = [
         str(python),
@@ -8052,7 +8053,7 @@ def _v5_default_producer_plans(
         "--native-model",
         args.native_model,
     ]
-    return {
+    plans = {
         producer: {
             "argv": [
                 producer if value == "{PRODUCER}" else value for value in common
@@ -8064,6 +8065,30 @@ def _v5_default_producer_plans(
         }
         for producer in V5_PRODUCER_NAMES
     }
+    plans["ui"]["env"]["VMLINUX_REAL_UI_RETAINED_PIDS"] = retained_pids
+    return plans
+
+
+def _v5_release_retained_pid_environment() -> str:
+    """Canonicalize the parent-owned processes that phase 5 must preserve."""
+
+    raw = (
+        os.environ.get("VMLINUX_REAL_UI_RETAINED_PIDS")
+        or os.environ.get("VMLX_REAL_UI_RETAINED_PIDS")
+        or ""
+    ).strip()
+    values = [value for value in re.split(r"[\s,]+", raw) if value]
+    if (
+        not values
+        or any(not re.fullmatch(r"[0-9]+", value) for value in values)
+        or any(int(value) <= 1 for value in values)
+        or len({int(value) for value in values}) != len(values)
+    ):
+        raise RuntimeError(
+            "V5 release proof requires unique retained process PIDs greater "
+            "than 1 in VMLINUX_REAL_UI_RETAINED_PIDS"
+        )
+    return ",".join(str(int(value)) for value in values)
 
 
 def _v5_validate_session_binding(
@@ -10229,6 +10254,25 @@ def _v5_ui_normalized_capture(
     return json.dumps(capture, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _v5_ui_harness_environment(
+    run_root: Path,
+    private_attestation_token_file: str,
+) -> dict[str, str]:
+    """Build the final Node harness environment without dropping PID custody."""
+
+    return _v5_minimal_env(
+        run_root,
+        {
+            PRIVATE_CACHE_ATTESTATION_TOKEN_FILE_ENV: (
+                private_attestation_token_file
+            ),
+            "VMLINUX_REAL_UI_RETAINED_PIDS": (
+                _v5_release_retained_pid_environment()
+            ),
+        },
+    )
+
+
 def _v5_ui_worker_capture(
     args: argparse.Namespace,
     source: dict[str, Any],
@@ -10274,13 +10318,9 @@ def _v5_ui_worker_capture(
     ).strip()
     if not private_attestation_token_file:
         raise RuntimeError("UI proof worker has no private attestation token file")
-    environment = _v5_minimal_env(
+    environment = _v5_ui_harness_environment(
         run_root,
-        {
-            PRIVATE_CACHE_ATTESTATION_TOKEN_FILE_ENV: (
-                private_attestation_token_file
-            ),
-        },
+        private_attestation_token_file,
     )
     environment.update(
         {

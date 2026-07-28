@@ -725,7 +725,14 @@ function readExternalFileBytes(
 }
 
 function readExternalExecutableIdentity(filePath, label) {
-  return readExternalFileBytes(filePath, label, {
+  const absolute = path.resolve(filePath)
+  // Python virtual environments deliberately expose python/python3/versioned
+  // aliases as symlinks. Resolve that executable alias first, then retain the
+  // existing regular-file + O_NOFOLLOW identity checks on the canonical target.
+  // Private proof artifacts still call readExternalFileBytes directly and
+  // therefore remain strictly non-symlink.
+  const canonical = realpathSync(absolute)
+  return readExternalFileBytes(canonical, label, {
     maxBytes: executableIdentityMaxBytes,
     retainRaw: false,
   })
@@ -1810,6 +1817,10 @@ async function captureListenerProcessBinding({
     )
   }
   const executablePath = await executablePathForPid(listenerPid)
+  const executableIdentity = readExternalExecutableIdentity(
+    executablePath,
+    `${kind} listener executable`,
+  )
   return {
     kind,
     port,
@@ -1820,10 +1831,21 @@ async function captureListenerProcessBinding({
     listener_pid: listenerPid,
     health_pid: expectedHealthPid || null,
     belongs_to_launched_process_tree: belongsToRoot,
-    executable_path: executablePath,
-    executable_sha256: sha256File(executablePath),
-    executable_path_fingerprint_sha256: sha256Text(path.resolve(executablePath)),
+    invoked_executable_path: path.resolve(executablePath),
+    invoked_executable_path_fingerprint_sha256: sha256Text(
+      path.resolve(executablePath),
+    ),
+    executable_path: executableIdentity.path,
+    executable_sha256: executableIdentity.sha256,
+    executable_path_fingerprint_sha256: sha256Text(executableIdentity.path),
   }
+}
+
+export function viteRendererSourceSeen(resources) {
+  return (Array.isArray(resources) ? resources : []).some((url) =>
+    /\/src\/(?:main|App)\.tsx(?:\?|$)/.test(String(url))
+    || /\/src\/renderer\/src\/(?:main|App)\.tsx(?:\?|$)/.test(String(url))
+  )
 }
 
 function captureUiRuntimeProvenance(
@@ -1905,9 +1927,7 @@ function captureUiRuntimeProvenance(
     page_url: rendererResources?.pageUrl || null,
     renderer_resources: allResources,
     vite_client_seen: allResources.some((url) => /(?:@vite\/client|@vite\/client)/.test(url)),
-    vite_renderer_source_seen: allResources.some(
-      (url) => /\/src\/renderer\/src\/(?:main|App)\.tsx(?:\?|$)/.test(url),
-    ),
+    vite_renderer_source_seen: viteRendererSourceSeen(allResources),
     electron_executable: executable,
     electron_executable_sha256:
       existsSync(executable) ? sha256File(executable) : null,
@@ -2534,12 +2554,11 @@ export function validateModelBundleBinding(result) {
       continue
     }
     if (
-      requestedPath
-      && healthModel !== requestedPath
-      && healthModel !== String(result?.modelPath || '')
+      requestedModel
+      && healthModel !== requestedModel
     ) {
       failures.push(
-        `${phase} /health model ${healthModel || 'missing'} does not match requested bundle ${requestedPath}`,
+        `${phase} /health model ${healthModel || 'missing'} does not match requested served model ${requestedModel}`,
       )
     }
     const attestation = health?.model_bundle_provenance
@@ -2619,6 +2638,14 @@ function expectedUiToolCallCount(result) {
   const profile = String(result?.requestContract?.uiActionProfile || '')
   if (profile === 'primary-tool-restart-probe') return 1
   if (profile === 'native-three-turn-switch') return 2
+  // The legacy three-turn prompt contract predates named release profiles but
+  // still explicitly requests one built-in run_command call on each of the
+  // first two turns. Do not let the presence of its profile name downgrade the
+  // expected count to the generic no-tool default.
+  if (
+    profile === 'legacy-three-turn'
+    && result?.requestedBuiltinTools === true
+  ) return 2
   if (profile) return 0
   return result?.requestedBuiltinTools === true ? 2 : 0
 }
@@ -2754,12 +2781,41 @@ export function validateRenderedDomEvidence(result) {
       failures.push('rendered answer exposed raw TeX/parser syntax')
     }
     const expectedTex = '47 \\times 19 = 893 < 920 = 46 \\times 20'
+    const persistedMathSource = String(
+      persistedById.get(String(assistantIds[renderingPromptIndex] || '')) || '',
+    )
+    const sourceSpellings = [
+      `\\(${expectedTex}\\)`,
+      `\\[${expectedTex}\\]`,
+      `$$${expectedTex}$$`,
+    ]
+    if (!sourceSpellings.some((source) => persistedMathSource.includes(source))) {
+      failures.push(
+        'persisted answer does not attest the exact TeX source rendered by KaTeX',
+      )
+    }
+    const expectedVisibleMath = normalizeProofText(
+      '47 × 19 = 893 < 920 = 46 × 20',
+    )
+    if (
+      !normalizeProofText(renderedMathMessage?.answerText)
+        .includes(expectedVisibleMath)
+    ) {
+      failures.push('rendered answer does not visibly contain the expected KaTeX expression')
+    }
+    // KaTeX output:'html' intentionally omits MathML annotations. If an
+    // annotation is present, it remains useful corroboration and must be exact;
+    // otherwise the exact persisted source plus the visible KaTeX DOM is the
+    // source/render binding.
     const annotations = Array.isArray(renderedMathMessage?.katexAnnotations)
       ? renderedMathMessage.katexAnnotations.map((value) => normalizeProofText(value))
       : []
     if (
-      annotations.length !== 1
-      || annotations[0] !== expectedTex
+      annotations.length > 0
+      && (
+        annotations.length !== 1
+        || annotations[0] !== expectedTex
+      )
     ) {
       failures.push('rendered answer KaTeX source does not exactly match the requested expression')
     }
@@ -2774,30 +2830,83 @@ function traceChannelText(events, channel) {
     .join('')
 }
 
+function traceReasoningSegments(events) {
+  const segments = new Map()
+  let inferredSegment = 0
+  for (const event of Array.isArray(events) ? events : []) {
+    if (event?.event === 'reasoningDone' || event?.event === 'reasoning_terminal') {
+      inferredSegment += 1
+      continue
+    }
+    if (event?.event !== 'stream' || event?.channel !== 'reasoning') continue
+    const explicit = Number(event?.segmentIndex)
+    const index = Number.isInteger(explicit) && explicit >= 0
+      ? explicit
+      : inferredSegment
+    segments.set(index, `${segments.get(index) || ''}${String(event?.delta || '')}`)
+  }
+  return [...segments.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, value]) => value)
+    .filter(Boolean)
+}
+
 export function upsertBoundedDomSample(samples, state, sample, maxSamples, force = false) {
   if (!Array.isArray(samples) || !state || !sample) return false
   const limit = Math.max(1, Number.parseInt(String(maxSamples), 10) || 1)
+  const otherLimit = limit >= 4 ? 2 : 0
+  const primaryLimit = Math.max(1, Math.floor((limit - otherLimit) / 2))
+  const channelLimits = {
+    content: primaryLimit,
+    reasoning: primaryLimit,
+    other: otherLimit,
+  }
+  const answerText = String(sample.answerText || '')
+  const reasoningText = String(sample.reasoningText || '')
+  const contentChanged = answerText !== String(state.lastAnswerText || '')
+  const reasoningChanged = reasoningText !== String(state.lastReasoningText || '')
+  const channel = contentChanged
+    ? 'content'
+    : reasoningChanged
+      ? 'reasoning'
+      : 'other'
+  state.channelCounts ||= { content: 0, reasoning: 0, other: 0 }
+  state.channelLastStoredIndex ||= {}
   const signature = [
-    String(sample.answerText || '').length,
-    String(sample.reasoningText || '').length,
+    answerText.length,
+    reasoningText.length,
     Number(sample.katexCount || 0),
     Array.isArray(sample.toolCards) ? sample.toolCards.length : 0,
   ].join(':')
   if (!force && signature === state.lastSignature) return false
-  if (state.count < limit) {
+  const channelHasRoom = Number(state.channelCounts[channel] || 0)
+    < Number(channelLimits[channel] || 0)
+  if (state.count < limit && channelHasRoom) {
     samples.push(sample)
     state.count += 1
+    state.channelCounts[channel] = Number(state.channelCounts[channel] || 0) + 1
     state.lastStoredIndex = samples.length - 1
+    state.channelLastStoredIndex[channel] = samples.length - 1
   } else if (
     force
-    && Number.isInteger(state.lastStoredIndex)
-    && state.lastStoredIndex >= 0
-    && state.lastStoredIndex < samples.length
+    && Number.isInteger(
+      state.channelLastStoredIndex[channel] ?? state.lastStoredIndex,
+    )
   ) {
-    samples[state.lastStoredIndex] = sample
+    const replacementIndex =
+      state.channelLastStoredIndex[channel] ?? state.lastStoredIndex
+    if (replacementIndex < 0 || replacementIndex >= samples.length) return false
+    samples[replacementIndex] = sample
+    state.lastStoredIndex = replacementIndex
+    state.channelLastStoredIndex[channel] = replacementIndex
   } else {
+    state.lastAnswerText = answerText
+    state.lastReasoningText = reasoningText
+    state.lastSignature = signature
     return false
   }
+  state.lastAnswerText = answerText
+  state.lastReasoningText = reasoningText
   state.lastSignature = signature
   return true
 }
@@ -2853,10 +2962,24 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
     }
     for (const channel of ['reasoning', 'content']) {
       let previousLength = 0
+      let previousSegmentIndex = null
       const channelEvents = events.filter(
         (event) => event?.event === 'stream' && event?.channel === channel,
       )
       for (const event of channelEvents) {
+        const segmentIndex = channel === 'reasoning'
+          ? (Number.isInteger(Number(event?.segmentIndex))
+              ? Number(event.segmentIndex)
+              : 0)
+          : 0
+        if (
+          channel === 'reasoning'
+          && previousSegmentIndex !== null
+          && segmentIndex !== previousSegmentIndex
+        ) {
+          previousLength = 0
+        }
+        previousSegmentIndex = segmentIndex
         const delta = String(event?.delta || '')
         const retainedFullContent = event?.payload?.fullContent
         const fullContentLength = Number(
@@ -2954,15 +3077,27 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
       .filter((segment) => typeof segment === 'string')
       .filter(Boolean)
       .join('\n')
-    const finalReasoning = traceChannelText(events, 'reasoning')
-    if (finalReasoning !== persistedReasoning) {
-      failures.push(`message ${row.messageId} final reasoning stream does not equal persisted reasoning`)
+    const persistedSegments = persistedReasoningSegments
+      .filter((segment) => typeof segment === 'string')
+      .filter(Boolean)
+    const finalReasoningSegments = traceReasoningSegments(events)
+    if (canonicalJson(finalReasoningSegments) !== canonicalJson(persistedSegments)) {
+      failures.push(
+        `message ${row.messageId} final reasoning stream segments do not equal persisted reasoning segments`,
+      )
     }
+    const renderedReasoningSegments = Array.isArray(rendered?.reasoningSegments)
+      ? rendered.reasoningSegments.map(String).filter(Boolean)
+      : persistedSegments.length <= 1 && String(rendered?.reasoningText || '').trim()
+        ? [String(rendered.reasoningText)]
+        : []
     if (
-      normalizeVisibleLinkText(rendered?.reasoningText)
-      !== normalizeVisibleLinkText(persistedReasoning)
+      canonicalJson(renderedReasoningSegments.map(normalizeVisibleLinkText))
+      !== canonicalJson(persistedSegments.map(normalizeVisibleLinkText))
     ) {
-      failures.push(`message ${row.messageId} normalized visible reasoning rail is not linked to persisted reasoning`)
+      failures.push(
+        `message ${row.messageId} normalized visible reasoning rail segments are not linked to persisted reasoning segments`,
+      )
     }
   }
   if (expectation === 'required' && reasoningMessageCount !== assistantIds.size) {
@@ -3251,7 +3386,10 @@ export function validateGenerationDefaultsEvidence(result) {
   const expectedRoute = result?.requestedWireApi === 'responses'
     ? '/v1/responses'
     : '/v1/chat/completions'
-  const expectedModel = String(result?.server?.health?.model_name || '')
+  // Sampling logs name the API-facing served model. The filesystem bundle is
+  // independently bound by model_bundle_provenance and must never be compared
+  // as though it were the served identifier.
+  const expectedModel = String(result?.servedModel || '')
   const expectedWire = result?.requestedWireApi === 'responses'
     ? 'responses'
     : 'completions'
@@ -3463,6 +3601,9 @@ export function validateServerCacheEvidence(result) {
   const visible = evidence.initialCacheControls || {}
   const nativeCache = health?.native_cache || {}
   if (evidence.runningSessionDrawer !== true) failures.push('cache controls were not inspected on the running session')
+  if (evidence.controlScope !== 'running-session-toolbar') {
+    failures.push('cache controls were not opened from the running-session toolbar')
+  }
   for (const field of ['enablePrefixCache', 'usePagedCache', 'enableBlockDiskCache']) {
     if (typeof visible[field] !== 'boolean') {
       failures.push(`running-session visible cache control ${field} is missing`)
@@ -3769,7 +3910,7 @@ export function validateUiRuntimeProvenance(result) {
       'Electron runtime executable',
     )
     if (
-      electron.path !== path.resolve(cdp.executable_path || '')
+      electron.path !== realpathSync(cdp.executable_path || '')
       || electron.sha256 !== provenance.electron_executable_sha256
       || electron.sha256 !== cdp.executable_sha256
       || sha256Text(electron.path) !== cdp.executable_path_fingerprint_sha256
@@ -3805,9 +3946,16 @@ export function validateUiRuntimeProvenance(result) {
   if (provenance.source_commit !== result?.gitProvenance?.after?.commit) {
     failures.push('renderer source commit is not bound to the proof HEAD')
   }
+  const buildSourceCommit = String(provenance.renderer_build_source_commit || '')
   if (
-    !/^[0-9a-f]{40}$/.test(String(provenance.renderer_build_source_commit || ''))
-    || provenance.renderer_build_source_commit !== result?.gitProvenance?.after?.commit
+    (
+      provenance.mode === 'installed-app'
+      || Boolean(buildSourceCommit)
+    )
+    && (
+      !/^[0-9a-f]{40}$/.test(buildSourceCommit)
+      || buildSourceCommit !== result?.gitProvenance?.after?.commit
+    )
   ) {
     failures.push('build-injected renderer source commit is not bound to the proof HEAD')
   }
@@ -3834,8 +3982,11 @@ export function validateUiRuntimeProvenance(result) {
     || backend.health_pid !== healthBinding.backend_pid
     || !validSha256(backend.executable_sha256)
     || !validSha256(backend.executable_path_fingerprint_sha256)
-    || backend.executable_path_fingerprint_sha256
+    || !validSha256(backend.invoked_executable_path_fingerprint_sha256)
+    || backend.invoked_executable_path_fingerprint_sha256
       !== healthBinding.runtime_source_hashes?.python_executable_fingerprint_sha256
+    || sha256Text(path.resolve(backend.invoked_executable_path || ''))
+      !== backend.invoked_executable_path_fingerprint_sha256
   ) {
     failures.push('backend TCP listener is not bound to /health PID and imported Python executable')
   }
@@ -3926,8 +4077,6 @@ export function validateUiRuntimeProvenance(result) {
     if (
       manifest.bundled_python_executable_fingerprint_sha256
         !== runtimeSource.python_executable_fingerprint_sha256
-      || manifest.bundled_python_executable_fingerprint_sha256
-        !== backend.executable_path_fingerprint_sha256
     ) {
       failures.push('installed backend did not import from the manifest-attested bundled Python')
     }
@@ -4879,6 +5028,7 @@ function validateMatrixIdentity(value, result) {
   const runnerAfter = identity?.runner?.after || {}
   const producerPath = 'tests/cross_matrix/run_agentic_protocol_matrix.py'
   const expectedHarnessPath = realpathSync(path.join(repoDir, producerPath))
+  let producerExecutableSha256 = ''
   if (
     canonicalJson(runnerBefore) !== canonicalJson(runnerAfter)
     || runnerBefore.repo_venv !== true
@@ -4909,6 +5059,7 @@ function validateMatrixIdentity(value, result) {
         runnerBefore.producer_executable_path,
         'Paired API producer executable',
       )
+      producerExecutableSha256 = executable.sha256
       if (
         harness.sha256 !== runnerBefore.producer_harness_sha256
         || harness.bytes !== Number(runnerBefore.producer_harness_size_bytes)
@@ -4932,10 +5083,13 @@ function validateMatrixIdentity(value, result) {
   }
   const uiBinding = result?.healthProvenance?.after?.binding || {}
   if (
-    runnerBefore.python_executable_fingerprint_sha256
-      !== uiBinding?.runtime_source_hashes?.python_executable_fingerprint_sha256
+    !validSha256(producerExecutableSha256)
+    || producerExecutableSha256
+      !== result?.uiRuntimeProvenance?.backend_python_process_binding?.executable_sha256
   ) {
-    failures.push('paired matrix producer Python does not match the UI backend Python')
+    failures.push(
+      'paired matrix producer Python canonical executable identity does not match the UI backend Python',
+    )
   }
   const bundleBefore = identity?.bundle?.before || {}
   const bundleAfter = identity?.bundle?.after || {}
@@ -6656,6 +6810,9 @@ async function main() {
           const reasoningNodes = [...root.querySelectorAll(
             '[data-vmlx-proof-reasoning-content="true"]'
           )];
+          const reasoningSegments = reasoningNodes
+            .map((node) => (node.textContent || '').trim())
+            .filter(Boolean);
           const toolCards = [...root.querySelectorAll('[data-vmlx-proof-tool-card]')].map((card) => ({
             kind: card.getAttribute('data-vmlx-proof-tool-card') || '',
             name: card.getAttribute('data-vmlx-proof-tool-name') || '',
@@ -6680,17 +6837,19 @@ async function main() {
               }
             }
           }
+          const proseAnswer = answer?.cloneNode(true);
+          proseAnswer?.querySelectorAll(
+            '[data-vmlx-proof-tool-card], [data-vmlx-proof-tool-container]'
+          ).forEach((element) => element.remove());
           return {
             cause,
             t: performance.now(),
             messageId: String(messageId || ''),
             role: root.getAttribute('data-vmlx-proof-message-role') || '',
             visible: isVisible(root),
-            answerText: (answer?.textContent || '').trim(),
-            reasoningText: reasoningNodes
-              .map((node) => (node.textContent || '').trim())
-              .filter(Boolean)
-              .join('\\n'),
+            answerText: (proseAnswer?.textContent || '').trim(),
+            reasoningText: reasoningSegments.join('\\n'),
+            reasoningSegments,
             html: answer?.innerHTML || '',
             katexCount: answer?.querySelectorAll('.katex').length || 0,
             katexErrorCount: answer?.querySelectorAll('.katex-error').length || 0,
@@ -6751,6 +6910,7 @@ async function main() {
         const streamTraceState = new Map();
         const eventTrace = [];
         const priorFullContent = new Map();
+        const reasoningSegmentIndex = new Map();
         let eventSequence = 0;
         const recordEvent = (bucket, event, data) => {
           const captured = { t: performance.now(), ...data };
@@ -6766,8 +6926,12 @@ async function main() {
           let delta = null;
           let cumulativeReset = false;
           let tracePayload = data;
+          const segmentIndex = channel === 'reasoning'
+            ? Number(reasoningSegmentIndex.get(messageId) || 0)
+            : null;
           if (event === 'stream' && typeof data?.fullContent === 'string') {
-            const key = messageId + ':' + channel;
+            const key = messageId + ':' + channel
+              + (channel === 'reasoning' ? ':' + segmentIndex : '');
             const previous = priorFullContent.get(key) || '';
             if (data.fullContent.startsWith(previous)) {
               delta = data.fullContent.slice(previous.length);
@@ -6817,8 +6981,12 @@ async function main() {
             messageId,
             delta,
             cumulativeReset,
+            segmentIndex,
             payload: tracePayload,
           });
+          if (event === 'reasoning_terminal') {
+            reasoningSegmentIndex.set(messageId, segmentIndex + 1);
+          }
           scheduleDomSample(messageId, event + ':' + channel, event !== 'stream');
         };
         const cleanup = [
@@ -8056,14 +8224,23 @@ async function main() {
           const cacheExpectRegex = ${JSON.stringify(cacheExpectRegex)};
           const expectPagedCacheLocked = ${JSON.stringify(expectPagedCacheLocked)};
           const expectPagedCache = ${JSON.stringify(expectPagedCache)};
-          const serverButton = await wait(() =>
-            [...document.querySelectorAll('button')].find((button) =>
-              (button.textContent || '').replace(/\\s+/g, ' ').trim() === 'Server'
-            ) || null,
-          'running-session Server settings control');
+          const serverButton = await wait(() => {
+            const visibleChatSettings = [...document.querySelectorAll(
+              '[data-vmlx-control="chat-settings"]'
+            )].find((button) => isVisible(button));
+            const toolbar = visibleChatSettings?.parentElement;
+            return [...(toolbar?.querySelectorAll('button') || [])].find((button) =>
+              button !== visibleChatSettings
+              && isVisible(button)
+              && (button.textContent || '').replace(/\\s+/g, ' ').trim() === 'Server'
+              && /server settings/i.test(button.getAttribute('title') || '')
+            ) || null;
+          }, 'running-session Server settings control');
           serverButton.click();
           const drawerHeader = await wait(() =>
             [...document.querySelectorAll('span')].find((element) =>
+              isVisible(element)
+              &&
               (element.textContent || '').replace(/\\s+/g, ' ').trim() === 'Server Settings'
             ) || null,
           'running-session Server Settings drawer');
@@ -8129,6 +8306,7 @@ async function main() {
             requested: true,
             verified,
             runningSessionDrawer: true,
+            controlScope: 'running-session-toolbar',
             visibleBlockDiskChecked: initialCacheControls.enableBlockDiskCache,
             cacheExpectRegex,
             expectPagedCacheLocked,

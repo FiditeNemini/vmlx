@@ -46,6 +46,7 @@ import {
   validateRequestCorrelatedCacheEvidence,
   validateServerCacheEvidence,
   validateUiRuntimeProvenance,
+  viteRendererSourceSeen,
   viteRawRendererModulePath,
   waitForOwnedUiReleaseSentinel,
   writePrivateArtifactFile,
@@ -379,7 +380,7 @@ describe("generated CDP expression syntax", () => {
     expect(harnessSource).not.toContain("payload: data,\n          });");
   });
 
-  it("preserves the terminal DOM state without ever exceeding the hard sample cap", () => {
+  it("reserves bounded DOM capacity for both reasoning and visible content", () => {
     const samples: Array<Record<string, unknown>> = [];
     const state = {
       count: 0,
@@ -392,16 +393,35 @@ describe("generated CDP expression syntax", () => {
         state,
         {
           messageId: "assistant-1",
-          answerText: "x".repeat(index),
-          reasoningText: "r",
+          answerText: "",
+          reasoningText: "r".repeat(index),
           katexCount: 0,
           toolCards: [],
         },
         24,
       );
     }
-    expect(samples).toHaveLength(24);
-    expect(state.count).toBe(24);
+    expect(samples).toHaveLength(11);
+    expect(state.channelCounts.reasoning).toBe(11);
+    expect(state.channelCounts.content).toBe(0);
+
+    for (let index = 1; index <= 30; index += 1) {
+      upsertBoundedDomSample(
+        samples,
+        state,
+        {
+          messageId: "assistant-1",
+          answerText: "x".repeat(index),
+          reasoningText: "r".repeat(30),
+          katexCount: 0,
+          toolCards: [],
+        },
+        24,
+      );
+    }
+    expect(samples).toHaveLength(22);
+    expect(state.count).toBe(22);
+    expect(state.channelCounts.content).toBe(11);
 
     upsertBoundedDomSample(
       samples,
@@ -416,8 +436,10 @@ describe("generated CDP expression syntax", () => {
       24,
       true,
     );
-    expect(samples).toHaveLength(24);
-    expect(samples.at(-1)?.answerText).toBe("terminal answer");
+    expect(samples).toHaveLength(22);
+    expect(samples.some((sample) =>
+      sample.answerText === "terminal answer"
+    )).toBe(true);
   });
 
   it("stages and attests each V5 cache phase before the real Start click", () => {
@@ -735,16 +757,16 @@ function goodResult(): Record<string, any> {
     visible: true,
     answerText: renderedContents[index],
     reasoningText: "Reason carefully",
+    reasoningSegments: ["Reason carefully"],
     html:
       index === 2
         ? '$43 and <span class="katex">47 × 19 = 893 &lt; 920 = 46 × 20</span>'
         : record.content,
     katexCount: index === 2 ? 1 : 0,
     katexErrorCount: 0,
-    katexAnnotations:
-      index === 2
-        ? ["47 \\times 19 = 893 < 920 = 46 \\times 20"]
-        : [],
+    // mathMarkdown uses KaTeX output:'html', which intentionally has no
+    // MathML annotation. The persisted answer remains the source attestation.
+    katexAnnotations: [],
     currencyOccurrences:
       index === 2 ? [{ text: "$43", insideKatex: false }] : [],
     toolCards:
@@ -755,6 +777,7 @@ function goodResult(): Record<string, any> {
               name: "run_command",
               phase: "result",
               visible: true,
+              text: `Used run_command REAL_UI_LIVE_TOOL_${index + 1}`,
             },
           ]
         : [],
@@ -777,7 +800,7 @@ function goodResult(): Record<string, any> {
   const healthRaw = {
     status: "healthy",
     model_loaded: true,
-    model_name: "/private/models/test-model",
+    model_name: "test-model",
     model_bundle_provenance: modelBundleAttestation,
     runtime_provenance: {
       model_bundle_provenance: modelBundleAttestation,
@@ -795,7 +818,7 @@ function goodResult(): Record<string, any> {
     },
     python_source_file_count: 10,
     python_source_read_error_count: 0,
-    model_name: "/private/models/test-model",
+    model_name: "test-model",
     model_bundle_fingerprint_sha256: sha,
     cache_topology_fingerprint_sha256: sha,
   };
@@ -831,6 +854,7 @@ function goodResult(): Record<string, any> {
       transientAlerts: [],
     },
     requestContract: {
+      uiActionProfile: "legacy-three-turn",
       promptOne: prompts[0],
       promptTwo: prompts[1],
       promptThree: prompts[2],
@@ -979,9 +1003,9 @@ function goodResult(): Record<string, any> {
     },
     resolvedSamplingRecords: assistantIds.map((assistantMessageId, index) => ({
       route_model:
-        "Resolved sampling kwargs route=/v1/chat/completions model=/private/models/test-model",
+        "Resolved sampling kwargs route=/v1/chat/completions model=test-model",
       route: "/v1/chat/completions",
-      model: "/private/models/test-model",
+      model: "test-model",
       turn: index + 1,
       proof_request_id: `user-${index + 1}`,
       request_id: `wire-request-${index + 1}`,
@@ -1014,6 +1038,7 @@ function goodResult(): Record<string, any> {
     },
     serverCacheControls: {
       runningSessionDrawer: true,
+      controlScope: "running-session-toolbar",
       visibleBlockDiskChecked: true,
       initialCacheControls: {
         enablePrefixCache: true,
@@ -1192,6 +1217,8 @@ function goodResult(): Record<string, any> {
       backend_python_process_binding: {
         listener_pid: 4321,
         health_pid: 4321,
+        invoked_executable_path: testExecutablePath,
+        invoked_executable_path_fingerprint_sha256: testExecutablePathSha,
         executable_path: testExecutablePath,
         executable_sha256: testExecutableSha,
         executable_path_fingerprint_sha256: testExecutablePathSha,
@@ -2112,6 +2139,41 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("recognizes the renderer entry at the Vite renderer-root URL", () => {
+    expect(
+      viteRendererSourceSeen([
+        "http://127.0.0.1:5173/@vite/client",
+        "http://127.0.0.1:5173/src/main.tsx",
+      ]),
+    ).toBe(true);
+    expect(
+      viteRendererSourceSeen([
+        "http://127.0.0.1:5173/@vite/client",
+        "http://127.0.0.1:5173/src/main.css",
+      ]),
+    ).toBe(false);
+  });
+
+  it("opens Server settings from the active session toolbar, not app mode", () => {
+    const source = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+    expect(source).toContain(
+      "const visibleChatSettings = [...document.querySelectorAll(",
+    );
+    expect(source).toContain(
+      "const toolbar = visibleChatSettings?.parentElement;",
+    );
+    expect(source).toContain(
+      "controlScope: 'running-session-toolbar'",
+    );
+    expect(source).not.toContain(
+      "[...document.querySelectorAll('button')].find((button) =>\n"
+        + "              (button.textContent || '').replace(/\\\\s+/g, ' ').trim() === 'Server'",
+    );
+  });
+
   it("rejects renderer proof paths outside the served renderer root", () => {
     expect(() => viteRawRendererModulePath("src/main.tsx", "r19")).toThrow(
       /outside the Vite renderer root/,
@@ -2436,6 +2498,46 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("accepts exact dev provenance when Vite has no build-injected commit", () => {
+    const result = structuredClone(goodResult());
+    result.uiRuntimeProvenance.renderer_build_source_commit = null;
+    expect(validateUiRuntimeProvenance(result)).toEqual([]);
+  });
+
+  it("canonicalizes a normal venv-style Python executable symlink", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "vmlx-python-alias-"));
+    try {
+      const alias = path.join(directory, "python3");
+      symlinkSync(testExecutablePath, alias);
+      const aliasFingerprint = crypto
+        .createHash("sha256")
+        .update(alias)
+        .digest("hex");
+      const result = structuredClone(goodResult());
+      result.uiRuntimeProvenance.backend_python_process_binding = {
+        ...result.uiRuntimeProvenance.backend_python_process_binding,
+        invoked_executable_path: alias,
+        invoked_executable_path_fingerprint_sha256: aliasFingerprint,
+        executable_path: alias,
+        executable_path_fingerprint_sha256: testExecutablePathSha,
+      };
+      // /health fingerprints sys.executable's invoked alias spelling. The
+      // listener retains and binds that path while canonical executable bytes
+      // permit python/python3/versioned aliases of the same venv target.
+      result.healthProvenance.after.binding.runtime_source_hashes
+        .python_executable_fingerprint_sha256 = aliasFingerprint;
+      expect(validateUiRuntimeProvenance(result)).toEqual([]);
+
+      result.healthProvenance.after.binding.runtime_source_hashes
+        .python_executable_fingerprint_sha256 = testExecutablePathSha;
+      expect(validateUiRuntimeProvenance(result).join("\n")).toMatch(
+        /backend TCP listener is not bound/,
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("derives renderer provenance from Git and wires local request identity through every wire request", () => {
     const viteConfig = readFileSync(
       path.join(process.cwd(), "electron.vite.config.ts"),
@@ -2522,6 +2624,19 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("keeps served model identity separate from bundle filesystem identity", () => {
+    const result = structuredClone(goodResult());
+    expect(result.servedModel).not.toBe(result.modelPath);
+    expect(validateModelBundleBinding(result)).toEqual([]);
+    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+
+    result.healthProvenance.before.raw.model_name = result.modelPath;
+    result.healthProvenance.after.raw.model_name = result.modelPath;
+    expect(validateModelBundleBinding(result).join("\n")).toMatch(
+      /does not match requested served model/,
+    );
+  });
+
   it("rejects settings not visibly persisted and stale route/model log records", () => {
     const result = structuredClone(goodResult());
     result.chatSettingsInteraction.persistedAfterReopen = false;
@@ -2556,6 +2671,7 @@ describe("real UI model proof harness", () => {
 
   it("rejects missing visible cache state, contradictory argv, and capacity-only telemetry", () => {
     const result = structuredClone(goodResult());
+    result.serverCacheControls.controlScope = "app-mode-navigation";
     delete result.serverCacheControls.initialCacheControls.enablePrefixCache;
     result.serverCacheControls.argv = [
       "--disable-prefix-cache",
@@ -2585,7 +2701,7 @@ describe("real UI model proof harness", () => {
       }),
     );
     expect(validateServerCacheEvidence(result).join("\n")).toMatch(
-      /visible cache control|contradicted enabled prefix cache|contradictory --no-paged-cache|no UI turn had request-correlated/,
+      /running-session toolbar|visible cache control|contradicted enabled prefix cache|contradictory --no-paged-cache|no UI turn had request-correlated/,
     );
   });
 
@@ -2638,6 +2754,79 @@ describe("real UI model proof harness", () => {
     expect(validateReasoningEvidence(result, "required")).toEqual([]);
   });
 
+  it("compares interleaved reasoning passes as ordered segments", () => {
+    const result = structuredClone(goodResult());
+    const trace = result.messageEventTrace[0];
+    const contentEvents = trace.events.filter(
+      (event: Record<string, unknown>) => event.channel === "content",
+    );
+    const terminal = trace.events.find(
+      (event: Record<string, unknown>) => event.event === "terminal",
+    );
+    trace.events = [
+      {
+        ...streamEvent(1, "reasoning", "Reason", "Reason"),
+        segmentIndex: 0,
+      },
+      {
+        ...streamEvent(2, "reasoning", "Reason carefully", " carefully"),
+        segmentIndex: 0,
+      },
+      {
+        sequence: 3,
+        event: "reasoning_terminal",
+        channel: "reasoning",
+        segmentIndex: 0,
+        payload: { reasoningSegments: ["Reason carefully"] },
+      },
+      {
+        ...streamEvent(4, "reasoning", "Plan", "Plan"),
+        segmentIndex: 1,
+      },
+      {
+        ...streamEvent(5, "reasoning", "Plan again", " again"),
+        segmentIndex: 1,
+      },
+      ...contentEvents.map((event: Record<string, unknown>, index: number) => ({
+        ...event,
+        sequence: 6 + index,
+      })),
+      { ...terminal, sequence: 8 },
+    ];
+    result.persistedReasoningByMessage[0] = [
+      "Reason carefully",
+      "Plan again",
+    ];
+    result.renderedDom.messages[0].reasoningSegments = [
+      "Reason carefully",
+      "Plan again",
+    ];
+    result.renderedDom.messages[0].reasoningText =
+      "Reason carefully\nPlan again";
+    result.renderedDom.samples = result.renderedDom.samples.map(
+      (sample: Record<string, any>) =>
+        sample.messageId === assistantIds[0]
+          ? {
+              ...sample,
+              reasoningText:
+                sample.answerText === renderedContents[0]
+                  ? "Reason carefully\nPlan again"
+                  : "Reason carefully",
+            }
+          : sample,
+    );
+
+    expect(validateReasoningEvidence(result, "required")).toEqual([]);
+
+    result.persistedReasoningByMessage[0] = [
+      "Plan again",
+      "Reason carefully",
+    ];
+    expect(validateReasoningEvidence(result, "required").join("\n")).toMatch(
+      /stream segments do not equal persisted reasoning segments|rail segments are not linked/,
+    );
+  });
+
   it("rejects duplicate/error tool records and missing probe cleanup", () => {
     const result = structuredClone(goodResult());
     result.persistedOaiCallsByMessage[1][0].id = "call-1";
@@ -2649,6 +2838,20 @@ describe("real UI model proof harness", () => {
     result.toolProbeCleanup.removed = false;
     expect(validateExactToolLoopEvidence(result).join("\n")).toMatch(
       /IDs are not unique|error status|not cleaned/,
+    );
+  });
+
+  it("requires both built-in calls for the legacy three-turn profile", () => {
+    const result = structuredClone(goodResult());
+    expect(result.requestContract.uiActionProfile).toBe("legacy-three-turn");
+    expect(validateExactToolLoopEvidence(result)).toEqual([]);
+
+    result.persistedOaiCallsByMessage[1] = [];
+    result.persistedOaiResultsByMessage[1] = [];
+    result.persistedToolsByMessage[1] = [];
+    result.renderedDom.messages[1].toolCards = [];
+    expect(validateExactToolLoopEvidence(result).join("\n")).toMatch(
+      /expected exactly 2 tool calls|expected exactly 2 tool results|expected exactly 2 visible calling statuses|expected exactly 2 rendered tool cards/,
     );
   });
 
@@ -2668,6 +2871,40 @@ describe("real UI model proof harness", () => {
     renderResult.renderedDom.rawI18nKeys = ["layout.chatHistory.groupToday"];
     expect(validateRenderedDomEvidence(renderResult).join("\n")).toMatch(
       /outside KaTeX|does not exactly match|raw i18n keys/,
+    );
+  });
+
+  it("attests answer prose without folding rendered tool-card text into it", () => {
+    const source = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+    expect(source).toContain("const proseAnswer = answer?.cloneNode(true);");
+    expect(source).toContain(
+      "'[data-vmlx-proof-tool-card], [data-vmlx-proof-tool-container]'",
+    );
+
+    const valid = structuredClone(goodResult());
+    valid.renderedDom.messages[0].toolCards[0].text =
+      "Used run_command REAL_UI_LIVE_TOOL_ONE";
+    expect(validateRenderedDomEvidence(valid)).toEqual([]);
+
+    valid.renderedDom.messages[0].answerText +=
+      " Used run_command REAL_UI_LIVE_TOOL_ONE";
+    expect(validateRenderedDomEvidence(valid).join("\n")).toMatch(
+      /normalized visible answer is not linked/,
+    );
+  });
+
+  it("binds output-html KaTeX to exact persisted TeX without requiring MathML", () => {
+    const valid = structuredClone(goodResult());
+    valid.renderedDom.messages[2].katexAnnotations = [];
+    expect(validateRenderedDomEvidence(valid)).toEqual([]);
+
+    valid.assistantRecords[2].content =
+      "$43 and \\(47 \\times 19 = 894 < 920 = 46 \\times 20\\)";
+    expect(validateRenderedDomEvidence(valid).join("\n")).toMatch(
+      /does not attest the exact TeX source/,
     );
   });
 
@@ -2779,6 +3016,41 @@ describe("real UI model proof harness", () => {
       expect(validatePairedApiEvidence(result).join("\n")).toMatch(
         /origins are not bound|source identity mismatch|bundle identity|producer executable\/harness bytes|aliases Electron\/backend/,
       );
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("matches paired producer/backend Python by canonical executable identity", () => {
+    const result = goodResult();
+    result.surfaceStatus = "dual_surface_attested";
+    const fixture = createValidPairedArtifact(result);
+    try {
+      const alias = path.join(fixture.directory, "python3");
+      symlinkSync(testExecutablePath, alias);
+      const value = structuredClone(fixture.artifact.value);
+      const aliasFingerprint = crypto
+        .createHash("sha256")
+        .update(alias)
+        .digest("hex");
+      const prefixFingerprint = crypto
+        .createHash("sha256")
+        .update(fixture.directory)
+        .digest("hex");
+      for (const phase of ["before", "after"]) {
+        value.identity.runner[phase].python_executable_path = alias;
+        value.identity.runner[phase].python_executable_fingerprint_sha256 =
+          aliasFingerprint;
+        value.identity.runner[phase].python_prefix_path = fixture.directory;
+        value.identity.runner[phase].python_prefix_fingerprint_sha256 =
+          prefixFingerprint;
+      }
+      result.pairedApiArtifact = writePairedArtifactValue(
+        fixture.directory,
+        "python-alias-identity.json",
+        value,
+      );
+      expect(validatePairedApiEvidence(result)).toEqual([]);
     } finally {
       rmSync(fixture.directory, { recursive: true, force: true });
     }

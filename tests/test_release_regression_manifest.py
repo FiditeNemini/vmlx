@@ -4393,6 +4393,9 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "VMLINUX_REAL_UI_VIDEO_EXPECT_REGEX" in source
     assert "provenSurfaces" in source
     assert "serverCacheControls" in source
+    assert "'[data-vmlx-control=\"server-settings\"]'" in source
+    assert "'[data-vmlx-surface=\"server-settings\"]'" in source
+    assert "visibleChatSettings?.parentElement" not in source
     assert "sectionButtons = [...(drawer?.querySelectorAll('button') || [])]" in source
     assert "const normalized = (button.innerText || '')" in source
     assert "normalized === title || normalized.includes(title)" in source
@@ -4429,10 +4432,10 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "visible Electron local Start control" in source
     assert "real UI proof requires an Electron-managed local session" in source
     assert "['running', 'loading', 'standby'].includes(sessionBeforeStart?.status)" in source
-    assert "sessionBeforeStart?.status === 'loading'" in source
-    assert "label === stopControlLabel" in source
+    assert "'[data-vmlx-control=\"session-stop\"][data-vmlx-session-id=\"'" in source
+    assert "if (current?.status === 'stopped') return resolve(current)" in source
     assert "for the active local session" in source
-    assert "return label === 'Start'" in source
+    assert "'[data-vmlx-control=\"session-start\"][data-vmlx-session-id=\"'" in source
     assert "window.api.chat.sendMessage" in source
     assert "window.api.performance.health" in source
     assert "window.api.cache.stats" in source

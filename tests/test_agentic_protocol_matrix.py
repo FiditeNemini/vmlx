@@ -248,6 +248,24 @@ def test_backend_identity_accepts_equivalent_checkout_python_alias(tmp_path: Pat
     ) == []
 
 
+def test_backend_identity_fingerprint_retains_bundle_file_attestation(
+    tmp_path: Path,
+):
+    _, source = _identity_repo(tmp_path)
+    _, bundle = _identity_bundle(tmp_path)
+    identity, failures = matrix._health_identity(
+        _identity_health(source, bundle=bundle)
+    )
+    assert failures == []
+    assert identity["model_bundle_files"] == bundle["files"]
+    core = {
+        key: value
+        for key, value in identity.items()
+        if key != "fingerprint_sha256"
+    }
+    assert identity["fingerprint_sha256"] == matrix._canonical_sha256(core)
+
+
 def test_public_request_metadata_retains_exact_tool_contracts_and_safe_history_links():
     payload = {
         "stream": True,

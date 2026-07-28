@@ -1406,8 +1406,14 @@ class TestServerSamplingResolution:
             "repetition_penalty": 1.07,
         }
         log_text = "\n".join(record.getMessage() for record in caplog.records)
-        assert "Resolved sampling kwargs route=/v1/chat/completions" in log_text
-        assert "Resolved sampling kwargs route=/v1/responses" in log_text
+        assert (
+            "Resolved sampling kwargs route=/v1/chat/completions "
+            "model=kwarg-model"
+        ) in log_text
+        assert (
+            "Resolved sampling kwargs route=/v1/responses "
+            "model=kwarg-model"
+        ) in log_text
         assert (
             "proof_request_id=proof-chat request_id=wire-chat "
             "message_id=message-chat"
@@ -11773,13 +11779,18 @@ class TestJangVLMFallbacks:
 class TestTurboQuantKVTelemetry:
     """Cache telemetry must agree for nested MLLM language models."""
 
-    def test_storage_only_compress_telemetry_is_not_labeled_live(
+    def test_storage_block_codec_telemetry_is_separate_from_topology_identity(
         self, monkeypatch
     ):
         from types import SimpleNamespace
 
         from jang_tools.turboquant.cache import TurboQuantKVCache as RuntimeTQCache
-        from vmlx_engine.server import _turboquant_kv_cache_status
+        from vmlx_engine import tq_disk_store
+        from vmlx_engine.server import (
+            _cache_storage_runtime_telemetry,
+            _cache_topology_configuration,
+            _turboquant_kv_cache_status,
+        )
 
         class TurboQuantKVCache:
             compress_after = 0
@@ -11797,6 +11808,39 @@ class TestTurboQuantKVTelemetry:
             "_vmlx_last_compress",
             {"calls": 3, "compressed_tokens_after": 154},
             raising=False,
+        )
+        monkeypatch.setattr(
+            tq_disk_store,
+            "tq_block_codec_telemetry",
+            lambda: {
+                "schema": "vmlx-tq-block-codec-v1",
+                "encode": {
+                    "calls": 4,
+                    "blocks": 19,
+                    "tokens": 1216,
+                    "last_event": {
+                        "sequence": 8,
+                        "blocks": 1,
+                        "tokens": 64,
+                        "boundary": "encode_tq_block",
+                        "key_bits_values": [8],
+                        "value_bits_values": [8],
+                    },
+                },
+                "decode": {
+                    "calls": 2,
+                    "blocks": 7,
+                    "tokens": 448,
+                    "last_event": {
+                        "sequence": 9,
+                        "blocks": 6,
+                        "tokens": 384,
+                        "boundary": "decode_tq_block",
+                        "key_bits_values": [8],
+                        "value_bits_values": [8],
+                    },
+                },
+            },
         )
 
         engine = SimpleNamespace(
@@ -11816,12 +11860,28 @@ class TestTurboQuantKVTelemetry:
         )
 
         status = _turboquant_kv_cache_status(engine=engine, scheduler=scheduler)
+        runtime_telemetry = _cache_storage_runtime_telemetry()
 
         assert status["live_encode_enabled"] is False
         assert status["storage_encode_enabled"] is True
-        assert status["storage_encode_telemetry"]["calls"] == 3
         assert status["codec_compress_telemetry"]["compressed_tokens_after"] == 154
         assert "live_encode_telemetry" not in status
+        assert "storage_encode_telemetry" not in status
+        assert runtime_telemetry["schema"] == (
+            "vmlx-cache-storage-runtime-telemetry-v1"
+        )
+        block_codec = runtime_telemetry["turboquant_block_codec"]
+        assert block_codec["schema"] == "vmlx-tq-block-codec-v1"
+        assert block_codec["encode"]["calls"] == 4
+        assert block_codec["encode"]["blocks"] == 19
+        assert block_codec["decode"]["calls"] == 2
+        assert block_codec["decode"]["blocks"] == 7
+        topology = _cache_topology_configuration(
+            scheduler,
+            {"turboquant_kv_cache": status},
+        )
+        assert "storage_encode_telemetry" not in topology["turboquant_kv_cache"]
+        assert "storage_decode_telemetry" not in topology["turboquant_kv_cache"]
 
     def test_detects_nested_mllm_turboquant_make_cache(self):
         from vmlx_engine.server import _turboquant_kv_cache_status

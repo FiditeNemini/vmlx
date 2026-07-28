@@ -920,9 +920,6 @@ def _fixture_cache_capture(
                 "enabled": tq_enabled,
                 "storage_key_bits": 4 if tq_enabled else 0,
                 "storage_value_bits": 4 if tq_enabled else 0,
-                "storage_encode_telemetry": (
-                    {"blocks": 1} if tq_enabled else {}
-                ),
             },
             "kv_cache_quantization": {"enabled": tq_enabled},
             "native_cache": {
@@ -989,6 +986,60 @@ def _fixture_cache_capture(
                     "health_counter_deltas": {},
                 },
             )
+        encode_count = (
+            2
+            if tq_enabled and gate_operation == "store"
+            else 0
+        )
+        decode_count = (
+            2
+            if tq_enabled
+            and (gate_operation == "probe" or phase["index"] == 2)
+            else 0
+        )
+
+        def codec_runtime(
+            encode_calls: int,
+            decode_calls: int,
+        ) -> dict:
+            def operation_row(
+                operation: str,
+                calls: int,
+            ) -> dict:
+                return {
+                    "calls": calls,
+                    "blocks": calls,
+                    "tokens": calls * 64,
+                    "last_event": (
+                        {
+                            "sequence": (
+                                encode_calls
+                                if operation == "encode"
+                                else encode_calls + decode_calls
+                            ),
+                            "boundary": (
+                                "encode_tq_block"
+                                if operation == "encode"
+                                else "decode_tq_entries"
+                            ),
+                            "blocks": 1,
+                            "tokens": 64,
+                            "key_bits_values": [4],
+                            "value_bits_values": [4],
+                        }
+                        if calls
+                        else None
+                    ),
+                }
+
+            return {
+                "schema": "vmlx-cache-storage-runtime-telemetry-v1",
+                "turboquant_block_codec": {
+                    "schema": "vmlx-tq-block-codec-v1",
+                    "encode": operation_row("encode", encode_calls),
+                    "decode": operation_row("decode", decode_calls),
+                },
+            }
         summary = {
             "schema": module.CACHE_PROOF_SCHEMA,
             "phase": gate_operation,
@@ -1017,7 +1068,14 @@ def _fixture_cache_capture(
                 }
             },
             "requests": requests,
+            "health_before": {
+                "cache_storage_runtime_telemetry": codec_runtime(0, 0),
+            },
             "health_final": {
+                "cache_storage_runtime_telemetry": codec_runtime(
+                    encode_count,
+                    decode_count,
+                ),
                 "cache": {
                     "block_disk_cache": {
                         "disk_size_bytes": 512,
@@ -1986,7 +2044,49 @@ def test_r19_raw_protocol_parser_rejects_malformed_and_missing_terminal():
     assert (
         module._parse_raw_protocol_stream(
             "chat",
+            b": keep-alive\n\nnot-an-sse-field\n\ndata: [DONE]\n\n",
+        )
+        is None
+    )
+    assert (
+        module._parse_raw_protocol_stream(
+            "ollama",
+            b": keep-alive\n"
+            b'{"message":{"content":"answer"},"done":true,"done_reason":"stop"}\n',
+        )
+        is None
+    )
+    assert (
+        module._parse_raw_protocol_stream(
+            "chat",
             b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n',
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("protocol", ["chat", "responses", "anthropic"])
+def test_r19_raw_sse_parser_accepts_interspersed_comments(protocol: str):
+    module = load_module()
+    raw = _fixture_protocol_response(protocol, 3)
+    lines = raw.splitlines(keepends=True)
+    with_comments = b": initial keep-alive\n" + b"".join(
+        line + (b": inter-event keep-alive\n" if index == 1 else b"")
+        for index, line in enumerate(lines)
+    )
+    parsed = module._parse_raw_protocol_stream(protocol, with_comments)
+    assert parsed is not None
+    assert parsed["terminals"] == 1
+    assert parsed["terminal_last"] is True
+    assert module._parse_raw_protocol_stream_v5(protocol, with_comments) is not None
+
+
+def test_r19_raw_sse_parser_rejects_comment_only_stream():
+    module = load_module()
+    assert (
+        module._parse_raw_protocol_stream(
+            "chat",
+            b": keep-alive\n\n: another keep-alive\n",
         )
         is None
     )
@@ -2427,6 +2527,67 @@ def test_r19_owned_jang_runner_requires_build_import_and_test(
         module.REQUIRED_ASSERTIONS["jang_runtime_provenance"]
     )
     assert len(results["jang_runtime_provenance"]["executions"]) == 3
+
+
+def test_r19_v5_jang_source_argument_is_authoritative_without_environment(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    jang_root = tmp_path / "jang"
+    jang_root.mkdir()
+    (jang_root / "pyproject.toml").write_text(
+        f'version = "{module.JANG_VERSION}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("VMLX_JANG_TOOLS_SOURCE", raising=False)
+
+    def fake_git(root: Path, *args: str) -> str:
+        assert root == jang_root.resolve()
+        command = tuple(args)
+        if command == ("rev-parse", "HEAD"):
+            return module.JANG_COMMIT
+        if command == ("rev-parse", "HEAD^{tree}"):
+            return module.JANG_TREE
+        if command == ("status", "--porcelain", "--untracked-files=all"):
+            return ""
+        if command == ("rev-parse", "@{upstream}"):
+            return module.JANG_COMMIT
+        if command == ("remote", "get-url", "origin"):
+            return "git@github.com:jjang-ai/jangq.git"
+        if command == (
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            "refs/heads/main",
+        ):
+            return f"{module.JANG_COMMIT}\trefs/heads/main"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(module, "run_git_in", fake_git)
+    failures: list[str] = []
+    observed = module.validate_jang_source(failures, jang_root)
+    assert failures == []
+    assert observed["commit"] == module.JANG_COMMIT
+    assert observed["tree"] == module.JANG_TREE
+
+
+def test_r19_v5_jang_source_argument_rejects_environment_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    explicit = tmp_path / "explicit"
+    environment = tmp_path / "environment"
+    explicit.mkdir()
+    environment.mkdir()
+    monkeypatch.setenv("VMLX_JANG_TOOLS_SOURCE", str(environment))
+    failures: list[str] = []
+    module.validate_jang_source(failures, explicit)
+    assert any(
+        "identify different repositories" in failure
+        for failure in failures
+    )
 
 
 def test_r19_health_family_contract_requires_actual_bundle_path_and_hashes(
@@ -3816,6 +3977,71 @@ def test_r19_v5_six_phase_cache_facts_are_raw_and_do_not_invent_cross_surface_po
         ),
     )
     tampered_captures.append(native_generic_contract)
+
+    tampered_captures.append(
+        replace_phase_summary(
+            capture,
+            0,
+            lambda summary: summary["health_final"].pop(
+                "cache_storage_runtime_telemetry"
+            ),
+        )
+    )
+    tampered_captures.append(
+        replace_phase_summary(
+            capture,
+            0,
+            lambda summary: summary["health_final"][
+                "cache_storage_runtime_telemetry"
+            ]["turboquant_block_codec"].update(
+                {
+                    "encode": {
+                        "calls": 0,
+                        "blocks": 0,
+                        "tokens": 0,
+                        "last_event": None,
+                    }
+                }
+            ),
+        )
+    )
+    tampered_captures.append(
+        replace_phase_summary(
+            capture,
+            1,
+            lambda summary: summary["health_final"][
+                "cache_storage_runtime_telemetry"
+            ]["turboquant_block_codec"]["decode"]["last_event"].__setitem__(
+                "key_bits_values",
+                [8],
+            ),
+        )
+    )
+    tampered_captures.append(
+        replace_phase_summary(
+            capture,
+            4,
+            lambda summary: summary["health_final"][
+                "cache_storage_runtime_telemetry"
+            ]["turboquant_block_codec"].update(
+                {
+                    "encode": {
+                        "calls": 1,
+                        "blocks": 1,
+                        "tokens": 64,
+                        "last_event": {
+                            "sequence": 1,
+                            "boundary": "encode_tq_block",
+                            "blocks": 1,
+                            "tokens": 64,
+                            "key_bits_values": [4],
+                            "value_bits_values": [4],
+                        },
+                    }
+                }
+            ),
+        )
+    )
 
     for field, value in (
         ("family", "dsv4"),

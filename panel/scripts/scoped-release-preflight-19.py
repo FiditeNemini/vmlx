@@ -1577,12 +1577,28 @@ def _derive_bundle_facts(parsed: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate_jang_source(failures: list[str]) -> dict[str, Any]:
-    configured = os.environ.get("VMLX_JANG_TOOLS_SOURCE")
+def validate_jang_source(
+    failures: list[str],
+    configured_source: Path | str | None = None,
+) -> dict[str, Any]:
+    configured_from_arg = (
+        str(Path(configured_source).expanduser().resolve())
+        if configured_source is not None
+        else ""
+    )
+    configured_from_env = os.environ.get("VMLX_JANG_TOOLS_SOURCE", "")
+    if configured_from_arg and configured_from_env:
+        require(
+            Path(configured_from_env).expanduser().resolve()
+            == Path(configured_from_arg),
+            failures,
+            "--jang-source and VMLX_JANG_TOOLS_SOURCE identify different repositories",
+        )
+    configured = configured_from_arg or configured_from_env
     require(
         bool(configured),
         failures,
-        "VMLX_JANG_TOOLS_SOURCE must identify the exact clean JANG release source",
+        "--jang-source or VMLX_JANG_TOOLS_SOURCE must identify the exact clean JANG release source",
     )
     if not configured:
         return {}
@@ -2119,6 +2135,11 @@ def _parse_raw_protocol_stream(
         if not line:
             event_name = ""
             continue
+        if protocol != "ollama" and line.startswith(":"):
+            # RFC 8895 Server-Sent Events comments are legal keep-alives.
+            # They carry no event payload and must not invalidate retained raw
+            # protocol evidence.
+            continue
         if protocol != "ollama" and line.startswith("event:"):
             event_name = line.removeprefix("event:").strip()
             continue
@@ -2362,6 +2383,8 @@ def _parse_raw_protocol_stream_v5(
         line = raw_line.strip()
         if not line:
             event_name = ""
+            continue
+        if protocol != "ollama" and line.startswith(":"):
             continue
         if protocol != "ollama" and line.startswith("event:"):
             event_name = line.removeprefix("event:").strip()
@@ -6535,12 +6558,55 @@ def _v5_cache_facts(
     phase_instantiated: dict[int, dict[str, Any]] = {}
     saw_phase2_ram_eviction = False
     saw_phase2_disk_eviction = False
+    saw_tq_storage_encode = False
+    saw_tq_storage_decode = False
 
     def integer(value: Any) -> int:
         try:
             return int(value or 0)
         except (TypeError, ValueError):
             return 0
+
+    def tq_codec_runtime(health: Any) -> dict[str, Any] | None:
+        telemetry = nested(
+            health,
+            "cache_storage_runtime_telemetry",
+        )
+        codec = (
+            telemetry.get("turboquant_block_codec")
+            if isinstance(telemetry, dict)
+            else None
+        )
+        if (
+            not isinstance(telemetry, dict)
+            or telemetry.get("schema")
+            != "vmlx-cache-storage-runtime-telemetry-v1"
+            or not isinstance(codec, dict)
+            or codec.get("schema") != "vmlx-tq-block-codec-v1"
+        ):
+            return None
+        return codec
+
+    def codec_delta(
+        before: dict[str, Any] | None,
+        after: dict[str, Any] | None,
+        operation: str,
+    ) -> tuple[int, int, int]:
+        before_row = (
+            before.get(operation) if isinstance(before, dict) else None
+        )
+        after_row = (
+            after.get(operation) if isinstance(after, dict) else None
+        )
+        if not isinstance(before_row, dict) or not isinstance(after_row, dict):
+            return (-1, -1, -1)
+        return (
+            integer(after_row.get("calls")) - integer(before_row.get("calls")),
+            integer(after_row.get("blocks"))
+            - integer(before_row.get("blocks")),
+            integer(after_row.get("tokens"))
+            - integer(before_row.get("tokens")),
+        )
 
     for expected_phase, scenario in zip(
         V5_CACHE_PHASES,
@@ -6866,6 +6932,12 @@ def _v5_cache_facts(
             if isinstance(topology, dict)
             else None
         )
+        codec_before = tq_codec_runtime(summary.get("health_before"))
+        codec_after = tq_codec_runtime(
+            summary.get("health_final") or summary.get("health_after")
+        )
+        encode_delta = codec_delta(codec_before, codec_after, "encode")
+        decode_delta = codec_delta(codec_before, codec_after, "decode")
         if cache_policy == "q4":
             primary_identity = str(
                 bundle_snapshot.get("derived", {}).get("identity") or ""
@@ -6890,9 +6962,46 @@ def _v5_cache_facts(
                 )
             ):
                 return set(), []
-            telemetry = tq.get("storage_encode_telemetry")
-            if not isinstance(telemetry, dict) or not telemetry:
+            requires_encode = gate_operation == "store"
+            requires_decode = gate_operation == "probe"
+            if expected_phase["index"] == 2:
+                requires_encode = True
+                requires_decode = True
+            if (
+                codec_before is None
+                or codec_after is None
+                or any(value < 0 for value in (*encode_delta, *decode_delta))
+                or (
+                    requires_encode
+                    and not all(value > 0 for value in encode_delta)
+                )
+                or (
+                    requires_decode
+                    and not all(value > 0 for value in decode_delta)
+                )
+            ):
                 return set(), []
+            for operation, delta in (
+                ("encode", encode_delta),
+                ("decode", decode_delta),
+            ):
+                if not all(value > 0 for value in delta):
+                    continue
+                row = codec_after.get(operation)
+                event = row.get("last_event") if isinstance(row, dict) else None
+                if (
+                    not isinstance(event, dict)
+                    or integer(event.get("sequence")) <= 0
+                    or integer(event.get("blocks")) <= 0
+                    or integer(event.get("tokens")) <= 0
+                    or event.get("key_bits_values") != [expected_storage_bits]
+                    or event.get("value_bits_values") != [expected_storage_bits]
+                ):
+                    return set(), []
+                if operation == "encode":
+                    saw_tq_storage_encode = True
+                else:
+                    saw_tq_storage_decode = True
             q4_phase_indexes.add(expected_phase["index"])
         elif cache_policy == "ssd-only":
             if (
@@ -6904,6 +7013,10 @@ def _v5_cache_facts(
                 or tq.get("enabled") is not False
                 or not isinstance(kv_quant, dict)
                 or kv_quant.get("enabled") is not False
+                or codec_before is None
+                or codec_after is None
+                or encode_delta != (0, 0, 0)
+                or decode_delta != (0, 0, 0)
             ):
                 return set(), []
             facts.add("explicit_off_honored")
@@ -6932,6 +7045,10 @@ def _v5_cache_facts(
                 or native_cache.get("schema") != "minimax_m3_msa_v1"
                 or not isinstance(generic_tq, dict)
                 or generic_tq.get("enabled") is not False
+                or codec_before is None
+                or codec_after is None
+                or encode_delta != (0, 0, 0)
+                or decode_delta != (0, 0, 0)
             ):
                 return set(), []
             facts.add("unsupported_architecture_exception_cache")
@@ -7007,6 +7124,8 @@ def _v5_cache_facts(
         == session_ids[V5_NATIVE_REPRESENTATIVE_ID]
         or len(set(all_backend_pids)) != len(V5_CACHE_PHASES)
         or any(len(set(pids)) != 2 for pids in q4_restart_pids.values())
+        or not saw_tq_storage_encode
+        or not saw_tq_storage_decode
     ):
         return set(), []
     facts.update(
@@ -13064,7 +13183,7 @@ def _v5_run(
     jang_state = (
         jang_observer(failures)
         if callable(jang_observer)
-        else validate_jang_source(failures)
+        else validate_jang_source(failures, args.jang_source)
     )
     owned_plan_provider = hooks.get("owned_check_plan_provider")
     owned_plans = (

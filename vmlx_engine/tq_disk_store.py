@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -54,6 +55,83 @@ _TQ_RESTORE_DTYPES = {
     "float16": mx.float16 if HAS_MLX else None,
     "float32": mx.float32 if HAS_MLX else None,
 }
+_TQ_BLOCK_CODEC_TELEMETRY_LOCK = threading.Lock()
+_TQ_BLOCK_CODEC_TELEMETRY: Dict[str, Any] = {
+    "sequence": 0,
+    "encode_calls": 0,
+    "encoded_blocks": 0,
+    "encoded_tokens": 0,
+    "last_encode": None,
+    "decode_calls": 0,
+    "decoded_blocks": 0,
+    "decoded_tokens": 0,
+    "last_decode": None,
+}
+
+
+def _record_tq_block_codec_event(
+    operation: str,
+    *,
+    blocks: int,
+    tokens: int,
+    metadata: Dict[str, Any],
+) -> None:
+    """Record one packed block-codec call after its output shape is validated.
+
+    This telemetry belongs to the direct ``tq_disk_store`` codec used by paged
+    and L2 cache blocks. It deliberately does not reuse
+    ``TurboQuantKVCache._vmlx_last_compress``: that class-level signal describes
+    live cache-object compression and is not touched by this storage path.
+    """
+    if operation not in {"encode", "decode"}:
+        raise ValueError(f"unsupported TQ block telemetry operation: {operation}")
+    block_count = max(0, int(blocks))
+    token_count = max(0, int(tokens))
+    with _TQ_BLOCK_CODEC_TELEMETRY_LOCK:
+        _TQ_BLOCK_CODEC_TELEMETRY["sequence"] += 1
+        sequence = int(_TQ_BLOCK_CODEC_TELEMETRY["sequence"])
+        if operation == "encode":
+            _TQ_BLOCK_CODEC_TELEMETRY["encode_calls"] += 1
+            _TQ_BLOCK_CODEC_TELEMETRY["encoded_blocks"] += block_count
+            _TQ_BLOCK_CODEC_TELEMETRY["encoded_tokens"] += token_count
+            _TQ_BLOCK_CODEC_TELEMETRY["last_encode"] = {
+                "sequence": sequence,
+                "blocks": block_count,
+                "tokens": token_count,
+                **metadata,
+            }
+        else:
+            _TQ_BLOCK_CODEC_TELEMETRY["decode_calls"] += 1
+            _TQ_BLOCK_CODEC_TELEMETRY["decoded_blocks"] += block_count
+            _TQ_BLOCK_CODEC_TELEMETRY["decoded_tokens"] += token_count
+            _TQ_BLOCK_CODEC_TELEMETRY["last_decode"] = {
+                "sequence": sequence,
+                "blocks": block_count,
+                "tokens": token_count,
+                **metadata,
+            }
+
+
+def tq_block_codec_telemetry() -> Dict[str, Any]:
+    """Return a bounded process snapshot of validated block codec calls."""
+    with _TQ_BLOCK_CODEC_TELEMETRY_LOCK:
+        last_encode = _TQ_BLOCK_CODEC_TELEMETRY["last_encode"]
+        last_decode = _TQ_BLOCK_CODEC_TELEMETRY["last_decode"]
+        return {
+            "schema": "vmlx-tq-block-codec-v1",
+            "encode": {
+                "calls": int(_TQ_BLOCK_CODEC_TELEMETRY["encode_calls"]),
+                "blocks": int(_TQ_BLOCK_CODEC_TELEMETRY["encoded_blocks"]),
+                "tokens": int(_TQ_BLOCK_CODEC_TELEMETRY["encoded_tokens"]),
+                "last_event": dict(last_encode) if last_encode is not None else None,
+            },
+            "decode": {
+                "calls": int(_TQ_BLOCK_CODEC_TELEMETRY["decode_calls"]),
+                "blocks": int(_TQ_BLOCK_CODEC_TELEMETRY["decoded_blocks"]),
+                "tokens": int(_TQ_BLOCK_CODEC_TELEMETRY["decoded_tokens"]),
+                "last_event": dict(last_decode) if last_decode is not None else None,
+            },
+        }
 
 
 def _canonical_tq_dtype(dtype: Any) -> str:
@@ -198,8 +276,12 @@ def warm_tq_decoder_states(
                 "value_bits": value_bits,
                 "seed": seed,
             },
+            _record_telemetry=False,
         )
-        decoded_keys, decoded_values = decode_tq_block(entry)
+        decoded_keys, decoded_values = decode_tq_block(
+            entry,
+            _record_telemetry=False,
+        )
         probe_arrays.extend((decoded_keys, decoded_values))
         codec_probes += 1
     if probe_arrays:
@@ -221,6 +303,8 @@ def encode_tq_block(
     keys: Any,
     values: Any,
     config: Dict[str, Any],
+    *,
+    _record_telemetry: bool = True,
 ) -> Tuple[str, Any, Any, Dict[str, Any]]:
     """Encode one positional paged-cache block as native TurboQuant data."""
     if not HAS_MLX:
@@ -260,7 +344,7 @@ def encode_tq_block(
         or int(cv.shape[-2]) != token_count
     ):
         raise ValueError("TQ block encoder did not produce a complete packed payload")
-    return (
+    result = (
         "turboquant_kv",
         ck,
         cv,
@@ -275,9 +359,31 @@ def encode_tq_block(
             "offset": token_count,
         },
     )
+    if _record_telemetry:
+        _record_tq_block_codec_event(
+            "encode",
+            blocks=1,
+            tokens=token_count,
+            metadata={
+                "boundary": "encode_tq_block",
+                "key_bits_values": [key_bits],
+                "value_bits_values": [value_bits],
+                "key_dim_values": [int(keys.shape[-1])],
+                "value_dim_values": [int(values.shape[-1])],
+                "key_dtype_values": [_canonical_tq_dtype(keys.dtype)],
+                "value_dtype_values": [_canonical_tq_dtype(values.dtype)],
+                "key_shape": [int(dim) for dim in keys.shape],
+                "value_shape": [int(dim) for dim in values.shape],
+            },
+        )
+    return result
 
 
-def decode_tq_block(entry: Tuple[Any, ...]) -> Tuple[Any, Any]:
+def decode_tq_block(
+    entry: Tuple[Any, ...],
+    *,
+    _record_telemetry: bool = True,
+) -> Tuple[Any, Any]:
     """Decode one native TurboQuant paged-cache block to attention KV tensors."""
     if not HAS_MLX:
         raise RuntimeError("MLX required for TQ block decoding")
@@ -310,6 +416,26 @@ def decode_tq_block(entry: Tuple[Any, ...]) -> Tuple[Any, Any]:
         raise ValueError(
             f"decoded TQ block length mismatch: expected={expected}, "
             f"keys={keys.shape[-2]}, values={values.shape[-2]}"
+        )
+    if _record_telemetry:
+        # _stack_tq_block_entries adds one outer page dimension so a single
+        # packed decode invocation can truthfully account for multiple blocks.
+        decoded_blocks = int(keys.shape[0]) if len(keys.shape) == 5 else 1
+        _record_tq_block_codec_event(
+            "decode",
+            blocks=decoded_blocks,
+            tokens=expected * decoded_blocks,
+            metadata={
+                "boundary": "decode_tq_block",
+                "key_bits_values": [int(config["key_bits"])],
+                "value_bits_values": [int(config["value_bits"])],
+                "key_dim_values": [int(config["key_dim"])],
+                "value_dim_values": [int(config["value_dim"])],
+                "key_dtype_values": [str(config["key_dtype"])],
+                "value_dtype_values": [str(config["value_dtype"])],
+                "key_shape": [int(dim) for dim in keys.shape],
+                "value_shape": [int(dim) for dim in values.shape],
+            },
         )
     return keys, values
 

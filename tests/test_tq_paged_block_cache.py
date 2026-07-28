@@ -233,9 +233,11 @@ def test_tq_decoder_startup_warmup_materializes_distinct_layer_seeds():
         for seed in (211, 212, 213)
     ]
     tq_disk_store._tq_decoder_pair.cache_clear()
+    telemetry_before = tq_disk_store.tq_block_codec_telemetry()
 
     stats = tq_disk_store.warm_tq_decoder_states(caches, probe_heads=2)
     info = tq_disk_store._tq_decoder_pair.cache_info()
+    telemetry_after = tq_disk_store.tq_block_codec_telemetry()
 
     assert stats["configs"] == 3
     assert stats["arrays"] > 0
@@ -245,6 +247,7 @@ def test_tq_decoder_startup_warmup_materializes_distinct_layer_seeds():
     assert stats["probe_heads"] == 2
     assert info.maxsize == 256
     assert info.currsize == 3
+    assert telemetry_after == telemetry_before
 
 
 def test_mllm_tq_decoder_warmup_resolves_language_model_owner(monkeypatch):
@@ -318,6 +321,56 @@ def test_tq_block_storage_encode_does_not_call_live_cache_compress(monkeypatch):
     assert entry[3]["value_bits"] == 4
     assert keys.shape == state["state"][0].shape
     assert values.shape == state["state"][1].shape
+
+
+def test_tq_block_codec_telemetry_counts_real_q4_encode_and_batched_decode():
+    from vmlx_engine import tq_disk_store
+
+    before = tq_disk_store.tq_block_codec_telemetry()
+    states = [_tq_state(tokens=8, seed=130) for _ in range(2)]
+    for state in states:
+        state["tq_config"].update(key_bits=4, value_bits=4)
+    entries = [
+        tq_disk_store.encode_tq_block(
+            state["state"][0],
+            state["state"][1],
+            state["tq_config"],
+        )
+        for state in states
+    ]
+    after_encode = tq_disk_store.tq_block_codec_telemetry()
+
+    assert after_encode["schema"] == "vmlx-tq-block-codec-v1"
+    assert after_encode["encode"]["calls"] - before["encode"]["calls"] == 2
+    assert after_encode["encode"]["blocks"] - before["encode"]["blocks"] == 2
+    assert after_encode["encode"]["tokens"] - before["encode"]["tokens"] == 16
+    assert after_encode["encode"]["last_event"] == {
+        "sequence": after_encode["encode"]["last_event"]["sequence"],
+        "blocks": 1,
+        "tokens": 8,
+        "boundary": "encode_tq_block",
+        "key_bits_values": [4],
+        "value_bits_values": [4],
+        "key_dim_values": [64],
+        "value_dim_values": [64],
+        "key_dtype_values": ["float16"],
+        "value_dtype_values": ["float16"],
+        "key_shape": [1, 2, 8, 64],
+        "value_shape": [1, 2, 8, 64],
+    }
+
+    keys, values = tq_disk_store.decode_tq_blocks(entries)
+    mx.eval(keys, values)
+    after_decode = tq_disk_store.tq_block_codec_telemetry()
+
+    assert after_decode["decode"]["calls"] - after_encode["decode"]["calls"] == 1
+    assert after_decode["decode"]["blocks"] - after_encode["decode"]["blocks"] == 2
+    assert after_decode["decode"]["tokens"] - after_encode["decode"]["tokens"] == 16
+    assert after_decode["decode"]["last_event"]["boundary"] == "decode_tq_block"
+    assert after_decode["decode"]["last_event"]["blocks"] == 2
+    assert after_decode["decode"]["last_event"]["tokens"] == 16
+    assert after_decode["decode"]["last_event"]["key_bits_values"] == [4]
+    assert after_decode["decode"]["last_event"]["value_bits_values"] == [4]
 
 
 def test_tq_block_batch_decode_matches_individual_q4_pages_exactly():

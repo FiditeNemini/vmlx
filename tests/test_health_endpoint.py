@@ -384,6 +384,59 @@ class TestHealthEndpoint:
             for value in provenance.values()
         )
 
+    def test_health_publishes_storage_runtime_telemetry_outside_topology(self):
+        """Volatile codec counters must not change the topology fingerprint."""
+        from vmlx_engine import server
+
+        runtime_telemetry = {
+            "schema": "vmlx-cache-storage-runtime-telemetry-v1",
+            "turboquant_block_codec": {
+                "schema": "vmlx-tq-block-codec-v1",
+                "encode": {
+                    "calls": 2,
+                    "blocks": 3,
+                    "tokens": 192,
+                    "last_event": {
+                        "sequence": 4,
+                        "boundary": "encode_tq_block",
+                    },
+                },
+                "decode": {
+                    "calls": 1,
+                    "blocks": 2,
+                    "tokens": 128,
+                    "last_event": {
+                        "sequence": 5,
+                        "boundary": "decode_tq_block",
+                    },
+                },
+            },
+        }
+        with (
+            patch.object(server, "_engine", None),
+            patch.object(server, "_model_name", None),
+            patch.object(server, "_model_load_error", None),
+            patch.object(server, "_mcp_manager", None),
+            patch.object(server, "_jang_metadata", None),
+            patch.object(server, "_last_request_time", 0.0),
+            patch.object(
+                server,
+                "_cache_storage_runtime_telemetry",
+                return_value=runtime_telemetry,
+            ),
+        ):
+            result = _run(server.health())
+
+        assert result["cache_storage_runtime_telemetry"] == runtime_telemetry
+        topology = result["cache_topology_provenance"]
+        assert topology["canonical_sha256"] == (
+            server._canonical_attestation_sha256(topology["configuration"])
+        )
+        assert "storage_runtime_telemetry" not in json.dumps(
+            topology["configuration"],
+            sort_keys=True,
+        )
+
     def test_health_bundle_attestation_hashes_observed_loaded_config_files(
         self,
         tmp_path,

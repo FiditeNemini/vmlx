@@ -9027,16 +9027,13 @@ def _turboquant_kv_cache_status(engine=None, scheduler=None) -> dict:
             ),
         }
         if live_telemetry is not None:
-            # TurboQuantKVCache.compress() is also the storage-boundary codec
-            # entry point. Do not label those calls as live mid-decode encoding
-            # when compress_after=0; that made a correct storage-only Qwen Auto
-            # run look like live lossy transitions had occurred.
+            # This class-level signal belongs to live cache-object compression.
+            # The paged/L2 block codec bypasses TurboQuantKVCache.compress() and
+            # is reported separately from tq_disk_store below.
             telemetry = dict(live_telemetry)
             status["codec_compress_telemetry"] = telemetry
             if live_encode_enabled:
                 status["live_encode_telemetry"] = telemetry
-            elif native_tq_storage:
-                status["storage_encode_telemetry"] = telemetry
         cfg = getattr(scheduler, "config", None) if scheduler is not None else None
         if cfg is not None:
             batch_api = bool(getattr(scheduler, "_tq_batch_api", False))
@@ -9059,6 +9056,23 @@ def _turboquant_kv_cache_status(engine=None, scheduler=None) -> dict:
             )
         return status
     return {"enabled": False}
+
+
+def _cache_storage_runtime_telemetry() -> dict[str, Any]:
+    """Return volatile storage-codec observations outside topology identity."""
+    telemetry: dict[str, Any] = {
+        "schema": "vmlx-cache-storage-runtime-telemetry-v1",
+    }
+    try:
+        from .tq_disk_store import tq_block_codec_telemetry
+
+        telemetry["turboquant_block_codec"] = tq_block_codec_telemetry()
+    except Exception:
+        telemetry["turboquant_block_codec"] = {
+            "schema": "vmlx-tq-block-codec-v1",
+            "available": False,
+        }
+    return telemetry
 
 
 def _current_model_config():
@@ -10356,6 +10370,12 @@ async def health():
         )
         if native_cache:
             result["native_cache"] = native_cache
+
+    # Volatile codec counters must not participate in the stable cache-topology
+    # fingerprint. Keep them as a separate runtime observation surface.
+    result["cache_storage_runtime_telemetry"] = (
+        _cache_storage_runtime_telemetry()
+    )
 
     model_loaded = bool(result.get("model_loaded"))
     model_bundle_provenance = _bundle_configuration_attestation(
@@ -13937,7 +13957,7 @@ async def ollama_chat(fastapi_request: Request):
 
     _log_resolved_sampling_kwargs(
         "/api/chat",
-        _model_path or _model_name or chat_req.model,
+        chat_req.model or _resolve_model_name(),
         chat_kwargs,
     )
 
@@ -16095,7 +16115,7 @@ async def create_chat_completion(
 
     _log_resolved_sampling_kwargs(
         "/v1/chat/completions",
-        _model_path or _model_name or request.model,
+        request.model or _resolve_model_name(),
         chat_kwargs,
         proof_request_id=_request_header_value(
             fastapi_request,
@@ -19113,7 +19133,7 @@ async def create_response(
 
     _log_resolved_sampling_kwargs(
         "/v1/responses",
-        _model_path or _model_name or request.model,
+        request.model or _resolve_model_name(),
         chat_kwargs,
         proof_request_id=_request_header_value(
             fastapi_request,

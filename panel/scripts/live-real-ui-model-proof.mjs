@@ -263,16 +263,15 @@ const samplingOverrides = {
 }
 const defaultPromptOne = builtinToolsEnabled
   ? [
-      'Use the run_command tool exactly once to create a file named real_ui_tool_probe_1.txt in the configured working directory.',
-      'Write the text REAL_UI_LIVE_TOOL_ONE into that file.',
+      'Use the run_command tool exactly once with this exact command:',
+      'printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt',
       'After the tool result is returned, reply briefly in English and include REAL_UI_LIVE_TOOL_ONE once.',
     ].join(' ')
   : 'Reply briefly in English. Include the phrase REAL_UI_LIVE once.'
 const defaultPromptTwo = builtinToolsEnabled
   ? [
-      'Use the run_command tool exactly once to read real_ui_tool_probe_1.txt and create real_ui_tool_probe_2.txt in the same working directory.',
-      'Write REAL_UI_LIVE_TOOL_TWO into the second file.',
-      'Do not copy the first file into the second file; the second file must contain REAL_UI_LIVE_TOOL_TWO.',
+      'Use the run_command tool exactly once with this exact command:',
+      'test "$(cat real_ui_tool_probe_1.txt)" = REAL_UI_LIVE_TOOL_ONE && printf %s REAL_UI_LIVE_TOOL_TWO > real_ui_tool_probe_2.txt',
       'After the tool result is returned, reply briefly in English with REAL_UI_LIVE_TOOL_TWO once and mention this is the second UI turn.',
     ].join(' ')
   : 'Repeat the phrase REAL_UI_LIVE once and mention that this is the second UI turn.'
@@ -282,10 +281,12 @@ const defaultPromptThree = builtinToolsEnabled
       'Using the prior tool results, reply briefly in English and include REAL_UI_LIVE_TOOL_ONE and REAL_UI_LIVE_TOOL_TWO once each.',
       'Mention that this is the third UI turn.',
       'Also include the literal currency string $43 and this exact inline TeX expression: $47 \\times 19 = 893 < 920 = 46 \\times 20$.',
+      'Copy that TeX byte-for-byte: keep both \\times commands and do not replace either one with a Unicode multiplication sign.',
     ].join(' ')
   : [
       'Repeat the phrase REAL_UI_LIVE once and mention that this is the third UI turn.',
       'Also include the literal currency string $43 and this exact inline TeX expression: $47 \\times 19 = 893 < 920 = 46 \\times 20$.',
+      'Copy that TeX byte-for-byte: keep both \\times commands and do not replace either one with a Unicode multiplication sign.',
     ].join(' ')
 const promptOne = promptOneOverride || defaultPromptOne
 const promptTwo = promptTwoOverride || defaultPromptTwo
@@ -2148,7 +2149,7 @@ function captureUiRuntimeProvenance(
   }
 }
 
-function runtimeBindingFromHealth(health) {
+export function runtimeBindingFromHealth(health) {
   const runtime = health?.runtime_provenance || {}
   const modelBundle = health?.model_bundle_provenance || {}
   const cacheTopology = health?.cache_topology_provenance || {}
@@ -2166,6 +2167,10 @@ function runtimeBindingFromHealth(health) {
     model_name: String(health?.model_name || ''),
     model_bundle_fingerprint_sha256:
       String(modelBundle.fingerprint_sha256 || ''),
+    model_bundle_files:
+      modelBundle?.files && typeof modelBundle.files === 'object'
+        ? modelBundle.files
+        : {},
     cache_topology_fingerprint_sha256:
       String(cacheTopology.fingerprint_sha256 || ''),
   }
@@ -3153,6 +3158,7 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
     for (const channel of ['reasoning', 'content']) {
       let previousLength = 0
       let previousSegmentIndex = null
+      let previousReasoningSegments = []
       const channelEvents = events.filter(
         (event) => event?.event === 'stream' && event?.channel === channel,
       )
@@ -3172,8 +3178,29 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
         previousSegmentIndex = segmentIndex
         const delta = String(event?.delta || '')
         const retainedFullContent = event?.payload?.fullContent
+        const retainedReasoningSegments = channel === 'reasoning'
+          ? event?.payload?.reasoningSegments
+          : null
+        if (
+          channel === 'reasoning'
+          && (
+            !Array.isArray(retainedReasoningSegments)
+            || retainedReasoningSegments.length <= segmentIndex
+            || previousReasoningSegments.some(
+              (value, index) => index < segmentIndex
+                && String(retainedReasoningSegments[index] || '') !== value,
+            )
+          )
+        ) {
+          failures.push(
+            `message ${row?.messageId || 'unknown'} reasoning segment history changed or was omitted`,
+          )
+          break
+        }
         const fullContentLength = Number(
-          event?.payload?.fullContentLength
+          (channel === 'reasoning'
+            ? event?.payload?.reasoningSegmentLength
+            : event?.payload?.fullContentLength)
             ?? (typeof retainedFullContent === 'string'
               ? retainedFullContent.length
               : Number.NaN),
@@ -3193,6 +3220,11 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
           break
         }
         previousLength = fullContentLength
+        if (channel === 'reasoning') {
+          previousReasoningSegments = retainedReasoningSegments.map(
+            (value) => String(value || ''),
+          )
+        }
       }
       if (containsTransientProtocolMarker(traceChannelText(channelEvents, channel))) {
         failures.push(`message ${row?.messageId || 'unknown'} leaked parser markers across ${channel} stream boundaries`)
@@ -5170,6 +5202,7 @@ function healthIdentityMatchesUi(identity, uiBinding) {
     'python_source_read_error_count',
     'model_name',
     'model_bundle_fingerprint_sha256',
+    'model_bundle_files',
     'cache_topology_fingerprint_sha256',
     'fingerprint_sha256',
   ].every((field) => canonicalJson(identity?.[field]) === canonicalJson(uiBinding?.[field]))
@@ -6970,9 +7003,8 @@ async function main() {
     ].join(' '),
     'primary-tool-restart-probe': [
       primarySharedPrefix,
-      'Call the built-in run_command tool exactly once.',
-      'Use it to create real_ui_tool_probe_1.txt containing exactly REAL_UI_LIVE_TOOL_ONE,',
-      'then read that same file.',
+      'Call the built-in run_command tool exactly once with this exact command:',
+      'printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt && cat real_ui_tool_probe_1.txt',
       'After the tool result, include REAL_UI_LIVE_TOOL_ONE in the visible answer.',
     ].join(' '),
     'primary-history-paged-evict-refault': [
@@ -7441,21 +7473,38 @@ async function main() {
             ? Number(reasoningSegmentIndex.get(messageId) || 0)
             : null;
           if (event === 'stream' && typeof data?.fullContent === 'string') {
+            const reasoningSegments = (
+              channel === 'reasoning' && Array.isArray(data?.reasoningSegments)
+            )
+              ? data.reasoningSegments.map((value) => String(value || ''))
+              : null;
+            const cumulativeContent = (
+              reasoningSegments
+              && Number.isInteger(segmentIndex)
+              && segmentIndex >= 0
+            )
+              ? String(reasoningSegments[segmentIndex] || '')
+              : data.fullContent;
             const key = messageId + ':' + channel
               + (channel === 'reasoning' ? ':' + segmentIndex : '');
             const previous = priorFullContent.get(key) || '';
-            if (data.fullContent.startsWith(previous)) {
-              delta = data.fullContent.slice(previous.length);
+            if (cumulativeContent.startsWith(previous)) {
+              delta = cumulativeContent.slice(previous.length);
             } else {
               cumulativeReset = previous.length > 0;
-              delta = data.fullContent;
+              delta = cumulativeContent;
             }
-            priorFullContent.set(key, data.fullContent);
+            priorFullContent.set(key, cumulativeContent);
             tracePayload = {
               messageId: data?.messageId || null,
               isReasoning: data?.isReasoning === true,
               metrics: data?.metrics || null,
               fullContentLength: data.fullContent.length,
+              reasoningSegments,
+              reasoningSegmentLength:
+                reasoningSegments && Number.isInteger(segmentIndex)
+                  ? String(reasoningSegments[segmentIndex] || '').length
+                  : null,
             };
             const summary = streamTraceState.get(messageId) || {
               messageId,
@@ -8885,29 +8934,25 @@ async function main() {
           const cacheExpectRegex = ${JSON.stringify(cacheExpectRegex)};
           const expectPagedCacheLocked = ${JSON.stringify(expectPagedCacheLocked)};
           const expectPagedCache = ${JSON.stringify(expectPagedCache)};
-          const serverButton = await wait(() => {
-            const visibleChatSettings = [...document.querySelectorAll(
-              '[data-vmlx-control="chat-settings"]'
-            )].find((button) => isVisible(button));
-            const toolbar = visibleChatSettings?.parentElement;
-            return [...(toolbar?.querySelectorAll('button') || [])].find((button) =>
-              button !== visibleChatSettings
-              && isVisible(button)
-              && (button.textContent || '').replace(/\\s+/g, ' ').trim() === 'Server'
-              && /server settings/i.test(button.getAttribute('title') || '')
-            ) || null;
-          }, 'running-session Server settings control');
-          serverButton.click();
-          const drawerHeader = await wait(() =>
-            [...document.querySelectorAll('span')].find((element) =>
-              isVisible(element)
-              &&
-              (element.textContent || '').replace(/\\s+/g, ' ').trim() === 'Server Settings'
+          const serverButton = await wait(() =>
+            [...document.querySelectorAll(
+              '[data-vmlx-control="server-settings"]'
+            )].find((button) =>
+              button instanceof HTMLButtonElement && isVisible(button)
             ) || null,
+          'running-session Server settings control');
+          serverButton.click();
+          const drawer = await wait(() => {
+            const candidate = document.querySelector(
+              '[data-vmlx-surface="server-settings"]'
+            );
+            return candidate instanceof HTMLElement && isVisible(candidate)
+              ? candidate
+              : null;
+          },
           'running-session Server Settings drawer');
           const sectionClickResults = [];
           const clickSection = async (title) => {
-            const drawer = drawerHeader.parentElement?.parentElement;
             const sectionButtons = [...(drawer?.querySelectorAll('button') || [])];
             const clickable = sectionButtons.find((button) => {
               const normalized = (button.innerText || '').replace(/\\s+/g, ' ').trim();
@@ -8927,7 +8972,6 @@ async function main() {
           };
           await clickSection('Prefix Cache');
           await clickSection('In-Memory Paged Cache');
-          const drawer = drawerHeader.parentElement?.parentElement;
           const labelFor = (text) => [...(drawer?.querySelectorAll('label') || [])]
             .find((label) => (label.innerText || '').includes(text));
           const inputFor = (text) => labelFor(text)?.querySelector('input[type="checkbox"]');

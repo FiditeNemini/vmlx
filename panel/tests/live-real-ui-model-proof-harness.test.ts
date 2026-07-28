@@ -35,6 +35,7 @@ import {
   readPrivateExternalJson,
   runPostSentinelWorkWithCleanup,
   resolveIndependentBundleGenerationDefaults,
+  runtimeBindingFromHealth,
   upsertBoundedDomSample,
   uniqueProofBasename,
   validateExactToolLoopEvidence,
@@ -681,7 +682,14 @@ function streamEvent(
     cumulativeReset: false,
     payload: {
       fullContent,
+      fullContentLength: fullContent.length,
       isReasoning: channel === "reasoning",
+      ...(channel === "reasoning"
+        ? {
+            reasoningSegments: [fullContent],
+            reasoningSegmentLength: fullContent.length,
+          }
+        : {}),
     },
   };
 }
@@ -828,6 +836,7 @@ function goodResult(): Record<string, any> {
     python_source_read_error_count: 0,
     model_name: "test-model",
     model_bundle_fingerprint_sha256: sha,
+    model_bundle_files: modelBundleAttestation.files,
     cache_topology_fingerprint_sha256: sha,
   };
   const result: Record<string, any> = {
@@ -2198,14 +2207,15 @@ describe("real UI model proof harness", () => {
       "utf8",
     );
     expect(source).toContain(
-      "const visibleChatSettings = [...document.querySelectorAll(",
+      "'[data-vmlx-control=\"server-settings\"]'",
     );
     expect(source).toContain(
-      "const toolbar = visibleChatSettings?.parentElement;",
+      "'[data-vmlx-surface=\"server-settings\"]'",
     );
     expect(source).toContain(
       "controlScope: 'running-session-toolbar'",
     );
+    expect(source).not.toContain("visibleChatSettings?.parentElement");
     expect(source).not.toContain(
       "[...document.querySelectorAll('button')].find((button) =>\n"
         + "              (button.textContent || '').replace(/\\\\s+/g, ' ').trim() === 'Server'",
@@ -2675,6 +2685,48 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("uses the same bundle-file-bound backend fingerprint as the API matrix", () => {
+    const health = {
+      model_name: "test-model",
+      runtime_provenance: {
+        pid: 4321,
+        server_module_sha256: sha,
+        package_init_sha256: sha,
+        python_source_tree_sha256: sha,
+        python_executable_fingerprint_sha256: testExecutablePathSha,
+        python_source_file_count: 10,
+        python_source_read_error_count: 0,
+      },
+      model_bundle_provenance: modelBundleAttestation,
+      cache_topology_provenance: {
+        fingerprint_sha256: sha,
+      },
+    };
+    const binding = runtimeBindingFromHealth(health);
+    const canonicalIdentity = {
+      backend_pid: 4321,
+      runtime_source_hashes: {
+        server_module_sha256: sha,
+        package_init_sha256: sha,
+        python_source_tree_sha256: sha,
+        python_executable_fingerprint_sha256: testExecutablePathSha,
+      },
+      python_source_file_count: 10,
+      python_source_read_error_count: 0,
+      model_name: "test-model",
+      model_bundle_fingerprint_sha256: sha,
+      model_bundle_files: modelBundleAttestation.files,
+      cache_topology_fingerprint_sha256: sha,
+    };
+    expect(binding.fingerprint_sha256).toBe(canonicalHash(canonicalIdentity));
+
+    const changedHealth = structuredClone(health);
+    changedHealth.model_bundle_provenance.files["config.json"].sha256 =
+      otherSha;
+    expect(runtimeBindingFromHealth(changedHealth).fingerprint_sha256)
+      .not.toBe(binding.fingerprint_sha256);
+  });
+
   it("rejects settings not visibly persisted and stale route/model log records", () => {
     const result = structuredClone(goodResult());
     result.chatSettingsInteraction.persistedAfterReopen = false;
@@ -2767,9 +2819,14 @@ describe("real UI model proof harness", () => {
     );
     reasoningEvents[0].delta = first;
     reasoningEvents[0].payload.fullContentLength = first.length;
+    reasoningEvents[0].payload.reasoningSegments = [first];
+    reasoningEvents[0].payload.reasoningSegmentLength = first.length;
     delete reasoningEvents[0].payload.fullContent;
     reasoningEvents[1].delta = second;
     reasoningEvents[1].payload.fullContentLength = first.length + second.length;
+    reasoningEvents[1].payload.reasoningSegments = [first + second];
+    reasoningEvents[1].payload.reasoningSegmentLength =
+      first.length + second.length;
     delete reasoningEvents[1].payload.fullContent;
     result.persistedReasoningByMessage[0] = [first + second];
 
@@ -2820,10 +2877,24 @@ describe("real UI model proof harness", () => {
       {
         ...streamEvent(4, "reasoning", "Plan", "Plan"),
         segmentIndex: 1,
+        payload: {
+          fullContent: "Reason carefully\n\nPlan",
+          fullContentLength: "Reason carefully\n\nPlan".length,
+          isReasoning: true,
+          reasoningSegments: ["Reason carefully", "Plan"],
+          reasoningSegmentLength: "Plan".length,
+        },
       },
       {
         ...streamEvent(5, "reasoning", "Plan again", " again"),
         segmentIndex: 1,
+        payload: {
+          fullContent: "Reason carefully\n\nPlan again",
+          fullContentLength: "Reason carefully\n\nPlan again".length,
+          isReasoning: true,
+          reasoningSegments: ["Reason carefully", "Plan again"],
+          reasoningSegmentLength: "Plan again".length,
+        },
       },
       ...contentEvents.map((event: Record<string, unknown>, index: number) => ({
         ...event,

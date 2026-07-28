@@ -120,8 +120,14 @@ signing-secrets/
 **/*sign*.local.*
 **/*notar*-local*
 **/*notar*-private*
+**/*notary*-profile*.exp
+**/*notariz*-profile*.exp
+**/*notary*-auth*.exp
+**/*notariz*-auth*.exp
 **/*sign*-local*
 **/*sign*-private*
+**/*signing*-profile*.exp
+**/*signing*-auth*.exp
 **/*codesign*-local*
 **/*codesign*-private*
 **/*release*.local.*

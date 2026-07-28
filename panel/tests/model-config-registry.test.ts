@@ -1763,6 +1763,56 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
     expect(detected.defaultEnableThinking).toBe(false)
   })
 
+  it('identifies Laguna XS 2.1 from authoritative JANG source metadata', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'laguna',
+        _name_or_path: 'Laguna-S-2.1-JANG_2L',
+      },
+      {
+        source_model: { name: 'Laguna-XS-2.1' },
+      },
+    )
+
+    expect(detectModelConfigFromDir(dir).architectureHints).toMatchObject({
+      lagunaVariant: 'xs-2.1',
+    })
+  })
+
+  it('lets authoritative JANG source metadata suppress a stale XS config name', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'laguna',
+        _name_or_path: 'Laguna-XS-2.1-JANG_4M',
+      },
+      {
+        source_model: { name: 'Laguna-S-2.1' },
+      },
+    )
+
+    expect(detectModelConfigFromDir(dir).architectureHints?.lagunaVariant).toBeUndefined()
+  })
+
+  it('uses config _name_or_path as the Laguna XS 2.1 compatibility fallback', () => {
+    const dir = makeModelDir({
+      model_type: 'laguna',
+      _name_or_path: 'poolside/Laguna-XS-2.1-JANG_6M',
+    })
+
+    expect(detectModelConfigFromDir(dir).architectureHints).toMatchObject({
+      lagunaVariant: 'xs-2.1',
+    })
+  })
+
+  it('does not infer a Laguna variant for a different model family', () => {
+    const dir = makeModelDir({
+      model_type: 'qwen3',
+      _name_or_path: 'poolside/Laguna-XS-2.1-JANG_4M',
+    })
+
+    expect(detectModelConfigFromDir(dir).architectureHints?.lagunaVariant).toBeUndefined()
+  })
+
   it('classifies Laguna full/sliding attention without changing its KV cache policy', () => {
     const dir = makeModelDir({
       model_type: 'laguna',

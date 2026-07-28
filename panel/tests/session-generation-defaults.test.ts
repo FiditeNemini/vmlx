@@ -68,7 +68,7 @@ describe('session generation-default hydration', () => {
     })
   })
 
-  it('shows the Laguna vendor top-k contract when older bundle metadata omits it', () => {
+  it('keeps Laguna top-k metadata-owned', () => {
     expect(resolveBundleGenerationDefaults(
       {
         do_sample: true,
@@ -87,7 +87,6 @@ describe('session generation-default hydration', () => {
     )).toEqual({
       temperature: 1,
       topP: 1,
-      topK: 20,
       source: 'jang_config',
     })
 

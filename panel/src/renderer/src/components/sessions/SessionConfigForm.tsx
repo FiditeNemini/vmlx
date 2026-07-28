@@ -528,6 +528,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     (config.defaultMinP ?? 0) > 0 ? `min-p ${((config.defaultMinP ?? 0) / 100).toFixed(2)}` : null,
     config.defaultRepetitionPenalty > 0 ? `repetition ${(config.defaultRepetitionPenalty / 100).toFixed(2)}` : null,
   ].filter(Boolean).join(', ')
+  const lagunaXsTopKMetadataWarning =
+    normalizedDetectedFamily === 'laguna' &&
+    detectedArchitectureHints?.lagunaVariant === 'xs-2.1' &&
+    Number(config.defaultTopK ?? 0) !== 20
 
   const toggleSection = (section: keyof typeof expandedSections) => {
     setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }))
@@ -656,6 +660,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
   return (
     <div className="space-y-0">
+      {lagunaXsTopKMetadataWarning && (
+        <IncompatWarning text={t('sessions.config.lagunaXsTopKWarning')} />
+      )}
       {/* Server Settings */}
       <Section title={t('sessions.config.serverSettings')} expanded={expandedSections.server} onToggle={() => toggleSection('server')}>
         <Field label={t('sessions.config.host')} tooltip="The network interface to bind to. Default 127.0.0.1 (localhost only). Change to 0.0.0.0 to allow connections from other machines on your network (LAN access). Use an API key when binding to 0.0.0.0.">

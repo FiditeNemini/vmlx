@@ -1059,6 +1059,36 @@ function configDeclaresCompleteLagunaMixedSwaAttention(config: any): boolean {
   return false
 }
 
+function applyLagunaVariantHint(
+  detected: DetectedConfig,
+  parsedConfig: any,
+  jangCfg: any,
+): DetectedConfig {
+  if (detected.family !== 'laguna') return detected
+
+  const sourceModelName = typeof jangCfg?.source_model?.name === 'string'
+    ? jangCfg.source_model.name.trim()
+    : ''
+  const configuredModelName = typeof parsedConfig?._name_or_path === 'string'
+    ? parsedConfig._name_or_path.trim()
+    : ''
+  const authoritativeName = sourceModelName || configuredModelName
+  if (!authoritativeName) return detected
+
+  const modelLeaf = authoritativeName.split('/').pop() ?? authoritativeName
+  if (!/^laguna[-_ ]xs[-_ ]2[._-]1(?:[-_ ]|$)/i.test(modelLeaf)) {
+    return detected
+  }
+
+  return {
+    ...detected,
+    architectureHints: {
+      ...(detected.architectureHints ?? {}),
+      lagunaVariant: 'xs-2.1',
+    },
+  }
+}
+
 function applyConfigMetadataOverrides(
   detected: DetectedConfig,
   parsedConfig: any,
@@ -1475,9 +1505,11 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
             }
             // JANG model detection: read jang_config.json for VLM
             const jangConfigPath = join(modelPath, 'jang_config.json')
+            let parsedJangConfig: any
             if (existsSync(jangConfigPath)) {
             try {
               const jangCfg = JSON.parse(readFileSync(jangConfigPath, 'utf-8'))
+              parsedJangConfig = jangCfg
               detected = applyJangCapabilities(detected, jangCfg)
               const nativeMtp = detectNativeMtpCapability(parsed, jangCfg, modelPath)
               if (nativeMtp) {
@@ -1512,6 +1544,7 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
           } else if (configDeclaresMedia(parsed)) {
             detected.isMultimodal = true
           }
+          detected = applyLagunaVariantHint(detected, parsed, parsedJangConfig)
           detected = applyConfigMetadataOverrides(detected, parsed)
           return detected
         }

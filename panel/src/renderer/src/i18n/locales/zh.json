@@ -582,6 +582,7 @@
       "diskCachePathPlaceholder": "~/.cache/vmlx-engine/prompt-cache",
       "powerManagement": "电源管理",
       "performanceGeneration": "性能与生成",
+      "lagunaXsTopKWarning": "Laguna XS 2.1 要求模型包声明 Top K 20，但此模型的元数据未解析为 20。请更新 generation_config.json 或 jang_config.json。vMLX 不会自动覆盖采样设置。",
       "toolIntegrationMCP": "工具集成 (MCP)",
       "mcpConfigPlaceholder": "/path/to/mcp-config.json",
       "chatTemplatePlaceholder": "留空则使用模型默认值",

@@ -582,6 +582,7 @@
       "diskCachePathPlaceholder": "~/.cache/vmlx-engine/prompt-cache",
       "powerManagement": "Gestión de energía",
       "performanceGeneration": "Rendimiento y generación",
+      "lagunaXsTopKWarning": "Laguna XS 2.1 espera que el paquete declare Top K 20, pero los metadatos de este modelo no resuelven ese valor. Actualice generation_config.json o jang_config.json. vMLX no sobrescribirá el muestreo automáticamente.",
       "toolIntegrationMCP": "Integración de herramientas (MCP)",
       "mcpConfigPlaceholder": "/ruta/a/mcp-config.json",
       "chatTemplatePlaceholder": "Deje vacío para usar la plantilla predeterminada del modelo",

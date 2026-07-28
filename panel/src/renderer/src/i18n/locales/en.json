@@ -582,6 +582,7 @@
       "diskCachePathPlaceholder": "~/.cache/vmlx-engine/prompt-cache",
       "powerManagement": "Power Management",
       "performanceGeneration": "Performance & Generation",
+      "lagunaXsTopKWarning": "Laguna XS 2.1 expects the bundle to declare Top K 20, but this model's metadata does not resolve to 20. Update generation_config.json or jang_config.json. vMLX will not override sampling automatically.",
       "toolIntegrationMCP": "Tool Integration (MCP)",
       "mcpConfigPlaceholder": "/path/to/mcp-config.json",
       "chatTemplatePlaceholder": "Leave empty to use model default",

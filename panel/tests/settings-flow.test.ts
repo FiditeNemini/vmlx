@@ -4258,6 +4258,36 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         expect(source).not.toContain('label="Default Max Tokens"')
     })
 
+    it('warns for stale Laguna XS top-k metadata without mutating sampling', () => {
+        const form = readFileSync(
+            'src/renderer/src/components/sessions/SessionConfigForm.tsx',
+            'utf8',
+        )
+
+        expect(form).toContain("normalizedDetectedFamily === 'laguna'")
+        expect(form).toContain("detectedArchitectureHints?.lagunaVariant === 'xs-2.1'")
+        expect(form).toContain('Number(config.defaultTopK ?? 0) !== 20')
+        expect(form).toContain("t('sessions.config.lagunaXsTopKWarning')")
+        expect(form).not.toContain("onChange('defaultTopK', 20)")
+
+        for (const sourcePath of [
+            'src/renderer/src/components/sessions/CreateSession.tsx',
+            'src/renderer/src/components/sessions/SessionSettings.tsx',
+            'src/renderer/src/components/sessions/ServerSettingsDrawer.tsx',
+        ]) {
+            expect(readFileSync(sourcePath, 'utf8')).toContain(
+                'detectedArchitectureHints={',
+            )
+        }
+
+        for (const locale of ['en', 'es', 'ja', 'ko', 'zh']) {
+            const messages = JSON.parse(
+                readFileSync(`src/renderer/src/i18n/locales/${locale}.json`, 'utf8'),
+            )
+            expect(messages.sessions.config.lagunaXsTopKWarning).toContain('20')
+        }
+    })
+
     it('video sampling controls are gated to runtime video-capable families', () => {
         const source = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
         const allowlistStart = source.indexOf('const detectedRuntimeVideoCapable = [')

@@ -3050,7 +3050,7 @@ class TestServerSamplingResolution:
         server._generation_defaults_cache.clear()
         assert server._resolve_top_k(None, str(tmp_path)) == 33
 
-    def test_laguna_omitted_top_k_uses_visible_vendor_contract(
+    def test_laguna_top_k_remains_metadata_owned(
         self,
         tmp_path,
         monkeypatch,
@@ -3068,12 +3068,17 @@ class TestServerSamplingResolution:
         server._jang_sampling_defaults_cache.clear()
         server._generation_defaults_cache.clear()
 
-        assert server._resolve_top_k(None, str(tmp_path)) == 20
+        assert server._resolve_top_k(None, str(tmp_path)) == 0
         assert server._resolve_top_k(0, str(tmp_path)) == 0
         assert server._resolve_top_k(7, str(tmp_path)) == 7
 
         monkeypatch.setattr(server, "_default_top_k", 11)
         assert server._resolve_top_k(None, str(tmp_path)) == 11
+
+        monkeypatch.setattr(server, "_default_top_k", None)
+        (tmp_path / "generation_config.json").write_text(json.dumps({"top_k": 20}))
+        server._generation_defaults_cache.clear()
+        assert server._resolve_top_k(None, str(tmp_path)) == 20
 
     def test_max_tokens_resolution_contract_applies_to_every_registered_family(
         self,

@@ -582,6 +582,7 @@
       "diskCachePathPlaceholder": "~/.cache/vmlx-engine/prompt-cache",
       "powerManagement": "電源管理",
       "performanceGeneration": "パフォーマンスと生成",
+      "lagunaXsTopKWarning": "Laguna XS 2.1 ではバンドルに Top K 20 の宣言が必要ですが、このモデルのメタデータは 20 に解決されません。generation_config.json または jang_config.json を更新してください。vMLX がサンプリングを自動的に上書きすることはありません。",
       "toolIntegrationMCP": "ツール連携 (MCP)",
       "mcpConfigPlaceholder": "/path/to/mcp-config.json",
       "chatTemplatePlaceholder": "空のままでモデルデフォルトを使用",

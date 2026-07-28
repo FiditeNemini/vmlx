@@ -3152,12 +3152,160 @@ def _paired_public_request(
     }
 
 
+def _request_lifecycle_view(
+    health: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Validate the engine-owned lifecycle attestation from ``/health``.
+
+    Prefix-cache request tables are deliberately excluded: their admission and
+    cleanup boundaries differ from the engine collector and scheduler.
+    """
+
+    lifecycle = health.get("request_lifecycle")
+    if not isinstance(lifecycle, dict):
+        return {}, ["/health request_lifecycle is missing"]
+    failures: list[str] = []
+    if lifecycle.get("schema") != "vmlx-request-lifecycle-v1":
+        failures.append("/health request_lifecycle schema is invalid")
+    if lifecycle.get("request_id_encoding") != "sha256-utf8-lowerhex":
+        failures.append(
+            "/health request_lifecycle request_id_encoding is invalid"
+        )
+    if lifecycle.get("available") is not True:
+        failures.append("/health request_lifecycle is unavailable")
+
+    def request_id_hashes(field: str) -> list[str]:
+        value = lifecycle.get(field)
+        if (
+            not isinstance(value, list)
+            or any(
+                not isinstance(item, str)
+                or item != item.lower()
+                or not _valid_sha256(item)
+                for item in value
+            )
+            or value != sorted(set(value))
+        ):
+            failures.append(f"/health request_lifecycle.{field} is invalid")
+            return []
+        return list(value)
+
+    def count(field: str, expected: int) -> int | None:
+        value = lifecycle.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            failures.append(f"/health request_lifecycle.{field} is invalid")
+            return None
+        if value != expected:
+            failures.append(
+                f"/health request_lifecycle.{field} does not match its ID list"
+            )
+        return value
+
+    collector_ids = request_id_hashes(
+        "engine_collector_request_ids_sha256"
+    )
+    waiting_ids = request_id_hashes(
+        "scheduler_waiting_request_ids_sha256"
+    )
+    running_ids = request_id_hashes(
+        "scheduler_running_request_ids_sha256"
+    )
+    active_ids = request_id_hashes("active_request_ids_sha256")
+    collector_count = count("engine_collector_count", len(collector_ids))
+    waiting_count = count("scheduler_waiting_count", len(waiting_ids))
+    running_count = count("scheduler_running_count", len(running_ids))
+    active_count = count("active_request_count", len(active_ids))
+    cleanup_pending = lifecycle.get("terminal_cleanup_pending")
+    if not isinstance(cleanup_pending, bool):
+        failures.append(
+            "/health request_lifecycle.terminal_cleanup_pending is invalid"
+        )
+
+    expected_active_ids = sorted(
+        set(collector_ids) | set(waiting_ids) | set(running_ids)
+    )
+    if active_ids != expected_active_ids:
+        failures.append(
+            "/health request_lifecycle.active_request_ids_sha256 is inconsistent"
+        )
+
+    running_rows = lifecycle.get("scheduler_running_requests")
+    running_row_ids: list[str] = []
+    if not isinstance(running_rows, list):
+        failures.append(
+            "/health request_lifecycle.scheduler_running_requests is invalid"
+        )
+    else:
+        for row in running_rows:
+            if (
+                not isinstance(row, dict)
+                or set(row) - {"request_id_sha256", "status"}
+                or (
+                    "status" in row
+                    and (
+                        not isinstance(row["status"], str)
+                        or not row["status"]
+                    )
+                )
+            ):
+                failures.append(
+                    "/health request_lifecycle.scheduler_running_requests is invalid"
+                )
+                continue
+            request_id = row.get("request_id_sha256")
+            if (
+                not isinstance(request_id, str)
+                or request_id != request_id.lower()
+                or not _valid_sha256(request_id)
+                or request_id not in running_ids
+                or request_id in running_row_ids
+            ):
+                failures.append(
+                    "/health request_lifecycle.scheduler_running_requests is invalid"
+                )
+                continue
+            running_row_ids.append(request_id)
+        if running_row_ids != running_ids:
+            failures.append(
+                "/health request_lifecycle.scheduler_running_requests "
+                "does not match scheduler_running_request_ids_sha256"
+            )
+
+    return {
+        "engine_collector_count": collector_count,
+        "engine_collector_request_ids_sha256": collector_ids,
+        "scheduler_waiting_count": waiting_count,
+        "scheduler_waiting_request_ids_sha256": waiting_ids,
+        "scheduler_running_count": running_count,
+        "scheduler_running_request_ids_sha256": running_ids,
+        "scheduler_running_requests": running_rows,
+        "active_request_count": active_count,
+        "active_request_ids_sha256": active_ids,
+        "terminal_cleanup_pending": cleanup_pending,
+    }, failures
+
+
+def _response_request_id_hashes(response_id: str) -> set[str]:
+    """Return public hashes for every documented Chat engine pass."""
+
+    if not response_id:
+        return set()
+    return {
+        _sha256(response_id),
+        _sha256(f"{response_id}:visible-answer"),
+        _sha256(f"{response_id}-xml-retry"),
+        _sha256(f"{response_id}-json-retry"),
+    }
+
+
 def _paired_gateway_lifecycle(
     action: Callable[[], dict[str, Any]],
     probe: Callable[[], dict[str, Any]],
     expected_fingerprint: str,
     timeout_s: float,
     poll_interval_s: float,
+    *,
+    protocol: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     ready = threading.Event()
     action_started = threading.Event()
@@ -3165,12 +3313,19 @@ def _paired_gateway_lifecycle(
     stop = threading.Event()
     samples: list[dict[str, Any]] = []
     failures: list[str] = []
+    observed_action_request_ids: set[str] = set()
+    state = {
+        "baseline_settled": False,
+        "active_seen": False,
+        "final_idle_settled": False,
+        "action_executed": False,
+    }
     started = time.monotonic()
 
     def observe(phase: str) -> dict[str, Any]:
         health = probe()
         identity, identity_failures = _health_identity(health)
-        running, active = _idle_values(health)
+        lifecycle, lifecycle_failures = _request_lifecycle_view(health)
         fingerprint = identity.get("fingerprint_sha256")
         row = {
             "phase": phase,
@@ -3180,90 +3335,241 @@ def _paired_gateway_lifecycle(
                 fingerprint if _valid_sha256(fingerprint) else None
             ),
             "identity_failures": identity_failures,
-            "num_running": running,
-            "active_requests": active,
+            "lifecycle_failures": lifecycle_failures,
+            **lifecycle,
+            # Compatibility aliases for readers of the original V5 artifact.
+            "num_running": lifecycle.get("scheduler_running_count"),
+            "active_requests": lifecycle.get("engine_collector_count"),
         }
         samples.append(row)
         if identity_failures:
             failures.append(f"{phase}: backend identity capture failed")
         elif fingerprint != expected_fingerprint:
             failures.append(f"{phase}: backend identity fingerprint mismatch")
+        if lifecycle_failures:
+            failures.append(f"{phase}: request lifecycle capture failed")
         return row
 
+    def is_idle(row: dict[str, Any]) -> bool:
+        return (
+            row.get("active_request_count") == 0
+            and row.get("terminal_cleanup_pending") is False
+        )
+
+    def bounded_single_owner(row: dict[str, Any], phase: str) -> bool:
+        counts = (
+            row.get("engine_collector_count"),
+            row.get("scheduler_waiting_count"),
+            row.get("scheduler_running_count"),
+            row.get("active_request_count"),
+        )
+        if any(
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > 1
+            for value in counts
+        ):
+            failures.append(f"{phase}: concurrent or malformed engine activity")
+            return False
+        active_ids = row.get("active_request_ids_sha256")
+        if not isinstance(active_ids, list):
+            failures.append(f"{phase}: active request IDs are unavailable")
+            return False
+        if active_ids and phase != "before":
+            observed_action_request_ids.update(active_ids)
+            state["active_seen"] = True
+        return True
+
     def poll() -> None:
-        try:
-            baseline = observe("before")
-        except Exception as exc:
-            failures.append(f"before: health probe raised {type(exc).__name__}")
+        baseline_deadline = time.monotonic() + timeout_s
+        idle_streak = 0
+        while time.monotonic() < baseline_deadline and not stop.is_set():
+            try:
+                baseline = observe("before")
+            except Exception as exc:
+                failures.append(
+                    f"before: health probe raised {type(exc).__name__}"
+                )
+                ready.set()
+                return
+            if baseline["identity_failures"] or baseline["lifecycle_failures"]:
+                ready.set()
+                return
+            if not bounded_single_owner(baseline, "before"):
+                ready.set()
+                return
+            if is_idle(baseline):
+                idle_streak += 1
+                if idle_streak >= 2:
+                    state["baseline_settled"] = True
+                    ready.set()
+                    break
+            else:
+                idle_streak = 0
+            stop.wait(poll_interval_s)
+        if not state["baseline_settled"]:
+            failures.append(
+                "before: direct backend did not settle to exclusive idle"
+            )
             ready.set()
             return
-        if (baseline["num_running"], baseline["active_requests"]) != (0, 0):
-            failures.append("before: direct backend was not exclusively idle")
-        ready.set()
         if not action_started.wait(timeout_s):
             failures.append("gateway action did not start before timeout")
             return
-        active_seen = False
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline and not stop.is_set():
-            phase = "after" if action_finished.is_set() else "during"
+
+        while not action_finished.is_set() and not stop.is_set():
             try:
-                row = observe(phase)
+                row = observe("during")
             except Exception as exc:
-                failures.append(f"{phase}: health probe raised {type(exc).__name__}")
+                failures.append(
+                    f"during: health probe raised {type(exc).__name__}"
+                )
                 return
-            counts = (row["num_running"], row["active_requests"])
-            if counts == (1, 1):
-                active_seen = True
-            elif counts == (0, 0) and action_finished.is_set() and active_seen:
+            if row["identity_failures"] or row["lifecycle_failures"]:
                 return
-            elif counts != (0, 0):
-                failures.append(f"{phase}: concurrent or ambiguous activity")
+            if not bounded_single_owner(row, "during"):
                 return
             stop.wait(poll_interval_s)
-        if not active_seen:
-            failures.append("during: exclusive gateway activity was not observed")
-        failures.append("after: exclusive idle state was not observed before timeout")
+
+        after_deadline = time.monotonic() + timeout_s
+        idle_streak = 0
+        while time.monotonic() < after_deadline and not stop.is_set():
+            try:
+                row = observe("after")
+            except Exception as exc:
+                failures.append(
+                    f"after: health probe raised {type(exc).__name__}"
+                )
+                return
+            if row["identity_failures"] or row["lifecycle_failures"]:
+                return
+            if not bounded_single_owner(row, "after"):
+                return
+            if is_idle(row):
+                idle_streak += 1
+                if idle_streak >= 2:
+                    state["final_idle_settled"] = True
+                    return
+            else:
+                idle_streak = 0
+            stop.wait(poll_interval_s)
+        failures.append(
+            "after: exclusive idle state did not settle before timeout"
+        )
 
     worker = threading.Thread(target=poll, name="paired-replay-health", daemon=True)
     worker.start()
-    if not ready.wait(timeout_s):
+    if not ready.wait(timeout_s + max(0.05, poll_interval_s * 2)):
         failures.append("before: health probe did not become ready before timeout")
-    action_started.set()
+        stop.set()
     action_error: BaseException | None = None
-    result: dict[str, Any] = {}
-    try:
-        result = action()
-    except BaseException as exc:
-        action_error = exc
-    finally:
+    result: dict[str, Any] = {
+        "status_code": 0,
+        "response_id": "",
+        "reasoning": "",
+        "content": "",
+        "notices": [],
+        "tool_calls": [],
+        "terminals": [],
+        "errors": [],
+        "events": [],
+        "_prepared_request_body_sha256": "",
+    }
+    if state["baseline_settled"]:
+        action_started.set()
+        state["action_executed"] = True
+        try:
+            result = action()
+        except BaseException as exc:
+            action_error = exc
+        finally:
+            action_finished.set()
+    else:
+        failures.append(
+            "gateway action skipped because exclusive idle was unattested"
+        )
+        stop.set()
         action_finished.set()
-        worker.join(timeout_s)
-        if worker.is_alive():
-            failures.append("health lifecycle poller did not terminate")
-            stop.set()
-            worker.join(min(timeout_s, 1.0))
-    before = [row for row in samples if row["phase"] == "before"]
-    during = [row for row in samples if row["phase"] == "during"]
-    after = [row for row in samples if row["phase"] == "after"]
-    complete = (
+    worker.join(timeout_s)
+    if worker.is_alive():
+        failures.append("health lifecycle poller did not terminate")
+        stop.set()
+        worker.join(min(timeout_s, 1.0))
+
+    response_id = str(result.get("response_id") or "")
+    correlation_available = protocol == "chat"
+    expected_request_ids = (
+        _response_request_id_hashes(response_id)
+        if correlation_available
+        else set()
+    )
+    foreign_request_ids = (
+        sorted(observed_action_request_ids - expected_request_ids)
+        if correlation_available
+        else []
+    )
+    correlation_failures: list[str] = []
+    if not correlation_available:
+        correlation_status = "unavailable_ollama_gateway_translation"
+        correlation_pass: bool | None = None
+    elif not response_id:
+        correlation_status = "missing_gateway_response_id"
+        correlation_pass = False
+        correlation_failures.append("gateway action did not return a response ID")
+    elif foreign_request_ids:
+        correlation_status = "foreign_request_ids"
+        correlation_pass = False
+        correlation_failures.append(
+            "gateway lifecycle observed foreign request IDs"
+        )
+    else:
+        correlation_status = "matched"
+        correlation_pass = True
+    if not state["active_seen"]:
+        failures.append("during: exclusive gateway activity was not observed")
+
+    bounded_complete = (
         not failures
-        and len(before) == 1
-        and (before[0]["num_running"], before[0]["active_requests"]) == (0, 0)
-        and any(
-            (row["num_running"], row["active_requests"]) == (1, 1) for row in during
-        )
-        and any(
-            (row["num_running"], row["active_requests"]) == (0, 0) for row in after
-        )
+        and state["baseline_settled"]
+        and state["active_seen"]
+        and state["final_idle_settled"]
+        and state["action_executed"]
+        and bool(observed_action_request_ids)
         and not worker.is_alive()
+    )
+    request_owned_complete = (
+        bounded_complete
+        and correlation_pass is True
+        and not correlation_failures
     )
     if action_error is not None:
         raise action_error
     return result, {
         "samples": samples,
-        "failures": list(dict.fromkeys(failures)),
-        "exclusive_idle_active_idle": complete,
+        "failures": list(dict.fromkeys([*failures, *correlation_failures])),
+        # The bounded observer remains useful even when a protocol cannot
+        # expose enough response identity to prove ownership.
+        "bounded_exclusive_idle_active_idle": bounded_complete,
+        # Retain the original key as the strict request-owned verdict consumed
+        # by the paired replay release gate.
+        "exclusive_idle_active_idle": request_owned_complete,
+        "request_owned_exclusive_idle_active_idle": request_owned_complete,
+        "baseline_idle_settled": state["baseline_settled"],
+        "gateway_activity_observed": state["active_seen"],
+        "final_idle_settled": state["final_idle_settled"],
+        "gateway_action_executed": state["action_executed"],
+        "gateway_response_id_sha256": (
+            _sha256(response_id) if response_id else None
+        ),
+        "request_id_correlation_available": correlation_available,
+        "request_id_correlation_status": correlation_status,
+        "request_id_correlation_pass": correlation_pass,
+        "expected_request_ids_sha256": sorted(expected_request_ids),
+        "observed_action_request_ids_sha256": sorted(
+            observed_action_request_ids
+        ),
+        "foreign_request_ids_sha256": foreign_request_ids,
         "worker_stopped": not worker.is_alive(),
     }
 
@@ -3316,6 +3622,7 @@ def run_paired_replay_discriminator(
         expected_backend_identity_fingerprint,
         health_timeout_s,
         health_poll_interval_s,
+        protocol=protocol,
     )
     a2 = send(direct_client, "a2")
     body_hashes = {

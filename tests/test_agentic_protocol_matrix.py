@@ -7,6 +7,7 @@ import json
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,6 @@ import pytest
 import requests
 
 from tests.cross_matrix import run_agentic_protocol_matrix as matrix
-
 
 TEST_PYTHON_EXECUTABLE_PATH = str(Path(sys.executable).absolute())
 TEST_PYTHON_EXECUTABLE_FINGERPRINT = matrix._sha256(
@@ -2635,12 +2635,47 @@ def _paired_replay(
     canary="",
     raw_override=None,
 ):
+    lock = threading.Lock()
+    response_id_b = "" if protocol == "ollama" else "response-b"
+    backend_request_id = (
+        "opaque-ollama-backend-request"
+        if protocol == "ollama"
+        else response_id_b
+    )
+    request_hash = matrix._sha256(backend_request_id)
+    child_hash = matrix._sha256("response-b:visible-answer")
+    foreign_hash = matrix._sha256("foreign-request")
+    preexisting_hash = matrix._sha256("direct-a1-terminal-cleanup")
     activity = {
-        "num_running": 1 if lifecycle == "preexisting" else 0,
-        "active_requests": 1 if lifecycle == "preexisting" else 0,
+        "collector": [],
+        "waiting": [],
+        "running": [],
+        "cleanup": False,
+        "gateway_started": False,
+        "probe_count": 0,
     }
+    if lifecycle in {"preexisting", "settling"}:
+        activity.update(
+            collector=[preexisting_hash],
+            cleanup=True,
+        )
     calls = []
     direct_index = 0
+
+    def set_activity(
+        *,
+        collector=(),
+        waiting=(),
+        running=(),
+        cleanup=False,
+    ):
+        with lock:
+            activity.update(
+                collector=list(collector),
+                waiting=list(waiting),
+                running=list(running),
+                cleanup=cleanup,
+            )
 
     class Client:
         def __init__(self, label):
@@ -2658,14 +2693,66 @@ def _paired_replay(
             nonlocal direct_index
             leg = "b" if self.label == "gateway" else ("a1", "a2")[direct_index]
             if self.label == "gateway":
-                activity.update(
-                    num_running=2 if lifecycle == "concurrent" else 1,
-                    active_requests=2 if lifecycle == "concurrent" else 1,
+                with lock:
+                    activity["gateway_started"] = True
+                active_hash = (
+                    child_hash
+                    if lifecycle == "child_suffix"
+                    else foreign_hash
+                    if lifecycle == "foreign"
+                    else request_hash
                 )
-                if lifecycle == "inactive":
-                    activity.update(num_running=0, active_requests=0)
-                time.sleep(0.04)
-                activity.update(num_running=0, active_requests=0)
+                if lifecycle == "fast":
+                    # The request completes between polls. The observer must
+                    # not invent activity from the successful response alone.
+                    pass
+                elif lifecycle == "inactive":
+                    time.sleep(0.04)
+                elif lifecycle == "non_atomic":
+                    for phase in (
+                        {"collector": [active_hash]},
+                        {"waiting": [active_hash]},
+                        {"running": [active_hash]},
+                        {
+                            "collector": [active_hash],
+                            "running": [active_hash],
+                        },
+                    ):
+                        set_activity(**phase)
+                        time.sleep(0.012)
+                elif lifecycle == "foreign_sequential":
+                    set_activity(
+                        collector=[active_hash],
+                        running=[active_hash],
+                    )
+                    time.sleep(0.02)
+                    set_activity(
+                        collector=[foreign_hash],
+                        running=[foreign_hash],
+                    )
+                    time.sleep(0.02)
+                elif lifecycle == "collector_only":
+                    set_activity(collector=[active_hash])
+                    time.sleep(0.04)
+                elif lifecycle == "running_only":
+                    set_activity(running=[active_hash])
+                    time.sleep(0.04)
+                elif lifecycle == "concurrent":
+                    set_activity(
+                        collector=[active_hash, foreign_hash],
+                        running=[active_hash, foreign_hash],
+                    )
+                    time.sleep(0.04)
+                else:
+                    set_activity(
+                        collector=[active_hash],
+                        running=[active_hash],
+                    )
+                    time.sleep(0.04)
+                if lifecycle not in {"inactive", "fast"}:
+                    set_activity(collector=[active_hash], cleanup=True)
+                    time.sleep(0.012)
+                set_activity()
                 content = gateway
             else:
                 content = direct[direct_index]
@@ -2691,7 +2778,13 @@ def _paired_replay(
             response = {
                 "status_code": 200,
                 "elapsed_ms": 7,
-                "response_id": f"response-{leg}",
+                "response_id": (
+                    ""
+                    if sent_protocol == "ollama"
+                    else response_id_b
+                    if leg == "b"
+                    else f"response-{leg}"
+                ),
                 "reasoning": canary or "private reasoning",
                 "content": canary or content,
                 "notices": [canary or f"notice-{content}"],
@@ -2714,23 +2807,74 @@ def _paired_replay(
 
     expected = "f" * 64
 
-    def fake_identity(_health):
+    def fake_identity(health):
         if identity == "failure":
             return {}, ["identity invalid"]
+        mismatch = identity == "mismatch" or (
+            identity == "drift" and health.get("_gateway_active") is True
+        )
         return {
-            "fingerprint_sha256": "e" * 64 if identity == "mismatch" else expected
+            "fingerprint_sha256": "e" * 64 if mismatch else expected
         }, []
 
     def health_probe():
         if lifecycle == "exception":
             raise RuntimeError("probe failed")
+        with lock:
+            activity["probe_count"] += 1
+            if (
+                lifecycle == "settling"
+                and not activity["gateway_started"]
+                and activity["probe_count"] >= 2
+            ):
+                activity.update(
+                    collector=[],
+                    waiting=[],
+                    running=[],
+                    cleanup=False,
+                )
+            collector = list(activity["collector"])
+            waiting = list(activity["waiting"])
+            running = list(activity["running"])
+            cleanup = bool(activity["cleanup"])
+            gateway_active = bool(collector or waiting or running)
+        active = sorted(set(collector) | set(waiting) | set(running))
+        running_rows = [
+            {"request_id_sha256": item, "status": "running"}
+            for item in sorted(running)
+        ]
+        if lifecycle == "missing_running_rows":
+            running_rows = []
+        result = {
+            "schema": "vmlx-request-lifecycle-v1",
+            "request_id_encoding": "sha256-utf8-lowerhex",
+            "available": True,
+            "engine_collector_count": len(collector),
+            "engine_collector_request_ids_sha256": sorted(collector),
+            "scheduler_waiting_count": len(waiting),
+            "scheduler_waiting_request_ids_sha256": sorted(waiting),
+            "scheduler_running_count": len(running),
+            "scheduler_running_request_ids_sha256": sorted(running),
+            "scheduler_running_requests": running_rows,
+            "active_request_count": len(active),
+            "active_request_ids_sha256": active,
+            "terminal_cleanup_pending": cleanup,
+        }
+        if lifecycle == "malformed":
+            result["active_request_count"] = "one"
+        elif lifecycle == "count_mismatch":
+            result["engine_collector_count"] = len(collector) + 1
+        elif lifecycle == "invalid_id":
+            result["active_request_ids_sha256"] = ["not-a-digest"]
+        elif lifecycle == "invalid_encoding":
+            result["request_id_encoding"] = "raw"
         return {
-            "scheduler": {"num_running": activity["num_running"]},
-            "cache": {
-                "scheduler_cache": {
-                    "active_requests": activity["active_requests"]
-                }
-            },
+            # These intentionally disagree with lifecycle v1. The observer
+            # must not use cache-table or legacy scheduler counts.
+            "scheduler": {"num_running": 99},
+            "cache": {"scheduler_cache": {"active_requests": 99}},
+            "request_lifecycle": result,
+            "_gateway_active": gateway_active,
         }
 
     monkeypatch.setattr(matrix, "_health_identity", fake_identity)
@@ -2755,7 +2899,15 @@ def _paired_replay(
 
 
 @pytest.mark.parametrize(
-    ("protocol", "mode", "stage", "direct", "gateway", "classification"),
+    (
+        "protocol",
+        "mode",
+        "stage",
+        "direct",
+        "gateway",
+        "classification",
+        "expected_pass",
+    ),
     [
         (
             "chat",
@@ -2764,6 +2916,7 @@ def _paired_replay(
             ("same", "same"),
             "different",
             "gateway_owned_difference",
+            True,
         ),
         (
             "ollama",
@@ -2771,7 +2924,8 @@ def _paired_replay(
             3,
             ("same", "same"),
             "same",
-            "all_equal_prior_history_variance",
+            "unverified",
+            False,
         ),
         (
             "chat",
@@ -2780,6 +2934,7 @@ def _paired_replay(
             ("first", "second"),
             "gateway",
             "shared_backend_model_or_cache_nondeterminism",
+            True,
         ),
         (
             "chat",
@@ -2788,11 +2943,19 @@ def _paired_replay(
             ("same", "same"),
             "same",
             "all_equal_prior_history_variance",
+            True,
         ),
     ],
 )
 def test_paired_replay_classification_and_frozen_order(
-    monkeypatch, protocol, mode, stage, direct, gateway, classification
+    monkeypatch,
+    protocol,
+    mode,
+    stage,
+    direct,
+    gateway,
+    classification,
+    expected_pass,
 ):
     result, calls = _paired_replay(
         monkeypatch,
@@ -2802,14 +2965,92 @@ def test_paired_replay_classification_and_frozen_order(
         direct=direct,
         gateway=gateway,
     )
-    assert result["pass"] is True
+    assert result["pass"] is expected_pass
     assert result["classification"] == classification
     assert [row[0] for row in calls] == ["direct", "gateway", "direct"]
     assert len({row[4] for row in calls}) == 1
     assert result["checks"] == {
         "exact_body_sha_equal": True,
-        "gateway_backend_lifecycle_pass": True,
+        "gateway_backend_lifecycle_pass": expected_pass,
     }
+
+
+@pytest.mark.parametrize(
+    ("lifecycle", "expected_counts"),
+    [
+        ("collector_only", (0, 1)),
+        ("running_only", (1, 0)),
+        ("non_atomic", None),
+        ("settling", None),
+        ("child_suffix", None),
+    ],
+)
+def test_paired_replay_accepts_bounded_non_atomic_lifecycle_transitions(
+    monkeypatch,
+    lifecycle,
+    expected_counts,
+):
+    result, calls = _paired_replay(monkeypatch, lifecycle=lifecycle)
+
+    assert result["pass"] is True
+    assert [row[0] for row in calls] == ["direct", "gateway", "direct"]
+    evidence = result["gateway_in_flight_direct_health"]
+    assert evidence["baseline_idle_settled"] is True
+    assert evidence["gateway_activity_observed"] is True
+    assert evidence["final_idle_settled"] is True
+    assert evidence["gateway_action_executed"] is True
+    assert evidence["request_id_correlation_status"] == "matched"
+    assert evidence["request_id_correlation_pass"] is True
+    assert evidence["foreign_request_ids_sha256"] == []
+    assert evidence["worker_stopped"] is True
+    assert all(
+        (row["num_running"] or 0) <= 1
+        and (row["active_requests"] or 0) <= 1
+        for row in evidence["samples"]
+    )
+    if expected_counts is not None:
+        assert any(
+            (row["num_running"], row["active_requests"]) == expected_counts
+            for row in evidence["samples"]
+            if row["phase"] in {"during", "after"}
+        )
+    if lifecycle == "settling":
+        assert any(
+            row["phase"] == "before" and row["active_request_count"] == 1
+            for row in evidence["samples"]
+        )
+    if lifecycle == "child_suffix":
+        assert evidence["observed_action_request_ids_sha256"] == [
+            matrix._sha256("response-b:visible-answer")
+        ]
+
+
+def test_paired_replay_ollama_keeps_exclusivity_without_fake_id_correlation(
+    monkeypatch,
+):
+    result, _ = _paired_replay(
+        monkeypatch,
+        protocol="ollama",
+        mode="stream",
+        stage=3,
+        lifecycle="running_only",
+    )
+
+    assert result["pass"] is False
+    assert result["classification"] == "unverified"
+    evidence = result["gateway_in_flight_direct_health"]
+    assert evidence["bounded_exclusive_idle_active_idle"] is True
+    assert evidence["exclusive_idle_active_idle"] is False
+    assert evidence["request_owned_exclusive_idle_active_idle"] is False
+    assert evidence["request_id_correlation_available"] is False
+    assert (
+        evidence["request_id_correlation_status"]
+        == "unavailable_ollama_gateway_translation"
+    )
+    assert evidence["request_id_correlation_pass"] is None
+    assert evidence["gateway_response_id_sha256"] is None
+    assert evidence["observed_action_request_ids_sha256"]
+    assert evidence["foreign_request_ids_sha256"] == []
 
 
 @pytest.mark.parametrize(
@@ -2818,9 +3059,18 @@ def test_paired_replay_classification_and_frozen_order(
         ("b", "exact", "match"),
         ("a2", "exact", "match"),
         (None, "inactive", "match"),
+        (None, "fast", "match"),
         (None, "concurrent", "match"),
         (None, "preexisting", "match"),
+        (None, "foreign", "match"),
+        (None, "foreign_sequential", "match"),
+        (None, "malformed", "match"),
+        (None, "count_mismatch", "match"),
+        (None, "invalid_id", "match"),
+        (None, "invalid_encoding", "match"),
+        (None, "missing_running_rows", "match"),
         (None, "exact", "mismatch"),
+        (None, "exact", "drift"),
         (None, "exact", "failure"),
         (None, "exception", "match"),
     ],
@@ -2836,6 +3086,80 @@ def test_paired_replay_suppresses_unattested_classification(
     )
     assert result["pass"] is False
     assert result["classification"] == "unverified"
+
+
+def test_paired_replay_rejects_fast_unsampled_gateway_action(monkeypatch):
+    result, calls = _paired_replay(monkeypatch, lifecycle="fast")
+
+    assert [row[0] for row in calls] == ["direct", "gateway", "direct"]
+    assert result["pass"] is False
+    evidence = result["gateway_in_flight_direct_health"]
+    assert evidence["gateway_action_executed"] is True
+    assert evidence["gateway_activity_observed"] is False
+    assert evidence["observed_action_request_ids_sha256"] == []
+    assert any(
+        "exclusive gateway activity was not observed" in failure
+        for failure in evidence["failures"]
+    )
+
+
+def test_paired_replay_rejects_concurrent_and_foreign_lifecycle_ids(
+    monkeypatch,
+):
+    concurrent, _ = _paired_replay(monkeypatch, lifecycle="concurrent")
+    assert concurrent["pass"] is False
+    concurrent_evidence = concurrent["gateway_in_flight_direct_health"]
+    assert any(
+        "concurrent or malformed engine activity" in failure
+        for failure in concurrent_evidence["failures"]
+    )
+
+    foreign, _ = _paired_replay(
+        monkeypatch,
+        lifecycle="foreign_sequential",
+    )
+    assert foreign["pass"] is False
+    foreign_evidence = foreign["gateway_in_flight_direct_health"]
+    assert foreign_evidence["request_id_correlation_status"] == "foreign_request_ids"
+    assert foreign_evidence["request_id_correlation_pass"] is False
+    assert foreign_evidence["foreign_request_ids_sha256"] == [
+        matrix._sha256("foreign-request")
+    ]
+    assert foreign_evidence["observed_action_request_ids_sha256"] == sorted(
+        [
+            matrix._sha256("response-b"),
+            matrix._sha256("foreign-request"),
+        ]
+    )
+    assert not any(
+        "concurrent or malformed engine activity" in failure
+        for failure in foreign_evidence["failures"]
+    )
+
+
+@pytest.mark.parametrize(
+    "lifecycle",
+    [
+        "malformed",
+        "count_mismatch",
+        "invalid_id",
+        "invalid_encoding",
+        "missing_running_rows",
+    ],
+)
+def test_paired_replay_rejects_malformed_lifecycle_attestation(
+    monkeypatch,
+    lifecycle,
+):
+    result, _ = _paired_replay(monkeypatch, lifecycle=lifecycle)
+
+    assert result["pass"] is False
+    evidence = result["gateway_in_flight_direct_health"]
+    assert any(
+        "request lifecycle capture failed" in failure
+        for failure in evidence["failures"]
+    )
+    assert any(row["lifecycle_failures"] for row in evidence["samples"])
 
 
 @pytest.mark.parametrize(

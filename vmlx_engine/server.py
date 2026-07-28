@@ -9931,6 +9931,172 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
     return result
 
 
+def _request_lifecycle_health_snapshot(
+    engine_stats: dict[str, Any],
+    scheduler_stats: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a prompt-free, engine-owned request lifecycle attestation.
+
+    Prefix-cache ``active_requests`` counts request tables and can legitimately
+    disappear before ``scheduler.running`` during terminal cleanup.  It is
+    therefore cache telemetry, not proof of gateway request ownership.  This
+    snapshot instead joins the engine's output collectors with scheduler
+    waiting/running IDs and the terminal-persistence gate.  Counts are derived
+    from the ID lists so consumers cannot accidentally attest mismatched
+    counters.
+    """
+
+    def _request_ids(value: Any) -> list[str] | None:
+        if not isinstance(value, list):
+            return None
+        if any(not isinstance(item, str) or not item for item in value):
+            return None
+        if len(set(value)) != len(value):
+            return None
+        return sorted(value)
+
+    collector_ids = _request_ids(
+        engine_stats.get("engine_collector_request_ids")
+    )
+    waiting_ids = _request_ids(
+        scheduler_stats.get(
+            "waiting_request_ids",
+            engine_stats.get("waiting_request_ids"),
+        )
+    )
+    running_ids = _request_ids(
+        scheduler_stats.get(
+            "running_request_ids",
+            engine_stats.get("running_request_ids"),
+        )
+    )
+    declared_collector_count = engine_stats.get("engine_collector_count")
+    declared_waiting_count = scheduler_stats.get(
+        "num_waiting",
+        engine_stats.get("num_waiting"),
+    )
+    declared_running_count = scheduler_stats.get(
+        "num_running",
+        engine_stats.get("num_running"),
+    )
+
+    def _count_matches_ids(value: Any, request_ids: list[str] | None) -> bool:
+        return (
+            request_ids is not None
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+            and value == len(request_ids)
+        )
+
+    def _running_status_rows(
+        value: Any,
+        request_ids: list[str] | None,
+    ) -> list[dict[str, str]] | None:
+        # Status rows are diagnostic, but a non-empty running set still needs
+        # one row per request so the public lifecycle cannot attest an
+        # incomplete scheduler view.  An absent field is therefore equivalent
+        # to an empty list only while there are no running requests.
+        if value is None:
+            return [] if request_ids == [] else None
+        if not isinstance(value, list) or request_ids is None:
+            return None
+        result_rows: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for row in value:
+            if not isinstance(row, dict):
+                return None
+            request_id = row.get("request_id")
+            if (
+                not isinstance(request_id, str)
+                or not request_id
+                or request_id not in request_ids
+                or request_id in seen
+            ):
+                return None
+            status = row.get("status")
+            if status is not None and not isinstance(status, str):
+                return None
+            seen.add(request_id)
+            result_rows.append(
+                {
+                    "request_id": request_id,
+                    **({"status": status} if status is not None else {}),
+                }
+            )
+        if seen != set(request_ids):
+            return None
+        return result_rows
+
+    source_running_status = _running_status_rows(
+        scheduler_stats.get("running_requests"),
+        running_ids,
+    )
+    cleanup_pending = engine_stats.get("terminal_cleanup_pending")
+    available = (
+        collector_ids is not None
+        and waiting_ids is not None
+        and running_ids is not None
+        and _count_matches_ids(declared_collector_count, collector_ids)
+        and _count_matches_ids(declared_waiting_count, waiting_ids)
+        and _count_matches_ids(declared_running_count, running_ids)
+        and source_running_status is not None
+        and isinstance(cleanup_pending, bool)
+    )
+    result: dict[str, Any] = {
+        "schema": "vmlx-request-lifecycle-v1",
+        "request_id_encoding": "sha256-utf8-lowerhex",
+        "available": available,
+    }
+    if not available:
+        return result
+
+    def _request_id_sha256(request_id: str) -> str:
+        return hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+
+    collector_id_hashes = sorted(
+        _request_id_sha256(request_id) for request_id in collector_ids
+    )
+    waiting_id_hashes = sorted(
+        _request_id_sha256(request_id) for request_id in waiting_ids
+    )
+    running_id_hashes = sorted(
+        _request_id_sha256(request_id) for request_id in running_ids
+    )
+    running_status = []
+    for row in source_running_status:
+        request_id = row["request_id"]
+        status = row.get("status")
+        running_status.append(
+            {
+                "request_id_sha256": _request_id_sha256(request_id),
+                **({"status": status} if isinstance(status, str) else {}),
+            }
+        )
+    running_status.sort(key=lambda row: row["request_id_sha256"])
+
+    active_id_hashes = sorted(
+        set(collector_id_hashes)
+        | set(waiting_id_hashes)
+        | set(running_id_hashes)
+    )
+    result.update(
+        {
+            "engine_collector_count": len(collector_id_hashes),
+            "engine_collector_request_ids_sha256": collector_id_hashes,
+            "scheduler_waiting_count": len(waiting_id_hashes),
+            "scheduler_waiting_request_ids_sha256": waiting_id_hashes,
+            "scheduler_running_count": len(running_id_hashes),
+            "scheduler_running_request_ids_sha256": running_id_hashes,
+            "scheduler_running_requests": running_status,
+            "active_request_count": len(active_id_hashes),
+            "active_request_ids_sha256": active_id_hashes,
+            "terminal_cleanup_pending": cleanup_pending,
+        }
+    )
+    return result
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint."""
@@ -10040,6 +10206,7 @@ async def health():
         result["speculative_decoding"] = spec_info.get(
             "speculative_decoding", spec_info
         )
+    scheduler_stats: dict[str, Any] = {}
     if scheduler:
         try:
             scheduler_stats = scheduler.get_stats()
@@ -10088,6 +10255,16 @@ async def health():
         cache_snapshot = _cache_telemetry_snapshot(scheduler)
         if cache_snapshot:
             result["cache"] = cache_snapshot
+
+    if _engine is not None:
+        result["request_lifecycle"] = _request_lifecycle_health_snapshot(
+            engine_stats,
+            # Batched LLM and MLLM engines publish their scheduler IDs in the
+            # same get_stats() snapshot as collector/cleanup state.  Reusing
+            # that snapshot avoids a second scheduler read widening the normal
+            # admission/terminal-cleanup observation skew.
+            engine_stats,
+        )
 
     # Smelt mode: report partial expert loading status
     if _smelt_enabled:

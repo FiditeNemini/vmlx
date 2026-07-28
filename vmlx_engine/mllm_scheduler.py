@@ -4592,9 +4592,32 @@ class MLLMScheduler:
         legacy/disk). Used by /v1/stats endpoint and health monitoring.
         """
         with self._queue_lock:
+            collector_request_ids = sorted(self.output_queues)
+            waiting_request_ids = [
+                request.request_id for request in self.waiting
+            ]
+            running_request_ids = sorted(self.running)
             stats = {
                 "num_waiting": len(self.waiting),
                 "num_running": len(self.running),
+                "waiting_request_ids": waiting_request_ids,
+                "running_request_ids": running_request_ids,
+                "running_requests": [
+                    {
+                        "request_id": request_id,
+                        "status": getattr(
+                            self.running[request_id].status,
+                            "name",
+                            str(self.running[request_id].status),
+                        ),
+                    }
+                    for request_id in running_request_ids
+                ],
+                "engine_collector_count": len(collector_request_ids),
+                "engine_collector_request_ids": collector_request_ids,
+                "terminal_cleanup_pending": (
+                    not self._terminal_cleanup_complete.is_set()
+                ),
                 "num_finished": len(self.finished_req_ids),
                 "num_requests_processed": self.num_requests_processed,
                 "total_prompt_tokens": self.total_prompt_tokens,

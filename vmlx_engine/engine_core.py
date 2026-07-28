@@ -760,12 +760,22 @@ class EngineCore:
         """Get engine statistics."""
         scheduler_stats = self.scheduler.get_stats()
         uptime = time.time() - self._start_time if self._start_time else 0
+        collector_request_ids = sorted(self._output_collectors)
 
         return {
             "running": self._running,
             "uptime_seconds": uptime,
             "steps_executed": self._steps_executed,
-            "active_requests": len(self._output_collectors),
+            "active_requests": len(collector_request_ids),
+            # These are the engine-owned consumers, not prefix-cache request
+            # tables.  Keep the IDs path-free and prompt-free so /health can
+            # attest which request owns a scheduler lifecycle without
+            # confusing cache bookkeeping with HTTP/gateway activity.
+            "engine_collector_count": len(collector_request_ids),
+            "engine_collector_request_ids": collector_request_ids,
+            "terminal_cleanup_pending": (
+                not self._terminal_cleanup_complete.is_set()
+            ),
             "stream_interval": self.config.stream_interval,
             **scheduler_stats,
         }

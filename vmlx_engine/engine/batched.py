@@ -2687,7 +2687,20 @@ class BatchedEngine(BaseEngine):
         }
 
         if self._mllm_scheduler:
-            stats["mllm_scheduler"] = self._mllm_scheduler.get_stats()
+            mllm_stats = self._mllm_scheduler.get_stats()
+            stats["mllm_scheduler"] = mllm_stats
+            for key in (
+                "engine_collector_count",
+                "engine_collector_request_ids",
+                "terminal_cleanup_pending",
+                "num_waiting",
+                "waiting_request_ids",
+                "num_running",
+                "running_request_ids",
+                "running_requests",
+            ):
+                if key in mllm_stats:
+                    stats[key] = mllm_stats[key]
         elif self._engine:
             stats.update(self._engine.get_stats())
 

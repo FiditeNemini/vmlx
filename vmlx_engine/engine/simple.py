@@ -1245,11 +1245,25 @@ class SimpleEngine(BaseEngine):
 
     def get_stats(self) -> dict[str, Any]:
         """Get engine statistics."""
+        current_request_ids = (
+            [self._current_request_id] if self._current_request_id else []
+        )
         return {
             "engine_type": "simple",
             "model_name": self._model_name,
             "is_mllm": self._is_mllm,
             "loaded": self._loaded,
+            "engine_collector_count": len(current_request_ids),
+            "engine_collector_request_ids": current_request_ids,
+            "terminal_cleanup_pending": False,
+            "num_waiting": 0,
+            "waiting_request_ids": [],
+            "num_running": len(current_request_ids),
+            "running_request_ids": current_request_ids,
+            "running_requests": [
+                {"request_id": request_id, "status": "RUNNING"}
+                for request_id in current_request_ids
+            ],
         }
 
     def get_cache_stats(self) -> dict[str, Any] | None:

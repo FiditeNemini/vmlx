@@ -31,6 +31,308 @@ def _run(coro):
 class TestHealthEndpoint:
     """Tests for the health() async handler."""
 
+    def test_engine_core_stats_expose_collector_and_cleanup_lifecycle(self):
+        """Engine stats distinguish request collectors from cache tables."""
+        from vmlx_engine.engine_core import EngineCore
+
+        core = EngineCore.__new__(EngineCore)
+        core.scheduler = SimpleNamespace(
+            get_stats=lambda: {
+                "num_waiting": 1,
+                "waiting_request_ids": ["req-waiting"],
+                "num_running": 1,
+                "running_request_ids": ["req-running"],
+            }
+        )
+        core._output_collectors = {
+            "req-running": object(),
+            "req-visible": object(),
+        }
+        core._terminal_cleanup_complete = asyncio.Event()
+        core._running = True
+        core._start_time = None
+        core._steps_executed = 7
+        core.config = SimpleNamespace(stream_interval=1)
+
+        stats = core.get_stats()
+
+        assert stats["engine_collector_count"] == 2
+        assert stats["engine_collector_request_ids"] == [
+            "req-running",
+            "req-visible",
+        ]
+        assert stats["terminal_cleanup_pending"] is True
+        assert stats["waiting_request_ids"] == ["req-waiting"]
+        assert stats["running_request_ids"] == ["req-running"]
+        core._terminal_cleanup_complete.set()
+        assert core.get_stats()["terminal_cleanup_pending"] is False
+
+    def test_simple_and_mllm_stats_share_lifecycle_source_fields(self):
+        """Simple and multimodal engines expose the same health source keys."""
+        from vmlx_engine.engine.batched import BatchedEngine
+        from vmlx_engine.engine.simple import SimpleEngine
+
+        simple = SimpleEngine.__new__(SimpleEngine)
+        simple._model_name = "simple-test"
+        simple._is_mllm = False
+        simple._loaded = True
+        simple._current_request_id = "simple-request"
+        simple_stats = simple.get_stats()
+        assert simple_stats["engine_collector_count"] == 1
+        assert simple_stats["engine_collector_request_ids"] == [
+            "simple-request"
+        ]
+        assert simple_stats["num_waiting"] == 0
+        assert simple_stats["running_request_ids"] == ["simple-request"]
+        assert simple_stats["terminal_cleanup_pending"] is False
+
+        mllm_source = {
+            "engine_collector_count": 1,
+            "engine_collector_request_ids": ["mllm-request"],
+            "terminal_cleanup_pending": True,
+            "num_waiting": 1,
+            "waiting_request_ids": ["mllm-request"],
+            "num_running": 0,
+            "running_request_ids": [],
+        }
+        batched = BatchedEngine.__new__(BatchedEngine)
+        batched._model_name = "mllm-test"
+        batched._is_mllm = True
+        batched._loaded = True
+        batched._stream_interval = 1
+        batched._mllm_scheduler = SimpleNamespace(
+            get_stats=lambda: dict(mllm_source)
+        )
+        batched._engine = None
+        mllm_stats = batched.get_stats()
+        for key, value in mllm_source.items():
+            assert mllm_stats[key] == value
+        assert mllm_stats["mllm_scheduler"] == mllm_source
+
+    def test_health_lifecycle_hashes_ids_and_rejects_malformed_source(self):
+        """Unauthenticated health exposes correlation hashes, never raw IDs."""
+        from vmlx_engine import server
+
+        engine_stats = {
+            "engine_collector_count": 1,
+            "engine_collector_request_ids": ["chatcmpl-owned"],
+            "terminal_cleanup_pending": True,
+        }
+        scheduler_stats = {
+            "num_waiting": 1,
+            "waiting_request_ids": ["chatcmpl-owned"],
+            "num_running": 2,
+            "running_request_ids": [
+                "chatcmpl-owned",
+                "chatcmpl-owned:visible-answer",
+            ],
+            "running_requests": [
+                {"request_id": "chatcmpl-owned", "status": "RUNNING"},
+                {
+                    "request_id": "chatcmpl-owned:visible-answer",
+                    "status": "WAITING",
+                },
+            ],
+        }
+
+        lifecycle = server._request_lifecycle_health_snapshot(
+            engine_stats,
+            scheduler_stats,
+        )
+        owned = hashlib.sha256(b"chatcmpl-owned").hexdigest()
+        visible = hashlib.sha256(
+            b"chatcmpl-owned:visible-answer"
+        ).hexdigest()
+
+        assert lifecycle == {
+            "schema": "vmlx-request-lifecycle-v1",
+            "request_id_encoding": "sha256-utf8-lowerhex",
+            "available": True,
+            "engine_collector_count": 1,
+            "engine_collector_request_ids_sha256": [owned],
+            "scheduler_waiting_count": 1,
+            "scheduler_waiting_request_ids_sha256": [owned],
+            "scheduler_running_count": 2,
+            "scheduler_running_request_ids_sha256": [owned, visible],
+            "scheduler_running_requests": [
+                {"request_id_sha256": owned, "status": "RUNNING"},
+                {"request_id_sha256": visible, "status": "WAITING"},
+            ],
+            "active_request_count": 2,
+            "active_request_ids_sha256": sorted([owned, visible]),
+            "terminal_cleanup_pending": True,
+        }
+        assert "chatcmpl-owned" not in json.dumps(lifecycle, sort_keys=True)
+
+        malformed = server._request_lifecycle_health_snapshot(
+            {
+                "engine_collector_count": 2,
+                "engine_collector_request_ids": ["duplicate", "duplicate"],
+                "terminal_cleanup_pending": False,
+            },
+            {
+                "num_waiting": 0,
+                "waiting_request_ids": [],
+                "num_running": 0,
+                "running_request_ids": [],
+            },
+        )
+        assert malformed == {
+            "schema": "vmlx-request-lifecycle-v1",
+            "request_id_encoding": "sha256-utf8-lowerhex",
+            "available": False,
+        }
+
+    @pytest.mark.parametrize(
+        ("count_owner", "count_field"),
+        [
+            ("engine", "engine_collector_count"),
+            ("scheduler", "num_waiting"),
+            ("scheduler", "num_running"),
+        ],
+    )
+    def test_health_lifecycle_rejects_count_list_disagreement(
+        self,
+        count_owner,
+        count_field,
+    ):
+        """Every published lifecycle count must equal its authoritative list."""
+        from vmlx_engine import server
+
+        engine_stats = {
+            "engine_collector_count": 1,
+            "engine_collector_request_ids": ["request-one"],
+            "terminal_cleanup_pending": False,
+        }
+        scheduler_stats = {
+            "num_waiting": 0,
+            "waiting_request_ids": [],
+            "num_running": 1,
+            "running_request_ids": ["request-one"],
+            "running_requests": [
+                {"request_id": "request-one", "status": "RUNNING"}
+            ],
+        }
+        owner = engine_stats if count_owner == "engine" else scheduler_stats
+        owner[count_field] += 1
+
+        lifecycle = server._request_lifecycle_health_snapshot(
+            engine_stats,
+            scheduler_stats,
+        )
+
+        assert lifecycle == {
+            "schema": "vmlx-request-lifecycle-v1",
+            "request_id_encoding": "sha256-utf8-lowerhex",
+            "available": False,
+        }
+
+    def test_health_lifecycle_rejects_malformed_running_status_rows(self):
+        """Diagnostic status rows cannot contradict scheduler-running IDs."""
+        from vmlx_engine import server
+
+        engine_stats = {
+            "engine_collector_count": 1,
+            "engine_collector_request_ids": ["request-one"],
+            "terminal_cleanup_pending": False,
+        }
+        base_scheduler = {
+            "num_waiting": 0,
+            "waiting_request_ids": [],
+            "num_running": 1,
+            "running_request_ids": ["request-one"],
+        }
+        for running_requests in (
+            [],
+            [{"request_id": "foreign"}],
+            [
+                {"request_id": "request-one"},
+                {"request_id": "request-one"},
+            ],
+            [{"request_id": "request-one", "status": 7}],
+        ):
+            lifecycle = server._request_lifecycle_health_snapshot(
+                engine_stats,
+                {
+                    **base_scheduler,
+                    "running_requests": running_requests,
+                },
+            )
+            assert lifecycle == {
+                "schema": "vmlx-request-lifecycle-v1",
+                "request_id_encoding": "sha256-utf8-lowerhex",
+                "available": False,
+            }
+
+        missing_rows = server._request_lifecycle_health_snapshot(
+            engine_stats,
+            base_scheduler,
+        )
+        assert missing_rows == {
+            "schema": "vmlx-request-lifecycle-v1",
+            "request_id_encoding": "sha256-utf8-lowerhex",
+            "available": False,
+        }
+
+    def test_health_publishes_engine_owned_request_lifecycle(self):
+        """The public health route attaches the standardized lifecycle block."""
+        from vmlx_engine import server
+
+        mock_engine = MagicMock()
+        mock_engine.get_stats.return_value = {
+            "engine_type": "batched",
+            "engine_collector_count": 1,
+            "engine_collector_request_ids": ["chatcmpl-route"],
+            "terminal_cleanup_pending": False,
+            "num_waiting": 0,
+            "waiting_request_ids": [],
+            "num_running": 1,
+            "running_request_ids": ["chatcmpl-route"],
+            "running_requests": [
+                {"request_id": "chatcmpl-route", "status": "RUNNING"}
+            ],
+        }
+        mock_engine.is_mllm = False
+        scheduler = MagicMock()
+        scheduler.get_stats.return_value = {
+            "num_waiting": 0,
+            "waiting_request_ids": [],
+            "num_running": 1,
+            "running_request_ids": ["chatcmpl-route"],
+            "running_requests": [
+                {"request_id": "chatcmpl-route", "status": "RUNNING"}
+            ],
+        }
+        expected_hash = hashlib.sha256(b"chatcmpl-route").hexdigest()
+
+        with (
+            patch.object(server, "_engine", mock_engine),
+            patch.object(server, "_get_scheduler", return_value=scheduler),
+            patch.object(server, "_model_name", None),
+            patch.object(server, "_model_path", None),
+            patch.object(server, "_model_load_error", None),
+            patch.object(server, "_mcp_manager", None),
+            patch.object(server, "_jang_metadata", None),
+            patch.object(server, "_last_request_time", 0.0),
+            patch.object(
+                server,
+                "_turboquant_kv_cache_status",
+                return_value={"enabled": False},
+            ),
+            patch.object(server, "_current_model_config", return_value=None),
+            patch.object(server, "_native_cache_status", return_value={}),
+        ):
+            result = _run(server.health())
+
+        lifecycle = result["request_lifecycle"]
+        assert lifecycle["available"] is True
+        assert lifecycle["engine_collector_count"] == 1
+        assert lifecycle["scheduler_running_count"] == 1
+        assert lifecycle["active_request_count"] == 1
+        assert lifecycle["active_request_ids_sha256"] == [expected_hash]
+        assert lifecycle["terminal_cleanup_pending"] is False
+        assert "chatcmpl-route" not in json.dumps(lifecycle, sort_keys=True)
+
     def test_health_mtp_route_is_registered(self):
         """MTP diagnostics should have a stable direct health route alias."""
         from vmlx_engine.server import app

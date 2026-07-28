@@ -882,6 +882,81 @@ def test_request_metadata_hashes_full_body_and_normalizes_only_tool_ids():
     assert first["max_output_tokens"] == 512
 
 
+def test_request_metadata_normalizes_only_responses_continuation_identity():
+    first_request = {
+        "model": "served-model",
+        "input": [{"role": "user", "content": "continue"}],
+        "stream": True,
+        "previous_response_id": "response-one",
+    }
+    second_request = {
+        **first_request,
+        "previous_response_id": "response-two",
+    }
+
+    first = matrix._request_public(2, first_request, protocol="responses")
+    second = matrix._request_public(2, second_request, protocol="responses")
+
+    assert first["previous_response_id"] == "response-one"
+    assert second["previous_response_id"] == "response-two"
+    assert first["body_sha256"] != second["body_sha256"]
+    assert first["canonical_body_sha256"] == second["canonical_body_sha256"]
+
+
+def test_request_metadata_does_not_normalize_noncontinuation_response_id_fields():
+    nested_first = {
+        "model": "served-model",
+        "input": [
+            {
+                "role": "user",
+                "content": {"previous_response_id": "nested-one"},
+            }
+        ],
+        "stream": True,
+    }
+    nested_second = {
+        **nested_first,
+        "input": [
+            {
+                "role": "user",
+                "content": {"previous_response_id": "nested-two"},
+            }
+        ],
+    }
+    chat_first = {
+        "model": "served-model",
+        "messages": [{"role": "user", "content": "continue"}],
+        "stream": False,
+        "previous_response_id": "chat-one",
+    }
+    chat_second = {
+        **chat_first,
+        "previous_response_id": "chat-two",
+    }
+
+    nested_public_first = matrix._request_public(
+        2,
+        nested_first,
+        protocol="responses",
+    )
+    nested_public_second = matrix._request_public(
+        2,
+        nested_second,
+        protocol="responses",
+    )
+    chat_public_first = matrix._request_public(2, chat_first, protocol="chat")
+    chat_public_second = matrix._request_public(2, chat_second, protocol="chat")
+
+    assert (
+        nested_public_first["canonical_body_sha256"]
+        != nested_public_second["canonical_body_sha256"]
+    )
+    assert (
+        chat_public_first["canonical_body_sha256"]
+        != chat_public_second["canonical_body_sha256"]
+    )
+
+
 def test_first_tool_prompt_is_base_independent():
     prompt = matrix.first_tool_instruction("anthropic", "stream")
 
@@ -2705,6 +2780,14 @@ def _paired_replay(
             ("first", "second"),
             "gateway",
             "shared_backend_model_or_cache_nondeterminism",
+        ),
+        (
+            "chat",
+            "nonstream",
+            3,
+            ("same", "same"),
+            "same",
+            "all_equal_prior_history_variance",
         ),
     ],
 )

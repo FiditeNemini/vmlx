@@ -118,6 +118,7 @@ RUNTIME_HASH_FIELDS = (
 PAIRED_REPLAY_TARGETS = {
     ("chat", "nonstream", 2),
     ("ollama", "stream", 3),
+    ("chat", "nonstream", 3),
 }
 PAIRED_REPLAY_EVENT_CHANNELS = {
     "reasoning",
@@ -602,22 +603,44 @@ def _validate_health_source_binding(
     return failures
 
 
-def _canonical_request_payload(value: Any) -> Any:
-    """Normalize only volatile tool-call IDs for cross-base body comparison."""
+def _canonical_request_payload(
+    value: Any,
+    *,
+    normalize_previous_response_id: bool = False,
+    _depth: int = 0,
+) -> Any:
+    """Normalize only protocol-owned volatile IDs for body comparison."""
     if isinstance(value, list):
-        return [_canonical_request_payload(item) for item in value]
+        return [
+            _canonical_request_payload(
+                item,
+                normalize_previous_response_id=normalize_previous_response_id,
+                _depth=_depth + 1,
+            )
+            for item in value
+        ]
     if not isinstance(value, dict):
         return value
 
     result: dict[str, Any] = {}
     object_type = str(value.get("type") or "")
     for key, item in value.items():
-        if key in {"call_id", "tool_call_id", "tool_use_id"} or (
+        if (
+            key == "previous_response_id"
+            and normalize_previous_response_id
+            and _depth == 0
+        ):
+            result[key] = "<response-id>" if item else item
+        elif key in {"call_id", "tool_call_id", "tool_use_id"} or (
             key == "id" and object_type in {"function", "function_call", "tool_use"}
         ):
             result[key] = "<tool-call-id>"
         else:
-            result[key] = _canonical_request_payload(item)
+            result[key] = _canonical_request_payload(
+                item,
+                normalize_previous_response_id=normalize_previous_response_id,
+                _depth=_depth + 1,
+            )
     return result
 
 
@@ -722,10 +745,18 @@ def _public_tool_history_linkage(payload: dict[str, Any]) -> list[dict[str, Any]
     return linkage
 
 
-def _request_public(stage: int, payload: dict[str, Any]) -> dict[str, Any]:
+def _request_public(
+    stage: int,
+    payload: dict[str, Any],
+    *,
+    protocol: str = "",
+) -> dict[str, Any]:
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     canonical = json.dumps(
-        _canonical_request_payload(payload),
+        _canonical_request_payload(
+            payload,
+            normalize_previous_response_id=protocol == "responses",
+        ),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
@@ -929,6 +960,7 @@ def _prepared_body_bytes(body: Any) -> bytes:
 def _prepared_request_public(
     request_body: bytes,
     expected_payload: dict[str, Any],
+    protocol: str,
 ) -> dict[str, Any]:
     """Bind the exact prepared request body to the public payload evidence."""
     try:
@@ -937,9 +969,9 @@ def _prepared_request_public(
         raise ValueError("prepared request body is not a UTF-8 JSON object") from exc
     if not isinstance(decoded, dict):
         raise ValueError("prepared request body is not a JSON object")
-    prepared_public = _request_public(0, decoded)
+    prepared_public = _request_public(0, decoded, protocol=protocol)
     prepared_public.pop("stage", None)
-    expected_public = _request_public(0, expected_payload)
+    expected_public = _request_public(0, expected_payload, protocol=protocol)
     expected_public.pop("stage", None)
     if prepared_public != expected_public:
         raise ValueError(
@@ -1027,8 +1059,9 @@ class DecompressedParserInputCaptureSession:
             prepared_request_public = _prepared_request_public(
                 request_body,
                 payload,
+                protocol,
             )
-            request_public = _request_public(0, payload)
+            request_public = _request_public(0, payload, protocol=protocol)
             request_public.pop("stage", None)
             response_headers = getattr(response.raw, "headers", None)
             if response_headers is None:
@@ -2995,10 +3028,17 @@ def _paired_public_history(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return linkage
 
 
-def _paired_public_request(stage: int, payload: dict[str, Any]) -> dict[str, Any]:
+def _paired_public_request(
+    stage: int,
+    payload: dict[str, Any],
+    protocol: str = "",
+) -> dict[str, Any]:
     raw = frozen_request_body(payload).decode("utf-8")
     canonical = json.dumps(
-        _canonical_request_payload(payload),
+        _canonical_request_payload(
+            payload,
+            normalize_previous_response_id=protocol == "responses",
+        ),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
@@ -3244,7 +3284,7 @@ def run_paired_replay_discriminator(
     """Run one frozen-body direct A1 / gateway B / direct A2 discriminator."""
     if (protocol, mode, int(stage)) not in PAIRED_REPLAY_TARGETS:
         raise ValueError(
-            "paired replay is limited to Chat nonstream round 2 and "
+            "paired replay is limited to Chat nonstream rounds 2/3 and "
             "Ollama stream round 3"
         )
     if gateway_direct_health_probe is None:
@@ -3256,7 +3296,7 @@ def run_paired_replay_discriminator(
     ):
         raise ValueError("paired replay request stream mode does not match target")
     body = frozen_request_body(payload)
-    request_public = _paired_public_request(stage, payload)
+    request_public = _paired_public_request(stage, payload, protocol)
     expected_sha = hashlib.sha256(body).hexdigest()
     stem = f"paired-{protocol}-{mode}-round{stage}"
 
@@ -3506,7 +3546,7 @@ def run_flow(
         enable_thinking=enable_thinking,
         second_tool_choice=second_tool_choice,
     )
-    request_records = [_request_public(1, request1)]
+    request_records = [_request_public(1, request1, protocol=protocol)]
     round1 = client.send(
         protocol,
         request1,
@@ -3545,7 +3585,7 @@ def run_flow(
         enable_thinking=enable_thinking,
         second_tool_choice=second_tool_choice,
     )
-    request_records.append(_request_public(2, request2))
+    request_records.append(_request_public(2, request2, protocol=protocol))
     round2 = client.send(
         protocol,
         request2,
@@ -3589,7 +3629,7 @@ def run_flow(
         enable_thinking=enable_thinking,
         second_tool_choice=second_tool_choice,
     )
-    request_records.append(_request_public(3, request3))
+    request_records.append(_request_public(3, request3, protocol=protocol))
     round3 = client.send(
         protocol,
         request3,
@@ -3722,6 +3762,11 @@ def run_flow(
         ],
         "executions": [_execution_public(execution1), _execution_public(execution2)],
         "terminal_classification": terminals,
+        "_paired_replay_payloads": (
+            {2: copy.deepcopy(request2), 3: copy.deepcopy(request3)}
+            if protocol == "chat" and mode == "nonstream"
+            else {}
+        ),
         "_prefinal_payload": request3,
     }
 
@@ -4572,6 +4617,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "flows": {},
         "abort_recovery": {},
+        "paired_replays": {},
     }
     if identity_failures:
         output["checks"] = {
@@ -4585,6 +4631,9 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         output["pass"] = False
         return output
 
+    paired_replay_payloads: dict[
+        tuple[str, str, str, int], dict[str, Any]
+    ] = {}
     for base_label, base_url in bases.items():
         client = ProtocolClient(
             base_url,
@@ -4612,7 +4661,23 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
                         enable_thinking=args.enable_thinking,
                         second_tool_choice=args.second_tool_choice,
                     )
+                    flow_replay_payloads = flow.pop(
+                        "_paired_replay_payloads", {}
+                    )
                     prefinal = flow.pop("_prefinal_payload", None)
+                    if isinstance(flow_replay_payloads, dict):
+                        for replay_stage, replay_payload in (
+                            flow_replay_payloads.items()
+                        ):
+                            if isinstance(replay_payload, dict):
+                                paired_replay_payloads[
+                                    (
+                                        base_label,
+                                        protocol,
+                                        mode,
+                                        int(replay_stage),
+                                    )
+                                ] = replay_payload
                     output["flows"][base_label][protocol][mode] = flow
                     if (
                         args.skip_cancellation
@@ -4671,6 +4736,69 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     }
+    paired_chat_required = (
+        "chat" in protocols
+        and "nonstream" in modes
+        and {"direct", "gateway"}.issubset(bases)
+    )
+    if paired_chat_required:
+        direct_flow = output["flows"].get("direct", {}).get("chat", {}).get(
+            "nonstream", {}
+        )
+        gateway_flow = output["flows"].get("gateway", {}).get("chat", {}).get(
+            "nonstream", {}
+        )
+        for replay_stage in (2, 3):
+            replay_key = f"chat_nonstream_round{replay_stage}"
+            replay_payload = paired_replay_payloads.get(
+                ("direct", "chat", "nonstream", replay_stage)
+            )
+            if (
+                not isinstance(replay_payload, dict)
+                or direct_flow.get("pass") is not True
+                or gateway_flow.get("pass") is not True
+            ):
+                output["paired_replays"][replay_key] = {
+                    "pass": False,
+                    "error_type": "PrerequisiteFlowFailure",
+                }
+                continue
+            try:
+                output["paired_replays"][replay_key] = (
+                    run_paired_replay_discriminator(
+                        direct_client=ProtocolClient(
+                            bases["direct"],
+                            args.api_key,
+                            args.timeout,
+                            base_label="direct",
+                        ),
+                        gateway_client=ProtocolClient(
+                            bases["gateway"],
+                            args.api_key,
+                            args.timeout,
+                            base_label="gateway",
+                        ),
+                        protocol="chat",
+                        mode="nonstream",
+                        stage=replay_stage,
+                        payload=replay_payload,
+                        expected_backend_identity_fingerprint=health_before[
+                            "direct"
+                        ]["identity"]["fingerprint_sha256"],
+                        gateway_direct_health_probe=lambda: _get_full_health(
+                            health_urls.get(
+                                "direct", bases["direct"] + "/health"
+                            ),
+                            args.timeout,
+                        ),
+                    )
+                )
+            except Exception as exc:
+                output["paired_replays"][replay_key] = {
+                    "pass": False,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
     flow_rows = [
         row
         for base in output["flows"].values()
@@ -4759,6 +4887,16 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
             True
             if args.skip_cancellation
             else bool(abort_rows) and all(row.get("pass") is True for row in abort_rows)
+        ),
+        "paired_replay_chat_nonstream_rounds_pass": (
+            not paired_chat_required
+            or all(
+                output["paired_replays"]
+                .get(f"chat_nonstream_round{stage}", {})
+                .get("pass")
+                is True
+                for stage in (2, 3)
+            )
         ),
         "raw_capture_complete": bool(output["raw_capture"]["complete"]),
     }

@@ -99,6 +99,20 @@ export function resolveBundleGenerationDefaults(
     defaults.source = 'jang_config'
   }
 
+  const model = objectRecord(modelConfig)
+  const textConfig = objectRecord(model?.text_config)
+  const modelType = model?.model_type ?? textConfig?.model_type
+  if (
+    defaults.topK == null &&
+    defaults.doSample !== false &&
+    modelType === 'laguna'
+  ) {
+    // Poolside's Laguna S/XS 2.1 serving/evaluation contract is top_k=20.
+    // Older converted artifacts omitted the field, so mirror the engine's
+    // transparent family fallback instead of displaying a false "Off".
+    defaults.topK = 20
+  }
+
   return Object.keys(defaults).some((key) => key !== 'source') ? defaults : null
 }
 

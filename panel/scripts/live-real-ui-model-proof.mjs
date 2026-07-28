@@ -2634,7 +2634,7 @@ function expectedUiTurnCount(result) {
     : 3
 }
 
-function expectedUiToolCallCount(result) {
+export function expectedUiToolCallCount(result) {
   const profile = String(result?.requestContract?.uiActionProfile || '')
   if (profile === 'primary-tool-restart-probe') return 1
   if (profile === 'native-three-turn-switch') return 2
@@ -2650,7 +2650,7 @@ function expectedUiToolCallCount(result) {
   return result?.requestedBuiltinTools === true ? 2 : 0
 }
 
-function uiProfileRequiresPositiveCacheReuse(result) {
+export function uiProfileRequiresPositiveCacheReuse(result) {
   return new Set([
     'primary-tool-restart-probe',
     'primary-history-paged-evict-refault',
@@ -3146,8 +3146,8 @@ export function validateExactToolLoopEvidence(result) {
   const domCards = (result?.renderedDom?.messages || [])
     .flatMap((message) => message?.toolCards || [])
   if (expectedToolCalls === 0) {
-    if (calls.length || statusCalls.length || domCards.length) {
-      failures.push('tool calls were observed in a no-tool UI proof')
+    if (calls.length || results.length || statuses.length || domCards.length) {
+      failures.push('tool call/result/status residue was observed in a no-tool UI proof')
     }
     return failures
   }
@@ -4505,7 +4505,7 @@ function collectAnthropicStream(raw, label) {
   }
 }
 
-function collectOllamaStream(raw, label) {
+export function collectOllamaStream(raw, label) {
   const reasoning = []
   const content = []
   const toolCalls = []
@@ -4531,9 +4531,9 @@ function collectOllamaStream(raw, label) {
       content.push(message.content)
       orderedChannels.push('content')
     }
-    for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+    for (const [index, call] of (Array.isArray(message.tool_calls) ? message.tool_calls : []).entries()) {
       toolCalls.push({
-        id: String(call?.id || ''),
+        id: String(call?.id || `ollama_call_${index}`),
         name: String(call?.function?.name || ''),
         arguments: canonicalJson(call?.function?.arguments || {}),
       })
@@ -5391,6 +5391,53 @@ function validateRawMatrixCapture(value, result) {
   return failures
 }
 
+export function validateFrozenChatParity(value) {
+  const failures = []
+  for (const stage of [2, 3]) {
+    const replay = value?.paired_replays?.[`chat_nonstream_round${stage}`]
+    const request = replay?.request || {}
+    const flowRequest = value?.flows?.direct?.chat?.nonstream?.requests?.[stage - 1] || {}
+    const hashes = request?.leg_body_sha256 || {}
+    const expectedHash = request?.prepared_body_sha256
+    const expectedThinking = stage === 2
+    if (
+      replay?.schema !== 'vmlx-agentic-protocol-paired-replay-v1'
+      || canonicalJson(replay?.target) !== canonicalJson({
+        protocol: 'chat',
+        mode: 'nonstream',
+        stage,
+      })
+      || replay?.pass !== true
+      || replay?.checks?.exact_body_sha_equal !== true
+      || replay?.checks?.gateway_backend_lifecycle_pass !== true
+    ) {
+      failures.push(
+        `Chat nonstream round ${stage} stochastic-history parity lacks a passing frozen paired replay`,
+      )
+    }
+    if (
+      !validSha256(expectedHash)
+      || canonicalJson(Object.keys(hashes).sort()) !== canonicalJson(['a1', 'a2', 'b'])
+      || Object.values(hashes).some((hash) => hash !== expectedHash)
+    ) {
+      failures.push(
+        `Chat nonstream round ${stage} frozen paired replay did not transmit one exact body on all three legs`,
+      )
+    }
+    if (
+      request?.body_sha256 !== expectedHash
+      || request?.body_sha256 !== flowRequest?.body_sha256
+      || request?.enable_thinking !== expectedThinking
+      || flowRequest?.enable_thinking !== expectedThinking
+    ) {
+      failures.push(
+        `Chat nonstream round ${stage} frozen paired replay is not bound to the transmitted ${expectedThinking ? 'On' : 'Off'} flow body`,
+      )
+    }
+  }
+  return failures
+}
+
 export function validatePairedApiEvidence(result) {
   const failures = []
   const artifact = result?.pairedApiArtifact
@@ -5482,21 +5529,28 @@ export function validatePairedApiEvidence(result) {
     for (const mode of expectedPairedApiModes) {
       const directRequests = flowBases?.direct?.[protocol]?.[mode]?.requests || []
       const gatewayRequests = flowBases?.gateway?.[protocol]?.[mode]?.requests || []
+      const parityIndexes = protocol === 'chat' && mode === 'nonstream'
+        ? [0]
+        : [0, 1, 2]
       if (
         directRequests.length !== 3
         || gatewayRequests.length !== 3
-        || directRequests.some((request, index) => (
-          !validSha256(request?.canonical_body_sha256)
-          || request.canonical_body_sha256
-            !== gatewayRequests[index]?.canonical_body_sha256
+        || directRequests.some((request) => !validSha256(request?.canonical_body_sha256))
+        || gatewayRequests.some((request) => !validSha256(request?.canonical_body_sha256))
+        || parityIndexes.some((index) => (
+          directRequests[index]?.canonical_body_sha256
+          !== gatewayRequests[index]?.canonical_body_sha256
         ))
       ) {
         failures.push(
-          `${protocol}/${mode} direct and gateway canonical request bodies are not byte-parity equivalent`,
+          protocol === 'chat' && mode === 'nonstream'
+            ? 'chat/nonstream initial direct and gateway canonical request bodies are not byte-parity equivalent'
+            : `${protocol}/${mode} direct and gateway canonical request bodies are not byte-parity equivalent`,
         )
       }
     }
   }
+  failures.push(...validateFrozenChatParity(value))
   failures.push(...validateRawMatrixCapture(value, result))
   if (claimsDualSurface && !isServerRequestCorrelationVerified(result)) {
     failures.push('dual-surface status was claimed without request/cache/settings correlation')
@@ -5546,6 +5600,10 @@ function assertResult(result) {
   const cacheTelemetryExpected = (
     sessionConfig.enablePrefixCache !== false
     && sessionConfig.continuousBatching !== false
+  )
+  const positiveCacheReuseExpected = (
+    cacheTelemetryExpected
+    && uiProfileRequiresPositiveCacheReuse(result)
   )
   if (result.format !== proofFormat) failures.push(`expected proof format ${proofFormat}`)
   if (result.bundleGenerationContract?.template?.usable !== true) {
@@ -5674,8 +5732,8 @@ function assertResult(result) {
     || result.gitProvenance?.before?.harness_sha256 !== result.gitProvenance?.after?.harness_sha256
   ) failures.push('source or UI proof harness changed during the live run')
   if (result.sendErrors?.length) failures.push(`renderer send errors: ${result.sendErrors.join('; ')}`)
-  if (cacheTelemetryExpected && (result.cache?.cacheHitTokens || 0) <= 0) failures.push('expected real cache-hit token telemetry after repeated UI turns')
-  if (cacheTelemetryExpected && !result.provenSurfaces?.includes('cache_hit_telemetry')) {
+  if (positiveCacheReuseExpected && (result.cache?.cacheHitTokens || 0) <= 0) failures.push('expected real cache-hit token telemetry after a reuse probe')
+  if (positiveCacheReuseExpected && !result.provenSurfaces?.includes('cache_hit_telemetry')) {
     failures.push('live proof did not record clean cache-hit telemetry')
   }
   if (
@@ -5710,8 +5768,12 @@ function assertResult(result) {
   if (!result.provenSurfaces?.includes('language_leak_check')) {
     failures.push('live proof did not record clean visible/reasoning language leak check')
   }
-  if (result.requestedBuiltinTools === true && !result.provenSurfaces?.includes('long_tool_loop')) {
-    failures.push('requested real built-in tools but proof did not record long_tool_loop surface')
+  const expectedToolCalls = expectedUiToolCallCount(result)
+  if (expectedToolCalls > 0 && !result.provenSurfaces?.includes('tool_loop')) {
+    failures.push('UI action profile expected real built-in tools but proof did not record tool_loop surface')
+  }
+  if (expectedToolCalls >= 2 && !result.provenSurfaces?.includes('long_tool_loop')) {
+    failures.push('UI action profile expected two real built-in tools but proof did not record long_tool_loop surface')
   }
   if (result.requestedEnableThinking === true && !result.provenSurfaces?.includes('reasoning_display')) {
     failures.push('requested real reasoning but proof did not record reasoning_display surface')
@@ -5773,6 +5835,7 @@ export function deriveProvenSurfaces(result) {
     result.requestedServerCacheControls === true
     && isCacheRequestCorrelationVerified(result)
     && validateRequestCorrelatedCacheEvidence(result).length === 0
+    && (result.cache?.cacheHitTokens || 0) > 0
     && cacheReconstructionClean(result)
   ) {
     surfaces.add('cache_hit_telemetry')

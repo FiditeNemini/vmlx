@@ -9335,6 +9335,72 @@ def _v5_reasoning_mode_request(
     return request, mode
 
 
+def _v5_rebind_flow_payload_to_transmitted_request(
+    payload: dict[str, Any],
+    request: dict[str, Any],
+) -> None:
+    """Keep run_flow's retained replay payload identical to the sent body."""
+    rebound = json.loads(json.dumps(request))
+    payload.clear()
+    payload.update(rebound)
+
+
+def _v5_bind_transmitted_request_metadata(
+    matrix: dict[str, Any],
+    records: list[dict[str, Any]],
+    harness: Any,
+) -> None:
+    """Replace pre-transform request summaries with exact transmitted bodies."""
+    seen: set[tuple[str, str, str, int]] = set()
+    expected_modes = {1: None, 2: True, 3: False}
+    for record in records:
+        match = re.fullmatch(
+            r"(stream|nonstream)-flow-round([123])",
+            str(record.get("capture_label") or ""),
+        )
+        if match is None:
+            continue
+        mode = match.group(1)
+        stage = int(match.group(2))
+        route = str(record.get("route") or "")
+        protocol = str(record.get("protocol") or "")
+        key = (route, protocol, mode, stage)
+        if key in seen:
+            raise RuntimeError("duplicate transmitted API request metadata")
+        try:
+            requests_public = matrix["flows"][route][protocol][mode]["requests"]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(
+                "transmitted API request has no matching public flow"
+            ) from exc
+        if not isinstance(requests_public, list) or len(requests_public) != 3:
+            raise RuntimeError("public API flow request metadata is incomplete")
+        public = harness._request_public(
+            stage,
+            record["request"],
+            protocol=protocol,
+        )
+        if public.get("enable_thinking") is not expected_modes[stage]:
+            raise RuntimeError(
+                "transmitted API reasoning mode does not match Auto/On/Off stage"
+            )
+        requests_public[stage - 1] = public
+        seen.add(key)
+
+    expected = {
+        (route, protocol, mode, stage)
+        for route, protocols in (matrix.get("flows") or {}).items()
+        for protocol, modes in protocols.items()
+        for mode, flow in modes.items()
+        if isinstance(flow, dict) and flow.get("pass") is True
+        for stage in (1, 2, 3)
+    }
+    if seen != expected:
+        raise RuntimeError(
+            "transmitted API request metadata does not cover every passing flow"
+        )
+
+
 def _v5_parse_resolved_sampling_log(
     line: str,
     *,
@@ -9616,12 +9682,27 @@ def _v5_api_worker_capture(
         stream: bool,
         *,
         capture_label: str = "request",
+        prepared_body: bytes | None = None,
     ) -> dict[str, Any]:
+        if capture_label.startswith("paired-"):
+            return original_send(
+                client,
+                protocol,
+                payload,
+                stream,
+                capture_label=capture_label,
+                prepared_body=prepared_body,
+            )
         request, reasoning_mode = _v5_reasoning_mode_request(
             protocol,
             payload,
             capture_label,
         )
+        # run_flow retains request2/request3 after send() to build the frozen
+        # direct/gateway replay. Keep that retained object identical to the
+        # post-wrapper body sent below, rather than replaying the pre-transform
+        # global enable_thinking value.
+        _v5_rebind_flow_payload_to_transmitted_request(payload, request)
         started_ns = time.monotonic_ns()
         result = original_send(
             client,
@@ -9629,6 +9710,7 @@ def _v5_api_worker_capture(
             request,
             stream,
             capture_label=capture_label,
+            prepared_body=prepared_body,
         )
         ended_ns = time.monotonic_ns()
         records.append(
@@ -9686,6 +9768,7 @@ def _v5_api_worker_capture(
         matrix = harness.run_matrix(matrix_args)
     finally:
         harness.ProtocolClient.send = original_send
+    _v5_bind_transmitted_request_metadata(matrix, records, harness)
     sampling = _v5_api_sampling_capture(
         harness,
         original_send,

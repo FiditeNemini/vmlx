@@ -20,8 +20,10 @@ import {
   applyTopLevelCorrelationStatus,
   assertCdpExpressionSyntax,
   captureBundleGenerationContract,
+  collectOllamaStream,
   deriveProvenSurfaces,
   correlateTerminalResponseToCacheExecution,
+  expectedUiToolCallCount,
   isCacheRequestCorrelationVerified,
   isServerRequestCorrelationVerified,
   localRendererModuleEvidence,
@@ -36,6 +38,7 @@ import {
   validateExactToolLoopEvidence,
   validateAttachOnlyLifecycle,
   validateGenerationDefaultsEvidence,
+  validateFrozenChatParity,
   validateModelBundleBinding,
   validateOwnedRunIntent,
   validatePairedApiEvidence,
@@ -46,6 +49,7 @@ import {
   validateRequestCorrelatedCacheEvidence,
   validateServerCacheEvidence,
   validateUiRuntimeProvenance,
+  uiProfileRequiresPositiveCacheReuse,
   viteRendererSourceSeen,
   viteRawRendererModulePath,
   waitForOwnedUiReleaseSentinel,
@@ -1614,7 +1618,7 @@ function createValidPairedArtifact(result: Record<string, any>) {
             canonical_body_sha256: canonicalHash(canonicalBodyIdentity),
             tool_choice: fixtureToolChoice(protocol, mode, stage),
             stream: mode === "stream",
-            enable_thinking: true,
+            enable_thinking: stage === 1 ? null : stage === 2,
             previous_response_id: (
               protocol === "responses" && stage > 1
                 ? `${baseLabel}-${protocol}-${mode}-${stage - 1}`
@@ -1891,6 +1895,34 @@ function createValidPairedArtifact(result: Record<string, any>) {
     run_directory: runDirectory,
     manifest_sha256: crypto.createHash("sha256").update(manifestText).digest("hex"),
   };
+  const pairedReplays = Object.fromEntries(
+    [2, 3].map((stage) => {
+      const flowRequest = flows.direct.chat.nonstream.requests[stage - 1];
+      const preparedBodySha = flowRequest.body_sha256;
+      return [
+        `chat_nonstream_round${stage}`,
+        {
+          schema: "vmlx-agentic-protocol-paired-replay-v1",
+          target: { protocol: "chat", mode: "nonstream", stage },
+          request: {
+            body_sha256: preparedBodySha,
+            enable_thinking: stage === 2,
+            prepared_body_sha256: preparedBodySha,
+            leg_body_sha256: {
+              a1: preparedBodySha,
+              b: preparedBodySha,
+              a2: preparedBodySha,
+            },
+          },
+          checks: {
+            exact_body_sha_equal: true,
+            gateway_backend_lifecycle_pass: true,
+          },
+          pass: true,
+        },
+      ];
+    }),
+  );
   const value = {
     schema: "vmlx-agentic-protocol-matrix-v2",
     schema_version: 2,
@@ -1939,6 +1971,7 @@ function createValidPairedArtifact(result: Record<string, any>) {
     },
     raw_capture: rawCapture,
     flows,
+    paired_replays: pairedReplays,
     abort_recovery: {},
     checks: {
       identity_provenance_pass: true,
@@ -1946,6 +1979,7 @@ function createValidPairedArtifact(result: Record<string, any>) {
       all_flows_pass: true,
       abort_recovery_skipped: true,
       all_abort_recovery_pass: true,
+      paired_replay_chat_nonstream_rounds_pass: true,
       raw_capture_complete: true,
     },
     pass: true,
@@ -2930,6 +2964,97 @@ describe("real UI model proof harness", () => {
     } finally {
       rmSync(fixture.directory, { recursive: true, force: true });
     }
+  });
+
+  it("requires frozen Chat stage-2 and stage-3 parity attestations", () => {
+    const result = goodResult();
+    const fixture = createValidPairedArtifact(result);
+    try {
+      const value = structuredClone(fixture.artifact.value);
+      expect(validateFrozenChatParity(value)).toEqual([]);
+
+      delete value.paired_replays.chat_nonstream_round3;
+      expect(validateFrozenChatParity(value).join("\n")).toMatch(
+        /round 3 stochastic-history parity|round 3 frozen paired replay/,
+      );
+
+      const wrongMode = structuredClone(fixture.artifact.value);
+      wrongMode.paired_replays.chat_nonstream_round3.request.enable_thinking = true;
+      expect(validateFrozenChatParity(wrongMode).join("\n")).toMatch(
+        /round 3 frozen paired replay is not bound to the transmitted Off flow body/,
+      );
+
+      const wrongBody = structuredClone(fixture.artifact.value);
+      wrongBody.paired_replays.chat_nonstream_round3.request.body_sha256 =
+        canonicalHash({ wrong: "body" });
+      expect(validateFrozenChatParity(wrongBody).join("\n")).toMatch(
+        /round 3 frozen paired replay is not bound to the transmitted Off flow body/,
+      );
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not promote a phase-0 store profile to cache-hit or tool-loop proof", () => {
+    const result = goodResult();
+    result.requestContract.uiActionProfile = "primary-reasoning-render-store";
+    result.requestContract.uiTurnCount = 1;
+    result.requestedBuiltinTools = true;
+
+    expect(expectedUiToolCallCount(result)).toBe(0);
+    expect(uiProfileRequiresPositiveCacheReuse(result)).toBe(false);
+    const surfaces = deriveProvenSurfaces(result);
+    expect(surfaces).not.toContain("cache_hit_telemetry");
+    expect(surfaces).not.toContain("tool_loop");
+    expect(surfaces).not.toContain("long_tool_loop");
+
+    const orphanResult = {
+      requestContract: {
+        uiActionProfile: "primary-reasoning-render-store",
+      },
+      persistedToolsByMessage: [[]],
+      persistedOaiCallsByMessage: [[]],
+      persistedOaiResultsByMessage: [[{ tool_call_id: "orphan" }]],
+      renderedDom: { messages: [] },
+    };
+    expect(validateExactToolLoopEvidence(orphanResult).join("\n")).toMatch(
+      /tool call\/result\/status residue/,
+    );
+
+    const errorStatus = {
+      ...orphanResult,
+      persistedToolsByMessage: [[{ phase: "error", toolCallId: "broken" }]],
+      persistedOaiResultsByMessage: [[]],
+    };
+    expect(validateExactToolLoopEvidence(errorStatus).join("\n")).toMatch(
+      /tool call\/result\/status residue/,
+    );
+  });
+
+  it("uses the canonical Ollama fallback ID when the backend omits one", () => {
+    const parsed = collectOllamaStream(
+      Buffer.from([
+        JSON.stringify({
+          message: {
+            tool_calls: [{
+              function: {
+                name: "file_info",
+                arguments: { path: "panel/package.json" },
+              },
+            }],
+          },
+          done: false,
+        }),
+        JSON.stringify({ message: {}, done: true, done_reason: "stop" }),
+      ].join("\n")),
+      "ollama-fallback-id",
+    );
+
+    expect(parsed.toolCalls).toEqual([{
+      id: "ollama_call_0",
+      name: "file_info",
+      arguments: JSON.stringify({ path: "panel/package.json" }),
+    }]);
   });
 
   it.each([

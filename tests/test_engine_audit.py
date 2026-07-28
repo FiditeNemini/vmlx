@@ -3050,6 +3050,31 @@ class TestServerSamplingResolution:
         server._generation_defaults_cache.clear()
         assert server._resolve_top_k(None, str(tmp_path)) == 33
 
+    def test_laguna_omitted_top_k_uses_visible_vendor_contract(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import vmlx_engine.server as server
+
+        (tmp_path / "config.json").write_text(json.dumps({"model_type": "laguna"}))
+        (tmp_path / "generation_config.json").write_text(json.dumps({
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "do_sample": True,
+        }))
+        monkeypatch.setattr(server, "_model_path", str(tmp_path))
+        monkeypatch.setattr(server, "_default_top_k", None)
+        server._jang_sampling_defaults_cache.clear()
+        server._generation_defaults_cache.clear()
+
+        assert server._resolve_top_k(None, str(tmp_path)) == 20
+        assert server._resolve_top_k(0, str(tmp_path)) == 0
+        assert server._resolve_top_k(7, str(tmp_path)) == 7
+
+        monkeypatch.setattr(server, "_default_top_k", 11)
+        assert server._resolve_top_k(None, str(tmp_path)) == 11
+
     def test_max_tokens_resolution_contract_applies_to_every_registered_family(
         self,
         tmp_path,

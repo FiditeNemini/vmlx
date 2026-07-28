@@ -1955,6 +1955,8 @@ def _model_family_for_defaults(model_name: str = "") -> str:
                     return "deepseek_v4"
                 if _model_type in {"minimax", "minimax_m2", "minimax_m2_5"}:
                     return "minimax_m2"
+                if _model_type == "laguna":
+                    return "laguna"
         except Exception:
             pass
     try:
@@ -2028,9 +2030,15 @@ def _resolve_top_k(request_value: int | None, model_name: str = "") -> int:
         return max(0, int(v))
     if _generation_config_declares_greedy_sampling(model_name):
         return 0
-    # Do not invent family-only sampler values. The Electron controls cannot
-    # truthfully display an engine-only fallback, and official bundle defaults
-    # must remain authoritative.
+    # Poolside evaluates Laguna S/XS 2.1 with top_k=20. Some converted Laguna
+    # bundles accidentally omitted that field while their model cards retained
+    # the vendor contract. Keep the compatibility default visible through
+    # /health and the Electron settings resolver; explicit request/startup
+    # values above still win.
+    if _model_family_for_defaults(model_name) == "laguna":
+        return 20
+
+    # Other families remain metadata-owned; do not invent sampler values.
     return 0
 
 

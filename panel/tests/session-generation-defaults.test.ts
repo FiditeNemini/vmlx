@@ -68,6 +68,41 @@ describe('session generation-default hydration', () => {
     })
   })
 
+  it('shows the Laguna vendor top-k contract when older bundle metadata omits it', () => {
+    expect(resolveBundleGenerationDefaults(
+      {
+        do_sample: true,
+        temperature: 1,
+        top_p: 1,
+      },
+      {
+        chat: {
+          sampling_defaults: {
+            temperature: 1,
+            top_p: 1,
+          },
+        },
+      },
+      { model_type: 'laguna' },
+    )).toEqual({
+      temperature: 1,
+      topP: 1,
+      topK: 20,
+      source: 'jang_config',
+    })
+
+    expect(resolveBundleGenerationDefaults(
+      { do_sample: true, top_k: 32 },
+      null,
+      { model_type: 'laguna' },
+    )).toMatchObject({ topK: 32 })
+    expect(resolveBundleGenerationDefaults(
+      { do_sample: false },
+      null,
+      { model_type: 'laguna' },
+    )).toMatchObject({ doSample: false })
+  })
+
   it('preserves an explicit do_sample=false declaration', () => {
     expect(applyBundleGenerationDefaultsToSessionConfig({}, { doSample: false })).toMatchObject({
       defaultDoSample: false,

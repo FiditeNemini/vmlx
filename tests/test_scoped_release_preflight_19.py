@@ -4131,6 +4131,150 @@ def test_r19_v5_sampling_log_parser_binds_all_request_identities():
     assert parsed["values"]["enable_thinking"] is False
 
 
+def test_r19_v5_reasoning_mode_request_maps_auto_on_off_labels():
+    module = load_module()
+    payload = {
+        "model": "fixture",
+        "enable_thinking": True,
+        "think": True,
+    }
+
+    auto, auto_mode = module._v5_reasoning_mode_request(
+        "chat", payload, "stream-flow-round1"
+    )
+    on, on_mode = module._v5_reasoning_mode_request(
+        "chat", payload, "nonstream-flow-round2"
+    )
+    off, off_mode = module._v5_reasoning_mode_request(
+        "ollama", payload, "stream-flow-round3"
+    )
+
+    assert (auto_mode, auto.get("enable_thinking"), auto.get("think")) == (
+        "auto",
+        None,
+        None,
+    )
+    assert (on_mode, on["enable_thinking"], on.get("think")) == (
+        "on",
+        True,
+        None,
+    )
+    assert (off_mode, off["think"], off.get("enable_thinking")) == (
+        "off",
+        False,
+        None,
+    )
+
+
+def test_r19_v5_transmitted_request_metadata_replaces_pretransform_summaries():
+    module = load_module()
+    matrix_result = {
+        "flows": {
+            "direct": {
+                "chat": {
+                    "stream": {
+                        "pass": True,
+                        "requests": [
+                            {"stale": 1},
+                            {"stale": 2},
+                            {"stale": 3},
+                        ],
+                    }
+                }
+            }
+        }
+    }
+    records = [
+        {
+            "route": "direct",
+            "protocol": "chat",
+            "capture_label": f"stream-flow-round{stage}",
+            "request": {
+                "model": "fixture",
+                **(
+                    {}
+                    if stage == 1
+                    else {"enable_thinking": stage == 2}
+                ),
+            },
+        }
+        for stage in (1, 2, 3)
+    ]
+
+    class Harness:
+        @staticmethod
+        def _request_public(stage, request, *, protocol=""):
+            return {
+                "stage": stage,
+                "model": request["model"],
+                "protocol": protocol,
+                "enable_thinking": request.get("enable_thinking"),
+            }
+
+    module._v5_bind_transmitted_request_metadata(
+        matrix_result,
+        records,
+        Harness,
+    )
+
+    assert matrix_result["flows"]["direct"]["chat"]["stream"]["requests"] == [
+        {
+            "stage": 1,
+            "model": "fixture",
+            "protocol": "chat",
+            "enable_thinking": None,
+        },
+        {
+            "stage": 2,
+            "model": "fixture",
+            "protocol": "chat",
+            "enable_thinking": True,
+        },
+        {
+            "stage": 3,
+            "model": "fixture",
+            "protocol": "chat",
+            "enable_thinking": False,
+        },
+    ]
+    assert (
+        SCRIPT.read_text(encoding="utf-8").count(
+            "_v5_bind_transmitted_request_metadata("
+        )
+        == 2
+    )
+
+
+def test_r19_v5_replay_payload_is_rebound_to_the_transmitted_off_body():
+    module = load_module()
+    retained = {
+        "model": "fixture",
+        "stream": False,
+        "enable_thinking": True,
+        "messages": [{"role": "user", "content": "continue"}],
+    }
+    transmitted, mode = module._v5_reasoning_mode_request(
+        "chat",
+        retained,
+        "nonstream-flow-round3",
+    )
+
+    module._v5_rebind_flow_payload_to_transmitted_request(
+        retained,
+        transmitted,
+    )
+
+    assert mode == "off"
+    assert retained == transmitted
+    assert retained["enable_thinking"] is False
+    assert (
+        SCRIPT.read_text(encoding="utf-8").count(
+            "_v5_rebind_flow_payload_to_transmitted_request("
+        )
+        == 2
+    )
+
+
 def test_r19_v5_sampling_log_lookup_survives_ring_wrap_and_rejects_duplicates(
     monkeypatch,
 ):

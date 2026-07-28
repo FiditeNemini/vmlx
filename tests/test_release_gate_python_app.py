@@ -603,6 +603,8 @@ def test_packaged_bundled_hash_gate_covers_runtime_files_changed_for_release():
         "mllm_scheduler.py",
         "model_configs.py",
         "model_config_registry.py",
+        "speculative.py",
+        "models/llm.py",
         "models/mllm.py",
         "models/step3p7_mlx_vlm.py",
         "omni_multimodal.py",
@@ -618,6 +620,7 @@ def test_packaged_bundled_hash_gate_covers_runtime_files_changed_for_release():
         "utils/ssm_companion_cache.py",
         "utils/ssm_companion_disk_store.py",
         "utils/jang_loader.py",
+        "utils/nanbeige_runtime.py",
         "utils/tokenizer.py",
     }
 
@@ -644,6 +647,9 @@ def test_packaged_bundled_hash_gate_covers_critical_jang_tools_files():
         "kimi_prune/generate_vl.py",
         "kimi_prune/runtime_patch.py",
         "mimo_v2/mlx_model.py",
+        "nanbeige/__init__.py",
+        "nanbeige/model.py",
+        "nanbeige/mlx_register.py",
         "step37/__init__.py",
         "step37/nvfp4_codec.py",
         "step37/step3p7_mlx.py",
@@ -796,6 +802,8 @@ def test_verify_bundled_python_hash_gate_covers_release_runtime_files():
         "mllm_scheduler.py",
         "model_configs.py",
         "model_config_registry.py",
+        "speculative.py",
+        "models/llm.py",
         "models/mllm.py",
         "models/step3p7_mlx_vlm.py",
         "omni_multimodal.py",
@@ -808,6 +816,7 @@ def test_verify_bundled_python_hash_gate_covers_release_runtime_files():
         "utils/ssm_companion_cache.py",
         "utils/ssm_companion_disk_store.py",
         "utils/jang_loader.py",
+        "utils/nanbeige_runtime.py",
         "utils/tokenizer.py",
     }
     expected_jang_tools_files = {
@@ -853,6 +862,32 @@ def test_verify_bundled_python_import_gate_covers_hy3_jangtq_runtime_modules():
     ):
         assert f'("{mod}",' in verifier
     assert '("mlx_lm.models.mimo_v2",' in verifier
+
+
+def test_verify_bundled_python_gates_nanbeige_content_and_registration_order():
+    verifier = Path("panel/scripts/verify-bundled-python.sh").read_text()
+
+    for rel in (
+        "utils/nanbeige_runtime.py",
+        "nanbeige/__init__.py",
+        "nanbeige/model.py",
+        "nanbeige/mlx_register.py",
+    ):
+        assert f'"{rel}"' in verifier
+
+    imports = (
+        "jang_tools.nanbeige",
+        "jang_tools.nanbeige.model",
+        "jang_tools.nanbeige.mlx_register",
+        "mlx_lm.models.nanbeige",
+    )
+    positions = []
+    for module in imports:
+        marker = f'("{module}",'
+        assert marker in verifier
+        positions.append(verifier.index(marker))
+    assert positions == sorted(positions)
+    assert "Nanbeige mlx-lm registration missing" in verifier
 
 
 def test_verify_bundled_python_checks_laguna_mixed_affine_runtime_contract():

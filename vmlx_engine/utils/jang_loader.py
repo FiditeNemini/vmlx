@@ -1509,6 +1509,13 @@ def _ensure_jang_family_runtime_supported(path: Path, config: dict | None) -> No
     """
     model_types = _config_model_types(config)
 
+    # Nanbeige's 22 shared transformer blocks execute twice and therefore need
+    # the loop-aware jang_tools runtime with 44 independent cache slots.
+    # Keep this registration helper shared with generic mlx-lm loading.
+    from .nanbeige_runtime import ensure_nanbeige_runtime_registered
+
+    ensure_nanbeige_runtime_registered(path, config=config)
+
     if "openpangu_v2" in model_types:
         # vMLX-owned vendored runtime (no upstream mlx-lm/jang_tools package).
         # Registering here covers every load path, not just the CLI entry.
@@ -4824,7 +4831,20 @@ def load_jang_model(
 
     jang_cfg = json.loads(config_path.read_text())
     _ensure_zaya_runtime_supported(path, jang_cfg)
-    _ensure_jang_family_runtime_supported(path, _read_hf_config(path))
+    hf_config = _read_hf_config(path)
+    _ensure_jang_family_runtime_supported(path, hf_config)
+
+    def _finalize_loaded_jang(result):
+        from .nanbeige_runtime import validate_nanbeige_loop_cache_contract
+
+        model, tokenizer = result
+        validate_nanbeige_loop_cache_contract(
+            model,
+            path,
+            config=hf_config,
+            jang_config=jang_cfg,
+        )
+        return model, tokenizer
     # Modern JANG writers emit {"version": 2, "weight_format": "...", ...} and
     # omit the legacy `format` field entirely. Accept native JANG weight formats
     # in addition to the {"format": "jang"|"jjqf"|"mxq"} legacy envelope.
@@ -4881,21 +4901,32 @@ def load_jang_model(
             from vmlx_engine.config.manager import ConfigManager
 
             config_manager = ConfigManager(model_name=path.name)
-        return _load_codebook_vq_model(path, jang_cfg, config_manager=config_manager)
+        return _finalize_loaded_jang(
+            _load_codebook_vq_model(
+                path,
+                jang_cfg,
+                config_manager=config_manager,
+            )
+        )
 
     # v2: instant load via mmap
     if _is_v2_model(path):
         logger.info(f"JANG v2 detected — loading via mmap (instant)")
-        return _load_jang_v2(
-            path, jang_cfg, skip_eval=skip_eval, filter_expert_keys=filter_expert_keys,
-            layer_range=layer_range,
+        return _finalize_loaded_jang(
+            _load_jang_v2(
+                path,
+                jang_cfg,
+                skip_eval=skip_eval,
+                filter_expert_keys=filter_expert_keys,
+                layer_range=layer_range,
+            )
         )
 
     # v1: repack path (legacy)
     logger.info(
         f"JANG v1 detected — repacking to MLX format (this may take a few minutes)"
     )
-    return _load_jang_v1(path, jang_cfg, config_path)
+    return _finalize_loaded_jang(_load_jang_v1(path, jang_cfg, config_path))
 
 
 # ─── v1 loader (legacy, repack) ─────────────────────────────────────

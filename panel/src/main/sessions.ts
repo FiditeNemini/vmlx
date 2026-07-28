@@ -4130,7 +4130,8 @@ export class SessionManager extends EventEmitter {
 
     // Speculative decoding
     const externalSpeculativeModel = config.speculativeModel || ''
-    const compatibleExternalSpeculative = !dsv4Active && !isVLM && !cacheStackActive && !!externalSpeculativeModel
+    const loopedNanbeige = detected.family === 'nanbeige' || detected.architectureHints?.cacheSchema === 'looped_kv_v1'
+    const compatibleExternalSpeculative = !dsv4Active && !isVLM && !cacheStackActive && !loopedNanbeige && !!externalSpeculativeModel
     if (externalSpeculativeModel && !compatibleExternalSpeculative) {
       const reason = dsv4Active
         ? 'DSV4-Flash has a native composite-cache runtime'
@@ -4138,6 +4139,8 @@ export class SessionManager extends EventEmitter {
         ? 'multimodal/VLM generation has no external draft verifier path'
         : cacheStackActive
         ? 'continuous batching is active'
+        : loopedNanbeige
+        ? 'Nanbeige has 44 looped KV slots for 22 shared layers'
         : 'this runtime does not support external draft decoding'
       console.warn(`[SESSION] Ignoring stale speculative model because ${reason}`)
     }

@@ -138,6 +138,13 @@ def _speculative_incompatibility_reason(args) -> str | None:
         return None
     if getattr(args, "continuous_batching", False):
         return "--continuous-batching"
+    from .speculative import external_speculative_incompatibility_reason
+
+    reason = external_speculative_incompatibility_reason(
+        getattr(args, "model", None)
+    )
+    if reason:
+        return reason
     try:
         from .api.utils import is_mllm_model
 

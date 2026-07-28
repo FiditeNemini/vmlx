@@ -277,8 +277,10 @@ class MLXLanguageModel:
         draft_model_arg = None
         num_draft = 0
         try:
-            from ..speculative import get_draft_model, get_num_draft_tokens, is_speculative_enabled, validate_draft_tokenizer
-            if is_speculative_enabled():
+            from ..speculative import get_draft_model, get_num_draft_tokens, should_use_speculative, validate_draft_tokenizer
+            if should_use_speculative(
+                target_model_name=getattr(self, "model_name", None)
+            ):
                 draft_model_arg = get_draft_model()
                 num_draft = get_num_draft_tokens()
                 if draft_model_arg is not None:
@@ -424,8 +426,10 @@ class MLXLanguageModel:
         # Check for speculative decoding
         spec_kwargs = {}
         try:
-            from ..speculative import get_draft_model, get_num_draft_tokens, is_speculative_enabled, validate_draft_tokenizer
-            if is_speculative_enabled():
+            from ..speculative import get_draft_model, get_num_draft_tokens, should_use_speculative, validate_draft_tokenizer
+            if should_use_speculative(
+                target_model_name=getattr(self, "model_name", None)
+            ):
                 draft_model = get_draft_model()
                 if draft_model is not None:
                     spec_kwargs["draft_model"] = draft_model

@@ -173,6 +173,36 @@ def register_all(registry=None):
         )
     )
 
+    # Nanbeige 4.2 — text-only looped transformer.
+    #
+    # The 22 shared decoder blocks execute twice, so model.make_cache() must
+    # expose 44 ordinary KV slots. The loader validates this looped_kv_v1
+    # contract before generation; this registry row owns protocol/default
+    # truth only. The native template starts in <think> unless explicitly
+    # disabled and emits xml_function tool calls.
+    _register(
+        ModelConfig(
+            family_name="nanbeige",
+            model_types=["nanbeige"],
+            cache_type="kv",
+            eos_tokens=["<|im_end|>", "<|endoftext|>"],
+            tool_parser="xml_function",
+            reasoning_parser="qwen3",
+            think_in_template=True,
+            supports_thinking=True,
+            supports_native_tools=True,
+            is_mllm=False,
+            architecture_hints={
+                "default_enable_thinking": True,
+                "cache_schema": "looped_kv_v1",
+                "num_loops": 2,
+                "cache_slots": 44,
+                "eos_token_ids": [166101, 166102],
+            },
+            priority=3,
+        )
+    )
+
     # Laguna (poolside) — 33B/3B agentic-coding MoE.
     #
     # Architecture (per `~/jang/jang-tools/jang_tools/laguna/README.md`):

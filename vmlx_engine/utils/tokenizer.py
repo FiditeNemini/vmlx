@@ -1063,6 +1063,21 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
     if local_model_path != model_name:
         logger.info(f"Resolved HF model to: {local_model_path}")
 
+    # Nanbeige 4.2 is a looped transformer: 22 shared module layers execute
+    # twice and require 44 independent KV-cache slots. Register the loop-aware
+    # model before either generic mlx-lm or JANG resolves model_type, then
+    # validate every returned model at this public load boundary.
+    from .nanbeige_runtime import (
+        ensure_nanbeige_runtime_registered,
+        validate_nanbeige_loop_cache_contract,
+    )
+
+    ensure_nanbeige_runtime_registered(local_model_path)
+
+    def _finalize_loaded_model(model, tokenizer):
+        validate_nanbeige_loop_cache_contract(model, local_model_path)
+        return model, tokenizer
+
     # ── Architecture-specific routing BEFORE the JANG gate ──
     #
     # `is_jang_model()` only fires for bundles whose `jang_config.weight_format`
@@ -1105,7 +1120,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
 
                     _m, _t = load_zaya_model(local_model_path)
                     _inject_chat_template_if_missing(_t, local_model_path)
-                    return _m, _t
+                    return _finalize_loaded_model(_m, _t)
             if _mt_arch == "laguna" or _tc_mt_arch == "laguna":
                 logger.info(
                     "Laguna bundle detected (early route) — load_laguna_model"
@@ -1113,7 +1128,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
                 from ..loaders.load_laguna import load_laguna_model
                 _m, _t = load_laguna_model(local_model_path)
                 _inject_chat_template_if_missing(_t, local_model_path)
-                return _m, _t
+                return _finalize_loaded_model(_m, _t)
             if _tc_mt_arch == "ministral3" or _mt_arch == "ministral3":
                 logger.info(
                     "Mistral-Medium-3.5 bundle detected (early route) — load_mistral3_model"
@@ -1121,7 +1136,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
                 from ..loaders.load_mistral3 import load_mistral3_model
                 _m, _t = load_mistral3_model(local_model_path)
                 _inject_chat_template_if_missing(_t, local_model_path)
-                return _m, _t
+                return _finalize_loaded_model(_m, _t)
     except (OSError, _json_arch.JSONDecodeError):
         pass
     except ImportError:
@@ -1141,7 +1156,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
 
             _m, _t = smelt_load(local_model_path, expert_percent=_smelt_pct)
             _inject_chat_template_if_missing(_t, local_model_path)
-            return _m, _t
+            return _finalize_loaded_model(_m, _t)
 
         # Route DeepSeek V4 bundles to the dedicated DSV4 runtime wrapper.
         # The wrapper keeps DSV4_LONG_CTX/pool/chat safeguards centralized,
@@ -1172,7 +1187,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
                         skip_params_eval=False,
                     )
                     _inject_chat_template_if_missing(_t, local_model_path)
-                    return _m, _t
+                    return _finalize_loaded_model(_m, _t)
 
                 # Laguna (poolside): 33B/3B agentic-coding MoE,
                 # model_type=laguna. mlx_lm has no native laguna class so
@@ -1188,7 +1203,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
                     from ..loaders.load_laguna import load_laguna_model
                     _m, _t = load_laguna_model(local_model_path)
                     _inject_chat_template_if_missing(_t, local_model_path)
-                    return _m, _t
+                    return _finalize_loaded_model(_m, _t)
 
                 # Mistral-Medium-3.5-128B: model_type=mistral3 outer
                 # wrapper + text_config.model_type=ministral3 inner.
@@ -1209,7 +1224,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
                     from ..loaders.load_mistral3 import load_mistral3_model
                     _m, _t = load_mistral3_model(local_model_path)
                     _inject_chat_template_if_missing(_t, local_model_path)
-                    return _m, _t
+                    return _finalize_loaded_model(_m, _t)
         except ImportError as _ie:
             if _is_dsv4_bundle:
                 raise RuntimeError(
@@ -1234,7 +1249,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
 
         _m, _t = load_jang_model(local_model_path)
         _inject_chat_template_if_missing(_t, local_model_path)
-        return _m, _t
+        return _finalize_loaded_model(_m, _t)
 
     # Check if model needs tokenizer fallback (e.g., Nemotron).
     # Pass resolved local path so _get_model_type_from_config can read config.json.
@@ -1246,7 +1261,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
         if not skip_turboquant:
             _apply_turboquant_to_model(model, local_model_path)
         _inject_chat_template_if_missing(tokenizer, local_model_path)
-        return model, tokenizer
+        return _finalize_loaded_model(model, tokenizer)
 
     try:
         model, tokenizer = load(
@@ -1255,7 +1270,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
         if not skip_turboquant:
             _apply_turboquant_to_model(model, local_model_path)
         _inject_chat_template_if_missing(tokenizer, local_model_path)
-        return model, tokenizer
+        return _finalize_loaded_model(model, tokenizer)
     except ValueError as e:
         # Fallback for models with non-standard tokenizers
         if "TokenizersBackend" in str(e) or "Tokenizer class" in str(e):
@@ -1266,7 +1281,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
             if not skip_turboquant:
                 _apply_turboquant_to_model(model, local_model_path)
             _inject_chat_template_if_missing(tokenizer, local_model_path)
-            return model, tokenizer
+            return _finalize_loaded_model(model, tokenizer)
         else:
             raise
 

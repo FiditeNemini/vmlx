@@ -141,6 +141,10 @@ registerFamily('qwen-mamba', { cacheType: 'mamba', toolParser: 'qwen', usePagedC
 // MiMo-V2.5 JANG_2L keeps multimodal assets. Its template emits generic XML
 // function calls and <think> reasoning, not Qwen tool JSON.
 registerFamily('mimo_v2', { cacheType: 'kv', toolParser: 'xml_function', reasoningParser: 'think_xml', supportsThinking: true, thinkInTemplate: false, enableAutoToolChoice: true, isMultimodal: true, description: 'MiMo V2.5 multimodal MoE', priority: 4 })
+// Nanbeige 4.2 reuses 22 module layers for two forward loops. The Python
+// loader owns the fail-closed 44-slot cache invariant; the panel mirrors the
+// text/protocol/default truth and blocks external draft decoding below.
+registerFamily('nanbeige', { cacheType: 'kv', toolParser: 'xml_function', reasoningParser: 'qwen3', supportsThinking: true, thinkInTemplate: true, defaultEnableThinking: true, architectureHints: { cacheSchema: 'looped_kv_v1', numLoops: 2, cacheSlots: 44 }, enableAutoToolChoice: true, isMultimodal: false, description: 'Nanbeige 4.2 looped transformer (22 layers x 2 loops)', priority: 3 })
 
 // Llama
 registerFamily('llama4', { cacheType: 'kv', toolParser: 'llama', enableAutoToolChoice: true, description: 'Llama 4', priority: 5 })
@@ -342,6 +346,7 @@ const MODEL_TYPE_TO_FAMILY: Record<string, string> = {
   'qwen': 'qwen2',
   'qwen_mamba': 'qwen-mamba',
   'mimo_v2': 'mimo_v2',
+  'nanbeige': 'nanbeige',
   // ── Llama family ──
   'llama': 'llama3',
   'llama4': 'llama4',

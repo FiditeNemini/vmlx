@@ -500,6 +500,9 @@ def test_packaged_integrity_checks_packaged_python_has_no_pycache(monkeypatch, t
 
 def test_staged_app_engine_hash_parity_rejects_stale_packaged_runtime(tmp_path):
     assert "models/step3p7_mlx_vlm.py" in runner.STAGED_APP_ENGINE_HASH_FILES
+    assert "models/llm.py" in runner.STAGED_APP_ENGINE_HASH_FILES
+    assert "speculative.py" in runner.STAGED_APP_ENGINE_HASH_FILES
+    assert "utils/nanbeige_runtime.py" in runner.STAGED_APP_ENGINE_HASH_FILES
     assert "patches/mlx_vlm_mtp/qwen35_vl.py" in runner.STAGED_APP_ENGINE_HASH_FILES
     assert "utils/mlx_vlm_compat.py" in runner.STAGED_APP_ENGINE_HASH_FILES
 

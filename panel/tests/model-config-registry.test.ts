@@ -1673,6 +1673,7 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
     { modelType: 'mistral3', family: 'mistral3', cacheType: 'kv', toolParser: 'mistral', isMultimodal: true },
     { modelType: 'mistral4', family: 'mistral4', cacheType: 'kv', toolParser: 'mistral', reasoningParser: 'mistral' },
     { modelType: 'mimo_v2', family: 'mimo_v2', cacheType: 'kv', toolParser: 'xml_function', reasoningParser: 'think_xml', isMultimodal: true },
+    { modelType: 'nanbeige', family: 'nanbeige', cacheType: 'kv', toolParser: 'xml_function', reasoningParser: 'qwen3', isMultimodal: false },
     { modelType: 'nemotron_h_v2', family: 'nemotron-h', cacheType: 'hybrid', toolParser: 'nemotron', reasoningParser: 'deepseek_r1', cacheSubtype: 'nemotron_h_ssm_attention' },
     { modelType: 'rwkv7', family: 'rwkv', cacheType: 'mamba' },
     { modelType: 'step3p7', family: 'step-3.7-flash', cacheType: 'kv', cacheSubtype: 'step3p7_full_sliding_kv', toolParser: 'step3p5', reasoningParser: 'qwen3', isMultimodal: true },
@@ -1702,6 +1703,55 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
       }
     })
   }
+
+  it('reports Nanbeige text/protocol/thinking/EOS/cache-slot truth without native MTP', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'nanbeige',
+        num_hidden_layers: 22,
+        num_loops: 2,
+        jang_runtime: {
+          cache_layout: 'looped_kv_v1',
+          cache_slots: 44,
+        },
+      },
+      {
+        weight_format: 'affine',
+        capabilities: {
+          family: 'nanbeige',
+          cache_type: 'kv',
+          reasoning_parser: 'qwen3',
+          tool_parser: 'xml_function',
+          supports_thinking: true,
+          think_in_template: true,
+          modality: 'text',
+        },
+        runtime: {
+          num_loops: 2,
+          cache_slots: 44,
+        },
+      },
+    )
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected).toMatchObject({
+      family: 'nanbeige',
+      cacheType: 'kv',
+      toolParser: 'xml_function',
+      reasoningParser: 'qwen3',
+      supportsThinking: true,
+      thinkInTemplate: true,
+      defaultEnableThinking: true,
+      isMultimodal: false,
+      architectureHints: {
+        cacheSchema: 'looped_kv_v1',
+        numLoops: 2,
+        cacheSlots: 44,
+      },
+    })
+    expect(detected.nativeMtp).toBeUndefined()
+  })
 
   it('keeps unstamped Laguna reasoning available while Auto follows the family fallback', () => {
     const dir = makeModelDir({ model_type: 'laguna' })

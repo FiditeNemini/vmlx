@@ -556,7 +556,8 @@ function buildCommandPreview(
 
     // Speculative decoding mirrors sessions.ts: external draft models are only
     // compatible with the non-VLM, non-DSV4, non-continuous-batching path.
-    const compatibleExternalSpeculative = !dsv4Active && !isVLM && !cacheStackActive && !!config.speculativeModel
+    const loopedNanbeige = detected?.family === 'nanbeige' || detected?.architectureHints?.cacheSchema === 'looped_kv_v1'
+    const compatibleExternalSpeculative = !dsv4Active && !isVLM && !cacheStackActive && !loopedNanbeige && !!config.speculativeModel
     if (compatibleExternalSpeculative) {
         parts.push('--speculative-model', config.speculativeModel)
         const numDraftTokens = finitePositiveInteger(config.numDraftTokens)
@@ -1687,6 +1688,27 @@ describe('Speculative Decoding', () => {
     it('sets --num-draft-tokens=20 (maximum)', () => {
         const out = preview({ continuousBatching: false, speculativeModel: 'draft-model', numDraftTokens: 20 })
         expect(getFlagValue(out, '--num-draft-tokens')).toBe('20')
+    })
+
+    it('suppresses external speculative decoding for Nanbeige looped KV', () => {
+        const out = preview(
+            {
+                continuousBatching: false,
+                speculativeModel: 'draft-model',
+                numDraftTokens: 5,
+            },
+            {
+                family: 'nanbeige',
+                cacheType: 'kv',
+                architectureHints: {
+                    cacheSchema: 'looped_kv_v1',
+                    numLoops: 2,
+                    cacheSlots: 44,
+                },
+            },
+        )
+        expect(hasFlag(out, '--speculative-model')).toBe(false)
+        expect(hasFlag(out, '--num-draft-tokens')).toBe(false)
     })
 })
 

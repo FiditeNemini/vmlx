@@ -77,6 +77,45 @@ def is_speculative_enabled() -> bool:
     return _spec_config is not None and _spec_config.enabled and _draft_model is not None
 
 
+def external_speculative_incompatibility_reason(
+    target_model_name: str | None,
+) -> str | None:
+    """Return why external draft decoding is unsafe for a target model.
+
+    mlx-lm's external speculative path splits prompt caches by
+    ``len(model.layers)``. Nanbeige 4.2 deliberately has 22 shared module
+    layers but 44 independent loop cache slots, so that split silently drops
+    the second loop's cache. Fail closed until the upstream verifier accepts
+    an explicit cache-slot count.
+    """
+
+    if not target_model_name:
+        return None
+    try:
+        from .model_config_registry import get_model_config_registry
+
+        config = get_model_config_registry().lookup(target_model_name)
+        hints = getattr(config, "architecture_hints", None) or {}
+        if (
+            getattr(config, "family_name", None) == "nanbeige"
+            or hints.get("cache_schema") == "looped_kv_v1"
+        ):
+            return "Nanbeige looped KV cache (44 slots for 22 shared layers)"
+    except Exception:
+        # A malformed optional JANG stamp must not let a known local Nanbeige
+        # bundle fall through to the unsafe external verifier.
+        pass
+
+    try:
+        from .utils.nanbeige_runtime import is_nanbeige_model_path
+
+        if is_nanbeige_model_path(target_model_name):
+            return "Nanbeige looped KV cache (44 slots for 22 shared layers)"
+    except Exception:
+        pass
+    return None
+
+
 def load_draft_model(config: SpeculativeConfig) -> tuple[Any, Any]:
     """Load the draft model for speculative decoding.
 
@@ -163,7 +202,11 @@ def unload_draft_model() -> None:
             pass
 
 
-def should_use_speculative(is_batched: bool = False, is_mllm: bool = False) -> bool:
+def should_use_speculative(
+    is_batched: bool = False,
+    is_mllm: bool = False,
+    target_model_name: str | None = None,
+) -> bool:
     """Check if speculative decoding should be used for this request.
 
     Speculative decoding is only compatible with:
@@ -185,6 +228,10 @@ def should_use_speculative(is_batched: bool = False, is_mllm: bool = False) -> b
         return False
     if is_mllm:
         logger.debug("Speculative decoding disabled: incompatible with multimodal models")
+        return False
+    reason = external_speculative_incompatibility_reason(target_model_name)
+    if reason:
+        logger.warning("Speculative decoding disabled: %s", reason)
         return False
     return True
 

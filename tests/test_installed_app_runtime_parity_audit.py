@@ -78,6 +78,9 @@ def test_installed_app_runtime_parity_hashes_packaged_engine_surface():
     assert "patches/mlx_vlm_mtp/qwen35_vl.py" in gate.CRITICAL_ENGINE_HASH_FILES
     assert "utils/ssm_companion_cache.py" in gate.CRITICAL_ENGINE_HASH_FILES
     assert "runtime_patches/gemma4_processing.py" in gate.CRITICAL_ENGINE_HASH_FILES
+    assert "speculative.py" in gate.CRITICAL_ENGINE_HASH_FILES
+    assert "models/llm.py" in gate.CRITICAL_ENGINE_HASH_FILES
+    assert "utils/nanbeige_runtime.py" in gate.CRITICAL_ENGINE_HASH_FILES
 
 
 def test_installed_app_runtime_parity_default_out_tracks_manifest():

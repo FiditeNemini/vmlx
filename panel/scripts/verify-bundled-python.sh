@@ -162,6 +162,8 @@ HASH_GATED_ENGINE_FILES=(
   "model_config_registry.py"
   "output_collector.py"
   "reasoning/minimax_m3_parser.py"
+  "speculative.py"
+  "models/llm.py"
   "models/mllm.py"
   "models/minimax_m3/cache.py"
   "models/step3p7_mlx_vlm.py"
@@ -186,6 +188,7 @@ HASH_GATED_ENGINE_FILES=(
   "utils/ssm_companion_cache.py"
   "utils/ssm_companion_disk_store.py"
   "utils/jang_loader.py"
+  "utils/nanbeige_runtime.py"
   "utils/tokenizer.py"
   "chat_templates/gemma4.jinja"
   "config/defaults.yaml"
@@ -235,6 +238,9 @@ HASH_GATED_JANG_TOOLS_FILES=(
   "kimi_prune/generate_vl.py"
   "kimi_prune/runtime_patch.py"
   "mimo_v2/mlx_model.py"
+  "nanbeige/__init__.py"
+  "nanbeige/model.py"
+  "nanbeige/mlx_register.py"
   "step37/__init__.py"
   "step37/nvfp4_codec.py"
   "step37/step3p7_mlx.py"
@@ -420,6 +426,10 @@ REQUIRED = [
     ("jang_tools.laguna.runtime", "jang_tools.laguna.runtime", "Laguna mixed-affine runtime missing from bundled jang-tools"),
     ("jang_tools.mimo_v2.mlx_register", "jang_tools.mimo_v2.mlx_register", "MiMo-V2.5 runtime registration missing from bundled jang-tools"),
     ("mlx_lm.models.mimo_v2", "mlx_lm.models.mimo_v2", "MiMo-V2.5 mlx-lm registration missing after importing jang_tools.mimo_v2.mlx_register"),
+    ("jang_tools.nanbeige", "jang_tools.nanbeige", "Nanbeige package missing from bundled jang-tools"),
+    ("jang_tools.nanbeige.model", "jang_tools.nanbeige.model", "Nanbeige looped-transformer model runtime missing from bundled jang-tools"),
+    ("jang_tools.nanbeige.mlx_register", "jang_tools.nanbeige.mlx_register", "Nanbeige mlx-lm registration hook missing from bundled jang-tools"),
+    ("mlx_lm.models.nanbeige", "mlx_lm.models.nanbeige", "Nanbeige mlx-lm registration missing after importing jang_tools.nanbeige.mlx_register"),
     ("jang_tools.step37.step3p7_mlx", "jang_tools.step37.step3p7_mlx", "Step3p7 source VLM runtime missing from bundled jang-tools"),
     ("jang_tools.load_jangtq", "jang_tools.load_jangtq", "JANGTQ fast-path loader missing from bundled jang-tools"),
     ("jang_tools.topk_override", "jang_tools.topk_override", "JANGTQ top-k runtime override helper missing from bundled jang-tools"),

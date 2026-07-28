@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs'
 import {
   isToolAuthorizedForCurrentTurn,
   isToolNameProvidedForCurrentTurn,
+  requiredToolChoiceNamesForCurrentTurn,
   requestedExactFinalToolNames,
   requestedOnceToolNames,
+  requestsBoundedFinalAnswerAfterToolResult,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
   requestsPrivateReasoningWithoutToolUse,
@@ -141,11 +143,59 @@ describe('tool auto-continue policy', () => {
       ),
     ).toEqual(['file_info'])
     expect(
+      requestedOnceToolNames(
+        'Use the run_command tool exactly once with this exact command: printf test.',
+      ),
+    ).toEqual(['run_command'])
+    expect(
+      requestedOnceToolNames(
+        'Invoke file_info exactly once, then execute run_command exactly once.',
+      ),
+    ).toEqual(['file_info', 'run_command'])
+    expect(
       requestedExactFinalToolNames(
         'Call the built-in `file_info` tool exactly once. Then reply exactly DONE.',
         ['file_info', 'write_file'],
       ),
     ).toEqual(['file_info'])
+  })
+
+  it('recognizes a bounded post-tool answer without requiring exact final wording', () => {
+    const releasePrompt =
+      'Use the run_command tool exactly once with this exact command: printf %s LIVE > probe.txt. After the tool result is returned, reply briefly in English and include LIVE once.'
+    expect(requestsBoundedFinalAnswerAfterToolResult(releasePrompt)).toBe(true)
+    expect(
+      requestsBoundedFinalAnswerAfterToolResult(
+        'Use run_command exactly once. After the tool result, use tools as needed and reply when done.',
+      ),
+    ).toBe(false)
+    expect(
+      requestsBoundedFinalAnswerAfterToolResult(
+        'Use run_command exactly once and use additional tools if useful. After the tool result, reply briefly.',
+      ),
+    ).toBe(false)
+    expect(
+      requestsBoundedFinalAnswerAfterToolResult(
+        'Use run_command exactly once. After the tool result, use more tools if needed, then reply briefly.',
+      ),
+    ).toBe(false)
+    expect(
+      requestsBoundedFinalAnswerAfterToolResult(
+        'Use run_command exactly once. After the tool result, call file_info and reply briefly.',
+        ['run_command', 'file_info'],
+      ),
+    ).toBe(false)
+    expect(
+      requestsBoundedFinalAnswerAfterToolResult(
+        'Use run_command exactly once, then call file_info exactly once. After both tool results, reply briefly.',
+        ['run_command', 'file_info'],
+      ),
+    ).toBe(true)
+    expect(
+      requestsBoundedFinalAnswerAfterToolResult(
+        'Discuss what a tool result means and reply briefly.',
+      ),
+    ).toBe(false)
   })
 
   it('keeps an open-ended catalog and matches provided names case-insensitively', () => {
@@ -176,6 +226,42 @@ describe('tool auto-continue policy', () => {
       type: 'function',
       function: { name: 'file_info' },
     })
+    expect(
+      toolChoiceForCurrentTurn(
+        false,
+        requiredToolChoiceNamesForCurrentTurn(
+          [],
+          requestedOnceToolNames(
+            'Use the run_command tool exactly once with command pwd. After the tool result, reply briefly.',
+          ),
+          true,
+        ),
+        'chat',
+      ),
+    ).toEqual({
+      type: 'function',
+      function: { name: 'run_command' },
+    })
+    expect(
+      toolChoiceForCurrentTurn(
+        false,
+        requiredToolChoiceNamesForCurrentTurn(
+          [],
+          requestedOnceToolNames(
+            'Use run_command exactly once and use more tools if needed.',
+          ),
+          false,
+        ),
+        'chat',
+      ),
+    ).toBeUndefined()
+    expect(
+      requiredToolChoiceNamesForCurrentTurn(
+        ['file_info'],
+        ['run_command'],
+        false,
+      ),
+    ).toEqual(['file_info'])
   })
 
   it('authorizes no MCP execution on forbidden or exact built-in turns', () => {
@@ -215,6 +301,12 @@ describe('tool auto-continue policy', () => {
       ),
     ).toBe(true)
     expect(requestsNoToolCalls('Please never use tools. Answer directly.')).toBe(true)
+    expect(
+      requestsNoToolCalls(
+        'Do not call another tool. Using the prior tool results, reply briefly.',
+      ),
+    ).toBe(true)
+    expect(requestsNoToolCalls('Do not use additional tools.')).toBe(true)
     expect(
       requestsNoToolCalls(
         '[FOLLOW] Without tools, retrieve the value from the previous turn.',
@@ -319,6 +411,10 @@ describe('tool auto-continue policy', () => {
     expect(source.match(/if \(attachBuiltinToolsForCurrentTurn\)/g) || []).toHaveLength(2)
     expect(source).toContain('toolChoiceForCurrentTurn(')
     expect(source).toContain('const requestToolChoice = currentTurnToolChoice()')
+    expect(source).toContain('const remainingExactlyOnceBuiltinTools =')
+    expect(source).toContain('requiredToolChoiceNamesForCurrentTurn(')
+    expect(source).toContain('boundedFinalAfterExactlyOnceTools')
+    expect(source).toContain('exactlyOnceToolsComplete')
     expect(source).toContain('obj.tool_choice = requestToolChoice')
     expect(source).toContain('obj.tool_choice = "none"')
   })

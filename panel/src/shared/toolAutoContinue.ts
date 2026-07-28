@@ -17,6 +17,15 @@ export type CurrentTurnToolChoice =
   | { type: 'function'; function: { name: string } }
   | undefined
 
+export function requiredToolChoiceNamesForCurrentTurn(
+  exactFinalToolNames: string[],
+  exactlyOnceToolNames: string[],
+  boundedFinalAfterExactlyOnceTools: boolean,
+): string[] {
+  if (exactFinalToolNames.length > 0) return exactFinalToolNames
+  return boundedFinalAfterExactlyOnceTools ? exactlyOnceToolNames : []
+}
+
 export function toolChoiceForCurrentTurn(
   suppressAllTools: boolean,
   exactFinalToolNames: string[],
@@ -93,7 +102,7 @@ export function requestedOnceToolNames(text: string): string[] {
   // genuinely agentic multi-tool work.
   const names = Array.from(
     text.matchAll(
-      /\bcall\s+(?:the\s+)?(?:built[- ]in\s+)?`?([a-z][\w-]*)`?(?:\s+(?:tool|function))?\s+exactly\s+once\b/gi,
+      /\b(?:call|use|invoke|run|execute)\s+(?:the\s+)?(?:built[- ]in\s+)?`?([a-z][\w-]*)`?(?:\s+(?:tool|function))?\s+exactly\s+once\b/gi,
     ),
     match => match[1].toLowerCase(),
   )
@@ -130,6 +139,12 @@ function explicitlyRequestedCatalogToolNames(
   return matches.sort((a, b) => a.index - b.index).map(match => match.name)
 }
 
+function permitsAdditionalToolUse(text: string): boolean {
+  return /\buse\s+tools?\s+as\s+needed\b|\b(?:use|call|invoke|run|execute)\s+(?:any\s+)?(?:other|additional|more|further)\s+tools?\b/i.test(
+    text,
+  )
+}
+
 export function requestedExactFinalToolNames(
   text: string,
   catalogToolNames: string[] = [],
@@ -144,11 +159,7 @@ export function requestedExactFinalToolNames(
   // Do not narrow an explicitly open-ended agentic request merely because it
   // also constrains one named tool. In that case the remaining catalog is part
   // of the user's stated contract.
-  const permitsAdditionalTools =
-    /\buse\s+tools?\s+as\s+needed\b|\b(?:use|call|invoke|run|execute)\s+(?:any\s+)?(?:other|additional)\s+tools?\b/i.test(
-      text,
-    )
-  if (permitsAdditionalTools) return []
+  if (permitsAdditionalToolUse(text)) return []
 
   // Keep this bounded to the final-result clause, but allow ordinary
   // modifiers from the exact contract ("the real tool result", "both tool
@@ -180,6 +191,32 @@ export function requestedExactFinalToolNames(
   const requested = new Set(explicitlyRequestedNames)
   for (const name of names) requested.add(name)
   return [...requested]
+}
+
+export function requestsBoundedFinalAnswerAfterToolResult(
+  text: string,
+  catalogToolNames: string[] = [],
+): boolean {
+  const exactlyOnceNames = requestedOnceToolNames(text)
+  if (exactlyOnceNames.length === 0) return false
+  if (permitsAdditionalToolUse(text)) return false
+  const exactlyOnceSet = new Set(exactlyOnceNames)
+  if (
+    explicitlyRequestedCatalogToolNames(text, catalogToolNames).some(
+      (name) => !exactlyOnceSet.has(name),
+    )
+  ) {
+    return false
+  }
+
+  // This is deliberately narrower than a generic mention of a tool result:
+  // the same clause must explicitly say that the user wants the assistant's
+  // answer after that result. It covers normal bounded wording such as
+  // "After the tool result is returned, reply briefly" without requiring the
+  // answer itself to have exact literal wording.
+  return /\bafter\b[^.!?\n]{0,96}\b(?:(?:the|both)\s+(?:real\s+)?(?:tool|function)\s+results?|(?:its|that)\s+results?)\b[^.!?\n]{0,96}\b(?:reply|respond|answer)\b/i.test(
+    text,
+  )
 }
 
 function containsExplicitToolRequest(text: string): boolean {
@@ -234,7 +271,7 @@ export function requestsNoToolCalls(text: string): boolean {
   // this returns true; that is the stable no-tool request contract for both
   // Responses and Chat Completions.
   const explicitProhibition =
-    /(?:^|[.!?\]\n])\s*(?:please\s+)?(?:do not|don['’]?t|dont|never)\s+(?:call|use)\s+(?:any\s+)?tools?\b(?!\s+unless)/i
+    /(?:^|[.!?\]\n])\s*(?:please\s+)?(?:do not|don['’]?t|dont|never)\s+(?:call|use)\s+(?:(?:any|another|additional|more)\s+)?tools?\b(?!\s+unless)/i
   const explicitWithoutTools =
     /(?:^|[.!?\]\n])\s*(?:please\s+)?without\s+(?:(?:using|calling)\s+)?(?:any\s+)?tools?\b/i
   return explicitProhibition.test(text) || explicitWithoutTools.test(text)

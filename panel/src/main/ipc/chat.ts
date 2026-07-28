@@ -32,8 +32,10 @@ import {
 } from "../../shared/interleavedReasoning";
 import {
   isToolAuthorizedForCurrentTurn,
+  requiredToolChoiceNamesForCurrentTurn,
   requestedExactFinalToolNames,
   requestedOnceToolNames,
+  requestsBoundedFinalAnswerAfterToolResult,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
   requestsPrivateReasoningWithoutToolUse,
@@ -1519,6 +1521,8 @@ export function registerChatHandlers(
         overrides?.builtinToolsEnabled === true
           ? requestedOnceToolNames(latestUserText)
           : [];
+      const exactlyOnceBuiltinToolNames =
+        exactlyOnceToolNames.filter((name) => isBuiltinTool(name));
       const completedExactFinalTools = new Set<string>();
       const completedExactlyOnceTools = new Set<string>();
       const suppressGenericAgenticToolPromptForNativeTools =
@@ -1538,6 +1542,12 @@ export function registerChatHandlers(
               zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
             })
           : [];
+      const boundedFinalAfterExactlyOnceTools =
+        exactlyOnceToolNames.length > 0 &&
+        requestsBoundedFinalAnswerAfterToolResult(
+          latestUserText,
+          toolCapabilityNames(unscopedCurrentTurnToolDefinitions),
+        );
       const exactFinalToolNames =
         overrides?.builtinToolsEnabled === true
           ? requestedExactFinalToolNames(
@@ -1643,9 +1653,18 @@ export function registerChatHandlers(
         const remainingExactBuiltinTools = exactFinalBuiltinToolNames.filter(
           (name) => !completedExactFinalTools.has(name),
         );
+        const remainingExactlyOnceBuiltinTools =
+          exactlyOnceBuiltinToolNames.filter(
+            (name) => !completedExactlyOnceTools.has(name),
+          );
+        const requiredToolNames = requiredToolChoiceNamesForCurrentTurn(
+          remainingExactBuiltinTools,
+          remainingExactlyOnceBuiltinTools,
+          boundedFinalAfterExactlyOnceTools,
+        );
         return toolChoiceForCurrentTurn(
           currentPromptAlreadyForbidsTools,
-          remainingExactBuiltinTools,
+          requiredToolNames,
           useResponsesApi ? "responses" : "chat",
         );
       };
@@ -4008,12 +4027,22 @@ export function registerChatHandlers(
               break;
             }
             emitToolStatus("processing", "", undefined, toolIteration);
-            plannedDirectAnswerPass =
-              (directAnswerAfterSingleTool || exactFinalToolNames.length > 1) &&
+            const exactFinalToolsComplete =
               exactFinalToolNames.length > 0 &&
               exactFinalToolNames.every((name) =>
                 completedExactFinalTools.has(name),
               );
+            const exactlyOnceToolsComplete =
+              exactlyOnceToolNames.length > 0 &&
+              exactlyOnceToolNames.every((name) =>
+                completedExactlyOnceTools.has(name),
+              );
+            plannedDirectAnswerPass =
+              ((directAnswerAfterSingleTool ||
+                exactFinalToolNames.length > 1) &&
+                exactFinalToolsComplete) ||
+              (boundedFinalAfterExactlyOnceTools &&
+                exactlyOnceToolsComplete);
             // Reset idle timer before follow-up — tools may have consumed minutes
             if (chatSession) sessionManager.touchSession(chatSession.id);
             if (!(await sendFollowUp())) break;

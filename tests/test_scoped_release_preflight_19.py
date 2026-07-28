@@ -5946,6 +5946,55 @@ def test_r19_v5_ui_adapter_translates_real_harness_terminal_and_tools():
     assert terminal["decode_tps"] == 50.0
     assert terminal["response_id"] == "resp-1"
 
+    unsuccessful_proof = json.loads(json.dumps(proof))
+    unsuccessful_proof["messageEventTrace"][0]["events"][-1]["payload"][
+        "finishReason"
+    ] = None
+    unsuccessful_bytes = json.dumps(
+        unsuccessful_proof,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    with pytest.raises(
+        RuntimeError,
+        match=r"source-owned UI turn terminal was unsuccessful "
+        r"\(finishReason=missing\)",
+    ):
+        module._v5_ui_normalized_capture(
+            argparse.Namespace(
+                v5_run_id=run_id,
+                v5_nonce=nonce,
+                v5_active_phase_index=5,
+            ),
+            unsuccessful_proof,
+            unsuccessful_bytes,
+            "session-1",
+        )
+
+    missing_timing_proof = json.loads(json.dumps(proof))
+    missing_timing_proof["messageEventTrace"][0]["events"][-1]["payload"][
+        "metrics"
+    ] = {}
+    missing_timing_bytes = json.dumps(
+        missing_timing_proof,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    with pytest.raises(
+        RuntimeError,
+        match="source-owned UI terminal has no raw timing",
+    ):
+        module._v5_ui_normalized_capture(
+            argparse.Namespace(
+                v5_run_id=run_id,
+                v5_nonce=nonce,
+                v5_active_phase_index=5,
+            ),
+            missing_timing_proof,
+            missing_timing_bytes,
+            "session-1",
+        )
+
 
 def test_r19_v5_pins_reject_links_and_bundle_identity_comes_from_bundle(
     tmp_path: Path,

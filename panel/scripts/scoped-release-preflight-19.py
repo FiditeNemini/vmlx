@@ -10311,10 +10311,18 @@ def _v5_ui_normalized_capture(
                 if (
                     not isinstance(ttft_ms, (int, float))
                     or not isinstance(tps, (int, float))
-                    or finish_reason
-                    not in {"stop", "end_turn", "completed", "complete"}
                 ):
                     raise RuntimeError("source-owned UI terminal has no raw timing")
+                if finish_reason not in {
+                    "stop",
+                    "end_turn",
+                    "completed",
+                    "complete",
+                }:
+                    raise RuntimeError(
+                        "source-owned UI turn terminal was unsuccessful "
+                        f"(finishReason={finish_reason or 'missing'})"
+                    )
                 normalized.append(
                     {
                         "type": "terminal",

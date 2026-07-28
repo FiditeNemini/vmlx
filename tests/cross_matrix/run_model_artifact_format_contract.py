@@ -31,6 +31,8 @@ SOURCE_HASH_FILES = (
     "vmlx_engine/model_config_registry.py",
     "vmlx_engine/model_configs.py",
     "vmlx_engine/native_mtp.py",
+    "vmlx_engine/patches/mlx_lm_mtp/qwen35_model.py",
+    "vmlx_engine/patches/mlx_vlm_mtp/qwen35_vl.py",
     "vmlx_engine/server.py",
     "vmlx_engine/utils/jang_loader.py",
     "vmlx_engine/loaders/load_jangtq.py",
@@ -69,6 +71,7 @@ REQUIRED_ARTIFACT_TEST_MARKERS = (
     # likely to regress when loader/autodetect code is touched.
     "test_qwen36_mxfp4_mtp_bundle_is_text_native_ready",
     "test_mxfp4_vlm_sanitize_shifts_mtp_norms_only",
+    "test_qwen_text_sanitize_mixed_shard_shifts_only_raw_mtp_norms",
     "test_mxfp_vlm_loader_quantizes_with_declared_mode",
     "test_jang_quant_mode_supports_mxfp8_metadata",
     "test_qwen36_plain_mlx_4bit_keeps_hybrid_cache_without_jang_or_mxfp",
@@ -140,7 +143,12 @@ def build_artifact(root: Path) -> dict[str, Any]:
             and "test_sanitize_restores_dwq_split_mla_kv_b_proj" not in missing_markers
             and "test_sanitize_trims_absent_mtp_layer_before_strict_load" not in missing_markers
         ),
-        "mxfp4_detection": not failed and "test_mxfp4_vlm_sanitize_shifts_mtp_norms_only" not in missing_markers,
+        "mxfp4_detection": (
+            not failed
+            and "test_mxfp4_vlm_sanitize_shifts_mtp_norms_only" not in missing_markers
+            and "test_qwen_text_sanitize_mixed_shard_shifts_only_raw_mtp_norms"
+            not in missing_markers
+        ),
         "mxfp8_detection": (
             not failed
             and "test_jang_quant_mode_supports_mxfp8_metadata" not in missing_markers

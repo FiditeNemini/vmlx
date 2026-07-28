@@ -1918,6 +1918,69 @@ class TestNativeMtpAutodetect:
             1.91015625,
         ]
 
+    def test_qwen_text_sanitize_mixed_shard_shifts_only_raw_mtp_norms(self):
+        import mlx.core as mx
+
+        from vmlx_engine.patches.mlx_lm_mtp import qwen35_model
+
+        if not qwen35_model.apply():
+            raise AssertionError("qwen35_model patch did not apply")
+
+        from mlx_lm.models.qwen3_5 import TextModel
+
+        fake_model = TextModel.__new__(TextModel)
+        fake_model.args = SimpleNamespace(tie_word_embeddings=False)
+        fake_model.mtp = object()
+
+        backbone_norm = mx.array([0.98, 1.02], dtype=mx.float16)
+        final_norm = mx.array([1.90, 2.02], dtype=mx.float16)
+        mtp_input_norm = mx.array([0.04, -0.04], dtype=mx.float16)
+        mtp_pre_fc_norm = mx.array([-0.18, 0.12], dtype=mx.float16)
+
+        sanitized = TextModel.sanitize(
+            fake_model,
+            {
+                "model.layers.32.input_layernorm.weight": backbone_norm,
+                "model.norm.weight": final_norm,
+                "mtp.layers.0.input_layernorm.weight": mtp_input_norm,
+                "mtp.pre_fc_norm_hidden.weight": mtp_pre_fc_norm,
+            },
+        )
+
+        assert mx.array_equal(
+            sanitized["model.layers.32.input_layernorm.weight"],
+            backbone_norm,
+        ).item()
+        assert mx.array_equal(
+            sanitized["model.norm.weight"],
+            final_norm,
+        ).item()
+        assert sanitized["mtp.layers.0.input_layernorm.weight"].tolist() == [
+            1.0400390625,
+            0.9599609375,
+        ]
+        assert sanitized["mtp.pre_fc_norm_hidden.weight"].tolist() == [
+            0.81982421875,
+            1.1201171875,
+        ]
+
+        disabled_model = TextModel.__new__(TextModel)
+        disabled_model.args = SimpleNamespace(tie_word_embeddings=False)
+        disabled = TextModel.sanitize(
+            disabled_model,
+            {
+                "model.layers.32.input_layernorm.weight": backbone_norm,
+                "model.norm.weight": final_norm,
+                "mtp.layers.0.input_layernorm.weight": mtp_input_norm,
+            },
+        )
+        assert "mtp.layers.0.input_layernorm.weight" not in disabled
+        assert mx.array_equal(
+            disabled["model.layers.32.input_layernorm.weight"],
+            backbone_norm,
+        ).item()
+        assert mx.array_equal(disabled["model.norm.weight"], final_norm).item()
+
     def test_mllm_generator_runs_vmlx_owned_native_mtp_decode_loop(self, monkeypatch):
         import mlx.core as mx
 

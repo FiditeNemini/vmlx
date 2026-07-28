@@ -595,8 +595,9 @@ def _patch_text_model(q35: Any) -> None:
         # vMLX-owned sanitize contract:
         # - keep mtp.* only when a real MTP module is attached;
         # - detect raw HF conv1d layout by shape, not by MTP key presence;
-        # - shift Qwen norm weights only for raw HF layout so already-MLX
-        #   JANG/MXFP bundles do not get shifted twice.
+        # - shift base Qwen norms only for raw HF layout, while shifting raw
+        #   preserved MTP norms independently, so mixed JANG/MXFP shards do
+        #   not shift already-MLX backbone norms twice.
         if not hasattr(self, "mtp"):
             weights = {k: v for k, v in weights.items() if "mtp." not in k}
         # vMLX's JANG loader sanitizes and loads one safetensor shard at a
@@ -618,20 +619,33 @@ def _patch_text_model(q35: Any) -> None:
             ".pre_fc_norm_embedding.weight",
             "mtp.norm.weight",
         )
+        # Qwen MXFP MTP artifacts intentionally mix two norm conventions:
+        # the language-model norms are already in MLX's ``weight + 1``
+        # convention, while the preserved fp16 MTP-head norms are still in
+        # the raw HF convention.  These tensors can share a safetensor shard.
+        # Never let a raw MTP norm make the whole shard look raw, otherwise
+        # every already-ready backbone norm in that shard is shifted twice.
+        base_weights = {
+            k: v
+            for k, v in weights.items()
+            if not (k.startswith("mtp.") or ".mtp." in k)
+        }
         has_unsanitized_conv1d = any(
             "conv1d.weight" in k and getattr(v, "shape", (1,))[-1] != 1
-            for k, v in weights.items()
+            for k, v in base_weights.items()
         )
-        should_shift_norm_weights = (
+        should_shift_base_norm_weights = (
             has_unsanitized_conv1d
-            or _qwen_norm_shard_looks_unshifted(weights, norm_keys)
+            or _qwen_norm_shard_looks_unshifted(base_weights, norm_keys)
         )
         for k, v in list(weights.items()):
             if "conv1d.weight" in k and v.shape[-1] != 1:
                 weights[k] = v.moveaxis(2, 1)
-            if should_shift_norm_weights and any(
-                k.endswith(sfx) for sfx in norm_keys
-            ):
+            is_norm = any(k.endswith(sfx) for sfx in norm_keys)
+            is_mtp_norm = is_norm and (
+                k.startswith("mtp.") or ".mtp." in k
+            )
+            if is_mtp_norm or (should_shift_base_norm_weights and is_norm):
                 if v.ndim == 1:
                     weights[k] = v + 1.0
         return weights

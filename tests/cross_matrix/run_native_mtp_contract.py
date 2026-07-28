@@ -30,6 +30,8 @@ SOURCE_HASH_FILES = (
     "tests/cross_matrix/output_counts.py",
     "vmlx_engine/native_mtp.py",
     "vmlx_engine/mllm_batch_generator.py",
+    "vmlx_engine/patches/mlx_lm_mtp/qwen35_model.py",
+    "vmlx_engine/patches/mlx_vlm_mtp/qwen35_vl.py",
     "vmlx_engine/server.py",
     "vmlx_engine/native_mtp_policy_suite.py",
     "panel/src/main/sessions.ts",
@@ -51,6 +53,7 @@ REQUIRED_NATIVE_MTP_TEST_MARKERS = (
     "test_cli_exposes_native_mtp_runtime_flags",
     "test_qwen36_nested_config_and_layered_tensors_are_native_ready",
     "test_qwen36_mxfp4_mtp_bundle_is_text_native_ready",
+    "test_qwen_text_sanitize_mixed_shard_shifts_only_raw_mtp_norms",
     "test_native_mtp_detection_uses_weights_not_path_name",
     "test_config_only_mtp_bundle_does_not_activate_native_runtime",
     "test_runtime_metadata_can_explicitly_drop_configured_mtp",
@@ -69,7 +72,7 @@ REQUIRED_NATIVE_MTP_TEST_MARKERS = (
     "test_partial_indexed_layers_flagged",
     # Panel launch controls. These are display/CLI-wiring contracts, not hidden
     # generation defaults.
-    "defaults native-MTP bundles to deterministic measured-depth launch policy without hidden sampler flags",
+    "defaults native-MTP bundles to bundle-owned sampling with compatible-only MTP gating",
     "lets users disable native MTP without leaving deterministic sampling overrides behind",
     "keeps non-MTP models on bundle-owned generation defaults",
     "DSV4 additional args cannot reenable native MTP or deterministic sampling policy",
@@ -167,7 +170,8 @@ def build_artifact(root: Path) -> dict[str, Any]:
             not failed
             and "test_native_mtp_depth_defaults_to_three" not in missing_markers
             and "test_mllm_generator_runs_depth3_native_mtp_verify_cycle" not in missing_markers
-            and "defaults native-MTP bundles to deterministic measured-depth launch policy without hidden sampler flags" not in missing_markers
+            and "defaults native-MTP bundles to bundle-owned sampling with compatible-only MTP gating"
+            not in missing_markers
         ),
         "model_tuning_depth_policy": (
             not failed
@@ -189,6 +193,8 @@ def build_artifact(root: Path) -> dict[str, Any]:
         "mxfp4_mxfp8_mtp_artifact_detection": (
             not failed
             and "test_qwen36_mxfp4_mtp_bundle_is_text_native_ready" not in missing_markers
+            and "test_qwen_text_sanitize_mixed_shard_shifts_only_raw_mtp_norms"
+            not in missing_markers
             and "test_jang_quant_mode_supports_mxfp8_metadata" not in missing_markers
         ),
         "mllm_native_mtp_decode_loop": (

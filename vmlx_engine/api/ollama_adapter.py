@@ -86,17 +86,14 @@ def _apply_ollama_prompt_context_limit(body: dict, req: dict[str, Any]) -> None:
 
 
 def _apply_ollama_top_k(opts: dict, req: dict[str, Any]) -> None:
-    """Forward only active top_k values; 0/-1 are disabled sentinels."""
-    value = opts.get("top_k")
-    if value is None:
-        return
-    try:
-        top_k = int(value)
-    except (TypeError, ValueError):
-        req["top_k"] = value
-        return
-    if top_k > 0:
-        req["top_k"] = top_k
+    """Preserve omission versus an explicit top_k value.
+
+    The adapter only translates request shapes. It must not truncate fractional
+    values or hide negative values before the OpenAI-compatible request models
+    validate them.
+    """
+    if "top_k" in opts:
+        req["top_k"] = opts["top_k"]
 
 
 def _apply_ollama_num_predict(opts: dict, req: dict[str, Any]) -> None:

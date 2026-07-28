@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 
 def test_ollama_generate_default_uses_chat_template_request_shape():
     from vmlx_engine.api.ollama_adapter import ollama_generate_to_openai_chat
@@ -42,18 +44,39 @@ def test_ollama_generate_default_uses_chat_template_request_shape():
     assert req["response_format"] == {"type": "json_object"}
 
 
-def test_ollama_chat_omits_disabled_top_k_sentinels():
+def test_ollama_chat_preserves_top_k_absent_zero_positive_contract():
     from vmlx_engine.api.ollama_adapter import ollama_chat_to_openai
 
-    for sentinel in (0, -1):
-        req = ollama_chat_to_openai(
-            {
-                "model": "hy3",
-                "messages": [{"role": "user", "content": "hi"}],
-                "options": {"top_k": sentinel},
-            }
-        )
-        assert "top_k" not in req
+    base = {
+        "model": "hy3",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    assert "top_k" not in ollama_chat_to_openai(base)
+    assert ollama_chat_to_openai(
+        {**base, "options": {"top_k": 0}}
+    )["top_k"] == 0
+    assert ollama_chat_to_openai(
+        {**base, "options": {"top_k": 40}}
+    )["top_k"] == 40
+
+
+@pytest.mark.parametrize("invalid_top_k", [-1, 1.5])
+def test_ollama_chat_preserves_invalid_top_k_for_request_validation(invalid_top_k):
+    from pydantic import ValidationError
+
+    from vmlx_engine.api.models import ChatCompletionRequest
+    from vmlx_engine.api.ollama_adapter import ollama_chat_to_openai
+
+    req = ollama_chat_to_openai(
+        {
+            "model": "hy3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "options": {"top_k": invalid_top_k},
+        }
+    )
+    assert req["top_k"] == invalid_top_k
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(req)
 
 
 def test_ollama_chat_translates_video_and_audio_extensions():
@@ -154,22 +177,45 @@ def test_ollama_chat_normalizes_private_thinking_before_text_and_media_history()
     assert '"thinking"' not in json.dumps(req["messages"])
 
 
-def test_ollama_generate_omits_disabled_top_k_sentinels():
+def test_ollama_generate_preserves_top_k_absent_zero_positive_contract():
     from vmlx_engine.api.ollama_adapter import (
         ollama_generate_to_openai,
         ollama_generate_to_openai_chat,
     )
 
     for convert in (ollama_generate_to_openai, ollama_generate_to_openai_chat):
-        for sentinel in (0, -1):
-            req = convert(
-                {
-                    "model": "hy3",
-                    "prompt": "hi",
-                    "options": {"top_k": sentinel},
-                }
-            )
-            assert "top_k" not in req
+        base = {"model": "hy3", "prompt": "hi"}
+        assert "top_k" not in convert(base)
+        assert convert({**base, "options": {"top_k": 0}})["top_k"] == 0
+        assert convert({**base, "options": {"top_k": 40}})["top_k"] == 40
+
+
+@pytest.mark.parametrize("invalid_top_k", [-1, 1.5])
+def test_ollama_generate_preserves_invalid_top_k_for_request_validation(
+    invalid_top_k,
+):
+    from pydantic import ValidationError
+
+    from vmlx_engine.api.models import ChatCompletionRequest, CompletionRequest
+    from vmlx_engine.api.ollama_adapter import (
+        ollama_generate_to_openai,
+        ollama_generate_to_openai_chat,
+    )
+
+    for convert, request_model in (
+        (ollama_generate_to_openai, CompletionRequest),
+        (ollama_generate_to_openai_chat, ChatCompletionRequest),
+    ):
+        req = convert(
+            {
+                "model": "hy3",
+                "prompt": "hi",
+                "options": {"top_k": invalid_top_k},
+            }
+        )
+        assert req["top_k"] == invalid_top_k
+        with pytest.raises(ValidationError):
+            request_model.model_validate(req)
 
 
 def test_ollama_chat_omits_non_positive_num_predict_sentinels():

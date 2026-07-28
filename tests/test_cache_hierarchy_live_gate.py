@@ -1162,6 +1162,7 @@ def _hybrid_health(*, pid: int = 1234) -> dict:
                 "request_id": "resp-health",
                 "max_len": 112,
                 "candidate_lengths": [112],
+                "attempted_candidate_lengths": [112],
                 "matched": True,
                 "checkpoint_tokens": 112,
                 "is_complete": True,
@@ -1209,6 +1210,7 @@ def _hybridize_hit(
             "request_id": execution["request_id"],
             "max_len": cached_tokens,
             "candidate_lengths": [cached_tokens],
+            "attempted_candidate_lengths": [cached_tokens],
             "matched": True,
             "checkpoint_tokens": cached_tokens,
             "is_complete": True,
@@ -1287,6 +1289,7 @@ def test_hybrid_health_evidence_retains_typed_lookup_and_monotonic_counters():
         "request_id": "resp-health",
         "max_len": 112,
         "candidate_lengths": [112],
+        "attempted_candidate_lengths": [112],
         "matched": True,
         "checkpoint_tokens": 112,
         "is_complete": True,
@@ -1317,12 +1320,21 @@ def test_hybrid_path_free_execution_drops_lookup_debug_paths():
     row["ssm_companion"]["last_prefix_lookup"][
         "debug_path"
     ] = "/private/cache/stale-lookup"
+    row["ssm_companion"]["last_prefix_lookup"][
+        "attempted_candidate_lengths"
+    ] = [112, "/private/cache/attempt"]
 
     execution = gate._path_free_execution(row)
     serialized = json.dumps(execution, sort_keys=True)
 
     assert "/private/" not in serialized
     assert "debug_path" not in execution["ssm_companion"]["last_prefix_lookup"]
+    assert (
+        execution["ssm_companion"]["last_prefix_lookup"][
+            "attempted_candidate_lengths"
+        ]
+        == []
+    )
     assert (
         execution["ssm_companion"]["last_prefix_lookup"]["request_id"]
         == execution["response_id"]
@@ -1349,6 +1361,29 @@ def test_hybrid_store_contract_accepts_only_paged_partial_prefix_with_tq_and_ssm
         partial["ssm_companion"]["last_prefix_lookup"]["checkpoint_tokens"]
         == partial["last_cache_execution"]["cached_tokens"]
     )
+
+
+def test_hybrid_hash_candidate_rejected_before_fetch_does_not_false_fail():
+    rows = _hybrid_store_rows()
+    partial = rows[2]
+    execution = partial["last_cache_execution"]
+    lookup = partial["ssm_companion"]["last_prefix_lookup"]
+    execution["attempted_cached_tokens"] = 128
+    lookup.update(
+        {
+            "max_len": 128,
+            "candidate_lengths": [120, 112],
+            "attempted_candidate_lengths": [128, 112],
+        }
+    )
+
+    failures = _validate_rows(
+        "store",
+        rows,
+        contract_profile="qwen_hybrid_ssm_tq4",
+    )
+
+    assert failures == []
 
 
 @pytest.mark.parametrize(
@@ -1383,6 +1418,18 @@ def test_hybrid_store_contract_accepts_only_paged_partial_prefix_with_tq_and_ssm
                 {"candidate_lengths": [96]}
             ),
             "SSM candidate lengths are not bound",
+        ),
+        (
+            lambda row: row["ssm_companion"]["last_prefix_lookup"].update(
+                {"attempted_candidate_lengths": ["112"]}
+            ),
+            "SSM attempted candidate lengths are malformed",
+        ),
+        (
+            lambda row: row["ssm_companion"]["last_prefix_lookup"].update(
+                {"attempted_candidate_lengths": [113, 112]}
+            ),
+            "SSM attempted candidate lengths are malformed",
         ),
         (
             lambda row: row.update({"response_id": "resp-other"}),

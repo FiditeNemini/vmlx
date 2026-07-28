@@ -541,9 +541,24 @@ def _path_free_prefix_lookup(last_prefix_lookup: Any) -> dict[str, Any]:
 
     if not isinstance(last_prefix_lookup, dict):
         return {}
-    candidate_lengths = last_prefix_lookup.get("candidate_lengths")
-    if not isinstance(candidate_lengths, list):
-        candidate_lengths = []
+
+    def _bounded_token_lengths(value: Any, *, max_items: int) -> list[int]:
+        if (
+            not isinstance(value, list)
+            or len(value) > max_items
+            or any(type(item) is not int or item <= 0 for item in value)
+        ):
+            return []
+        return list(value)
+
+    candidate_lengths = _bounded_token_lengths(
+        last_prefix_lookup.get("candidate_lengths"),
+        max_items=20,
+    )
+    attempted_candidate_lengths = _bounded_token_lengths(
+        last_prefix_lookup.get("attempted_candidate_lengths"),
+        max_items=21,
+    )
     return {
         key: last_prefix_lookup.get(key)
         for key in (
@@ -556,7 +571,8 @@ def _path_free_prefix_lookup(last_prefix_lookup: Any) -> dict[str, Any]:
         )
         if key in last_prefix_lookup
     } | {
-        "candidate_lengths": list(candidate_lengths),
+        "candidate_lengths": candidate_lengths,
+        "attempted_candidate_lengths": attempted_candidate_lengths,
     }
 
 
@@ -2356,8 +2372,24 @@ def _validate_hybrid_ssm_tq4_hit(
     checkpoint_tokens = _integer(lookup.get("checkpoint_tokens"))
     max_len = _integer(lookup.get("max_len"))
     candidate_lengths = lookup.get("candidate_lengths")
-    if not isinstance(candidate_lengths, list):
+    candidates_well_formed = (
+        isinstance(candidate_lengths, list)
+        and len(candidate_lengths) <= 20
+        and all(type(candidate) is int for candidate in candidate_lengths)
+    )
+    if not candidates_well_formed:
         candidate_lengths = []
+    attempted_candidate_lengths = lookup.get("attempted_candidate_lengths")
+    attempts_well_formed = (
+        isinstance(attempted_candidate_lengths, list)
+        and 0 < len(attempted_candidate_lengths) <= 21
+        and all(
+            type(candidate) is int
+            for candidate in attempted_candidate_lengths
+        )
+    )
+    if not attempts_well_formed:
+        attempted_candidate_lengths = []
     if lookup.get("matched") is not True:
         failures.append(f"{tag}: SSM companion prefix lookup did not match")
     if lookup.get("is_complete") is not True:
@@ -2372,13 +2404,11 @@ def _validate_hybrid_ssm_tq4_hit(
             f"{tag}: SSM prefix lookup max_len={max_len} does not equal "
             f"attempted_cached_tokens={attempted_cached_tokens}"
         )
-    normalized_candidates = [
-        _integer(candidate) for candidate in candidate_lengths
-    ]
+    normalized_candidates = list(candidate_lengths)
     if (
-        checkpoint_tokens not in normalized_candidates
+        not candidates_well_formed
+        or checkpoint_tokens not in normalized_candidates
         or not normalized_candidates
-        or normalized_candidates[0] != checkpoint_tokens
         or any(
             candidate <= 0 or candidate > attempted_cached_tokens
             for candidate in normalized_candidates
@@ -2387,6 +2417,24 @@ def _validate_hybrid_ssm_tq4_hit(
         failures.append(
             f"{tag}: SSM candidate lengths are not bound to the attempted "
             "prefix and matched checkpoint"
+        )
+    normalized_attempts = list(attempted_candidate_lengths)
+    if (
+        not attempts_well_formed
+        or normalized_attempts[-1:] != [checkpoint_tokens]
+        or any(
+            candidate <= 0 or candidate > attempted_cached_tokens
+            for candidate in normalized_attempts
+        )
+        or any(
+            candidate != attempted_cached_tokens
+            and candidate not in normalized_candidates
+            for candidate in normalized_attempts
+        )
+    ):
+        failures.append(
+            f"{tag}: SSM attempted candidate lengths are malformed, "
+            "out of bounds, or do not terminate at the accepted checkpoint"
         )
     if lookup.get("source") not in {
         "exact_boundary_l1_or_l2",

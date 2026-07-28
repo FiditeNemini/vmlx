@@ -85,6 +85,8 @@ PAGED_CACHE_SCHEMA_VERSION = (
     "paged_n1_keys_v11_qwen_tool_continuation_rotating_terminal_window"
 )
 
+_LOOPED_CACHE_LAYOUT = "looped_kv_v1"
+
 
 def runtime_cache_fingerprint() -> str:
     """Fingerprint runtime packages that define cache tensor semantics.
@@ -109,6 +111,48 @@ def runtime_cache_fingerprint() -> str:
             version = "unknown"
         parts.append(f"{package}={version}")
     return "runtime_cache=" + ",".join(parts)
+
+
+def _looped_cache_identity_parts(model: Any) -> List[str]:
+    """Return path-free identity fields for validated looped KV layouts.
+
+    Nanbeige reuses 22 layer modules for two forward loops, but owns 44
+    independent prompt-cache slots.  ``num_hidden_layers`` alone therefore
+    cannot distinguish its native cache from a stock 22-slot cache. The loader
+    joins config.jang_runtime, jang_config.runtime, and native cache facts,
+    then stamps this validated contract on the loaded model.
+    """
+
+    contract = getattr(model, "_vmlx_looped_cache_contract", None)
+    if (
+        not isinstance(contract, dict)
+        or str(contract.get("cache_layout") or "").strip().lower()
+        != _LOOPED_CACHE_LAYOUT
+    ):
+        return []
+
+    parts = [f"cache_layout={_LOOPED_CACHE_LAYOUT}"]
+    values = {
+        name: value
+        for name in ("num_hidden_layers", "num_loops", "cache_slots")
+        if isinstance((value := contract.get(name)), int)
+        and not isinstance(value, bool)
+        and value > 0
+    }
+    for name in ("num_loops", "cache_slots"):
+        if name in values:
+            parts.append(f"{name}={values[name]}")
+    if "num_hidden_layers" in values and "num_loops" in values:
+        layers = values["num_hidden_layers"]
+        loops = values["num_loops"]
+        parts.append(f"looped_cache_shape={layers}x{loops}={layers * loops}")
+    return parts
+
+
+def looped_cache_identity_scope(model: Any) -> str:
+    """Serialize validated loop-cache identity for persistent namespaces."""
+
+    return ":".join(_looped_cache_identity_parts(model))
 
 
 def compute_model_cache_key(
@@ -167,6 +211,11 @@ def compute_model_cache_key(
             break
     except Exception:
         pass
+
+    # Looped transformers can own more cache slots than their shared module
+    # count. Persisted prefix/L2 records must bind that actual runtime layout,
+    # not only ``num_hidden_layers``.
+    parts.extend(_looped_cache_identity_parts(model))
 
     # 2. Path + mtime — catches edited config.json / jang_config.json
     if model_path:

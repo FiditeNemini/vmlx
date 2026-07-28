@@ -121,6 +121,111 @@ def test_nanbeige_loop_cache_contract_joins_all_authoritative_sources(tmp_path):
     assert model._vmlx_looped_cache_contract == contract
 
 
+def test_nanbeige_cache_identity_includes_validated_loop_layout_without_paths():
+    import inspect
+
+    from vmlx_engine.prefix_cache import _looped_cache_identity_parts
+    from vmlx_engine.scheduler import Scheduler
+
+    model = _FakeNanbeige()
+    model._vmlx_looped_cache_contract = {
+        "cache_layout": "looped_kv_v1",
+        "num_hidden_layers": 22,
+        "num_loops": 2,
+        "cache_slots": 44,
+    }
+
+    assert _looped_cache_identity_parts(model) == [
+        "cache_layout=looped_kv_v1",
+        "num_loops=2",
+        "cache_slots=44",
+        "looped_cache_shape=22x2=44",
+    ]
+    scheduler_source = inspect.getsource(Scheduler.__init__)
+    assert "block_scope_key = _append_looped_cache_identity_scope(" in scheduler_source
+    assert "scope_key = _append_looped_cache_identity_scope(" in scheduler_source
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    (
+        ("cache_layout", "looped_kv_v2"),
+        ("num_loops", 3),
+        ("cache_slots", 22),
+    ),
+)
+def test_nanbeige_cache_identity_and_text_l2_namespace_invalidate_layout_drift(
+    monkeypatch,
+    field,
+    changed_value,
+):
+    from vmlx_engine import prefix_cache
+    from vmlx_engine.scheduler import _append_looped_cache_identity_scope
+
+    monkeypatch.setattr(
+        prefix_cache,
+        "runtime_cache_fingerprint",
+        lambda: "runtime_cache=test",
+    )
+    contract = {
+        "cache_layout": "looped_kv_v1",
+        "num_hidden_layers": 22,
+        "num_loops": 2,
+        "cache_slots": 44,
+    }
+    baseline = _FakeNanbeige()
+    baseline._vmlx_looped_cache_contract = dict(contract)
+    changed = _FakeNanbeige()
+    changed._vmlx_looped_cache_contract = dict(contract)
+    changed._vmlx_looped_cache_contract[field] = changed_value
+
+    assert prefix_cache.compute_model_cache_key(
+        baseline
+    ) != prefix_cache.compute_model_cache_key(changed)
+    base_scope = "/same/model:quant=q4:runtime_cache=test"
+    assert _append_looped_cache_identity_scope(
+        base_scope, baseline
+    ) != _append_looped_cache_identity_scope(base_scope, changed)
+
+
+def test_ordinary_model_cache_identity_ignores_non_looped_runtime_metadata(
+    monkeypatch,
+):
+    from vmlx_engine import prefix_cache
+    from vmlx_engine.scheduler import _append_looped_cache_identity_scope
+
+    monkeypatch.setattr(
+        prefix_cache,
+        "runtime_cache_fingerprint",
+        lambda: "runtime_cache=test",
+    )
+    base_config = {
+        "model_type": "qwen3",
+        "num_hidden_layers": 22,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 4,
+        "hidden_size": 2048,
+        "vocab_size": 32000,
+    }
+    plain = SimpleNamespace(config=SimpleNamespace(**base_config))
+    with_irrelevant_fields = SimpleNamespace(
+        config=SimpleNamespace(
+            **base_config,
+            jang_runtime={"num_loops": 2, "cache_slots": 44},
+        )
+    )
+
+    assert prefix_cache.compute_model_cache_key(
+        plain
+    ) == prefix_cache.compute_model_cache_key(with_irrelevant_fields)
+    base_scope = "/same/model:quant=q4:runtime_cache=test"
+    assert _append_looped_cache_identity_scope(base_scope, plain) == base_scope
+    assert (
+        _append_looped_cache_identity_scope(base_scope, with_irrelevant_fields)
+        == base_scope
+    )
+
+
 def test_nanbeige_rejects_silent_22_slot_stock_cache(tmp_path):
     from vmlx_engine.utils.nanbeige_runtime import (
         validate_nanbeige_loop_cache_contract,

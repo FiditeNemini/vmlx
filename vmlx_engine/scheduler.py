@@ -37,6 +37,7 @@ from .prefix_cache import (
     PAGED_CACHE_SCHEMA_VERSION,
     PrefixCacheManager,
     compute_model_cache_key,
+    looped_cache_identity_scope,
     runtime_cache_fingerprint,
 )
 from .errors import PromptTooLongError
@@ -75,6 +76,11 @@ def _call_with_optional_cache_extra(
     if cache_extra_keys is not None:
         kwargs["cache_extra_keys"] = cache_extra_keys
     return method(*args, **kwargs)
+
+
+def _append_looped_cache_identity_scope(scope: str, model: Any) -> str:
+    looped_scope = looped_cache_identity_scope(model)
+    return f"{scope}:{looped_scope}" if looped_scope else scope
 
 
 def _typed_paged_cache_detail(cache_type: str, *, disk_hit: bool) -> str:
@@ -1060,6 +1066,10 @@ class Scheduler:
                             f"{dsv4_scope}"
                             f"{zaya_scope}"
                         )
+                        block_scope_key = _append_looped_cache_identity_scope(
+                            block_scope_key,
+                            self.model,
+                        )
                         model_hash = hashlib.sha256(
                             block_scope_key.encode()
                         ).hexdigest()[:12]
@@ -1299,6 +1309,10 @@ class Scheduler:
                     f":tq_native={tq_native_tag}"
                     f":prefix_cache_schema={PAGED_CACHE_SCHEMA_VERSION}"
                     f":{runtime_cache_fingerprint()}"
+                )
+                scope_key = _append_looped_cache_identity_scope(
+                    scope_key,
+                    self.model,
                 )
                 model_hash = hashlib.sha256(scope_key.encode()).hexdigest()[:12]
                 model_slug = os.path.basename(self.config.model_path.rstrip("/"))

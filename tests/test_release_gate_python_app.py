@@ -485,6 +485,8 @@ def test_bundle_python_uses_one_pinned_binary_opencv_distribution():
     assert '"mlx-audio==$MLX_AUDIO_VERSION"' in bundler
     assert "opencv-python-headless" not in bundler
     assert '"$PYTHON" -m pip install --only-binary=:all:' in bundler
+    assert 'rm -rf "$SITE/setuptools"' not in bundler
+    assert "setuptools: KEEP" in bundler
     assert '"opencv-python==4.13.0.92"' in pyproject
     assert "opencv-python-headless" not in pyproject
     assert 'version("opencv-python")' in verifier

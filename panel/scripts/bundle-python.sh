@@ -437,8 +437,9 @@ find "$SITE" -type d -name ".agents" -exec rm -rf {} + 2>/dev/null || true
 # Modern pip install ships libsndfile_arm64.dylib alongside _soundfile_data,
 # so the older "missing libsndfile.dylib" runtime crash no longer applies.
 # Verified working at bundle time: see verify-bundled-python.sh soundfile gate.
-rm -rf "$SITE/setuptools" 2>/dev/null || true          # build tool, not needed at runtime (~4.2 MB)
-rm -rf "$SITE/setuptools"*.dist-info 2>/dev/null || true
+# setuptools: KEEP. Torch declares it as a runtime requirement, and removing it
+# leaves the packaged environment dependency-incomplete even when imports seem
+# to work on the build machine.
 rm -rf "$WHEELHOUSE" 2>/dev/null || true
 
 # Keep pip intact (needed for engine auto-update at runtime via python3 -m pip)

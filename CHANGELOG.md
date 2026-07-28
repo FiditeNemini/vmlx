@@ -36,7 +36,7 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ### Distribution hardening
 
-- Public source and bundled Python attest the exact clean JANG 2.5.34 source
+- Public source and bundled Python attest the exact clean JANG 2.5.35 source
   tree used by the release.
 - Sequoia and Tahoe artifacts remain separate, signed, notarized outputs bound
   to one exact source revision.

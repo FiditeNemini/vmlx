@@ -70,7 +70,7 @@ CONTROL_MARKER_RE = re.compile(
     r"|<\|(?:tool_call|tool_calls|point|box)[^>]*\|>"
 )
 JANG_VERSION = "2.5.34"
-JANG_COMMIT = "f7583e445e8bf75abe49b5cd0a19370a1d5ceb41"
+JANG_COMMIT = "af71f23328a74a407340d2499d642fb33a90e701"
 JANG_TREE = "00dee8c330fd69697cce530ea667ed6ffed87a97"
 
 BUNDLE_CONFIG_FILES = (

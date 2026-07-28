@@ -1643,7 +1643,7 @@ def test_v5_production_build_accepts_actual_electron_vite_contract(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"fixture {relative}\n", encoding="utf-8")
     terminal = (
-        b"ok bundled JANG provenance matches source (2.5.34 @ f7583e4)\n"
+        b"ok bundled JANG provenance matches source (2.5.34 @ af71f23)\n"
         b"bundled-python: all critical imports ok\n"
     )
     facts, details = module._v5_owned_check_facts(
@@ -6634,7 +6634,7 @@ def _v5_fixture_child(argv: list[str]) -> int:
             path = args.output_root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"fixture {relative}\n", encoding="utf-8")
-        print("ok bundled JANG provenance matches source (2.5.34 @ f7583e4)")
+        print("ok bundled JANG provenance matches source (2.5.34 @ af71f23)")
         print("bundled-python: all critical imports ok")
     elif command == "jang_build":
         assert args.distribution_root

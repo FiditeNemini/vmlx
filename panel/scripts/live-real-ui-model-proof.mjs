@@ -30,6 +30,44 @@ const panelDir = path.resolve(new URL('..', import.meta.url).pathname)
 const repoDir = path.resolve(panelDir, '..')
 const proofFormat = 'vmlx-electron-ui-proof-v2'
 const executableIdentityMaxBytes = 512 * 1024 * 1024
+const installedReleaseManifestSchema = 'vmlx-installed-release-manifest-v1'
+const installedReleaseManifestFields = [
+  'app_asar_sha256',
+  'bundled_provenance_sha256',
+  'bundled_python_executable_fingerprint_sha256',
+  'bundled_python_executable_sha256',
+  'electron_executable_sha256',
+  'schema',
+  'source_commit',
+  'source_tree',
+]
+const installedBundledPythonRelativePath = path.join(
+  'Contents',
+  'Resources',
+  'bundled-python',
+  'python',
+  'bin',
+  'python3',
+)
+const installedAppArtifactPaths = {
+  app_asar: {
+    manifestField: 'app_asar_sha256',
+    relativePath: path.join('Contents', 'Resources', 'app.asar'),
+  },
+  electron_executable: {
+    manifestField: 'electron_executable_sha256',
+    relativePath: path.join('Contents', 'MacOS', 'vMLX'),
+  },
+  bundled_provenance: {
+    manifestField: 'bundled_provenance_sha256',
+    relativePath: path.join(
+      'Contents',
+      'Resources',
+      'bundled-python',
+      'vmlx-bundle-provenance.json',
+    ),
+  },
+}
 const proofDirInput = process.env.VMLINUX_REAL_UI_PROOF_DIR
   || process.env.VMLX_REAL_UI_PROOF_DIR
   || process.env.VMLX_PRIVATE_EVIDENCE_ROOT
@@ -953,8 +991,12 @@ export function privateCacheAttestationSessionArgs(tokenFilePath) {
     + `--private-cache-attestation-token-file=${opened.path}`
 }
 
-export function readPrivateExternalJson(filePath, label) {
-  const opened = readPrivateExternalBytes(filePath, label)
+export function readPrivateExternalJson(
+  filePath,
+  label,
+  maxBytes = 64 * 1024 * 1024,
+) {
+  const opened = readPrivateExternalBytes(filePath, label, maxBytes)
   return {
     path: opened.path,
     sha256: opened.sha256,
@@ -1899,20 +1941,15 @@ async function captureGitProvenance() {
 
 function readExternalReleaseManifest(manifestPath) {
   if (!manifestPath) return null
-  const absolute = path.resolve(manifestPath)
-  const stat = lstatSync(absolute)
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new Error('Installed release manifest must be a regular, non-symlink file')
-  }
-  const canonical = realpathSync(absolute)
-  if (isPathInside(canonical, realpathSync(repoDir))) {
-    throw new Error('Installed release manifest must be independent of the source checkout')
-  }
-  const raw = readFileSync(canonical)
+  const opened = readPrivateExternalJson(
+    manifestPath,
+    'Installed release manifest',
+    1024 * 1024,
+  )
   return {
-    path: canonical,
-    sha256: crypto.createHash('sha256').update(raw).digest('hex'),
-    value: JSON.parse(raw.toString('utf8')),
+    path: opened.path,
+    sha256: opened.sha256,
+    value: opened.value,
   }
 }
 
@@ -4380,7 +4417,9 @@ export function validateUiRuntimeProvenance(result) {
     const manifest = provenance.external_release_manifest || {}
     if (
       !validSha256(provenance.external_release_manifest_sha256)
-      || manifest.schema !== 'vmlx-installed-release-manifest-v1'
+      || canonicalJson(Object.keys(manifest).sort())
+        !== canonicalJson(installedReleaseManifestFields)
+      || manifest.schema !== installedReleaseManifestSchema
       || manifest.source_commit !== result?.gitProvenance?.after?.commit
       || manifest.source_tree !== result?.gitProvenance?.after?.tree
     ) {
@@ -4446,6 +4485,12 @@ export function validateUiRuntimeProvenance(result) {
         !== runtimeSource.python_executable_fingerprint_sha256
     ) {
       failures.push('installed backend did not import from the manifest-attested bundled Python')
+    }
+    if (
+      !validSha256(manifest.bundled_python_executable_sha256)
+      || manifest.bundled_python_executable_sha256 !== backend.executable_sha256
+    ) {
+      failures.push('installed backend Python bytes do not match the external release manifest')
     }
   } else {
     failures.push(`unknown UI launch mode ${provenance.mode || 'missing'}`)
@@ -5396,11 +5441,11 @@ function validateMatrixIdentity(value, result) {
   const runnerAfter = identity?.runner?.after || {}
   const producerPath = 'tests/cross_matrix/run_agentic_protocol_matrix.py'
   const expectedHarnessPath = realpathSync(path.join(repoDir, producerPath))
+  const uiRuntime = result?.uiRuntimeProvenance || {}
+  const executionMode = String(runnerBefore.execution_mode || '')
   let producerExecutableSha256 = ''
   if (
     canonicalJson(runnerBefore) !== canonicalJson(runnerAfter)
-    || runnerBefore.repo_venv !== true
-    || runnerBefore.repo_python !== true
     || runnerBefore.producer_harness_relative_path !== producerPath
     || path.resolve(runnerBefore.producer_harness_path || '') !== expectedHarnessPath
   ) {
@@ -5439,6 +5484,225 @@ function validateMatrixIdentity(value, result) {
     } catch (error) {
       failures.push(String(error?.message || error))
     }
+  }
+  const checkoutFingerprints = runnerBefore
+    .checkout_python_invocation_fingerprints_sha256
+  const installedFingerprints = runnerBefore
+    .installed_python_invocation_fingerprints_sha256
+  const acceptedFingerprints = runnerBefore
+    .accepted_python_invocation_fingerprints_sha256
+  const validFingerprintList = (value, allowEmpty = false) => (
+    Array.isArray(value)
+    && (allowEmpty || value.length > 0)
+    && value.every((fingerprint) => validSha256(fingerprint))
+  )
+  if (uiRuntime.mode === 'electron-dev') {
+    if (
+      executionMode !== 'source-checkout-venv'
+      || runnerBefore.repo_venv !== true
+      || runnerBefore.repo_python !== true
+      || runnerBefore.installed_runtime !== null
+      || !validFingerprintList(checkoutFingerprints)
+      || canonicalJson(acceptedFingerprints) !== canonicalJson(checkoutFingerprints)
+      || !Array.isArray(installedFingerprints)
+      || installedFingerprints.length !== 0
+      || !checkoutFingerprints.includes(
+        runnerBefore.python_executable_fingerprint_sha256,
+      )
+    ) {
+      failures.push('paired matrix source-checkout runner identity is invalid')
+    }
+  } else if (uiRuntime.mode === 'installed-app') {
+    const installed = runnerBefore.installed_runtime || {}
+    const manifest = installed.manifest || {}
+    const appPath = path.resolve(String(installed.app_path || ''))
+    let canonicalAppPath = appPath
+    try {
+      canonicalAppPath = realpathSync(appPath)
+    } catch {}
+    const expectedAppPath = path.resolve(String(result?.installedAppPath || ''))
+    const invokedPythonPath = path.resolve(
+      String(installed.invoked_python_path || ''),
+    )
+    const expectedPythonPath = path.join(
+      appPath,
+      installedBundledPythonRelativePath,
+    )
+    let expectedPythonPrefix = path.dirname(path.dirname(expectedPythonPath))
+    try {
+      expectedPythonPrefix = realpathSync(expectedPythonPrefix)
+    } catch {}
+    const sourceBinding = installed.source_binding || {}
+    const expectedSourceBinding = {
+      head: uiSourceAfter.commit,
+      tree: uiSourceAfter.tree,
+      server_module_sha256: uiSourceAfter.server_module_sha256,
+      package_init_sha256: uiSourceAfter.package_init_sha256,
+      python_source_tree_sha256: uiSourceAfter.python_source_tree_sha256,
+      python_source_file_count: uiSourceAfter.python_source_file_count,
+      python_source_read_error_count: uiSourceAfter.python_source_read_error_count,
+    }
+    if (
+      executionMode !== 'installed-runtime'
+      || runnerBefore.repo_venv !== false
+      || runnerBefore.repo_python !== false
+      || !validFingerprintList(checkoutFingerprints, true)
+      || !validFingerprintList(installedFingerprints)
+      || installedFingerprints.length !== 1
+      || canonicalJson(acceptedFingerprints) !== canonicalJson(installedFingerprints)
+      || installedFingerprints[0]
+        !== runnerBefore.python_executable_fingerprint_sha256
+      || installed.schema !== 'vmlx-agentic-installed-runtime-v1'
+    ) {
+      failures.push('paired matrix installed-runtime runner identity is invalid')
+    }
+    if (
+      !expectedAppPath
+      || appPath !== expectedAppPath
+      || path.basename(appPath) !== 'vMLX.app'
+      || invokedPythonPath !== expectedPythonPath
+      || runnerBefore.python_executable_path !== expectedPythonPath
+      || installed.python_prefix_path !== expectedPythonPrefix
+      || runnerBefore.python_prefix_path !== expectedPythonPrefix
+    ) {
+      failures.push('paired matrix installed app/Python paths do not match the UI install')
+    }
+    if (
+      canonicalJson(Object.keys(manifest).sort())
+        !== canonicalJson(installedReleaseManifestFields)
+      || manifest.schema !== installedReleaseManifestSchema
+      || manifest.source_commit !== uiSourceAfter.commit
+      || manifest.source_tree !== uiSourceAfter.tree
+      || installed.manifest_opened_nofollow !== true
+      || !validSha256(installed.manifest_sha256)
+      || !Number.isInteger(Number(installed.manifest_size_bytes))
+      || Number(installed.manifest_size_bytes) <= 0
+      || Number(installed.manifest_size_bytes) > 1024 * 1024
+      || installed.manifest_nlink !== 1
+    ) {
+      failures.push('paired matrix installed release manifest attestation is invalid')
+    }
+    try {
+      const reopenedManifest = readPrivateExternalJson(
+        installed.manifest_path,
+        'Paired installed release manifest',
+        1024 * 1024,
+      )
+      if (
+        reopenedManifest.path !== uiRuntime.external_release_manifest_path
+        || reopenedManifest.path !== installed.manifest_path
+        || reopenedManifest.sha256 !== uiRuntime.external_release_manifest_sha256
+        || reopenedManifest.sha256 !== installed.manifest_sha256
+        || reopenedManifest.bytes !== Number(installed.manifest_size_bytes)
+        || reopenedManifest.mode !== 0o600
+        || reopenedManifest.nlink !== 1
+        || reopenedManifest.opened_nofollow !== true
+        || canonicalJson(reopenedManifest.value) !== canonicalJson(manifest)
+        || canonicalJson(reopenedManifest.value)
+          !== canonicalJson(uiRuntime.external_release_manifest)
+      ) {
+        failures.push('paired UI/API installed release manifests are not the same private file')
+      }
+    } catch (error) {
+      failures.push(String(error?.message || error))
+    }
+    const bundledPython = installed.bundled_python || {}
+    try {
+      const reopenedPython = readExternalExecutableIdentity(
+        expectedPythonPath,
+        'Paired installed bundled Python',
+      )
+      if (
+        bundledPython.path !== reopenedPython.path
+        || !isPathInside(reopenedPython.path, canonicalAppPath)
+      ) {
+        failures.push('paired matrix bundled Python canonical path escapes or differs from the UI app')
+      }
+      if (
+        bundledPython.sha256 !== reopenedPython.sha256
+        || Number(bundledPython.size_bytes) !== reopenedPython.bytes
+        || manifest.bundled_python_executable_sha256 !== reopenedPython.sha256
+        || manifest.bundled_python_executable_sha256
+          !== runnerBefore.producer_executable_sha256
+      ) {
+        failures.push('paired matrix bundled Python bytes are not manifest/producer bound')
+      }
+      if (
+        manifest.bundled_python_executable_fingerprint_sha256
+          !== runnerBefore.python_executable_fingerprint_sha256
+        || manifest.bundled_python_executable_fingerprint_sha256
+          !== uiRuntime.backend_python_process_binding
+            ?.invoked_executable_path_fingerprint_sha256
+      ) {
+        failures.push('paired matrix bundled Python lexical path fingerprint is not manifest/UI bound')
+      }
+      if (
+        manifest.bundled_python_executable_sha256
+          !== uiRuntime.backend_python_process_binding?.executable_sha256
+      ) {
+        failures.push('paired matrix bundled Python bytes do not match the UI backend')
+      }
+    } catch (error) {
+      failures.push(String(error?.message || error))
+    }
+    const installedArtifacts = installed.artifacts || {}
+    if (
+      canonicalJson(Object.keys(installedArtifacts).sort())
+        !== canonicalJson(Object.keys(installedAppArtifactPaths).sort())
+    ) {
+      failures.push('paired matrix installed artifact set is not exact')
+    }
+    for (const [label, contract] of Object.entries(installedAppArtifactPaths)) {
+      const record = installedArtifacts[label] || {}
+      const expectedPath = path.join(appPath, contract.relativePath)
+      try {
+        const reopened = readExternalFileBytes(
+          expectedPath,
+          `Paired installed ${label.replaceAll('_', ' ')}`,
+          { maxBytes: executableIdentityMaxBytes, retainRaw: false },
+        )
+        if (
+          record.opened_nofollow !== true
+          || record.requested_path !== expectedPath
+          || record.path !== reopened.path
+          || record.sha256 !== reopened.sha256
+          || Number(record.size_bytes) !== reopened.bytes
+          || record.sha256 !== manifest[contract.manifestField]
+        ) {
+          failures.push(`paired matrix installed ${label} bytes/path are invalid`)
+        }
+      } catch (error) {
+        failures.push(String(error?.message || error))
+      }
+    }
+    if (
+      uiRuntime.app_asar !== path.join(
+        appPath,
+        installedAppArtifactPaths.app_asar.relativePath,
+      )
+      || manifest.app_asar_sha256 !== uiRuntime.app_asar_sha256
+      || uiRuntime.electron_executable !== path.join(
+        appPath,
+        installedAppArtifactPaths.electron_executable.relativePath,
+      )
+      || manifest.electron_executable_sha256
+        !== uiRuntime.electron_executable_sha256
+      || uiRuntime.bundled_provenance_path !== path.join(
+        appPath,
+        installedAppArtifactPaths.bundled_provenance.relativePath,
+      )
+      || manifest.bundled_provenance_sha256
+        !== uiRuntime.bundled_provenance_sha256
+      || canonicalJson(installed.bundled_provenance)
+        !== canonicalJson(uiRuntime.bundled_provenance)
+      || canonicalJson(installed.bundled_source)
+        !== canonicalJson(uiRuntime.bundled_source)
+      || canonicalJson(sourceBinding) !== canonicalJson(expectedSourceBinding)
+    ) {
+      failures.push('paired matrix installed provenance does not match the exact UI package/source')
+    }
+  } else {
+    failures.push('paired matrix producer cannot be bound to an unknown UI runtime mode')
   }
   const producerPid = Number(runnerBefore.producer_pid)
   const forbiddenPids = [

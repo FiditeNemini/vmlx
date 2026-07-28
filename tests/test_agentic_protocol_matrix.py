@@ -4,6 +4,7 @@
 import copy
 import hashlib
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -96,6 +97,105 @@ def _identity_runner() -> dict:
         "producer_harness_sha256": "2" * 64,
         "producer_harness_size_bytes": 8192,
     }
+
+
+def _installed_runner_fixture(
+    monkeypatch,
+    tmp_path: Path,
+) -> tuple[Path, dict, Path, dict]:
+    repo_root, _ = _identity_repo(tmp_path)
+    harness_path = (
+        repo_root / "tests/cross_matrix/run_agentic_protocol_matrix.py"
+    )
+    harness_path.parent.mkdir(parents=True)
+    harness_path.write_bytes(Path(matrix.__file__).read_bytes())
+    subprocess.run(
+        ["git", "-C", str(repo_root), "add", "."],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--amend",
+            "--no-edit",
+            "-q",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    source = matrix.observe_source_checkout(repo_root)
+
+    app_root = tmp_path / "installed" / "vMLX.app"
+    resources = app_root / "Contents/Resources"
+    python_root = resources / "bundled-python/python"
+    python_executable = python_root / "bin/python3"
+    python_executable.parent.mkdir(parents=True)
+    python_executable.write_bytes(b"installed-python-binary\n")
+    python_executable.chmod(0o755)
+    electron_executable = app_root / "Contents/MacOS/vMLX"
+    electron_executable.parent.mkdir(parents=True)
+    electron_executable.write_bytes(b"installed-electron-binary\n")
+    electron_executable.chmod(0o755)
+    app_asar = resources / "app.asar"
+    app_asar.write_bytes(b"installed-renderer-asar\n")
+    bundled_provenance = resources / "bundled-python/vmlx-bundle-provenance.json"
+    bundled_provenance.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "vmlx": {"commit": source["head"], "version": "test"},
+                "jang": {"commit": "a" * 40, "version": "test"},
+                "mlx_wheel_platform": "test",
+            }
+        )
+        + "\n"
+    )
+    bundled_source = resources / "vmlx-engine-source/vmlx_engine"
+    bundled_source.mkdir(parents=True)
+    for name in ("__init__.py", "server.py"):
+        (bundled_source / name).write_bytes(
+            (repo_root / "vmlx_engine" / name).read_bytes()
+        )
+
+    manifest = {
+        "schema": matrix.INSTALLED_RELEASE_MANIFEST_SCHEMA,
+        "source_commit": source["head"],
+        "source_tree": source["tree"],
+        "app_asar_sha256": hashlib.sha256(app_asar.read_bytes()).hexdigest(),
+        "electron_executable_sha256": hashlib.sha256(
+            electron_executable.read_bytes()
+        ).hexdigest(),
+        "bundled_provenance_sha256": hashlib.sha256(
+            bundled_provenance.read_bytes()
+        ).hexdigest(),
+        "bundled_python_executable_sha256": hashlib.sha256(
+            python_executable.read_bytes()
+        ).hexdigest(),
+        "bundled_python_executable_fingerprint_sha256": matrix._sha256(
+            str(python_executable.absolute())
+        ),
+    }
+    manifest_path = tmp_path / "private" / "installed-release.json"
+    manifest_path.parent.mkdir()
+    manifest_path.write_text(json.dumps(manifest) + "\n")
+    manifest_path.chmod(0o600)
+
+    monkeypatch.setattr(matrix.sys, "executable", str(python_executable))
+    monkeypatch.setattr(matrix.sys, "prefix", str(python_root))
+    runner = matrix.observe_runner_environment(
+        repo_root,
+        manifest_path,
+        source,
+    )
+    return repo_root, source, manifest_path, runner
 
 
 def _identity_health(
@@ -222,6 +322,154 @@ def test_runner_identity_requires_real_producer_pid_executable_and_harness_bytes
         "proof runner Python executable path binding is invalid",
         "proof producer executable path cannot be resolved",
     ]
+
+
+def test_installed_runner_is_bound_to_external_manifest_and_bundled_python(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _, source, manifest_path, runner = _installed_runner_fixture(
+        monkeypatch,
+        tmp_path,
+    )
+
+    assert manifest_path.is_file()
+    assert stat.S_IMODE(manifest_path.stat().st_mode) == 0o600
+    assert runner["execution_mode"] == "installed-runtime"
+    assert runner["repo_venv"] is False
+    assert runner["repo_python"] is False
+    assert runner["installed_runtime"]["manifest_opened_nofollow"] is True
+    assert runner["installed_runtime"]["source_binding"]["head"] == source["head"]
+    assert matrix._runner_environment_failures(runner) == []
+
+    installed = runner["installed_runtime"]
+    assert (
+        installed["bundled_python"]["sha256"]
+        == runner["producer_executable_sha256"]
+    )
+    assert (
+        installed["manifest"][
+            "bundled_python_executable_sha256"
+        ]
+        == runner["producer_executable_sha256"]
+    )
+    assert (
+        installed["manifest"][
+            "bundled_python_executable_fingerprint_sha256"
+        ]
+        == runner["python_executable_fingerprint_sha256"]
+    )
+
+
+def test_installed_runner_health_binding_uses_manifest_attested_python(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _, source, _, runner = _installed_runner_fixture(monkeypatch, tmp_path)
+    bundle_root, bundle = _identity_bundle(tmp_path)
+    del bundle_root
+    health = _identity_health(source, bundle=bundle)
+    health["runtime_provenance"][
+        "python_executable_fingerprint_sha256"
+    ] = runner["python_executable_fingerprint_sha256"]
+    identity, failures = matrix._health_identity(health)
+
+    assert failures == []
+    assert matrix._validate_health_source_binding(
+        identity,
+        source,
+        runner,
+        bundle,
+        bundle["model_name"],
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "expected"),
+    [
+        ("manifest-symlink", "regular non-symlink"),
+        ("manifest-hardlink", "exactly one filesystem link"),
+        ("manifest-in-worktree", "outside every Git worktree"),
+        ("manifest-oversized", "safety limit"),
+        ("wrong-source", "source commit does not match"),
+        ("mutated-asar", "app asar does not match"),
+        ("mutated-python", "bundled Python does not match"),
+        ("python-symlink-escape", "resolves outside the installed app"),
+    ],
+)
+def test_installed_runner_rejects_unbound_release_material(
+    monkeypatch,
+    tmp_path: Path,
+    failure_mode: str,
+    expected: str,
+):
+    repo_root, source, manifest_path, runner = _installed_runner_fixture(
+        monkeypatch,
+        tmp_path,
+    )
+    installed = runner["installed_runtime"]
+    requested_manifest = manifest_path
+    if failure_mode == "manifest-symlink":
+        requested_manifest = manifest_path.with_name("manifest-link.json")
+        requested_manifest.symlink_to(manifest_path)
+    elif failure_mode == "manifest-hardlink":
+        requested_manifest = manifest_path.with_name("manifest-hardlink.json")
+        os.link(manifest_path, requested_manifest)
+    elif failure_mode == "manifest-in-worktree":
+        requested_manifest = repo_root / "private-manifest.json"
+        requested_manifest.write_bytes(manifest_path.read_bytes())
+        requested_manifest.chmod(0o600)
+    elif failure_mode == "manifest-oversized":
+        manifest_path.write_bytes(
+            manifest_path.read_bytes() + b" " * (1024 * 1024)
+        )
+        manifest_path.chmod(0o600)
+    elif failure_mode == "wrong-source":
+        manifest = json.loads(manifest_path.read_text())
+        manifest["source_commit"] = "0" * len(source["head"])
+        manifest_path.write_text(json.dumps(manifest) + "\n")
+        manifest_path.chmod(0o600)
+    elif failure_mode == "mutated-asar":
+        Path(installed["artifacts"]["app_asar"]["path"]).write_bytes(
+            b"mutated-after-manifest\n"
+        )
+    elif failure_mode == "mutated-python":
+        Path(installed["invoked_python_path"]).write_bytes(
+            b"mutated-python-after-manifest\n"
+        )
+    elif failure_mode == "python-symlink-escape":
+        python_path = Path(installed["invoked_python_path"])
+        escaped = tmp_path / "escaped-python3"
+        escaped.write_bytes(python_path.read_bytes())
+        escaped.chmod(0o755)
+        python_path.unlink()
+        python_path.symlink_to(escaped)
+
+    with pytest.raises(ValueError, match=expected):
+        matrix.observe_runner_environment(
+            repo_root,
+            requested_manifest,
+            source,
+        )
+
+
+def test_installed_runner_failure_contract_rejects_attestation_mutation(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _, _, _, runner = _installed_runner_fixture(monkeypatch, tmp_path)
+    runner["installed_runtime"]["bundled_source"][
+        "server_module_sha256"
+    ] = "f" * 64
+    runner["installed_runtime"]["bundled_python"]["sha256"] = "e" * 64
+    runner["installed_runtime"]["manifest"][
+        "bundled_python_executable_sha256"
+    ] = "d" * 64
+
+    failures = matrix._runner_environment_failures(runner)
+
+    assert "installed bundled Python identity is invalid" in failures
+    assert "installed runtime source provenance is invalid" in failures
 
 
 def test_backend_identity_accepts_equivalent_checkout_python_alias(tmp_path: Path):
@@ -1060,6 +1308,8 @@ def test_import_safe_parser_requires_caller_supplied_model_and_base(tmp_path: Pa
             str(tmp_path / "out.json"),
             "--source-head",
             "observed-at-run-time",
+            "--installed-release-manifest",
+            str(tmp_path / "installed-release.json"),
             "--run-id",
             "paired-proof-run",
         ]
@@ -1072,6 +1322,7 @@ def test_import_safe_parser_requires_caller_supplied_model_and_base(tmp_path: Pa
     ]
     assert args.raw_artifact_dir is None
     assert args.source_head == "observed-at-run-time"
+    assert args.installed_release_manifest == tmp_path / "installed-release.json"
     assert args.run_id == "paired-proof-run"
 
 

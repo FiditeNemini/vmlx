@@ -99,6 +99,34 @@ CAPTURE_SEMANTICS = (
 )
 OUTPUT_SCHEMA = "vmlx-agentic-protocol-matrix-v2"
 OUTPUT_SCHEMA_VERSION = 2
+INSTALLED_RELEASE_MANIFEST_SCHEMA = "vmlx-installed-release-manifest-v1"
+INSTALLED_RELEASE_MANIFEST_FIELDS = {
+    "schema",
+    "source_commit",
+    "source_tree",
+    "app_asar_sha256",
+    "electron_executable_sha256",
+    "bundled_provenance_sha256",
+    "bundled_python_executable_sha256",
+    "bundled_python_executable_fingerprint_sha256",
+}
+INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH = Path(
+    "Contents/Resources/bundled-python/python/bin/python3"
+)
+INSTALLED_APP_ARTIFACTS = {
+    "app_asar": (
+        Path("Contents/Resources/app.asar"),
+        "app_asar_sha256",
+    ),
+    "electron_executable": (
+        Path("Contents/MacOS/vMLX"),
+        "electron_executable_sha256",
+    ),
+    "bundled_provenance": (
+        Path("Contents/Resources/bundled-python/vmlx-bundle-provenance.json"),
+        "bundled_provenance_sha256",
+    ),
+}
 BUNDLE_ATTESTATION_FILENAMES = (
     "config.json",
     "generation_config.json",
@@ -229,6 +257,64 @@ def _opened_regular_file_identity(path: Path, label: str) -> dict[str, Any]:
     }
 
 
+def _opened_nofollow_regular_file(
+    path: Path,
+    label: str,
+    *,
+    retain_bytes: bool = False,
+    max_bytes: int | None = None,
+    require_single_link: bool = False,
+) -> tuple[dict[str, Any], bytes]:
+    """Open a caller-named regular file without following its final component."""
+    requested = path.expanduser().absolute()
+    path_stat = requested.lstat()
+    if not stat.S_ISREG(path_stat.st_mode) or stat.S_ISLNK(path_stat.st_mode):
+        raise ValueError(f"{label} is not a regular non-symlink file")
+    if require_single_link and path_stat.st_nlink != 1:
+        raise ValueError(f"{label} must have exactly one filesystem link")
+    if max_bytes is not None and path_stat.st_size > max_bytes:
+        raise ValueError(f"{label} exceeds the {max_bytes}-byte safety limit")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(requested, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError(f"{label} is not a regular file")
+        if require_single_link and opened.st_nlink != 1:
+            raise ValueError(f"{label} opened object must have exactly one link")
+        if (
+            opened.st_dev != path_stat.st_dev
+            or opened.st_ino != path_stat.st_ino
+            or opened.st_size != path_stat.st_size
+        ):
+            raise ValueError(f"{label} changed identity while opening")
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := os.read(descriptor, 1024 * 1024):
+            if retain_bytes:
+                chunks.append(chunk)
+            digest.update(chunk)
+            size += len(chunk)
+            if max_bytes is not None and size > max_bytes:
+                raise ValueError(
+                    f"{label} exceeds the {max_bytes}-byte safety limit"
+                )
+    finally:
+        os.close(descriptor)
+    return (
+        {
+            "path": str(requested.resolve(strict=True)),
+            "requested_path": str(requested),
+            "sha256": digest.hexdigest(),
+            "size_bytes": size,
+            "nlink": opened.st_nlink,
+            "opened_nofollow": True,
+        },
+        b"".join(chunks),
+    )
+
+
 def _git_text(repo_root: Path, *arguments: str) -> str:
     environment = dict(os.environ)
     for name in ("GIT_DIR", "GIT_WORK_TREE"):
@@ -307,10 +393,220 @@ def observe_source_checkout(repo_root: Path) -> dict[str, Any]:
     }
 
 
-def observe_runner_environment(repo_root: Path) -> dict[str, Any]:
-    """Bind the proof runner to the same checkout-owned Python as the server."""
+def _installed_app_root_from_python(executable: Path) -> Path:
+    candidate = executable
+    for _ in INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH.parts:
+        candidate = candidate.parent
+    if candidate / INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH != executable:
+        raise ValueError(
+            "installed proof runner is not the packaged bundled-Python path"
+        )
+    if candidate.name != "vMLX.app":
+        raise ValueError("installed proof runner is not inside vMLX.app")
+    app_stat = candidate.lstat()
+    if not stat.S_ISDIR(app_stat.st_mode) or stat.S_ISLNK(app_stat.st_mode):
+        raise ValueError("installed vMLX.app is not a real non-symlink directory")
+    return candidate
+
+
+def _observe_installed_runtime(
+    *,
+    manifest_path: Path,
+    repo_root: Path,
+    source: dict[str, Any],
+    invoked_executable: Path,
+) -> dict[str, Any]:
+    manifest_requested = manifest_path.expanduser().absolute()
+    if _is_within_directory(manifest_requested, repo_root) or _is_in_git_context(
+        manifest_requested
+    ):
+        raise ValueError(
+            "--installed-release-manifest must resolve outside every Git "
+            "worktree and Git metadata directory"
+        )
+    if stat.S_IMODE(manifest_requested.stat().st_mode) != 0o600:
+        raise ValueError("installed release manifest permissions must be 0600")
+    manifest_record, manifest_bytes = _opened_nofollow_regular_file(
+        manifest_requested,
+        "installed release manifest",
+        retain_bytes=True,
+        max_bytes=1024 * 1024,
+        require_single_link=True,
+    )
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("installed release manifest is not valid UTF-8 JSON") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("installed release manifest must be a JSON object")
+    if set(manifest) != INSTALLED_RELEASE_MANIFEST_FIELDS:
+        raise ValueError("installed release manifest fields are not exact")
+    if manifest.get("schema") != INSTALLED_RELEASE_MANIFEST_SCHEMA:
+        raise ValueError("installed release manifest schema is invalid")
+    if manifest.get("source_commit") != source.get("head"):
+        raise ValueError(
+            "installed release manifest source commit does not match the checkout"
+        )
+    if manifest.get("source_tree") != source.get("tree"):
+        raise ValueError(
+            "installed release manifest source tree does not match the checkout"
+        )
+    for field in sorted(INSTALLED_RELEASE_MANIFEST_FIELDS - {
+        "schema",
+        "source_commit",
+        "source_tree",
+    }):
+        if not _valid_sha256(manifest.get(field)):
+            raise ValueError(f"installed release manifest {field} is invalid")
+
+    lexical_executable = invoked_executable.absolute()
+    app_root = _installed_app_root_from_python(lexical_executable)
+    invoked_fingerprint = _sha256(str(lexical_executable))
+    if (
+        invoked_fingerprint
+        != manifest["bundled_python_executable_fingerprint_sha256"]
+    ):
+        raise ValueError(
+            "installed proof runner path does not match the manifest-attested "
+            "bundled Python"
+        )
+    bundled_python = _opened_regular_file_identity(
+        lexical_executable,
+        "installed bundled Python",
+    )
+    if not _is_within_directory(Path(bundled_python["path"]), app_root):
+        raise ValueError(
+            "installed bundled Python resolves outside the installed app"
+        )
+    if (
+        bundled_python["sha256"]
+        != manifest["bundled_python_executable_sha256"]
+    ):
+        raise ValueError(
+            "installed bundled Python does not match the release manifest"
+        )
+
+    artifacts: dict[str, dict[str, Any]] = {}
+    artifact_bytes: dict[str, bytes] = {}
+    for label, (relative_path, manifest_field) in INSTALLED_APP_ARTIFACTS.items():
+        record, content = _opened_nofollow_regular_file(
+            app_root / relative_path,
+            f"installed {label.replace('_', ' ')}",
+            retain_bytes=label == "bundled_provenance",
+        )
+        if record["sha256"] != manifest[manifest_field]:
+            raise ValueError(
+                f"installed {label.replace('_', ' ')} does not match the "
+                "release manifest"
+            )
+        artifacts[label] = record
+        artifact_bytes[label] = content
+    if not os.access(artifacts["electron_executable"]["path"], os.X_OK):
+        raise ValueError("installed Electron executable is not executable")
+
+    try:
+        provenance = json.loads(artifact_bytes["bundled_provenance"].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "installed bundled provenance is not valid UTF-8 JSON"
+        ) from exc
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("schema_version") != 1
+        or not isinstance(provenance.get("vmlx"), dict)
+        or provenance["vmlx"].get("commit") != source.get("head")
+    ):
+        raise ValueError(
+            "installed bundled provenance does not match the source checkout"
+        )
+
+    bundled_source_root = (
+        app_root / "Contents/Resources/vmlx-engine-source/vmlx_engine"
+    )
+    bundled_source_stat = bundled_source_root.lstat()
+    if (
+        not stat.S_ISDIR(bundled_source_stat.st_mode)
+        or stat.S_ISLNK(bundled_source_stat.st_mode)
+    ):
+        raise ValueError("installed bundled source is not a real directory")
+    for bundled_python_source in bundled_source_root.rglob("*.py"):
+        bundled_python_source_stat = bundled_python_source.lstat()
+        if (
+            not stat.S_ISREG(bundled_python_source_stat.st_mode)
+            or stat.S_ISLNK(bundled_python_source_stat.st_mode)
+        ):
+            raise ValueError(
+                "installed bundled source contains a non-regular Python file"
+            )
+    bundled_tree_sha256, bundled_file_count, bundled_read_errors = (
+        _python_source_tree_digest(bundled_source_root)
+    )
+    bundled_source = {
+        "python_source_tree_sha256": bundled_tree_sha256,
+        "python_source_file_count": bundled_file_count,
+        "python_source_read_error_count": bundled_read_errors,
+        "server_module_sha256": hashlib.sha256(
+            (bundled_source_root / "server.py").read_bytes()
+        ).hexdigest(),
+        "package_init_sha256": hashlib.sha256(
+            (bundled_source_root / "__init__.py").read_bytes()
+        ).hexdigest(),
+    }
+    for field in (
+        *RUNTIME_SOURCE_HASH_FIELDS,
+        "python_source_file_count",
+        "python_source_read_error_count",
+    ):
+        if bundled_source.get(field) != source.get(field):
+            raise ValueError(
+                f"installed bundled source does not match the checkout: {field}"
+            )
+
+    source_binding = {
+        field: source[field]
+        for field in (
+            "head",
+            "tree",
+            *RUNTIME_SOURCE_HASH_FIELDS,
+            "python_source_file_count",
+            "python_source_read_error_count",
+        )
+    }
+    return {
+        "schema": "vmlx-agentic-installed-runtime-v1",
+        "manifest": manifest,
+        "manifest_path": manifest_record["path"],
+        "manifest_sha256": manifest_record["sha256"],
+        "manifest_size_bytes": manifest_record["size_bytes"],
+        "manifest_nlink": manifest_record["nlink"],
+        "manifest_opened_nofollow": manifest_record["opened_nofollow"],
+        "app_path": str(app_root),
+        "invoked_python_path": str(lexical_executable),
+        "invoked_python_fingerprint_sha256": invoked_fingerprint,
+        "python_prefix_path": str(
+            lexical_executable.parent.parent.resolve(strict=True)
+        ),
+        "bundled_python": bundled_python,
+        "artifacts": artifacts,
+        "bundled_provenance": provenance,
+        "bundled_source": bundled_source,
+        "source_binding": source_binding,
+    }
+
+
+def observe_runner_environment(
+    repo_root: Path,
+    installed_release_manifest: Path | None = None,
+    source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bind the proof producer to source Python or a manifest-bound install."""
     git_root = repo_root.resolve(strict=True)
-    expected_prefix = (git_root / ".venv").resolve(strict=True)
+    expected_prefix_path = git_root / ".venv"
+    expected_prefix = (
+        expected_prefix_path.absolute()
+        if installed_release_manifest is not None
+        else expected_prefix_path.resolve(strict=True)
+    )
     actual_prefix = Path(sys.prefix).resolve(strict=True)
     executable = Path(sys.executable).absolute()
     executable_file = _opened_regular_file_identity(
@@ -338,7 +634,33 @@ def observe_runner_environment(repo_root: Path) -> dict[str, Any]:
             if candidate.resolve(strict=True) == producer_executable
         }
     )
+    installed_runtime = None
+    if installed_release_manifest is not None:
+        installed_runtime = _observe_installed_runtime(
+            manifest_path=installed_release_manifest,
+            repo_root=git_root,
+            source=source or observe_source_checkout(git_root),
+            invoked_executable=executable,
+        )
+        if actual_prefix != Path(installed_runtime["python_prefix_path"]):
+            raise ValueError(
+                "installed proof runner sys.prefix is not the bundled Python root"
+            )
+    execution_mode = (
+        "installed-runtime" if installed_runtime is not None else "source-checkout-venv"
+    )
+    installed_python_invocation_fingerprints = (
+        [installed_runtime["invoked_python_fingerprint_sha256"]]
+        if installed_runtime is not None
+        else []
+    )
+    accepted_python_invocation_fingerprints = (
+        installed_python_invocation_fingerprints
+        if installed_runtime is not None
+        else checkout_python_invocation_fingerprints
+    )
     return {
+        "execution_mode": execution_mode,
         "repo_venv": actual_prefix == expected_prefix,
         "repo_python": executable in expected_executables,
         "python_executable_path": str(executable),
@@ -347,6 +669,12 @@ def observe_runner_environment(repo_root: Path) -> dict[str, Any]:
         ).hexdigest(),
         "checkout_python_invocation_fingerprints_sha256": (
             checkout_python_invocation_fingerprints
+        ),
+        "installed_python_invocation_fingerprints_sha256": (
+            installed_python_invocation_fingerprints
+        ),
+        "accepted_python_invocation_fingerprints_sha256": (
+            accepted_python_invocation_fingerprints
         ),
         "python_prefix_path": str(actual_prefix),
         "python_prefix_fingerprint_sha256": hashlib.sha256(
@@ -360,6 +688,7 @@ def observe_runner_environment(repo_root: Path) -> dict[str, Any]:
         "producer_harness_path": harness_file["path"],
         "producer_harness_sha256": harness_file["sha256"],
         "producer_harness_size_bytes": harness_file["size_bytes"],
+        "installed_runtime": installed_runtime,
     }
 
 
@@ -572,12 +901,16 @@ def _validate_health_source_binding(
     observed_python_fingerprint = identity.get("runtime_source_hashes", {}).get(
         "python_executable_fingerprint_sha256"
     )
-    checkout_python_fingerprints = runner.get(
-        "checkout_python_invocation_fingerprints_sha256"
+    accepted_python_fingerprints = runner.get(
+        "accepted_python_invocation_fingerprints_sha256"
     )
+    if accepted_python_fingerprints is None:
+        accepted_python_fingerprints = runner.get(
+            "checkout_python_invocation_fingerprints_sha256"
+        )
     if (
-        not isinstance(checkout_python_fingerprints, list)
-        or observed_python_fingerprint not in checkout_python_fingerprints
+        not isinstance(accepted_python_fingerprints, list)
+        or observed_python_fingerprint not in accepted_python_fingerprints
     ):
         failures.append(
             "observed backend Python executable does not match the proof runner"
@@ -4518,28 +4851,181 @@ def _source_identity_failures(
 
 def _runner_environment_failures(runner: dict[str, Any]) -> list[str]:
     failures: list[str] = []
-    if runner.get("repo_venv") is not True:
-        failures.append("proof runner sys.prefix is not the source checkout .venv")
-    if runner.get("repo_python") is not True:
-        failures.append("proof runner executable is not the source checkout Python")
+    execution_mode = runner.get("execution_mode") or "source-checkout-venv"
+    if execution_mode not in {"source-checkout-venv", "installed-runtime"}:
+        failures.append("proof runner execution mode is invalid")
     if not _valid_sha256(runner.get("python_executable_fingerprint_sha256")):
         failures.append("proof runner Python executable fingerprint is invalid")
-    checkout_python_fingerprints = runner.get(
-        "checkout_python_invocation_fingerprints_sha256"
-    )
-    if (
-        not isinstance(checkout_python_fingerprints, list)
-        or not checkout_python_fingerprints
-        or any(
-            not _valid_sha256(fingerprint)
-            for fingerprint in checkout_python_fingerprints
+    if execution_mode == "source-checkout-venv":
+        if runner.get("repo_venv") is not True:
+            failures.append("proof runner sys.prefix is not the source checkout .venv")
+        if runner.get("repo_python") is not True:
+            failures.append("proof runner executable is not the source checkout Python")
+        checkout_python_fingerprints = runner.get(
+            "checkout_python_invocation_fingerprints_sha256"
         )
-        or runner.get("python_executable_fingerprint_sha256")
-        not in checkout_python_fingerprints
-    ):
-        failures.append(
-            "proof runner checkout Python invocation fingerprints are invalid"
+        accepted_python_fingerprints = runner.get(
+            "accepted_python_invocation_fingerprints_sha256"
         )
+        if (
+            not isinstance(checkout_python_fingerprints, list)
+            or not checkout_python_fingerprints
+            or any(
+                not _valid_sha256(fingerprint)
+                for fingerprint in checkout_python_fingerprints
+            )
+            or runner.get("python_executable_fingerprint_sha256")
+            not in checkout_python_fingerprints
+        ):
+            failures.append(
+                "proof runner checkout Python invocation fingerprints are invalid"
+            )
+        if (
+            accepted_python_fingerprints is not None
+            and accepted_python_fingerprints != checkout_python_fingerprints
+        ):
+            failures.append(
+                "proof runner accepted Python fingerprints do not match the "
+                "source checkout"
+            )
+    elif execution_mode == "installed-runtime":
+        if (
+            runner.get("repo_venv") is not False
+            or runner.get("repo_python") is not False
+        ):
+            failures.append(
+                "installed proof runner unexpectedly aliases source-checkout Python"
+            )
+        installed_python_fingerprints = runner.get(
+            "installed_python_invocation_fingerprints_sha256"
+        )
+        accepted_python_fingerprints = runner.get(
+            "accepted_python_invocation_fingerprints_sha256"
+        )
+        if (
+            not isinstance(installed_python_fingerprints, list)
+            or len(installed_python_fingerprints) != 1
+            or installed_python_fingerprints
+            != accepted_python_fingerprints
+            or runner.get("python_executable_fingerprint_sha256")
+            not in installed_python_fingerprints
+        ):
+            failures.append(
+                "installed proof runner Python invocation binding is invalid"
+            )
+        installed_runtime = runner.get("installed_runtime")
+        if not isinstance(installed_runtime, dict):
+            failures.append("installed proof runner release attestation is missing")
+        else:
+            manifest = installed_runtime.get("manifest")
+            artifacts = installed_runtime.get("artifacts")
+            bundled_python = installed_runtime.get("bundled_python")
+            bundled_source = installed_runtime.get("bundled_source")
+            source_binding = installed_runtime.get("source_binding")
+            provenance = installed_runtime.get("bundled_provenance")
+            manifest_value = manifest if isinstance(manifest, dict) else {}
+            if (
+                installed_runtime.get("schema")
+                != "vmlx-agentic-installed-runtime-v1"
+                or installed_runtime.get("manifest_opened_nofollow") is not True
+                or not Path(
+                    str(installed_runtime.get("manifest_path") or "")
+                ).is_absolute()
+                or not _valid_sha256(installed_runtime.get("manifest_sha256"))
+                or int(installed_runtime.get("manifest_size_bytes") or 0) <= 0
+                or int(installed_runtime.get("manifest_size_bytes") or 0)
+                > 1024 * 1024
+                or installed_runtime.get("manifest_nlink") != 1
+                or not isinstance(manifest, dict)
+                or set(manifest_value) != INSTALLED_RELEASE_MANIFEST_FIELDS
+                or manifest_value.get("schema")
+                != INSTALLED_RELEASE_MANIFEST_SCHEMA
+            ):
+                failures.append("installed release manifest attestation is invalid")
+            app_path = Path(str(installed_runtime.get("app_path") or ""))
+            invoked_python_path = Path(
+                str(installed_runtime.get("invoked_python_path") or "")
+            )
+            if (
+                not app_path.is_absolute()
+                or app_path.name != "vMLX.app"
+                or app_path / INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+                != invoked_python_path
+            ):
+                failures.append("installed app and bundled Python paths are invalid")
+            if (
+                not isinstance(artifacts, dict)
+                or set(artifacts) != set(INSTALLED_APP_ARTIFACTS)
+                or any(
+                    not isinstance(artifacts.get(label), dict)
+                    or artifacts[label].get("opened_nofollow") is not True
+                    or artifacts[label].get("requested_path")
+                    != str(app_path / relative_path)
+                    or artifacts[label].get("sha256")
+                    != manifest_value.get(manifest_field)
+                    for label, (
+                        relative_path,
+                        manifest_field,
+                    ) in INSTALLED_APP_ARTIFACTS.items()
+                )
+            ):
+                failures.append("installed app artifact manifest binding is invalid")
+            if (
+                not isinstance(bundled_python, dict)
+                or bundled_python.get("sha256")
+                != runner.get("producer_executable_sha256")
+                or bundled_python.get("sha256")
+                != manifest_value.get("bundled_python_executable_sha256")
+                or bundled_python.get("size_bytes")
+                != runner.get("producer_executable_size_bytes")
+                or bundled_python.get("path")
+                != str(invoked_python_path.resolve(strict=False))
+                or installed_runtime.get("invoked_python_path")
+                != runner.get("python_executable_path")
+                or installed_runtime.get("invoked_python_fingerprint_sha256")
+                != runner.get("python_executable_fingerprint_sha256")
+                or installed_runtime.get("python_prefix_path")
+                != runner.get("python_prefix_path")
+                or manifest_value.get(
+                    "bundled_python_executable_fingerprint_sha256"
+                )
+                != runner.get("python_executable_fingerprint_sha256")
+            ):
+                failures.append("installed bundled Python identity is invalid")
+            expected_source = {
+                "head": manifest_value.get("source_commit"),
+                "tree": manifest_value.get("source_tree"),
+            }
+            if isinstance(source_binding, dict):
+                expected_source.update(
+                    {
+                        field: source_binding.get(field)
+                        for field in (
+                            *RUNTIME_SOURCE_HASH_FIELDS,
+                            "python_source_file_count",
+                            "python_source_read_error_count",
+                        )
+                    }
+                )
+            if (
+                not isinstance(source_binding, dict)
+                or source_binding != expected_source
+                or not isinstance(bundled_source, dict)
+                or any(
+                    bundled_source.get(field) != source_binding.get(field)
+                    for field in (
+                        *RUNTIME_SOURCE_HASH_FIELDS,
+                        "python_source_file_count",
+                        "python_source_read_error_count",
+                    )
+                )
+                or not isinstance(provenance, dict)
+                or provenance.get("schema_version") != 1
+                or not isinstance(provenance.get("vmlx"), dict)
+                or provenance["vmlx"].get("commit")
+                != source_binding.get("head")
+            ):
+                failures.append("installed runtime source provenance is invalid")
     if not _valid_sha256(runner.get("python_prefix_fingerprint_sha256")):
         failures.append("proof runner Python prefix fingerprint is invalid")
     executable_path = Path(str(runner.get("python_executable_path") or ""))
@@ -4821,8 +5307,21 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         )
     git_worktree = _git_worktree_root(repo_root)
     _validate_private_result_destination(Path(args.output), git_worktree)
+    installed_release_manifest = getattr(
+        args,
+        "installed_release_manifest",
+        None,
+    )
     source_before = observe_source_checkout(repo_root)
-    runner_before = observe_runner_environment(repo_root)
+    runner_before = (
+        observe_runner_environment(
+            repo_root,
+            installed_release_manifest,
+            source_before,
+        )
+        if installed_release_manifest is not None
+        else observe_runner_environment(repo_root)
+    )
     bundle_before = observe_bundle_configuration(Path(args.bundle_root))
     identity_failures = _source_identity_failures(
         source_before,
@@ -5138,7 +5637,15 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
             f"source identity capture failed after matrix: {type(exc).__name__}"
         )
     try:
-        runner_after = observe_runner_environment(repo_root)
+        runner_after = (
+            observe_runner_environment(
+                repo_root,
+                installed_release_manifest,
+                source_after or None,
+            )
+            if installed_release_manifest is not None
+            else observe_runner_environment(repo_root)
+        )
     except (OSError, ValueError) as exc:
         identity_failures.append(
             f"runner identity capture failed after matrix: {type(exc).__name__}"
@@ -5257,6 +5764,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--source-head",
         required=True,
         help="Expected Git HEAD; the runner must observe an exact clean match",
+    )
+    parser.add_argument(
+        "--installed-release-manifest",
+        type=Path,
+        help=(
+            "External vmlx-installed-release-manifest-v1 for an installed-app "
+            "run. The producer must be that app's exact bundled Python and the "
+            "manifest must resolve outside every Git worktree."
+        ),
     )
     parser.add_argument(
         "--run-id",

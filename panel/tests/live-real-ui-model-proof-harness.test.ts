@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import {
   chmodSync,
+  linkSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -2006,11 +2007,19 @@ function createValidPairedArtifact(result: Record<string, any>) {
     python_source_read_error_count: result.gitProvenance.after.python_source_read_error_count,
   };
   const runner = {
+    execution_mode: "source-checkout-venv",
     repo_venv: true,
     repo_python: true,
     python_executable_path: producerExecutable,
     python_executable_fingerprint_sha256:
       binding.runtime_source_hashes.python_executable_fingerprint_sha256,
+    checkout_python_invocation_fingerprints_sha256: [
+      binding.runtime_source_hashes.python_executable_fingerprint_sha256,
+    ],
+    installed_python_invocation_fingerprints_sha256: [],
+    accepted_python_invocation_fingerprints_sha256: [
+      binding.runtime_source_hashes.python_executable_fingerprint_sha256,
+    ],
     python_prefix_path: testExecutablePrefixPath,
     python_prefix_fingerprint_sha256: testExecutablePrefixPathSha,
     producer_pid: 987654,
@@ -2021,6 +2030,7 @@ function createValidPairedArtifact(result: Record<string, any>) {
     producer_harness_path: producerSource,
     producer_harness_sha256: crypto.createHash("sha256").update(producerHarnessBytes).digest("hex"),
     producer_harness_size_bytes: producerHarnessBytes.length,
+    installed_runtime: null,
   };
   const bundle = {
     ...result.bundleGenerationContract.health_attestation,
@@ -2148,6 +2158,210 @@ function writePairedArtifactValue(
   const artifactPath = path.join(directory, name);
   writePrivateArtifactFile(artifactPath, JSON.stringify(value));
   return readPrivateExternalJson(artifactPath, `Paired fixture ${name}`);
+}
+
+function createInstalledPairedArtifact(result: Record<string, any>) {
+  const fixture = createValidPairedArtifact(result);
+  const value = structuredClone(fixture.artifact.value);
+  const appPath = path.join(fixture.directory, "installed", "vMLX.app");
+  const resources = path.join(appPath, "Contents", "Resources");
+  const pythonPrefix = path.join(resources, "bundled-python", "python");
+  const pythonPath = path.join(pythonPrefix, "bin", "python3");
+  const electronPath = path.join(appPath, "Contents", "MacOS", "vMLX");
+  const appAsarPath = path.join(resources, "app.asar");
+  const bundledProvenancePath = path.join(
+    resources,
+    "bundled-python",
+    "vmlx-bundle-provenance.json",
+  );
+  mkdirSync(path.dirname(pythonPath), { recursive: true });
+  mkdirSync(path.dirname(electronPath), { recursive: true });
+  writeFileSync(pythonPath, testExecutableBytes);
+  chmodSync(pythonPath, 0o755);
+  writeFileSync(electronPath, testExecutableBytes);
+  chmodSync(electronPath, 0o755);
+  writeFileSync(appAsarPath, "installed-renderer-asar\n");
+  const bundledProvenance = {
+    schema_version: 1,
+    vmlx: {
+      commit: result.gitProvenance.after.commit,
+      version: "1.6.19",
+    },
+  };
+  writeFileSync(
+    bundledProvenancePath,
+    `${JSON.stringify(bundledProvenance)}\n`,
+  );
+  const fileIdentity = (filePath: string) => {
+    const bytes = readFileSync(filePath);
+    return {
+      path: realpathSync(filePath),
+      requested_path: filePath,
+      sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+      size_bytes: bytes.length,
+      opened_nofollow: true,
+    };
+  };
+  const pythonIdentity = fileIdentity(pythonPath);
+  const canonicalPythonPrefix = realpathSync(pythonPrefix);
+  const appAsarIdentity = fileIdentity(appAsarPath);
+  const electronIdentity = fileIdentity(electronPath);
+  const provenanceIdentity = fileIdentity(bundledProvenancePath);
+  const pythonPathSha = crypto
+    .createHash("sha256")
+    .update(pythonPath)
+    .digest("hex");
+  const pythonPrefixSha = crypto
+    .createHash("sha256")
+    .update(canonicalPythonPrefix)
+    .digest("hex");
+  const manifest = {
+    schema: "vmlx-installed-release-manifest-v1",
+    source_commit: result.gitProvenance.after.commit,
+    source_tree: result.gitProvenance.after.tree,
+    app_asar_sha256: appAsarIdentity.sha256,
+    electron_executable_sha256: electronIdentity.sha256,
+    bundled_provenance_sha256: provenanceIdentity.sha256,
+    bundled_python_executable_sha256: pythonIdentity.sha256,
+    bundled_python_executable_fingerprint_sha256: pythonPathSha,
+  };
+  const manifestPath = path.join(
+    fixture.directory,
+    "installed-release-manifest.json",
+  );
+  writePrivateArtifactFile(manifestPath, `${JSON.stringify(manifest)}\n`);
+  const openedManifest = readPrivateExternalJson(
+    manifestPath,
+    "Installed release manifest fixture",
+  );
+  const source = value.identity.source.after;
+  const sourceBinding = {
+    head: source.head,
+    tree: source.tree,
+    server_module_sha256: source.server_module_sha256,
+    package_init_sha256: source.package_init_sha256,
+    python_source_tree_sha256: source.python_source_tree_sha256,
+    python_source_file_count: source.python_source_file_count,
+    python_source_read_error_count: source.python_source_read_error_count,
+  };
+  const bundledSource = {
+    server_module_sha256: source.server_module_sha256,
+    package_init_sha256: source.package_init_sha256,
+    python_source_tree_sha256: source.python_source_tree_sha256,
+    python_source_file_count: source.python_source_file_count,
+    python_source_read_error_count: source.python_source_read_error_count,
+  };
+  const runner = {
+    ...value.identity.runner.before,
+    execution_mode: "installed-runtime",
+    repo_venv: false,
+    repo_python: false,
+    python_executable_path: pythonPath,
+    python_executable_fingerprint_sha256: pythonPathSha,
+    checkout_python_invocation_fingerprints_sha256: [],
+    installed_python_invocation_fingerprints_sha256: [pythonPathSha],
+    accepted_python_invocation_fingerprints_sha256: [pythonPathSha],
+    python_prefix_path: canonicalPythonPrefix,
+    python_prefix_fingerprint_sha256: pythonPrefixSha,
+    producer_executable_path: pythonIdentity.path,
+    producer_executable_sha256: pythonIdentity.sha256,
+    producer_executable_size_bytes: pythonIdentity.size_bytes,
+    installed_runtime: {
+      schema: "vmlx-agentic-installed-runtime-v1",
+      manifest,
+      manifest_path: openedManifest.path,
+      manifest_sha256: openedManifest.sha256,
+      manifest_size_bytes: openedManifest.bytes,
+      manifest_nlink: openedManifest.nlink,
+      manifest_opened_nofollow: true,
+      app_path: appPath,
+      invoked_python_path: pythonPath,
+      invoked_python_fingerprint_sha256: pythonPathSha,
+      python_prefix_path: canonicalPythonPrefix,
+      bundled_python: {
+        path: pythonIdentity.path,
+        sha256: pythonIdentity.sha256,
+        size_bytes: pythonIdentity.size_bytes,
+      },
+      artifacts: {
+        app_asar: appAsarIdentity,
+        electron_executable: electronIdentity,
+        bundled_provenance: provenanceIdentity,
+      },
+      bundled_provenance: bundledProvenance,
+      bundled_source: bundledSource,
+      source_binding: sourceBinding,
+    },
+  };
+  value.identity.runner.before = runner;
+  value.identity.runner.after = structuredClone(runner);
+
+  const setHealthPythonFingerprint = (row: Record<string, any>) => {
+    row.identity.runtime_source_hashes.python_executable_fingerprint_sha256 =
+      pythonPathSha;
+  };
+  for (const baseLabel of ["direct", "gateway"]) {
+    for (const phase of ["before", "after"]) {
+      setHealthPythonFingerprint(value.identity.health[baseLabel][phase]);
+    }
+  }
+  for (const phase of ["before", "after"]) {
+    result.healthProvenance[phase].binding.runtime_source_hashes
+      .python_executable_fingerprint_sha256 = pythonPathSha;
+  }
+  result.installedAppPath = appPath;
+  result.uiRuntimeProvenance = {
+    ...result.uiRuntimeProvenance,
+    mode: "installed-app",
+    electron_executable: electronPath,
+    electron_executable_sha256: electronIdentity.sha256,
+    cdp_process_binding: {
+      ...result.uiRuntimeProvenance.cdp_process_binding,
+      executable_path: electronIdentity.path,
+      executable_sha256: electronIdentity.sha256,
+      executable_path_fingerprint_sha256: crypto
+        .createHash("sha256")
+        .update(electronIdentity.path)
+        .digest("hex"),
+    },
+    backend_python_process_binding: {
+      ...result.uiRuntimeProvenance.backend_python_process_binding,
+      invoked_executable_path: pythonPath,
+      invoked_executable_path_fingerprint_sha256: pythonPathSha,
+      executable_path: pythonIdentity.path,
+      executable_sha256: pythonIdentity.sha256,
+      executable_path_fingerprint_sha256: crypto
+        .createHash("sha256")
+        .update(pythonIdentity.path)
+        .digest("hex"),
+    },
+    app_asar: appAsarPath,
+    app_asar_sha256: appAsarIdentity.sha256,
+    external_release_manifest_path: openedManifest.path,
+    external_release_manifest_sha256: openedManifest.sha256,
+    external_release_manifest: manifest,
+    bundled_provenance_path: bundledProvenancePath,
+    bundled_provenance_sha256: provenanceIdentity.sha256,
+    bundled_provenance: bundledProvenance,
+    bundled_provenance_error: null,
+    bundled_source_root: path.join(
+      resources,
+      "vmlx-engine-source",
+      "vmlx_engine",
+    ),
+    bundled_source: bundledSource,
+  };
+  return {
+    ...fixture,
+    appPath,
+    manifestPath,
+    pythonPath,
+    artifact: writePairedArtifactValue(
+      fixture.directory,
+      "installed-paired-api-proof.json",
+      value,
+    ),
+  };
 }
 
 function refreshRawCaptureManifest(value: Record<string, any>) {
@@ -2769,6 +2983,7 @@ describe("real UI model proof harness", () => {
         app_asar_sha256: sha,
         electron_executable_sha256: testExecutableSha,
         bundled_provenance_sha256: sha,
+        bundled_python_executable_sha256: testExecutableSha,
         bundled_python_executable_fingerprint_sha256: testExecutablePathSha,
       },
       bundled_provenance_sha256: sha,
@@ -3173,6 +3388,84 @@ describe("real UI model proof harness", () => {
     }
   });
 
+  it("binds an installed paired producer to the same private manifest and packaged bytes", () => {
+    const result = goodResult();
+    result.surfaceStatus = "dual_surface_attested";
+    const fixture = createInstalledPairedArtifact(result);
+    try {
+      result.pairedApiArtifact = fixture.artifact;
+      const installed = fixture.artifact.value.identity.runner.before
+        .installed_runtime;
+      expect(installed.app_path).toBe(fixture.appPath);
+      expect(installed.bundled_python.path).toBe(
+        realpathSync(fixture.pythonPath),
+      );
+      expect(path.relative(realpathSync(installed.app_path), installed.bundled_python.path))
+        .not.toMatch(/^\.\.(?:\/|$)/);
+      expect(validateUiRuntimeProvenance(result)).toEqual([]);
+      expect(validatePairedApiEvidence(result)).toEqual([]);
+
+      writeFileSync(fixture.pythonPath, "mutated-after-attestation\n");
+      expect(validateUiRuntimeProvenance(result).join("\n")).toMatch(
+        /Python backend executable path\/bytes|backend Python bytes/,
+      );
+      expect(validatePairedApiEvidence(result).join("\n")).toMatch(
+        /producer executable\/harness bytes|bundled Python path\/bytes|canonical executable identity/,
+      );
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: "oversized private manifest",
+      mutate: (fixture: Record<string, any>) => {
+        writeFileSync(
+          fixture.manifestPath,
+          Buffer.concat([
+            readFileSync(fixture.manifestPath),
+            Buffer.alloc(1024 * 1024, 0x20),
+          ]),
+        );
+      },
+      expected: /safety limit/,
+    },
+    {
+      name: "hard-linked private manifest",
+      mutate: (fixture: Record<string, any>) => {
+        linkSync(
+          fixture.manifestPath,
+          path.join(fixture.directory, "installed-release-hardlink.json"),
+        );
+      },
+      expected: /exactly one filesystem link/,
+    },
+    {
+      name: "bundled Python symlink escaping the app",
+      mutate: (fixture: Record<string, any>) => {
+        const escapedPython = path.join(fixture.directory, "escaped-python3");
+        writeFileSync(escapedPython, readFileSync(fixture.pythonPath));
+        chmodSync(escapedPython, 0o755);
+        rmSync(fixture.pythonPath);
+        symlinkSync(escapedPython, fixture.pythonPath);
+      },
+      expected: /canonical path escapes or differs from the UI app/,
+    },
+  ])("rejects installed paired evidence with $name", ({ mutate, expected }) => {
+    const result = goodResult();
+    result.surfaceStatus = "dual_surface_attested";
+    const fixture = createInstalledPairedArtifact(result);
+    try {
+      result.pairedApiArtifact = fixture.artifact;
+      expect(validatePairedApiEvidence(result)).toEqual([]);
+      mutate(fixture);
+      expect(validatePairedApiEvidence(result).join("\n")).toMatch(expected);
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
   it("requires frozen Chat stage-2 and stage-3 parity attestations", () => {
     const result = goodResult();
     const fixture = createValidPairedArtifact(result);
@@ -3373,6 +3666,10 @@ describe("real UI model proof harness", () => {
         value.identity.runner[phase].python_executable_path = alias;
         value.identity.runner[phase].python_executable_fingerprint_sha256 =
           aliasFingerprint;
+        value.identity.runner[phase]
+          .checkout_python_invocation_fingerprints_sha256 = [aliasFingerprint];
+        value.identity.runner[phase]
+          .accepted_python_invocation_fingerprints_sha256 = [aliasFingerprint];
         value.identity.runner[phase].python_prefix_path = fixture.directory;
         value.identity.runner[phase].python_prefix_fingerprint_sha256 =
           prefixFingerprint;

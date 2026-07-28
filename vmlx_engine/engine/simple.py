@@ -28,6 +28,22 @@ from .base import BaseEngine, GenerationOutput
 logger = logging.getLogger(__name__)
 
 
+def _count_llm_prompt_tokens(tokenizer: Any, prompt: str) -> int:
+    """Count an LLM string prompt using mlx-lm's special-token policy."""
+    if tokenizer is None:
+        return 0
+    bos_token = getattr(tokenizer, "bos_token", None)
+    add_special_tokens = bos_token is None or not prompt.startswith(bos_token)
+    try:
+        return len(
+            tokenizer.encode(prompt, add_special_tokens=add_special_tokens)
+        )
+    except TypeError:
+        return len(tokenizer.encode(prompt))
+    except Exception:
+        return 0
+
+
 class SimpleEngine(BaseEngine):
     """
     Simple engine for direct model calls.
@@ -255,10 +271,7 @@ class SimpleEngine(BaseEngine):
             tokens = []
         if finish_reason != "stop":
             finish_reason = "length" if len(tokens) >= max_tokens else "stop"
-        try:
-            prompt_tokens = len(tokenizer.encode(prompt))
-        except Exception:
-            prompt_tokens = 0
+        prompt_tokens = _count_llm_prompt_tokens(tokenizer, prompt)
         return GenerationOutput(
             text=clean_output_text(output_text),
             raw_text=output_text,
@@ -474,14 +487,7 @@ class SimpleEngine(BaseEngine):
 
     def _prompt_token_count(self, prompt: str) -> int:
         tokenizer = getattr(getattr(self, "_model", None), "tokenizer", None)
-        if tokenizer is None:
-            return 0
-        try:
-            return len(tokenizer.encode(prompt, add_special_tokens=False))
-        except TypeError:
-            return len(tokenizer.encode(prompt))
-        except Exception:
-            return 0
+        return _count_llm_prompt_tokens(tokenizer, prompt)
 
     def _raise_if_prompt_over_limit(
         self,
@@ -558,12 +564,18 @@ class SimpleEngine(BaseEngine):
             raw_text = output.text
             text = clean_output_text(raw_text)
 
+            prompt_tokens = getattr(output, "prompt_tokens", 0)
+            if prompt_tokens == 0:
+                prompt_tokens = _count_llm_prompt_tokens(
+                    getattr(self._model, "tokenizer", None),
+                    prompt,
+                )
             return GenerationOutput(
                 text=text,
                 raw_text=raw_text,
                 tokens=getattr(output, "tokens", []),
                 logprobs=getattr(output, "logprobs", None),
-                prompt_tokens=getattr(output, "prompt_tokens", 0),
+                prompt_tokens=prompt_tokens,
                 completion_tokens=getattr(
                     output, "completion_tokens", len(getattr(output, "tokens", []))
                 ),
@@ -679,10 +691,10 @@ class SimpleEngine(BaseEngine):
                 if finished:
                     finish_reason = getattr(chunk, "finish_reason", "stop")
                     if prompt_tokens == 0:
-                        try:
-                            prompt_tokens = len(self._model.tokenizer.encode(prompt))
-                        except Exception:
-                            prompt_tokens = 0
+                        prompt_tokens = _count_llm_prompt_tokens(
+                            getattr(self._model, "tokenizer", None),
+                            prompt,
+                        )
 
                 yield GenerationOutput(
                     text=accumulated_text,
@@ -700,10 +712,10 @@ class SimpleEngine(BaseEngine):
                 if completion_tokens == 0:
                     logger.warning("stream_generate yielded zero tokens — model may have failed silently")
                 if prompt_tokens == 0:
-                    try:
-                        prompt_tokens = len(self._model.tokenizer.encode(prompt))
-                    except Exception:
-                        prompt_tokens = 0
+                    prompt_tokens = _count_llm_prompt_tokens(
+                        getattr(self._model, "tokenizer", None),
+                        prompt,
+                    )
                 yield GenerationOutput(
                     text=accumulated_text,
                     new_text="",
@@ -930,10 +942,7 @@ class SimpleEngine(BaseEngine):
                 # closes the surface that surfaced ISSUE-A4-004 (nemotron_h
                 # HTTP serve reported prompt_tokens=0 with all-<unk> output).
                 if _prompt_tokens == 0:
-                    try:
-                        _prompt_tokens = len(tokenizer.encode(prompt))
-                    except Exception:
-                        _prompt_tokens = 0
+                    _prompt_tokens = _count_llm_prompt_tokens(tokenizer, prompt)
                 return GenerationOutput(
                     text=text,
                     raw_text=raw_text,

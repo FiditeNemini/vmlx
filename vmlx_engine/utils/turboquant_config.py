@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 QWEN_HYBRID_LIVE_TQ_COMPRESS_AFTER = 0
 UNCALIBRATED_AUTO_TQ_BITS = 4
 BONSAI_UNCALIBRATED_AUTO_TQ_BITS = 8
-MINIMAX_M2_UNCALIBRATED_AUTO_TQ_BITS = 4
+MINIMAX_M2_UNCALIBRATED_AUTO_TQ_BITS = 8
 MIXED_SWA_AUTO_TQ_BITS = 4
 HY3_FULL_KV_AUTO_TQ_BITS = 4
 # Compatibility name retained for downstream tests/imports.  The safety rule is
@@ -126,10 +126,11 @@ def apply_uncalibrated_auto_tq_policy(
     last-six critical layers because uniform q4 failed live semantic restore and
     the narrower first/last-three boundary still had a strict-format miss.
     Bonsai keeps q8 on every compatible KV layer because its repeated
-    agent-loop proof established that boundary. MiniMax M2.x uses the normal q4
-    storage policy; its family-specific semantic cache gate must still prove
-    cold/warm/restart equivalence before release. HY3's plain full-KV runtime
-    continues to use q4.
+    agent-loop proof established that boundary. MiniMax M2.x also uses q8
+    throughout: independent long-prefix semantic A/B gates showed prompt-
+    sensitive visible/tool-route drift after otherwise structurally exact q4
+    page and disk round-trips, while bypassed requests remained coherent.
+    HY3's plain full-KV runtime continues to use q4.
     Cumulative SSM/GatedDelta companions remain native and are never assigned
     fake TQ slots. A bundle-owned calibrated ``turboquant`` block or explicit
     operator settings remain authoritative.
@@ -181,7 +182,7 @@ def apply_uncalibrated_auto_tq_policy(
     elif hy3_full_kv:
         auto_policy = "hy3_full_kv_storage_tq4"
     elif minimax_m2 and len(attention_layers) == len(layer_types):
-        auto_policy = "minimax_m2_full_kv_storage_tq4"
+        auto_policy = "minimax_m2_full_kv_storage_tq8"
     elif len(attention_layers) == len(layer_types):
         auto_policy = "uncalibrated_full_kv_storage_tq4"
     else:

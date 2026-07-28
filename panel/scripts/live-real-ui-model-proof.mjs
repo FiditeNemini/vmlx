@@ -3947,7 +3947,7 @@ const pairedCaptureLayer = 'requests.decompressed_response_parser_input'
 const pairedCaptureSemantics = [
   'Exact decompressed response-body bytes delivered to protocol parsers: ',
   'streaming bytes before requests.iter_lines line splitting or Unicode ',
-  'decoding, and Responses nonstream bytes before JSON decoding; excludes ',
+  'decoding, and nonstream response bytes before JSON decoding; excludes ',
   'HTTP transfer framing and compressed transport octets.',
 ].join('')
 const pairedSafeCaptureHeaderNames = new Set([
@@ -4114,15 +4114,7 @@ function collectResponsesStream(raw, label) {
 }
 
 function collectResponsesNonstream(raw, label) {
-  let body
-  try {
-    body = JSON.parse(raw.toString('utf8'))
-  } catch {
-    throw new Error(`${label} contains malformed Responses nonstream JSON`)
-  }
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    throw new Error(`${label} Responses nonstream JSON is not an object`)
-  }
+  const body = parseProtocolNonstreamBody(raw, label, 'Responses')
   const reasoning = []
   const content = []
   const toolCalls = []
@@ -4166,6 +4158,123 @@ function collectResponsesNonstream(raw, label) {
     terminal: status === 'completed',
     terminalReasons: status ? [`response.${status}`] : [],
     orderedChannels,
+    postTerminalEvents: 0,
+  }
+}
+
+function parseProtocolNonstreamBody(raw, label, protocolLabel) {
+  let body
+  try {
+    body = JSON.parse(raw.toString('utf8'))
+  } catch {
+    throw new Error(`${label} contains malformed ${protocolLabel} nonstream JSON`)
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new Error(`${label} ${protocolLabel} nonstream JSON is not an object`)
+  }
+  return body
+}
+
+function collectOpenAiChatNonstream(raw, label) {
+  const body = parseProtocolNonstreamBody(raw, label, 'Chat')
+  const choice = Array.isArray(body.choices) ? body.choices[0] : null
+  const message = choice?.message || {}
+  const reasoning = String(
+    message.reasoning_content ?? message.reasoning ?? '',
+  )
+  const content = String(message.content ?? '')
+  const toolCalls = (Array.isArray(message.tool_calls) ? message.tool_calls : [])
+    .map((call) => ({
+      id: String(call?.id || ''),
+      name: String(call?.function?.name || ''),
+      arguments: call?.function?.arguments ?? '',
+    }))
+  const terminalReason = String(choice?.finish_reason || '')
+  return {
+    reasoning,
+    content,
+    toolCalls,
+    terminal: Boolean(terminalReason),
+    terminalReasons: terminalReason ? [terminalReason] : [],
+    orderedChannels: [
+      ...(reasoning ? ['reasoning'] : []),
+      ...(content ? ['content'] : []),
+      ...toolCalls.map(() => 'tool'),
+      ...(terminalReason ? [`terminal:${terminalReason}`] : []),
+    ],
+    postTerminalEvents: 0,
+  }
+}
+
+function collectAnthropicNonstream(raw, label) {
+  const body = parseProtocolNonstreamBody(raw, label, 'Anthropic')
+  const reasoning = []
+  const content = []
+  const toolCalls = []
+  const orderedChannels = []
+  for (const block of Array.isArray(body.content) ? body.content : []) {
+    if (['thinking', 'reasoning'].includes(String(block?.type || ''))) {
+      const text = String(
+        block?.thinking ?? block?.reasoning ?? block?.text ?? '',
+      )
+      if (text) {
+        reasoning.push(text)
+        orderedChannels.push('reasoning')
+      }
+    } else if (block?.type === 'text') {
+      const text = String(block?.text || '')
+      if (text) {
+        content.push(text)
+        orderedChannels.push('content')
+      }
+    } else if (block?.type === 'tool_use') {
+      toolCalls.push({
+        id: String(block?.id || ''),
+        name: String(block?.name || ''),
+        arguments: block?.input ?? {},
+      })
+      orderedChannels.push('tool')
+    }
+  }
+  const terminalReason = String(body.stop_reason || '')
+  if (terminalReason) orderedChannels.push(`terminal:${terminalReason}`)
+  return {
+    reasoning: reasoning.join(''),
+    content: content.join(''),
+    toolCalls,
+    terminal: Boolean(terminalReason),
+    terminalReasons: terminalReason ? [terminalReason] : [],
+    orderedChannels,
+    postTerminalEvents: 0,
+  }
+}
+
+function collectOllamaNonstream(raw, label) {
+  const body = parseProtocolNonstreamBody(raw, label, 'Ollama')
+  const message = body.message || {}
+  const reasoning = String(message.thinking ?? message.reasoning ?? '')
+  const content = String(message.content ?? '')
+  const toolCalls = (Array.isArray(message.tool_calls) ? message.tool_calls : [])
+    .map((call, index) => ({
+      id: String(call?.id || `ollama_call_${index}`),
+      name: String(call?.function?.name || ''),
+      arguments: call?.function?.arguments ?? {},
+    }))
+  const terminalReason = body.done === true
+    ? String(body.done_reason || 'stop')
+    : ''
+  return {
+    reasoning,
+    content,
+    toolCalls,
+    terminal: Boolean(terminalReason),
+    terminalReasons: terminalReason ? [terminalReason] : [],
+    orderedChannels: [
+      ...(reasoning ? ['reasoning'] : []),
+      ...(content ? ['content'] : []),
+      ...toolCalls.map(() => 'tool'),
+      ...(terminalReason ? [`terminal:${terminalReason}`] : []),
+    ],
     postTerminalEvents: 0,
   }
 }
@@ -4303,6 +4412,14 @@ function collectProtocolStream(protocol, raw, label) {
   if (protocol === 'responses') return collectResponsesStream(raw, label)
   if (protocol === 'anthropic') return collectAnthropicStream(raw, label)
   if (protocol === 'ollama') return collectOllamaStream(raw, label)
+  throw new Error(`${label} has unsupported protocol ${protocol}`)
+}
+
+function collectProtocolNonstream(protocol, raw, label) {
+  if (protocol === 'chat') return collectOpenAiChatNonstream(raw, label)
+  if (protocol === 'responses') return collectResponsesNonstream(raw, label)
+  if (protocol === 'anthropic') return collectAnthropicNonstream(raw, label)
+  if (protocol === 'ollama') return collectOllamaNonstream(raw, label)
   throw new Error(`${label} has unsupported protocol ${protocol}`)
 }
 
@@ -4961,12 +5078,10 @@ function validateRawMatrixCapture(value, result) {
       for (const captureLabel of streamLabels) {
         expectedRoutes.push(`${baseLabel}\0${protocol}\0${captureLabel}`)
       }
-      if (protocol === 'responses') {
-        for (const roundNumber of [1, 2, 3]) {
-          expectedRoutes.push(
-            `${baseLabel}\0responses\0nonstream-flow-round${roundNumber}`,
-          )
-        }
+      for (const roundNumber of [1, 2, 3]) {
+        expectedRoutes.push(
+          `${baseLabel}\0${protocol}\0nonstream-flow-round${roundNumber}`,
+        )
       }
     }
   }
@@ -5066,10 +5181,6 @@ function validateRawMatrixCapture(value, result) {
       /^nonstream-flow-round([123])$/,
     )
     if (!streamRoundMatch && !nonstreamRoundMatch) continue
-    if (nonstreamRoundMatch && route.protocol !== 'responses') {
-      failures.push(`${label} nonstream raw capture is not Responses`)
-      continue
-    }
     const mode = streamRoundMatch ? 'stream' : 'nonstream'
     const roundMatch = streamRoundMatch || nonstreamRoundMatch
     const roundIndex = Number(roundMatch[1]) - 1
@@ -5080,7 +5191,7 @@ function validateRawMatrixCapture(value, result) {
     try {
       parsed = mode === 'stream'
         ? collectProtocolStream(route.protocol, bodyOpened.raw, label)
-        : collectResponsesNonstream(bodyOpened.raw, label)
+        : collectProtocolNonstream(route.protocol, bodyOpened.raw, label)
     } catch (error) {
       failures.push(String(error?.message || error))
       continue

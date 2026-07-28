@@ -1256,7 +1256,7 @@ const pairedToolParameters: Record<string, Record<string, unknown>> = {
 const pairedCaptureSemantics = [
   "Exact decompressed response-body bytes delivered to protocol parsers: ",
   "streaming bytes before requests.iter_lines line splitting or Unicode ",
-  "decoding, and Responses nonstream bytes before JSON decoding; excludes ",
+  "decoding, and nonstream response bytes before JSON decoding; excludes ",
   "HTTP transfer framing and compressed transport octets.",
 ].join("");
 
@@ -1465,6 +1465,76 @@ function rawResponsesNonstream(
   });
 }
 
+function rawProtocolNonstream(
+  protocol: string,
+  round: number,
+  callId: string,
+  expectedFinal: string,
+) {
+  if (protocol === "responses") {
+    return rawResponsesNonstream(round, callId, expectedFinal);
+  }
+  const toolName = round === 1 ? "file_info" : "run_command";
+  const args = round === 1
+    ? { path: "panel/package.json" }
+    : { command: "pwd" };
+  const reasoning = `Reason ${protocol} ${round} A.B.`;
+  if (protocol === "chat") {
+    return JSON.stringify({
+      id: `chat-nonstream-${round}`,
+      choices: [{
+        message: round < 3
+          ? {
+              reasoning_content: reasoning,
+              tool_calls: [{
+                id: callId,
+                type: "function",
+                function: {
+                  name: toolName,
+                  arguments: JSON.stringify(args),
+                },
+              }],
+            }
+          : { content: expectedFinal },
+        finish_reason: round < 3 ? "tool_calls" : "stop",
+      }],
+    });
+  }
+  if (protocol === "anthropic") {
+    return JSON.stringify({
+      id: `anthropic-nonstream-${round}`,
+      content: round < 3
+        ? [
+            { type: "thinking", thinking: reasoning },
+            {
+              type: "tool_use",
+              id: callId,
+              name: toolName,
+              input: args,
+            },
+          ]
+        : [{ type: "text", text: expectedFinal }],
+      stop_reason: round < 3 ? "tool_use" : "end_turn",
+    });
+  }
+  if (protocol === "ollama") {
+    return JSON.stringify({
+      message: round < 3
+        ? {
+            thinking: reasoning,
+            tool_calls: [{
+              id: callId,
+              function: { name: toolName, arguments: args },
+            }],
+          }
+        : { content: expectedFinal },
+      done: true,
+      done_reason: round < 3 ? "tool_calls" : "stop",
+    });
+  }
+  throw new Error(`unsupported nonstream fixture protocol ${protocol}`);
+}
+
 function createValidPairedArtifact(result: Record<string, any>) {
   const binding = result.healthProvenance.after.binding;
   const directory = mkdtempSync(path.join(tmpdir(), "vmlx-paired-api-v2-"));
@@ -1632,9 +1702,6 @@ function createValidPairedArtifact(result: Record<string, any>) {
               !["DONE", "message_stop"].includes(value)),
           })),
         };
-        if (mode !== "stream" && !(mode === "nonstream" && protocol === "responses")) {
-          continue;
-        }
         for (let roundNumber = 1; roundNumber <= 3; roundNumber += 1) {
           sequence += 1;
           const captureLabel = `${mode}-flow-round${roundNumber}`;
@@ -1645,7 +1712,8 @@ function createValidPairedArtifact(result: Record<string, any>) {
                 executions[roundNumber - 1]?.call_id || "",
                 expectedFinal,
               )
-            : rawResponsesNonstream(
+            : rawProtocolNonstream(
+                protocol,
                 roundNumber,
                 executions[roundNumber - 1]?.call_id || "",
                 expectedFinal,
@@ -1876,6 +1944,23 @@ function writePairedArtifactValue(
   return readPrivateExternalJson(artifactPath, `Paired fixture ${name}`);
 }
 
+function refreshRawCaptureManifest(value: Record<string, any>) {
+  const rawCapture = value.raw_capture;
+  const manifest = structuredClone(rawCapture);
+  for (const field of [
+    "manifest_file",
+    "manifest_path",
+    "manifest_sha256",
+    "run_directory",
+  ]) delete manifest[field];
+  const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
+  writeFileSync(rawCapture.manifest_path, manifestText);
+  rawCapture.manifest_sha256 = crypto
+    .createHash("sha256")
+    .update(manifestText)
+    .digest("hex");
+}
+
 function rewriteRawCaptureBody(
   value: Record<string, any>,
   {
@@ -1987,6 +2072,26 @@ function rewriteRawCaptureMetadata(
 }
 
 describe("real UI model proof harness", () => {
+  it("keeps raw capture semantics byte-exact with the Python producer", () => {
+    const exactFragment =
+      "decoding, and nonstream response bytes before JSON decoding; excludes ";
+    const attestorSource = readFileSync(
+      path.resolve(process.cwd(), "scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+    const producerSource = readFileSync(
+      path.resolve(
+        process.cwd(),
+        "../tests/cross_matrix/run_agentic_protocol_matrix.py",
+      ),
+      "utf8",
+    );
+    expect(pairedCaptureSemantics).toContain(exactFragment);
+    expect(attestorSource).toContain(`'${exactFragment}'`);
+    expect(producerSource).toContain(`"${exactFragment}"`);
+    expect(attestorSource).not.toContain("Responses nonstream bytes");
+  });
+
   it("maps renderer paths to distinct raw Vite filesystem module identities", () => {
     const panelRoot = path.resolve(new URL("..", import.meta.url).pathname);
     expect(
@@ -2577,12 +2682,72 @@ describe("real UI model proof harness", () => {
     valid.surfaceStatus = "dual_surface_attested";
     const fixture = createValidPairedArtifact(valid);
     try {
+      expect(fixture.artifact.value.raw_capture.routes).toHaveLength(48);
       valid.pairedApiArtifact = fixture.artifact;
       expect(validatePairedApiEvidence(valid)).toEqual([]);
 
       valid.pairedApiArtifact.value.backend_pid = 9999;
       expect(validatePairedApiEvidence(valid).join("\n")).toMatch(
         /metadata does not match|backend identity/,
+      );
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: "missing",
+      mutate: (value: Record<string, any>) => {
+        value.raw_capture.routes.pop();
+        for (const field of ["expected", "started", "finished"]) {
+          value.raw_capture[field] -= 1;
+        }
+      },
+    },
+    {
+      name: "extra",
+      mutate: (value: Record<string, any>) => {
+        const extra = structuredClone(value.raw_capture.routes[0]);
+        extra.capture_label = "nonstream-flow-round4";
+        value.raw_capture.routes.push(extra);
+        for (const field of ["expected", "started", "finished"]) {
+          value.raw_capture[field] += 1;
+        }
+      },
+    },
+    {
+      name: "duplicate",
+      mutate: (value: Record<string, any>) => {
+        value.raw_capture.routes.push(
+          structuredClone(value.raw_capture.routes[0]),
+        );
+        for (const field of ["expected", "started", "finished"]) {
+          value.raw_capture[field] += 1;
+        }
+      },
+    },
+    {
+      name: "mismatched",
+      mutate: (value: Record<string, any>) => {
+        value.raw_capture.routes[0].protocol = "responses";
+      },
+    },
+  ])("rejects a $name raw route set", ({ name, mutate }) => {
+    const result = goodResult();
+    result.surfaceStatus = "dual_surface_attested";
+    const fixture = createValidPairedArtifact(result);
+    try {
+      const value = structuredClone(fixture.artifact.value);
+      mutate(value);
+      refreshRawCaptureManifest(value);
+      result.pairedApiArtifact = writePairedArtifactValue(
+        fixture.directory,
+        `bad-raw-routes-${name}.json`,
+        value,
+      );
+      expect(validatePairedApiEvidence(result).join("\n")).toMatch(
+        /raw capture manifest contract\/totals are not exact|raw capture routes are missing, duplicated, or unexpected/,
       );
     } finally {
       rmSync(fixture.directory, { recursive: true, force: true });
@@ -2876,6 +3041,65 @@ describe("real UI model proof harness", () => {
       result.pairedApiArtifact = writePairedArtifactValue(
         fixture.directory,
         "missing-nonstream-status.json",
+        value,
+      );
+      expect(validatePairedApiEvidence(result).join("\n")).toMatch(
+        /raw bytes do not reproduce the public flow\/request evidence/,
+      );
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: "Chat missing finish_reason",
+      protocol: "chat",
+      body: (expectedFinal: string) => JSON.stringify({
+        id: "chat-missing-terminal",
+        choices: [{
+          message: { content: expectedFinal },
+        }],
+      }),
+    },
+    {
+      name: "Anthropic incorrect stop_reason",
+      protocol: "anthropic",
+      body: (expectedFinal: string) => JSON.stringify({
+        id: "anthropic-wrong-terminal",
+        content: [{ type: "text", text: expectedFinal }],
+        stop_reason: "max_tokens",
+      }),
+    },
+    {
+      name: "Ollama missing done terminal",
+      protocol: "ollama",
+      body: (expectedFinal: string) => JSON.stringify({
+        message: { content: expectedFinal },
+        done: false,
+        done_reason: "stop",
+      }),
+    },
+  ])("rejects $name in self-consistent nonstream raw bytes", ({
+    protocol,
+    body,
+  }) => {
+    const result = goodResult();
+    result.surfaceStatus = "dual_surface_attested";
+    const fixture = createValidPairedArtifact(result);
+    try {
+      const value = structuredClone(fixture.artifact.value);
+      const expectedFinal =
+        value.flows.direct[protocol].nonstream.expected_final;
+      rewriteRawCaptureBody(value, {
+        baseLabel: "direct",
+        protocol,
+        captureLabel: "nonstream-flow-round3",
+        body: body(expectedFinal),
+      });
+      result.pairedApiArtifact = writePairedArtifactValue(
+        fixture.directory,
+        `bad-${protocol}-nonstream-terminal.json`,
         value,
       );
       expect(validatePairedApiEvidence(result).join("\n")).toMatch(

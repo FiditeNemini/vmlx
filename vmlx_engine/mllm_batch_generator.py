@@ -2412,7 +2412,185 @@ def _fix_hybrid_cache(
 # Fetch sites in this file have been updated to unpack the new tuple.
 # See `agentprogress/3/notes-to-2.md` for the migration guide and
 # `agentprogress/2/decisions.md` D-A2-007 for the option-C rationale.
-from .utils.ssm_companion_cache import HybridSSMStateCache, SSMCompanionCache  # noqa: F401
+from .utils.ssm_companion_cache import (  # noqa: F401
+    HybridSSMStateCache,
+    SSMCompanionCache,
+    make_ssm_prefix_lookup,
+    normalize_ssm_telemetry_request_id,
+    sanitize_ssm_prefix_lookup,
+)
+
+
+def _ssm_telemetry_attr(value: Any, name: str, default: Any = None) -> Any:
+    """Read optional telemetry without allowing descriptors to affect serving."""
+
+    try:
+        return getattr(value, name, default)
+    except Exception:
+        return default
+
+
+def _ssm_telemetry_store_size(state_cache: Any) -> int:
+    try:
+        return int(_ssm_telemetry_attr(state_cache, "size", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _attach_request_ssm_prefix_lookup(
+    request: Any,
+    lookup: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Overwrite stale request telemetry with one normalized lookup record."""
+
+    request_id = normalize_ssm_telemetry_request_id(
+        _ssm_telemetry_attr(request, "request_id")
+    )
+    current = dict(lookup)
+    current["request_id"] = request_id
+    execution = dict(_ssm_telemetry_attr(request, "_cache_execution") or {})
+    execution["request_id"] = request_id
+    execution["ssm_prefix_lookup"] = current
+    request._cache_execution = execution
+    return current
+
+
+def _record_request_ssm_exact_lookup(
+    request: Any,
+    state_cache: Any,
+    *,
+    max_len: int,
+    matched: bool,
+    is_complete: bool,
+) -> Dict[str, Any]:
+    """Attach the actual exact-boundary lookup used by the fast path."""
+
+    lookup = make_ssm_prefix_lookup(
+        max_len=max_len,
+        candidate_lengths=[max_len] if max_len > 0 and matched else [],
+        attempted_candidate_lengths=[max_len] if max_len > 0 else [],
+        matched=max_len > 0 and matched,
+        checkpoint_tokens=max_len if matched else 0,
+        is_complete=is_complete if matched else False,
+        source=(
+            "exact_boundary_l1_or_l2"
+            if max_len > 0 and matched
+            else "none"
+        ),
+        reason=(
+            "matched"
+            if max_len > 0 and matched
+            else "candidate_fetch_miss"
+            if max_len > 0
+            else "non_positive_max_len"
+        ),
+        store_size=_ssm_telemetry_store_size(state_cache),
+    )
+    return _attach_request_ssm_prefix_lookup(request, lookup)
+
+
+def _fetch_request_ssm_longest_prefix(
+    request: Any,
+    state_cache: Any,
+    *,
+    enabled: bool,
+    token_ids: List[int],
+    max_len: int,
+    cache_extra_keys: Any = None,
+    exact_boundary_already_missed: bool = False,
+) -> Tuple[Optional[Tuple[int, List[Any], bool]], Dict[str, Any]]:
+    """Fetch and attach fresh request-owned, path-free SSM lookup telemetry."""
+
+    request_id = normalize_ssm_telemetry_request_id(
+        _ssm_telemetry_attr(request, "request_id")
+    )
+    fetch_property_failed = False
+    try:
+        fetch_fn = getattr(state_cache, "fetch_longest_prefix", None)
+    except Exception:
+        fetch_fn = None
+        fetch_property_failed = True
+    store_size = _ssm_telemetry_store_size(state_cache)
+    result: Optional[Tuple[int, List[Any], bool]] = None
+    if not enabled:
+        lookup = make_ssm_prefix_lookup(
+            max_len=max_len,
+            reason="ssm_prefix_resume_disabled",
+            store_size=store_size,
+            request_id=request_id,
+        )
+    elif fetch_property_failed:
+        lookup = make_ssm_prefix_lookup(
+            max_len=max_len,
+            reason="lookup_exception",
+            store_size=store_size,
+            request_id=request_id,
+        )
+    elif not callable(fetch_fn):
+        lookup = make_ssm_prefix_lookup(
+            max_len=max_len,
+            reason="lookup_unavailable",
+            store_size=store_size,
+            request_id=request_id,
+        )
+    elif max_len <= 0:
+        lookup = make_ssm_prefix_lookup(
+            max_len=0,
+            reason="non_positive_max_len",
+            store_size=store_size,
+            request_id=request_id,
+        )
+    else:
+        try:
+            fetch_kwargs = {"cache_extra_keys": cache_extra_keys}
+            if exact_boundary_already_missed:
+                fetch_kwargs["exact_boundary_already_missed"] = True
+            result = fetch_fn(token_ids, max_len, **fetch_kwargs)
+        except Exception:
+            lookup = make_ssm_prefix_lookup(
+                max_len=max_len,
+                attempted_candidate_lengths=[max_len],
+                reason="lookup_exception",
+                store_size=store_size,
+                request_id=request_id,
+            )
+        else:
+            lookup = sanitize_ssm_prefix_lookup(
+                _ssm_telemetry_attr(state_cache, "last_prefix_lookup"),
+                request_id=request_id,
+                fallback_max_len=max_len,
+                fallback_store_size=store_size,
+                fallback_attempted_candidate_lengths=[max_len],
+            )
+            result_matches_lookup = (
+                lookup.get("max_len") == max_len
+                and (
+                    (
+                        result is None
+                        and lookup.get("matched") is False
+                        and lookup.get("checkpoint_tokens") == 0
+                    )
+                    or (
+                        isinstance(result, tuple)
+                        and len(result) == 3
+                        and lookup.get("matched") is True
+                        and type(result[0]) is int
+                        and lookup.get("checkpoint_tokens") == result[0]
+                        and lookup.get("is_complete") == bool(result[2])
+                    )
+                )
+            )
+            if not result_matches_lookup:
+                lookup = make_ssm_prefix_lookup(
+                    max_len=max_len,
+                    attempted_candidate_lengths=[max_len],
+                    reason="malformed_lookup",
+                    store_size=store_size,
+                    request_id=request_id,
+                )
+
+    lookup = _attach_request_ssm_prefix_lookup(request, lookup)
+    return result, lookup
 
 
 @dataclass
@@ -6161,7 +6339,9 @@ class MLLMBatchGenerator:
             req._cached_tokens = 0
             req._cache_execution_started = time.perf_counter()
             req._cache_execution = {
-                "request_id": req.request_id,
+                "request_id": normalize_ssm_telemetry_request_id(
+                    req.request_id
+                ),
                 "cache_detail": None,
                 # API usage counts the cache-key prompt. The template-owned
                 # generation suffix is tracked separately and still forwarded.
@@ -6316,6 +6496,17 @@ class MLLMBatchGenerator:
                                         _fetch_num,
                                         cache_extra_keys=_ssm_extra_keys,
                                     ) if _fetch_num > 0 else None
+                                    _record_request_ssm_exact_lookup(
+                                        req,
+                                        self._ssm_state_cache,
+                                        max_len=int(_fetch_num or 0),
+                                        matched=_entry is not None,
+                                        is_complete=(
+                                            bool(_entry[1])
+                                            if _entry is not None
+                                            else False
+                                        ),
+                                    )
                                     if _entry is None:
                                         ssm_states = None
                                     else:
@@ -6346,21 +6537,26 @@ class MLLMBatchGenerator:
                                         _enable_resume = _os.environ.get(
                                             "VMLX_DISABLE_SSM_PREFIX_RESUME"
                                         ) not in ("1", "true", "True", "yes", "on")
-                                        _missed_ck = None
-                                        _fn = getattr(
-                                            self._ssm_state_cache,
-                                            "fetch_longest_prefix",
-                                            None,
-                                        )
-                                        if _enable_resume and _fn is not None and _fetch_num > 0:
-                                            try:
-                                                _missed_ck = _fn(
-                                                    token_list,
-                                                    _fetch_num,
-                                                    cache_extra_keys=_ssm_extra_keys,
-                                                )
-                                            except Exception:
-                                                _missed_ck = None
+                                        if _enable_resume:
+                                            (
+                                                _missed_ck,
+                                                _ssm_prefix_lookup,
+                                            ) = _fetch_request_ssm_longest_prefix(
+                                                req,
+                                                self._ssm_state_cache,
+                                                enabled=True,
+                                                token_ids=token_list,
+                                                max_len=int(_fetch_num or 0),
+                                                cache_extra_keys=_ssm_extra_keys,
+                                                exact_boundary_already_missed=True,
+                                            )
+                                        else:
+                                            _missed_ck = None
+                                            _ssm_prefix_lookup = dict(
+                                                req._cache_execution[
+                                                    "ssm_prefix_lookup"
+                                                ]
+                                            )
 
                                         if _enable_resume and _missed_ck is not None:
                                             _ck_len, _ck_states, _ck_complete = _missed_ck
@@ -6374,22 +6570,18 @@ class MLLMBatchGenerator:
                                                     getattr(block_table, "num_tokens", 0) or 0
                                                 )
                                                 self._stats.last_hybrid_kv_without_ssm = {
-                                                    "request_id": req.request_id,
+                                                    "request_id": normalize_ssm_telemetry_request_id(
+                                                        req.request_id
+                                                    ),
                                                     "cached_tokens": int(
                                                         getattr(block_table, "num_tokens", 0) or 0
                                                     ),
                                                     "reason": "checkpoint_incomplete",
                                                     "checkpoint_tokens": int(_ck_len or 0),
                                                 }
-                                                _lookup = getattr(
-                                                    self._ssm_state_cache,
-                                                    "last_prefix_lookup",
-                                                    None,
-                                                )
-                                                if isinstance(_lookup, dict):
-                                                    self._stats.last_hybrid_kv_without_ssm[
-                                                        "ssm_prefix_lookup"
-                                                    ] = dict(_lookup)
+                                                self._stats.last_hybrid_kv_without_ssm[
+                                                    "ssm_prefix_lookup"
+                                                ] = dict(_ssm_prefix_lookup)
                                                 logger.info(
                                                     f"vmlx#91 RESUME skipped for {req.request_id}: "
                                                     f"checkpoint at {_ck_len} has is_complete=False "
@@ -6440,22 +6632,18 @@ class MLLMBatchGenerator:
                                                     getattr(block_table, "num_tokens", 0) or 0
                                                 )
                                                 self._stats.last_hybrid_kv_without_ssm = {
-                                                    "request_id": req.request_id,
+                                                    "request_id": normalize_ssm_telemetry_request_id(
+                                                        req.request_id
+                                                    ),
                                                     "cached_tokens": int(
                                                         getattr(block_table, "num_tokens", 0) or 0
                                                     ),
                                                     "reason": "checkpoint_below_one_block",
                                                     "checkpoint_tokens": int(_ck_len or 0),
                                                 }
-                                                _lookup = getattr(
-                                                    self._ssm_state_cache,
-                                                    "last_prefix_lookup",
-                                                    None,
-                                                )
-                                                if isinstance(_lookup, dict):
-                                                    self._stats.last_hybrid_kv_without_ssm[
-                                                        "ssm_prefix_lookup"
-                                                    ] = dict(_lookup)
+                                                self._stats.last_hybrid_kv_without_ssm[
+                                                    "ssm_prefix_lookup"
+                                                ] = dict(_ssm_prefix_lookup)
                                                 logger.info(
                                                     f"vmlx#91 RESUME skipped for {req.request_id}: "
                                                     f"checkpoint at {_ck_len} below one block — "
@@ -6474,7 +6662,9 @@ class MLLMBatchGenerator:
                                                 getattr(block_table, "num_tokens", 0) or 0
                                             )
                                             self._stats.last_hybrid_kv_without_ssm = {
-                                                "request_id": req.request_id,
+                                                "request_id": normalize_ssm_telemetry_request_id(
+                                                    req.request_id
+                                                ),
                                                 "cached_tokens": int(
                                                     getattr(block_table, "num_tokens", 0) or 0
                                                 ),
@@ -6484,15 +6674,9 @@ class MLLMBatchGenerator:
                                                     else "no_ssm_companion_state"
                                                 ),
                                             }
-                                            _lookup = getattr(
-                                                self._ssm_state_cache,
-                                                "last_prefix_lookup",
-                                                None,
-                                            )
-                                            if isinstance(_lookup, dict):
-                                                self._stats.last_hybrid_kv_without_ssm[
-                                                    "ssm_prefix_lookup"
-                                                ] = dict(_lookup)
+                                            self._stats.last_hybrid_kv_without_ssm[
+                                                "ssm_prefix_lookup"
+                                            ] = dict(_ssm_prefix_lookup)
                                             if _missed_ck is not None:
                                                 _ck_len, _, _ = _missed_ck
                                                 self._stats.last_hybrid_kv_without_ssm[
@@ -6530,7 +6714,9 @@ class MLLMBatchGenerator:
                                 )
                                 _cache_execution.update(
                                     {
-                                        "request_id": req.request_id,
+                                        "request_id": normalize_ssm_telemetry_request_id(
+                                            req.request_id
+                                        ),
                                         "cache_detail": None,
                                         "attempted_cached_tokens": int(
                                             getattr(block_table, "num_tokens", 0) or 0
@@ -7216,7 +7402,9 @@ class MLLMBatchGenerator:
                 )
                 execution.update(
                     {
-                        "request_id": req.request_id,
+                        "request_id": normalize_ssm_telemetry_request_id(
+                            req.request_id
+                        ),
                         "cache_detail": getattr(req, "_cache_detail", None),
                         "prompt_tokens": _prompt_tokens,
                         "cache_key_tokens": _prompt_tokens,

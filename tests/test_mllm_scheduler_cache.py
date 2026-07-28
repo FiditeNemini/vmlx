@@ -12,6 +12,8 @@ Covers:
 - get_stats() cache reporting
 """
 
+import json
+
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 from dataclasses import fields
@@ -22,10 +24,13 @@ from vmlx_engine.mllm_scheduler import MLLMSchedulerConfig, MLLMScheduler
 from vmlx_engine.mllm_batch_generator import (
     MLLMBatchGenerator,
     _disk_prefix_hit_tail_and_cached_tokens as _mllm_disk_prefix_hit_tail_and_cached_tokens,
+    _fetch_request_ssm_longest_prefix,
     _paged_reconstruct_disk_source,
     _prefix_hit_tail_and_cached_tokens as _mllm_prefix_hit_tail_and_cached_tokens,
+    _record_request_ssm_exact_lookup,
     _trace_mimo_v2_generated_token,
 )
+from vmlx_engine.utils.ssm_companion_cache import make_ssm_prefix_lookup
 
 
 def test_mllm_scheduler_does_not_shadow_hashlib_in_init():
@@ -1146,10 +1151,17 @@ class TestHybridSSMStateCache:
         assert cache.last_prefix_lookup == {
             "max_len": 5,
             "candidate_lengths": [4],
+            "candidate_count": 1,
+            "candidate_lengths_truncated": False,
+            "attempted_candidate_lengths": [5, 4],
+            "attempted_candidate_count": 2,
+            "attempted_candidate_lengths_truncated": False,
             "matched": True,
             "checkpoint_tokens": 4,
             "is_complete": True,
             "source": "l1_or_l2",
+            "reason": "matched",
+            "store_size": 1,
         }
 
         miss = cache.fetch_longest_prefix([9, 2, 3, 4], 4)
@@ -1157,10 +1169,294 @@ class TestHybridSSMStateCache:
         assert cache.last_prefix_lookup == {
             "max_len": 4,
             "candidate_lengths": [4],
+            "candidate_count": 1,
+            "candidate_lengths_truncated": False,
+            "attempted_candidate_lengths": [4],
+            "attempted_candidate_count": 1,
+            "attempted_candidate_lengths_truncated": False,
             "matched": False,
+            "checkpoint_tokens": 0,
+            "is_complete": False,
+            "source": "none",
             "reason": "prefix_hash_mismatch",
             "store_size": 1,
         }
+
+
+def test_request_ssm_lookup_overwrites_success_miss_disabled_and_exception():
+    request = SimpleNamespace(
+        request_id="req-current",
+        _cache_execution={
+            "ssm_prefix_lookup": {
+                "request_id": "req-stale",
+                "debug_path": "/private/stale",
+            }
+        },
+    )
+
+    class _Cache:
+        size = 2
+        mode = "hit"
+        last_prefix_lookup = None
+
+        def fetch_longest_prefix(
+            self,
+            token_ids,
+            max_len,
+            cache_extra_keys=None,
+        ):
+            if self.mode == "exception":
+                raise RuntimeError("/private/cache/secret")
+            matched = self.mode == "hit"
+            self.last_prefix_lookup = make_ssm_prefix_lookup(
+                max_len=max_len,
+                candidate_lengths=[4],
+                attempted_candidate_lengths=[max_len, 4],
+                matched=matched,
+                checkpoint_tokens=4 if matched else 0,
+                is_complete=matched,
+                source="l1_or_l2" if matched else "none",
+                reason="matched" if matched else "candidate_fetch_miss",
+                store_size=self.size,
+            )
+            return (4, ["state"], True) if matched else None
+
+    cache = _Cache()
+    result, lookup = _fetch_request_ssm_longest_prefix(
+        request,
+        cache,
+        enabled=True,
+        token_ids=[1, 2, 3, 4, 5],
+        max_len=5,
+    )
+    assert result == (4, ["state"], True)
+    assert lookup["matched"] is True
+    assert request._cache_execution["ssm_prefix_lookup"] == lookup
+
+    cache.mode = "miss"
+    _, lookup = _fetch_request_ssm_longest_prefix(
+        request,
+        cache,
+        enabled=True,
+        token_ids=[9, 2, 3, 4, 5],
+        max_len=5,
+    )
+    assert lookup["matched"] is False
+    assert lookup["reason"] == "candidate_fetch_miss"
+
+    _, lookup = _fetch_request_ssm_longest_prefix(
+        request,
+        cache,
+        enabled=False,
+        token_ids=[1, 2, 3, 4, 5],
+        max_len=5,
+    )
+    assert lookup["reason"] == "ssm_prefix_resume_disabled"
+    assert lookup["attempted_candidate_lengths"] == []
+
+    cache.mode = "exception"
+    _, lookup = _fetch_request_ssm_longest_prefix(
+        request,
+        cache,
+        enabled=True,
+        token_ids=[1, 2, 3, 4, 5],
+        max_len=5,
+    )
+    assert lookup == {
+        "max_len": 5,
+        "candidate_lengths": [],
+        "candidate_count": 0,
+        "candidate_lengths_truncated": False,
+        "attempted_candidate_lengths": [5],
+        "attempted_candidate_count": 1,
+        "attempted_candidate_lengths_truncated": False,
+        "matched": False,
+        "checkpoint_tokens": 0,
+        "is_complete": False,
+        "source": "none",
+        "reason": "lookup_exception",
+        "store_size": 2,
+        "request_id": "req-current",
+    }
+    assert "/private/" not in repr(request._cache_execution)
+    assert "req-stale" not in repr(request._cache_execution)
+
+
+def test_request_ssm_lookup_guards_telemetry_properties_and_preserves_hit():
+    class _RaisingTelemetryCache:
+        mode = "last_lookup"
+
+        @property
+        def size(self):
+            raise RuntimeError("/private/size-secret")
+
+        @property
+        def last_prefix_lookup(self):
+            raise RuntimeError("/private/lookup-secret")
+
+        def fetch_longest_prefix(self, *args, **kwargs):
+            return (4, ["state"], True)
+
+    request = SimpleNamespace(
+        request_id="proof-request",
+        _cache_execution={"ssm_prefix_lookup": {"request_id": "stale"}},
+    )
+    cache = _RaisingTelemetryCache()
+    result, lookup = _fetch_request_ssm_longest_prefix(
+        request,
+        cache,
+        enabled=True,
+        token_ids=[1, 2, 3, 4, 5],
+        max_len=5,
+    )
+    assert result == (4, ["state"], True)
+    assert lookup["reason"] == "malformed_lookup"
+    assert lookup["store_size"] == 0
+    assert "/private/" not in repr(request._cache_execution)
+    assert "stale" not in repr(request._cache_execution)
+
+    class _RaisingFetchProperty:
+        size = 3
+
+        @property
+        def fetch_longest_prefix(self):
+            raise RuntimeError("/private/fetch-secret")
+
+    result, lookup = _fetch_request_ssm_longest_prefix(
+        request,
+        _RaisingFetchProperty(),
+        enabled=True,
+        token_ids=[1, 2, 3, 4, 5],
+        max_len=5,
+    )
+    assert result is None
+    assert lookup["reason"] == "lookup_exception"
+    assert lookup["store_size"] == 3
+    assert lookup["attempted_candidate_lengths"] == []
+    assert lookup["attempted_candidate_count"] == 0
+    assert "/private/" not in repr(request._cache_execution)
+
+
+def test_request_ssm_lookup_rejects_stale_well_formed_prior_result():
+    request = SimpleNamespace(
+        request_id="req-current",
+        _cache_execution={"request_id": "req-current"},
+    )
+
+    class _StaleLookupCache:
+        size = 1
+        last_prefix_lookup = make_ssm_prefix_lookup(
+            max_len=4,
+            candidate_lengths=[4],
+            attempted_candidate_lengths=[4],
+            matched=True,
+            checkpoint_tokens=4,
+            is_complete=True,
+            source="exact_boundary_l1_or_l2",
+            reason="matched",
+        )
+
+        def fetch_longest_prefix(self, *args, **kwargs):
+            return None
+
+    result, lookup = _fetch_request_ssm_longest_prefix(
+        request,
+        _StaleLookupCache(),
+        enabled=True,
+        token_ids=[1, 2, 3, 4, 5],
+        max_len=5,
+    )
+    assert result is None
+    assert lookup["max_len"] == 5
+    assert lookup["matched"] is False
+    assert lookup["reason"] == "malformed_lookup"
+    assert lookup["request_id"] == "req-current"
+    assert request._cache_execution["ssm_prefix_lookup"] == lookup
+
+
+def test_production_exact_ssm_lookup_attaches_actual_hit_and_miss():
+    import inspect
+
+    production_source = inspect.getsource(MLLMBatchGenerator._process_prompts)
+    exact_fetch = production_source.index(
+        "_entry = self._ssm_state_cache.fetch("
+    )
+    exact_attestation = production_source.index(
+        "_record_request_ssm_exact_lookup("
+    )
+    exact_branch = production_source.index("if _entry is None:", exact_fetch)
+    assert exact_fetch < exact_attestation < exact_branch
+    assert "exact_boundary_already_missed=True" in production_source
+
+    request = SimpleNamespace(
+        request_id="req-exact",
+        _cache_execution={"request_id": "req-exact"},
+    )
+    cache = SimpleNamespace(size=2)
+
+    hit = _record_request_ssm_exact_lookup(
+        request,
+        cache,
+        max_len=64,
+        matched=True,
+        is_complete=True,
+    )
+    assert hit["max_len"] == 64
+    assert hit["candidate_lengths"] == [64]
+    assert hit["attempted_candidate_lengths"] == [64]
+    assert hit["matched"] is True
+    assert hit["checkpoint_tokens"] == 64
+    assert hit["source"] == "exact_boundary_l1_or_l2"
+
+    miss = _record_request_ssm_exact_lookup(
+        request,
+        cache,
+        max_len=64,
+        matched=False,
+        is_complete=False,
+    )
+    assert miss["max_len"] == 64
+    assert miss["candidate_lengths"] == []
+    assert miss["attempted_candidate_lengths"] == [64]
+    assert miss["matched"] is False
+    assert miss["checkpoint_tokens"] == 0
+    assert miss["reason"] == "candidate_fetch_miss"
+    assert request._cache_execution["ssm_prefix_lookup"] == miss
+
+
+def test_request_ssm_lookup_hashes_malicious_request_identity_everywhere():
+    malicious_prefix = "../private/cache/\n"
+    malicious = malicious_prefix + ("x" * (319 - len(malicious_prefix)))
+    assert len(malicious) == 319
+    request = SimpleNamespace(
+        request_id=malicious,
+        _cache_execution={"request_id": malicious},
+    )
+
+    class _Cache:
+        size = 0
+        last_prefix_lookup = make_ssm_prefix_lookup(
+            max_len=5,
+            attempted_candidate_lengths=[5],
+            reason="candidate_fetch_miss",
+        )
+
+        def fetch_longest_prefix(self, *args, **kwargs):
+            return None
+
+    _, lookup = _fetch_request_ssm_longest_prefix(
+        request,
+        _Cache(),
+        enabled=True,
+        token_ids=[1, 2, 3, 4, 5],
+        max_len=5,
+    )
+    payload = json.dumps(request._cache_execution)
+    assert malicious not in payload
+    assert "../private" not in payload
+    assert "\n" not in payload
+    assert lookup["request_id"].startswith("opaque-")
+    assert request._cache_execution["request_id"] == lookup["request_id"]
 
 
 # ============================================================

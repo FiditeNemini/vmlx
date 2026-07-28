@@ -13012,6 +13012,174 @@ class TestTurboQuantKVTelemetry:
         assert ssm["disk_enabled"] is True
         assert ssm["disk_directory"] == "/tmp/vmlx-test/ssm_companion"
 
+    def test_ssm_snapshot_projects_only_request_bound_path_free_lookup(self):
+        import vmlx_engine.server as server
+        from vmlx_engine.utils.ssm_companion_cache import make_ssm_prefix_lookup
+
+        class _SSMCache:
+            size = 1
+            max_entries = 8
+            disk_enabled = False
+            disk_directory = None
+
+        lookup = make_ssm_prefix_lookup(
+            max_len=64,
+            candidate_lengths=[48],
+            attempted_candidate_lengths=[64, 48],
+            matched=True,
+            checkpoint_tokens=48,
+            is_complete=True,
+            source="l1_or_l2",
+            reason="matched",
+            store_size=1,
+            request_id="req-current",
+        )
+        lookup["debug_path"] = "/private/cache/ssm"
+        execution = {
+            "request_id": "req-current",
+            "attempted_cached_tokens": 64,
+            "ssm_prefix_lookup": lookup,
+        }
+        scheduler = SimpleNamespace(
+            _ssm_state_cache=_SSMCache(),
+            get_stats=lambda: {"last_cache_execution": execution},
+        )
+
+        snapshot = server._ssm_companion_snapshot(scheduler)
+
+        assert snapshot["last_prefix_lookup"]["request_id"] == "req-current"
+        assert snapshot["last_prefix_lookup"]["candidate_lengths"] == [48]
+        assert "debug_path" not in snapshot["last_prefix_lookup"]
+        assert "/private/" not in json.dumps(snapshot["last_prefix_lookup"])
+
+        execution["ssm_prefix_lookup"]["request_id"] = "req-stale"
+        assert (
+            "last_prefix_lookup"
+            not in server._ssm_companion_snapshot(scheduler)
+        )
+
+        execution["ssm_prefix_lookup"] = make_ssm_prefix_lookup(
+            max_len=48,
+            candidate_lengths=[48],
+            attempted_candidate_lengths=[48],
+            matched=True,
+            checkpoint_tokens=48,
+            is_complete=True,
+            source="exact_boundary_l1_or_l2",
+            reason="matched",
+            request_id="req-current",
+        )
+        stale = server._ssm_companion_snapshot(scheduler)[
+            "last_prefix_lookup"
+        ]
+        assert stale["max_len"] == 64
+        assert stale["matched"] is False
+        assert stale["reason"] == "malformed_lookup"
+
+        execution["ssm_prefix_lookup"] = {"request_id": "req-current"}
+        malformed = server._ssm_companion_snapshot(scheduler)[
+            "last_prefix_lookup"
+        ]
+        assert malformed["request_id"] == "req-current"
+        assert malformed["max_len"] == 64
+        assert malformed["matched"] is False
+        assert malformed["reason"] == "malformed_lookup"
+        assert malformed["candidate_lengths"] == []
+
+        execution["ssm_prefix_lookup"] = make_ssm_prefix_lookup(
+            max_len=64,
+            candidate_lengths=list(range(64, 34, -1)),
+            attempted_candidate_lengths=[64] + list(range(63, 33, -1)),
+            reason="candidate_fetch_miss",
+            request_id="req-current",
+        )
+        truncated = server._ssm_companion_snapshot(scheduler)[
+            "last_prefix_lookup"
+        ]
+        assert truncated["candidate_count"] == 30
+        assert truncated["candidate_lengths_truncated"] is True
+        assert truncated["attempted_candidate_count"] == 31
+        assert truncated["attempted_candidate_lengths_truncated"] is True
+
+        execution.pop("ssm_prefix_lookup")
+        assert (
+            "last_prefix_lookup"
+            not in server._ssm_companion_snapshot(scheduler)
+        )
+
+    def test_ssm_snapshot_hashes_malicious_request_id_and_guards_properties(self):
+        import vmlx_engine.server as server
+        from vmlx_engine.utils.ssm_companion_cache import make_ssm_prefix_lookup
+
+        malicious_prefix = "../private/cache/\n"
+        malicious = malicious_prefix + (
+            "x" * (319 - len(malicious_prefix))
+        )
+        assert len(malicious) == 319
+        lookup = make_ssm_prefix_lookup(
+            max_len=64,
+            candidate_lengths=[48],
+            attempted_candidate_lengths=[64, 48],
+            matched=True,
+            checkpoint_tokens=48,
+            is_complete=True,
+            source="l1_or_l2",
+            reason="matched",
+            request_id=malicious,
+        )
+        execution = {
+            "request_id": malicious,
+            "attempted_cached_tokens": 64,
+            "ssm_prefix_lookup": lookup,
+        }
+
+        class _SSMCache:
+            _store = {"fallback": object()}
+            max_entries = 8
+            disk_enabled = False
+            disk_directory = None
+
+            @property
+            def size(self):
+                raise RuntimeError("/private/size-secret")
+
+        class _Scheduler:
+            _ssm_state_cache = _SSMCache()
+
+            @property
+            def get_stats(self):
+                raise RuntimeError("/private/stats-secret")
+
+            batch_generator = SimpleNamespace(
+                _stats=SimpleNamespace(last_cache_execution=execution)
+            )
+
+        snapshot = server._ssm_companion_snapshot(_Scheduler())
+        payload = json.dumps(snapshot)
+        normalized = snapshot["last_prefix_lookup"]["request_id"]
+        assert normalized.startswith("opaque-")
+        assert malicious not in payload
+        assert "../private" not in payload
+        assert "\n" not in payload
+        assert snapshot["entries"] == 1
+
+        class _RaisingFallbackScheduler:
+            _ssm_state_cache = _SSMCache()
+
+            @property
+            def get_stats(self):
+                raise RuntimeError("/private/stats-secret")
+
+            @property
+            def batch_generator(self):
+                raise RuntimeError("/private/fallback-secret")
+
+        fallback_snapshot = server._ssm_companion_snapshot(
+            _RaisingFallbackScheduler()
+        )
+        assert "last_prefix_lookup" not in fallback_snapshot
+        assert "/private/" not in json.dumps(fallback_snapshot)
+
     @pytest.mark.asyncio
     async def test_cache_stats_reports_disabled_kv_quant_without_zero_bit_ui(self, monkeypatch):
         import vmlx_engine.server as server

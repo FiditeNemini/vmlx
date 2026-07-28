@@ -148,6 +148,10 @@ from .reasoning.gptoss_parser import GptOssReasoningParser
 from .tool_parsers import ToolParserManager
 from .tool_parsers.abstract_tool_parser import generate_tool_id
 from .utils.hybrid_tq_cache import is_turboquant_make_cache
+from .utils.ssm_companion_cache import (
+    normalize_ssm_telemetry_request_id,
+    sanitize_ssm_prefix_lookup,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -9625,26 +9629,96 @@ def _kv_cache_quantization_status(
     }
 
 
+def _request_bound_ssm_prefix_lookup(
+    scheduler: Any,
+) -> dict[str, Any] | None:
+    """Return only a typed SSM lookup owned by the latest cache execution."""
+
+    def _telemetry_attr(value: Any, name: str, default: Any = None) -> Any:
+        try:
+            return getattr(value, name, default)
+        except Exception:
+            return default
+
+    scheduler_stats: Any = None
+    stats_fn = _telemetry_attr(scheduler, "get_stats")
+    if callable(stats_fn):
+        try:
+            scheduler_stats = stats_fn()
+        except Exception:
+            scheduler_stats = None
+    if not isinstance(scheduler_stats, dict):
+        batch_generator = _telemetry_attr(scheduler, "batch_generator")
+        batch_stats = _telemetry_attr(batch_generator, "_stats")
+        execution = _telemetry_attr(batch_stats, "last_cache_execution")
+    else:
+        execution = scheduler_stats.get("last_cache_execution")
+    if not isinstance(execution, dict):
+        return None
+
+    raw_execution_request_id = execution.get("request_id")
+    lookup = execution.get("ssm_prefix_lookup")
+    if (
+        raw_execution_request_id is None
+        or not isinstance(lookup, dict)
+        or lookup.get("request_id") is None
+    ):
+        return None
+    execution_request_id = normalize_ssm_telemetry_request_id(
+        raw_execution_request_id
+    )
+    lookup_request_id = normalize_ssm_telemetry_request_id(
+        lookup.get("request_id")
+    )
+    if lookup_request_id != execution_request_id:
+        return None
+
+    attempted = execution.get("attempted_cached_tokens")
+    fallback_max_len = (
+        attempted if type(attempted) is int and attempted >= 0 else 0
+    )
+    sanitized = sanitize_ssm_prefix_lookup(
+        lookup,
+        request_id=execution_request_id,
+        fallback_max_len=fallback_max_len,
+    )
+    if sanitized.get("max_len") != fallback_max_len:
+        return sanitize_ssm_prefix_lookup(
+            None,
+            request_id=execution_request_id,
+            fallback_max_len=fallback_max_len,
+        )
+    return sanitized
+
+
 def _ssm_companion_snapshot(scheduler: Any) -> dict[str, Any] | None:
     """Collect SSM companion L1/L2 stats without assuming scheduler flavor."""
+    def _telemetry_attr(value: Any, name: str, default: Any = None) -> Any:
+        try:
+            return getattr(value, name, default)
+        except Exception:
+            return default
+
     if scheduler is None:
         return None
-    ssm_cache = getattr(scheduler, "_ssm_state_cache", None)
+    ssm_cache = _telemetry_attr(scheduler, "_ssm_state_cache")
     if ssm_cache is None:
-        batch_generator = getattr(scheduler, "batch_generator", None)
+        batch_generator = _telemetry_attr(scheduler, "batch_generator")
         if batch_generator is not None:
-            ssm_cache = getattr(batch_generator, "_ssm_state_cache", None)
+            ssm_cache = _telemetry_attr(batch_generator, "_ssm_state_cache")
     if ssm_cache is None:
         # MLLM creates HybridSSMStateCache lazily with the batch generator, but
         # its scheduler owns the L2 disk store at startup. Surface that
         # configured L2 tier before the first request so /health and
         # /v1/cache/stats don't falsely imply SSM persistence is absent.
-        disk = getattr(scheduler, "_ssm_companion_disk_store", None)
+        disk = _telemetry_attr(scheduler, "_ssm_companion_disk_store")
         if disk is None:
             return None
-        cfg = getattr(scheduler, "config", None)
-        max_entries = int(getattr(cfg, "ssm_state_cache_size", 0) or 0)
-        max_mb = getattr(cfg, "ssm_state_cache_max_mb", None)
+        cfg = _telemetry_attr(scheduler, "config")
+        max_entries = int(
+            _telemetry_attr(cfg, "ssm_state_cache_size", 0) or 0
+        )
+        max_mb = _telemetry_attr(cfg, "ssm_state_cache_max_mb")
         snapshot: dict[str, Any] = {
             "entries": 0,
             "max_entries": max_entries,
@@ -9661,25 +9735,29 @@ def _ssm_companion_snapshot(scheduler: Any) -> dict[str, Any] | None:
                 else None
             ),
             "disk_enabled": True,
-            "disk_directory": str(getattr(disk, "directory", None) or ""),
+            "disk_directory": str(_telemetry_attr(disk, "directory") or ""),
         }
-        if hasattr(disk, "stats"):
+        stats_fn = _telemetry_attr(disk, "stats")
+        if callable(stats_fn):
             try:
-                snapshot["disk"] = disk.stats()
+                snapshot["disk"] = stats_fn()
             except Exception as exc:
                 snapshot["disk"] = {"enabled": True, "error": str(exc)}
+        request_lookup = _request_bound_ssm_prefix_lookup(scheduler)
+        if request_lookup is not None:
+            snapshot["last_prefix_lookup"] = request_lookup
         return snapshot
 
-    entries = getattr(ssm_cache, "size", None)
+    entries = _telemetry_attr(ssm_cache, "size")
     if entries is None:
-        entries = len(getattr(ssm_cache, "_store", {}) or {})
-    max_entries = getattr(ssm_cache, "max_entries", None)
+        entries = len(_telemetry_attr(ssm_cache, "_store", {}) or {})
+    max_entries = _telemetry_attr(ssm_cache, "max_entries")
     if max_entries is None:
-        max_entries = getattr(ssm_cache, "_max_entries", 0)
-    nbytes = int(getattr(ssm_cache, "total_nbytes", 0) or 0)
-    max_bytes = getattr(ssm_cache, "max_bytes", None)
+        max_entries = _telemetry_attr(ssm_cache, "_max_entries", 0)
+    nbytes = int(_telemetry_attr(ssm_cache, "total_nbytes", 0) or 0)
+    max_bytes = _telemetry_attr(ssm_cache, "max_bytes")
     if max_bytes is None:
-        max_bytes = getattr(ssm_cache, "_max_bytes", None)
+        max_bytes = _telemetry_attr(ssm_cache, "_max_bytes")
     if max_bytes is not None:
         max_bytes = int(max_bytes)
     snapshot: dict[str, Any] = {
@@ -9687,10 +9765,12 @@ def _ssm_companion_snapshot(scheduler: Any) -> dict[str, Any] | None:
         "max_entries": int(max_entries or 0),
         "nbytes": nbytes,
         "nbytes_mb": round(nbytes / (1024 * 1024), 2),
-        "evictions": int(getattr(ssm_cache, "evictions", 0) or 0),
-        "evicted_bytes": int(getattr(ssm_cache, "evicted_bytes", 0) or 0),
+        "evictions": int(_telemetry_attr(ssm_cache, "evictions", 0) or 0),
+        "evicted_bytes": int(
+            _telemetry_attr(ssm_cache, "evicted_bytes", 0) or 0
+        ),
         "evicted_bytes_mb": round(
-            int(getattr(ssm_cache, "evicted_bytes", 0) or 0)
+            int(_telemetry_attr(ssm_cache, "evicted_bytes", 0) or 0)
             / (1024 * 1024),
             2,
         ),
@@ -9700,15 +9780,21 @@ def _ssm_companion_snapshot(scheduler: Any) -> dict[str, Any] | None:
             if max_bytes is not None
             else None
         ),
-        "disk_enabled": bool(getattr(ssm_cache, "disk_enabled", False)),
-        "disk_directory": getattr(ssm_cache, "disk_directory", None),
+        "disk_enabled": bool(
+            _telemetry_attr(ssm_cache, "disk_enabled", False)
+        ),
+        "disk_directory": _telemetry_attr(ssm_cache, "disk_directory"),
     }
-    disk = getattr(ssm_cache, "_disk", None)
-    if disk is not None and hasattr(disk, "stats"):
+    disk = _telemetry_attr(ssm_cache, "_disk")
+    stats_fn = _telemetry_attr(disk, "stats")
+    if disk is not None and callable(stats_fn):
         try:
-            snapshot["disk"] = disk.stats()
+            snapshot["disk"] = stats_fn()
         except Exception as exc:
             snapshot["disk"] = {"enabled": True, "error": str(exc)}
+    request_lookup = _request_bound_ssm_prefix_lookup(scheduler)
+    if request_lookup is not None:
+        snapshot["last_prefix_lookup"] = request_lookup
     return snapshot
 
 

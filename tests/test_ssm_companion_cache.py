@@ -22,6 +22,9 @@ from vmlx_engine.utils.ssm_companion_cache import (
     HybridSSMStateCache,  # back-compat alias
     SSMCompanionCache,
     SSMCompanionEntry,
+    make_ssm_prefix_lookup,
+    normalize_ssm_telemetry_request_id,
+    sanitize_ssm_prefix_lookup,
 )
 
 
@@ -822,10 +825,17 @@ def test_disk_store_restores_selected_boundary_without_l1_length_index(tmp_path)
     assert cache2.last_prefix_lookup == {
         "max_len": 4,
         "candidate_lengths": [4],
+        "candidate_count": 1,
+        "candidate_lengths_truncated": False,
+        "attempted_candidate_lengths": [4],
+        "attempted_candidate_count": 1,
+        "attempted_candidate_lengths_truncated": False,
         "matched": True,
         "checkpoint_tokens": 4,
         "is_complete": True,
         "source": "exact_boundary_l1_or_l2",
+        "reason": "matched",
+        "store_size": 1,
     }
     assert disk2.stats()["hits"] == 1
     assert disk1.shutdown()
@@ -875,10 +885,17 @@ def test_disk_store_discovers_shorter_partial_boundary_after_restart(tmp_path):
     assert cache2.last_prefix_lookup == {
         "max_len": 4,
         "candidate_lengths": [3],
+        "candidate_count": 1,
+        "candidate_lengths_truncated": False,
+        "attempted_candidate_lengths": [4, 3],
+        "attempted_candidate_count": 2,
+        "attempted_candidate_lengths_truncated": False,
         "matched": True,
         "checkpoint_tokens": 3,
         "is_complete": True,
         "source": "partial_boundary_disk_l2",
+        "reason": "matched",
+        "store_size": 1,
     }
     stats = disk2.stats()
     assert stats["hits"] == 1
@@ -899,6 +916,157 @@ def test_disk_store_discovers_shorter_partial_boundary_after_restart(tmp_path):
     assert disk1.shutdown()
     assert disk2.shutdown()
     assert disk3.shutdown()
+
+
+def test_prefix_lookup_distinguishes_candidates_from_actual_fetch_attempts():
+    cache = SSMCompanionCache(max_entries=4, disk_store=False)
+    cache.store([9, 9, 9, 9, 9, 9], 6, [_FakeSSMLayer(6.0)])
+    cache.store([1, 2, 3, 4], 4, [_FakeSSMLayer(4.0)])
+
+    hit = cache.fetch_longest_prefix([1, 2, 3, 4, 5, 6, 7], max_len=7)
+
+    assert hit is not None
+    assert hit[0] == 4
+    assert cache.last_prefix_lookup == {
+        "max_len": 7,
+        "candidate_lengths": [6, 4],
+        "candidate_count": 2,
+        "candidate_lengths_truncated": False,
+        # 7 was the exact-boundary probe. Length 6 was a candidate but its
+        # prefix hash did not match, so fetch() was invoked next at length 4.
+        "attempted_candidate_lengths": [7, 4],
+        "attempted_candidate_count": 2,
+        "attempted_candidate_lengths_truncated": False,
+        "matched": True,
+        "checkpoint_tokens": 4,
+        "is_complete": True,
+        "source": "l1_or_l2",
+        "reason": "matched",
+        "store_size": 2,
+    }
+
+
+def test_prefix_lookup_sanitizer_is_path_free_and_fails_closed():
+    raw = make_ssm_prefix_lookup(
+        max_len=8,
+        candidate_lengths=[4],
+        attempted_candidate_lengths=[8, 4],
+        matched=True,
+        checkpoint_tokens=4,
+        is_complete=True,
+        source="l1_or_l2",
+        reason="matched",
+        store_size=2,
+    )
+    raw["debug_path"] = "/private/cache/ssm"
+    raw["cache_key"] = "secret-key"
+
+    clean = sanitize_ssm_prefix_lookup(raw, request_id="req-clean")
+
+    assert clean["request_id"] == "req-clean"
+    assert clean["matched"] is True
+    assert "debug_path" not in clean
+    assert "cache_key" not in clean
+
+    raw["candidate_lengths"] = ["4"]
+    malformed = sanitize_ssm_prefix_lookup(
+        raw,
+        request_id="req-malformed",
+        fallback_max_len=8,
+        fallback_store_size=2,
+        fallback_attempted_candidate_lengths=[8],
+    )
+    assert malformed == {
+        "max_len": 8,
+        "candidate_lengths": [],
+        "candidate_count": 0,
+        "candidate_lengths_truncated": False,
+        "attempted_candidate_lengths": [8],
+        "attempted_candidate_count": 1,
+        "attempted_candidate_lengths_truncated": False,
+        "matched": False,
+        "checkpoint_tokens": 0,
+        "is_complete": False,
+        "source": "none",
+        "reason": "malformed_lookup",
+        "store_size": 2,
+        "request_id": "req-malformed",
+    }
+
+
+def test_prefix_lookup_bounds_thirty_fetch_misses_with_exact_counts():
+    class _ThirtyFetchMisses(SSMCompanionCache):
+        def fetch(self, *args, **kwargs):
+            return None
+
+    cache = _ThirtyFetchMisses(max_entries=1, disk_store=False)
+    token_ids = list(range(1, 65))
+    for length in range(1, 31):
+        prefix_hash = cache._prefix_hash(token_ids, length)
+        cache._length_index[length] = {prefix_hash: f"entry-{length}"}
+
+    assert cache.fetch_longest_prefix(token_ids, max_len=64) is None
+    lookup = cache.last_prefix_lookup
+    assert lookup["reason"] == "candidate_fetch_miss"
+    assert lookup["candidate_count"] == 30
+    assert len(lookup["candidate_lengths"]) == 20
+    assert lookup["candidate_lengths_truncated"] is True
+    # One exact-boundary probe plus all 30 indexed candidate fetches.
+    assert lookup["attempted_candidate_count"] == 31
+    assert len(lookup["attempted_candidate_lengths"]) == 21
+    assert lookup["attempted_candidate_lengths_truncated"] is True
+    sanitized = sanitize_ssm_prefix_lookup(
+        lookup,
+        request_id="proof-truncated-miss",
+        fallback_max_len=64,
+    )
+    assert sanitized["candidate_count"] == 30
+    assert sanitized["candidate_lengths_truncated"] is True
+    assert sanitized["attempted_candidate_count"] == 31
+    assert sanitized["attempted_candidate_lengths_truncated"] is True
+
+
+def test_prefix_lookup_can_reuse_prior_exact_miss_without_duplicate_fetch():
+    class _PriorExactMiss(SSMCompanionCache):
+        fetch_lengths = []
+
+        def fetch(self, token_ids, num_tokens, cache_extra_keys=None):
+            self.fetch_lengths.append(num_tokens)
+            return None
+
+    cache = _PriorExactMiss(max_entries=1, disk_store=False)
+    token_ids = [1, 2, 3, 4, 5]
+    exact_hash = cache._prefix_hash(token_ids, 5)
+    cache._length_index[5] = {exact_hash: "entry-5"}
+    prefix_hash = cache._prefix_hash(token_ids, 4)
+    cache._length_index[4] = {prefix_hash: "entry-4"}
+
+    assert (
+        cache.fetch_longest_prefix(
+            token_ids,
+            max_len=5,
+            exact_boundary_already_missed=True,
+        )
+        is None
+    )
+    assert cache.fetch_lengths == [4]
+    assert cache.last_prefix_lookup["attempted_candidate_lengths"] == [5, 4]
+    assert cache.last_prefix_lookup["attempted_candidate_count"] == 2
+
+
+def test_prefix_lookup_request_id_normalization_is_stable_and_path_free():
+    assert normalize_ssm_telemetry_request_id("chatcmpl-proof_123") == (
+        "chatcmpl-proof_123"
+    )
+    malicious_prefix = "../private/cache/\n"
+    malicious = malicious_prefix + ("x" * (319 - len(malicious_prefix)))
+    assert len(malicious) == 319
+    normalized = normalize_ssm_telemetry_request_id(malicious)
+    assert normalized.startswith("opaque-")
+    assert len(normalized) == len("opaque-") + 32
+    assert malicious not in normalized
+    assert "/" not in normalized
+    assert "\n" not in normalized
 
 
 def test_disk_store_stats_include_tokens_and_io_counters(tmp_path):

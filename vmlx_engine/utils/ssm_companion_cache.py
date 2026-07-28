@@ -81,6 +81,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections import OrderedDict
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
@@ -98,6 +99,241 @@ logger = logging.getLogger(__name__)
 
 # Type alias for the per-fetch return value: (states, is_complete) or None
 SSMCompanionEntry = Optional[Tuple[List[Any], bool]]
+
+SSM_PREFIX_LOOKUP_MAX_CANDIDATES = 20
+SSM_PREFIX_LOOKUP_MAX_ATTEMPTS = 21
+SSM_TELEMETRY_REQUEST_ID_MAX_CHARS = 128
+_SSM_TELEMETRY_REQUEST_ID_RE = re.compile(
+    rf"[A-Za-z0-9][A-Za-z0-9._:-]{{0,{SSM_TELEMETRY_REQUEST_ID_MAX_CHARS - 1}}}"
+)
+_SSM_PREFIX_LOOKUP_SOURCES = {
+    "none",
+    "exact_boundary_l1_or_l2",
+    "l1_or_l2",
+    "partial_boundary_disk_l2",
+}
+_SSM_PREFIX_LOOKUP_REASONS = {
+    "matched",
+    "non_positive_max_len",
+    "no_candidate_lengths",
+    "prefix_hash_mismatch",
+    "candidate_fetch_miss",
+    "lookup_exception",
+    "lookup_unavailable",
+    "malformed_lookup",
+    "ssm_prefix_resume_disabled",
+}
+
+
+def _non_negative_int(value: Any) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
+def normalize_ssm_telemetry_request_id(value: Any) -> str:
+    """Return a bounded path/control-safe identity for cache telemetry."""
+
+    try:
+        raw = value if type(value) is str else str(value)
+    except Exception:
+        raw = "<unprintable>"
+    if _SSM_TELEMETRY_REQUEST_ID_RE.fullmatch(raw):
+        return raw
+    digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
+    return f"opaque-{digest[:32]}"
+
+
+def _bounded_positive_lengths(
+    value: Any,
+    *,
+    limit: int,
+    preserve_last: bool = False,
+    preserve_value: int = 0,
+) -> Tuple[List[int], int, bool]:
+    if not isinstance(value, (list, tuple)):
+        return [], 0, False
+    if any(type(item) is not int or item <= 0 for item in value):
+        return [], 0, False
+    count = len(value)
+    truncated = count > limit
+    result = list(value[:limit])
+    if truncated and preserve_last and result:
+        result[-1] = value[-1]
+    if (
+        truncated
+        and preserve_value > 0
+        and preserve_value in value
+        and preserve_value not in result
+        and result
+    ):
+        result[-1] = preserve_value
+    return result, count, truncated
+
+
+def make_ssm_prefix_lookup(
+    *,
+    max_len: int,
+    candidate_lengths: Any = (),
+    candidate_count: Optional[int] = None,
+    attempted_candidate_lengths: Any = (),
+    attempted_candidate_count: Optional[int] = None,
+    matched: bool = False,
+    checkpoint_tokens: int = 0,
+    is_complete: bool = False,
+    source: str = "none",
+    reason: str,
+    store_size: int = 0,
+    request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build the complete, bounded, path-free SSM prefix lookup record."""
+
+    bounded_candidates, observed_candidate_count, _ = (
+        _bounded_positive_lengths(
+            candidate_lengths,
+            limit=SSM_PREFIX_LOOKUP_MAX_CANDIDATES,
+            preserve_value=checkpoint_tokens if matched else 0,
+        )
+    )
+    bounded_attempts, observed_attempted_count, _ = (
+        _bounded_positive_lengths(
+            attempted_candidate_lengths,
+            limit=SSM_PREFIX_LOOKUP_MAX_ATTEMPTS,
+            preserve_last=bool(matched),
+        )
+    )
+    candidate_count = (
+        candidate_count
+        if type(candidate_count) is int
+        and candidate_count >= observed_candidate_count
+        else observed_candidate_count
+    )
+    attempted_candidate_count = (
+        attempted_candidate_count
+        if type(attempted_candidate_count) is int
+        and attempted_candidate_count >= observed_attempted_count
+        else observed_attempted_count
+    )
+    record: Dict[str, Any] = {
+        "max_len": _non_negative_int(max_len),
+        "candidate_lengths": bounded_candidates,
+        "candidate_count": candidate_count,
+        "candidate_lengths_truncated": candidate_count > len(bounded_candidates),
+        "attempted_candidate_lengths": bounded_attempts,
+        "attempted_candidate_count": attempted_candidate_count,
+        "attempted_candidate_lengths_truncated": (
+            attempted_candidate_count > len(bounded_attempts)
+        ),
+        "matched": bool(matched),
+        "checkpoint_tokens": _non_negative_int(checkpoint_tokens),
+        "is_complete": bool(is_complete),
+        "source": source if source in _SSM_PREFIX_LOOKUP_SOURCES else "none",
+        "reason": reason if reason in _SSM_PREFIX_LOOKUP_REASONS else "malformed_lookup",
+        "store_size": _non_negative_int(store_size),
+    }
+    if request_id is not None:
+        record["request_id"] = normalize_ssm_telemetry_request_id(request_id)
+    return record
+
+
+def sanitize_ssm_prefix_lookup(
+    value: Any,
+    *,
+    request_id: str,
+    fallback_max_len: int = 0,
+    fallback_store_size: int = 0,
+    fallback_attempted_candidate_lengths: Any = (),
+) -> Dict[str, Any]:
+    """Strictly copy a cache lookup record and stamp its owning request.
+
+    Unknown keys are dropped. Missing, malformed, or semantically inconsistent
+    fields fail closed to a typed ``malformed_lookup`` record rather than
+    preserving stale global diagnostics or arbitrary path/error strings.
+    """
+
+    fallback = make_ssm_prefix_lookup(
+        max_len=fallback_max_len,
+        attempted_candidate_lengths=fallback_attempted_candidate_lengths,
+        reason="malformed_lookup",
+        store_size=fallback_store_size,
+        request_id=request_id,
+    )
+    if not isinstance(value, dict):
+        return fallback
+
+    max_len = value.get("max_len")
+    candidates = value.get("candidate_lengths")
+    candidate_count = value.get("candidate_count")
+    candidates_truncated = value.get("candidate_lengths_truncated")
+    attempts = value.get("attempted_candidate_lengths")
+    attempted_count = value.get("attempted_candidate_count")
+    attempts_truncated = value.get("attempted_candidate_lengths_truncated")
+    matched = value.get("matched")
+    checkpoint_tokens = value.get("checkpoint_tokens")
+    is_complete = value.get("is_complete")
+    source = value.get("source")
+    reason = value.get("reason")
+    store_size = value.get("store_size")
+    if (
+        type(max_len) is not int
+        or max_len < 0
+        or not isinstance(candidates, list)
+        or len(candidates) > SSM_PREFIX_LOOKUP_MAX_CANDIDATES
+        or any(type(item) is not int or item <= 0 for item in candidates)
+        or type(candidate_count) is not int
+        or candidate_count < len(candidates)
+        or type(candidates_truncated) is not bool
+        or candidates_truncated != (candidate_count > len(candidates))
+        or not isinstance(attempts, list)
+        or len(attempts) > SSM_PREFIX_LOOKUP_MAX_ATTEMPTS
+        or any(type(item) is not int or item <= 0 for item in attempts)
+        or type(attempted_count) is not int
+        or attempted_count < len(attempts)
+        or type(attempts_truncated) is not bool
+        or attempts_truncated != (attempted_count > len(attempts))
+        or type(matched) is not bool
+        or type(checkpoint_tokens) is not int
+        or checkpoint_tokens < 0
+        or type(is_complete) is not bool
+        or source not in _SSM_PREFIX_LOOKUP_SOURCES
+        or reason not in _SSM_PREFIX_LOOKUP_REASONS
+        or type(store_size) is not int
+        or store_size < 0
+        or any(item > max_len for item in candidates)
+        or any(item > max_len for item in attempts)
+    ):
+        return fallback
+    if matched:
+        if (
+            checkpoint_tokens <= 0
+            or checkpoint_tokens > max_len
+            or checkpoint_tokens not in candidates
+            or not attempts
+            or attempts[-1] != checkpoint_tokens
+            or source == "none"
+            or reason != "matched"
+        ):
+            return fallback
+    elif (
+        checkpoint_tokens != 0
+        or is_complete
+        or source != "none"
+        or reason == "matched"
+    ):
+        return fallback
+
+    return make_ssm_prefix_lookup(
+        max_len=max_len,
+        candidate_lengths=candidates,
+        candidate_count=candidate_count,
+        attempted_candidate_lengths=attempts,
+        attempted_candidate_count=attempted_count,
+        matched=matched,
+        checkpoint_tokens=checkpoint_tokens,
+        is_complete=is_complete,
+        source=source,
+        reason=reason,
+        store_size=store_size,
+        request_id=request_id,
+    )
 
 
 class SSMCompanionCache:
@@ -513,6 +749,7 @@ class SSMCompanionCache:
         token_ids: List[int],
         max_len: int,
         cache_extra_keys: Optional[Any] = None,
+        exact_boundary_already_missed: bool = False,
     ) -> Optional[Tuple[int, List[Any], bool]]:
         """vmlx#91: find the longest stored checkpoint whose key tokens are
         a prefix of ``token_ids[:max_len]``, allowing the caller to resume
@@ -533,13 +770,17 @@ class SSMCompanionCache:
         applies — callers get independent buffers, never shared refs.
         """
         if max_len <= 0:
-            self.last_prefix_lookup = {
-                "max_len": int(max_len or 0),
-                "candidate_lengths": [],
-                "matched": False,
-                "reason": "non_positive_max_len",
-            }
+            self.last_prefix_lookup = make_ssm_prefix_lookup(
+                max_len=int(max_len or 0),
+                reason="non_positive_max_len",
+                store_size=len(self._store),
+            )
             return None
+        # The exact boundary is always the first logical attempt. The MLLM
+        # fast path can pass ``exact_boundary_already_missed=True`` after it
+        # has already performed that fetch, avoiding a duplicate disk/L1 read
+        # while retaining the actual attempt in telemetry.
+        attempted_candidate_lengths: List[int] = [int(max_len)]
         # A fresh process has no in-memory ``_length_index`` yet, even when
         # the scheduler's block-disk tier has selected an exact cached block
         # boundary. Probe that boundary directly first so ``fetch()`` can
@@ -548,21 +789,28 @@ class SSMCompanionCache:
         # longer multi-turn prompts saw KV disk hits but unnecessarily fell
         # back to a full hybrid prefill because only L1 checkpoint lengths were
         # considered below.
-        exact_boundary = self.fetch(
-            token_ids,
-            max_len,
-            cache_extra_keys=cache_extra_keys,
+        exact_boundary = (
+            None
+            if exact_boundary_already_missed
+            else self.fetch(
+                token_ids,
+                max_len,
+                cache_extra_keys=cache_extra_keys,
+            )
         )
         if exact_boundary is not None:
             states, is_complete = exact_boundary
-            self.last_prefix_lookup = {
-                "max_len": int(max_len),
-                "candidate_lengths": [int(max_len)],
-                "matched": True,
-                "checkpoint_tokens": int(max_len),
-                "is_complete": bool(is_complete),
-                "source": "exact_boundary_l1_or_l2",
-            }
+            self.last_prefix_lookup = make_ssm_prefix_lookup(
+                max_len=int(max_len),
+                candidate_lengths=[int(max_len)],
+                attempted_candidate_lengths=attempted_candidate_lengths,
+                matched=True,
+                checkpoint_tokens=int(max_len),
+                is_complete=is_complete,
+                source="exact_boundary_l1_or_l2",
+                reason="matched",
+                store_size=len(self._store),
+            )
             return (max_len, states, is_complete)
         # Scan lengths in descending order so we find the longest match.
         # L1 supplies boundaries learned in this process. L2 supplies
@@ -584,7 +832,10 @@ class SSMCompanionCache:
         # shorter L2 boundaries need another fetch attempt.
         candidate_lengths = sorted(
             {
-                n for n in self._length_index.keys() if n <= max_len
+                n
+                for n in self._length_index.keys()
+                if n < max_len
+                or (n == max_len and not exact_boundary_already_missed)
             }
             | {
                 n for n in disk_candidate_lengths if n < max_len
@@ -592,13 +843,12 @@ class SSMCompanionCache:
             reverse=True,
         )
         if not candidate_lengths:
-            self.last_prefix_lookup = {
-                "max_len": int(max_len),
-                "candidate_lengths": [],
-                "matched": False,
-                "reason": "no_candidate_lengths",
-                "store_size": len(self._store),
-            }
+            self.last_prefix_lookup = make_ssm_prefix_lookup(
+                max_len=int(max_len),
+                attempted_candidate_lengths=attempted_candidate_lengths,
+                reason="no_candidate_lengths",
+                store_size=len(self._store),
+            )
             return None
         # Compute the prefix_hash for each candidate length against the
         # query's own tokens and compare. First match wins.
@@ -611,31 +861,39 @@ class SSMCompanionCache:
             if stored_key is None and not disk_candidate:
                 continue
             # Delegate to fetch() so deep-copy discipline is uniform.
+            attempted_candidate_lengths.append(n)
             result = self.fetch(token_ids, n, cache_extra_keys=cache_extra_keys)
             if result is None:
                 # deepcopy failed — treat as miss per existing contract
                 continue
             states, is_complete = result
-            self.last_prefix_lookup = {
-                "max_len": int(max_len),
-                "candidate_lengths": [int(n) for n in candidate_lengths[:20]],
-                "matched": True,
-                "checkpoint_tokens": int(n),
-                "is_complete": bool(is_complete),
-                "source": (
+            self.last_prefix_lookup = make_ssm_prefix_lookup(
+                max_len=int(max_len),
+                candidate_lengths=candidate_lengths,
+                attempted_candidate_lengths=attempted_candidate_lengths,
+                matched=True,
+                checkpoint_tokens=n,
+                is_complete=is_complete,
+                source=(
                     "partial_boundary_disk_l2"
                     if stored_key is None and disk_candidate
                     else "l1_or_l2"
                 ),
-            }
+                reason="matched",
+                store_size=len(self._store),
+            )
             return (n, states, is_complete)
-        self.last_prefix_lookup = {
-            "max_len": int(max_len),
-            "candidate_lengths": [int(n) for n in candidate_lengths[:20]],
-            "matched": False,
-            "reason": "prefix_hash_mismatch",
-            "store_size": len(self._store),
-        }
+        self.last_prefix_lookup = make_ssm_prefix_lookup(
+            max_len=int(max_len),
+            candidate_lengths=candidate_lengths,
+            attempted_candidate_lengths=attempted_candidate_lengths,
+            reason=(
+                "candidate_fetch_miss"
+                if len(attempted_candidate_lengths) > 1
+                else "prefix_hash_mismatch"
+            ),
+            store_size=len(self._store),
+        )
         return None
 
     def clear(self) -> None:

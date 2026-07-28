@@ -1162,7 +1162,11 @@ def _hybrid_health(*, pid: int = 1234) -> dict:
                 "request_id": "resp-health",
                 "max_len": 112,
                 "candidate_lengths": [112],
+                "candidate_count": 1,
+                "candidate_lengths_truncated": False,
                 "attempted_candidate_lengths": [112],
+                "attempted_candidate_count": 1,
+                "attempted_candidate_lengths_truncated": False,
                 "matched": True,
                 "checkpoint_tokens": 112,
                 "is_complete": True,
@@ -1210,7 +1214,11 @@ def _hybridize_hit(
             "request_id": execution["request_id"],
             "max_len": cached_tokens,
             "candidate_lengths": [cached_tokens],
+            "candidate_count": 1,
+            "candidate_lengths_truncated": False,
             "attempted_candidate_lengths": [cached_tokens],
+            "attempted_candidate_count": 1,
+            "attempted_candidate_lengths_truncated": False,
             "matched": True,
             "checkpoint_tokens": cached_tokens,
             "is_complete": True,
@@ -1289,7 +1297,11 @@ def test_hybrid_health_evidence_retains_typed_lookup_and_monotonic_counters():
         "request_id": "resp-health",
         "max_len": 112,
         "candidate_lengths": [112],
+        "candidate_count": 1,
+        "candidate_lengths_truncated": False,
         "attempted_candidate_lengths": [112],
+        "attempted_candidate_count": 1,
+        "attempted_candidate_lengths_truncated": False,
         "matched": True,
         "checkpoint_tokens": 112,
         "is_complete": True,
@@ -1373,7 +1385,9 @@ def test_hybrid_hash_candidate_rejected_before_fetch_does_not_false_fail():
         {
             "max_len": 128,
             "candidate_lengths": [120, 112],
+            "candidate_count": 2,
             "attempted_candidate_lengths": [128, 112],
+            "attempted_candidate_count": 2,
         }
     )
 
@@ -1430,6 +1444,24 @@ def test_hybrid_hash_candidate_rejected_before_fetch_does_not_false_fail():
                 {"attempted_candidate_lengths": [113, 112]}
             ),
             "SSM attempted candidate lengths are malformed",
+        ),
+        (
+            lambda row: row["ssm_companion"]["last_prefix_lookup"].update(
+                {
+                    "candidate_count": 2,
+                    "candidate_lengths_truncated": True,
+                }
+            ),
+            "SSM candidate telemetry is truncated",
+        ),
+        (
+            lambda row: row["ssm_companion"]["last_prefix_lookup"].update(
+                {
+                    "attempted_candidate_count": 2,
+                    "attempted_candidate_lengths_truncated": True,
+                }
+            ),
+            "SSM attempted-candidate telemetry is truncated",
         ),
         (
             lambda row: row.update({"response_id": "resp-other"}),

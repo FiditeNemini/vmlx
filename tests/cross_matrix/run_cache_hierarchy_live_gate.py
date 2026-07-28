@@ -559,6 +559,16 @@ def _path_free_prefix_lookup(last_prefix_lookup: Any) -> dict[str, Any]:
         last_prefix_lookup.get("attempted_candidate_lengths"),
         max_items=21,
     )
+    candidate_count = last_prefix_lookup.get("candidate_count")
+    attempted_candidate_count = last_prefix_lookup.get(
+        "attempted_candidate_count"
+    )
+    candidate_lengths_truncated = last_prefix_lookup.get(
+        "candidate_lengths_truncated"
+    )
+    attempted_candidate_lengths_truncated = last_prefix_lookup.get(
+        "attempted_candidate_lengths_truncated"
+    )
     return {
         key: last_prefix_lookup.get(key)
         for key in (
@@ -568,11 +578,34 @@ def _path_free_prefix_lookup(last_prefix_lookup: Any) -> dict[str, Any]:
             "checkpoint_tokens",
             "is_complete",
             "source",
+            "reason",
+            "store_size",
         )
         if key in last_prefix_lookup
     } | {
         "candidate_lengths": candidate_lengths,
         "attempted_candidate_lengths": attempted_candidate_lengths,
+        "candidate_count": (
+            candidate_count
+            if type(candidate_count) is int and candidate_count >= 0
+            else None
+        ),
+        "attempted_candidate_count": (
+            attempted_candidate_count
+            if type(attempted_candidate_count) is int
+            and attempted_candidate_count >= 0
+            else None
+        ),
+        "candidate_lengths_truncated": (
+            candidate_lengths_truncated
+            if type(candidate_lengths_truncated) is bool
+            else None
+        ),
+        "attempted_candidate_lengths_truncated": (
+            attempted_candidate_lengths_truncated
+            if type(attempted_candidate_lengths_truncated) is bool
+            else None
+        ),
     }
 
 
@@ -2390,6 +2423,25 @@ def _validate_hybrid_ssm_tq4_hit(
     )
     if not attempts_well_formed:
         attempted_candidate_lengths = []
+    candidate_count = lookup.get("candidate_count")
+    attempted_candidate_count = lookup.get("attempted_candidate_count")
+    if (
+        lookup.get("candidate_lengths_truncated") is not False
+        or type(candidate_count) is not int
+        or candidate_count != len(candidate_lengths)
+    ):
+        failures.append(
+            f"{tag}: SSM candidate telemetry is truncated or count-mismatched"
+        )
+    if (
+        lookup.get("attempted_candidate_lengths_truncated") is not False
+        or type(attempted_candidate_count) is not int
+        or attempted_candidate_count != len(attempted_candidate_lengths)
+    ):
+        failures.append(
+            f"{tag}: SSM attempted-candidate telemetry is truncated or "
+            "count-mismatched"
+        )
     if lookup.get("matched") is not True:
         failures.append(f"{tag}: SSM companion prefix lookup did not match")
     if lookup.get("is_complete") is not True:

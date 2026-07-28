@@ -2,6 +2,31 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 describe('manual session single-model enforcement', () => {
+  it('fails closed at the global detector for proof-owned Electron lifecycles', () => {
+    const source = readFileSync('src/main/sessions.ts', 'utf8')
+    const start = source.indexOf('async detect(): Promise<DetectedProcess[]>')
+    const end = source.indexOf('private parsePsLine', start)
+    const block = source.slice(start, end)
+    const proofGuard = block.indexOf(
+      'shouldUseProofOwnedEngineLifecycle(process.argv, process.env)',
+    )
+    const processScan = block.indexOf("execSync('ps aux'")
+
+    expect(source).toContain(
+      "import { shouldUseProofOwnedEngineLifecycle } from '../shared/userDataOverride'",
+    )
+    expect(proofGuard).toBeGreaterThanOrEqual(0)
+    expect(processScan).toBeGreaterThan(proofGuard)
+    expect(block.slice(proofGuard, processScan)).toContain('return detected')
+
+    const stopStart = source.indexOf('async stopAll(): Promise<void>')
+    const stopEnd = source.indexOf('// ─── Queries', stopStart)
+    const stopBlock = source.slice(stopStart, stopEnd)
+    expect(stopBlock).toContain('const processes = await this.detect()')
+    expect(stopBlock).toContain("managed.process.kill('SIGTERM')")
+    expect(stopBlock).toContain("managed.process.kill('SIGKILL')")
+  })
+
   it('serializes UI starts and unloads every other local engine before launch', () => {
     const source = readFileSync('src/main/sessions.ts', 'utf8')
     const start = source.indexOf('async startSession(sessionId: string)')

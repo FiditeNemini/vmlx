@@ -28,12 +28,23 @@ describe('app user-data isolation bootstrap', () => {
   it('honors the isolated-secondary proof gate before taking the app-wide lock', () => {
     const main = source()
 
-    expect(main).toContain("import { shouldAllowSecondaryInstance } from '../shared/userDataOverride'")
+    expect(main).toContain('shouldAllowSecondaryInstance,')
+    expect(main).toContain('shouldUseProofOwnedEngineLifecycle,')
+    expect(main).toContain('resolveProofOwnedGatewayPort,')
     expect(main).toContain(
       'const allowSecondaryInstance = shouldAllowSecondaryInstance(process.argv, process.env)',
     )
     expect(main).toContain(
       'const gotTheLock = allowSecondaryInstance || app.requestSingleInstanceLock()',
+    )
+    expect(main).toContain(
+      'const proofOwnedEngineLifecycle = shouldUseProofOwnedEngineLifecycle(',
+    )
+    expect(main).toContain(
+      "console.log('[STARTUP] Skipping global vmlx-engine detection for proof-owned lifecycle')",
+    )
+    expect(main).toContain(
+      'const gwPort = proofOwnedGatewayPort',
     )
   })
 

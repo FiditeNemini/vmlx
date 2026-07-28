@@ -36,6 +36,7 @@ import {
 } from '../shared/sessionConfigMigrations'
 import { appendMetalWiredLimitGuidance, classifyLargeModelMemoryPreflight } from '../shared/metalWiredLimit'
 import { sessionMatchesModelPath } from '../shared/sessionUtils'
+import { shouldUseProofOwnedEngineLifecycle } from '../shared/userDataOverride'
 import {
   classifySessionModelPaths,
   type SessionModelPathClassification,
@@ -1315,6 +1316,18 @@ export class SessionManager extends EventEmitter {
 
   async detect(): Promise<DetectedProcess[]> {
     const detected: DetectedProcess[] = []
+
+    // A source-owned live-proof Electron runs beside the user's real app with
+    // its own userData directory and explicit secondary-instance permission.
+    // That process must manage only engines it launches itself. Keeping the
+    // guard at the global detection boundary prevents startup adoption,
+    // single-model pruning, replacement adoption, and quit/crash cleanup from
+    // ever claiming an unrelated vmlx-engine PID. Normal product launches do
+    // not satisfy the three-part proof gate and retain the existing adoption
+    // and orphan-cleanup behavior.
+    if (shouldUseProofOwnedEngineLifecycle(process.argv, process.env)) {
+      return detected
+    }
 
     try {
       const output = execSync('ps aux', { encoding: 'utf-8', timeout: 5000 })

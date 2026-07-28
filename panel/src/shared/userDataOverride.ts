@@ -34,3 +34,31 @@ export function resolveUserDataOverride(argv: readonly string[], env: UserDataEn
 export function shouldAllowSecondaryInstance(argv: readonly string[], env: UserDataEnv): boolean {
   return !!resolveUserDataOverride(argv, env) && hasSecondaryInstanceFlag(argv, env)
 }
+
+export function shouldUseProofOwnedEngineLifecycle(
+  argv: readonly string[],
+  env: UserDataEnv,
+): boolean {
+  const requested =
+    env.VMLINUX_PROOF_OWNED_ENGINE_LIFECYCLE === '1' ||
+    env.VMLX_PROOF_OWNED_ENGINE_LIFECYCLE === '1'
+  return requested && shouldAllowSecondaryInstance(argv, env)
+}
+
+export function resolveProofOwnedGatewayPort(
+  argv: readonly string[],
+  env: UserDataEnv,
+): number | undefined {
+  if (!shouldUseProofOwnedEngineLifecycle(argv, env)) return undefined
+  const raw = (
+    env.VMLINUX_PROOF_GATEWAY_PORT ||
+    env.VMLX_PROOF_GATEWAY_PORT ||
+    ''
+  ).trim()
+  if (!raw) return undefined
+  const port = Number(raw)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('proof-owned gateway port must be an integer from 1 to 65535')
+  }
+  return port
+}

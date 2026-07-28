@@ -26,6 +26,7 @@ import {
   isServerRequestCorrelationVerified,
   localRendererModuleEvidence,
   ownedUiProducerPid,
+  parseOptionalPort,
   parseResolvedSamplingKwargs,
   privateCacheAttestationSessionArgs,
   readPrivateExternalJson,
@@ -104,6 +105,44 @@ describe("owned UI producer identity", () => {
       harnessPid: 65680,
       parentPid: 1,
     })).toThrow(/producer PID is invalid/);
+  });
+});
+
+describe("proof-owned Electron launch isolation", () => {
+  it("validates explicit backend/CDP/gateway ports", () => {
+    expect(parseOptionalPort(undefined, "CDP")).toBeUndefined();
+    expect(parseOptionalPort("9356", "CDP")).toBe(9356);
+    expect(() => parseOptionalPort("0", "CDP")).toThrow(/integer from 1 to 65535/);
+    expect(() => parseOptionalPort("8080.5", "gateway")).toThrow(
+      /integer from 1 to 65535/,
+    );
+  });
+
+  it("starts both app variants with explicit isolated ownership", () => {
+    const source = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+    const start = source.indexOf("function startUiApp(");
+    const end = source.indexOf("async function childProcessTree", start);
+    const block = source.slice(start, end);
+
+    expect(block).toContain("VMLX_ALLOW_SECONDARY_INSTANCE: '1'");
+    expect(block).toContain("VMLX_PROOF_OWNED_ENGINE_LIFECYCLE: '1'");
+    expect(block).toContain("VMLX_PROOF_GATEWAY_PORT: String(gatewayPort)");
+    expect(block).toContain("VMLINUX_PROOF_OWNED_ENGINE_LIFECYCLE: '1'");
+    expect(block).toContain("VMLINUX_PROOF_GATEWAY_PORT: String(gatewayPort)");
+    expect(block).toContain("`--vmlx-user-data-dir=${userDataDir}`");
+    expect(block.match(/'--vmlx-allow-secondary-instance'/g)).toHaveLength(2);
+    expect(block.match(/env: proofEnv/g)).toHaveLength(2);
+    expect(source).toContain(
+      "throw new Error('Real UI backend, CDP, and gateway ports must be distinct')",
+    );
+    expect(source).toContain(
+      "'Proof-owned gateway shifted from requested port '",
+    );
+    expect(source).toContain("kind: 'electron-gateway'");
+    expect(source).toContain("gateway_process_binding: gatewayProcessBinding");
   });
 });
 const defaults = {

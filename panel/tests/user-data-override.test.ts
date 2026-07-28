@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { resolveUserDataOverride, shouldAllowSecondaryInstance } from '../src/shared/userDataOverride'
+import {
+  resolveProofOwnedGatewayPort,
+  resolveUserDataOverride,
+  shouldAllowSecondaryInstance,
+  shouldUseProofOwnedEngineLifecycle,
+} from '../src/shared/userDataOverride'
 
 describe('local proof user-data override', () => {
   it('prefers explicit launch args over env vars', () => {
@@ -44,5 +49,48 @@ describe('local proof user-data override', () => {
         VMLX_ALLOW_SECONDARY_INSTANCE: '1',
       }),
     ).toBe(true)
+  })
+
+  it('enables proof-owned engine lifecycle only with all three isolation gates', () => {
+    const argv = [
+      'vMLX',
+      '--vmlx-user-data-dir=/tmp/proof',
+      '--vmlx-allow-secondary-instance',
+    ]
+    expect(shouldUseProofOwnedEngineLifecycle(['vMLX'], {
+      VMLX_PROOF_OWNED_ENGINE_LIFECYCLE: '1',
+    })).toBe(false)
+    expect(shouldUseProofOwnedEngineLifecycle(
+      ['vMLX', '--vmlx-user-data-dir=/tmp/proof'],
+      { VMLX_PROOF_OWNED_ENGINE_LIFECYCLE: '1' },
+    )).toBe(false)
+    expect(shouldUseProofOwnedEngineLifecycle(argv, {})).toBe(false)
+    expect(shouldUseProofOwnedEngineLifecycle(argv, {
+      VMLX_PROOF_OWNED_ENGINE_LIFECYCLE: '1',
+    })).toBe(true)
+    expect(shouldUseProofOwnedEngineLifecycle(['vMLX'], {
+      VMLINUX_USER_DATA_DIR: '/tmp/proof',
+      VMLINUX_ALLOW_SECONDARY_INSTANCE: '1',
+      VMLINUX_PROOF_OWNED_ENGINE_LIFECYCLE: '1',
+    })).toBe(true)
+  })
+
+  it('accepts a proof gateway port only inside proof-owned lifecycle', () => {
+    const argv = [
+      'vMLX',
+      '--vmlx-user-data-dir=/tmp/proof',
+      '--vmlx-allow-secondary-instance',
+    ]
+    expect(resolveProofOwnedGatewayPort(argv, {
+      VMLX_PROOF_OWNED_ENGINE_LIFECYCLE: '1',
+      VMLX_PROOF_GATEWAY_PORT: '18081',
+    })).toBe(18081)
+    expect(resolveProofOwnedGatewayPort(['vMLX'], {
+      VMLX_PROOF_GATEWAY_PORT: '18081',
+    })).toBeUndefined()
+    expect(() => resolveProofOwnedGatewayPort(argv, {
+      VMLX_PROOF_OWNED_ENGINE_LIFECYCLE: '1',
+      VMLX_PROOF_GATEWAY_PORT: '65536',
+    })).toThrow(/integer from 1 to 65535/)
   })
 })

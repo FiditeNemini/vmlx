@@ -31,7 +31,11 @@ import { registerModelSettingsHandlers } from './db/model-settings'
 import { registerImageHandlers } from './ipc/image'
 import { networkInterfaces } from 'os'
 import { selectLanAddress, type NetworkInterfaceMap } from './network-address'
-import { shouldAllowSecondaryInstance } from '../shared/userDataOverride'
+import {
+  resolveProofOwnedGatewayPort,
+  shouldAllowSecondaryInstance,
+  shouldUseProofOwnedEngineLifecycle,
+} from '../shared/userDataOverride'
 
 // Dev-only: expose Chrome DevTools Protocol for live UI automation when
 // VMLX_REMOTE_DEBUG_PORT is set. No-op in normal/production launches.
@@ -46,6 +50,15 @@ let downloadWindow: BrowserWindow | null = null
 let handlersRegistered = false
 let isQuitting = false
 const processManager = new ProcessManager()
+const allowSecondaryInstance = shouldAllowSecondaryInstance(process.argv, process.env)
+const proofOwnedEngineLifecycle = shouldUseProofOwnedEngineLifecycle(
+  process.argv,
+  process.env,
+)
+const proofOwnedGatewayPort = resolveProofOwnedGatewayPort(
+  process.argv,
+  process.env,
+)
 
 function getLanAddress(): string | undefined {
   return selectLanAddress(networkInterfaces() as NetworkInterfaceMap)
@@ -126,10 +139,12 @@ process.on('unhandledRejection', (reason) => {
 })
 
 // Prevent multiple instances — second instance would corrupt SQLite
-const allowSecondaryInstance = shouldAllowSecondaryInstance(process.argv, process.env)
 const gotTheLock = allowSecondaryInstance || app.requestSingleInstanceLock()
 if (allowSecondaryInstance) {
   console.log('[STARTUP] Allowing an isolated secondary instance for live proof')
+}
+if (proofOwnedEngineLifecycle) {
+  console.log('[STARTUP] Proof-owned engine lifecycle enabled; global engine adoption is disabled')
 }
 if (!gotTheLock) {
   app.quit()
@@ -486,19 +501,24 @@ app.whenReady().then(async () => {
   const appVersion = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8')).version
   checkForUpdates(() => mainWindow, appVersion)
 
-  // Detect and adopt existing vmlx-engine processes on startup
-  try {
-    const adopted = await sessionManager.detectAndAdoptAll()
-    if (adopted.length > 0) {
-      console.log(`[STARTUP] Adopted ${adopted.length} vmlx-engine process(es):`)
-      for (const s of adopted) {
-        console.log(`  - ${s.modelName || s.modelPath} on port ${s.port} (PID ${s.pid})`)
+  // Detect and adopt existing vmlx-engine processes on normal startup. An
+  // explicitly isolated proof instance owns only the engines it launches.
+  if (proofOwnedEngineLifecycle) {
+    console.log('[STARTUP] Skipping global vmlx-engine detection for proof-owned lifecycle')
+  } else {
+    try {
+      const adopted = await sessionManager.detectAndAdoptAll()
+      if (adopted.length > 0) {
+        console.log(`[STARTUP] Adopted ${adopted.length} vmlx-engine process(es):`)
+        for (const s of adopted) {
+          console.log(`  - ${s.modelName || s.modelPath} on port ${s.port} (PID ${s.pid})`)
+        }
+      } else {
+        console.log('[STARTUP] No existing vmlx-engine processes found')
       }
-    } else {
-      console.log('[STARTUP] No existing vmlx-engine processes found')
+    } catch (e) {
+      console.error('[STARTUP] Error during process detection:', e)
     }
-  } catch (e) {
-    console.error('[STARTUP] Error during process detection:', e)
   }
 
   // Start global health monitor for all sessions
@@ -516,7 +536,8 @@ app.whenReady().then(async () => {
   // Start API gateway (single-port proxy for all models)
   const gatewayEnabled = db.getSetting('gateway_enabled') !== 'false'
   if (gatewayEnabled) {
-    const gwPort = parseInt(db.getSetting('gateway_port') || '8080', 10)
+    const gwPort = proofOwnedGatewayPort
+      ?? parseInt(db.getSetting('gateway_port') || '8080', 10)
     apiGateway.start(gwPort).catch(err => {
       console.error('[gateway] Failed to start:', err.message || err)
     })

@@ -210,6 +210,26 @@ function envNumber(name) {
   return Number.isFinite(parsed) ? parsed : undefined
 }
 
+export function parseOptionalPort(value, label) {
+  if (value == null || String(value).trim() === '') return undefined
+  const port = Number(value)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${label} must be an integer from 1 to 65535`)
+  }
+  return port
+}
+
+const requestedCdpPort = parseOptionalPort(
+  process.env.VMLINUX_REAL_UI_CDP_PORT
+    || process.env.VMLX_REAL_UI_CDP_PORT,
+  'Real UI CDP port',
+)
+const requestedGatewayPort = parseOptionalPort(
+  process.env.VMLINUX_REAL_UI_GATEWAY_PORT
+    || process.env.VMLX_REAL_UI_GATEWAY_PORT,
+  'Real UI gateway port',
+)
+
 const builtinToolsEnabled = envBool('VMLINUX_REAL_UI_BUILTIN_TOOLS', false)
 const samplingOverrides = {
   temperature: envNumber('VMLINUX_REAL_UI_TEMPERATURE'),
@@ -1979,6 +1999,14 @@ async function freePort() {
   })
 }
 
+async function freePortExcluding(excluded) {
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const port = await freePort()
+    if (!excluded.has(port)) return port
+  }
+  throw new Error('Unable to allocate a distinct loopback port')
+}
+
 async function requestJson(url, timeoutMs = 1000) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -2289,20 +2317,30 @@ export function localRendererModuleEvidence() {
   })
 }
 
-function startUiApp(userDataDir, debugPort) {
+function startUiApp(userDataDir, debugPort, gatewayPort) {
+  const proofEnv = {
+    ...process.env,
+    VMLX_SKIP_UPDATE_CHECK: '1',
+    VMLX_ALLOW_SECONDARY_INSTANCE: '1',
+    VMLX_PROOF_OWNED_ENGINE_LIFECYCLE: '1',
+    VMLX_PROOF_GATEWAY_PORT: String(gatewayPort),
+    VMLINUX_PROOF_OWNED_ENGINE_LIFECYCLE: '1',
+    VMLINUX_PROOF_GATEWAY_PORT: String(gatewayPort),
+  }
   if (installedAppPath) {
     const exe = path.join(installedAppPath, 'Contents', 'MacOS', 'vMLX')
     if (!existsSync(exe)) {
       throw new Error(`Installed vMLX executable not found: ${exe}`)
     }
     const args = [
-      `--user-data-dir=${userDataDir}`,
+      `--vmlx-user-data-dir=${userDataDir}`,
+      '--vmlx-allow-secondary-instance',
       `--remote-debugging-port=${debugPort}`,
     ]
     const logs = []
     const proc = spawn(exe, args, {
       cwd: tmpdir(),
-      env: { ...process.env, VMLX_SKIP_UPDATE_CHECK: '1' },
+      env: proofEnv,
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -2316,6 +2354,7 @@ function startUiApp(userDataDir, debugPort) {
       uiLaunchMode: 'installed-app',
       command: [exe, ...args],
       appPath: installedAppPath,
+      gatewayPort,
     }
   }
 
@@ -2324,13 +2363,14 @@ function startUiApp(userDataDir, debugPort) {
     'dev',
     '--',
     '--',
-    `--user-data-dir=${userDataDir}`,
+    `--vmlx-user-data-dir=${userDataDir}`,
+    '--vmlx-allow-secondary-instance',
     `--remote-debugging-port=${debugPort}`,
   ]
   const logs = []
   const proc = spawn('npm', args, {
     cwd: panelDir,
-    env: { ...process.env, VMLX_SKIP_UPDATE_CHECK: '1' },
+    env: proofEnv,
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -2344,6 +2384,7 @@ function startUiApp(userDataDir, debugPort) {
     uiLaunchMode: 'electron-dev',
     command: ['npm', ...args],
     appPath: '',
+    gatewayPort,
   }
 }
 
@@ -6022,7 +6063,24 @@ async function main() {
   ) {
     throw new Error('VMLINUX_REAL_UI_ATTACH_CDP_URL must be an exact loopback HTTP(S) origin')
   }
-  const debugPort = attachCdp ? Number(attachCdp.port) : await freePort()
+  const debugPort = attachCdp
+    ? Number(attachCdp.port)
+    : requestedCdpPort
+      ?? await freePortExcluding(new Set([serverPort]))
+  const gatewayPort = attachCdp
+    ? null
+    : requestedGatewayPort
+      ?? await freePortExcluding(new Set([serverPort, debugPort]))
+  if (
+    !attachCdp
+    && (
+      gatewayPort === serverPort
+      || gatewayPort === debugPort
+      || debugPort === serverPort
+    )
+  ) {
+    throw new Error('Real UI backend, CDP, and gateway ports must be distinct')
+  }
   const baseUrl = `http://127.0.0.1:${serverPort}`
   let ownedRunIntent = null
   let activeReleasePhase = null
@@ -6179,7 +6237,9 @@ async function main() {
   let healthBefore = {}
   let rendererResourceEvidence = {}
   let cdpProcessBinding = null
+  let gatewayProcessBinding = null
   let backendProcessBinding = null
+  let proofGatewayStatus = null
   try {
     app = attachCdp
       ? {
@@ -6194,7 +6254,7 @@ async function main() {
           cdpUrl: attachCdp.origin,
           expectedElectronPid,
         }
-      : startUiApp(userDataDir, debugPort)
+      : startUiApp(userDataDir, debugPort, gatewayPort)
     appLogs = app.logs
 
     const target = await waitForTarget(debugPort, appLogs)
@@ -6224,6 +6284,50 @@ async function main() {
         check();
       })
     `)
+    if (!app.attached) {
+      proofGatewayStatus = await evaluate(cdp, `
+        new Promise((resolve, reject) => {
+          const started = Date.now();
+          const check = async () => {
+            try {
+              const status = await window.api.gateway.getStatus();
+              if (
+                status?.running === true
+                && Number(status.port) === ${JSON.stringify(gatewayPort)}
+                && status.host === '127.0.0.1'
+              ) {
+                resolve(status);
+                return;
+              }
+              if (
+                status?.running === true
+                && Number(status.port) !== ${JSON.stringify(gatewayPort)}
+              ) {
+                reject(new Error(
+                  'Proof-owned gateway shifted from requested port '
+                  + ${JSON.stringify(gatewayPort)}
+                  + ' to '
+                  + String(status.port)
+                ));
+                return;
+              }
+            } catch (_) {}
+            if (Date.now() - started > 30000) {
+              reject(new Error('Timed out waiting for the proof-owned gateway listener'));
+              return;
+            }
+            setTimeout(check, 100);
+          };
+          check();
+        })
+      `)
+      gatewayProcessBinding = await captureListenerProcessBinding({
+        port: gatewayPort,
+        expectedRootPid: app.proc.pid,
+        expectedHealthPid: null,
+        kind: 'electron-gateway',
+      })
+    }
     rendererResourceEvidence = await evaluate(cdp, `({
       pageUrl: location.href,
       scripts: [...document.scripts].map((script) => script.src).filter(Boolean),
@@ -8115,6 +8219,11 @@ async function main() {
       run_id: runId,
       generated_at: new Date().toISOString(),
       base_url: baseUrl,
+      gateway_base_url: proofGatewayStatus
+        ? `http://127.0.0.1:${proofGatewayStatus.port}`
+        : releaseGatewayBaseUrl || null,
+      gateway_status: proofGatewayStatus,
+      gateway_process_binding: gatewayProcessBinding,
       backend_pid: healthProvenance.after.binding.backend_pid,
       backend_identity_fingerprint_sha256:
         healthProvenance.after.binding.fingerprint_sha256,
@@ -8260,6 +8369,7 @@ async function main() {
         ui_only_ready_for_separate_api_run: true,
         run_id: runId,
         base_url: baseUrl,
+        gateway_base_url: uiBackendBinding.gateway_base_url,
         backend_pid: healthProvenance.after.binding.backend_pid,
         backend_identity_fingerprint_sha256:
           healthProvenance.after.binding.fingerprint_sha256,

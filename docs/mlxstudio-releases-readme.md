@@ -29,7 +29,7 @@ MLX Studio is a full-featured macOS app that wraps the [vMLX inference server](h
     <td align="center"><img src="assets/image-tab.png" width="400"><br><b>Image Generation</b></td>
   </tr>
   <tr>
-    <td align="center"><img src="assets/tools-tab.png" width="400"><br><b>Developer Tools</b></td>
+    <td align="center"><img src="assets/gguf-to-mlx.png" width="400"><br><b>Developer Tools</b></td>
     <td align="center"><img src="assets/menu-bar.png" width="400"><br><b>Menu Bar Tray</b></td>
   </tr>
 </table>
@@ -38,8 +38,9 @@ MLX Studio is a full-featured macOS app that wraps the [vMLX inference server](h
 
 > **[Download the latest DMG from Releases](https://github.com/jjang-ai/mlxstudio/releases/latest)**
 
-1. Download `MLXStudio-X.Y.Z-arm64.dmg` from the latest release
-2. Open the DMG and drag **MLX Studio** to your Applications folder
+1. Download `vMLX-X.Y.Z-tahoe-arm64.dmg` for macOS Tahoe (recommended), or
+   `vMLX-X.Y.Z-sequoia-arm64.dmg` for macOS Sequoia
+2. Open the DMG and drag **vMLX** to your Applications folder
 3. Launch from Applications or Spotlight
 
 All releases are signed and notarized by Apple for Gatekeeper compatibility.

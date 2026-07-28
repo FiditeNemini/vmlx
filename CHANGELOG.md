@@ -2,6 +2,52 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.19] - 2026-07-28
+
+### Changed
+
+- Model sampling defaults remain owned by explicit request values and the
+  selected bundle's `jang_config.json` / `generation_config.json`; vMLX no
+  longer synthesizes a Laguna-specific top-k value.
+- Fresh and restored Electron settings hydrate model-derived sampling and
+  output defaults without painting stale placeholder values as saved
+  overrides.
+- Native MTP health and profiling expose cache lifecycle, acceptance, and
+  phase timing without changing generation policy.
+- Looped-transformer cache identities include the effective repeated layer
+  layout, preventing persistent cache reuse across incompatible loop counts.
+- Release and UI proof tooling binds captures to the exact Electron, gateway,
+  Python engine, bundle, request, and endpoint provenance.
+
+### Fixed
+
+- Qwen native-MTP loading preserves already converted backbone normalization
+  tensors while applying conversion only to MTP-owned tensors.
+- Hybrid TurboQuant prompt-batch splits preserve MLX dtype metadata without
+  retry loops or stalled streams.
+- SSD cache eviction preserves causal parent chains, and disk payload encoding
+  runs off the inference completion path after safe MLX detachment.
+- Ollama preserves explicit top-k request semantics, including zero.
+- Prompt-token accounting follows mlx-lm's BOS handling for text-only engines.
+- Literal currency no longer consumes the delimiter of a following valid
+  single-dollar math expression in the Electron renderer.
+
+### Distribution hardening
+
+- Public source and bundled Python attest the exact clean JANG 2.5.34 source
+  tree used by the release.
+- Sequoia and Tahoe artifacts remain separate, signed, notarized outputs bound
+  to one exact source revision.
+
+### Checkpoint boundary
+
+- Laguna XS 2.1 artifact-level long-reasoning repetition is not hidden by an
+  app-side sampler clamp, forced close tag, prompt coercion, or output cap.
+  Bundle publishers should validate corrected artifacts independently.
+- Broader exhaustive family, modality, long-context, cache-pressure, and
+  performance coverage continues after this checkpoint and is not implied by
+  the release version alone.
+
 ## [1.6.18] - 2026-07-25
 
 ### Changed

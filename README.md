@@ -527,7 +527,7 @@ vMLX includes a native macOS desktop app (MLX Studio) with 5 modes:
 <table align="center">
 <tr>
 <td align="center"><img src="https://raw.githubusercontent.com/jjang-ai/vmlx/main/assets/image-edit-tab.png" width="450" alt="Image generation and editing" /></td>
-<td align="center"><img src="https://raw.githubusercontent.com/jjang-ai/vmlx/main/assets/tools-tab.png" width="450" alt="Developer tools" /></td>
+<td align="center"><img src="https://raw.githubusercontent.com/jjang-ai/vmlx/main/assets/gguf-to-mlx.png" width="450" alt="Developer tools" /></td>
 </tr>
 <tr>
 <td align="center"><em>Image generation and editing with Flux models</em></td>

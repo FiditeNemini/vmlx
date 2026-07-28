@@ -89,11 +89,22 @@ venv.bak/
 *.der
 *.mobileprovision
 *.provisionprofile
+*.keychain
+*.keychain-db
+*.keychain-db-*
 *.notary-result.json
 *.notary-results.json
 *.notary-info.json
 *.notary-log.json
 *.notary-submit.json
+notary-result*.json
+notary-results*.json
+notary-info*.json
+notary-log*.json
+notary-submit*.json
+notary-handoff*.env
+signing-handoff*.env
+build-handoff*.env
 notary-results/
 notary-records/
 private-release/
@@ -102,6 +113,12 @@ release-credentials/
 signing-secrets/
 **/*notar*.local.*
 **/*sign*.local.*
+**/*notar*-local*
+**/*notar*-private*
+**/*sign*-local*
+**/*sign*-private*
+**/*codesign*-local*
+**/*codesign*-private*
 **/*release*.private.*
 **/*credential*.local.*
 

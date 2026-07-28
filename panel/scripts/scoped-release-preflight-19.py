@@ -537,6 +537,7 @@ FAMILY_CONTRACTS: dict[str, dict[str, Any]] = {
 
 V5_MANIFEST_SCHEMA = "vmlx-r19-owned-release-preflight-v5"
 V5_PRODUCER_ENVELOPE_SCHEMA = "vmlx-r19-owned-producer-envelope-v5"
+V5_SAMPLING_PROBE_MAX_TOKENS = 16
 V5_UI_SCHEMA = "vmlx-r19-owned-ui-capture-v5"
 V5_API_SCHEMA = "vmlx-r19-owned-api-capture-v5"
 V5_CACHE_SCHEMA = "vmlx-r19-owned-cache-capture-v5"
@@ -6378,9 +6379,11 @@ def _v5_api_facts(
                     != hashlib.sha256(result_bytes).hexdigest()
                     or resolved.get("line_sha256")
                     != hashlib.sha256(line_bytes).hexdigest()
-                    or request.get("max_tokens") != 2
+                    or request.get("max_tokens")
+                    != V5_SAMPLING_PROBE_MAX_TOKENS
                     or request.get("enable_thinking") is not False
-                    or resolved.get("values", {}).get("max_tokens") != 2
+                    or resolved.get("values", {}).get("max_tokens")
+                    != V5_SAMPLING_PROBE_MAX_TOKENS
                     or resolved.get("values", {}).get("enable_thinking")
                     is not False
                 ):
@@ -9606,7 +9609,7 @@ def _v5_api_sampling_capture(
                 }
             ],
             "stream": False,
-            "max_tokens": 16,
+            "max_tokens": V5_SAMPLING_PROBE_MAX_TOKENS,
             "enable_thinking": False,
             **override,
         }
@@ -9667,11 +9670,34 @@ def _v5_api_sampling_capture(
         )
     health_after_bytes = _v5_loopback_http_get(str(binding["health_url"]))
     health_after = json.loads(health_after_bytes)
-    if health_after.get("effective_defaults") != effective_defaults:
+    effective_defaults_after = health_after.get("effective_defaults")
+    if not isinstance(effective_defaults_after, dict):
+        raise RuntimeError("sampling probe post-request health has no effective defaults")
+    stable_sampling_keys = (
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repetition_penalty",
+    )
+    stable_defaults_before = {
+        key: effective_defaults[key]
+        for key in stable_sampling_keys
+        if key in effective_defaults
+    }
+    stable_defaults_after = {
+        key: effective_defaults_after[key]
+        for key in stable_sampling_keys
+        if key in effective_defaults_after
+    }
+    if stable_defaults_after != stable_defaults_before:
         raise RuntimeError("per-request sampling override changed server defaults")
     return {
         "schema": "vmlx-r19-owned-sampling-attestation-v1",
         "health_effective_defaults": effective_defaults,
+        "health_effective_defaults_after": effective_defaults_after,
+        "stable_sampling_defaults_before": stable_defaults_before,
+        "stable_sampling_defaults_after": stable_defaults_after,
         "health_before_sha256": hashlib.sha256(health_before_bytes).hexdigest(),
         "health_after_sha256": hashlib.sha256(health_after_bytes).hexdigest(),
         "default_resolved": observations[0]["resolved"]["values"],

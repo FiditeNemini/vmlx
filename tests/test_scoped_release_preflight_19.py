@@ -387,14 +387,14 @@ def _fixture_sampling_attestation(
             "model": model,
             "messages": [{"role": "user", "content": f"sample-{label}"}],
             "stream": False,
-            "max_tokens": 2,
+            "max_tokens": module.V5_SAMPLING_PROBE_MAX_TOKENS,
             "enable_thinking": False,
             **override,
         }
         resolved_values = {
             **resolved_defaults,
             **override,
-            "max_tokens": 2,
+            "max_tokens": module.V5_SAMPLING_PROBE_MAX_TOKENS,
             "enable_thinking": False,
         }
         line = (
@@ -4325,6 +4325,156 @@ def test_r19_v5_sampling_log_lookup_survives_ring_wrap_and_rejects_duplicates(
             request_id="request-1",
             message_id="message-1",
             timeout=0.1,
+        )
+
+
+def _run_sampling_capture_fixture(
+    module,
+    monkeypatch,
+    *,
+    health_before: dict,
+    health_after: dict,
+):
+    health_rows = [
+        json.dumps({"effective_defaults": health_before}).encode(),
+        json.dumps({"effective_defaults": health_after}).encode(),
+    ]
+    requests = []
+
+    class ProtocolClient:
+        def __init__(self, *_args, **_kwargs):
+            self.headers = {}
+
+    class Harness:
+        pass
+
+    Harness.ProtocolClient = ProtocolClient
+    monkeypatch.setattr(
+        module,
+        "_v5_loopback_http_get",
+        lambda _url: health_rows.pop(0),
+    )
+    monkeypatch.setattr(module, "_v5_cdp_session_logs", lambda *_args: [])
+
+    def original_send(
+        _client,
+        protocol,
+        request,
+        stream,
+        *,
+        capture_label,
+    ):
+        assert protocol == "chat"
+        assert stream is False
+        assert capture_label.startswith("sampling_")
+        requests.append(deepcopy(request))
+        return {
+            "status_code": 200,
+            "errors": [],
+            "terminals": [{"status": "completed"}],
+        }
+
+    def resolved(_binding, _before, **kwargs):
+        request = requests[-1]
+        values = {
+            key: request.get(key, health_before.get(key))
+            for key in ("temperature", "top_p", "top_k", "min_p")
+            if request.get(key, health_before.get(key)) is not None
+        }
+        values.update(
+            {
+                "max_tokens": request["max_tokens"],
+                "enable_thinking": request["enable_thinking"],
+            }
+        )
+        return (
+            {
+                "route": kwargs["route"],
+                "model": "fixture-model",
+                "proof_request_id": kwargs["proof_request_id"],
+                "request_id": kwargs["request_id"],
+                "message_id": kwargs["message_id"],
+                "values": values,
+                "line_sha256": "a" * 64,
+                "line_b64": module._v5_encode_bytes(b"fixture"),
+            },
+            [],
+        )
+
+    monkeypatch.setattr(module, "_v5_wait_for_resolved_sampling_log", resolved)
+    capture = module._v5_api_sampling_capture(
+        Harness,
+        original_send,
+        {
+            "direct_base_url": "http://127.0.0.1:18088",
+            "health_url": "http://127.0.0.1:18088/health",
+            "cdp_url": "http://127.0.0.1:19358",
+            "session_id": "fixture-session",
+            "model": "fixture-model",
+            "model_bundle_path": "/models/fixture-model",
+        },
+    )
+    return capture, requests
+
+
+def test_r19_v5_sampling_capture_allows_dynamic_metal_output_cap(
+    monkeypatch,
+):
+    module = load_module()
+    before = {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 40,
+        "min_p": 0.0,
+        "max_output_tokens": 14518,
+    }
+    after = {**before, "max_output_tokens": 14504}
+    capture, requests = _run_sampling_capture_fixture(
+        module,
+        monkeypatch,
+        health_before=before,
+        health_after=after,
+    )
+    assert capture["stable_sampling_defaults_before"] == {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 40,
+        "min_p": 0.0,
+    }
+    assert (
+        capture["stable_sampling_defaults_after"]
+        == capture["stable_sampling_defaults_before"]
+    )
+    assert capture["health_effective_defaults_after"]["max_output_tokens"] == 14504
+    assert requests[1]["temperature"] == 0.123
+    assert "temperature" not in requests[0]
+    assert "temperature" not in requests[2]
+    assert {
+        request["max_tokens"] for request in requests
+    } == {module.V5_SAMPLING_PROBE_MAX_TOKENS}
+
+
+def test_r19_v5_sampling_capture_rejects_persisted_sampler_override(
+    monkeypatch,
+):
+    module = load_module()
+    before = {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 40,
+        "min_p": 0.0,
+        "max_output_tokens": 14518,
+    }
+    after = {**before, "temperature": 0.123, "max_output_tokens": 14504}
+    with pytest.raises(
+        RuntimeError,
+        match="per-request sampling override changed server defaults",
+    ):
+        _run_sampling_capture_fixture(
+            module,
+            monkeypatch,
+            health_before=before,
+            health_after=after,
         )
 
 

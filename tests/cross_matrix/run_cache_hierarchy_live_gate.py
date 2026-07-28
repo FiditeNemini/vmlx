@@ -3361,11 +3361,24 @@ def validate_l2_size_eviction_observation(
         failures.append("L2 size eviction: old and recent prefixes are identical")
 
     saved_max = _integer(observation.get("saved_max_bytes"))
+    l1_max = _integer(observation.get("l1_max_resident_bytes"))
     peak = _integer(observation.get("peak_observed_bytes"))
     final = _integer(observation.get("final_observed_bytes"))
     fillers = _integer(observation.get("bounded_filler_request_count"))
     if saved_max <= 0:
         failures.append("L2 size eviction: configured disk bound is not positive")
+    if l1_max <= 0:
+        failures.append("L2 size eviction: configured L1 byte bound is not positive")
+    if (
+        observation.get("l1_l2_capacity_margin_ok") is not True
+        or l1_max <= 0
+        or saved_max <= 0
+        or l1_max * 2 >= saved_max
+    ):
+        failures.append(
+            "L2 size eviction: live L1 byte bound does not leave the required "
+            "2x margin below L2"
+        )
     if not 0 <= peak <= saved_max:
         failures.append("L2 size eviction: peak bytes exceed configured bound")
     if not 0 <= final <= peak:
@@ -3378,6 +3391,14 @@ def validate_l2_size_eviction_observation(
         failures.append("L2 size eviction: recent prefix did not survive")
     if observation.get("recent_prefix_last_access_after_old") is not True:
         failures.append("L2 size eviction: recent LRU touch was not proven")
+    if (
+        observation.get("evicting_filler_stage") != "post-refault"
+        or _integer(observation.get("post_refault_filler_request_count")) <= 0
+    ):
+        failures.append(
+            "L2 size eviction: eviction was not caused by a post-refault "
+            "request-correlated filler"
+        )
 
     binding_specs = (
         ("old_before", old_fingerprint),
@@ -4507,6 +4528,23 @@ def _run_store_evict_refault_scenario(
     recent_fingerprint = str(
         recent_before.get("block_chain_fingerprint_sha256") or ""
     )
+    cache_health = health_after.get("cache")
+    if not isinstance(cache_health, dict):
+        cache_health = {}
+    cache_totals = cache_health.get("totals")
+    if not isinstance(cache_totals, dict):
+        cache_totals = {}
+    l1_max_resident_bytes = _integer(
+        cache_totals.get("l1_max_resident_bytes")
+    )
+    configured_l2_max_bytes = _integer(
+        (recent_before.get("l2") or {}).get("store_max_size_bytes")
+    )
+    l1_l2_capacity_margin_ok = (
+        l1_max_resident_bytes > 0
+        and configured_l2_max_bytes > 0
+        and l1_max_resident_bytes * 2 < configured_l2_max_bytes
+    )
     peak_bytes = max(
         _integer((old_before.get("l2") or {}).get("store_total_size_bytes")),
         _integer(
@@ -4520,13 +4558,71 @@ def _run_store_evict_refault_scenario(
     old_after_durable_filler: dict[str, Any] = {}
     recent_after_durable_filler: dict[str, Any] = {}
 
+    def _pre_refault_failure_observation() -> dict[str, Any]:
+        return {
+            "schema": L2_SIZE_EVICTION_SCHEMA,
+            "scenario": "store-evict-refault",
+            "source_head": observed_source.get("head"),
+            "source_tree": observed_source.get("tree"),
+            "model_bundle_fingerprint_sha256": (
+                (health_attestation.get("model_bundle_provenance") or {}).get(
+                    "fingerprint_sha256"
+                )
+            ),
+            "cache_topology_fingerprint_sha256": (
+                (health_attestation.get("cache_topology_provenance") or {}).get(
+                    "fingerprint_sha256"
+                )
+            ),
+            "saved_max_bytes": configured_l2_max_bytes,
+            "l1_max_resident_bytes": l1_max_resident_bytes,
+            "l1_l2_capacity_margin_ok": l1_l2_capacity_margin_ok,
+            "peak_observed_bytes": peak_bytes,
+            "bounded_filler_request_count": filler_count,
+            "old_prefix_fingerprint_sha256": old_fingerprint,
+            "recent_prefix_fingerprint_sha256": recent_fingerprint,
+            "old_before": old_before,
+            "recent_before": recent_before,
+            "recent_pre_refault": recent_pre_refault,
+            "write_fences": durability_rows,
+            "pre_refault_ready": False,
+        }
+
+    if not l1_l2_capacity_margin_ok:
+        failures.append(
+            "store-evict-refault: live L1 byte bound must be less than half "
+            "the configured L2 byte bound before eviction fillers run"
+        )
+        return (
+            _pre_refault_failure_observation(),
+            rows,
+            failures,
+            health_after,
+        )
+
     while filler_count < max_filler_requests:
+        old_pre_refault = _prefix_binding(pre_refault_contract, "old")
+        old_pre_refault_l2 = old_pre_refault.get("l2")
         recent_l1 = recent_pre_refault.get("l1")
         recent_l2 = recent_pre_refault.get("l2")
+        if not isinstance(old_pre_refault_l2, dict):
+            old_pre_refault_l2 = {}
         if not isinstance(recent_l1, dict):
             recent_l1 = {}
         if not isinstance(recent_l2, dict):
             recent_l2 = {}
+        if old_pre_refault_l2.get("terminal_readable") is False:
+            failures.append(
+                "store-evict-refault: older prefix left L2 before the recent "
+                "prefix reached the refault boundary"
+            )
+            break
+        if recent_l2.get("terminal_readable") is False:
+            failures.append(
+                "store-evict-refault: recent prefix left L2 before it could "
+                "be evicted from L1 and refaulted"
+            )
+            break
         if (
             recent_l1.get("terminal_resident_payload_present") is False
             and recent_l2.get("terminal_readable") is True
@@ -4581,23 +4677,6 @@ def _run_store_evict_refault_scenario(
             pre_refault_contract,
             "recent",
         )
-        old_after_filler = _prefix_binding(pre_refault_contract, "old")
-        if (
-            not attestation_failures
-            and durability_proof.get("ok") is True
-            and durability_proof.get("post_eviction_complete") is True
-            and _integer(durability_proof.get("disk_evictions_delta")) > 0
-            and (old_after_filler.get("l2") or {}).get("terminal_readable")
-            is False
-            and (recent_pre_refault.get("l2") or {}).get(
-                "terminal_readable"
-            )
-            is True
-            and not evicting_filler_fence
-        ):
-            evicting_filler_fence = durability_proof
-            old_after_durable_filler = old_after_filler
-            recent_after_durable_filler = recent_pre_refault
         peak_bytes = max(
             peak_bytes,
             _integer(
@@ -4616,15 +4695,39 @@ def _run_store_evict_refault_scenario(
     )
     recent_l1 = recent_pre_refault.get("l1")
     recent_l2 = recent_pre_refault.get("l2")
-    if (
-        not isinstance(recent_l1, dict)
-        or recent_l1.get("terminal_resident_payload_present") is not False
-        or not isinstance(recent_l2, dict)
-        or recent_l2.get("terminal_readable") is not True
-    ):
-        failures.append(
-            "store-evict-refault: bounded fillers did not evict the recent "
-            "prefix from L1 while retaining it in L2"
+    old_pre_refault = _prefix_binding(pre_refault_contract, "old")
+    old_pre_refault_l2 = old_pre_refault.get("l2")
+    pre_refault_ready = (
+        isinstance(recent_l1, dict)
+        and recent_l1.get("terminal_resident_payload_present") is False
+        and isinstance(recent_l2, dict)
+        and recent_l2.get("terminal_readable") is True
+        and isinstance(old_pre_refault_l2, dict)
+        and old_pre_refault_l2.get("terminal_readable") is True
+    )
+    if not pre_refault_ready:
+        if (
+            isinstance(recent_l2, dict)
+            and recent_l2.get("terminal_readable") is True
+            and isinstance(old_pre_refault_l2, dict)
+            and old_pre_refault_l2.get("terminal_readable") is False
+        ):
+            failures.append(
+                "store-evict-refault: older prefix left L2 before the recent "
+                "prefix reached the refault boundary"
+            )
+        elif not any(
+            "recent prefix left L2 before" in failure for failure in failures
+        ):
+            failures.append(
+                "store-evict-refault: bounded fillers did not evict the recent "
+                "prefix from L1 while retaining it in L2"
+            )
+        return (
+            _pre_refault_failure_observation(),
+            rows,
+            failures,
+            health_after,
         )
 
     refault_row, health_after = _run_response_observation(
@@ -4662,6 +4765,7 @@ def _run_store_evict_refault_scenario(
         "recent",
     )
 
+    post_refault_filler_count = 0
     final_contract = post_refault_contract
     old_final = _prefix_binding(final_contract, "old")
     recent_final = _prefix_binding(final_contract, "recent")
@@ -4672,10 +4776,24 @@ def _run_store_evict_refault_scenario(
             old_l2 = {}
         if not isinstance(recent_l2, dict):
             recent_l2 = {}
+        if recent_l2.get("terminal_readable") is False:
+            failures.append(
+                "store-evict-refault: recent prefix left L2 after refault "
+                "before the older prefix was evicted"
+            )
+            break
         if (
             old_l2.get("terminal_readable") is False
             and recent_l2.get("terminal_readable") is True
         ):
+            if (
+                post_refault_filler_count <= 0
+                or not evicting_filler_fence
+            ):
+                failures.append(
+                    "store-evict-refault: older prefix was already absent "
+                    "before a post-refault eviction filler"
+                )
             break
         filler_prompt, marker = _l2_filler_prompt(
             nonce,
@@ -4703,6 +4821,7 @@ def _run_store_evict_refault_scenario(
         durability_proof = _path_free_durability_proof(row, durability)
         durability_rows.append(durability_proof)
         filler_count += 1
+        post_refault_filler_count += 1
         if durable_health:
             health_after = durable_health
         if durability.get("ok") is not True:
@@ -4780,9 +4899,15 @@ def _run_store_evict_refault_scenario(
             )
         ),
         "saved_max_bytes": saved_max,
+        "l1_max_resident_bytes": l1_max_resident_bytes,
+        "l1_l2_capacity_margin_ok": l1_l2_capacity_margin_ok,
         "peak_observed_bytes": peak_bytes,
         "final_observed_bytes": final_bytes,
         "bounded_filler_request_count": filler_count,
+        "post_refault_filler_request_count": post_refault_filler_count,
+        "evicting_filler_stage": (
+            "post-refault" if evicting_filler_fence else None
+        ),
         "old_prefix_fingerprint_sha256": old_fingerprint,
         "recent_prefix_fingerprint_sha256": recent_fingerprint,
         "old_prefix_evicted": old_l2.get("terminal_readable") is False,

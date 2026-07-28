@@ -471,7 +471,7 @@ describe("generated CDP expression syntax", () => {
       "const releasePagedCacheMemoryPercent = activeReleasePhase?.paged_ram",
     );
     expect(harnessSource).toMatch(
-      /const releasePagedCacheMemoryPercent = activeReleasePhase\?\.paged_ram\s+\? 10\s+: null/,
+      /const releasePagedCacheMemoryPercent = activeReleasePhase\?\.paged_ram\s+\? 5\s+: null/,
     );
     expect(harnessSource).toContain(
       "{ cacheMemoryPercent: releasePagedCacheMemoryPercent }",

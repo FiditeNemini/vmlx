@@ -6943,15 +6943,19 @@ async function main() {
   const uiTurnCount = Number(activeReleasePhase?.ui_turn_count || 3)
   const apiActionProfile = activeReleasePhase?.api_action_profile
     || 'full-agentic'
-  // Keep the release proof's paged-RAM tier below its fixed 10 GiB SSD tier.
+  // Keep the release proof's paged-RAM tier well below its fixed 10 GiB SSD
+  // tier. The cache gate must first evict the recent target from L1 while its
+  // exact chain is still readable in L2, then perform a real disk refault.
   // MiniMax M2.7's model-safe q8 cache uses enough bytes per block that the
-  // normal 15% session default made L1 larger than L2 on the release M5 Max.
-  // In that topology the bounded SSD store evicted the recent target before
-  // RAM pressure could refault it, so the phase-2 survival assertion was
-  // unreachable. This is proof-session configuration only; product defaults
-  // and user-created sessions remain unchanged.
+  // normal 15% session default, and even the prior 10% proof override once
+  // earlier phase entries were present, let bounded L2 evict the recent target
+  // before its terminal L1 block was gone. Five percent gives the proof
+  // topology a measured >=2x L2/L1 byte margin. The cache gate independently
+  // attests that live margin and fails closed if the host cannot provide it.
+  // This is proof-session configuration only; product defaults and
+  // user-created sessions remain unchanged.
   const releasePagedCacheMemoryPercent = activeReleasePhase?.paged_ram
-    ? 10
+    ? 5
     : null
   const releaseBlockDiskCacheAnchorPhase = (() => {
     if (!activeReleasePhase) return null

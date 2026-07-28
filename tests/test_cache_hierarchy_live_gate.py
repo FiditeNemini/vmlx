@@ -346,9 +346,13 @@ def _l2_eviction_observation(*, disk_only: bool = False) -> dict:
         "model_bundle_fingerprint_sha256": CONFIG,
         "cache_topology_fingerprint_sha256": CACHE_TOPOLOGY,
         "saved_max_bytes": 1000,
+        "l1_max_resident_bytes": 400,
+        "l1_l2_capacity_margin_ok": True,
         "peak_observed_bytes": 900,
         "final_observed_bytes": 800,
         "bounded_filler_request_count": 2,
+        "post_refault_filler_request_count": 1,
+        "evicting_filler_stage": "post-refault",
         "old_prefix_fingerprint_sha256": "2" * 64,
         "recent_prefix_fingerprint_sha256": "5" * 64,
         "old_prefix_evicted": True,
@@ -833,6 +837,14 @@ def test_prefix_bounds_accepts_smaller_architecture_safe_hybrid_checkpoint():
             ),
             "not bound to its Responses request_id",
         ),
+        (
+            lambda row: row.update({"l1_max_resident_bytes": 600}),
+            "required 2x margin below L2",
+        ),
+        (
+            lambda row: row.update({"evicting_filler_stage": "pre-refault"}),
+            "post-refault request-correlated filler",
+        ),
     ),
 )
 def test_l2_eviction_observation_fails_closed_without_exact_filler_proof(
@@ -851,6 +863,174 @@ def test_l2_eviction_observation_fails_closed_without_exact_filler_proof(
     )
 
     assert any(expected_failure in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    ("old_readable", "recent_resident", "recent_readable", "failure_text"),
+    (
+        (
+            True,
+            True,
+            False,
+            "recent prefix left L2 before",
+        ),
+        (
+            False,
+            True,
+            True,
+            "older prefix left L2 before",
+        ),
+    ),
+)
+def test_l2_eviction_scenario_stops_before_invalid_refault_boundary(
+    monkeypatch,
+    tmp_path,
+    old_readable,
+    recent_resident,
+    recent_readable,
+    failure_text,
+):
+    calls: list[str] = []
+
+    def binding(
+        fingerprint: str,
+        *,
+        resident: bool,
+        readable: bool,
+    ) -> dict:
+        return {
+            "block_chain_fingerprint_sha256": fingerprint,
+            "l1": {
+                "terminal_resident_payload_present": resident,
+            },
+            "l2": {
+                "terminal_readable": readable,
+                "store_total_size_bytes": 600,
+                "store_max_size_bytes": 1000,
+            },
+        }
+
+    before = {
+        "old": binding("2" * 64, resident=True, readable=True),
+        "recent": binding("5" * 64, resident=True, readable=True),
+    }
+    lost = {
+        "old": binding(
+            "2" * 64,
+            resident=False,
+            readable=old_readable,
+        ),
+        "recent": binding(
+            "5" * 64,
+            resident=recent_resident,
+            readable=recent_readable,
+        ),
+    }
+    contracts = iter(((before, []), (lost, [])))
+
+    def fake_response_observation(**kwargs):
+        tag = kwargs["tag"]
+        calls.append(tag)
+        return (
+            {
+                "tag": tag,
+                "response_id": f"resp-{tag}",
+            },
+            {
+                "cache": {
+                    "totals": {
+                        "l1_max_resident_bytes": 400,
+                    }
+                }
+            },
+        )
+
+    monkeypatch.setattr(
+        gate,
+        "_run_response_observation",
+        fake_response_observation,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_scenario_request_durability",
+        lambda **_kwargs: (
+            {"ok": True},
+            {
+                "cache": {
+                    "totals": {
+                        "l1_max_resident_bytes": 400,
+                    }
+                }
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_path_free_durability_proof",
+        lambda row, _durability: {
+            "tag": row["tag"],
+            "ok": True,
+            "post_eviction_complete": True,
+            "disk_evictions_delta": 1,
+        },
+    )
+    monkeypatch.setattr(
+        gate,
+        "_fetch_prefix_attestation",
+        lambda **_kwargs: next(contracts),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_prefix_binding",
+        lambda contract, pair_name: contract[pair_name],
+    )
+    monkeypatch.setattr(
+        gate,
+        "_write_path_free_attestation",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_prefix_access_touch",
+        lambda **_kwargs: pytest.fail(
+            "a missing recent L2 chain must never be cold-restored as refault"
+        ),
+    )
+
+    observation, _rows, failures, _health = (
+        gate._run_store_evict_refault_scenario(
+            base_url="http://127.0.0.1:8000",
+            model=MODEL,
+            nonce=NONCE,
+            records=4,
+            artifact_dir=tmp_path,
+            timeout=5,
+            durability_timeout=5,
+            durability_poll_interval=0.1,
+            max_filler_requests=64,
+            health_attestation={
+                "model_bundle_provenance": {
+                    "fingerprint_sha256": CONFIG,
+                },
+                "cache_topology_provenance": {
+                    "fingerprint_sha256": CACHE_TOPOLOGY,
+                },
+            },
+            observed_source={
+                "head": SOURCE,
+                "tree": _observed_source(SOURCE)["tree"],
+            },
+        )
+    )
+
+    assert calls == [
+        "l2_old_store",
+        "l2_recent_store",
+        "l2_filler_000",
+    ]
+    assert observation["pre_refault_ready"] is False
+    assert observation["bounded_filler_request_count"] == 1
+    assert any(failure_text in failure for failure in failures)
 
 
 def test_l2_eviction_observation_rejects_swapped_stale_and_wrong_source():

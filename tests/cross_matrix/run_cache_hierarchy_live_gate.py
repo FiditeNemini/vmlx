@@ -3080,15 +3080,204 @@ def _validate_execution_prefix_bounds(
 ) -> list[str]:
     if not isinstance(execution, dict) or not isinstance(binding, dict):
         return [f"{label}: execution/prefix binding is missing"]
-    cached_tokens = _integer(execution.get("cached_tokens"))
+    failures: list[str] = []
+    last = execution.get("last_cache_execution")
+    if not isinstance(last, dict):
+        return [f"{label}: request-correlated cache execution is missing"]
+    response_id = str(execution.get("response_id") or "")
+    attempted_tokens = _integer(last.get("attempted_cached_tokens"))
+    cached_tokens = _integer(last.get("cached_tokens"))
+    reported_cached_tokens = _integer(execution.get("cached_tokens"))
     reusable_floor = _integer(binding.get("reusable_prefix_tokens"))
     lcp_ceiling = _integer(binding.get("longest_common_prefix_tokens"))
-    if not reusable_floor <= cached_tokens <= lcp_ceiling:
-        return [
-            f"{label}: cached_tokens={cached_tokens} is outside the exact "
+    block_size = _integer(binding.get("block_size"))
+    if not reusable_floor <= attempted_tokens <= lcp_ceiling:
+        failures.append(
+            f"{label}: attempted_cached_tokens={attempted_tokens} is outside the exact "
             f"block-aligned prefix range [{reusable_floor}, {lcp_ceiling}]"
-        ]
-    return []
+        )
+    if block_size <= 0:
+        failures.append(f"{label}: source block size is invalid")
+    elif attempted_tokens <= 0 or attempted_tokens % block_size != 0:
+        failures.append(
+            f"{label}: attempted_cached_tokens={attempted_tokens} is not "
+            f"positive and block-aligned to {block_size}"
+        )
+    if cached_tokens <= 0 or cached_tokens > attempted_tokens:
+        failures.append(
+            f"{label}: accepted cached_tokens={cached_tokens} is not within "
+            f"(0, {attempted_tokens}]"
+        )
+    elif block_size > 0 and cached_tokens % block_size != 0:
+        failures.append(
+            f"{label}: accepted cached_tokens={cached_tokens} is not "
+            f"block-aligned to {block_size}"
+        )
+    if reported_cached_tokens != cached_tokens:
+        failures.append(
+            f"{label}: Responses cached_tokens={reported_cached_tokens} does "
+            f"not equal scheduler accepted cached_tokens={cached_tokens}"
+        )
+    if block_size <= 0 or attempted_tokens <= 0:
+        return failures
+    if cached_tokens == attempted_tokens:
+        return failures
+
+    partial = execution.get("last_cache_reuse_partial")
+    if not isinstance(partial, dict):
+        failures.append(
+            f"{label}: reduced accepted prefix lacks request-correlated "
+            "memory-fit telemetry"
+        )
+        return failures
+
+    partial_request_id = str(partial.get("request_id") or "")
+    last_request_id = str(last.get("request_id") or "")
+    if (
+        not response_id
+        or partial_request_id != response_id
+        or last_request_id != response_id
+    ):
+        failures.append(
+            f"{label}: memory-fit telemetry is not correlated to the Responses request"
+        )
+    if partial.get("reason") != "insufficient_memory_for_full_cache_merge":
+        failures.append(f"{label}: memory-fit telemetry reason is invalid")
+    partial_original = _integer(partial.get("original_cached_tokens"))
+    partial_used = _integer(partial.get("used_cached_tokens"))
+    partial_dropped = _integer(partial.get("dropped_cached_tokens"))
+    expected_dropped = attempted_tokens - cached_tokens
+    if partial_original != attempted_tokens:
+        failures.append(
+            f"{label}: memory-fit original_cached_tokens={partial_original} "
+            f"does not equal attempted_cached_tokens={attempted_tokens}"
+        )
+    if partial_used != cached_tokens:
+        failures.append(
+            f"{label}: memory-fit used_cached_tokens={partial_used} does not "
+            f"equal accepted cached_tokens={cached_tokens}"
+        )
+    if partial_dropped != expected_dropped:
+        failures.append(
+            f"{label}: memory-fit dropped_cached_tokens={partial_dropped} does "
+            f"not equal attempted-minus-accepted={expected_dropped}"
+        )
+    elif block_size > 0 and partial_dropped % block_size != 0:
+        failures.append(
+            f"{label}: memory-fit dropped_cached_tokens={partial_dropped} is "
+            f"not block-aligned to {block_size}"
+        )
+    prompt_tokens = _integer(last.get("prompt_tokens"))
+    uncached_tokens = _integer(last.get("uncached_prompt_tokens"))
+    if _integer(partial.get("prompt_tokens")) != prompt_tokens:
+        failures.append(f"{label}: memory-fit prompt token count does not match")
+    if (
+        _integer(partial.get("tail_tokens")) != uncached_tokens
+        or uncached_tokens != max(prompt_tokens - cached_tokens, 0)
+    ):
+        failures.append(f"{label}: memory-fit tail token count does not match")
+
+    def _number(value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        if number != number or number in (float("inf"), float("-inf")):
+            return None
+        return number
+
+    available_bytes = _number(partial.get("available_bytes"))
+    cache_bytes = _number(partial.get("cache_bytes"))
+    budget_bytes = _number(partial.get("budget_bytes"))
+    original_needed_bytes = _number(partial.get("original_needed_bytes"))
+    used_cache_bytes = _number(partial.get("used_cache_bytes"))
+    used_needed_bytes = _number(partial.get("used_needed_bytes"))
+    multiplier = _number(partial.get("multiplier"))
+    budget_fraction = _number(partial.get("budget_fraction"))
+    if (
+        available_bytes is None
+        or available_bytes <= 0
+        or cache_bytes is None
+        or cache_bytes <= 0
+        or budget_bytes is None
+        or original_needed_bytes is None
+        or used_cache_bytes is None
+        or used_needed_bytes is None
+        or multiplier is None
+        or multiplier <= 0
+        or budget_fraction is None
+        or not 0.10 <= budget_fraction <= 0.95
+    ):
+        failures.append(f"{label}: exact memory-fit byte telemetry is invalid")
+        return failures
+
+    expected_budget_bytes = available_bytes * budget_fraction
+    expected_original_needed_bytes = cache_bytes * multiplier
+    expected_used_cache_bytes = cache_bytes * (
+        float(cached_tokens) / float(attempted_tokens)
+    )
+    expected_used_needed_bytes = expected_used_cache_bytes * multiplier
+    float_tolerance = 1e-9
+    for field, observed, expected in (
+        ("budget_bytes", budget_bytes, expected_budget_bytes),
+        (
+            "original_needed_bytes",
+            original_needed_bytes,
+            expected_original_needed_bytes,
+        ),
+        ("used_cache_bytes", used_cache_bytes, expected_used_cache_bytes),
+        ("used_needed_bytes", used_needed_bytes, expected_used_needed_bytes),
+    ):
+        if abs(observed - expected) > max(1.0, abs(expected)) * float_tolerance:
+            failures.append(
+                f"{label}: memory-fit {field} does not match source telemetry"
+            )
+    if (
+        original_needed_bytes <= budget_bytes
+        or used_needed_bytes > budget_bytes
+    ):
+        failures.append(
+            f"{label}: memory-fit budget does not prove full reuse exceeded "
+            "the budget while accepted reuse fit"
+        )
+
+    bytes_per_token = max(cache_bytes / float(attempted_tokens), 1.0)
+    cache_budget_bytes = (
+        available_bytes * budget_fraction / float(multiplier)
+    )
+    expected_target = int(cache_budget_bytes / bytes_per_token)
+    expected_target = min(expected_target, attempted_tokens - 1)
+    expected_target = (expected_target // block_size) * block_size
+    if expected_target < block_size:
+        expected_target = 0
+    cache_contract = str(partial.get("cache_contract") or "")
+    exact_max_contracts = {
+        "plain_kv",
+        "turboquant_kv",
+        "mixed_swa_kv",
+    }
+    architecture_safe_contracts = {
+        "hybrid_ssm",
+        "deepseek_v4_composite",
+        "zaya_cca",
+    }
+    if cache_contract not in exact_max_contracts | architecture_safe_contracts:
+        failures.append(
+            f"{label}: memory-fit cache_contract={cache_contract!r} is unsupported"
+        )
+    elif cache_contract in exact_max_contracts and cached_tokens != expected_target:
+        failures.append(
+            f"{label}: accepted cached_tokens={cached_tokens} is not the "
+            f"maximum memory-fit block-aligned prefix={expected_target}"
+        )
+    elif (
+        cache_contract in architecture_safe_contracts
+        and cached_tokens > expected_target
+    ):
+        failures.append(
+            f"{label}: architecture-safe cached_tokens={cached_tokens} exceeds "
+            f"the maximum memory-fit block-aligned prefix={expected_target}"
+        )
+    return failures
 
 
 def _validate_strict_write_fence_proof(
@@ -3920,6 +4109,9 @@ def _run_response_observation(
             "last_cache_execution": (after.get("scheduler") or {}).get(
                 "last_cache_execution"
             ),
+            "last_cache_reuse_partial": (after.get("scheduler") or {}).get(
+                "last_cache_reuse_partial"
+            ),
             "scheduler_cache": (
                 (after.get("cache") or {}).get("scheduler_cache") or {}
             ),
@@ -3957,6 +4149,9 @@ def _path_free_execution(row: dict[str, Any]) -> dict[str, Any]:
     last = row.get("last_cache_execution")
     if not isinstance(last, dict):
         last = {}
+    partial = row.get("last_cache_reuse_partial")
+    if not isinstance(partial, dict):
+        partial = {}
     cache_detail = row.get("cache_detail")
     if not isinstance(cache_detail, dict):
         cache_detail = {}
@@ -4041,6 +4236,37 @@ def _path_free_execution(row: dict[str, Any]) -> dict[str, Any]:
                 "tq_native_blocks",
             )
             if key in last
+        },
+        "last_cache_reuse_partial": {
+            key: partial.get(key)
+            for key in (
+                "request_id",
+                "reason",
+                "cache_contract",
+                "cache_format",
+                "available_bytes",
+                "cache_bytes",
+                "budget_bytes",
+                "original_needed_bytes",
+                "used_cache_bytes",
+                "used_needed_bytes",
+                "original_needed_mb",
+                "budget_mb",
+                "available_mb",
+                "original_cache_mb",
+                "used_cache_mb",
+                "used_needed_mb",
+                "multiplier",
+                "budget_fraction",
+                "kv_cache_bits",
+                "original_cached_tokens",
+                "used_cached_tokens",
+                "dropped_cached_tokens",
+                "tail_tokens",
+                "prompt_tokens",
+                "cache_type",
+            )
+            if key in partial
         },
     }
 

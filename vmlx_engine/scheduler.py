@@ -3858,6 +3858,10 @@ class Scheduler:
         remaining_tokens: List[int],
         cache_contract: str,
     ) -> None:
+        # Paged lookup credits the full prefix it found before worker-side
+        # memory fitting. Reconcile that optimistic credit to the smaller
+        # block-aligned prefix generation actually consumes.
+        self._accept_paged_hit_credit(request, used_cached_tokens)
         budget_bytes = float(available_bytes) * float(budget_fraction)
         if original_cached_tokens > 0 and cache_bytes > 0:
             used_cache_bytes = float(cache_bytes) * (
@@ -3872,6 +3876,12 @@ class Scheduler:
             "reason": "insufficient_memory_for_full_cache_merge",
             "cache_contract": cache_contract,
             "cache_format": self._cache_reuse_cache_format(cache_to_use),
+            "available_bytes": int(available_bytes),
+            "cache_bytes": int(cache_bytes),
+            "budget_bytes": budget_bytes,
+            "original_needed_bytes": float(cache_bytes) * float(multiplier),
+            "used_cache_bytes": used_cache_bytes,
+            "used_needed_bytes": used_cache_bytes * float(multiplier),
             "original_needed_mb": round((cache_bytes * multiplier) / 1048576, 1),
             "budget_mb": round(budget_bytes / 1048576, 1),
             "available_mb": round(available_bytes / 1048576, 1),

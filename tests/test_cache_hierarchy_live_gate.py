@@ -259,6 +259,7 @@ def _path_free_execution() -> dict:
             "cache_outcome": "hit",
             "cache_detail": "block-disk",
             "prompt_tokens": 35,
+            "attempted_cached_tokens": 32,
             "cached_tokens": 32,
             "uncached_prompt_tokens": 3,
             "prefill_tokens": 3,
@@ -635,6 +636,168 @@ def test_l2_eviction_observation_accepts_truthful_ssd_only_state():
         assert l1["backend_mode"] == "block_disk_only"
         assert l1["paged_ram_enabled"] is False
         assert l1["resident_payload_blocks_present"] == 0
+
+
+def test_l2_eviction_observation_accepts_request_correlated_memory_fit_partial():
+    observation = _l2_eviction_observation()
+    execution = observation["recent_refault_execution"]
+    execution["cached_tokens"] = 16
+    execution["last_cache_execution"].update(
+        {
+            "attempted_cached_tokens": 32,
+            "cached_tokens": 16,
+            "uncached_prompt_tokens": 19,
+            "prefill_tokens": 19,
+        }
+    )
+    execution["last_cache_reuse_partial"] = {
+        "request_id": "resp-l2",
+        "reason": "insufficient_memory_for_full_cache_merge",
+        "cache_contract": "turboquant_kv",
+        "available_bytes": 4800,
+        "cache_bytes": 3200,
+        "budget_bytes": 3600.0,
+        "original_needed_bytes": 6400.0,
+        "used_cache_bytes": 1600.0,
+        "used_needed_bytes": 3200.0,
+        "multiplier": 2.0,
+        "budget_fraction": 0.75,
+        "original_cached_tokens": 32,
+        "used_cached_tokens": 16,
+        "dropped_cached_tokens": 16,
+        "tail_tokens": 19,
+        "prompt_tokens": 35,
+    }
+
+    failures = gate.validate_l2_size_eviction_observation(
+        observation,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+        max_filler_requests=64,
+    )
+
+    assert failures == []
+
+
+def test_l2_eviction_observation_rejects_unattested_memory_fit_partial():
+    observation = _l2_eviction_observation()
+    execution = observation["recent_refault_execution"]
+    execution["cached_tokens"] = 16
+    execution["last_cache_execution"].update(
+        {
+            "attempted_cached_tokens": 32,
+            "cached_tokens": 16,
+            "uncached_prompt_tokens": 19,
+            "prefill_tokens": 19,
+        }
+    )
+
+    failures = gate.validate_l2_size_eviction_observation(
+        observation,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+        max_filler_requests=64,
+    )
+
+    assert any(
+        "lacks request-correlated memory-fit telemetry" in failure
+        for failure in failures
+    )
+
+
+def test_prefix_bounds_rejects_unnecessarily_short_memory_fit_partial():
+    execution = _path_free_execution()
+    execution["cached_tokens"] = 16
+    execution["last_cache_execution"].update(
+        {
+            "prompt_tokens": 80,
+            "attempted_cached_tokens": 64,
+            "cached_tokens": 16,
+            "uncached_prompt_tokens": 64,
+            "prefill_tokens": 64,
+        }
+    )
+    execution["last_cache_reuse_partial"] = {
+        "request_id": "resp-l2",
+        "reason": "insufficient_memory_for_full_cache_merge",
+        "cache_contract": "turboquant_kv",
+        "available_bytes": 12000,
+        "cache_bytes": 6400,
+        "budget_bytes": 9000.0,
+        "original_needed_bytes": 12800.0,
+        "used_cache_bytes": 1600.0,
+        "used_needed_bytes": 3200.0,
+        "multiplier": 2.0,
+        "budget_fraction": 0.75,
+        "original_cached_tokens": 64,
+        "used_cached_tokens": 16,
+        "dropped_cached_tokens": 48,
+        "tail_tokens": 64,
+        "prompt_tokens": 80,
+    }
+    binding = {
+        "block_size": 16,
+        "reusable_prefix_tokens": 64,
+        "longest_common_prefix_tokens": 65,
+    }
+
+    failures = gate._validate_execution_prefix_bounds(
+        execution,
+        binding,
+        label="L2 memory-fit",
+    )
+
+    assert any(
+        "is not the maximum memory-fit block-aligned prefix=32" in failure
+        for failure in failures
+    )
+
+
+def test_prefix_bounds_accepts_smaller_architecture_safe_hybrid_checkpoint():
+    execution = _path_free_execution()
+    execution["cached_tokens"] = 16
+    execution["last_cache_execution"].update(
+        {
+            "prompt_tokens": 80,
+            "attempted_cached_tokens": 64,
+            "cached_tokens": 16,
+            "uncached_prompt_tokens": 64,
+            "prefill_tokens": 64,
+        }
+    )
+    execution["last_cache_reuse_partial"] = {
+        "request_id": "resp-l2",
+        "reason": "insufficient_memory_for_full_cache_merge",
+        "cache_contract": "hybrid_ssm",
+        "available_bytes": 12000,
+        "cache_bytes": 6400,
+        "budget_bytes": 9000.0,
+        "original_needed_bytes": 12800.0,
+        "used_cache_bytes": 1600.0,
+        "used_needed_bytes": 3200.0,
+        "multiplier": 2.0,
+        "budget_fraction": 0.75,
+        "original_cached_tokens": 64,
+        "used_cached_tokens": 16,
+        "dropped_cached_tokens": 48,
+        "tail_tokens": 64,
+        "prompt_tokens": 80,
+    }
+    binding = {
+        "block_size": 16,
+        "reusable_prefix_tokens": 64,
+        "longest_common_prefix_tokens": 65,
+    }
+
+    failures = gate._validate_execution_prefix_bounds(
+        execution,
+        binding,
+        label="L2 hybrid memory-fit",
+    )
+
+    assert failures == []
 
 
 @pytest.mark.parametrize(
@@ -1352,6 +1515,37 @@ def test_hybrid_path_free_execution_drops_lookup_debug_paths():
         == execution["response_id"]
         == execution["last_cache_execution"]["request_id"]
     )
+
+
+def test_path_free_execution_retains_only_memory_fit_attestation_fields():
+    row = _path_free_execution()
+    row["last_cache_reuse_partial"] = {
+        "request_id": "resp-l2",
+        "reason": "insufficient_memory_for_full_cache_merge",
+        "available_bytes": 4800,
+        "cache_bytes": 3200,
+        "budget_bytes": 3600.0,
+        "original_needed_bytes": 6400.0,
+        "used_cache_bytes": 1600.0,
+        "used_needed_bytes": 3200.0,
+        "multiplier": 2.0,
+        "budget_fraction": 0.75,
+        "original_cached_tokens": 32,
+        "used_cached_tokens": 16,
+        "dropped_cached_tokens": 16,
+        "tail_tokens": 19,
+        "prompt_tokens": 35,
+        "debug_path": "/private/cache/must-not-leak",
+    }
+
+    execution = gate._path_free_execution(row)
+    partial = execution["last_cache_reuse_partial"]
+
+    assert partial["request_id"] == execution["response_id"] == "resp-l2"
+    assert partial["available_bytes"] == 4800
+    assert partial["used_needed_bytes"] == 3200.0
+    assert "debug_path" not in partial
+    assert "/private/" not in json.dumps(execution, sort_keys=True)
 
 
 def test_hybrid_store_contract_accepts_only_paged_partial_prefix_with_tq_and_ssm():

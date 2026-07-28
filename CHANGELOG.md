@@ -27,6 +27,8 @@ All notable changes to vMLX Engine will be documented in this file.
   retry loops or stalled streams.
 - SSD cache eviction preserves causal parent chains, and disk payload encoding
   runs off the inference completion path after safe MLX detachment.
+- Memory-pressure cache trims preserve the maximum safe block-aligned SSD
+  prefix and reconcile saved-token telemetry to the prefix actually consumed.
 - Ollama preserves explicit top-k request semantics, including zero.
 - Prompt-token accounting follows mlx-lm's BOS handling for text-only engines.
 - Literal currency no longer consumes the delimiter of a following valid

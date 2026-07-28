@@ -897,10 +897,17 @@ class TestSchedulerBasic:
 
             def __init__(self):
                 self.trim_calls = []
+                self.credit_adjustments = []
+                self.tokens_saved = 256
 
             def trim_block_table(self, request_id, target_tokens):
                 self.trim_calls.append((request_id, target_tokens))
                 return trimmed
+
+            def adjust_cache_hit_credit(self, request_id, *, accepted_tokens):
+                self.credit_adjustments.append((request_id, accepted_tokens))
+                self.tokens_saved = accepted_tokens
+                return True
 
             def reconstruct_cache(self, block_table):
                 assert block_table is trimmed
@@ -938,6 +945,8 @@ class TestSchedulerBasic:
         assert request.shared_prefix_blocks == 2
         assert request.prompt_cache == ["small-cache"]
         assert cache.trim_calls == [("req-partial", 128)]
+        assert cache.credit_adjustments == [("req-partial", 128)]
+        assert cache.tokens_saved == 128
 
         stats = scheduler.get_stats()
         assert stats["cache_reuse_partial_downgrades"] == 1
@@ -945,6 +954,12 @@ class TestSchedulerBasic:
         assert stats["last_cache_reuse_partial"]["original_cached_tokens"] == 256
         assert stats["last_cache_reuse_partial"]["used_cached_tokens"] == 128
         assert stats["last_cache_reuse_partial"]["tail_tokens"] == 192
+        assert stats["last_cache_reuse_partial"]["available_bytes"] == 1_100
+        assert stats["last_cache_reuse_partial"]["cache_bytes"] == 1_000
+        assert stats["last_cache_reuse_partial"]["budget_bytes"] == 1_045.0
+        assert stats["last_cache_reuse_partial"]["original_needed_bytes"] == 2_000.0
+        assert stats["last_cache_reuse_partial"]["used_cache_bytes"] == 500.0
+        assert stats["last_cache_reuse_partial"]["used_needed_bytes"] == 1_000.0
 
     def test_memory_pressure_partial_reuse_records_effective_budget_and_final_cache(
         self, mock_model, mock_tokenizer

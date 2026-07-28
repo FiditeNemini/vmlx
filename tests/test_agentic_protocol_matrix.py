@@ -2496,3 +2496,593 @@ def test_nonstream_chat_capture_preserves_parser_input_bytes(
     assert manifest["complete"] is True
     assert manifest["routes"][0]["protocol"] == "chat"
     assert manifest["routes"][0]["capture_label"] == "nonstream-round1"
+
+
+def test_prepared_body_transport_is_byte_exact(monkeypatch):
+    payload = {
+        "model": "served-model",
+        "messages": [{"role": "user", "content": "frozen"}],
+        "stream": False,
+    }
+    body = matrix.frozen_request_body(payload)
+    observed = {}
+
+    def fake_post(url, **kwargs):
+        observed.update(kwargs)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = (
+            b'{"choices":[{"message":{"content":"done"},'
+            b'"finish_reason":"stop"}]}'
+        )
+        response.encoding = "utf-8"
+        response.request = requests.Request(
+            "POST", url, headers=kwargs["headers"], data=kwargs["data"]
+        ).prepare()
+        return response
+
+    monkeypatch.setattr(matrix.requests, "post", fake_post)
+    result = matrix.ProtocolClient("http://direct.invalid", None, 30).send(
+        "chat", payload, False, prepared_body=body
+    )
+
+    assert observed["data"] == body
+    assert observed["stream"] is True
+    assert result["content"] == "done"
+    assert result["_prepared_request_body_sha256"] == hashlib.sha256(body).hexdigest()
+
+    def mutating_post(url, **kwargs):
+        response = fake_post(url, **kwargs)
+        response.request = requests.Request(
+            "POST", url, headers=kwargs["headers"], data=kwargs["data"] + b" "
+        ).prepare()
+        return response
+
+    monkeypatch.setattr(matrix.requests, "post", mutating_post)
+    with pytest.raises(ValueError, match="changed before transport"):
+        matrix.ProtocolClient("http://direct.invalid", None, 30).send(
+            "chat", payload, False, prepared_body=body
+        )
+
+
+def _paired_replay(
+    monkeypatch,
+    *,
+    protocol="chat",
+    mode="nonstream",
+    stage=2,
+    direct=("same", "same"),
+    gateway="same",
+    body_fault=None,
+    lifecycle="exact",
+    identity="match",
+    payload=None,
+    canary="",
+    raw_override=None,
+):
+    activity = {
+        "num_running": 1 if lifecycle == "preexisting" else 0,
+        "active_requests": 1 if lifecycle == "preexisting" else 0,
+    }
+    calls = []
+    direct_index = 0
+
+    class Client:
+        def __init__(self, label):
+            self.label = label
+
+        def send(
+            self,
+            sent_protocol,
+            _payload,
+            sent_stream,
+            *,
+            capture_label,
+            prepared_body,
+        ):
+            nonlocal direct_index
+            leg = "b" if self.label == "gateway" else ("a1", "a2")[direct_index]
+            if self.label == "gateway":
+                activity.update(
+                    num_running=2 if lifecycle == "concurrent" else 1,
+                    active_requests=2 if lifecycle == "concurrent" else 1,
+                )
+                if lifecycle == "inactive":
+                    activity.update(num_running=0, active_requests=0)
+                time.sleep(0.04)
+                activity.update(num_running=0, active_requests=0)
+                content = gateway
+            else:
+                content = direct[direct_index]
+                direct_index += 1
+            calls.append(
+                (self.label, sent_protocol, sent_stream, capture_label, prepared_body)
+            )
+            digest = hashlib.sha256(prepared_body).hexdigest()
+            if body_fault == leg:
+                digest = "" if leg == "a2" else "0" * 64
+            event = {
+                "at_ms": 7,
+                "channel": "tool",
+                "kind": (
+                    "ollama.tool" if sent_protocol == "ollama" else "chat.tool.complete"
+                ),
+                "call_id": f"volatile-{leg}",
+            }
+            error = {"channel": "error", "kind": "json_parse_error"}
+            if canary:
+                event["private_event"] = canary
+                error["private_error"] = canary
+            response = {
+                "status_code": 200,
+                "elapsed_ms": 7,
+                "response_id": f"response-{leg}",
+                "reasoning": canary or "private reasoning",
+                "content": canary or content,
+                "notices": [canary or f"notice-{content}"],
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": f"volatile-{leg}",
+                        "name": "run_command",
+                        "arguments": {"command": canary or "pwd"},
+                    }
+                ],
+                "terminals": ["stop"],
+                "errors": [error],
+                "events": [event],
+                "_prepared_request_body_sha256": digest,
+            }
+            if raw_override:
+                response.update(raw_override)
+            return response
+
+    expected = "f" * 64
+
+    def fake_identity(_health):
+        if identity == "failure":
+            return {}, ["identity invalid"]
+        return {
+            "fingerprint_sha256": "e" * 64 if identity == "mismatch" else expected
+        }, []
+
+    def health_probe():
+        if lifecycle == "exception":
+            raise RuntimeError("probe failed")
+        return {
+            "scheduler": {"num_running": activity["num_running"]},
+            "cache": {
+                "scheduler_cache": {
+                    "active_requests": activity["active_requests"]
+                }
+            },
+        }
+
+    monkeypatch.setattr(matrix, "_health_identity", fake_identity)
+    result = matrix.run_paired_replay_discriminator(
+        direct_client=Client("direct"),
+        gateway_client=Client("gateway"),
+        protocol=protocol,
+        mode=mode,
+        stage=stage,
+        payload=payload
+        or {
+            "model": "served-model",
+            "messages": [{"role": "user", "content": "frozen"}],
+            "stream": mode == "stream",
+        },
+        expected_backend_identity_fingerprint=expected,
+        gateway_direct_health_probe=health_probe,
+        health_timeout_s=0.2,
+        health_poll_interval_s=0.002,
+    )
+    return result, calls
+
+
+@pytest.mark.parametrize(
+    ("protocol", "mode", "stage", "direct", "gateway", "classification"),
+    [
+        (
+            "chat",
+            "nonstream",
+            2,
+            ("same", "same"),
+            "different",
+            "gateway_owned_difference",
+        ),
+        (
+            "ollama",
+            "stream",
+            3,
+            ("same", "same"),
+            "same",
+            "all_equal_prior_history_variance",
+        ),
+        (
+            "chat",
+            "nonstream",
+            2,
+            ("first", "second"),
+            "gateway",
+            "shared_backend_model_or_cache_nondeterminism",
+        ),
+    ],
+)
+def test_paired_replay_classification_and_frozen_order(
+    monkeypatch, protocol, mode, stage, direct, gateway, classification
+):
+    result, calls = _paired_replay(
+        monkeypatch,
+        protocol=protocol,
+        mode=mode,
+        stage=stage,
+        direct=direct,
+        gateway=gateway,
+    )
+    assert result["pass"] is True
+    assert result["classification"] == classification
+    assert [row[0] for row in calls] == ["direct", "gateway", "direct"]
+    assert len({row[4] for row in calls}) == 1
+    assert result["checks"] == {
+        "exact_body_sha_equal": True,
+        "gateway_backend_lifecycle_pass": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("body_fault", "lifecycle", "identity"),
+    [
+        ("b", "exact", "match"),
+        ("a2", "exact", "match"),
+        (None, "inactive", "match"),
+        (None, "concurrent", "match"),
+        (None, "preexisting", "match"),
+        (None, "exact", "mismatch"),
+        (None, "exact", "failure"),
+        (None, "exception", "match"),
+    ],
+)
+def test_paired_replay_suppresses_unattested_classification(
+    monkeypatch, body_fault, lifecycle, identity
+):
+    result, _ = _paired_replay(
+        monkeypatch,
+        body_fault=body_fault,
+        lifecycle=lifecycle,
+        identity=identity,
+    )
+    assert result["pass"] is False
+    assert result["classification"] == "unverified"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["tool_calls", "notices", "terminals", "errors", "events"],
+)
+@pytest.mark.parametrize("invalid_container", [{}, (), ""])
+def test_paired_replay_pipeline_rejects_nonlist_raw_collections(
+    monkeypatch,
+    field,
+    invalid_container,
+):
+    with pytest.raises(ValueError, match=rf"raw {field} is not a list"):
+        _paired_replay(
+            monkeypatch,
+            raw_override={field: invalid_container},
+        )
+
+
+def test_paired_replay_rejects_invalid_target_prerequisites():
+    kwargs = {
+        "direct_client": None,
+        "gateway_client": None,
+        "payload": {"model": "served-model", "stream": True},
+        "expected_backend_identity_fingerprint": "f" * 64,
+        "gateway_direct_health_probe": lambda: {},
+    }
+    with pytest.raises(ValueError, match="limited to Chat nonstream"):
+        matrix.run_paired_replay_discriminator(
+            protocol="responses", mode="stream", stage=3, **kwargs
+        )
+    with pytest.raises(ValueError, match="stream mode"):
+        matrix.run_paired_replay_discriminator(
+            protocol="chat", mode="nonstream", stage=2, **kwargs
+        )
+    kwargs["payload"]["stream"] = False
+    kwargs["gateway_direct_health_probe"] = None
+    with pytest.raises(ValueError, match="direct-health"):
+        matrix.run_paired_replay_discriminator(
+            protocol="chat", mode="nonstream", stage=2, **kwargs
+        )
+
+
+def test_paired_replay_whole_result_redacts_request_and_response_canaries(
+    monkeypatch,
+):
+    canaries = [
+        "CANARY-PROMPT",
+        "CANARY-CONTRACT-NAME",
+        "CANARY-DESCRIPTION",
+        "CANARY-SCHEMA-KEY",
+        "CANARY-CHOICE",
+        "CANARY-CALL-ID",
+        "CANARY-HISTORY-NAME",
+        "CANARY-RESULT-NAME",
+        "CANARY-RESULT",
+        "CANARY-PREVIOUS-ID",
+        "CANARY-RESPONSE",
+    ]
+    payload = {
+        "model": "served-model",
+        "messages": [
+            {"role": "user", "content": canaries[0]},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": canaries[5],
+                        "type": "function",
+                        "function": {"name": canaries[6], "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": canaries[5],
+                "name": canaries[7],
+                "content": canaries[8],
+            },
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": canaries[1],
+                    "description": canaries[2],
+                    "parameters": {
+                        "type": "object",
+                        "properties": {canaries[3]: {"type": "string"}},
+                    },
+                },
+            }
+        ],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": canaries[4]},
+        },
+        "previous_response_id": canaries[9],
+        "stream": False,
+    }
+    result, _ = _paired_replay(
+        monkeypatch, payload=payload, canary=canaries[10]
+    )
+    serialized = json.dumps(result, sort_keys=True)
+    assert all(canary not in serialized for canary in canaries)
+    linkage = result["request"]["tool_history_linkage"]
+    assert linkage[0]["call_id"] == linkage[1]["call_id"] == "tool_call_1"
+    response = result["responses"]["a1"]
+    assert response["tool_calls"][0]["call_id"] == response["events"][0]["call_id"]
+
+
+def _private_response(**overrides):
+    value = {
+        "reasoning": "",
+        "content": "",
+        "status_code": 200,
+        "notices": [],
+        "tool_calls": [],
+        "terminals": [],
+        "errors": [],
+        "events": [],
+    }
+    value.update(overrides)
+    return value
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"tool_calls": [["nested"]]},
+        {
+            "tool_calls": [
+                {"index": 0, "name": "run_command", "arguments": []}
+            ]
+        },
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "name": "run_command",
+                    "arguments": {},
+                    "unknown": {"nested": "value"},
+                }
+            ]
+        },
+        {"notices": [{"nested": "value"}]},
+        {"terminals": [{"nested": "value"}]},
+        {"terminals": ["not-a-terminal"]},
+        {"errors": {}},
+        {"errors": ()},
+        {"errors": ""},
+        {"events": {}},
+        {"events": ()},
+        {"events": ""},
+        {
+            "events": [
+                {
+                    "channel": "content",
+                    "kind": "chat.content.complete",
+                    "unknown": {"nested": "value"},
+                }
+            ]
+        },
+        {
+            "errors": [
+                {
+                    "channel": "error",
+                    "kind": "json_parse_error",
+                    "unknown": {"nested": "value"},
+                }
+            ]
+        },
+    ],
+)
+def test_paired_replay_public_response_rejects_unsupported_shapes(overrides):
+    with pytest.raises(ValueError):
+        matrix._paired_public_response(_private_response(**overrides))
+
+
+def test_paired_replay_path_free_event_contract():
+    event = {
+        "channel": "content",
+        "kind": "chat.content.complete",
+        "chars": 7,
+        "sha256": matrix._sha256("visible"),
+    }
+    assert matrix._paired_public_response(
+        _private_response(events=[event])
+    )["events"] == [event]
+    for invalid in (
+        {**event, "chars": -1},
+        {**event, "sha256": "invalid"},
+        {**event, "kind": "delta"},
+    ):
+        with pytest.raises(ValueError):
+            matrix._paired_public_response(
+                _private_response(events=[invalid])
+            )
+
+
+def test_paired_replay_accepts_real_collector_result_without_notices():
+    canary = "CANARY-REAL-EVENT-COLLECTOR"
+    collector = matrix.EventCollector(protocol="chat", started=time.monotonic())
+    collector.text(
+        "content",
+        canary,
+        "chat.content.complete",
+        at_ms=1.0,
+    )
+    collector.terminal("stop", at_ms=2.0)
+    raw = collector.result(status_code=200, elapsed_ms=3.0)
+
+    assert "notices" not in raw
+    normalized = matrix._normalized_replay_response(raw)
+    public = matrix._paired_public_response(normalized)
+    assert normalized["notices"] == []
+    assert canary not in json.dumps(public)
+    assert public["content_chars"] == len(canary)
+    assert public["content_sha256"] == matrix._sha256(canary)
+    assert public["events"][0] == {
+        "channel": "content",
+        "kind": "chat.content.complete",
+        "chars": len(canary),
+        "sha256": matrix._sha256(canary),
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"tools": {}},
+        {"tools": ()},
+        {"tools": ""},
+        {"messages": {}},
+        {"messages": ()},
+        {"messages": ""},
+        {"messages": ["not-an-object"]},
+        {
+            "messages": [
+                {"role": "assistant", "content": "", "tool_calls": {}}
+            ]
+        },
+        {
+            "messages": [
+                {"role": "assistant", "content": "", "tool_calls": ()}
+            ]
+        },
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": ["not-an-object"],
+                }
+            ]
+        },
+        {"messages": [{"role": "user", "content": {}}]},
+        {"messages": [{"role": "user", "content": ()}]},
+        {"messages": [{"role": "user", "content": ["not-an-object"]}]},
+    ],
+)
+def test_paired_replay_request_rejects_malformed_collection_shapes(mutation):
+    payload = {
+        "model": "served-model",
+        "messages": [{"role": "user", "content": "valid"}],
+        "stream": False,
+        **mutation,
+    }
+    with pytest.raises(ValueError):
+        matrix._paired_public_request(2, payload)
+
+
+@pytest.mark.parametrize("invalid_id", [{}, [], 7])
+def test_paired_replay_request_rejects_nontext_tool_ids(invalid_id):
+    payload = {
+        "model": "served-model",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": invalid_id,
+                        "type": "function",
+                        "function": {
+                            "name": "run_command",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            }
+        ],
+        "stream": False,
+    }
+    with pytest.raises(ValueError, match="call id is not text"):
+        matrix._paired_public_request(2, payload)
+
+
+@pytest.mark.parametrize("location", ["tool", "event"])
+@pytest.mark.parametrize("invalid_id", [{}, [], 7])
+def test_paired_replay_response_rejects_nontext_tool_ids(
+    location,
+    invalid_id,
+):
+    raw = {
+        "status_code": 200,
+        "reasoning": "",
+        "content": "",
+        "notices": [],
+        "tool_calls": [],
+        "terminals": [],
+        "errors": [],
+        "events": [],
+    }
+    if location == "tool":
+        raw["tool_calls"] = [
+            {
+                "index": 0,
+                "id": invalid_id,
+                "name": "run_command",
+                "arguments": {},
+            }
+        ]
+    else:
+        raw["events"] = [
+            {
+                "channel": "tool",
+                "kind": "chat.tool.complete",
+                "call_id": invalid_id,
+            }
+        ]
+    with pytest.raises(ValueError, match="call id is not text"):
+        matrix._normalized_replay_response(raw)

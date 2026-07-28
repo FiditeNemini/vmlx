@@ -34,6 +34,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -114,6 +115,33 @@ RUNTIME_HASH_FIELDS = (
     *RUNTIME_SOURCE_HASH_FIELDS,
     "python_executable_fingerprint_sha256",
 )
+PAIRED_REPLAY_TARGETS = {
+    ("chat", "nonstream", 2),
+    ("ollama", "stream", 3),
+}
+PAIRED_REPLAY_EVENT_CHANNELS = {
+    "reasoning",
+    "content",
+    "tool",
+    "terminal",
+    "error",
+}
+PAIRED_REPLAY_EVENT_KINDS = {
+    "chat.reasoning.complete",
+    "chat.content.complete",
+    "chat.tool.complete",
+    "ollama.thinking",
+    "ollama.content",
+    "ollama.tool",
+    "json_parse_error",
+    "ollama.error",
+    "stop",
+    "length",
+    "tool_calls",
+    "DONE",
+}
+PAIRED_REPLAY_TOOL_NAMES = {"file_info", "run_command"}
+PAIRED_REPLAY_TERMINALS = {"stop", "length", "tool_calls", "DONE"}
 
 TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "file_info": {
@@ -2398,16 +2426,35 @@ class ProtocolClient:
         stream: bool,
         *,
         capture_label: str = "request",
+        prepared_body: bytes | None = None,
     ) -> dict[str, Any]:
         started = time.monotonic()
         started_at = datetime.now(UTC).isoformat()
-        response = requests.post(
-            self.base_url + self.route(protocol),
-            headers=self.headers,
-            json=payload,
-            stream=stream,
-            timeout=(15, self.timeout),
-        )
+        prepared_sha256 = ""
+        if prepared_body is None:
+            response = requests.post(
+                self.base_url + self.route(protocol),
+                headers=self.headers,
+                json=payload,
+                stream=stream,
+                timeout=(15, self.timeout),
+            )
+        else:
+            response = requests.post(
+                self.base_url + self.route(protocol),
+                headers=self.headers,
+                data=prepared_body,
+                stream=True,
+                timeout=(15, self.timeout),
+            )
+            observed = _prepared_body_bytes(
+                response.request.body if response.request is not None else None
+            )
+            if observed != prepared_body:
+                with suppress(Exception):
+                    response.close()
+                raise ValueError("prepared request body changed before transport")
+            prepared_sha256 = hashlib.sha256(observed).hexdigest()
         if not stream:
             capture: DecompressedParserInputCaptureSession | None = None
             capture_error_type: str | None = None
@@ -2439,7 +2486,7 @@ class ProtocolClient:
                         )[:2000]
                     }
                 completed_ms = _milliseconds(started)
-                return parse_nonstream(
+                result = parse_nonstream(
                     protocol,
                     body,
                     response.status_code,
@@ -2462,6 +2509,9 @@ class ProtocolClient:
                             completed_ms=completed_ms,
                             error_type=capture_error_type,
                         )
+            if prepared_sha256:
+                result["_prepared_request_body_sha256"] = prepared_sha256
+            return result
 
         collector = EventCollector(protocol=protocol, started=started)
         event_name: str | None = None
@@ -2531,7 +2581,744 @@ class ProtocolClient:
                         completed_ms=completed_ms,
                         error_type=capture_error_type,
                     )
-        return collector.result(response.status_code, completed_ms)
+        result = collector.result(response.status_code, completed_ms)
+        if prepared_sha256:
+            result["_prepared_request_body_sha256"] = prepared_sha256
+        return result
+
+
+def frozen_request_body(payload: dict[str, Any]) -> bytes:
+    """Serialize one request once for byte-identical A1/B/A2 replay."""
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+
+
+def _paired_digest(value: Any, label: str, *, json_value: bool = False) -> dict[str, Any]:
+    if json_value:
+        try:
+            text = json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"paired replay {label} is not JSON") from exc
+    else:
+        if not isinstance(value, str):
+            raise ValueError(f"paired replay {label} is not text")
+        text = value
+    return {"chars": len(text), "sha256": _sha256(text)}
+
+
+def _prefixed_digest(prefix: str, digest: dict[str, Any]) -> dict[str, Any]:
+    return {f"{prefix}_{key}": value for key, value in digest.items()}
+
+
+def _paired_stable_id(
+    value: Any,
+    id_map: dict[str, str],
+    label: str,
+) -> str:
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"paired replay {label} is not text")
+    if value not in id_map:
+        id_map[value] = f"tool_call_{len(id_map) + 1}"
+    return id_map[value]
+
+
+def _normalized_replay_response(result: dict[str, Any]) -> dict[str, Any]:
+    """Retain response semantics while removing timing/envelope IDs."""
+    call_ids: dict[str, str] = {}
+    collections = {}
+    for collection_name in (
+        "tool_calls",
+        "notices",
+        "terminals",
+        "errors",
+        "events",
+    ):
+        value = (
+            []
+            if collection_name == "notices" and collection_name not in result
+            else result.get(collection_name)
+        )
+        if not isinstance(value, list):
+            raise ValueError(
+                f"paired replay raw {collection_name} is not a list"
+            )
+        collections[collection_name] = value
+
+    tools = []
+    for source in collections["tool_calls"]:
+        if not isinstance(source, dict):
+            tools.append(copy.deepcopy(source))
+            continue
+        call = {
+            key: copy.deepcopy(value)
+            for key, value in source.items()
+            if key not in {"id", "call_id"}
+        }
+        raw_call_id = source.get("id")
+        if raw_call_id is None or raw_call_id == "":
+            raw_call_id = source.get("call_id")
+        call_id = _paired_stable_id(
+            raw_call_id,
+            call_ids,
+            "response tool call id",
+        )
+        if call_id:
+            call["call_id"] = call_id
+        tools.append(call)
+    events = []
+    for source in collections["events"]:
+        if not isinstance(source, dict):
+            events.append(copy.deepcopy(source))
+            continue
+        event = {
+            key: copy.deepcopy(value)
+            for key, value in source.items()
+            if key
+            not in {"at_ms", "elapsed_ms", "started_at", "completed_ms", "response_id"}
+        }
+        if "call_id" in source:
+            call_id = _paired_stable_id(
+                source["call_id"],
+                call_ids,
+                "response event call id",
+            )
+            if call_id:
+                event["call_id"] = call_id
+        events.append(event)
+    def strip_timing(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: copy.deepcopy(value)
+            for key, value in row.items()
+            if key not in {"at_ms", "elapsed_ms", "started_at", "completed_ms"}
+        }
+    return {
+        "status_code": result.get("status_code"),
+        "reasoning": result.get("reasoning"),
+        "content": result.get("content"),
+        "notices": copy.deepcopy(collections["notices"]),
+        "tool_calls": tools,
+        "terminals": copy.deepcopy(collections["terminals"]),
+        "errors": [
+            strip_timing(row) if isinstance(row, dict) else copy.deepcopy(row)
+            for row in collections["errors"]
+        ],
+        "events": events,
+    }
+
+
+def _paired_public_event(source: Any, label: str) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        raise ValueError(f"paired replay {label} row is not an object")
+    allowed = {
+        "channel",
+        "kind",
+        "index",
+        "call_id",
+        "name_fragment",
+        "chars",
+        "sha256",
+        "argument_chars",
+        "argument_sha256",
+        "detail_chars",
+        "detail_sha256",
+    }
+    public: dict[str, Any] = {}
+    unknown_text = []
+    for key, value in source.items():
+        if not isinstance(key, str):
+            raise ValueError(f"paired replay {label} field name is not text")
+        if key not in allowed:
+            if not isinstance(value, str):
+                raise ValueError(f"paired replay {label} has an unsupported field")
+            unknown_text.append(
+                {
+                    **_prefixed_digest("field_name", _paired_digest(key, "field name")),
+                    **_prefixed_digest("value", _paired_digest(value, "field value")),
+                }
+            )
+        elif key == "channel":
+            if value not in PAIRED_REPLAY_EVENT_CHANNELS:
+                raise ValueError(f"paired replay {label} channel is unsupported")
+            public[key] = value
+        elif key == "kind":
+            if value not in PAIRED_REPLAY_EVENT_KINDS:
+                raise ValueError(f"paired replay {label} kind is unsupported")
+            public[key] = value
+        elif key == "name_fragment":
+            if value not in PAIRED_REPLAY_TOOL_NAMES:
+                raise ValueError(f"paired replay {label} tool name is unsupported")
+            public[key] = value
+        elif key == "call_id":
+            if not (
+                isinstance(value, str)
+                and value.startswith("tool_call_")
+                and value.removeprefix("tool_call_").isdigit()
+            ):
+                raise ValueError(f"paired replay {label} linkage is invalid")
+            public[key] = value
+        elif key.endswith("_sha256") or key == "sha256":
+            if not _valid_sha256(value):
+                raise ValueError(f"paired replay {label} digest is invalid")
+            public[key] = value
+        elif not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"paired replay {label} count is invalid")
+        else:
+            public[key] = value
+    if unknown_text:
+        public["unknown_text_fields"] = unknown_text
+    return public
+
+
+def _paired_public_response(value: dict[str, Any]) -> dict[str, Any]:
+    status = value.get("status_code")
+    if not isinstance(status, int) or isinstance(status, bool) or status < 0:
+        raise ValueError("paired replay response status is invalid")
+    reasoning = _paired_digest(value.get("reasoning"), "reasoning")
+    content = _paired_digest(value.get("content"), "content")
+    notices = value.get("notices")
+    tools = value.get("tool_calls")
+    terminals = value.get("terminals")
+    errors = value.get("errors")
+    events = value.get("events")
+    if (
+        not isinstance(notices, list)
+        or not isinstance(tools, list)
+        or not isinstance(errors, list)
+        or not isinstance(events, list)
+    ):
+        raise ValueError("paired replay response lists are invalid")
+    if not isinstance(terminals, list) or any(
+        not isinstance(item, str) or item not in PAIRED_REPLAY_TERMINALS
+        for item in terminals
+    ):
+        raise ValueError("paired replay terminal is unsupported")
+    public_tools = []
+    for source in tools:
+        if not isinstance(source, dict):
+            raise ValueError("paired replay tool call is not an object")
+        if set(source) - {
+            "index",
+            "call_id",
+            "name",
+            "arguments",
+            "arguments_parse_error",
+            "arguments_sha256",
+        }:
+            raise ValueError("paired replay tool call has unsupported fields")
+        index, name, arguments = (
+            source.get("index"),
+            source.get("name"),
+            source.get("arguments"),
+        )
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            raise ValueError("paired replay tool index is invalid")
+        if name not in PAIRED_REPLAY_TOOL_NAMES or not isinstance(arguments, dict):
+            raise ValueError("paired replay tool name or arguments are invalid")
+        call_id = source.get("call_id")
+        if call_id and not (
+            isinstance(call_id, str)
+            and call_id.startswith("tool_call_")
+            and call_id.removeprefix("tool_call_").isdigit()
+        ):
+            raise ValueError("paired replay tool linkage is invalid")
+        tool = {
+            "index": index,
+            "call_id": call_id or None,
+            "name": name,
+            **_prefixed_digest(
+                "arguments", _paired_digest(arguments, "tool arguments", json_value=True)
+            ),
+        }
+        parse_error = source.get("arguments_parse_error")
+        if parse_error is not None:
+            tool.update(
+                _prefixed_digest(
+                    "arguments_parse_error",
+                    _paired_digest(parse_error, "tool parse error"),
+                )
+            )
+        raw_arguments_sha = source.get("arguments_sha256")
+        if raw_arguments_sha is not None:
+            if not _valid_sha256(raw_arguments_sha):
+                raise ValueError("paired replay raw arguments digest is invalid")
+            tool["raw_arguments_sha256"] = raw_arguments_sha
+        public_tools.append(tool)
+    return {
+        "semantic_sha256": _canonical_sha256(value),
+        "status_code": status,
+        **_prefixed_digest("reasoning", reasoning),
+        **_prefixed_digest("content", content),
+        "notices": [_paired_digest(item, "notice") for item in notices],
+        "tool_calls": public_tools,
+        "terminals": list(terminals),
+        "errors": [
+            _paired_public_event(row, "error") for row in errors
+        ],
+        "events": [
+            _paired_public_event(row, "event") for row in events
+        ],
+    }
+
+
+def _paired_public_history(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    history = payload["input"] if "input" in payload else payload.get("messages")
+    if not isinstance(history, list):
+        raise ValueError("paired replay history is not a list")
+    call_ids: dict[str, str] = {}
+    linkage: list[dict[str, Any]] = []
+
+    def append_link(
+        kind: str,
+        role: Any,
+        *,
+        call_id: Any = None,
+        name: Any = None,
+        output: Any = None,
+    ) -> None:
+        if role not in {"assistant", "tool", "function_call_output", "user"}:
+            raise ValueError("paired replay history tool role is unsupported")
+        row = {"kind": kind, "role": role}
+        stable_id = _paired_stable_id(call_id, call_ids, "history tool call id")
+        if stable_id:
+            row.update(
+                {
+                    "call_id": stable_id,
+                    **_prefixed_digest(
+                        "call_id", _paired_digest(call_id, "history tool call id")
+                    ),
+                }
+            )
+        if name is not None:
+            row.update(
+                _prefixed_digest(
+                    "name", _paired_digest(name, "history tool name")
+                )
+            )
+        if output is not None:
+            row.update(
+                _prefixed_digest(
+                    "output", _paired_digest(output, "history tool output")
+                )
+            )
+        linkage.append(row)
+
+    for item in history:
+        if not isinstance(item, dict):
+            raise ValueError("paired replay history item is not an object")
+        role = item.get("role")
+        item_type = item.get("type")
+        if not isinstance(role, str) or (
+            item_type is not None and not isinstance(item_type, str)
+        ):
+            raise ValueError("paired replay history role/type is invalid")
+        content = item.get("content")
+        if content is not None and not isinstance(content, (str, list)):
+            raise ValueError("paired replay history content has an invalid shape")
+        if "tool_calls" in item:
+            calls = item["tool_calls"]
+            if not isinstance(calls, list):
+                raise ValueError("paired replay history tool_calls is not a list")
+            for call in calls:
+                if not isinstance(call, dict):
+                    raise ValueError(
+                        "paired replay history tool call is not an object"
+                    )
+                function = call.get("function")
+                if not isinstance(function, dict):
+                    raise ValueError(
+                        "paired replay history tool function is not an object"
+                    )
+                arguments = function.get("arguments")
+                if arguments is not None and not isinstance(arguments, (str, dict)):
+                    raise ValueError(
+                        "paired replay history tool arguments are invalid"
+                    )
+                append_link(
+                    "assistant_tool_call",
+                    role,
+                    call_id=call.get("id"),
+                    name=function.get("name"),
+                )
+        if item_type == "function_call_output":
+            append_link(
+                "tool_result",
+                "function_call_output",
+                call_id=item.get("call_id"),
+                output=item.get("output"),
+            )
+        if role == "tool":
+            if not isinstance(content, str):
+                raise ValueError("paired replay tool result content is not text")
+            call_id = item.get("tool_call_id")
+            if call_id is None or call_id == "":
+                call_id = item.get("tool_use_id")
+            name = item.get("name")
+            if name is None:
+                name = item.get("tool_name")
+            append_link(
+                "tool_result",
+                role,
+                call_id=call_id,
+                name=name,
+                output=content,
+            )
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                raise ValueError("paired replay history block is not an object")
+            block_type = block.get("type")
+            if block_type is not None and not isinstance(block_type, str):
+                raise ValueError("paired replay history block type is invalid")
+            if block_type == "tool_use":
+                tool_input = block.get("input")
+                if tool_input is not None and not isinstance(tool_input, dict):
+                    raise ValueError("paired replay history tool input is invalid")
+                append_link(
+                    "assistant_tool_call",
+                    role,
+                    call_id=block.get("id"),
+                    name=block.get("name"),
+                )
+            elif block_type == "tool_result":
+                append_link(
+                    "tool_result",
+                    role,
+                    call_id=block.get("tool_use_id"),
+                    output=block.get("content"),
+                )
+    return linkage
+
+
+def _paired_public_request(stage: int, payload: dict[str, Any]) -> dict[str, Any]:
+    raw = frozen_request_body(payload).decode("utf-8")
+    canonical = json.dumps(
+        _canonical_request_payload(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    choice = payload.get("tool_choice")
+    if isinstance(choice, str):
+        if choice not in {"auto", "none", "required", "any"}:
+            raise ValueError("paired replay tool choice is unsupported")
+        public_choice: dict[str, Any] | None = {"kind": choice}
+    elif choice is None:
+        public_choice = None
+    elif isinstance(choice, dict) and choice.get("type") in {"function", "tool"}:
+        function = choice.get("function", choice)
+        if not isinstance(function, dict):
+            raise ValueError("paired replay named tool choice is invalid")
+        public_choice = {
+            "kind": "named_tool",
+            "type": choice["type"],
+            **_prefixed_digest(
+                "name", _paired_digest(function.get("name"), "tool choice name")
+            ),
+            **_prefixed_digest(
+                "choice", _paired_digest(choice, "tool choice", json_value=True)
+            ),
+        }
+    else:
+        raise ValueError("paired replay tool choice has an invalid shape")
+    contracts = []
+    tools = payload.get("tools") if "tools" in payload else []
+    if not isinstance(tools, list):
+        raise ValueError("paired replay tool contracts are not a list")
+    for index, source in enumerate(tools):
+        if not isinstance(source, dict):
+            raise ValueError("paired replay tool contract is not an object")
+        function = source.get("function", source)
+        if not isinstance(function, dict) or source.get("type", "function") != "function":
+            raise ValueError("paired replay tool contract is invalid")
+        contracts.append(
+            {
+                "index": index,
+                "kind": "function",
+                **_prefixed_digest(
+                    "name", _paired_digest(function.get("name"), "contract name")
+                ),
+                **_prefixed_digest(
+                    "description",
+                    _paired_digest(
+                        function.get("description", source.get("description", "")),
+                        "contract description",
+                    ),
+                ),
+                **_prefixed_digest(
+                    "schema",
+                    _paired_digest(
+                        function.get(
+                            "parameters",
+                            source.get("parameters", source.get("input_schema")),
+                        ),
+                        "contract schema",
+                        json_value=True,
+                    ),
+                ),
+                **_prefixed_digest(
+                    "contract",
+                    _paired_digest(source, "tool contract", json_value=True),
+                ),
+            }
+        )
+    linkage = _paired_public_history(payload)
+    previous = payload.get("previous_response_id")
+    previous_public = (
+        None
+        if previous is None or previous == ""
+        else {
+            "linkage": "response_id_1",
+            **_paired_digest(previous, "previous response id"),
+        }
+    )
+    thinking = payload.get("enable_thinking", payload.get("think"))
+    if (
+        thinking is not None
+        and not isinstance(thinking, bool)
+        and thinking not in {"auto", "on", "off"}
+    ):
+        raise ValueError("paired replay thinking mode is unsupported")
+    options = payload.get("options")
+    if options is not None and not isinstance(options, dict):
+        raise ValueError("paired replay options are invalid")
+    max_output = payload.get(
+        "max_output_tokens",
+        payload.get("max_tokens", (options or {}).get("num_predict")),
+    )
+    if max_output is not None and (
+        not isinstance(max_output, int)
+        or isinstance(max_output, bool)
+        or max_output < 0
+    ):
+        raise ValueError("paired replay max output token count is invalid")
+    return {
+        "stage": int(stage),
+        "body_chars": len(raw),
+        "body_sha256": _sha256(raw),
+        "canonical_body_sha256": _sha256(canonical),
+        "tool_choice": public_choice,
+        "stream": payload["stream"],
+        "enable_thinking": thinking,
+        "previous_response_id": previous_public,
+        "max_output_tokens": max_output,
+        "tool_contracts": contracts,
+        "tool_history_linkage": linkage,
+    }
+
+
+def _paired_gateway_lifecycle(
+    action: Callable[[], dict[str, Any]],
+    probe: Callable[[], dict[str, Any]],
+    expected_fingerprint: str,
+    timeout_s: float,
+    poll_interval_s: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    ready = threading.Event()
+    action_started = threading.Event()
+    action_finished = threading.Event()
+    stop = threading.Event()
+    samples: list[dict[str, Any]] = []
+    failures: list[str] = []
+    started = time.monotonic()
+
+    def observe(phase: str) -> dict[str, Any]:
+        health = probe()
+        identity, identity_failures = _health_identity(health)
+        running, active = _idle_values(health)
+        fingerprint = identity.get("fingerprint_sha256")
+        row = {
+            "phase": phase,
+            "at_ms": _milliseconds(started),
+            "full_sha256": _canonical_sha256(health),
+            "identity_fingerprint_sha256": (
+                fingerprint if _valid_sha256(fingerprint) else None
+            ),
+            "identity_failures": identity_failures,
+            "num_running": running,
+            "active_requests": active,
+        }
+        samples.append(row)
+        if identity_failures:
+            failures.append(f"{phase}: backend identity capture failed")
+        elif fingerprint != expected_fingerprint:
+            failures.append(f"{phase}: backend identity fingerprint mismatch")
+        return row
+
+    def poll() -> None:
+        try:
+            baseline = observe("before")
+        except Exception as exc:
+            failures.append(f"before: health probe raised {type(exc).__name__}")
+            ready.set()
+            return
+        if (baseline["num_running"], baseline["active_requests"]) != (0, 0):
+            failures.append("before: direct backend was not exclusively idle")
+        ready.set()
+        if not action_started.wait(timeout_s):
+            failures.append("gateway action did not start before timeout")
+            return
+        active_seen = False
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and not stop.is_set():
+            phase = "after" if action_finished.is_set() else "during"
+            try:
+                row = observe(phase)
+            except Exception as exc:
+                failures.append(f"{phase}: health probe raised {type(exc).__name__}")
+                return
+            counts = (row["num_running"], row["active_requests"])
+            if counts == (1, 1):
+                active_seen = True
+            elif counts == (0, 0) and action_finished.is_set() and active_seen:
+                return
+            elif counts != (0, 0):
+                failures.append(f"{phase}: concurrent or ambiguous activity")
+                return
+            stop.wait(poll_interval_s)
+        if not active_seen:
+            failures.append("during: exclusive gateway activity was not observed")
+        failures.append("after: exclusive idle state was not observed before timeout")
+
+    worker = threading.Thread(target=poll, name="paired-replay-health", daemon=True)
+    worker.start()
+    if not ready.wait(timeout_s):
+        failures.append("before: health probe did not become ready before timeout")
+    action_started.set()
+    action_error: BaseException | None = None
+    result: dict[str, Any] = {}
+    try:
+        result = action()
+    except BaseException as exc:
+        action_error = exc
+    finally:
+        action_finished.set()
+        worker.join(timeout_s)
+        if worker.is_alive():
+            failures.append("health lifecycle poller did not terminate")
+            stop.set()
+            worker.join(min(timeout_s, 1.0))
+    before = [row for row in samples if row["phase"] == "before"]
+    during = [row for row in samples if row["phase"] == "during"]
+    after = [row for row in samples if row["phase"] == "after"]
+    complete = (
+        not failures
+        and len(before) == 1
+        and (before[0]["num_running"], before[0]["active_requests"]) == (0, 0)
+        and any(
+            (row["num_running"], row["active_requests"]) == (1, 1) for row in during
+        )
+        and any(
+            (row["num_running"], row["active_requests"]) == (0, 0) for row in after
+        )
+        and not worker.is_alive()
+    )
+    if action_error is not None:
+        raise action_error
+    return result, {
+        "samples": samples,
+        "failures": list(dict.fromkeys(failures)),
+        "exclusive_idle_active_idle": complete,
+        "worker_stopped": not worker.is_alive(),
+    }
+
+
+def run_paired_replay_discriminator(
+    *,
+    direct_client: ProtocolClient,
+    gateway_client: ProtocolClient,
+    protocol: str,
+    mode: str,
+    stage: int,
+    payload: dict[str, Any],
+    expected_backend_identity_fingerprint: str,
+    gateway_direct_health_probe: Callable[[], dict[str, Any]] | None,
+    health_timeout_s: float = 5.0,
+    health_poll_interval_s: float = 0.025,
+) -> dict[str, Any]:
+    """Run one frozen-body direct A1 / gateway B / direct A2 discriminator."""
+    if (protocol, mode, int(stage)) not in PAIRED_REPLAY_TARGETS:
+        raise ValueError(
+            "paired replay is limited to Chat nonstream round 2 and "
+            "Ollama stream round 3"
+        )
+    if gateway_direct_health_probe is None:
+        raise ValueError("paired replay requires an in-flight direct-health probe")
+    if not _valid_sha256(expected_backend_identity_fingerprint):
+        raise ValueError("paired replay expected backend fingerprint is invalid")
+    if not isinstance(payload.get("stream"), bool) or payload["stream"] != (
+        mode == "stream"
+    ):
+        raise ValueError("paired replay request stream mode does not match target")
+    body = frozen_request_body(payload)
+    request_public = _paired_public_request(stage, payload)
+    expected_sha = hashlib.sha256(body).hexdigest()
+    stem = f"paired-{protocol}-{mode}-round{stage}"
+
+    def send(client: ProtocolClient, leg: str) -> dict[str, Any]:
+        return client.send(
+            protocol,
+            payload,
+            mode == "stream",
+            capture_label=f"{stem}-{leg}",
+            prepared_body=body,
+        )
+
+    a1 = send(direct_client, "a1")
+    b, lifecycle = _paired_gateway_lifecycle(
+        lambda: send(gateway_client, "b"),
+        gateway_direct_health_probe,
+        expected_backend_identity_fingerprint,
+        health_timeout_s,
+        health_poll_interval_s,
+    )
+    a2 = send(direct_client, "a2")
+    body_hashes = {
+        leg: str(result.get("_prepared_request_body_sha256") or "")
+        for leg, result in {"a1": a1, "b": b, "a2": a2}.items()
+    }
+    normalized = {
+        leg: _normalized_replay_response(result)
+        for leg, result in {"a1": a1, "b": b, "a2": a2}.items()
+    }
+    direct_stable = normalized["a1"] == normalized["a2"]
+    checks = {
+        "exact_body_sha_equal": set(body_hashes.values()) == {expected_sha},
+        "gateway_backend_lifecycle_pass": (
+            lifecycle["exclusive_idle_active_idle"] is True
+        ),
+    }
+    if not all(checks.values()):
+        classification = "unverified"
+    elif not direct_stable:
+        classification = "shared_backend_model_or_cache_nondeterminism"
+    elif normalized["a1"] == normalized["b"]:
+        classification = "all_equal_prior_history_variance"
+    else:
+        classification = "gateway_owned_difference"
+    return {
+        "schema": "vmlx-agentic-protocol-paired-replay-v1",
+        "target": {"protocol": protocol, "mode": mode, "stage": int(stage)},
+        "request": {
+            **request_public,
+            "prepared_body_bytes": len(body),
+            "prepared_body_sha256": expected_sha,
+            "leg_body_sha256": body_hashes,
+        },
+        "responses": {
+            leg: _paired_public_response(value) for leg, value in normalized.items()
+        },
+        "direct_replay_stable": direct_stable,
+        "classification": classification,
+        "gateway_in_flight_direct_health": lifecycle,
+        "checks": checks,
+        "pass": all(checks.values()),
+    }
 
 
 def _request_common(

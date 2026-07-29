@@ -2674,6 +2674,249 @@ async function capturePng(cdp, filePath) {
   return filePath
 }
 
+const requiredScreenshotMaxBytes = 64 * 1024 * 1024
+const requiredPngSignature = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+])
+
+export function attestPrivatePngScreenshot(filePath) {
+  const exactPath = path.resolve(filePath)
+  const pathStat = lstatSync(exactPath)
+  if (!pathStat.isFile() || pathStat.isSymbolicLink()) {
+    throw new Error('Required real UI screenshot must be a regular, non-symlink file')
+  }
+  if ((pathStat.mode & 0o077) !== 0) {
+    throw new Error('Required real UI screenshot must not be group/world accessible')
+  }
+  if (pathStat.nlink !== 1) {
+    throw new Error('Required real UI screenshot must have exactly one filesystem link')
+  }
+  if (pathStat.size <= 0) {
+    throw new Error('required screenshot artifact is empty')
+  }
+  if (pathStat.size > requiredScreenshotMaxBytes) {
+    throw new Error(
+      `Required real UI screenshot exceeds ${requiredScreenshotMaxBytes} bytes`,
+    )
+  }
+
+  const noFollow = Number(fsConstants.O_NOFOLLOW || 0)
+  let fd
+  let openedStat
+  let raw
+  try {
+    // Open the exact requested path, not a realpath-resolved target. O_NOFOLLOW
+    // plus the path/fd identity comparisons below close final-component swap
+    // and symlink races between lstat, open, and the completed read.
+    fd = openSync(exactPath, fsConstants.O_RDONLY | noFollow)
+    openedStat = fstatSync(fd)
+    if (!openedStat.isFile()) {
+      throw new Error('Required real UI screenshot opened object is not a regular file')
+    }
+    if ((openedStat.mode & 0o077) !== 0) {
+      throw new Error('Required real UI screenshot opened object is group/world accessible')
+    }
+    if (openedStat.nlink !== 1) {
+      throw new Error('Required real UI screenshot opened object must have exactly one filesystem link')
+    }
+    if (
+      openedStat.dev !== pathStat.dev
+      || openedStat.ino !== pathStat.ino
+      || openedStat.size !== pathStat.size
+    ) {
+      throw new Error('Required real UI screenshot changed identity between lstat and exact-path open')
+    }
+    raw = readFileSync(fd)
+    if (raw.length !== openedStat.size) {
+      throw new Error('Required real UI screenshot changed size while reading')
+    }
+    if (
+      raw.length < requiredPngSignature.length
+      || !raw.subarray(0, requiredPngSignature.length).equals(requiredPngSignature)
+    ) {
+      throw new Error('required screenshot artifact does not have a valid PNG signature')
+    }
+    const afterReadStat = fstatSync(fd)
+    if (
+      afterReadStat.dev !== openedStat.dev
+      || afterReadStat.ino !== openedStat.ino
+      || afterReadStat.size !== openedStat.size
+      || afterReadStat.mtimeMs !== openedStat.mtimeMs
+      || afterReadStat.ctimeMs !== openedStat.ctimeMs
+    ) {
+      throw new Error('Required real UI screenshot changed identity while reading')
+    }
+    const pathAfterRead = lstatSync(exactPath)
+    if (
+      !pathAfterRead.isFile()
+      || pathAfterRead.isSymbolicLink()
+      || pathAfterRead.dev !== openedStat.dev
+      || pathAfterRead.ino !== openedStat.ino
+      || pathAfterRead.size !== openedStat.size
+      || pathAfterRead.mtimeMs !== openedStat.mtimeMs
+      || pathAfterRead.ctimeMs !== openedStat.ctimeMs
+    ) {
+      throw new Error('Required real UI screenshot path changed identity while reading')
+    }
+    if ((pathAfterRead.mode & 0o077) !== 0 || pathAfterRead.nlink !== 1) {
+      throw new Error('Required real UI screenshot path lost its private single-link state')
+    }
+  } finally {
+    if (fd != null) closeSync(fd)
+  }
+
+  const canonicalPath = realpathSync(exactPath)
+  if (isPathInside(canonicalPath, realpathSync(repoDir))) {
+    throw new Error('Required real UI screenshot must stay outside the public Git worktree')
+  }
+  const finalPathStat = lstatSync(exactPath)
+  if (
+    !finalPathStat.isFile()
+    || finalPathStat.isSymbolicLink()
+    || finalPathStat.dev !== openedStat.dev
+    || finalPathStat.ino !== openedStat.ino
+    || finalPathStat.size !== openedStat.size
+    || finalPathStat.mtimeMs !== openedStat.mtimeMs
+    || finalPathStat.ctimeMs !== openedStat.ctimeMs
+  ) {
+    throw new Error('Required real UI screenshot path changed identity during canonicalization')
+  }
+  return {
+    path: exactPath,
+    canonicalPath,
+    device: openedStat.dev,
+    inode: openedStat.ino,
+    byteSize: raw.length,
+    sha256: crypto.createHash('sha256').update(raw).digest('hex'),
+    mode: openedStat.mode & 0o777,
+    nlink: openedStat.nlink,
+    openedNoFollow: true,
+    regularFile: true,
+    nonSymlink: true,
+    privatePermissions: (openedStat.mode & 0o077) === 0,
+    exactRequestedPath: true,
+    pngSignatureValid: true,
+  }
+}
+
+export function screenshotAttestationsMatch(captureAttestation, finalAttestation) {
+  return Boolean(
+    captureAttestation
+    && finalAttestation
+    && captureAttestation.path === finalAttestation.path
+    && captureAttestation.canonicalPath === finalAttestation.canonicalPath
+    && captureAttestation.device === finalAttestation.device
+    && captureAttestation.inode === finalAttestation.inode
+    && captureAttestation.byteSize === finalAttestation.byteSize
+    && captureAttestation.sha256 === finalAttestation.sha256
+    && finalAttestation.openedNoFollow === true
+    && finalAttestation.regularFile === true
+    && finalAttestation.nonSymlink === true
+    && finalAttestation.privatePermissions === true
+    && finalAttestation.exactRequestedPath === true
+    && finalAttestation.pngSignatureValid === true
+  )
+}
+
+export async function captureRequiredScreenshot(capture, filePath) {
+  const attemptedPath = path.resolve(filePath)
+  try {
+    const capturedPath = await capture(filePath)
+    if (!capturedPath) {
+      throw new Error('required screenshot capture returned no artifact path')
+    }
+    const resolvedCapturedPath = path.resolve(capturedPath)
+    if (resolvedCapturedPath !== attemptedPath) {
+      throw new Error(
+        'required screenshot capture substituted a different artifact path: '
+        + `${resolvedCapturedPath} != ${attemptedPath}`,
+      )
+    }
+    const attestation = attestPrivatePngScreenshot(resolvedCapturedPath)
+    return {
+      status: 'captured',
+      path: attestation.path,
+      attemptedPath,
+      attestation,
+      finalAttestation: null,
+      error: null,
+    }
+  } catch (error) {
+    return {
+      status: 'failed',
+      path: null,
+      attemptedPath,
+      attestation: null,
+      finalAttestation: null,
+      error: {
+        stage: 'chat_screenshot_capture',
+        name: error?.name || 'Error',
+        message: error?.message || String(error),
+      },
+    }
+  }
+}
+
+export function reattestRequiredScreenshot(screenshotCapture) {
+  if (
+    screenshotCapture?.status !== 'captured'
+    || !screenshotCapture?.path
+    || !screenshotCapture?.attestation
+  ) return screenshotCapture
+  try {
+    const finalAttestation = attestPrivatePngScreenshot(
+      screenshotCapture.attemptedPath,
+    )
+    if (!screenshotAttestationsMatch(
+      screenshotCapture.attestation,
+      finalAttestation,
+    )) {
+      throw new Error(
+        'required screenshot artifact identity changed after capture '
+        + '(device/inode/size/SHA-256 mismatch)',
+      )
+    }
+    return {
+      ...screenshotCapture,
+      path: finalAttestation.path,
+      finalAttestation,
+      error: null,
+    }
+  } catch (error) {
+    return {
+      ...screenshotCapture,
+      status: 'failed',
+      path: null,
+      finalAttestation: null,
+      error: {
+        stage: 'chat_screenshot_reattestation',
+        name: error?.name || 'Error',
+        message: error?.message || String(error),
+      },
+    }
+  }
+}
+
+export function mergeRequiredScreenshotOutcome(rendererResult, screenshotCapture) {
+  const screenshotFailed = (
+    screenshotCapture?.status !== 'captured'
+    || !screenshotCapture?.path
+    || screenshotCapture?.error
+  )
+  return {
+    ...rendererResult,
+    // A renderer/chat failure is the primary defect. A later CDP screenshot
+    // timeout is retained as secondary metadata and must not mask that stage.
+    rendererFailureStage: rendererResult?.rendererFailureStage
+      || (
+        screenshotFailed
+          ? screenshotCapture?.error?.stage || 'chat_screenshot_capture'
+          : null
+      ),
+    screenshotCapture,
+  }
+}
+
 const rendererProofModulePaths = [
   'src/renderer/src/main.tsx',
   'src/renderer/src/App.tsx',
@@ -6585,6 +6828,26 @@ function assertResult(result) {
     || result.gitProvenance?.before?.tree !== result.gitProvenance?.after?.tree
     || result.gitProvenance?.before?.harness_sha256 !== result.gitProvenance?.after?.harness_sha256
   ) failures.push('source or UI proof harness changed during the live run')
+  if (
+    result.screenshotCapture?.status !== 'captured'
+    || !result.screenshotCapture?.path
+    || result.screenshotCapture?.error
+    || result.screenshotCapture?.attestation?.path !== result.screenshotCapture?.path
+    || !Number.isInteger(result.screenshotCapture?.attestation?.byteSize)
+    || result.screenshotCapture?.attestation?.byteSize <= 0
+    || !validSha256(result.screenshotCapture?.attestation?.sha256)
+    || result.screenshotCapture?.attestation?.openedNoFollow !== true
+    || result.screenshotCapture?.attestation?.regularFile !== true
+    || result.screenshotCapture?.attestation?.nonSymlink !== true
+    || result.screenshotCapture?.attestation?.privatePermissions !== true
+    || result.screenshotCapture?.attestation?.exactRequestedPath !== true
+    || result.screenshotCapture?.attestation?.pngSignatureValid !== true
+    || !screenshotAttestationsMatch(
+      result.screenshotCapture?.attestation,
+      result.screenshotCapture?.finalAttestation,
+    )
+    || result.screenshots?.chat !== result.screenshotCapture?.path
+  ) failures.push('required real UI screenshot was not successfully captured')
   if (result.sendErrors?.length) failures.push(`renderer send errors: ${result.sendErrors.join('; ')}`)
   if (positiveCacheReuseExpected && (result.cache?.cacheHitTokens || 0) <= 0) failures.push('expected real cache-hit token telemetry after a reuse probe')
   if (positiveCacheReuseExpected && !result.provenSurfaces?.includes('cache_hit_telemetry')) {
@@ -9307,10 +9570,15 @@ async function main() {
       }
       throw error
     }
-    const chatScreenshot = await capturePng(
-      cdp,
+    const screenshotCapture = await captureRequiredScreenshot(
+      (filePath) => capturePng(cdp, filePath),
       path.join(proofDir, `${proofBasename}-chat.png`),
     )
+    rendererResult = mergeRequiredScreenshotOutcome(
+      rendererResult,
+      screenshotCapture,
+    )
+    let chatScreenshot = screenshotCapture.path
     let serverCacheControls = { requested: false, verified: false }
     if (checkServerCacheControls) {
       try {
@@ -10069,7 +10337,7 @@ async function main() {
         reasoningNumericRunCount: rendererResult.reasoningNumericRunCount || 0,
       },
       screenshots: {
-        chat: path.resolve(chatScreenshot),
+        chat: chatScreenshot,
       },
       ...rendererResult,
       gitProvenance: {
@@ -10124,12 +10392,23 @@ async function main() {
       appLogTail: appLogs.slice(-80),
       serverLogTail: rendererResult.sessionLogs || [],
     }
-    applyTopLevelCorrelationStatus(result, {
-      rendererFailed: Boolean(rendererResult.rendererFailureStage),
-    })
     result.visibleAssistantTurnsComplete = visibleAssistantAfterEachUser(result.chat?.turns || [])
     result.liveSpeedSamples = extractLiveSpeedSamples(result)
     result.provenSurfaces = deriveProvenSurfaces(result)
+    rendererResult = mergeRequiredScreenshotOutcome(
+      rendererResult,
+      reattestRequiredScreenshot(rendererResult.screenshotCapture),
+    )
+    chatScreenshot = rendererResult.screenshotCapture?.path || null
+    result.screenshotCapture = rendererResult.screenshotCapture
+    result.rendererFailureStage = rendererResult.rendererFailureStage
+    result.failureStage = result.failureStage
+      || rendererResult.rendererFailureStage
+      || undefined
+    result.screenshots.chat = chatScreenshot
+    applyTopLevelCorrelationStatus(result, {
+      rendererFailed: Boolean(rendererResult.rendererFailureStage),
+    })
     let assertionError = null
     try {
       assertResult(result)
@@ -10144,7 +10423,7 @@ async function main() {
       ui_session_attestation: uiSessionAttestation?.path || null,
       paired_raw_api_proof: pairedApiArtifact?.path || null,
       owned_release_sentinel: releaseEvidence?.path || null,
-      screenshot: path.resolve(chatScreenshot),
+      screenshot: chatScreenshot,
     }
     writePrivateArtifactFile(proofPath, JSON.stringify(result, null, 2))
     if (process.env.VMLINUX_REAL_UI_ALLOW_FAIL === '1' || process.env.VMLX_REAL_UI_ALLOW_FAIL === '1') {

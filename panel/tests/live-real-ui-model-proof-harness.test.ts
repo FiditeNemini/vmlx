@@ -20,6 +20,7 @@ import {
   applyAssertionFailureStatus,
   applyTopLevelCorrelationStatus,
   assertCdpExpressionSyntax,
+  captureRequiredScreenshot,
   captureBundleGenerationContract,
   collectOllamaStream,
   deriveProvenSurfaces,
@@ -28,12 +29,14 @@ import {
   isCacheRequestCorrelationVerified,
   isServerRequestCorrelationVerified,
   localRendererModuleEvidence,
+  mergeRequiredScreenshotOutcome,
   ownedUiProducerPid,
   parseExplicitPidList,
   parseOptionalPort,
   parseResolvedSamplingKwargs,
   privateCacheAttestationSessionArgs,
   readPrivateExternalJson,
+  reattestRequiredScreenshot,
   runPostSentinelWorkWithCleanup,
   resolveIndependentBundleGenerationDefaults,
   runtimeBindingFromHealth,
@@ -623,6 +626,352 @@ describe("generated CDP expression syntax", () => {
     expect(preflightSource).toContain(
       '"VMLINUX_REAL_UI_MAX_TOKENS": "2048"',
     );
+  });
+});
+
+describe("required real UI screenshot failure handling", () => {
+  const onePixelPng = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+
+  it("preserves the primary renderer failure and records a secondary capture timeout", async () => {
+    const primarySendErrors = [{
+      turn: 1,
+      stage: "first_visible_ui_send",
+      message: "timeout waiting for terminal event",
+    }];
+    const capture = await captureRequiredScreenshot(
+      async () => {
+        throw new Error("CDP timeout: Page.captureScreenshot");
+      },
+      "/private/proof/chat.png",
+    );
+    const result = mergeRequiredScreenshotOutcome({
+      rendererFailureStage: "first_visible_ui_send",
+      sendErrors: primarySendErrors,
+    }, capture);
+
+    expect(result.rendererFailureStage).toBe("first_visible_ui_send");
+    expect(result.sendErrors).toBe(primarySendErrors);
+    expect(result.screenshotCapture).toMatchObject({
+      status: "failed",
+      path: null,
+      error: {
+        stage: "chat_screenshot_capture",
+        message: "CDP timeout: Page.captureScreenshot",
+      },
+    });
+
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-failure-"));
+    try {
+      const proofPath = path.join(proofDir, "proof.json");
+      writePrivateArtifactFile(proofPath, JSON.stringify({
+        rendererFailureStage: result.rendererFailureStage,
+        sendErrors: result.sendErrors,
+        screenshots: { chat: capture.path },
+        screenshotCapture: result.screenshotCapture,
+      }));
+      expect(JSON.parse(readFileSync(proofPath, "utf8"))).toMatchObject({
+        rendererFailureStage: "first_visible_ui_send",
+        screenshots: { chat: null },
+        screenshotCapture: {
+          status: "failed",
+          error: { stage: "chat_screenshot_capture" },
+        },
+      });
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on screenshot capture when no earlier renderer failure exists", async () => {
+    const capture = await captureRequiredScreenshot(
+      async () => {
+        throw new Error("capture rejected");
+      },
+      "/private/proof/chat.png",
+    );
+    const result = mergeRequiredScreenshotOutcome({
+      rendererFailureStage: null,
+      sendErrors: [],
+    }, capture);
+
+    expect(result.rendererFailureStage).toBe("chat_screenshot_capture");
+    expect(result.screenshotCapture.path).toBeNull();
+  });
+
+  it("attests a real private PNG before retaining it as visual evidence", async () => {
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-valid-"));
+    try {
+      const screenshotPath = path.join(proofDir, "chat.png");
+      const capture = await captureRequiredScreenshot(
+        async (filePath) => writePrivateArtifactFile(filePath, onePixelPng),
+        screenshotPath,
+      );
+      const result = mergeRequiredScreenshotOutcome({
+        rendererFailureStage: null,
+        sendErrors: [],
+      }, capture);
+      const finalCapture = reattestRequiredScreenshot(
+        result.screenshotCapture,
+      );
+
+      expect(result.rendererFailureStage).toBeNull();
+      expect(finalCapture).toMatchObject({
+        status: "captured",
+        path: screenshotPath,
+        attestation: {
+          path: screenshotPath,
+          byteSize: onePixelPng.length,
+          sha256: crypto.createHash("sha256").update(onePixelPng).digest("hex"),
+          openedNoFollow: true,
+          regularFile: true,
+          nonSymlink: true,
+          privatePermissions: true,
+          exactRequestedPath: true,
+          pngSignatureValid: true,
+        },
+        finalAttestation: {
+          path: screenshotPath,
+          byteSize: onePixelPng.length,
+          sha256: crypto.createHash("sha256").update(onePixelPng).digest("hex"),
+        },
+        error: null,
+      });
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a missing screenshot artifact", async () => {
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-missing-"));
+    try {
+      const capture = await captureRequiredScreenshot(
+        async (filePath) => filePath,
+        path.join(proofDir, "missing.png"),
+      );
+      expect(capture).toMatchObject({
+        status: "failed",
+        path: null,
+        attestation: null,
+        error: { stage: "chat_screenshot_capture" },
+      });
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an empty screenshot artifact", async () => {
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-empty-"));
+    try {
+      const capture = await captureRequiredScreenshot(
+        async (filePath) => writePrivateArtifactFile(filePath, Buffer.alloc(0)),
+        path.join(proofDir, "empty.png"),
+      );
+      expect(capture.error?.message).toMatch(/artifact is empty/);
+      expect(capture.path).toBeNull();
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a non-PNG screenshot artifact", async () => {
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-format-"));
+    try {
+      const capture = await captureRequiredScreenshot(
+        async (filePath) => writePrivateArtifactFile(filePath, Buffer.from("not a png")),
+        path.join(proofDir, "chat.png"),
+      );
+      expect(capture.error?.message).toMatch(/valid PNG signature/);
+      expect(capture.path).toBeNull();
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a substituted screenshot path", async () => {
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-substitute-"));
+    try {
+      const requestedPath = path.join(proofDir, "requested.png");
+      const substitutedPath = path.join(proofDir, "substituted.png");
+      const capture = await captureRequiredScreenshot(
+        async () => writePrivateArtifactFile(substitutedPath, onePixelPng),
+        requestedPath,
+      );
+      expect(capture.error?.message).toMatch(/substituted a different artifact path/);
+      expect(capture.path).toBeNull();
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a symlink screenshot artifact", async () => {
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-symlink-"));
+    try {
+      const targetPath = path.join(proofDir, "target.png");
+      const screenshotPath = path.join(proofDir, "chat.png");
+      writePrivateArtifactFile(targetPath, onePixelPng);
+      symlinkSync(targetPath, screenshotPath);
+      const capture = await captureRequiredScreenshot(
+        async (filePath) => filePath,
+        screenshotPath,
+      );
+      expect(capture.error?.message).toMatch(/regular, non-symlink file/);
+      expect(capture.path).toBeNull();
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a non-regular screenshot artifact", async () => {
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-directory-"));
+    try {
+      const screenshotPath = path.join(proofDir, "chat.png");
+      const capture = await captureRequiredScreenshot(
+        async (filePath) => {
+          mkdirSync(filePath, { mode: 0o700 });
+          return filePath;
+        },
+        screenshotPath,
+      );
+      expect(capture.error?.message).toMatch(/regular, non-symlink file/);
+      expect(capture.path).toBeNull();
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a group-readable screenshot artifact", async () => {
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-mode-"));
+    try {
+      const screenshotPath = path.join(proofDir, "chat.png");
+      const capture = await captureRequiredScreenshot(
+        async (filePath) => {
+          writePrivateArtifactFile(filePath, onePixelPng);
+          chmodSync(filePath, 0o640);
+          return filePath;
+        },
+        screenshotPath,
+      );
+      expect(capture.error?.message).toMatch(/group\/world accessible/);
+      expect(capture.path).toBeNull();
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects deletion after capture during final re-attestation", async () => {
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-delete-"));
+    try {
+      const screenshotPath = path.join(proofDir, "chat.png");
+      const capture = await captureRequiredScreenshot(
+        async (filePath) => writePrivateArtifactFile(filePath, onePixelPng),
+        screenshotPath,
+      );
+      rmSync(screenshotPath);
+      const finalCapture = reattestRequiredScreenshot(capture);
+      const result = mergeRequiredScreenshotOutcome({
+        rendererFailureStage: "first_visible_ui_send",
+        sendErrors: [{
+          turn: 1,
+          stage: "first_visible_ui_send",
+          message: "timeout waiting for terminal event",
+        }],
+      }, finalCapture);
+
+      expect(finalCapture).toMatchObject({
+        status: "failed",
+        path: null,
+        finalAttestation: null,
+        error: { stage: "chat_screenshot_reattestation" },
+      });
+      expect(result.rendererFailureStage).toBe("first_visible_ui_send");
+      const proofPath = path.join(proofDir, "failed-proof.json");
+      writePrivateArtifactFile(proofPath, JSON.stringify({
+        status: "fail",
+        failureStage: result.rendererFailureStage,
+        screenshots: { chat: result.screenshotCapture.path },
+        screenshotCapture: result.screenshotCapture,
+      }));
+      expect(JSON.parse(readFileSync(proofPath, "utf8"))).toMatchObject({
+        status: "fail",
+        failureStage: "first_visible_ui_send",
+        screenshots: { chat: null },
+        screenshotCapture: {
+          status: "failed",
+          error: { stage: "chat_screenshot_reattestation" },
+        },
+      });
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects valid-PNG replacement after capture by identity and digest", async () => {
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-replace-"));
+    try {
+      const screenshotPath = path.join(proofDir, "chat.png");
+      const capture = await captureRequiredScreenshot(
+        async (filePath) => writePrivateArtifactFile(filePath, onePixelPng),
+        screenshotPath,
+      );
+      rmSync(screenshotPath);
+      writePrivateArtifactFile(
+        screenshotPath,
+        Buffer.concat([onePixelPng, Buffer.from("replacement")]),
+      );
+      const finalCapture = reattestRequiredScreenshot(capture);
+
+      expect(finalCapture.error?.stage).toBe("chat_screenshot_reattestation");
+      expect(finalCapture.error?.message).toMatch(/identity changed after capture/);
+      expect(finalCapture.path).toBeNull();
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a symlink swap after capture during final re-attestation", async () => {
+    const proofDir = mkdtempSync(path.join(tmpdir(), "vmlx-screenshot-swap-"));
+    try {
+      const screenshotPath = path.join(proofDir, "chat.png");
+      const replacementPath = path.join(proofDir, "replacement.png");
+      const capture = await captureRequiredScreenshot(
+        async (filePath) => writePrivateArtifactFile(filePath, onePixelPng),
+        screenshotPath,
+      );
+      rmSync(screenshotPath);
+      writePrivateArtifactFile(replacementPath, onePixelPng);
+      symlinkSync(replacementPath, screenshotPath);
+      const finalCapture = reattestRequiredScreenshot(capture);
+
+      expect(finalCapture.error?.stage).toBe("chat_screenshot_reattestation");
+      expect(finalCapture.error?.message).toMatch(/regular, non-symlink file/);
+      expect(finalCapture.path).toBeNull();
+    } finally {
+      rmSync(proofDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the production PASS assertions fail-closed on screenshot evidence", () => {
+    const harnessSource = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+
+    expect(harnessSource).toContain(
+      "required real UI screenshot was not successfully captured",
+    );
+    expect(harnessSource).toContain(
+      "rendererResult = mergeRequiredScreenshotOutcome(",
+    );
+    expect(harnessSource).toContain(
+      "reattestRequiredScreenshot(rendererResult.screenshotCapture)",
+    );
+    expect(harnessSource).toContain(
+      "fd = openSync(exactPath, fsConstants.O_RDONLY | noFollow)",
+    );
+    expect(harnessSource).toContain("screenshot: chatScreenshot");
   });
 });
 

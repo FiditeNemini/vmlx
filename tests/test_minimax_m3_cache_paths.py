@@ -212,6 +212,7 @@ def test_scheduler_memory_object_store_prefers_minimax_m3_prompt_snapshot(monkey
     request.status = RequestStatus.RUNNING
 
     scheduler = object.__new__(Scheduler)
+    scheduler.config = SimpleNamespace(enable_prefix_cache=True)
     scheduler.uid_to_request_id = {1: request.request_id}
     scheduler.running = {request.request_id: request}
     scheduler.batch_generator = None
@@ -219,6 +220,7 @@ def test_scheduler_memory_object_store_prefers_minimax_m3_prompt_snapshot(monkey
     scheduler._pld_spec_enabled = False
     scheduler._tq_active = False
     scheduler.block_aware_cache = None
+    scheduler.memory_aware_cache = object()
     scheduler._mixed_attention_cache_model = False
     scheduler._uses_dsv4_cache = False
     scheduler._uses_zaya_cache = False
@@ -276,6 +278,7 @@ def test_scheduler_m3_cache_hit_store_rederives_clean_prompt_cache(monkeypatch):
     request.status = RequestStatus.RUNNING
 
     scheduler = object.__new__(Scheduler)
+    scheduler.config = SimpleNamespace(enable_prefix_cache=True)
     scheduler.uid_to_request_id = {1: request.request_id}
     scheduler.running = {request.request_id: request}
     scheduler.batch_generator = None
@@ -283,6 +286,7 @@ def test_scheduler_m3_cache_hit_store_rederives_clean_prompt_cache(monkeypatch):
     scheduler._pld_spec_enabled = False
     scheduler._tq_active = False
     scheduler.block_aware_cache = None
+    scheduler.memory_aware_cache = object()
     scheduler._mixed_attention_cache_model = False
     scheduler._uses_m3_msa_cache = True
     scheduler._uses_dsv4_cache = False
@@ -354,6 +358,7 @@ def test_scheduler_paged_m3_cache_hit_store_rederives_clean_prompt_cache(monkeyp
     request.status = RequestStatus.RUNNING
 
     scheduler = object.__new__(Scheduler)
+    scheduler.config = SimpleNamespace(enable_prefix_cache=True)
     scheduler.uid_to_request_id = {1: request.request_id}
     scheduler.running = {request.request_id: request}
     scheduler.batch_generator = None

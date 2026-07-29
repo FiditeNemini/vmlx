@@ -108,6 +108,7 @@ def test_dsv4_prefill_realizes_last_logits_before_clearing_transients(monkeypatc
     gen = DSV4BatchGenerator.__new__(DSV4BatchGenerator)
     gen.model = FakeModel()
     gen.prefill_step_size = 2048
+    gen._prefill_single_shot = False
     gen._sync = lambda: events.append(("sync", None))
 
     def record_eval(value):

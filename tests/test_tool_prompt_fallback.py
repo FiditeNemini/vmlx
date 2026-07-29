@@ -770,6 +770,61 @@ def test_dsv4_prior_tool_result_does_not_terminalize_new_explicit_tool():
     assert injected.count('<｜DSML｜invoke name="run_command">') == 1
 
 
+def test_dsv4_client_narrowed_remaining_tool_is_not_terminalized():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    current_request = "Execute this exact command: pwd"
+    messages = [
+        {"role": "user", "content": "Inspect the package metadata."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "file_info",
+                        "arguments": {"path": "panel/package.json"},
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": "Path: panel/package.json"},
+        {"role": "user", "content": current_request},
+    ]
+
+    injected = check_and_inject_fallback_tools(
+        f"<｜User｜>{current_request}<｜Assistant｜>",
+        messages,
+        tools,
+        DSV4LikeTokenizer(),
+        {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "tools": tools,
+            "tool_choice": {"type": "function", "name": "run_command"},
+        },
+        tool_parser_id="dsml",
+    )
+
+    assert "Native DSV4 tool-result continuation" not in injected
+    assert "the requested tool already ran" not in injected
+    assert (
+        '<｜DSML｜parameter name="command" string="true">'
+        "pwd</｜DSML｜parameter>"
+    ) in injected
+
+
 def test_dsv4_fallback_preserves_recent_tool_schema_on_later_user_turn():
     tools = [
         {

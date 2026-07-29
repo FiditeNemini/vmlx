@@ -681,13 +681,22 @@ def check_and_inject_fallback_tools(
         for name in explicitly_requested_tool_names
         if name not in tools_called_after_latest_user
     }
+    dsv4_client_narrowed_to_remaining_tools = bool(
+        tools_called_after_latest_user
+        and tool_names
+        and set(tool_names).isdisjoint(tools_called_after_latest_user)
+    )
     # A tool result followed by an explicit request for a *different* tool is
     # a multi-tool continuation, not a terminal synthesis turn.  Treating both
     # shapes alike injected "the requested tool already ran / do not emit
     # another tool call" beside the new request.  Live DSV4 then copied schema
     # residue or looped while trying to satisfy those contradictory contracts.
     dsv4_multi_tool_continuation = bool(
-        dsv4_tool_result_activity and dsv4_requested_remaining_tools
+        dsv4_tool_result_activity
+        and (
+            dsv4_requested_remaining_tools
+            or dsv4_client_narrowed_to_remaining_tools
+        )
     )
     dsv4_tool_result_continuation = bool(
         dsv4_tool_result_activity and not dsv4_multi_tool_continuation
@@ -884,6 +893,10 @@ def check_and_inject_fallback_tools(
             explicitly_requested = (
                 _request_mentions_tool_name(name)
                 or name in recent_tool_call_arguments
+                or (
+                    dsv4_client_narrowed_to_remaining_tools
+                    and name in tool_names
+                )
             )
             values = {
                 param: _derive_dsml_request_param_value(name, param)
@@ -1305,10 +1318,12 @@ def check_and_inject_fallback_tools(
     # the rendered prompt and inject the parser-matching format.
     if is_dsv4_prompt:
         if dsv4_multi_tool_continuation:
+            remaining_names = dsv4_requested_remaining_tools or set(tool_names)
             dsv4_prompt_tools = [
                 tool
                 for tool in template_tools
-                if _tool_props(tool)[0] in dsv4_requested_remaining_tools
+                if _tool_props(tool)[0] in remaining_names
+                and _tool_props(tool)[0] not in tools_called_after_latest_user
             ] or _requested_tools(template_tools)
         elif dsv4_tool_result_continuation and recent_tool_call_arguments:
             dsv4_prompt_tools = _recently_called_tools(template_tools)

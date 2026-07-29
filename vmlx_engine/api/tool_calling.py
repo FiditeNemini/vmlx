@@ -1993,7 +1993,7 @@ def check_and_inject_fallback_tools(
         is_dsv4_prompt
         and explicit_tool_requested
         and recent_tool_call_arguments
-        and not dsv4_tool_result_continuation
+        and not dsv4_tool_result_activity
     ):
         # A new explicit DSV4 tool request can immediately follow an earlier
         # native tool/result/final-answer transcript. Live Electron testing

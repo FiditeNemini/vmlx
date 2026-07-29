@@ -767,6 +767,7 @@ def test_dsv4_prior_tool_result_does_not_terminalize_new_explicit_tool():
         '<｜DSML｜parameter name="command" string="true">'
         "pwd</｜DSML｜parameter>"
     ) in injected
+    assert injected.count('<｜DSML｜invoke name="run_command">') == 1
 
 
 def test_dsv4_fallback_preserves_recent_tool_schema_on_later_user_turn():

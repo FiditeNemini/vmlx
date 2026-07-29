@@ -5816,11 +5816,19 @@ def _v5_ui_facts(
             return set(), []
         if not _successful_terminal(events):
             return set(), []
-        reasoning = "".join(
-            str(row.get("text") or "")
-            for row in events
-            if row.get("type") == "reasoning_delta"
-        )
+        reasoning_segments: list[str] = []
+        active_reasoning: list[str] = []
+        for row in events:
+            if row.get("type") == "reasoning_delta":
+                active_reasoning.append(str(row.get("text") or ""))
+                continue
+            if active_reasoning:
+                reasoning_segments.append("".join(active_reasoning))
+                active_reasoning = []
+        if active_reasoning:
+            reasoning_segments.append("".join(active_reasoning))
+        reasoning_segments = [value for value in reasoning_segments if value]
+        reasoning = "\n".join(reasoning_segments)
         content = "".join(
             str(row.get("text") or "")
             for row in events
@@ -5838,9 +5846,9 @@ def _v5_ui_facts(
             return set(), []
         if any(not isinstance(row, str) for row in source_reasoning_rows):
             return set(), []
-        source_reasoning = "\n".join(
+        source_reasoning_segments = [
             row for row in source_reasoning_rows if row
-        )
+        ]
         expected = _expected_visible_final(request)
         terminal_response_id = next(
             (
@@ -5853,7 +5861,7 @@ def _v5_ui_facts(
         if (
             not content.strip()
             or source_message.get("content") != content
-            or source_reasoning != reasoning
+            or source_reasoning_segments != reasoning_segments
             or not str(message.get("content_text") or "").strip()
             or (reasoning and not str(message.get("reasoning_text") or "").strip())
             or (

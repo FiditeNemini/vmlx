@@ -5523,6 +5523,100 @@ def test_r19_v5_ui_facts_do_not_invent_unobserved_settings_or_layout(
     ) == (set(), [])
 
 
+def test_r19_v5_ui_facts_preserve_interleaved_reasoning_boundaries(
+    tmp_path: Path,
+):
+    module = load_module()
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    captures = []
+    phase_observations = []
+    for phase in module.V5_CACHE_PHASES:
+        capture, dom = _fixture_ui_capture(
+            module,
+            "ui-interleaved-reasoning",
+            "c" * 32,
+            session_id=(
+                "ui-interleaved-native"
+                if phase["index"] == 5
+                else "ui-interleaved-primary"
+            ),
+            phase_index=phase["index"],
+            evidence_root=tmp_path / f"phase-{phase['index']}",
+        )
+        if phase["index"] == 5:
+            first = "reason-before-tool"
+            second = "reason-after-tool"
+            turn = capture["turns"][0]
+            events = [
+                json.loads(row)
+                for row in base64.b64decode(
+                    turn["events_b64"], validate=True
+                ).decode().splitlines()
+                if row
+            ]
+            events.insert(
+                3,
+                {"type": "reasoning_delta", "text": second},
+            )
+            events[0]["text"] = first
+            for seq, event in enumerate(events):
+                event["seq"] = seq
+            turn["events_b64"] = _fixture_jsonl_b64(events)
+            source_proof = json.loads(
+                base64.b64decode(
+                    capture["source_proof_b64"], validate=True
+                )
+            )
+            source_proof["persistedReasoningByMessage"][0] = [first, second]
+            capture["source_proof_b64"] = _fixture_json_b64(source_proof)
+            dom["messages"][0]["reasoning_text"] = f"{first}\n{second}"
+        raw = json.dumps(
+            capture,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        captures.append((capture, raw))
+        dom_bytes = json.dumps(
+            dom,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        phase_observations.append(
+            {
+                "phase_index": phase["index"],
+                "observation": {
+                    "dom": dom,
+                    "dom_bytes_sha256": hashlib.sha256(dom_bytes).hexdigest(),
+                },
+            }
+        )
+    runtime = {
+        "phase_observations": phase_observations,
+    }
+    facts, hashes = module._v5_ui_facts(captures, runtime, bundle)
+    assert "reasoning_tool_reasoning_tool_answer" in facts
+    assert hashes
+
+    mismatched = deepcopy(captures)
+    native_capture = mismatched[5][0]
+    source_proof = json.loads(
+        base64.b64decode(
+            native_capture["source_proof_b64"], validate=True
+        )
+    )
+    source_proof["persistedReasoningByMessage"][0][1] += "-changed"
+    native_capture["source_proof_b64"] = _fixture_json_b64(source_proof)
+    mismatched[5] = (
+        native_capture,
+        json.dumps(
+            native_capture,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+    )
+    assert module._v5_ui_facts(mismatched, runtime, bundle) == (set(), [])
+
+
 def test_r19_v5_ui_facts_detects_common_namespace_translation_key(
     tmp_path: Path,
 ):

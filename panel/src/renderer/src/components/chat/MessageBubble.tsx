@@ -584,7 +584,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
               ? 'complete'
               : 'streaming'
           }
-          data-vmlx-proof-answer-source-length={message.content.length}
+          data-vmlx-proof-answer-full-length={message.content.length}
           data-vmlx-proof-answer-rendered-length={displayedContent.length}
         >
           {renderInlineContent()}

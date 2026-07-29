@@ -3390,9 +3390,9 @@ export function validateRenderedDomEvidence(result) {
     }
     if (
       rendered.answerState !== 'complete'
-      || !Number.isInteger(rendered.answerSourceLength)
-      || rendered.answerSourceLength < 0
-      || rendered.answerRenderedLength !== rendered.answerSourceLength
+      || !Number.isInteger(rendered.answerFullLength)
+      || rendered.answerFullLength < 0
+      || rendered.answerRenderedLength !== rendered.answerFullLength
     ) {
       failures.push(
         `assistant message ${messageId} visible typewriter did not drain to the persisted source length`,
@@ -8178,8 +8178,8 @@ async function main() {
             visible: isVisible(root),
             answerText: (proseAnswer?.innerText || proseAnswer?.textContent || '').trim(),
             answerState: answer?.getAttribute('data-vmlx-proof-answer-state') || '',
-            answerSourceLength: Number(
-              answer?.getAttribute('data-vmlx-proof-answer-source-length') || -1
+            answerFullLength: Number(
+              answer?.getAttribute('data-vmlx-proof-answer-full-length') || -1
             ),
             answerRenderedLength: Number(
               answer?.getAttribute('data-vmlx-proof-answer-rendered-length') || -1
@@ -9347,7 +9347,7 @@ async function main() {
                 return (
                   answer?.getAttribute('data-vmlx-proof-answer-state') === 'complete'
                   && Number(answer.getAttribute('data-vmlx-proof-answer-rendered-length'))
-                    === Number(answer.getAttribute('data-vmlx-proof-answer-source-length'))
+                    === Number(answer.getAttribute('data-vmlx-proof-answer-full-length'))
                 );
               }),
               uiTurnCount + ' assistant typewriter buffers to drain',

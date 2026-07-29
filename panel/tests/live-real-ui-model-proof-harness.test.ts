@@ -1290,7 +1290,7 @@ function goodResult(): Record<string, any> {
     visible: true,
     answerText: renderedContents[index],
     answerState: "complete",
-    answerSourceLength: record.content.length,
+    answerFullLength: record.content.length,
     answerRenderedLength: record.content.length,
     reasoningText: "Reason carefully",
     reasoningSegments: ["Reason carefully"],
@@ -3759,7 +3759,7 @@ describe("real UI model proof harness", () => {
     valid.messageEventTrace[0] = primaryTrace(assistantIds[0], persisted, 0);
     valid.renderedDom.messages[0].answerText =
       "R19-DONE\nfirst item\nsecond item";
-    valid.renderedDom.messages[0].answerSourceLength = persisted.length;
+    valid.renderedDom.messages[0].answerFullLength = persisted.length;
     valid.renderedDom.messages[0].answerRenderedLength = persisted.length;
     expect(validateRenderedDomEvidence(valid)).toEqual([]);
   });
@@ -3793,7 +3793,7 @@ describe("real UI model proof harness", () => {
     );
     valid.renderedDom.messages[2].answerText = unicodeAnswer;
     valid.renderedDom.messages[2].html = `<p>${unicodeAnswer}</p>`;
-    valid.renderedDom.messages[2].answerSourceLength = unicodeAnswer.length;
+    valid.renderedDom.messages[2].answerFullLength = unicodeAnswer.length;
     valid.renderedDom.messages[2].answerRenderedLength = unicodeAnswer.length;
     valid.renderedDom.messages[2].katexCount = 0;
     valid.renderedDom.messages[2].katexAnnotations = [];

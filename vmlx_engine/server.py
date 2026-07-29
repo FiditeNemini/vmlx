@@ -651,44 +651,23 @@ def _estimate_max_prompt_tokens() -> int:
     Returns 0 if estimation fails (no limit enforced).
     """
     try:
-        import mlx.core as mx
-
-        _device_info = getattr(mx, "device_info", None) or mx.metal.device_info
-        _get_active = (
-            getattr(mx, "get_active_memory", None) or mx.metal.get_active_memory
+        from vmlx_engine.utils.memory_limits import (
+            estimate_kv_bytes_per_token_from_config,
         )
-        max_ws = _device_info()["max_recommended_working_set_size"]
-        active = _get_active()
+
+        active, max_ws = _metal_projection_stats()
         free = max_ws - active
         # Allow KV to use at most 60% of free memory
         kv_budget = int(free * 0.6)
-        # Estimate bytes per token from engine config
-        engine = get_engine()
-        if hasattr(engine, "model"):
-            model = engine.model
-            config = getattr(model, "config", None) or getattr(model, "args", None)
-            if config:
-                n_layers = getattr(config, "num_hidden_layers", 0) or getattr(
-                    config, "n_layers", 0
-                )
-                n_kv_heads = getattr(config, "num_key_value_heads", 0) or getattr(
-                    config, "n_kv_heads", 0
-                )
-                head_dim = getattr(config, "head_dim", 0)
-                if not head_dim:
-                    hidden = getattr(config, "hidden_size", 0)
-                    n_heads = getattr(config, "num_attention_heads", 0) or getattr(
-                        config, "n_heads", 0
-                    )
-                    head_dim = hidden // n_heads if n_heads else 128
-                if n_layers and n_kv_heads and head_dim:
-                    bytes_per_token = (
-                        n_layers * 2 * n_kv_heads * head_dim * 2
-                    )  # K+V, float16
-                    max_tokens = (
-                        kv_budget // bytes_per_token if bytes_per_token > 0 else 0
-                    )
-                    return max(1024, max_tokens)  # floor at 1K tokens
+        config = _loaded_model_config_for_memory_projection()
+        bytes_per_token = estimate_kv_bytes_per_token_from_config(config)
+        if config is not None and bytes_per_token > 0:
+            max_tokens = kv_budget // bytes_per_token
+            estimated = max(1024, max_tokens)  # preserve the existing 1K floor
+            declared_limit = _declared_context_limit_from_config(config)
+            if declared_limit > 0:
+                estimated = min(estimated, declared_limit)
+            return max(1, estimated)
         return 0
     except Exception:
         return 0
@@ -699,10 +678,91 @@ def _loaded_model_config_for_memory_projection():
         engine = get_engine()
     except Exception:
         return None
-    model = getattr(engine, "model", None)
-    if model is None:
-        model = getattr(engine, "_model", None)
-    return getattr(model, "config", None) or getattr(model, "args", None)
+    candidates = [
+        getattr(engine, "model", None),
+        getattr(engine, "_model", None),
+    ]
+    seen: set[int] = set()
+    while candidates:
+        model = candidates.pop(0)
+        if model is None or id(model) in seen:
+            continue
+        seen.add(id(model))
+        config = getattr(model, "config", None) or getattr(model, "args", None)
+        if config is not None:
+            return config
+        # SimpleEngine owns an MLXLanguageModel/MLXMultimodalLM wrapper at
+        # ``_model``; the raw loaded model (and its config) is one level down.
+        candidates.extend(
+            [
+                getattr(model, "model", None),
+                getattr(model, "_model", None),
+            ]
+        )
+    return None
+
+
+def _declared_context_limit_from_config(config: Any) -> int:
+    """Return the authoritative model context ceiling when declared.
+
+    Multimodal wrappers commonly carry the text ceiling under ``text_config``.
+    Use the smallest positive declared ceiling so an outer wrapper cannot make
+    the memory-derived prompt cap exceed its text model's native context.
+    """
+
+    if config is None:
+        return 0
+
+    def read(value: Any, key: str) -> Any:
+        if isinstance(value, dict):
+            return value.get(key)
+        return getattr(value, key, None)
+
+    nested = read(config, "text_config")
+    candidates = [config]
+    if nested is not None:
+        candidates.append(nested)
+    limits: list[int] = []
+    for candidate in candidates:
+        for key in (
+            "max_position_embeddings",
+            "max_sequence_length",
+            "max_seq_len",
+            "model_max_length",
+            "context_length",
+            "n_positions",
+        ):
+            try:
+                value = int(read(candidate, key) or 0)
+            except (TypeError, ValueError):
+                continue
+            # Tokenizer sentinel values can be enormous and are not real model
+            # context declarations. Real supported contexts are far below 1B.
+            if 0 < value <= 1_000_000_000:
+                limits.append(value)
+    return min(limits) if limits else 0
+
+
+def _refresh_loaded_max_prompt_tokens(reason: str) -> int:
+    """Recompute the session prompt cap after the engine owns a loaded model."""
+
+    global _max_prompt_tokens
+
+    explicit_limit = (_cli_args or {}).get("max_prompt_tokens")
+    auto_estimate = _estimate_max_prompt_tokens()
+    _max_prompt_tokens = _resolve_max_prompt_tokens(
+        auto_estimate,
+        explicit_limit,
+    )
+    if _max_prompt_tokens > 0:
+        source = "explicit" if explicit_limit and explicit_limit > 0 else "automatic"
+        logger.info(
+            "Refreshed max prompt/context length after %s: %d tokens (%s)",
+            reason,
+            _max_prompt_tokens,
+            source,
+        )
+    return _max_prompt_tokens
 
 
 def _metal_projection_stats() -> tuple[int, int]:
@@ -4848,7 +4908,7 @@ _EFFORT_THINKING_BUDGET = {"low": 1024, "medium": 8192, "high": 32768, "max": 13
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan for startup/shutdown events."""
-    global _engine, _mcp_manager
+    global _engine, _mcp_manager, _max_prompt_tokens
 
     caffeinate_process = None
     if platform.system() == "Darwin":
@@ -4868,6 +4928,7 @@ async def lifespan(app: FastAPI):
     if _engine is not None and hasattr(_engine, "_loaded") and not _engine._loaded:
         await _engine.start()
         _record_metal_ws_model_baseline("lifespan_engine_start")
+        _refresh_loaded_max_prompt_tokens("lifespan_engine_start")
 
         # Apply chat template override for BatchedEngine (SimpleEngine does it in load_model)
         try:
@@ -10710,6 +10771,10 @@ async def admin_wake():
                         logger.info(f"Draft model reloaded: {_spec_model}")
                     except Exception as e:
                         logger.warning(f"Failed to reload draft model on wake: {e}")
+                # Measure after the optional speculative draft is resident so
+                # deep-wake prompt limits use the same total memory ownership
+                # as initial startup.
+                _refresh_loaded_max_prompt_tokens("admin_wake_engine_start")
                 _standby_state = None
                 logger.info(f"Woke from deep sleep — model {_model_name} reloaded")
                 return {"status": "active"}

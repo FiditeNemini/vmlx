@@ -949,7 +949,7 @@ def _fixture_cache_capture(
             "partial_b" if gate_operation == "store" else "restart_partial_c"
         )
         partial_selector = "B" if gate_operation == "store" else "C"
-        disk_refault = gate_operation == "probe" or phase["index"] == 2
+        disk_refault = gate_operation == "probe"
         partial_execution = {
             "prompt_tokens": 128,
             "cached_tokens": 112,
@@ -966,12 +966,8 @@ def _fixture_cache_capture(
                 "cache_contract_ok": True,
                 "cached_tokens": 112,
                 "health_counter_deltas": {
-                    "scheduler_cache.evictions": (
-                        1 if phase["index"] == 2 else 0
-                    ),
-                    "block_disk_cache.disk_evictions": (
-                        1 if phase["index"] == 2 else 0
-                    ),
+                    "scheduler_cache.evictions": 0,
+                    "block_disk_cache.disk_evictions": 0,
                 },
                 "last_cache_execution": partial_execution,
             }
@@ -1095,6 +1091,40 @@ def _fixture_cache_capture(
                 "old_prefix_evicted": True,
                 "recent_prefix_present": True,
                 "recent_prefix_last_access_after_old": True,
+                "recent_before": {
+                    "l1": {
+                        "terminal_resident_payload_present": True,
+                    }
+                },
+                "recent_pre_refault": {
+                    "l1": {
+                        "terminal_resident_payload_present": False,
+                    }
+                },
+                "evicting_filler_fence": {
+                    "request_correlated": True,
+                    "post_eviction_complete": True,
+                    "fence_sealed": True,
+                    "disk_evictions_delta": 1,
+                },
+                "recent_refault_execution": {
+                    "response_id": "resp-phase2-refault",
+                    "response_id_consistent": True,
+                    "status_code": 200,
+                    "terminal_ok": True,
+                    "marker_ok": True,
+                    "cached_tokens": 112,
+                    "cache_detail": {
+                        "source": "paged+disk+tq-native",
+                    },
+                    "last_cache_execution": {
+                        **partial_execution,
+                        "cache_reuse_applied": True,
+                        "cache_outcome": "hit",
+                        "disk_blocks": 7,
+                        "cache_detail": "paged+disk+tq-native",
+                    },
+                },
             }
         if phase["index"] == 3:
             summary["l2_restart_restore_observation"] = {
@@ -2111,6 +2141,270 @@ def test_r19_responses_completed_event_requires_successful_completed_status(
         + b"\n\n"
     )
     assert module._parse_raw_protocol_stream("responses", raw) is None
+
+
+def test_r19_responses_added_and_done_tool_name_is_idempotent():
+    module = load_module()
+    raw = (
+        _fixture_sse(
+            "response.created",
+            {
+                "type": "response.created",
+                "response": {"id": "resp-1", "status": "in_progress"},
+            },
+        )
+        + _fixture_sse(
+            "response.output_item.added",
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "file_info",
+                    "arguments": "",
+                },
+            },
+        )
+        + _fixture_sse(
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "file_info",
+                    "arguments": '{"path":"panel/package.json"}',
+                },
+            },
+        )
+        + _fixture_sse(
+            "response.completed",
+            {
+                "type": "response.completed",
+                "response": {"id": "resp-1", "status": "completed"},
+            },
+        )
+    ).encode()
+
+    parsed = module._parse_raw_protocol_stream("responses", raw)
+
+    assert parsed is not None
+    assert parsed["response_id"] == "resp-1"
+    assert parsed["tool_calls"] == [
+        {
+            "id": "call-1",
+            "function": {
+                "name": "file_info",
+                "arguments": {"path": "panel/package.json"},
+            },
+        }
+    ]
+
+
+def test_r19_chat_tool_name_fragments_still_accumulate():
+    module = load_module()
+    calls = {}
+
+    module._append_tool_delta(calls, 0, "call-1", "file_", "")
+    module._append_tool_delta(calls, 0, None, "info", "{}")
+
+    assert calls[0]["name"] == "file_info"
+
+
+def test_r19_responses_dynamic_final_uses_retained_results_and_response_chain():
+    module = load_module()
+    final = (
+        "AGENTIC-RESPONSES-STREAM-DONE SIZE=5.3 KB "
+        "PWD=/Users/eric/mlx/vllm-mlx-r19-release-build"
+    )
+    requests = [
+        {
+            "stream": True,
+            "max_output_tokens": 256,
+            "input": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Use file_info and then run_command. Reply with exactly "
+                        "one line in this format: "
+                        "AGENTIC-RESPONSES-STREAM-DONE "
+                        "SIZE=<copy size_human from the file_info result> "
+                        "PWD=<copy stdout from the run_command result>. "
+                        "Replace both angle-bracket placeholders with the real "
+                        "result values; output no other text."
+                    ),
+                }
+            ],
+        },
+        {
+            "stream": True,
+            "max_output_tokens": 256,
+            "previous_response_id": "resp-1",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": json.dumps(
+                        {
+                            "path": "panel/package.json",
+                            "size_human": "5.3 KB",
+                        },
+                        separators=(",", ":"),
+                    ),
+                }
+            ],
+        },
+        {
+            "stream": True,
+            "max_output_tokens": 256,
+            "previous_response_id": "resp-2",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-2",
+                    "output": json.dumps(
+                        {
+                            "command": "pwd",
+                            "exit_code": 0,
+                            "stdout": (
+                                "/Users/eric/mlx/"
+                                "vllm-mlx-r19-release-build"
+                            ),
+                        },
+                        separators=(",", ":"),
+                    ),
+                }
+            ],
+        },
+    ]
+
+    def response_stream(
+        response_id: str,
+        reasoning: str,
+        *,
+        call_id: str = "",
+        name: str = "",
+        arguments: dict | None = None,
+        content_parts: tuple[str, ...] = (),
+    ) -> bytes:
+        events = [
+            _fixture_sse(
+                "response.created",
+                {
+                    "type": "response.created",
+                    "response": {
+                        "id": response_id,
+                        "status": "in_progress",
+                    },
+                },
+            ),
+            _fixture_sse(
+                "response.reasoning_text.delta",
+                {
+                    "type": "response.reasoning_text.delta",
+                    "delta": reasoning,
+                },
+            ),
+        ]
+        if call_id:
+            item = {
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": json.dumps(arguments, separators=(",", ":")),
+            }
+            events.extend(
+                [
+                    _fixture_sse(
+                        "response.output_item.added",
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": 0,
+                            "item": {**item, "arguments": ""},
+                        },
+                    ),
+                    _fixture_sse(
+                        "response.output_item.done",
+                        {
+                            "type": "response.output_item.done",
+                            "output_index": 0,
+                            "item": item,
+                        },
+                    ),
+                ]
+            )
+        for part in content_parts:
+            events.append(
+                _fixture_sse(
+                    "response.output_text.delta",
+                    {
+                        "type": "response.output_text.delta",
+                        "delta": part,
+                    },
+                )
+            )
+        events.append(
+            _fixture_sse(
+                "response.completed",
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": response_id,
+                        "status": "completed",
+                    },
+                },
+            )
+        )
+        return "".join(events).encode()
+
+    streams = [
+        response_stream(
+            "resp-1",
+            "reason-one",
+            call_id="call-1",
+            name="file_info",
+            arguments={"path": "panel/package.json"},
+        ),
+        response_stream(
+            "resp-2",
+            "reason-two",
+            call_id="call-2",
+            name="run_command",
+            arguments={"command": "pwd"},
+        ),
+        response_stream(
+            "resp-3",
+            "reason-three",
+            content_parts=(final[:34], final[34:]),
+        ),
+    ]
+
+    facts = module._api_flow_facts_from_raw(
+        "responses",
+        requests,
+        streams,
+    )
+
+    assert {
+        "nonempty_final",
+        "content_progressive",
+        "exact_tool_arguments",
+        "history_three_turn",
+        "tool_result_continuation",
+        "reasoning_tool_reasoning_tool_answer",
+    } <= facts
+
+    wrong_chain = deepcopy(requests)
+    wrong_chain[2]["previous_response_id"] = "resp-wrong"
+    wrong_facts = module._api_flow_facts_from_raw(
+        "responses",
+        wrong_chain,
+        streams,
+    )
+    assert "history_three_turn" not in wrong_facts
+    assert "tool_result_continuation" not in wrong_facts
 
 
 @pytest.mark.parametrize(
@@ -3847,6 +4141,25 @@ def test_r19_v5_six_phase_cache_facts_are_raw_and_do_not_invent_cross_surface_po
         bundle_fingerprint=bundle["fingerprint_sha256"],
         native_bundle_fingerprint=native_bundle["fingerprint_sha256"],
     )
+    phase2_summary = json.loads(
+        base64.b64decode(capture["phases"][2]["summary_b64"])
+    )
+    phase2_partial = next(
+        row
+        for row in phase2_summary["requests"]
+        if row["tag"] == "partial_b"
+    )["last_cache_execution"]
+    phase2_refault = phase2_summary["l2_size_eviction_observation"][
+        "recent_refault_execution"
+    ]["last_cache_execution"]
+    assert phase2_partial["disk_blocks"] == 0
+    assert "disk" not in phase2_partial["cache_detail"]
+    assert all(
+        not any((row.get("health_counter_deltas") or {}).values())
+        for row in phase2_summary["requests"]
+    )
+    assert phase2_refault["disk_blocks"] > 0
+    assert "disk" in phase2_refault["cache_detail"]
     raw = json.dumps(
         capture,
         sort_keys=True,
@@ -3916,6 +4229,107 @@ def test_r19_v5_six_phase_cache_facts_are_raw_and_do_not_invent_cross_surface_po
             ]
         )
         return changed
+
+    def rebind_phase2_eviction_attestation(changed):
+        changed_phase2_bytes = base64.b64decode(
+            changed["phases"][2]["summary_b64"]
+        )
+        changed_phase2_sha256 = hashlib.sha256(
+            changed_phase2_bytes
+        ).hexdigest()
+        changed["phases"][3][
+            "linked_store_summary_sha256"
+        ] = changed_phase2_sha256
+        phase3_bytes = base64.b64decode(
+            changed["phases"][3]["summary_b64"]
+        )
+        changed["l2_size_eviction_attestation"] = (
+            module._v5_derive_l2_size_eviction_attestation(
+                run_id=changed["run_id"],
+                nonce=changed["nonce"],
+                phase2_summary=json.loads(changed_phase2_bytes),
+                phase2_summary_sha256=changed_phase2_sha256,
+                phase3_summary=json.loads(phase3_bytes),
+                phase3_summary_sha256=hashlib.sha256(
+                    phase3_bytes
+                ).hexdigest(),
+            )
+        )
+        return changed
+
+    phase2_without_disk_refault = replace_phase_summary(
+        capture,
+        2,
+        lambda summary: summary["l2_size_eviction_observation"][
+            "recent_refault_execution"
+        ]["last_cache_execution"].update(
+            {
+                "disk_blocks": 0,
+                "cache_detail": "paged+tq-native",
+            }
+        ),
+    )
+    rebind_phase2_eviction_attestation(phase2_without_disk_refault)
+    phase2_without_disk_refault_raw = json.dumps(
+        phase2_without_disk_refault,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    assert module._v5_cache_facts(
+        [
+            (
+                phase2_without_disk_refault,
+                phase2_without_disk_refault_raw,
+            )
+        ],
+        representatives,
+    ) == (set(), [])
+
+    phase2_counter_only_ram = replace_phase_summary(
+        capture,
+        2,
+        lambda summary: (
+            summary["l2_size_eviction_observation"]["recent_pre_refault"][
+                "l1"
+            ].update({"terminal_resident_payload_present": True}),
+            summary["requests"][0]["health_counter_deltas"].update(
+                {"scheduler_cache.evictions": 1}
+            ),
+        ),
+    )
+    rebind_phase2_eviction_attestation(phase2_counter_only_ram)
+    phase2_counter_only_ram_raw = json.dumps(
+        phase2_counter_only_ram,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    assert module._v5_cache_facts(
+        [(phase2_counter_only_ram, phase2_counter_only_ram_raw)],
+        representatives,
+    ) == (set(), [])
+
+    phase2_counter_only_disk = replace_phase_summary(
+        capture,
+        2,
+        lambda summary: (
+            summary["l2_size_eviction_observation"][
+                "evicting_filler_fence"
+            ].update({"request_correlated": False}),
+            summary["requests"][0]["health_counter_deltas"].update(
+                {"block_disk_cache.disk_evictions": 1}
+            ),
+        ),
+    )
+    rebind_phase2_eviction_attestation(phase2_counter_only_disk)
+    phase2_counter_only_disk_raw = json.dumps(
+        phase2_counter_only_disk,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    assert module._v5_cache_facts(
+        [(phase2_counter_only_disk, phase2_counter_only_disk_raw)],
+        representatives,
+    ) == (set(), [])
 
     tampered_captures = []
 

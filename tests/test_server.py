@@ -231,6 +231,102 @@ class TestHelperFunctions:
 
         assert server._resolve_max_prompt_tokens(4096, 0) == 4096
 
+    def test_estimate_max_prompt_tokens_uses_batched_private_model_and_context_ceiling(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+        from vmlx_engine import server
+
+        config = SimpleNamespace(
+            num_hidden_layers=22,
+            num_loops=2,
+            num_key_value_heads=8,
+            head_dim=128,
+            torch_dtype="bfloat16",
+            max_position_embeddings=262144,
+        )
+        engine = SimpleNamespace(_model=SimpleNamespace(args=config))
+        monkeypatch.setattr(server, "get_engine", lambda: engine)
+        monkeypatch.setattr(
+            server,
+            "_metal_projection_stats",
+            lambda: (0, 10 * 1024**4),
+        )
+
+        assert server._estimate_max_prompt_tokens() == 262144
+
+    def test_estimate_max_prompt_tokens_uses_simple_engine_wrapper_model(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+        from vmlx_engine import server
+
+        config = SimpleNamespace(
+            num_hidden_layers=4,
+            num_key_value_heads=2,
+            head_dim=64,
+            torch_dtype="bfloat16",
+            max_position_embeddings=32768,
+        )
+        raw_model = SimpleNamespace(args=config)
+        language_model_wrapper = SimpleNamespace(model=raw_model)
+        engine = SimpleNamespace(_model=language_model_wrapper)
+        monkeypatch.setattr(server, "get_engine", lambda: engine)
+        monkeypatch.setattr(
+            server,
+            "_metal_projection_stats",
+            lambda: (0, 1024**4),
+        )
+
+        assert server._estimate_max_prompt_tokens() == 32768
+
+    def test_declared_context_limit_prefers_smaller_nested_text_ceiling(self):
+        from types import SimpleNamespace
+        from vmlx_engine import server
+
+        config = SimpleNamespace(
+            max_position_embeddings=262144,
+            text_config=SimpleNamespace(max_position_embeddings=131072),
+        )
+
+        assert server._declared_context_limit_from_config(config) == 131072
+
+    def test_refresh_loaded_max_prompt_tokens_applies_automatic_estimate(
+        self, monkeypatch
+    ):
+        from vmlx_engine import server
+
+        monkeypatch.setattr(server, "_cli_args", {"max_prompt_tokens": None})
+        monkeypatch.setattr(server, "_max_prompt_tokens", 0)
+        monkeypatch.setattr(server, "_estimate_max_prompt_tokens", lambda: 65536)
+
+        assert server._refresh_loaded_max_prompt_tokens("test") == 65536
+        assert server._max_prompt_tokens == 65536
+
+    def test_refresh_loaded_max_prompt_tokens_preserves_explicit_limit(
+        self, monkeypatch
+    ):
+        from vmlx_engine import server
+
+        monkeypatch.setattr(server, "_cli_args", {"max_prompt_tokens": 8192})
+        monkeypatch.setattr(server, "_max_prompt_tokens", 0)
+        monkeypatch.setattr(server, "_estimate_max_prompt_tokens", lambda: 65536)
+
+        assert server._refresh_loaded_max_prompt_tokens("test") == 8192
+        assert server._max_prompt_tokens == 8192
+
+    def test_admin_wake_refreshes_prompt_limit_after_speculative_draft_reload(self):
+        import inspect
+        from vmlx_engine import server
+
+        source = inspect.getsource(server.admin_wake)
+
+        assert source.index(
+            "await _run_on_model_executor(load_draft_model, _spec_cfg)"
+        ) < source.index(
+            '_refresh_loaded_max_prompt_tokens("admin_wake_engine_start")'
+        )
+
     def test_effective_max_prompt_tokens_request_can_only_lower_session_cap(self, monkeypatch):
         from types import SimpleNamespace
         from vmlx_engine import server

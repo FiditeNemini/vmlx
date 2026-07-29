@@ -2105,7 +2105,18 @@ def _append_tool_delta(
     if call_id:
         row["id"] = str(call_id)
     if name:
-        row["name"] += str(name)
+        incoming_name = str(name)
+        current_name = str(row.get("name") or "")
+        if not current_name:
+            row["name"] = incoming_name
+        elif incoming_name.startswith(current_name):
+            # Responses emits the same completed function-call item through
+            # both ``response.output_item.added`` and ``.done``.  Treat a
+            # repeated/cumulative full name as an idempotent snapshot while
+            # retaining Chat Completions' genuinely fragmented name deltas.
+            row["name"] = incoming_name
+        else:
+            row["name"] = current_name + incoming_name
     if arguments:
         if isinstance(arguments, str):
             row["arguments"] += arguments
@@ -2169,6 +2180,7 @@ def _parse_raw_protocol_stream(
     terminal_last = False
     normalized_channels: list[str] = []
     event_kinds: list[str] = []
+    response_ids: set[str] = set()
     for event_index, (event_name, data) in enumerate(parsed_events):
         if isinstance(data, dict):
             declared_kind = str(data.get("type") or event_name)
@@ -2224,6 +2236,14 @@ def _parse_raw_protocol_stream(
         elif protocol == "responses":
             if not isinstance(data, dict):
                 return None
+            response_id = str(data.get("response_id") or "")
+            response = data.get("response")
+            if isinstance(response, dict):
+                response_id = str(response.get("id") or response_id)
+            if response_id:
+                response_ids.add(response_id)
+                if len(response_ids) > 1:
+                    return None
             kind = str(data.get("type") or event_name)
             if event_name and kind != event_name:
                 return None
@@ -2244,9 +2264,18 @@ def _parse_raw_protocol_stream(
             }:
                 item = data.get("item")
                 if isinstance(item, dict) and item.get("type") == "function_call":
+                    output_index = data.get("output_index")
+                    try:
+                        call_index = (
+                            int(output_index)
+                            if output_index is not None
+                            else len(tool_parts)
+                        )
+                    except (TypeError, ValueError):
+                        return None
                     _append_tool_delta(
                         tool_parts,
-                        int(data.get("output_index") or len(tool_parts)),
+                        call_index,
                         item.get("call_id") or item.get("id"),
                         item.get("name"),
                         item.get("arguments"),
@@ -2360,6 +2389,7 @@ def _parse_raw_protocol_stream(
         "terminal_last": terminal_last,
         "channels": normalized_channels,
         "event_kinds": event_kinds,
+        "response_id": next(iter(response_ids), ""),
         "raw_sha256": hashlib.sha256(raw_bytes).hexdigest(),
     }
 
@@ -2556,7 +2586,10 @@ def _request_tool_results(body: Any) -> list[dict[str, str]]:
     return results
 
 
-def _expected_visible_final(body: Any) -> str:
+def _expected_visible_final(
+    body: Any,
+    tool_results: list[dict[str, str]] | None = None,
+) -> str:
     strings: list[str] = []
 
     def visit(value: Any) -> None:
@@ -2570,6 +2603,37 @@ def _expected_visible_final(body: Any) -> str:
                 visit(nested)
 
     visit(body)
+    dynamic_pattern = re.compile(
+        r"(?is)reply with exactly one line in this format:\s*"
+        r"([A-Z0-9][A-Z0-9_.:/-]{4,}-DONE)\s+"
+        r"SIZE=<copy size_human from the file_info result>\s+"
+        r"PWD=<copy stdout from the run_command result>\."
+    )
+    for value in reversed(strings):
+        match = dynamic_pattern.search(value)
+        if not match:
+            continue
+        size_values: set[str] = set()
+        stdout_values: set[str] = set()
+        for result in tool_results or []:
+            try:
+                decoded = json.loads(str(result.get("content") or ""))
+            except (AttributeError, json.JSONDecodeError):
+                continue
+            if not isinstance(decoded, dict):
+                continue
+            size_human = decoded.get("size_human")
+            stdout = decoded.get("stdout")
+            if isinstance(size_human, str) and size_human.strip():
+                size_values.add(size_human.strip())
+            if isinstance(stdout, str) and stdout.strip():
+                stdout_values.add(stdout.strip())
+        if len(size_values) == 1 and len(stdout_values) == 1:
+            return (
+                f"{match.group(1)} SIZE={next(iter(size_values))} "
+                f"PWD={next(iter(stdout_values))}"
+            )
+        return ""
     patterns = (
         r"(?i)visible answer (?:must be|exactly)\s+[`'\"]?([A-Z0-9][A-Z0-9_.:=/-]{4,})",
         r"(?i)reply exactly\s+[`'\"]?([A-Z0-9][A-Z0-9_.:=/-]{4,})",
@@ -2613,7 +2677,15 @@ def _api_flow_facts_from_raw(
         )
     ):
         facts.update({"reasoning_separate", "reasoning_not_stale"})
-    expected_final = _expected_visible_final(request_bodies[2])
+    retained_tool_results = [
+        result
+        for body in request_bodies
+        for result in _request_tool_results(body)
+    ]
+    expected_final = _expected_visible_final(
+        request_bodies,
+        retained_tool_results,
+    )
     if expected_final and contents[2].strip() == expected_final:
         facts.add("nonempty_final")
     if rounds[2]["content_delta_count"] > 1:
@@ -2630,13 +2702,39 @@ def _api_flow_facts_from_raw(
         and _tool_call_name(calls[1][0]) == "run_command"
         and _tool_call_arguments(calls[1][0]) == {"command": "pwd"}
     )
-    result_chain = (
-        len(result_round_2) >= 1
+    inline_result_chain = (
+        exact_calls
+        and len(result_round_2) >= 1
         and len(result_round_3) >= 2
         and result_round_2[-1]["call_id"] == calls[0][0].get("id")
         and result_round_3[-1]["call_id"] == calls[1][0].get("id")
         and bool(result_round_2[-1]["content"])
         and bool(result_round_3[-1]["content"])
+    )
+    responses_previous_ids_present = protocol == "responses" and any(
+        body.get("previous_response_id") for body in request_bodies[1:]
+    )
+    responses_linked_result_chain = (
+        exact_calls
+        and protocol == "responses"
+        and len(result_round_2) >= 1
+        and len(result_round_3) >= 1
+        and result_round_2[-1]["call_id"] == calls[0][0].get("id")
+        and result_round_3[-1]["call_id"] == calls[1][0].get("id")
+        and bool(result_round_2[-1]["content"])
+        and bool(result_round_3[-1]["content"])
+        and bool(rounds[0].get("response_id"))
+        and bool(rounds[1].get("response_id"))
+        and rounds[0]["response_id"] != rounds[1]["response_id"]
+        and request_bodies[1].get("previous_response_id")
+        == rounds[0]["response_id"]
+        and request_bodies[2].get("previous_response_id")
+        == rounds[1]["response_id"]
+    )
+    result_chain = (
+        responses_linked_result_chain
+        if responses_previous_ids_present
+        else inline_result_chain
     )
     if result_chain:
         facts.add("history_three_turn")
@@ -6819,12 +6917,64 @@ def _v5_cache_facts(
         ):
             return set(), []
         phase_executions[expected_phase["index"]] = execution
-        if expected_phase["index"] == 2 and (
-            integer(execution.get("disk_blocks")) <= 0
-            or "disk"
-            not in str(execution.get("cache_detail") or "").lower()
-        ):
-            return set(), []
+        if expected_phase["index"] == 2:
+            eviction_observation = summary.get(
+                "l2_size_eviction_observation"
+            )
+            refault_execution = nested(
+                summary,
+                "l2_size_eviction_observation",
+                "recent_refault_execution",
+                "last_cache_execution",
+            )
+            if (
+                not isinstance(refault_execution, dict)
+                or integer(refault_execution.get("disk_blocks")) <= 0
+                or "disk"
+                not in str(
+                    refault_execution.get("cache_detail") or ""
+                ).lower()
+            ):
+                return set(), []
+            recent_before_l1 = nested(
+                eviction_observation,
+                "recent_before",
+                "l1",
+            )
+            recent_pre_refault_l1 = nested(
+                eviction_observation,
+                "recent_pre_refault",
+                "l1",
+            )
+            evicting_filler_fence = (
+                eviction_observation.get("evicting_filler_fence")
+                if isinstance(eviction_observation, dict)
+                else None
+            )
+            saw_phase2_ram_eviction = saw_phase2_ram_eviction or (
+                isinstance(recent_before_l1, dict)
+                and recent_before_l1.get(
+                    "terminal_resident_payload_present"
+                )
+                is True
+                and isinstance(recent_pre_refault_l1, dict)
+                and recent_pre_refault_l1.get(
+                    "terminal_resident_payload_present"
+                )
+                is False
+            )
+            saw_phase2_disk_eviction = saw_phase2_disk_eviction or (
+                isinstance(evicting_filler_fence, dict)
+                and evicting_filler_fence.get("request_correlated") is True
+                and evicting_filler_fence.get("post_eviction_complete") is True
+                and evicting_filler_fence.get("fence_sealed") is True
+                and integer(
+                    evicting_filler_fence.get("disk_evictions_delta")
+                )
+                > 0
+                and eviction_observation.get("old_prefix_evicted") is True
+                and eviction_observation.get("recent_prefix_present") is True
+            )
         if cache_policy == "q4":
             facts.update(
                 {
@@ -6896,21 +7046,6 @@ def _v5_cache_facts(
                         "disk_refault_observed",
                     }
                 )
-        all_counter_deltas = [
-            row.get("health_counter_deltas")
-            for row in requests
-            if isinstance(row, dict)
-            and isinstance(row.get("health_counter_deltas"), dict)
-        ]
-        if expected_phase["index"] == 2:
-            saw_phase2_ram_eviction = any(
-                integer(row.get("scheduler_cache.evictions")) > 0
-                for row in all_counter_deltas
-            )
-            saw_phase2_disk_eviction = any(
-                integer(row.get("block_disk_cache.disk_evictions")) > 0
-                for row in all_counter_deltas
-            )
         phase_instantiated[expected_phase["index"]] = instantiated
         configured = (
             topology.get("configured")
@@ -10520,11 +10655,15 @@ def _v5_ui_worker_capture(
             "VMLINUX_REAL_UI_EXPECT_PAGED_CACHE": (
                 "1" if phase["paged_ram"] else "0"
             ),
-            "VMLINUX_REAL_UI_MAX_TOKENS": "2048",
             "VMLINUX_REAL_UI_BUILTIN_TOOLS": "1",
             "VMLINUX_REAL_UI_ALLOW_FAIL": "1",
         }
     )
+    # Phase 0 is the untouched new-session bundle-default proof. Do not write
+    # a saved max-output override before its only visible settings snapshot.
+    # Later phases stay bounded so their behavior/cache rows cannot run away.
+    if int(phase["index"]) != 0:
+        environment["VMLINUX_REAL_UI_MAX_TOKENS"] = "2048"
     process = subprocess.Popen(  # noqa: S603 - pinned source-owned harness
         [str(node), str(harness_path)],
         cwd=ROOT / "panel",

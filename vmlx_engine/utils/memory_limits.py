@@ -66,6 +66,13 @@ def estimate_kv_bytes_per_token_from_config(config) -> int:
             or _cfg_get(cfg, "num_layers")
             or 0
         )
+        num_loops = (
+            _cfg_get(cfg, "total_loops")
+            or _cfg_get(cfg, "num_loops")
+            or _cfg_get(config, "total_loops")
+            or _cfg_get(config, "num_loops")
+            or 1
+        )
         n_heads = (
             _cfg_get(cfg, "num_attention_heads")
             or _cfg_get(cfg, "n_heads")
@@ -90,12 +97,20 @@ def estimate_kv_bytes_per_token_from_config(config) -> int:
         )
         try:
             n_layers = int(n_layers)
+            num_loops = int(num_loops)
             n_kv_heads = int(n_kv_heads)
             head_dim = int(head_dim)
         except (TypeError, ValueError):
             continue
         if n_layers > 0 and n_kv_heads > 0 and head_dim > 0:
-            return n_layers * 2 * n_kv_heads * head_dim * _dtype_scalar_bytes(dtype)
+            effective_layers = n_layers * max(1, num_loops)
+            return (
+                effective_layers
+                * 2
+                * n_kv_heads
+                * head_dim
+                * _dtype_scalar_bytes(dtype)
+            )
     return 0
 
 

@@ -4844,7 +4844,7 @@ def load_jang_model(
             config=hf_config,
             jang_config=jang_cfg,
         )
-        return model, tokenizer
+        return result
     # Modern JANG writers emit {"version": 2, "weight_format": "...", ...} and
     # omit the legacy `format` field entirely. Accept native JANG weight formats
     # in addition to the {"format": "jang"|"jjqf"|"mxq"} legacy envelope.

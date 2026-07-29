@@ -95,6 +95,31 @@ def test_estimate_kv_bytes_per_token_from_text_config_dict():
     assert estimate_kv_bytes_per_token_from_config(cfg) == 2 * 2 * 4 * 8 * 2
 
 
+def test_estimate_kv_bytes_per_token_counts_looped_cache_slots():
+    cfg = {
+        "num_hidden_layers": 22,
+        "num_loops": 2,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "torch_dtype": "bfloat16",
+    }
+
+    assert estimate_kv_bytes_per_token_from_config(cfg) == 44 * 2 * 8 * 128 * 2
+
+
+def test_estimate_kv_bytes_prefers_runtime_total_loops():
+    cfg = SimpleNamespace(
+        num_hidden_layers=22,
+        num_loops=1,
+        total_loops=2,
+        num_key_value_heads=8,
+        head_dim=128,
+        torch_dtype="bfloat16",
+    )
+
+    assert estimate_kv_bytes_per_token_from_config(cfg) == 44 * 2 * 8 * 128 * 2
+
+
 def test_projected_output_token_cap_accounts_for_transient_multiplier():
     gib = 1024**3
     cap = projected_output_token_cap(

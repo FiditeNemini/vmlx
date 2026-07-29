@@ -7784,13 +7784,17 @@ class TestStartupCompatibilityGuards:
 
     def test_bundled_python_restores_launcher_and_libpython_after_dependency_install(self):
         bundle_script = Path("./panel/scripts/bundle-python.sh").read_text()
+        cleanup_idx = bundle_script.index("cleanup_bundle_build()")
+        cleanup_trap_idx = bundle_script.index("trap cleanup_bundle_build EXIT")
+        cleanup_block = bundle_script[cleanup_idx:cleanup_trap_idx]
         dependency_install_idx = bundle_script.index('echo "==> Installing dependencies..."')
         local_install_idx = bundle_script.index('echo "==> Installing mlx-audio')
         dependency_block = bundle_script[dependency_install_idx:local_install_idx]
 
         assert "restore_python_runtime_files" in bundle_script
         assert 'STANDALONE_TARBALL="$(mktemp' in bundle_script
-        assert 'trap \'rm -f "$STANDALONE_TARBALL"\'' in bundle_script
+        assert 'rm -f "$STANDALONE_TARBALL"' in cleanup_block
+        assert "trap cleanup_bundle_build EXIT" in bundle_script
         assert "tar xzf \"$STANDALONE_TARBALL\"" in bundle_script
         assert "python/bin/python3.12" in bundle_script
         assert "python/lib/libpython3.12.dylib" in bundle_script
@@ -12012,6 +12016,9 @@ class TestTurboQuantKVTelemetry:
         scheduler._cache_hit_tokens = 0
         scheduler._cache_hit_tokens_by_detail = {}
         scheduler._queue_lock = threading.RLock()
+        scheduler.output_queues = {}
+        scheduler._terminal_cleanup_complete = threading.Event()
+        scheduler._terminal_cleanup_complete.set()
         scheduler.waiting = []
         scheduler.running = {}
         scheduler.finished_req_ids = set()
@@ -12079,6 +12086,9 @@ class TestTurboQuantKVTelemetry:
         scheduler._cache_hit_tokens = 0
         scheduler._cache_hit_tokens_by_detail = {}
         scheduler._queue_lock = threading.RLock()
+        scheduler.output_queues = {}
+        scheduler._terminal_cleanup_complete = threading.Event()
+        scheduler._terminal_cleanup_complete.set()
         scheduler.waiting = []
         scheduler.running = {}
         scheduler.finished_req_ids = set()

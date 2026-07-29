@@ -518,6 +518,19 @@ def test_bundle_python_isolates_host_python_and_publishes_only_verified_staging(
     assert "unset PYTHONPATH PYTHONHOME VIRTUAL_ENV" in verifier
 
 
+def test_bundle_python_retries_only_owned_tree_cleanup_and_still_fails_closed():
+    bundler = Path("panel/scripts/bundle-python.sh").read_text()
+
+    assert "remove_bundle_tree_with_retry()" in bundler
+    assert "for attempt in 1 2 3" in bundler
+    assert '/bin/rm -rf "$target"' in bundler
+    assert "retrying transient bundled-Python cleanup" in bundler
+    assert "cleanup did not converge after 3 attempts" in bundler
+    assert 'remove_bundle_tree_with_retry "$BUNDLE_DIR"' in bundler
+    assert 'remove_bundle_tree_with_retry "$PREVIOUS_BUNDLE_DIR"' in bundler
+    assert 'rm -rf "$PREVIOUS_BUNDLE_DIR"' not in bundler
+
+
 def test_machine_specific_apple_notary_and_signing_helpers_are_ignored():
     private_helpers = (
         "panel/scripts/apple-notary-profile.sh",

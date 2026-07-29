@@ -28,6 +28,32 @@ VMLX_SOURCE_COMMIT=""
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH PYTHONHOME VIRTUAL_ENV
 
+remove_bundle_tree_with_retry() {
+  local target="$1"
+  local attempt
+
+  # APFS can transiently return ENOTEMPTY while retiring the large, freshly
+  # renamed site-packages tree.  The EXIT trap's immediate second rm has
+  # consistently completed that same cleanup, so make the retry explicit and
+  # bounded instead of failing a verified build after it has been published.
+  # This helper is only called with this script's PID-scoped staging/previous
+  # paths.  Exhausting the bounded attempts remains a hard release failure.
+  for attempt in 1 2 3; do
+    if /bin/rm -rf "$target" \
+      && [ ! -e "$target" ] \
+      && [ ! -L "$target" ]; then
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      echo "WARNING: retrying transient bundled-Python cleanup ($attempt/3): $target" >&2
+      /bin/sleep 1
+    fi
+  done
+
+  echo "ERROR: bundled-Python cleanup did not converge after 3 attempts: $target" >&2
+  return 1
+}
+
 cleanup_bundle_build() {
   local status=$?
   trap - EXIT
@@ -35,13 +61,13 @@ cleanup_bundle_build() {
     rm -f "$STANDALONE_TARBALL"
   fi
   if [ "$BUNDLE_PUBLISHED" -ne 1 ]; then
-    rm -rf "$BUNDLE_DIR"
+    remove_bundle_tree_with_retry "$BUNDLE_DIR" || true
   fi
   if [ -e "$PREVIOUS_BUNDLE_DIR" ]; then
     if [ ! -e "$FINAL_BUNDLE_DIR" ] && [ ! -L "$FINAL_BUNDLE_DIR" ]; then
       mv "$PREVIOUS_BUNDLE_DIR" "$FINAL_BUNDLE_DIR" || true
     else
-      rm -rf "$PREVIOUS_BUNDLE_DIR"
+      remove_bundle_tree_with_retry "$PREVIOUS_BUNDLE_DIR" || true
     fi
   fi
   exit "$status"
@@ -183,7 +209,8 @@ check_local_jang_source_clean
 
 # Build in a private sibling directory. The currently verified bundle remains
 # untouched unless this entire build and verifier both succeed.
-rm -rf "$BUNDLE_DIR" "$PREVIOUS_BUNDLE_DIR"
+remove_bundle_tree_with_retry "$BUNDLE_DIR"
+remove_bundle_tree_with_retry "$PREVIOUS_BUNDLE_DIR"
 mkdir -p "$BUNDLE_DIR"
 
 # Download python-build-standalone (Astral's relocatable Python builds)
@@ -891,7 +918,7 @@ if ! mv "$BUNDLE_DIR" "$FINAL_BUNDLE_DIR"; then
   exit 1
 fi
 BUNDLE_PUBLISHED=1
-rm -rf "$PREVIOUS_BUNDLE_DIR"
+remove_bundle_tree_with_retry "$PREVIOUS_BUNDLE_DIR"
 
 echo "==> Done! Bundled Python ready at: $FINAL_BUNDLE_DIR"
 echo "    Next: npm run build && npx electron-builder --mac"

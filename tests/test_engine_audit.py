@@ -7731,7 +7731,8 @@ class TestStartupCompatibilityGuards:
         # not the earlier function definitions/EXIT cleanup body.
         dirty_guard_index = bundle_script.index("\ncheck_local_jang_source_clean\n")
         destructive_build_index = bundle_script.index(
-            '\nrm -rf "$BUNDLE_DIR" "$PREVIOUS_BUNDLE_DIR"\n'
+            '\nremove_bundle_tree_with_retry "$BUNDLE_DIR"\n'
+            'remove_bundle_tree_with_retry "$PREVIOUS_BUNDLE_DIR"\n'
         )
 
         assert '${VMLX_ALLOW_DIRTY_JANG_SOURCE:-${VMLINUX_ALLOW_DIRTY_JANG_SOURCE:-0}}' in local_install_block

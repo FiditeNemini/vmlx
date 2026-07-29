@@ -95,9 +95,27 @@ def test_private_attestation_post_requires_and_sends_dedicated_proof_headers(
     token = "private_" + ("q" * 48)
     monkeypatch.setenv(gate.PRIVATE_ATTESTATION_TOKEN_ENV, token)
     monkeypatch.setattr(gate.urllib.request, "urlopen", fake_urlopen)
+    ordered_payload = {
+        "contract_version": 1,
+        "request_controls": {
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "cache_contract_unused",
+                    "description": "Stable schema",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                        "additionalProperties": False,
+                    },
+                }
+            ]
+        },
+    }
     assert gate._json_post(
         "http://127.0.0.1:8000/v1/cache/token-contract",
-        {"contract_version": 1},
+        ordered_payload,
         7,
         private_attestation=True,
     ) == {"ok": True}
@@ -109,6 +127,8 @@ def test_private_attestation_post_requires_and_sends_dedicated_proof_headers(
         == gate.PRIVATE_ATTESTATION_PROOF_HEADER
     )
     assert token.encode() not in request.data
+    assert request.data == json.dumps(ordered_payload).encode()
+    assert request.data != json.dumps(ordered_payload, sort_keys=True).encode()
 
 
 def _prefix_snapshot(

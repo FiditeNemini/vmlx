@@ -102,11 +102,10 @@ def _json_post(
     *,
     private_attestation: bool = False,
 ) -> dict[str, Any]:
-    body = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
+    # Preserve the exact insertion order used by the live Responses request.
+    # Tool schemas are rendered into the chat template, so recursively sorting
+    # their JSON keys here can change the tokenized prompt being attested.
+    body = json.dumps(payload).encode()
     headers = {"Content-Type": "application/json"}
     if private_attestation:
         token = os.environ.get(PRIVATE_ATTESTATION_TOKEN_ENV, "").strip()

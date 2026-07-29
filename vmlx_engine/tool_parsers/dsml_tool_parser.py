@@ -24,6 +24,7 @@ Selected via `--tool-call-parser dsml` or via the deepseek_v4 family config
 in model_configs.py.
 """
 
+import inspect
 import json
 import re
 from collections.abc import Sequence
@@ -587,7 +588,16 @@ class DSMLToolParser(ToolParser):
         except Exception:
             return None
         try:
-            model_path = request.get("model_path") if isinstance(request, dict) else None
+            if isinstance(request, dict):
+                model_path = request.get("model_path")
+                enable_thinking = request.get("enable_thinking")
+                chat_template_kwargs = request.get("chat_template_kwargs")
+            else:
+                model_path = getattr(request, "model_path", None)
+                enable_thinking = getattr(request, "enable_thinking", None)
+                chat_template_kwargs = getattr(request, "chat_template_kwargs", None)
+            if enable_thinking is None and isinstance(chat_template_kwargs, dict):
+                enable_thinking = chat_template_kwargs.get("enable_thinking")
             enc = _load_encoding_dsv4_module(
                 model_path=Path(model_path) if model_path else None
             )
@@ -596,8 +606,47 @@ class DSMLToolParser(ToolParser):
         parse_fn = getattr(enc, "parse_message_from_completion_text", None)
         if parse_fn is None:
             return None
+
+        # The production DSV4 encoder owns two contracts that differ from the
+        # older one-argument test adapters:
+        #
+        # * ``thinking_mode`` is a required second argument; and
+        # * the text must include the bundle's EOS token even though the
+        #   generation loop removes EOS before tool parsing.
+        #
+        # Inspect the callable before invoking it so compatibility does not
+        # rely on catching TypeError and accidentally hiding a TypeError raised
+        # *inside* the canonical parser.
+        parser_text = model_output
+        eos_token = getattr(enc, "eos_token", None)
+        if (
+            isinstance(eos_token, str)
+            and eos_token
+            and not parser_text.endswith(eos_token)
+        ):
+            parser_text += eos_token
+        thinking_mode = (
+            "thinking"
+            if enable_thinking is True
+            or (enable_thinking is None and "</think>" in model_output)
+            else "chat"
+        )
         try:
-            parsed = parse_fn(model_output)
+            parameters = inspect.signature(parse_fn).parameters
+            mode_parameter = parameters.get("thinking_mode")
+            accepts_keyword_mode = mode_parameter is not None and (
+                mode_parameter.kind is not inspect.Parameter.POSITIONAL_ONLY
+            )
+            accepts_keyword_mode = accepts_keyword_mode or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            if accepts_keyword_mode:
+                parsed = parse_fn(parser_text, thinking_mode=thinking_mode)
+            elif mode_parameter is not None:
+                parsed = parse_fn(parser_text, thinking_mode)
+            else:
+                parsed = parse_fn(parser_text)
         except Exception:
             return None
         if not isinstance(parsed, dict):

@@ -3138,6 +3138,108 @@ class TestFallbackToolPromptFormat:
         assert streaming is None
         assert parser.stream_tool_calls_complete(text) is False
 
+    def test_dsml_parser_honors_production_two_arg_encoder_and_restores_eos(
+        self, monkeypatch
+    ):
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.loaders import dsv4_chat_encoder
+        from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
+
+        calls = []
+
+        class ProductionShapeEncoder:
+            eos_token = "<DSV4_EOS>"
+
+            @staticmethod
+            def parse_message_from_completion_text(text, thinking_mode):
+                calls.append((text, thinking_mode))
+                assert text.endswith(ProductionShapeEncoder.eos_token)
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Need the working directory.",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": '{"command": "pwd"}',
+                            },
+                        }
+                    ],
+                }
+
+        monkeypatch.setattr(
+            dsv4_chat_encoder,
+            "_load_encoding_dsv4_module",
+            lambda model_path=None: ProductionShapeEncoder,
+        )
+        req = {
+            "model_path": "/models/dsv4",
+            "enable_thinking": True,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "run_command",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"command": {"type": "string"}},
+                            "required": ["command"],
+                        },
+                    },
+                }
+            ],
+        }
+
+        result = DSMLToolParser(None)._try_encoding_dsv4_parse(
+            '<｜DSML｜invoke name="run_command">pwd</｜DSML｜invoke>',
+            request=req,
+        )
+
+        assert result is not None
+        assert result.tools_called
+        assert result.tool_calls[0]["name"] == "run_command"
+        assert result.tool_calls[0]["arguments"] == '{"command": "pwd"}'
+        assert calls == [
+            (
+                '<｜DSML｜invoke name="run_command">pwd</｜DSML｜invoke>'
+                "<DSV4_EOS>",
+                "thinking",
+            )
+        ]
+
+        monkeypatch.setattr(server, "_tool_call_parser", "dsml")
+        monkeypatch.setattr(server, "_model_path", "/models/dsv4")
+        api_request = ResponsesRequest(
+            model="dsv4",
+            input="Call run_command with pwd.",
+            enable_thinking=True,
+            tools=[
+                {
+                    "type": "function",
+                    "name": "run_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                }
+            ],
+        )
+
+        cleaned, api_calls = server._parse_tool_calls_with_parser(
+            '<｜DSML｜invoke name="run_command">pwd</｜DSML｜invoke>',
+            api_request,
+        )
+
+        assert cleaned == ""
+        assert api_calls
+        assert api_calls[0].function.name == "run_command"
+        assert api_calls[0].function.arguments == '{"command": "pwd"}'
+        assert calls[-1][1] == "thinking"
+
     def test_dsml_parser_repairs_partial_invoke_with_malformed_value_attr(self):
         from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
 

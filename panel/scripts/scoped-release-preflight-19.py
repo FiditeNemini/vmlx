@@ -5359,11 +5359,18 @@ def _v5_independent_runtime_observation(
     runtime_hashes = _v5_runtime_source_attestation(runtime)
     if runtime_hashes is None:
         raise RuntimeError("health runtime source provenance is incomplete")
-    process_observer = (hooks or {}).get("process_observer", _observe_process)
+    configured_process_observer = (hooks or {}).get("process_observer")
     listener_observer = (hooks or {}).get("listener_observer")
-    backend = process_observer(int(raw.get("backend_pid") or 0))
-    gateway = process_observer(int(raw.get("gateway_pid") or 0))
-    electron = process_observer(int(raw.get("electron_pid") or 0))
+    if callable(configured_process_observer):
+        backend = configured_process_observer(int(raw.get("backend_pid") or 0))
+        gateway = configured_process_observer(int(raw.get("gateway_pid") or 0))
+        electron = configured_process_observer(int(raw.get("electron_pid") or 0))
+    else:
+        backend = _v5_observe_runtime_process_with_argv(
+            int(raw.get("backend_pid") or 0)
+        )
+        gateway = _observe_process(int(raw.get("gateway_pid") or 0))
+        electron = _observe_process(int(raw.get("electron_pid") or 0))
     if not all(isinstance(value, dict) for value in (backend, gateway, electron)):
         raise RuntimeError("runtime process observation is incomplete")
     direct_expected = {
@@ -13072,6 +13079,61 @@ def _observe_process(pid: int) -> dict[str, Any] | None:
         "executable_path": str(executable.resolve()),
         "executable_sha256": sha256_file(executable.resolve()),
     }
+
+
+def _v5_observe_runtime_process_with_argv(pid: int) -> dict[str, Any] | None:
+    """Recover a stable live backend invocation without weakening libproc.
+
+    Owned release-check children use the libproc-only observer because they can
+    exit or rewrite their process title before a separate ``ps`` child runs.
+    A held model backend is long-lived, and its health contract intentionally
+    fingerprints the non-resolved invocation path (for example
+    ``.venv/bin/python3``).  Sample that argv once, bracketed by two identical
+    libproc identities, and fail closed on any process/exec transition.
+    """
+
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    if sys.platform != "darwin":
+        return _observe_process(pid)
+    before = _observe_darwin_process(pid)
+    if before is None:
+        return None
+    try:
+        command = subprocess.run(
+            ["/bin/ps", "-ww", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    after = _observe_darwin_process(pid)
+    if (
+        after is None
+        or after != before
+        or command.returncode != 0
+        or not command.stdout.strip()
+    ):
+        return None
+    try:
+        argv = shlex.split(command.stdout.strip())
+    except ValueError:
+        return None
+    if not argv or not isinstance(argv[0], str):
+        return None
+    invocation = Path(argv[0])
+    observed = Path(after["executable_path"])
+    try:
+        if (
+            not invocation.is_absolute()
+            or not invocation.is_file()
+            or invocation.resolve(strict=True) != observed.resolve(strict=True)
+        ):
+            return None
+    except OSError:
+        return None
+    return {**after, "argv": argv}
 
 
 def _observe_listener(host: str, port: int) -> dict[str, Any] | None:

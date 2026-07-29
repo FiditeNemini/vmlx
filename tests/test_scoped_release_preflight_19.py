@@ -3240,6 +3240,112 @@ def test_r19_v5_backend_invocation_fingerprint_preserves_venv_symlink(
     assert module._v5_backend_invocation_fingerprint(mismatched) is None
 
 
+def test_r19_v5_runtime_backend_argv_is_bracketed_by_libproc_identity(
+    monkeypatch,
+    tmp_path: Path,
+):
+    module = load_module()
+    target = Path(sys.executable).resolve()
+    invocation = tmp_path / "venv-python"
+    invocation.symlink_to(target)
+    identity = {
+        "pid": 7123,
+        "start_identity": "darwin-proc:123:456789",
+        "executable_path": str(target),
+        "executable_sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+    }
+    identities = iter([
+        {**deepcopy(identity), "argv": []},
+        {**deepcopy(identity), "argv": []},
+    ])
+    monkeypatch.setattr(
+        module,
+        "_observe_darwin_process",
+        lambda _pid: next(identities),
+    )
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f'{invocation} -m vmlx_engine.cli serve "model path"\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        run,
+    )
+
+    observed = module._v5_observe_runtime_process_with_argv(7123)
+
+    assert observed == {
+        **identity,
+        "argv": [
+            str(invocation),
+            "-m",
+            "vmlx_engine.cli",
+            "serve",
+            "model path",
+        ],
+    }
+    assert calls == [
+        (
+            ["/bin/ps", "-ww", "-p", "7123", "-o", "command="],
+            {"capture_output": True, "text": True, "check": False},
+        )
+    ]
+    assert module._v5_backend_invocation_fingerprint(observed) == hashlib.sha256(
+        str(invocation.absolute()).encode()
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    [
+        ("pid", 7124),
+        ("start_identity", "darwin-proc:124:000001"),
+        ("executable_path", "/bin/sh"),
+        ("executable_sha256", "b" * 64),
+    ],
+)
+def test_r19_v5_runtime_backend_argv_rejects_libproc_identity_drift(
+    monkeypatch,
+    changed_field,
+    changed_value,
+):
+    module = load_module()
+    before = {
+        "pid": 7123,
+        "start_identity": "darwin-proc:123:456789",
+        "executable_path": str(Path(sys.executable).resolve()),
+        "executable_sha256": "a" * 64,
+        "argv": [],
+    }
+    after = {**before, changed_field: changed_value}
+    identities = iter([before, after])
+    monkeypatch.setattr(
+        module,
+        "_observe_darwin_process",
+        lambda _pid: next(identities),
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"{Path(sys.executable).absolute()} -V\n",
+            stderr="",
+        ),
+    )
+
+    assert module._v5_observe_runtime_process_with_argv(7123) is None
+
+
 def test_r19_bundle_attestation_rejects_symlink_and_hardlink_files(
     tmp_path: Path,
 ):

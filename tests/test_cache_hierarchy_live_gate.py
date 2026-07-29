@@ -496,8 +496,8 @@ def test_cache_scenario_keeps_instructions_and_tool_schema_stable():
     assert controls["instructions"] == generated["instructions"]
     assert controls["tools"] == generated["tools"]
     assert controls["tools"][0]["name"] == "cache_contract_unused"
-    assert "tool_choice" not in controls
-    assert "tool_choice" not in generated
+    assert controls["tool_choice"] == "none"
+    assert generated["tool_choice"] == "none"
     assert generated["max_output_tokens"] == 512
     assert "cache_salt" not in controls
     assert "media_salt" not in controls

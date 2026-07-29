@@ -67,6 +67,12 @@ def _cache_scenario_request_controls() -> dict[str, Any]:
         "enable_thinking": False,
         "instructions": CACHE_SCENARIO_INSTRUCTIONS,
         "tools": [dict(tool) for tool in CACHE_SCENARIO_TOOLS],
+        # Keep the stable tool schema in the rendered/cache-key contract while
+        # making the transport-only marker response deterministic.  A natural-
+        # language "do not call tools" instruction is not an API constraint:
+        # models may legally return content and a redundant tool call when
+        # tool_choice is left on auto, which does not indicate cache corruption.
+        "tool_choice": "none",
     }
 
 

@@ -434,6 +434,21 @@ def test_release_dmg_staging_uses_recursive_signer_before_final_audit():
     assert "verify_release_macho_leaves" in script
 
 
+def test_r19_release_toolchain_plan_is_sealed_before_bound_actions():
+    script = Path("panel/scripts/build-release-dmgs.sh").read_text()
+    writer = script[
+        script.index("write_r19_toolchain_plan()") : script.index(
+            "run_bound_release_action()"
+        )
+    ]
+
+    replace_idx = writer.index("os.replace(temporary, output)")
+    seal_idx = writer.index("os.chmod(output, 0o400)")
+    digest_idx = writer.index("print(hashlib.sha256(encoded).hexdigest())")
+
+    assert replace_idx < seal_idx < digest_idx
+
+
 def test_bundled_verifier_rejects_non_relocatable_console_shebangs():
     verifier = Path("panel/scripts/verify-bundled-python.sh").read_text()
 

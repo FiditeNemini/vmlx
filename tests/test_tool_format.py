@@ -3155,6 +3155,10 @@ class TestFallbackToolPromptFormat:
             def parse_message_from_completion_text(text, thinking_mode):
                 calls.append((text, thinking_mode))
                 assert text.endswith(ProductionShapeEncoder.eos_token)
+                if thinking_mode == "thinking":
+                    assert "</think>" in text
+                else:
+                    assert "</think>" not in text
                 return {
                     "role": "assistant",
                     "content": "",
@@ -3193,10 +3197,16 @@ class TestFallbackToolPromptFormat:
             ],
         }
 
-        result = DSMLToolParser(None)._try_encoding_dsv4_parse(
-            '<｜DSML｜invoke name="run_command">pwd</｜DSML｜invoke>',
-            request=req,
+        canonical_fragment = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="run_command">\n'
+            '<｜DSML｜parameter name="command" string="true">'
+            "pwd</｜DSML｜parameter>\n"
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls>"
         )
+        parser = DSMLToolParser(None)
+        result = parser._try_encoding_dsv4_parse(canonical_fragment, request=req)
 
         assert result is not None
         assert result.tools_called
@@ -3204,11 +3214,23 @@ class TestFallbackToolPromptFormat:
         assert result.tool_calls[0]["arguments"] == '{"command": "pwd"}'
         assert calls == [
             (
-                '<｜DSML｜invoke name="run_command">pwd</｜DSML｜invoke>'
-                "<DSV4_EOS>",
-                "thinking",
+                "\n\n" + canonical_fragment + "<DSV4_EOS>",
+                "chat",
             )
         ]
+
+        thinking_fragment = (
+            "Need the working directory.</think>\n\n" + canonical_fragment
+        )
+        thinking_result = parser._try_encoding_dsv4_parse(
+            thinking_fragment,
+            request=req,
+        )
+        assert thinking_result is not None
+        assert calls[-1] == (
+            thinking_fragment + "<DSV4_EOS>",
+            "thinking",
+        )
 
         monkeypatch.setattr(server, "_tool_call_parser", "dsml")
         monkeypatch.setattr(server, "_model_path", "/models/dsv4")
@@ -3230,7 +3252,7 @@ class TestFallbackToolPromptFormat:
         )
 
         cleaned, api_calls = server._parse_tool_calls_with_parser(
-            '<｜DSML｜invoke name="run_command">pwd</｜DSML｜invoke>',
+            canonical_fragment,
             api_request,
         )
 
@@ -3238,7 +3260,43 @@ class TestFallbackToolPromptFormat:
         assert api_calls
         assert api_calls[0].function.name == "run_command"
         assert api_calls[0].function.arguments == '{"command": "pwd"}'
-        assert calls[-1][1] == "thinking"
+        assert calls[-1] == (
+            "\n\n" + canonical_fragment + "<DSV4_EOS>",
+            "chat",
+        )
+
+    def test_dsml_parser_does_not_hide_internal_canonical_type_error(
+        self, monkeypatch
+    ):
+        import pytest
+
+        from vmlx_engine.loaders import dsv4_chat_encoder
+        from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
+
+        calls = []
+
+        class BrokenEncoder:
+            eos_token = "<DSV4_EOS>"
+
+            @staticmethod
+            def parse_message_from_completion_text(text, thinking_mode):
+                calls.append((text, thinking_mode))
+                raise TypeError("internal canonical parser defect")
+
+        monkeypatch.setattr(
+            dsv4_chat_encoder,
+            "_load_encoding_dsv4_module",
+            lambda model_path=None: BrokenEncoder,
+        )
+
+        with pytest.raises(TypeError, match="internal canonical parser defect"):
+            DSMLToolParser(None)._try_encoding_dsv4_parse(
+                "<｜DSML｜tool_calls></｜DSML｜tool_calls>",
+                request={"enable_thinking": True},
+            )
+
+        assert len(calls) == 1
+        assert calls[0][1] == "chat"
 
     def test_dsml_parser_repairs_partial_invoke_with_malformed_value_attr(self):
         from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser

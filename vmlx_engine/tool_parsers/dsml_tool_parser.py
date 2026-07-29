@@ -590,14 +590,8 @@ class DSMLToolParser(ToolParser):
         try:
             if isinstance(request, dict):
                 model_path = request.get("model_path")
-                enable_thinking = request.get("enable_thinking")
-                chat_template_kwargs = request.get("chat_template_kwargs")
             else:
                 model_path = getattr(request, "model_path", None)
-                enable_thinking = getattr(request, "enable_thinking", None)
-                chat_template_kwargs = getattr(request, "chat_template_kwargs", None)
-            if enable_thinking is None and isinstance(chat_template_kwargs, dict):
-                enable_thinking = chat_template_kwargs.get("enable_thinking")
             enc = _load_encoding_dsv4_module(
                 model_path=Path(model_path) if model_path else None
             )
@@ -618,6 +612,12 @@ class DSMLToolParser(ToolParser):
         # rely on catching TypeError and accidentally hiding a TypeError raised
         # *inside* the canonical parser.
         parser_text = model_output
+        canonical_tool_calls_open = f"<{DSML_PREFIX}tool_calls>"
+        if parser_text.startswith(canonical_tool_calls_open):
+            # Server parse sites intentionally strip display/reasoning text.
+            # The production encoder, however, recognizes a tool-call turn by
+            # the canonical separator immediately before the wrapper.
+            parser_text = "\n\n" + parser_text
         eos_token = getattr(enc, "eos_token", None)
         if (
             isinstance(eos_token, str)
@@ -625,12 +625,12 @@ class DSMLToolParser(ToolParser):
             and not parser_text.endswith(eos_token)
         ):
             parser_text += eos_token
-        thinking_mode = (
-            "thinking"
-            if enable_thinking is True
-            or (enable_thinking is None and "</think>" in model_output)
-            else "chat"
-        )
+        # Parse the fragment we actually received. Most server paths already
+        # separated reasoning from content even when the request enabled
+        # thinking, so forcing ``thinking`` from request metadata would make
+        # the production parser demand a </think> marker that is no longer in
+        # this fragment.
+        thinking_mode = "thinking" if "</think>" in model_output else "chat"
         try:
             parameters = inspect.signature(parse_fn).parameters
             mode_parameter = parameters.get("thinking_mode")
@@ -647,6 +647,11 @@ class DSMLToolParser(ToolParser):
                 parsed = parse_fn(parser_text, thinking_mode)
             else:
                 parsed = parse_fn(parser_text)
+        except TypeError:
+            # A TypeError from the selected call shape is an implementation
+            # defect, not malformed model output. Do not silently retry another
+            # signature or hide a TypeError raised inside the bundle parser.
+            raise
         except Exception:
             return None
         if not isinstance(parsed, dict):

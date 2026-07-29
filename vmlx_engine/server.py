@@ -6358,10 +6358,6 @@ def _parse_tool_calls_with_parser(
                 "model_path": (
                     _model_path or _model_name or getattr(request, "model", None)
                 ),
-                "enable_thinking": getattr(request, "enable_thinking", None),
-                "chat_template_kwargs": getattr(
-                    request, "chat_template_kwargs", None
-                ),
             }
         strict_native_format = bool(
             getattr(parser_cls, "STRICT_NATIVE_TOOL_FORMAT", False)
@@ -6507,10 +6503,6 @@ def _stream_tool_call_early_stop_parser(
                     _model_path
                     or _model_name
                     or getattr(request, "model", None)
-                ),
-                "enable_thinking": getattr(request, "enable_thinking", None),
-                "chat_template_kwargs": getattr(
-                    request, "chat_template_kwargs", None
                 ),
             }
         # A user-scoped exact-once contract must stop on the first complete,

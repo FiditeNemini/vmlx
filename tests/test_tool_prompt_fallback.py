@@ -664,6 +664,111 @@ def test_dsv4_explicit_direct_command_binds_only_text_before_followup_sentence()
     )[1].split("</｜DSML｜parameter>", 1)[0]
 
 
+def test_dsv4_electron_exact_command_binds_the_complete_shell_command():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    command = "printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt"
+    user_request = (
+        "Use the run_command tool exactly once with this exact command: "
+        f"{command} After the tool result is returned, reply briefly."
+    )
+
+    injected = check_and_inject_fallback_tools(
+        f"<｜User｜>{user_request}<｜Assistant｜>",
+        [{"role": "user", "content": user_request}],
+        tools,
+        DSV4LikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="dsml",
+    )
+
+    assert (
+        '<｜DSML｜parameter name="command" string="true">'
+        f"{command}</｜DSML｜parameter>"
+    ) in injected
+    assert (
+        '<｜DSML｜parameter name="command" string="true">'
+        "printf</｜DSML｜parameter>"
+    ) not in injected
+
+
+def test_dsv4_prior_tool_result_does_not_terminalize_new_explicit_tool():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "file_info",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        },
+    ]
+    second_request = (
+        "The real file_info result is now present. Call run_command exactly once "
+        "with command pwd. Do not repeat file_info and do not answer yet."
+    )
+    messages = [
+        {"role": "user", "content": "Call file_info with path panel/package.json."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "file_info",
+                        "arguments": {"path": "panel/package.json"},
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": "Path: panel/package.json"},
+        {"role": "user", "content": second_request},
+    ]
+
+    injected = check_and_inject_fallback_tools(
+        f"<｜User｜>{second_request}<｜Assistant｜>",
+        messages,
+        tools,
+        DSV4LikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="dsml",
+    )
+
+    assert "Native DSV4 tool-result continuation" not in injected
+    assert "the requested tool already ran" not in injected
+    assert 'Tool: run_command' in injected
+    assert 'Tool: file_info' not in injected
+    assert (
+        '<｜DSML｜parameter name="command" string="true">'
+        "pwd</｜DSML｜parameter>"
+    ) in injected
+
+
 def test_dsv4_fallback_preserves_recent_tool_schema_on_later_user_turn():
     tools = [
         {

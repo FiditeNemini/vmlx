@@ -237,7 +237,16 @@ class DSMLToolParser(ToolParser):
         self, args: dict[str, Any], schema: dict[str, Any] | None
     ) -> bool:
         _, required = self._schema_props_required(schema)
-        return all(p in args for p in required)
+        if not all(p in args for p in required):
+            return False
+        # DSV4 can copy the native schema attribute as the argument value
+        # (``string`` / ``string=``).  Presence alone must not make that a
+        # schema-valid call: executing it turns a malformed model emission into
+        # a hallucinated tool result and poisons the following history turn.
+        return not any(
+            isinstance(value, str) and value.strip().rstrip("=") == "string"
+            for value in args.values()
+        )
 
     def _clean_residue(self, text: str | None) -> str | None:
         """Remove DSML wrapper/invoke residue from visible content."""
@@ -675,6 +684,8 @@ class DSMLToolParser(ToolParser):
                 plain_args = self._parse_plain_params(body, schema)
                 if plain_args and self._required_satisfied(plain_args, schema):
                     args.update(plain_args)
+            if schema and not self._required_satisfied(args, schema):
+                continue
             tool_calls.append(
                 self._make_tool_call(
                     name=name,
@@ -754,10 +765,16 @@ class DSMLToolParser(ToolParser):
         # A new invoke block just closed. Emit tool calls for each block
         # that's new since `prev_blocks`.
         new_calls = []
+        schemas = self._tool_schemas(request)
         for m in curr_blocks[len(prev_blocks):]:
             name = m.group(1)
             body = m.group(2)
             args = self._parse_params(body)
+            schema = schemas.get(name) if schemas else None
+            if schemas and schema is None:
+                return None
+            if schema and not self._required_satisfied(args, schema):
+                return None
             new_calls.append(
                 self._make_stream_tool_call_delta(
                     index=len(prev_blocks) + len(new_calls),

@@ -672,9 +672,25 @@ def check_and_inject_fallback_tools(
     qwen_terminal_tool_result_continuation = bool(
         qwen_tool_result_continuation and not qwen_multi_tool_continuation
     )
-    dsv4_tool_result_continuation = bool(
+    dsv4_tool_result_activity = bool(
         is_dsv4_prompt
         and (tools_called_after_latest_user or tool_result_after_latest_user)
+    )
+    dsv4_requested_remaining_tools = {
+        name
+        for name in explicitly_requested_tool_names
+        if name not in tools_called_after_latest_user
+    }
+    # A tool result followed by an explicit request for a *different* tool is
+    # a multi-tool continuation, not a terminal synthesis turn.  Treating both
+    # shapes alike injected "the requested tool already ran / do not emit
+    # another tool call" beside the new request.  Live DSV4 then copied schema
+    # residue or looped while trying to satisfy those contradictory contracts.
+    dsv4_multi_tool_continuation = bool(
+        dsv4_tool_result_activity and dsv4_requested_remaining_tools
+    )
+    dsv4_tool_result_continuation = bool(
+        dsv4_tool_result_activity and not dsv4_multi_tool_continuation
     )
     lfm2_tool_result_continuation = bool(
         is_lfm2_native_tool_prompt
@@ -779,6 +795,11 @@ def check_and_inject_fallback_tools(
 
         if normalized_tool == "run_command" and normalized_param == "command":
             direct_patterns = (
+                # Electron's built-in tool prompt uses this exact wording.
+                # Keep the whole unquoted shell command through the explicit
+                # follow-up boundary; the generic scalar matcher below only
+                # captured its first word (usually ``printf`` or ``test``).
+                r'\b(?:this\s+)?exact\s+command\s*:\s*([^\n]{1,240}?)(?=\s+(?:After|Then)\b|$)',
                 r'\brun\s+exactly:\s*`([^`\n]{1,240})`',
                 r'\brun\s+exactly:\s*([^\n]{1,240}?)(?:\s+\.\s+(?:After|Then)\b|$)',
                 r'\bto\s+run:\s*([^\n]{1,240}?)(?:\s*\.\s+(?:After|Then)\b|$)',
@@ -1283,7 +1304,13 @@ def check_and_inject_fallback_tools(
     # requests. Detect by the canonical DSV4 turn tokens already present in
     # the rendered prompt and inject the parser-matching format.
     if is_dsv4_prompt:
-        if dsv4_tool_result_continuation and recent_tool_call_arguments:
+        if dsv4_multi_tool_continuation:
+            dsv4_prompt_tools = [
+                tool
+                for tool in template_tools
+                if _tool_props(tool)[0] in dsv4_requested_remaining_tools
+            ] or _requested_tools(template_tools)
+        elif dsv4_tool_result_continuation and recent_tool_call_arguments:
             dsv4_prompt_tools = _recently_called_tools(template_tools)
         elif explicit_tool_requested:
             dsv4_prompt_tools = _requested_tools(template_tools)

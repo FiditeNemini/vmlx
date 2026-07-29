@@ -3093,6 +3093,51 @@ class TestFallbackToolPromptFormat:
         assert " string=" not in result.tool_calls[0]["arguments"]
         assert result.content is None
 
+    def test_dsml_parser_rejects_schema_placeholder_as_tool_argument(self):
+        from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
+
+        text = (
+            '<｜DSML｜tool_calls>\n'
+            '<｜DSML｜invoke name="run_command">\n'
+            '<｜DSML｜parameter name="command" string="true"> string='
+            '</｜DSML｜parameter>\n'
+            '</｜DSML｜invoke>\n'
+            '</｜DSML｜tool_calls>'
+        )
+        req = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "run_command",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"command": {"type": "string"}},
+                            "required": ["command"],
+                        },
+                    },
+                }
+            ]
+        }
+        parser = DSMLToolParser(None)
+
+        result = parser.extract_tool_calls(text, request=req)
+        streaming = parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=text,
+            delta_text=text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=req,
+        )
+        parser._stream_stop_request = req
+
+        assert not result.tools_called
+        assert result.tool_calls == []
+        assert streaming is None
+        assert parser.stream_tool_calls_complete(text) is False
+
     def test_dsml_parser_repairs_partial_invoke_with_malformed_value_attr(self):
         from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
 

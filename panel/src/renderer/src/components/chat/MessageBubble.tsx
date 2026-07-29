@@ -579,6 +579,13 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
         <div
           className="text-sm"
           data-vmlx-proof-answer="true"
+          data-vmlx-proof-answer-state={
+            !isStreaming && displayedContent.length === message.content.length
+              ? 'complete'
+              : 'streaming'
+          }
+          data-vmlx-proof-answer-source-length={message.content.length}
+          data-vmlx-proof-answer-rendered-length={displayedContent.length}
         >
           {renderInlineContent()}
           {answerPassPending && isStreaming && !message.content && (

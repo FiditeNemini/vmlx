@@ -25,6 +25,7 @@ import {
   collectOllamaStream,
   deriveProvenSurfaces,
   correlateTerminalResponseToCacheExecution,
+  cssEscapeIdentifier,
   expectedUiToolCallCount,
   isCacheRequestCorrelationVerified,
   isServerRequestCorrelationVerified,
@@ -129,6 +130,13 @@ const renderedContents = [
 ];
 
 describe("current visible Start lifecycle", () => {
+  it("serializes leading-digit session IDs exactly like browser CSS.escape", () => {
+    expect(cssEscapeIdentifier("336d4a0e-22b1-4f6c-a89a-107aefd619ef"))
+      .toBe("\\33 36d4a0e-22b1-4f6c-a89a-107aefd619ef");
+    expect(cssEscapeIdentifier("owned-proof-session"))
+      .toBe("owned-proof-session");
+  });
+
   it("ignores a reused stale error row and other-session events", async () => {
     const harness = startLifecycleHarness({
       id: "target",
@@ -604,21 +612,48 @@ describe("generated CDP expression syntax", () => {
       "kvCacheQuantization: String(activeReleasePhase.kv_cache_quantization || 'none')",
     );
     expect(harnessSource).toContain(
-      "const releasePagedCacheMemoryPercent = activeReleasePhase?.paged_ram",
+      "const releasePagedCacheMemoryMb = activeReleasePhase?.paged_ram",
     );
     expect(harnessSource).toMatch(
-      /const releasePagedCacheMemoryPercent = activeReleasePhase\?\.paged_ram\s+\? 5\s+: null/,
+      /const releasePagedCacheMemoryMb = activeReleasePhase\?\.paged_ram\s+\? 4096\s+: null/,
     );
     expect(harnessSource).toContain(
-      "{ cacheMemoryPercent: releasePagedCacheMemoryPercent }",
+      "const releaseBlockDiskCacheMaxGb = activeReleasePhase ? 10 : null",
+    );
+    expect(harnessSource).toContain(
+      "{ cacheMemoryMb: releasePagedCacheMemoryMb }",
     );
     expect(
       harnessSource.match(
-        /cacheMemoryPercent: releasePagedCacheMemoryPercent/g,
+        /cacheMemoryMb: releasePagedCacheMemoryMb/g,
       ),
     ).toHaveLength(2);
+    expect(
+      harnessSource.match(
+        /blockDiskCacheMaxGb: releaseBlockDiskCacheMaxGb/g,
+      ),
+    ).toHaveLength(2);
+    expect(
+      harnessSource.match(/cacheMemoryPercent: 0/g),
+    ).toHaveLength(2);
     expect(harnessSource).not.toContain(
-      "const releasePagedCacheMemoryPercent =\n          ${",
+      "const releasePagedCacheMemoryMb =\n          ${",
+    );
+    expect(harnessSource).toContain("const parityIndexes = [0]");
+    const cacheDrawerProbeStart = harnessSource.indexOf(
+      "let serverCacheControls = { requested: false, verified: false }",
+    );
+    const cacheDrawerProbeEnd = harnessSource.indexOf(
+      "serverCacheControls = { requested: true, verified: false, error:",
+      cacheDrawerProbeStart,
+    );
+    const cacheDrawerProbe = harnessSource.slice(
+      cacheDrawerProbeStart,
+      cacheDrawerProbeEnd,
+    );
+    expect(cacheDrawerProbe).toContain("const isVisible = (element) => {");
+    expect(cacheDrawerProbe).toContain(
+      "'[data-vmlx-control=\"server-settings\"]'",
     );
     expect(preflightSource).toContain(
       '"VMLINUX_REAL_UI_EXPECT_PAGED_CACHE": (',
@@ -1254,6 +1289,9 @@ function goodResult(): Record<string, any> {
     role: "assistant",
     visible: true,
     answerText: renderedContents[index],
+    answerState: "complete",
+    answerSourceLength: record.content.length,
+    answerRenderedLength: record.content.length,
     reasoningText: "Reason carefully",
     reasoningSegments: ["Reason carefully"],
     html:
@@ -1347,6 +1385,18 @@ function goodResult(): Record<string, any> {
     ),
     renderedDom: {
       messages,
+      userMessages: [
+        {
+          messageId: "user-3",
+          role: "user",
+          visible: true,
+          text: "Preserve $43 and render 47 × 19 = 893 < 920 = 46 × 20.",
+          html: '$43 and <span class="katex">47 × 19 = 893 &lt; 920 = 46 × 20</span>',
+          katexCount: 1,
+          katexErrorCount: 0,
+          currencyOccurrences: [{ text: "$43", insideKatex: false }],
+        },
+      ],
       samples,
       rawI18nKeys: [],
       visibleErrors: [],
@@ -2389,6 +2439,7 @@ function createValidPairedArtifact(result: Record<string, any>) {
   const healthRow = {
     url: "http://127.0.0.1:8000/health",
     full: healthFull,
+    full_canonical_json: canonicalJson(healthFull),
     full_sha256: canonicalHash(healthFull),
     identity: binding,
   };
@@ -3701,16 +3752,52 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("links rendered line breaks and list glyphs to persisted Markdown", () => {
+    const valid = structuredClone(goodResult());
+    const persisted = "R19-DONE\n- first item\n- second item";
+    valid.assistantRecords[0].content = persisted;
+    valid.messageEventTrace[0] = primaryTrace(assistantIds[0], persisted, 0);
+    valid.renderedDom.messages[0].answerText =
+      "R19-DONE\nfirst item\nsecond item";
+    valid.renderedDom.messages[0].answerSourceLength = persisted.length;
+    valid.renderedDom.messages[0].answerRenderedLength = persisted.length;
+    expect(validateRenderedDomEvidence(valid)).toEqual([]);
+  });
+
+  it("rejects a terminal DOM snapshot before the typewriter fully drains", () => {
+    const invalid = structuredClone(goodResult());
+    invalid.renderedDom.messages[0].answerRenderedLength -= 1;
+    expect(validateRenderedDomEvidence(invalid).join("\n")).toMatch(
+      /visible typewriter did not drain/,
+    );
+  });
+
   it("binds output-html KaTeX to exact persisted TeX without requiring MathML", () => {
     const valid = structuredClone(goodResult());
     valid.renderedDom.messages[2].katexAnnotations = [];
     expect(validateRenderedDomEvidence(valid)).toEqual([]);
 
-    valid.assistantRecords[2].content =
-      "$43 and $47 \\times 19 = 894 < 920 = 46 \\times 20$";
+    valid.renderedDom.messages[2].katexCount = 0;
     expect(validateRenderedDomEvidence(valid).join("\n")).toMatch(
-      /does not attest the exact single-dollar TeX source/,
+      /persisted TeX source did not produce a KaTeX-rendered expression/,
     );
+  });
+
+  it("accepts truthful Unicode math when the model does not emit TeX delimiters", () => {
+    const valid = structuredClone(goodResult());
+    const unicodeAnswer = "$43 and 47 × 19 = 893 < 920 = 46 × 20";
+    valid.assistantRecords[2].content = unicodeAnswer;
+    valid.messageEventTrace[2] = primaryTrace(
+      assistantIds[2],
+      unicodeAnswer,
+    );
+    valid.renderedDom.messages[2].answerText = unicodeAnswer;
+    valid.renderedDom.messages[2].html = `<p>${unicodeAnswer}</p>`;
+    valid.renderedDom.messages[2].answerSourceLength = unicodeAnswer.length;
+    valid.renderedDom.messages[2].answerRenderedLength = unicodeAnswer.length;
+    valid.renderedDom.messages[2].katexCount = 0;
+    valid.renderedDom.messages[2].katexAnnotations = [];
+    expect(validateRenderedDomEvidence(valid)).toEqual([]);
   });
 
   it("requires a separate, exactly bound raw API artifact before dual-surface claims", () => {

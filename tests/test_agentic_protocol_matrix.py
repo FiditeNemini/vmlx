@@ -26,6 +26,15 @@ TEST_PYTHON_PREFIX_PATH = str(Path(sys.prefix).resolve())
 TEST_PYTHON_PREFIX_FINGERPRINT = matrix._sha256(TEST_PYTHON_PREFIX_PATH)
 
 
+def test_python_canonical_json_preserves_integral_float_bytes():
+    canonical = matrix._canonical_json({"float": 10.0, "integer": 10})
+
+    assert canonical == '{"float":10.0,"integer":10}'
+    assert matrix._canonical_sha256({"float": 10.0, "integer": 10}) == (
+        hashlib.sha256(canonical.encode()).hexdigest()
+    )
+
+
 def _identity_repo(tmp_path: Path) -> tuple[Path, dict]:
     repo_root = tmp_path / "repo"
     package_json = repo_root / matrix.FILE_INFO_PATH

@@ -826,6 +826,20 @@ describe('Prefix Cache', () => {
         expect(getFlagValue(out, '--cache-memory-mb')).toBe('4096')
     })
 
+    it('release cache profile uses a fixed L1/L2 budget without a stale percentage flag', () => {
+        const out = preview({
+            enablePrefixCache: true,
+            usePagedCache: true,
+            enableBlockDiskCache: true,
+            cacheMemoryMb: 4096,
+            cacheMemoryPercent: 0,
+            blockDiskCacheMaxGb: 10,
+        })
+        expect(getFlagValue(out, '--cache-memory-mb')).toBe('4096')
+        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
+        expect(getFlagValue(out, '--block-disk-cache-max-gb')).toBe('10')
+    })
+
     it('session launch emits cache memory mb from a single call site', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf-8')
         const matches = source.match(/args\.push\('--cache-memory-mb'/g) ?? []

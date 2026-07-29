@@ -197,15 +197,17 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+
+
 def _canonical_sha256(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode()
-    ).hexdigest()
+    return hashlib.sha256(_canonical_json(value).encode()).hexdigest()
 
 
 def _valid_sha256(value: Any) -> bool:
@@ -5120,6 +5122,7 @@ def _capture_health_evidence(
                 evidence[base_label] = {
                     "url": _safe_request_url(health_url),
                     "full": transport_full,
+                    "full_canonical_json": _canonical_json(transport_full),
                     "full_sha256": _canonical_sha256(transport_full),
                     "error_type": "GatewayBackendIdentityMissing",
                 }
@@ -5133,6 +5136,7 @@ def _capture_health_evidence(
                 evidence[base_label] = {
                     "url": _safe_request_url(health_url),
                     "full": transport_full,
+                    "full_canonical_json": _canonical_json(transport_full),
                     "full_sha256": _canonical_sha256(transport_full),
                     "error_type": "GatewayBackendOriginMismatch",
                 }
@@ -5160,6 +5164,7 @@ def _capture_health_evidence(
                 evidence[base_label] = {
                     "url": _safe_request_url(health_url),
                     "full": transport_full,
+                    "full_canonical_json": _canonical_json(transport_full),
                     "full_sha256": _canonical_sha256(transport_full),
                     "error_type": "GatewayBackendIdentityMissing",
                 }
@@ -5175,6 +5180,7 @@ def _capture_health_evidence(
                 evidence[base_label] = {
                     "url": _safe_request_url(health_url),
                     "full": transport_full,
+                    "full_canonical_json": _canonical_json(transport_full),
                     "full_sha256": _canonical_sha256(transport_full),
                     "identity_url": _safe_request_url(identity_url),
                     "error_type": "GatewayBackendHealthCaptureFailed",
@@ -5187,6 +5193,7 @@ def _capture_health_evidence(
         evidence[base_label] = {
             "url": _safe_request_url(health_url),
             "full": transport_full,
+            "full_canonical_json": _canonical_json(transport_full),
             "full_sha256": _canonical_sha256(transport_full),
             "identity": identity,
         }
@@ -5195,6 +5202,7 @@ def _capture_health_evidence(
                 {
                     "identity_url": _safe_request_url(identity_url),
                     "identity_full": full,
+                    "identity_full_canonical_json": _canonical_json(full),
                     "identity_full_sha256": _canonical_sha256(full),
                 }
             )

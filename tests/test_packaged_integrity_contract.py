@@ -2679,6 +2679,70 @@ def test_r19_bound_tool_action_preserves_non_utf8_output_through_json(tmp_path):
     assert restored.stdout.encode("utf-8", "surrogateescape") == expected
 
 
+def test_r19_git_status_excludes_only_its_verified_release_python_action(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    scripts = repo / "tests" / "cross_matrix"
+    scripts.mkdir(parents=True)
+    original = scripts / "run_packaged_integrity_contract.py"
+    original.write_text("# verified runner\n", encoding="utf-8")
+    action = scripts / (
+        ".run_packaged_integrity_contract.py.vmlx-r19-"
+        "0123456789abcdef0123456789abcdef"
+    )
+    os.link(original, action)
+    monkeypatch.setattr(runner, "__file__", str(action))
+
+    action_row = f"?? {action.relative_to(repo).as_posix()}\n"
+    dirty_row = "?? actual-untracked.txt\n"
+    filtered = runner._strip_verified_release_python_action_from_git_status(
+        arguments=[
+            "-C",
+            str(repo),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ],
+        stdout=action_row + dirty_row,
+    )
+
+    assert filtered == dirty_row
+
+
+def test_r19_git_status_refuses_to_hide_an_unverified_lookalike(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    scripts = repo / "tests" / "cross_matrix"
+    scripts.mkdir(parents=True)
+    original = scripts / "run_packaged_integrity_contract.py"
+    original.write_text("# verified runner\n", encoding="utf-8")
+    action = scripts / (
+        ".run_packaged_integrity_contract.py.vmlx-r19-"
+        "fedcba9876543210fedcba9876543210"
+    )
+    action.write_text("# lookalike, not a hardlink\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "__file__", str(action))
+
+    with pytest.raises(
+        runner.ArtifactChainError,
+        match="not the verified runner hardlink",
+    ):
+        runner._strip_verified_release_python_action_from_git_status(
+            arguments=[
+                "-C",
+                str(repo),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
+            stdout=f"?? {action.relative_to(repo).as_posix()}\n",
+        )
+
+
 @pytest.mark.parametrize("action", ("git", "shasum", "awk", "file", "find"))
 def test_r19_bound_tool_action_detects_each_residual_tool_swap(
     tmp_path,

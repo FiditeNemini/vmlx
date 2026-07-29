@@ -3144,6 +3144,89 @@ def _bound_release_toolchain(
     return toolchain, record
 
 
+def _strip_verified_release_python_action_from_git_status(
+    *,
+    arguments: list[str],
+    stdout: str,
+) -> str:
+    """Remove only this runner's verified source-adjacent action hardlink.
+
+    The release Python launcher executes a hash-bound hardlink beside a Python
+    script so imports and ``__file__`` keep their source-tree semantics.  A
+    pinned ``git status`` launched by this script can therefore observe that
+    one action hardlink while it is running.  Exclude it from the measurement
+    only after proving that the path is the expected random action name and is
+    the same inode as the original runner.  Every other status row remains
+    visible to the source-identity fence.
+    """
+    if (
+        len(arguments) != 5
+        or arguments[0] != "-C"
+        or arguments[2:] != [
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ]
+    ):
+        return stdout
+
+    repo = _absolute_path(Path(arguments[1]))
+    action_path = Path(__file__).absolute()
+    match = re.fullmatch(
+        r"\.(?P<original>[^/]+\.py)\.vmlx-r19-(?P<nonce>[0-9a-f]{32})",
+        action_path.name,
+    )
+    if match is None:
+        return stdout
+    try:
+        relative_action = action_path.relative_to(repo).as_posix()
+    except ValueError:
+        return stdout
+
+    original_path = action_path.with_name(match.group("original"))
+    try:
+        action_stat = action_path.stat(follow_symlinks=False)
+        original_stat = original_path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise ArtifactChainError(
+            "release Python script action disappeared during git status"
+        ) from exc
+    if (
+        not stat.S_ISREG(action_stat.st_mode)
+        or not stat.S_ISREG(original_stat.st_mode)
+        or action_stat.st_nlink < 2
+        or (
+            action_stat.st_dev,
+            action_stat.st_ino,
+            action_stat.st_size,
+        )
+        != (
+            original_stat.st_dev,
+            original_stat.st_ino,
+            original_stat.st_size,
+        )
+    ):
+        raise ArtifactChainError(
+            "release Python git-status action is not the verified runner hardlink"
+        )
+
+    expected_row = f"?? {relative_action}"
+    rows = stdout.splitlines(keepends=True)
+    matching = [
+        index
+        for index, row in enumerate(rows)
+        if row.rstrip("\r\n") == expected_row
+    ]
+    if not matching:
+        return stdout
+    if len(matching) != 1:
+        raise ArtifactChainError(
+            "release Python git-status action appeared more than once"
+        )
+    del rows[matching[0]]
+    return "".join(rows)
+
+
 def run_bound_tool_action(
     *,
     document_path: Path,
@@ -3267,7 +3350,13 @@ def run_bound_tool_action(
         "returncode": completed.returncode,
     }
     if capture_output:
-        result["stdout"] = completed.stdout or ""
+        stdout = completed.stdout or ""
+        if action == "git":
+            stdout = _strip_verified_release_python_action_from_git_status(
+                arguments=argv,
+                stdout=stdout,
+            )
+        result["stdout"] = stdout
         result["stderr"] = completed.stderr or ""
     return result
 

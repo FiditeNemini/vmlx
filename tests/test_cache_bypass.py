@@ -237,26 +237,34 @@ class TestSchedulerBypassGating:
 
     def test_scheduler_store_path_honors_bypass(self):
         src = self._read("vmlx_engine/scheduler.py")
+        cleanup_idx = src.index("def _cleanup_finished(")
+        cleanup_src = src[cleanup_idx:]
         # _skip_cache_store must get forced to True when bypass is set
-        assert 'getattr(request, "_bypass_prefix_cache", False):' in src, (
+        assert 'getattr(request, "_bypass_prefix_cache", False):' in cleanup_src, (
             "scheduler.py store path no longer reads _bypass_prefix_cache"
         )
         # And the line immediately after must set _skip_cache_store = True
-        idx = src.index('getattr(request, "_bypass_prefix_cache", False):')
+        idx = cleanup_src.index('getattr(request, "_bypass_prefix_cache", False):')
         # Search forward within a small window for the assignment
-        window = src[idx : idx + 200]
+        window = cleanup_src[idx : idx + 200]
         assert "_skip_cache_store = True" in window, (
             "scheduler.py bypass check no longer forces _skip_cache_store = True"
         )
 
     def test_scheduler_finish_path_skips_cache_extraction_when_bypassed(self):
         src = self._read("vmlx_engine/scheduler.py")
+        helper_idx = src.index("def _terminal_cache_capture_enabled(")
+        helper_end = src.index("def _process_batch_responses(", helper_idx)
+        helper_src = src[helper_idx:helper_end]
+        assert 'getattr(request, "_bypass_prefix_cache", False)' in helper_src, (
+            "scheduler.py terminal cache-capture owner gate no longer rejects "
+            "bypassed requests"
+        )
         idx = src.index("# Extract cache for future reuse")
         window = src[idx : src.index("self.total_completion_tokens", idx)]
-        assert 'not getattr(request, "_bypass_prefix_cache", False)' in window, (
-            "scheduler.py still extracts prompt-boundary cache for bypassed "
-            "requests; cache_salt/skip_prefix_cache must avoid both lookup "
-            "and store-side extraction work/logs"
+        assert "self._terminal_cache_capture_enabled(request, response)" in window, (
+            "scheduler.py terminal path no longer delegates prompt-boundary "
+            "cache extraction to the bypass-aware owner gate"
         )
 
     def test_mllm_scheduler_store_path_honors_bypass(self):

@@ -6898,6 +6898,32 @@ class Scheduler:
 
         return scheduled
 
+    def _terminal_cache_capture_enabled(self, request: Request, response: Any) -> bool:
+        """Return whether a finished response has a real cache-store owner.
+
+        Batch generators expose ``prompt_cache`` even when every prefix-cache
+        tier is disabled.  Treating that attribute alone as permission to
+        capture state made path-dependent families run a second full prompt
+        prefill after terminal delivery with nowhere to publish the result.
+        Require both the configured prefix-cache contract and an instantiated
+        L1/L2 store before doing any snapshot extraction or deferred re-prefill.
+        """
+        if getattr(request, "_bypass_prefix_cache", False):
+            return False
+        if not hasattr(response, "prompt_cache"):
+            return False
+        if not bool(getattr(self.config, "enable_prefix_cache", False)):
+            return False
+        return any(
+            getattr(self, name, None) is not None
+            for name in (
+                "block_aware_cache",
+                "memory_aware_cache",
+                "prefix_cache",
+                "disk_cache",
+            )
+        )
+
     def _process_batch_responses(
         self, responses: List[Any]
     ) -> Tuple[List[RequestOutput], Set[str]]:
@@ -7175,10 +7201,7 @@ class Scheduler:
                             pass
 
                 # Extract cache for future reuse
-                if (
-                    hasattr(response, "prompt_cache")
-                    and not getattr(request, "_bypass_prefix_cache", False)
-                ):
+                if self._terminal_cache_capture_enabled(request, response):
                     try:
                         # CLEAN PROMPT-BOUNDARY SNAPSHOT (DSV4 fast path).
                         #

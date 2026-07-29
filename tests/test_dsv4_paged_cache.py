@@ -2387,6 +2387,52 @@ def test_dsv4_cache_hit_store_skips_sync_full_reprefill_when_snapshot_missing():
     assert "chunk_size = len(prompt_tokens) if self._uses_dsv4_cache" not in helper_src
 
 
+def test_terminal_cache_capture_requires_enabled_instantiated_store():
+    """A generator cache object cannot trigger a throwaway second prefill.
+
+    The live DSV4 Electron cache-Off row exposed ``prompt_cache`` on every
+    terminal response.  Without this ownership gate, the mixed-SWA branch
+    scheduled a full clean re-prefill even though no prefix/L2 backend existed.
+    """
+    from vmlx_engine.scheduler import Scheduler
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.config = SimpleNamespace(enable_prefix_cache=False)
+    scheduler.block_aware_cache = None
+    scheduler.memory_aware_cache = None
+    scheduler.prefix_cache = None
+    scheduler.disk_cache = None
+    request = SimpleNamespace(_bypass_prefix_cache=False)
+    response = SimpleNamespace(prompt_cache=object())
+
+    assert not Scheduler._terminal_cache_capture_enabled(
+        scheduler,
+        request,
+        response,
+    )
+
+    scheduler.config.enable_prefix_cache = True
+    assert not Scheduler._terminal_cache_capture_enabled(
+        scheduler,
+        request,
+        response,
+    )
+
+    scheduler.memory_aware_cache = object()
+    assert Scheduler._terminal_cache_capture_enabled(
+        scheduler,
+        request,
+        response,
+    )
+
+    request._bypass_prefix_cache = True
+    assert not Scheduler._terminal_cache_capture_enabled(
+        scheduler,
+        request,
+        response,
+    )
+
+
 def test_dsv4_short_prompt_snapshot_skip_does_not_sync_reprefill_for_store():
     """Short-prompt snapshot skips must also skip sync re-prefill store.
 

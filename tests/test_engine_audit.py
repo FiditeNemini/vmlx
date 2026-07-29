@@ -7727,8 +7727,12 @@ class TestStartupCompatibilityGuards:
             bundle_script.index('JANG_LOCAL="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}"')
             : bundle_script.index("# Clean up to reduce size")
         ]
-        destructive_build_index = bundle_script.index('rm -rf "$BUNDLE_DIR"')
-        dirty_guard_index = bundle_script.index("check_local_jang_source_clean")
+        # Match the top-level guard invocation and destructive staging reset,
+        # not the earlier function definitions/EXIT cleanup body.
+        dirty_guard_index = bundle_script.index("\ncheck_local_jang_source_clean\n")
+        destructive_build_index = bundle_script.index(
+            '\nrm -rf "$BUNDLE_DIR" "$PREVIOUS_BUNDLE_DIR"\n'
+        )
 
         assert '${VMLX_ALLOW_DIRTY_JANG_SOURCE:-${VMLINUX_ALLOW_DIRTY_JANG_SOURCE:-0}}' in local_install_block
         assert "RELEASE BLOCKED — local jang-tools package source is dirty" in local_install_block

@@ -128,7 +128,7 @@ def test_pool_quantized_v4_cache_does_not_route_to_hybrid_ssm():
 def test_dsv4_pool_quant_default_preserves_legacy_fallback_and_env_override(
     monkeypatch, request
 ):
-    """Unstamped bundles default on, while explicit env remains authoritative."""
+    """The direct loader's pool codec default is independent of prefix reuse."""
     from vmlx_engine.loaders.load_jangtq_dsv4 import (
         _configure_dsv4_pool_quant_default,
     )
@@ -170,8 +170,8 @@ def test_dsv4_pool_quant_default_reads_bundle_cache_stamp(
     assert _configure_dsv4_pool_quant_default(str(tmp_path)) == "1"
 
 
-def test_dsv4_cli_cache_policy_defaults_to_native_composite_cache(caplog, monkeypatch):
-    """DSV4 serve auto-config defaults to native composite prefix/paged/L2."""
+def test_dsv4_cli_cache_policy_defaults_composite_cache_off(caplog, monkeypatch):
+    """DSV4 serve defaults to full prefill until cached output is equivalent."""
     from vmlx_engine.cli import _apply_dsv4_cache_policy
 
     monkeypatch.delenv("VMLX_DSV4_ENABLE_PREFIX_CACHE", raising=False)
@@ -186,15 +186,16 @@ def test_dsv4_cli_cache_policy_defaults_to_native_composite_cache(caplog, monkey
 
     changed = _apply_dsv4_cache_policy(args, logger=__import__("logging").getLogger("test"))
 
-    assert args.enable_prefix_cache is True
-    assert args.disable_prefix_cache is False
-    assert args.use_paged_cache is True
-    assert args.enable_block_disk_cache is True
-    assert args.paged_cache_block_size == 256
-    assert "prefix_cache=disabled_until_dsv4_equivalence" not in changed
-    assert "paged=disabled_until_dsv4_equivalence" not in changed
-    assert "L2 disk=disabled_until_dsv4_equivalence" not in changed
-    assert "block_size=64->256" in changed
+    assert args.enable_prefix_cache is False
+    assert args.disable_prefix_cache is True
+    assert args.use_paged_cache is False
+    assert args.enable_block_disk_cache is False
+    assert args.paged_cache_block_size == 64
+    assert "prefix_cache=explicitly_disabled" in changed
+    assert "paged=disabled_without_prefix" in changed
+    assert "L2 disk=disabled_without_prefix" in changed
+    assert "block_size=64->256" not in changed
+    assert "output equivalence is not proven" in caplog.text
 
 
 def test_dsv4_cli_cache_policy_opt_in_uses_ds4_page_sized_blocks(monkeypatch):
@@ -222,10 +223,23 @@ def test_dsv4_cli_cache_policy_opt_in_uses_ds4_page_sized_blocks(monkeypatch):
     assert "block_size=64->256" in changed
 
 
+def test_dsv4_cli_cache_policy_env_opt_in_remains_available(monkeypatch):
+    """Direct engine diagnostics may opt in through the documented env knob."""
+    from vmlx_engine.cli import _dsv4_prefix_cache_opt_in
+
+    monkeypatch.setenv("VMLX_DSV4_ENABLE_PREFIX_CACHE", "1")
+    args = SimpleNamespace(
+        disable_prefix_cache=False,
+        dsv4_enable_prefix_cache=False,
+    )
+
+    assert _dsv4_prefix_cache_opt_in(args) is True
+
+
 def test_dsv4_runtime_policy_applies_to_bench_like_cli_args(
     tmp_path, monkeypatch, request
 ):
-    """Bench/CLI paths must use the default-on native DSV4 cache policy."""
+    """Bench/CLI paths must share the default-off DSV4 cache boundary."""
     from vmlx_engine.cli import _apply_dsv4_runtime_policy
 
     _restore_process_env_after_test(
@@ -270,11 +284,11 @@ def test_dsv4_runtime_policy_applies_to_bench_like_cli_args(
     )
 
     assert applied is True
-    assert args.enable_prefix_cache is True
-    assert args.disable_prefix_cache is False
-    assert args.use_paged_cache is True
-    assert args.enable_block_disk_cache is True
-    assert args.paged_cache_block_size == 256
+    assert args.enable_prefix_cache is False
+    assert args.disable_prefix_cache is True
+    assert args.use_paged_cache is False
+    assert args.enable_block_disk_cache is False
+    assert args.paged_cache_block_size == 64
     assert args.kv_cache_quantization == "none"
     assert args.kv_cache_quantization_explicit is True
     assert args.max_num_seqs == 1
@@ -293,10 +307,10 @@ def test_dsv4_runtime_policy_applies_to_bench_like_cli_args(
     assert os.environ["VMLX_DISABLE_TQ_KV"] == "1"
     assert "VMLX_FORCE_TQ_AUTO" not in os.environ
     assert "continuous_batching=off->on" in changes
-    assert "prefix_cache=explicitly_disabled" not in changes
-    assert "paged=disabled_without_prefix" not in changes
-    assert "L2 disk=disabled_without_prefix" not in changes
-    assert "block_size=64->256" in changes
+    assert "prefix_cache=explicitly_disabled" in changes
+    assert "paged=disabled_without_prefix" in changes
+    assert "L2 disk=disabled_without_prefix" in changes
+    assert "block_size=64->256" not in changes
     assert "max_num_seqs=9->1" in changes
     assert "prefill_batch_size=2048->1" in changes
     assert "completion_batch_size=99->1" in changes
@@ -310,7 +324,7 @@ def test_dsv4_runtime_policy_applies_to_bench_like_cli_args(
 
 
 def test_dsv4_runtime_policy_respects_explicit_prefix_cache_disable(monkeypatch):
-    """DSV4 defaults to the composite paged path, but explicit prefix off wins."""
+    """Explicit prefix Off wins even when the diagnostic flag is present."""
     from vmlx_engine.cli import _apply_dsv4_runtime_policy
 
     args = SimpleNamespace(
@@ -348,11 +362,11 @@ def test_dsv4_runtime_policy_respects_explicit_prefix_cache_disable(monkeypatch)
     assert args.disable_prefix_cache is True
     assert args.use_paged_cache is False
     assert args.enable_block_disk_cache is False
-    assert args.paged_cache_block_size == 256
+    assert args.paged_cache_block_size == 64
     assert "prefix_cache=explicitly_disabled" in changes
     assert "paged=disabled_without_prefix" in changes
     assert "L2 disk=disabled_without_prefix" in changes
-    assert "block_size=64->256" in changes
+    assert "block_size=64->256" not in changes
 
 
 def test_panel_suppresses_generic_kv_quantization_controls_for_dsv4():
@@ -382,9 +396,9 @@ def test_panel_names_dsv4_cache_as_native_composite_not_generic_paged_kv():
     assert "const pagedCacheSectionTitle = t('sessions.config.pagedKVCache')" in form
     assert "DSV4 Native Cache" not in form
     assert "const pagedCacheToggleLabel = dsv4Active" not in form
-    assert "DSV4 Native Composite Prefix Cache" in form
+    assert "DSV4 Native Composite Prefix Cache" not in form
     assert "DSV4 generic paged-KV controls are hidden" in form
-    assert "not generic paged KV" in form
+    assert "restored SWA+CSA/HCA state has not proven output-equivalent" in form
 
 
 def test_panel_suppresses_dsv4_batch_sizes_but_passes_real_prefill_step():
@@ -414,27 +428,27 @@ def test_panel_suppresses_dsv4_batch_sizes_but_passes_real_prefill_step():
     assert "if (!dsv4Active && completionBatchSize != null)" in settings
 
 
-def test_dsv4_ui_defaults_composite_cache_on_but_exposes_explicit_disable():
-    """DSV4 settings default to native cache with a restart-gated opt-out."""
+def test_dsv4_ui_defaults_composite_cache_off_and_exposes_no_false_reuse_toggle():
+    """DSV4 product settings truthfully expose full-prefill-only serving."""
     from pathlib import Path
 
     form = Path("panel/src/renderer/src/components/sessions/SessionConfigForm.tsx").read_text()
 
     assert "const effectiveContinuousBatching = dsv4Active ? true : config.continuousBatching" in form
-    assert "dsv4PrefixCache: true" in form
-    assert "dsv4PoolQuant: true" in form
-    assert "const dsv4CompositeCacheOptIn = dsv4Active && config.dsv4PrefixCache !== false" in form
+    assert "dsv4PrefixCache: false" in form
+    assert "dsv4PoolQuant: false" not in form
+    assert "dsv4CompositeCacheOptIn" not in form
     assert "const prefixOff = !effectivePrefixCacheEnabled" in form
     assert "const multimodalActive = !dsv4Active" in form
     assert "checked={effectiveContinuousBatching}" in form
     assert "checked={effectivePrefixCacheEnabled}" in form
-    assert "cacheControlUpdatesForDsv4CompositeToggle" in form
-    assert "applyDsv4CompositeCacheToggle" in form
-    assert "cacheControlUpdatesForDsv4PoolQuantToggle" in form
-    assert "applyDsv4PoolQuantToggle" in form
+    assert "cacheControlUpdatesForDsv4CompositeToggle" not in form
+    assert "applyDsv4CompositeCacheToggle" not in form
+    assert "cacheControlUpdatesForDsv4PoolQuantToggle" not in form
+    assert "applyDsv4PoolQuantToggle" not in form
     assert "const genericPagedCacheToggleDisabled = !dsv4Active && (cachePolicy.pagedCacheDisabled || openPanguExactTypedCache)" in form
-    assert "DSV4 Native Composite Prefix Cache" in form
-    assert "checked={config.dsv4PrefixCache !== false}" in form
+    assert "restored SWA+CSA/HCA state has not proven output-equivalent" in form
+    assert "checked={config.dsv4PrefixCache !== false}" not in form
     assert "DSV4 Composite Prefix Cache" not in form
     assert "DSV4 Native Cache" not in form
     assert "DSV4 Pool Quantization" not in form
@@ -481,20 +495,21 @@ def test_dsv4_launch_filters_stale_saved_and_additional_args():
         assert "--stream-interval" in source
         assert "--tool-call-parser" in source
         assert "--reasoning-parser" in source
-        assert "dsv4PrefixCacheOptIn" in source
+        assert "dsv4PrefixCacheOptIn" not in source
     assert "config.isMultimodal = false" in sessions
     assert "--dsv4-enable-prefix-cache" in sessions
 
 
-def test_dsv4_cache_ui_has_one_prefix_owner_and_no_stale_duplicate_labels():
-    """The DSV4 settings surface must expose one prefix owner, not layered generic duplicates."""
+def test_dsv4_cache_ui_exposes_no_unusable_cache_owner_or_stale_duplicate_labels():
+    """The DSV4 product surface must not advertise nonfunctional reuse."""
     from pathlib import Path
 
     form = Path("panel/src/renderer/src/components/sessions/SessionConfigForm.tsx").read_text()
 
-    assert 'label="DSV4 Native Composite Prefix Cache"' in form
-    assert 'label="DSV4 CSA/HCA Pool Codec"' in form
-    assert 'label={dsv4Active ? "DSV4 Block Disk Cache (SSD / L2)"' in form
+    assert 'label="DSV4 Native Composite Prefix Cache"' not in form
+    assert 'label="DSV4 CSA/HCA Pool Codec"' not in form
+    assert 'label="Block Disk Cache (SSD / L2)"' in form
+    assert "DSV4 Block Disk Cache (SSD / L2)" not in form
 
     # Generic prefix/paged/stored-KV controls must be hidden or disabled for
     # DSV4. The internal paged path is only the block index/L2 transport for
@@ -514,38 +529,33 @@ def test_dsv4_cache_ui_has_one_prefix_owner_and_no_stale_duplicate_labels():
         assert stale_label not in form
 
 
-def test_dsv4_cache_toggle_updates_and_env_are_one_contract():
-    """DSV4 composite-cache, L2, and pool-codec toggles must map to one launch/env policy."""
+def test_dsv4_product_ui_has_no_cache_opt_in_but_cli_env_remains_explicit():
+    """Product sessions fail closed while direct CLI diagnostics stay explicit."""
     from pathlib import Path
 
     policy = Path("panel/src/shared/cacheControlPolicy.ts").read_text()
     dsv4_env = Path("panel/src/shared/dsv4Env.ts").read_text()
     sessions = Path("panel/src/main/sessions.ts").read_text()
 
-    assert "export function cacheControlUpdatesForDsv4CompositeToggle" in policy
-    assert "['dsv4PrefixCache', enabled]" in policy
-    assert "['enablePrefixCache', enabled]" in policy
-    assert "['usePagedCache', enabled]" in policy
-    assert "['enableBlockDiskCache', enabled]" in policy
-    assert "if (!enabled) updates.splice(1, 0, ['dsv4PoolQuant', false])" in policy
+    assert "Dsv4" not in policy
+    assert "dsv4PrefixCache" not in policy
+    assert "dsv4PoolQuant" not in policy
 
-    assert "export function cacheControlUpdatesForDsv4PoolQuantToggle" in policy
-    assert "if (!enabled) return [['dsv4PoolQuant', false]]" in policy
-    assert "['dsv4PrefixCache', true]" in policy
-    assert "['enablePrefixCache', true]" in policy
-    assert "['usePagedCache', true]" in policy
-    assert "['enableBlockDiskCache', true]" in policy
-    assert "['dsv4PoolQuant', true]" in policy
+    assert "dsv4PrefixCache" not in dsv4_env
+    assert "dsv4PoolQuant?:" not in dsv4_env
+    assert "dsv4PoolQuantDefault?: boolean" in dsv4_env
+    assert "typeof options.dsv4PoolQuantDefault === 'boolean'" in dsv4_env
+    assert "options.dsv4PoolQuantDefault ? '1' : '0'" in dsv4_env
+    assert "env.VMLX_DSV4_ENABLE_PREFIX_CACHE" not in dsv4_env
 
-    assert "const prefixEnabled = config.dsv4PrefixCache !== false" in dsv4_env
-    assert "const poolQuantEnabled = prefixEnabled && config.dsv4PoolQuant !== false" in dsv4_env
-    assert "env.DSV4_POOL_QUANT = poolQuantEnabled ? '1' : '0'" in dsv4_env
-    assert "env.VMLX_DSV4_ENABLE_PREFIX_CACHE = '1'" in dsv4_env
-
-    assert "config.dsv4PoolQuant = dsv4PrefixOptIn && config.dsv4PoolQuant !== false" in sessions
-    assert "config.enablePrefixCache = dsv4PrefixOptIn" in sessions
-    assert "config.usePagedCache = dsv4PrefixOptIn" in sessions
-    assert "config.enableBlockDiskCache = dsv4PrefixOptIn" in sessions
+    assert "const dsv4PrefixOptIn = false" not in sessions
+    assert "config.dsv4PoolQuant = false" not in sessions
+    assert "config.enablePrefixCache = false" in sessions
+    assert "config.usePagedCache = false" in sessions
+    assert "config.enableBlockDiskCache = false" in sessions
+    assert "config.dsv4PoolQuant = detected.dsv4PoolQuantDefault" in sessions
+    assert "delete config.dsv4PoolQuant" in sessions
+    assert "dsv4PoolQuantDefault: freshDetectedConfig?.dsv4PoolQuantDefault" in sessions
 
 
 def test_session_preview_and_real_launch_share_dsv4_and_image_sanitizers():
@@ -1249,8 +1259,8 @@ def test_dsv4_serve_path_forces_generic_kv_quantization_off():
     assert 'os.environ["VMLX_DISABLE_TQ_KV"] = "1"' in policy_src
 
 
-def test_dsv4_cli_cache_summary_names_native_composite_cache():
-    """Startup summary should say DSV4 composite cache, not generic paged KV."""
+def test_dsv4_cli_cache_summary_names_diagnostic_native_composite_cache():
+    """Diagnostic startup summary must not advertise generic paged KV."""
     from types import SimpleNamespace
 
     from vmlx_engine.cli import _cache_stack_summary_lines
@@ -1267,7 +1277,7 @@ def test_dsv4_cli_cache_summary_names_native_composite_cache():
     )
 
     joined = "\n".join(lines)
-    assert "DSV4 native composite prefix cache" in joined
+    assert "DSV4 diagnostic native composite prefix cache" in joined
     assert "deepseek_v4_v8" in joined
     assert "generic paged KV" in joined
     assert "Paged cache:" not in joined
@@ -1616,6 +1626,579 @@ def test_dsv4_paged_restore_requires_full_prefill():
     add_request = inspect.getsource(Scheduler.add_request)
     assert "_dsv4_paged_hit_requires_full_prefill" in add_request
     assert "_release_unusable_paged_hit(request)" in add_request
+
+
+def test_failed_generation_prefix_trim_never_stores_original_state_under_shorter_key():
+    """Every cache family must fail closed when key/state alignment fails."""
+    import inspect
+
+    from vmlx_engine.scheduler import Scheduler
+
+    cleanup = inspect.getsource(Scheduler._cleanup_finished)
+    failed_trim_branch = cleanup.index("if trunc_ok and truncated_dicts:")
+    fail_closed = cleanup.index("cache_data = None", failed_trim_branch)
+    family_specific_log = cleanup.index(
+        "if not self._uses_dsv4_cache:", fail_closed
+    )
+    store_guard = cleanup.index("if cache_data is not None:", family_specific_log)
+
+    # cache_data is discarded before selecting the family-specific diagnostic,
+    # so this is a generic correctness boundary rather than a DSV4-only guard.
+    assert failed_trim_branch < fail_closed < family_specific_log < store_guard
+    assert "key/state equivalence is unknown for every" in cleanup[
+        failed_trim_branch:family_specific_log
+    ]
+    assert "self.block_aware_cache.store_cache(" not in cleanup[
+        fail_closed:store_guard
+    ]
+
+
+def _run_cleanup_publication_probe(
+    monkeypatch,
+    *,
+    request_id,
+    prompt_token_ids,
+    gen_prompt_len,
+    extracted_cache,
+    uses_dsv4_cache,
+    is_hybrid=False,
+    reject_publication=True,
+):
+    """Run the real cleanup path and retain every attempted publication."""
+    import vmlx_engine.scheduler as scheduler_mod
+    from vmlx_engine.request import Request, RequestStatus, SamplingParams
+    from vmlx_engine.scheduler import Scheduler
+
+    monkeypatch.setattr(scheduler_mod, "clear_mlx_memory_cache", lambda log=None: None)
+
+    request = Request(
+        request_id=request_id,
+        prompt=list(prompt_token_ids),
+        sampling_params=SamplingParams(max_tokens=4),
+    )
+    request.prompt_token_ids = list(request.prompt)
+    request.num_prompt_tokens = len(request.prompt_token_ids)
+    request.status = RequestStatus.RUNNING
+    request._gen_prompt_len = gen_prompt_len
+    request._extracted_cache = extracted_cache
+
+    published = []
+
+    class _Paged:
+        max_resident_bytes = 0
+
+        @staticmethod
+        def release_request_refs(_table):
+            return None
+
+        @staticmethod
+        def detach_request(_request_id):
+            return None
+
+    class _BlockAware:
+        _request_tables = {}
+        paged_cache = _Paged()
+
+        @staticmethod
+        def store_cache(*args, **kwargs):
+            published.append((args, kwargs))
+            if reject_publication:
+                raise AssertionError("unalignable state reached store_cache")
+            return []
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.running = {request.request_id: request}
+    scheduler.requests = {request.request_id: request}
+    scheduler.request_id_to_uid = {}
+    scheduler.uid_to_request_id = {}
+    scheduler.finished_req_ids = set()
+    scheduler.batch_generator = None
+    scheduler.stop_tokens = set()
+    scheduler.block_aware_cache = _BlockAware()
+    scheduler.memory_aware_cache = None
+    scheduler.prefix_cache = None
+    scheduler.disk_cache = None
+    scheduler.config = type("_Config", (), {"enable_prefix_cache": True})()
+    scheduler._ssm_state_cache = None
+    scheduler._kv_cache_bits = 0
+    scheduler._is_hybrid = is_hybrid
+    scheduler._uses_dsv4_cache = uses_dsv4_cache
+    scheduler._uses_zaya_cache = False
+    scheduler._mixed_attention_cache_model = False
+    scheduler._pld_pending = {}
+    scheduler._pld_ngram_indices = {}
+    scheduler._pick_cache_type_for_request = lambda _request: "user"
+    scheduler._retarget_ssm_rederive_to_paged_boundary = lambda *_args, **_kwargs: None
+    scheduler._dsv4_trace_timing = lambda *_args, **_kwargs: None
+    scheduler._cleanup_detokenizer = lambda _request_id: None
+    scheduler._materialize_deferred_prompt_cache = lambda _request_id, _request: None
+    scheduler.model = object()
+
+    Scheduler._cleanup_finished(scheduler, {request.request_id})
+
+    return request, published
+
+
+def test_generation_prefix_cleanup_rejects_nonpositive_cache_boundary(monkeypatch):
+    """A recognized state still cannot be published under an empty key."""
+    state = (
+        mx.zeros((1, 1, 2, 8), dtype=mx.float16),
+        mx.zeros((1, 1, 2, 8), dtype=mx.float16),
+    )
+    request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="nonpositive-generation-prefix-boundary",
+        prompt_token_ids=[10, 90],
+        gen_prompt_len=1,
+        extracted_cache=[
+            {"state": state, "meta_state": (2,), "class_name": "KVCache"}
+        ],
+        uses_dsv4_cache=False,
+    )
+
+    assert published == []
+    assert request._extracted_cache is None
+
+
+def test_generation_prefix_cleanup_rejects_nonempty_cache_list(monkeypatch):
+    """Nested CacheList payloads fail closed until recursively aligned."""
+    request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="nonempty-cache-list",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {
+                "state": None,
+                "meta_state": None,
+                "class_name": "CacheList",
+                "sub_caches": [
+                    {
+                        "state": (
+                            mx.zeros((1, 1, 5, 8), dtype=mx.float16),
+                            mx.zeros((1, 1, 5, 8), dtype=mx.float16),
+                        ),
+                        "meta_state": (5,),
+                        "class_name": "KVCache",
+                    }
+                ],
+            }
+        ],
+        uses_dsv4_cache=False,
+    )
+
+    assert published == []
+    assert request._extracted_cache is None
+
+
+def test_generation_prefix_cleanup_rejects_unknown_nonempty_state(monkeypatch):
+    """Unknown nonempty layer formats may not ride a shortened cache key."""
+    request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="unknown-nonempty-state",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {
+                "state": {"opaque": mx.zeros((5, 8), dtype=mx.float16)},
+                "meta_state": None,
+                "class_name": "FutureOpaqueCache",
+            }
+        ],
+        uses_dsv4_cache=False,
+    )
+
+    assert published == []
+    assert request._extracted_cache is None
+
+
+def test_generation_prefix_cleanup_rejects_unknown_rank_five_tuple(monkeypatch):
+    """A tuple is positional only for the rank-3/4 formats the store owns."""
+    state = (
+        mx.zeros((1, 1, 1, 5, 8), dtype=mx.float16),
+        mx.zeros((1, 1, 1, 5, 8), dtype=mx.float16),
+    )
+    request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="unknown-rank-five-state",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {
+                "state": state,
+                "meta_state": None,
+                "class_name": "FutureRankFiveCache",
+            }
+        ],
+        uses_dsv4_cache=False,
+    )
+
+    assert published == []
+    assert request._extracted_cache is None
+
+
+def test_generation_prefix_cleanup_publishes_aligned_plain_kv(monkeypatch):
+    """Fail-closed handling must preserve the recognized positional KV lane."""
+    state = (
+        mx.arange(40, dtype=mx.float16).reshape(1, 1, 5, 8),
+        mx.arange(40, dtype=mx.float16).reshape(1, 1, 5, 8),
+    )
+    _request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="aligned-plain-kv",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {"state": state, "meta_state": (5,), "class_name": "KVCache"}
+        ],
+        uses_dsv4_cache=False,
+        reject_publication=False,
+    )
+
+    assert len(published) == 1
+    args, _kwargs = published[0]
+    assert args[1] == [10, 11, 12]
+    stored_keys, stored_values = args[2][0]["state"]
+    assert stored_keys.shape[-2] == 3
+    assert stored_values.shape[-2] == 3
+
+
+def test_generation_prefix_cleanup_rejects_plain_kv_shorter_than_key(monkeypatch):
+    """A positional KV state shorter than the cache key must fail closed."""
+    state = (
+        mx.zeros((1, 1, 2, 8), dtype=mx.float16),
+        mx.zeros((1, 1, 2, 8), dtype=mx.float16),
+    )
+    _request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="plain-kv-shorter-than-key",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {"state": state, "meta_state": (2,), "class_name": "KVCache"}
+        ],
+        uses_dsv4_cache=False,
+    )
+
+    assert published == []
+
+
+def test_generation_prefix_cleanup_handles_safe_and_wrapped_rotating_kv(
+    monkeypatch,
+):
+    """Direct rotating metadata trims only before the circular buffer wraps."""
+    state = (
+        mx.zeros((1, 1, 5, 8), dtype=mx.float16),
+        mx.zeros((1, 1, 5, 8), dtype=mx.float16),
+    )
+    _request, safe_publication = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="safe-rotating-kv",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {
+                "state": state,
+                "meta_state": ("0", "8", "5", "5"),
+                "class_name": "RotatingKVCache",
+            }
+        ],
+        uses_dsv4_cache=False,
+        reject_publication=False,
+    )
+
+    assert len(safe_publication) == 1
+    safe_layer = safe_publication[0][0][2][0]
+    assert safe_layer["state"][0].shape[-2] == 3
+    assert safe_layer["meta_state"] == ("0", "8", "3", "3")
+
+    _request, wrapped_publication = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="wrapped-rotating-kv",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {
+                "state": state,
+                "meta_state": ("0", "4", "5", "1"),
+                "class_name": "RotatingKVCache",
+            }
+        ],
+        uses_dsv4_cache=False,
+    )
+
+    assert wrapped_publication == []
+
+
+def test_generation_prefix_cleanup_rejects_missing_or_malformed_rotating_meta(
+    monkeypatch,
+):
+    """Rotating temporal order cannot be inferred from absent metadata."""
+    state = (
+        mx.zeros((1, 1, 5, 8), dtype=mx.float16),
+        mx.zeros((1, 1, 5, 8), dtype=mx.float16),
+    )
+    for request_id, meta_state in (
+        ("missing-rotating-meta", ()),
+        ("malformed-rotating-meta", ("keep", "max", "offset", "idx")),
+        ("malformed-rotating-idx", ("0", "8", "5", "bogus")),
+        ("divergent-rotating-idx", ("0", "8", "5", "4")),
+    ):
+        _request, published = _run_cleanup_publication_probe(
+            monkeypatch,
+            request_id=request_id,
+            prompt_token_ids=[10, 11, 12, 13, 90, 91],
+            gen_prompt_len=2,
+            extracted_cache=[
+                {
+                    "state": state,
+                    "meta_state": meta_state,
+                    "class_name": "RotatingKVCache",
+                }
+            ],
+            uses_dsv4_cache=False,
+        )
+        assert published == []
+
+
+def _quantized_kv_state(length: int):
+    return tuple(
+        mx.zeros((1, 1, length, width), dtype=mx.float16)
+        for width in (8, 2, 2)
+    )
+
+
+def test_generation_prefix_cleanup_publishes_exact_quantized_kv(monkeypatch):
+    """Quantized K/V components align and slice to the exact key length."""
+    _request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="aligned-quantized-kv",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {
+                "state": (_quantized_kv_state(5), _quantized_kv_state(5)),
+                "meta_state": ("5", "64", "4"),
+                "class_name": "QuantizedKVCache",
+            }
+        ],
+        uses_dsv4_cache=False,
+        reject_publication=False,
+    )
+
+    assert len(published) == 1
+    layer = published[0][0][2][0]
+    assert all(part.shape[-2] == 3 for part in layer["state"][0])
+    assert all(part.shape[-2] == 3 for part in layer["state"][1])
+    assert layer["meta_state"] == ("3", "64", "4")
+
+
+def test_generation_prefix_cleanup_rejects_misaligned_quantized_kv(monkeypatch):
+    """A single shorter value component invalidates the quantized layer."""
+    bad_values = list(_quantized_kv_state(5))
+    bad_values[1] = mx.zeros((1, 1, 2, 2), dtype=mx.float16)
+    _request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="misaligned-quantized-kv",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {
+                "state": (_quantized_kv_state(5), tuple(bad_values)),
+                "meta_state": ("5", "64", "4"),
+                "class_name": "QuantizedKVCache",
+            }
+        ],
+        uses_dsv4_cache=False,
+    )
+
+    assert published == []
+
+
+def test_generation_prefix_cleanup_rejects_misaligned_minimax_m3_state(
+    monkeypatch,
+):
+    """MiniMax-M3 keys, values, and lightning-indexer keys must agree."""
+    _request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="misaligned-minimax-m3-cache",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {
+                "state": (
+                    mx.zeros((1, 1, 5, 8), dtype=mx.float16),
+                    mx.zeros((1, 1, 4, 8), dtype=mx.float16),
+                    mx.zeros((1, 1, 5, 4), dtype=mx.float16),
+                ),
+                "meta_state": ("5",),
+                "class_name": "MiniMaxM3SparseCache",
+            }
+        ],
+        uses_dsv4_cache=False,
+    )
+
+    assert published == []
+
+
+def test_generation_prefix_cleanup_rejects_dsv4_state_shorter_than_key(
+    monkeypatch,
+):
+    """DSV4 native offset must reach the exact reusable key boundary."""
+    from jang_tools.dsv4.mlx_model import DeepseekV4Cache
+
+    cache = DeepseekV4Cache(sliding_window=128, compress_ratio=4)
+    keys = mx.zeros((1, 1, 2, 8), dtype=mx.float16)
+    cache.update_and_fetch(keys, keys)
+    mx.eval(cache.state)
+    assert cache.offset == 2
+
+    _request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="dsv4-state-shorter-than-key",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[_state_dict(cache)],
+        uses_dsv4_cache=True,
+    )
+
+    assert published == []
+
+
+def test_generation_prefix_cleanup_rejects_dsv4_local_length_meta_mismatch(
+    monkeypatch,
+):
+    """DSV4 metadata cannot claim tokens absent from its local K/V state."""
+    from jang_tools.dsv4.mlx_model import DeepseekV4Cache
+
+    cache = DeepseekV4Cache(sliding_window=128, compress_ratio=4)
+    keys = mx.zeros((1, 1, 2, 8), dtype=mx.float16)
+    cache.update_and_fetch(keys, keys)
+    mx.eval(cache.state)
+    state_dict = _state_dict(cache)
+    state_dict["meta_state"] = ("0", "128", "3", "3")
+
+    _request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="dsv4-local-length-meta-mismatch",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[state_dict],
+        uses_dsv4_cache=True,
+    )
+
+    assert published == []
+
+
+def test_generation_prefix_cleanup_publishes_true_no_state_placeholder(monkeypatch):
+    """A layer with no state and no nested payload remains usable."""
+    _request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="true-no-state-placeholder",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {
+                "state": None,
+                "meta_state": None,
+                "class_name": "EmptyCachePlaceholder",
+            }
+        ],
+        uses_dsv4_cache=False,
+        reject_publication=False,
+    )
+
+    assert len(published) == 1
+    assert published[0][0][1] == [10, 11, 12]
+
+
+def test_generation_prefix_cleanup_keeps_hybrid_kv_and_skips_cumulative_state(
+    monkeypatch,
+):
+    """Hybrid KV blocks publish while cumulative SSM state stays companion-owned."""
+    kv_state = (
+        mx.arange(40, dtype=mx.float16).reshape(1, 1, 5, 8),
+        mx.arange(40, dtype=mx.float16).reshape(1, 1, 5, 8),
+    )
+    _request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="hybrid-kv-with-external-ssm-companion",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {"state": kv_state, "meta_state": (5,), "class_name": "KVCache"},
+            {
+                "state": [mx.zeros((1, 8, 5), dtype=mx.float16)],
+                "meta_state": None,
+                "class_name": "MambaCache",
+            },
+        ],
+        uses_dsv4_cache=False,
+        is_hybrid=True,
+        reject_publication=False,
+    )
+
+    assert len(published) == 1
+    args, kwargs = published[0]
+    assert args[1] == [10, 11, 12]
+    assert args[2][0]["state"][0].shape[-2] == 3
+    assert args[2][1]["class_name"] == "MambaCache"
+    assert args[2][1]["state"] is None
+    assert kwargs["store_cumulative_state"] is False
+
+
+def test_non_dsv4_cleanup_drops_unalignable_state_before_paged_or_l2_publication(
+    monkeypatch,
+):
+    """Unknown non-DSV4 state must not be published under a shorter key."""
+    request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="generic-unalignable-store",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[object()],
+        uses_dsv4_cache=False,
+    )
+
+    assert published == []
+    assert request._extracted_cache is None
+
+
+def test_dsv4_cleanup_drops_real_wrapped_state_before_shortened_key_publication(
+    monkeypatch,
+):
+    """A wrapped DeepseekV4Cache state dict must fail closed in cleanup."""
+    from jang_tools.dsv4.mlx_model import DeepseekV4Cache
+
+    cache = DeepseekV4Cache(sliding_window=128, compress_ratio=4)
+    # Populate through the real RotatingKVCache update path so the serialized
+    # metadata describes a genuinely wrapped state, rather than a fabricated
+    # offset on an otherwise short cache.
+    for start in range(0, 160, 32):
+        keys = mx.full((1, 1, 32, 8), start, dtype=mx.float16)
+        cache.update_and_fetch(keys, keys + 1)
+    mx.eval(cache.state)
+
+    wrapped_state = _state_dict(cache)
+    assert cache.offset == 160
+    assert cache.offset > cache.local.max_size
+    assert int(wrapped_state["meta_state"][2]) == cache.offset
+
+    # After the two generation-prefix tokens are removed, the reusable key
+    # would represent 97 tokens (98 prompt tokens minus the N-1 re-feed token),
+    # while the wrapped state represents 160. DeepseekV4Cache cannot safely
+    # rewind that SWA+CSA/HCA state to this boundary.
+    request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="dsv4-wrapped-state-store",
+        prompt_token_ids=list(range(100)),
+        gen_prompt_len=2,
+        extracted_cache=[wrapped_state],
+        uses_dsv4_cache=True,
+    )
+
+    assert published == []
+    assert request._extracted_cache is None
 
 
 def test_dsv4_cache_hit_store_skips_sync_full_reprefill_when_snapshot_missing():

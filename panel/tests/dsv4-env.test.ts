@@ -12,44 +12,40 @@ describe('dsv4EnvFromConfig', () => {
     expect(dsv4EnvFromConfig({ host: 'x', port: 1 })).toEqual({})
   })
 
-  it('defaults production DSV4 runtime env to native composite cache and materialized pool quant', () => {
+  it('defaults production DSV4 runtime env to full-prefill serving', () => {
     expect(dsv4EnvFromConfig({}, { dsv4Active: true })).toEqual({
       DSV4_LONG_CTX: '1',
-      DSV4_POOL_QUANT: '1',
-      VMLX_DSV4_ENABLE_PREFIX_CACHE: '1',
     })
   })
 
-  it('does not enable DSV4 pool quant unless native composite prefix cache is enabled', () => {
-    expect(dsv4EnvFromConfig({ dsv4PrefixCache: false, dsv4PoolQuant: true }, { dsv4Active: true })).toEqual({
+  it('ignores stale product cache opt-ins and leaves an unstamped pool codec model-owned', () => {
+    expect(dsv4EnvFromConfig({ dsv4PrefixCache: true, dsv4PoolQuant: true } as any, { dsv4Active: true })).toEqual({
+      DSV4_LONG_CTX: '1',
+    })
+  })
+
+  it('emits the explicit bundle pool codec default when true', () => {
+    expect(dsv4EnvFromConfig({}, {
+      dsv4Active: true,
+      dsv4PoolQuantDefault: true,
+    })).toEqual({
+      DSV4_LONG_CTX: '1',
+      DSV4_POOL_QUANT: '1',
+    })
+  })
+
+  it('emits the explicit bundle pool codec default when false', () => {
+    expect(dsv4EnvFromConfig({}, {
+      dsv4Active: true,
+      dsv4PoolQuantDefault: false,
+    })).toEqual({
       DSV4_LONG_CTX: '1',
       DSV4_POOL_QUANT: '0',
     })
   })
 
-  it('enables DSV4 pool quant by default only under DSV4 native composite cache', () => {
-    expect(dsv4EnvFromConfig({ dsv4PrefixCache: true, dsv4PoolQuant: true }, { dsv4Active: true })).toEqual({
-      DSV4_LONG_CTX: '1',
-      DSV4_POOL_QUANT: '1',
-      VMLX_DSV4_ENABLE_PREFIX_CACHE: '1',
-    })
-  })
-
-  it('keeps DSV4 composite prefix cache active while allowing pool quant override off', () => {
-    expect(dsv4EnvFromConfig({ dsv4PrefixCache: true }, { dsv4Active: true })).toEqual({
-      DSV4_LONG_CTX: '1',
-      DSV4_POOL_QUANT: '1',
-      VMLX_DSV4_ENABLE_PREFIX_CACHE: '1',
-    })
-    expect(dsv4EnvFromConfig({ dsv4PrefixCache: true, dsv4PoolQuant: false }, { dsv4Active: true })).toEqual({
-      DSV4_LONG_CTX: '1',
-      DSV4_POOL_QUANT: '0',
-      VMLX_DSV4_ENABLE_PREFIX_CACHE: '1',
-    })
-  })
-
-  it('does not leak DSV4 pool quant env into non-DSV4 launches', () => {
-    expect(dsv4EnvFromConfig({ dsv4PoolQuant: true }, { dsv4Active: false })).toEqual({})
+  it('does not leak stale DSV4 cache fields into non-DSV4 launches', () => {
+    expect(dsv4EnvFromConfig({ dsv4PrefixCache: true, dsv4PoolQuant: true } as any, { dsv4Active: false })).toEqual({})
   })
 
   it('does not gate raw max through an env opt-in anymore', () => {
@@ -96,17 +92,13 @@ describe('dsv4EnvFromConfig', () => {
     expect(env).toEqual({})
   })
 
-  it('combines supported DSV4 fields when set together', () => {
+  it('keeps legacy behavior fields inert under the fixed product envelope', () => {
     const env = dsv4EnvFromConfig({
-      dsv4PrefixCache: true,
-      dsv4PoolQuant: true,
       dsv4RawMax: true,
       dsv4ForceDirect: true,
     }, { dsv4Active: true })
     expect(env).toEqual({
       DSV4_LONG_CTX: '1',
-      DSV4_POOL_QUANT: '1',
-      VMLX_DSV4_ENABLE_PREFIX_CACHE: '1',
     })
   })
 
@@ -134,6 +126,9 @@ describe('dsv4EnvFromConfig wired into sessions.ts spawnEnv', () => {
     // Called and merged into spawnEnv (each emitted env var assigned)
     expect(source).toContain('const dsv4Env = dsv4EnvFromConfig(config as any, {')
     expect(source).toContain("dsv4Active: freshDetectedFamily === 'deepseek-v4'")
+    expect(source).toContain('dsv4PoolQuantDefault: freshDetectedConfig?.dsv4PoolQuantDefault')
+    expect(source).toContain('delete spawnEnv.DSV4_LONG_CTX')
+    expect(source).toContain('delete spawnEnv.DSV4_POOL_QUANT')
     expect(source).toContain('spawnEnv[key] = value')
   })
 
@@ -183,7 +178,7 @@ describe('dsv4EnvFromConfig wired into sessions.ts spawnEnv', () => {
 })
 
 describe('DSV4 runtime controls in SessionConfigForm', () => {
-  it('declares typed session config fields with safe defaults', () => {
+  it('keeps the reusable-cache field off without inventing a pool-codec default', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const formPath = path.resolve(__dirname, '../src/renderer/src/components/sessions/SessionConfigForm.tsx')
@@ -191,12 +186,12 @@ describe('DSV4 runtime controls in SessionConfigForm', () => {
 
     expect(source).toContain('dsv4PoolQuant?: boolean')
     expect(source).toContain('dsv4PrefixCache?: boolean')
-    expect(source).toContain('dsv4PoolQuant: true')
-    expect(source).toContain('dsv4PrefixCache: true')
+    expect(source).not.toContain('dsv4PoolQuant: false')
+    expect(source).toContain('dsv4PrefixCache: false')
     expect(source).not.toContain('dsv4FinalizerTokens')
   })
 
-  it('renders only supported DSV4 runtime controls without duplicate cache toggles', () => {
+  it('renders the fail-closed DSV4 cache boundary without unusable toggles', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const formPath = path.resolve(__dirname, '../src/renderer/src/components/sessions/SessionConfigForm.tsx')
@@ -209,17 +204,21 @@ describe('DSV4 runtime controls in SessionConfigForm', () => {
     expect(source).not.toContain("onChange={v => onChange('dsv4FinalizerTokens', v)}")
     expect(source).not.toContain('DSV4 Force Direct Rail')
     expect(source).not.toContain("onChange={v => onChange('dsv4ForceDirect', v)}")
-    expect(source).toContain('DSV4 Native Composite Prefix Cache')
-    expect(source).toContain('cacheControlUpdatesForDsv4CompositeToggle')
-    expect(source).toContain('applyDsv4CompositeCacheToggle')
-    expect(source).toContain('DSV4 CSA/HCA Pool Codec')
-    expect(source).toContain('cacheControlUpdatesForDsv4PoolQuantToggle')
-    expect(source).toContain('applyDsv4PoolQuantToggle')
+    expect(source).not.toContain('DSV4 Native Composite Prefix Cache')
+    expect(source).not.toContain('cacheControlUpdatesForDsv4CompositeToggle')
+    expect(source).not.toContain('applyDsv4CompositeCacheToggle')
+    expect(source).not.toContain('DSV4 CSA/HCA Pool Codec')
+    expect(source).not.toContain('cacheControlUpdatesForDsv4PoolQuantToggle')
+    expect(source).not.toContain('applyDsv4PoolQuantToggle')
     expect(source).not.toContain('DSV4 Native Cache')
     expect(source).not.toContain('DSV4 Composite Prefix Cache')
     expect(source).not.toContain('DSV4 Pool Quantization')
     expect(source).not.toContain('DSV4 Flash composite prefix cache is disabled')
-    expect(source).toContain('Generic KV q4/q8 stays suppressed for DSV4')
+    expect(source).toContain('restored SWA+CSA/HCA state has not proven output-equivalent')
+    expect(source).toContain('independent CSA/HCA pool codec follows the model bundle')
+    expect(source).toContain('{!dsv4Active && <PerformanceHint text="Keep ON for best overall behavior:')
+    expect(source).toContain('{!dsv4Active && (')
+    expect(source).toContain('{!dsv4Active && showCachingHelp && (')
     expect(source).not.toContain("disabled={!dsv4CompositeCacheOptIn}")
     expect(source).not.toContain("onChange={v => onChange('dsv4PoolQuant', dsv4CompositeCacheOptIn && v)}")
     expect(source).not.toContain("onChange={() => onChange('dsv4PoolQuant', false)}")

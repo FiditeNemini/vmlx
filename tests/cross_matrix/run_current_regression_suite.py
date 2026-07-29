@@ -34,10 +34,14 @@ EXPECTED_OPEN_REQUIREMENTS = [
     "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared",
     "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared",
     "Real Electron UI cross-family live model matrix is release-cleared",
+    "DSV4 native composite same-process reuse is cold-prefill equivalent",
+    "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
     "DSV4 long-output/code/file-generation quality is release-cleared",
 ]
 DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
     "Real Electron UI cross-family live model matrix is release-cleared",
+    "DSV4 native composite same-process reuse is cold-prefill equivalent",
+    "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
     "DSV4 long-output/code/file-generation quality is release-cleared",
 }
 
@@ -69,8 +73,11 @@ CURRENT_SUITE_SOURCE_HASH_FILES = (
     "panel/src/main/sessions.ts",
     "panel/src/main/tools/executor.ts",
     "panel/src/renderer/src/components/chat/MessageBubble.tsx",
+    "panel/src/renderer/src/components/sessions/CreateSession.tsx",
+    "panel/src/renderer/src/components/sessions/ServerSettingsDrawer.tsx",
     "panel/src/renderer/src/components/sessions/SessionConfigForm.tsx",
     "panel/src/renderer/src/components/sessions/SessionSettings.tsx",
+    "panel/src/shared/dsv4Env.ts",
     "panel/src/shared/reasoningParserAliases.ts",
     "panel/tests/api-gateway-ollama-behavior.test.ts",
     "panel/tests/api-gateway-ollama.test.ts",

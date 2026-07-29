@@ -544,10 +544,11 @@ API_CACHE_SOURCE_HASH_FILES = (
     "tests/test_tool_format.py",
 )
 PANEL_SETTINGS_CONTRACT_CHECKS = (
-    "dsv4_default_native_prefix_on",
-    "dsv4_explicit_prefix_off_disables_native_flags",
-    "dsv4_l2_explicit_off_preserves_prefix",
-    "dsv4_generic_kv_flags_suppressed",
+    "dsv4_default_full_prefill",
+    "dsv4_default_native_prefix_off",
+    "dsv4_stale_cache_controls_fail_closed",
+    "dsv4_product_cache_opt_in_hidden",
+    "dsv4_generic_tq_stays_off",
     "max_output_context_cli_split",
     "chat_max_output_is_per_chat_override",
     "non_dsv4_cache_toggles_preserved",
@@ -5820,7 +5821,7 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         and default_reasoning_parser_ok
         and default_tool_required_checks_ok
     )
-    current_default_native_cache_ok = (
+    historical_default_native_cache_ok = (
         "--disable-prefix-cache" not in default_tool_cmd
         and "--dsv4-enable-prefix-cache" in default_tool_cmd
         and "--use-paged-cache" in default_tool_cmd
@@ -5837,11 +5838,13 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         if isinstance(panel_settings_contract.get("checks"), dict)
         else {}
     )
-    current_app_launch_default_cache_ok = (
+    current_fail_closed_product_policy_ok = (
         panel_settings_contract.get("status") == "pass"
-        and panel_settings_raw_checks.get("dsv4_default_native_prefix_on") is True
-        and panel_settings_raw_checks.get("dsv4_generic_kv_flags_suppressed") is True
-        and current_default_native_cache_ok
+        and panel_settings_raw_checks.get("dsv4_default_full_prefill") is True
+        and panel_settings_raw_checks.get("dsv4_default_native_prefix_off") is True
+        and panel_settings_raw_checks.get("dsv4_stale_cache_controls_fail_closed") is True
+        and panel_settings_raw_checks.get("dsv4_product_cache_opt_in_hidden") is True
+        and panel_settings_raw_checks.get("dsv4_generic_tq_stays_off") is True
     )
     thinking_tool_rounds = default_cache_tool_loop_thinking_on.get("rounds") or []
     thinking_tool_executed = [
@@ -6124,30 +6127,16 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
     ui_cli = ui.get("cli_preview_assertions") or {}
     _add(
         requirements,
-        "DSV4 Flash prefix/paged/L2 cache is enabled by default from app launch",
-        _status(
-            current_app_launch_default_cache_ok
-            or all(
-                cache_checks.get(key)
-                for key in (
-                    "persistedDefaultOn",
-                    "launchHasDsv4EnablePrefix",
-                    "launchHasUsePagedCache",
-                    "launchHasBlockDisk",
-                    "launchNoDisablePrefix",
-                )
-            )
-        ),
-        (
-            [PANEL_SETTINGS_CONTRACT_REL, DSV4_DEFAULT_CACHE_TOOL_LOOP_REL]
-            if current_app_launch_default_cache_ok
-            else [
-                "build/current-dsv4-cache-proof-digest-20260521.json",
-                "build/dev-ui-smoke-20260521/summary.json",
-            ]
+        "DSV4 product sessions default to fail-closed full prefill",
+        _status(current_fail_closed_product_policy_ok),
+        [PANEL_SETTINGS_CONTRACT_REL],
+        caveat=(
+            None
+            if current_fail_closed_product_policy_ok
+            else "The current product must suppress DSV4 prefix, paged, L2, pool-codec, and generic TurboQuant KV controls until native restore equivalence is reproved."
         ),
         details={
-            **{
+            "historical_may_default_on_diagnostic": {
                 key: cache_checks.get(key)
                 for key in (
                     "persistedDefaultOn",
@@ -6158,82 +6147,77 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
                 )
             },
             "current_panel_settings_status": panel_settings_contract.get("status"),
-            "current_panel_settings_dsv4_default_native_prefix_on": (
-                panel_settings_raw_checks.get("dsv4_default_native_prefix_on")
+            "current_panel_settings_dsv4_default_full_prefill": (
+                panel_settings_raw_checks.get("dsv4_default_full_prefill")
             ),
-            "current_panel_settings_dsv4_generic_kv_flags_suppressed": (
-                panel_settings_raw_checks.get("dsv4_generic_kv_flags_suppressed")
+            "current_panel_settings_dsv4_default_native_prefix_off": (
+                panel_settings_raw_checks.get("dsv4_default_native_prefix_off")
             ),
-            "current_default_cache_launch_has_dsv4_enable_prefix_cache": (
+            "current_panel_settings_dsv4_stale_cache_controls_fail_closed": (
+                panel_settings_raw_checks.get("dsv4_stale_cache_controls_fail_closed")
+            ),
+            "current_panel_settings_dsv4_product_cache_opt_in_hidden": (
+                panel_settings_raw_checks.get("dsv4_product_cache_opt_in_hidden")
+            ),
+            "current_panel_settings_dsv4_generic_tq_stays_off": (
+                panel_settings_raw_checks.get("dsv4_generic_tq_stays_off")
+            ),
+            "historical_default_cache_launch_has_dsv4_enable_prefix_cache": (
                 "--dsv4-enable-prefix-cache" in default_tool_cmd
             ),
-            "current_default_cache_launch_has_use_paged_cache": (
+            "historical_default_cache_launch_has_use_paged_cache": (
                 "--use-paged-cache" in default_tool_cmd
             ),
-            "current_default_cache_launch_has_block_disk_cache": (
+            "historical_default_cache_launch_has_block_disk_cache": (
                 "--enable-block-disk-cache" in default_tool_cmd
             ),
-            "current_default_cache_launch_has_disable_prefix_cache": (
+            "historical_default_cache_launch_has_disable_prefix_cache": (
                 "--disable-prefix-cache" in default_tool_cmd
             ),
-            "current_default_cache_native_cache_type": default_tool_native.get(
+            "historical_default_cache_native_cache_type": default_tool_native.get(
                 "cache_type"
             ),
-            "current_default_cache_native_prefix": default_tool_native.get("prefix"),
-            "current_default_cache_native_paged": default_tool_native.get("paged"),
-            "current_default_cache_native_block_disk_l2": default_tool_native.get(
+            "historical_default_cache_native_prefix": default_tool_native.get("prefix"),
+            "historical_default_cache_native_paged": default_tool_native.get("paged"),
+            "historical_default_cache_native_block_disk_l2": default_tool_native.get(
                 "block_disk_l2"
             ),
-            "current_default_cache_generic_turboquant_kv": (
+            "historical_default_cache_generic_turboquant_kv": (
                 default_tool_native.get("generic_turboquant_kv")
             ),
-            "current_default_native_cache_ok": current_default_native_cache_ok,
-            "current_app_launch_default_cache_ok": current_app_launch_default_cache_ok,
+            "historical_default_native_cache_diagnostic_ok": historical_default_native_cache_ok,
+            "current_fail_closed_product_policy_ok": current_fail_closed_product_policy_ok,
+            "native_reuse_equivalence_deferred": True,
         },
     )
     _add(
         requirements,
-        "DSV4 cache is native SWA+CSA/HCA composite, not generic KV/TurboQuant KV",
-        _status(
-            (
-                native.get("cache_type") == "native_composite"
-                and native.get("prefix") is True
-                and native.get("paged") is True
-                and native.get("block_disk_l2") is True
-                and (native.get("generic_turboquant_kv") or {}).get("enabled") is False
-            )
-            or current_default_native_cache_ok
-        ),
-        (
-            ["build/dev-ui-dsv4-live-cache-proof-20260521/result.json"]
-            if (
-                native.get("cache_type") == "native_composite"
-                and native.get("prefix") is True
-                and native.get("paged") is True
-                and native.get("block_disk_l2") is True
-                and (native.get("generic_turboquant_kv") or {}).get("enabled")
-                is False
-            )
-            else [DSV4_DEFAULT_CACHE_TOOL_LOOP_REL]
-        ),
+        "DSV4 cache opt-in remains native SWA+CSA/HCA composite with generic TurboQuant KV off",
+        _status(current_fail_closed_product_policy_ok),
+        [PANEL_SETTINGS_CONTRACT_REL],
+        caveat="Architecture classification and fail-closed launch policy do not prove native positive-hit reuse equivalence.",
         details={
-            "cache_type": native.get("cache_type"),
-            "components": native.get("components"),
-            "generic_turboquant_kv": native.get("generic_turboquant_kv"),
-            "cache_store_policy": native.get("cache_store_policy"),
-            "current_default_cache_native_cache_type": default_tool_native.get(
+            "historical_cache_type": native.get("cache_type"),
+            "historical_components": native.get("components"),
+            "historical_generic_turboquant_kv": native.get("generic_turboquant_kv"),
+            "historical_cache_store_policy": native.get("cache_store_policy"),
+            "historical_default_cache_native_cache_type": default_tool_native.get(
                 "cache_type"
             ),
-            "current_default_cache_components": default_tool_native.get(
+            "historical_default_cache_components": default_tool_native.get(
                 "components"
             ),
-            "current_default_cache_generic_turboquant_kv": (
+            "historical_default_cache_generic_turboquant_kv": (
                 default_tool_native.get("generic_turboquant_kv")
             ),
-            "current_default_cache_store_policy": (
+            "historical_default_cache_store_policy": (
                 default_tool_native.get("cache_store_policy")
             ),
-            "current_default_cache_native_cache_ok": current_default_native_cache_ok,
+            "current_fail_closed_product_policy_ok": current_fail_closed_product_policy_ok,
+            "current_generic_tq_stays_off": panel_settings_raw_checks.get(
+                "dsv4_generic_tq_stays_off"
+            ),
+            "native_positive_hit_functionality_deferred": True,
         },
     )
     cached_details = (((turn2.get("body") or {}).get("usage") or {}).get("prompt_tokens_details") or {})
@@ -6363,73 +6347,53 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
     )
     _add(
         requirements,
-        "DSV4 same-process cache hit improves latency/TTFT and records paged+dsv4 hit",
-        _status(
-            (
-                cache_checks.get("hotFasterTtft")
-                and cache_checks.get("sameProcessHitDsv4")
-            )
-            or current_responses_cache_hit_ok
-        ),
-        (
-            [
-                "build/current-dsv4-cache-proof-digest-20260521.json",
-                "build/dev-ui-dsv4-live-cache-proof-20260521/result.json",
-            ]
-            if cache_checks.get("hotFasterTtft")
-            and cache_checks.get("sameProcessHitDsv4")
-            else [DSV4_RESPONSES_CACHE_GATE_REL]
-        ),
+        "DSV4 native composite same-process reuse is cold-prefill equivalent",
+        _status(False),
+        [DSV4_RESPONSES_CACHE_GATE_REL],
+        caveat="Deferred beyond v1.6.19: historical hit/latency telemetry does not prove byte-equivalent cache state or output against cold full prefill, so product sessions stay fail-closed.",
         details={
-            "cold_ttft_sec": (cache.get("timings") or {}).get("cold_ttft_sec"),
-            "hot_ttft_sec": (cache.get("timings") or {}).get("hot_ttft_sec"),
-            "dev_cold_elapsed_sec": turn1.get("elapsed_sec"),
-            "dev_hot_elapsed_sec": turn2.get("elapsed_sec"),
-            "dev_cached_tokens": cached_details.get("cached_tokens"),
-            "dev_cache_detail": cached_details.get("cache_detail"),
-            "current_responses_cache_gate_status": (
+            "deferred_release": "v1.6.20",
+            "required_proof": "same-prompt cold-vs-restored cache state and output equivalence on the exact release source",
+            "historical_may_cold_ttft_sec": (cache.get("timings") or {}).get("cold_ttft_sec"),
+            "historical_may_hot_ttft_sec": (cache.get("timings") or {}).get("hot_ttft_sec"),
+            "historical_may_dev_cold_elapsed_sec": turn1.get("elapsed_sec"),
+            "historical_may_dev_hot_elapsed_sec": turn2.get("elapsed_sec"),
+            "historical_may_dev_cached_tokens": cached_details.get("cached_tokens"),
+            "historical_may_dev_cache_detail": cached_details.get("cache_detail"),
+            "historical_responses_cache_gate_status": (
                 dsv4_responses_cache_gate.get("status")
             ),
-            "current_responses_cached_tokens": responses_cached_tokens,
-            "current_responses_cache_detail": (
+            "historical_responses_cached_tokens": responses_cached_tokens,
+            "historical_responses_cache_detail": (
                 responses_cached_follow_details.get("cache_detail")
             ),
-            "current_responses_stream_cached_tokens": responses_stream_cached_tokens,
-            "current_responses_stream_cache_detail": (
+            "historical_responses_stream_cached_tokens": responses_stream_cached_tokens,
+            "historical_responses_stream_cache_detail": (
                 responses_stream_follow_details.get("cache_detail")
             ),
-            "current_responses_stream_ttft_sec": responses_stream_ttft,
-            "current_responses_cached_wall_sec": responses_cached_wall,
-            "current_responses_no_cache_wall_sec": responses_no_cache_wall,
-            "current_responses_no_cache_tokens": responses_no_cache_tokens,
-            "current_responses_cache_hit_ok": current_responses_cache_hit_ok,
+            "historical_responses_stream_ttft_sec": responses_stream_ttft,
+            "historical_responses_cached_wall_sec": responses_cached_wall,
+            "historical_responses_no_cache_wall_sec": responses_no_cache_wall,
+            "historical_responses_no_cache_tokens": responses_no_cache_tokens,
+            "historical_hit_telemetry_ok": current_responses_cache_hit_ok,
+            "current_cold_prefill_equivalence_proven": False,
         },
     )
     _add(
         requirements,
-        "DSV4 block disk L2 stores and hits after restart",
-        _status(
-            (
-                cache_checks.get("blockDiskWrite")
-                and cache_checks.get("restartL2DiskHit")
-                and cache_checks.get("restartDsv4CacheHit")
-            )
-            or current_restart_l2_ok
-        ),
-        (
-            ["build/current-dsv4-cache-proof-digest-20260521.json"]
-            if cache_checks.get("blockDiskWrite")
-            and cache_checks.get("restartL2DiskHit")
-            and cache_checks.get("restartDsv4CacheHit")
-            else [DSV4_RESPONSES_RESTART_L2_GATE_REL]
-        ),
+        "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
+        _status(False),
+        [DSV4_RESPONSES_RESTART_L2_GATE_REL],
+        caveat="Deferred beyond v1.6.19: historical disk-write/hit telemetry does not prove restored SWA+CSA/HCA state or output equivalence after restart.",
         details={
-            "after_hot_block_disk": (cache.get("stats_after_hot") or {}).get("block_disk_cache"),
-            "after_restart_block_disk": (cache.get("stats_after_restart") or {}).get("block_disk_cache"),
-            "current_restart_l2_gate_status": (
+            "deferred_release": "v1.6.20",
+            "required_proof": "restart and SSD-only refault cold-vs-restored cache state and output equivalence on the exact release source",
+            "historical_may_after_hot_block_disk": (cache.get("stats_after_hot") or {}).get("block_disk_cache"),
+            "historical_may_after_restart_block_disk": (cache.get("stats_after_restart") or {}).get("block_disk_cache"),
+            "historical_restart_l2_gate_status": (
                 dsv4_responses_restart_l2_gate.get("status")
             ),
-            "current_restart_l2_checks": {
+            "historical_restart_l2_checks": {
                 key: restart_l2_checks.get(key)
                 for key in (
                     "native_cache",
@@ -6446,18 +6410,19 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
                     "store_turn_fresh",
                 )
             },
-            "current_restart_cache_dir": (
+            "historical_restart_cache_dir": (
                 dsv4_responses_restart_l2_gate.get("cache_dir")
             ),
-            "current_restart_before_block_disk": restart_l2_before_block,
-            "current_restart_after_block_disk": restart_l2_after_block,
-            "current_restart_cached_tokens": restart_l2_cached_tokens,
-            "current_restart_cache_detail": restart_l2_cache_detail,
-            "current_restart_l2_disk_hits": restart_l2_after_block.get("disk_hits"),
-            "current_restart_l2_disk_writes_before": restart_l2_before_block.get(
+            "historical_restart_before_block_disk": restart_l2_before_block,
+            "historical_restart_after_block_disk": restart_l2_after_block,
+            "historical_restart_cached_tokens": restart_l2_cached_tokens,
+            "historical_restart_cache_detail": restart_l2_cache_detail,
+            "historical_restart_l2_disk_hits": restart_l2_after_block.get("disk_hits"),
+            "historical_restart_l2_disk_writes_before": restart_l2_before_block.get(
                 "disk_writes"
             ),
-            "current_restart_l2_ok": current_restart_l2_ok,
+            "historical_restart_hit_telemetry_ok": current_restart_l2_ok,
+            "current_restart_cold_prefill_equivalence_proven": False,
         },
     )
     _add(
@@ -6502,7 +6467,7 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
     )
     _add(
         requirements,
-        "DSV4 can perform multiple tool iterations then final answer",
+        "Historical DSV4 multi-tool diagnostic completed iterations and final answer",
         _status(
             (two_tool_names == ["list_directory", "write_file"] and final_text == "DONE")
             or (
@@ -6524,8 +6489,9 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
             else [DSV4_DEFAULT_CACHE_TOOL_LOOP_REL]
         ),
         caveat=(
-            "This proof used --disable-prefix-cache, so it proves DSML multi-tool "
-            "loop behavior separately from default-on cache."
+            "This proof used --disable-prefix-cache, which matches the v1.6.19 "
+            "fail-closed product policy and proves DSML multi-tool loop behavior "
+            "separately from deferred native-cache reuse."
             if two_tool_names == ["list_directory", "write_file"]
             and final_text == "DONE"
             and default_tool_names
@@ -6533,18 +6499,20 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
             else None
         ),
         details={
+            "historical_diagnostic_only": True,
+            "current_release_clearance": False,
             "executed_tools": executed_tools,
             "final_text": final_text,
-            "current_default_cache_executed_tool_names": default_tool_names,
-            "current_default_cache_final_text": default_tool_final_text,
-            "current_default_cache_required_checks_ok": (
+            "historical_native_cache_executed_tool_names": default_tool_names,
+            "historical_native_cache_final_text": default_tool_final_text,
+            "historical_native_cache_required_checks_ok": (
                 default_tool_required_checks_ok
             ),
         },
     )
     _add(
         requirements,
-            "DSV4 default-cache multi-tool agent loop is proven",
+            "Historical DSV4 native-cache multi-tool diagnostic is retained",
             _status(
                 default_tool_names == ["list_directory", "write_file", "write_file"]
                 and default_tool_final_text == "DONE"
@@ -6552,16 +6520,19 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
             ),
         [DSV4_DEFAULT_CACHE_TOOL_LOOP_REL],
         caveat=(
-            None
+            "Historical diagnostic only; this row does not clear current DSV4 native reuse, restart, or L2 equivalence."
             if default_tool_cache_ok
             else (
-                "Existing multi-tool proof failed required check(s): "
+                "Historical multi-tool diagnostic failed required check(s): "
                 + ", ".join(failed_required_default_tool_checks)
             )
             if failed_required_default_tool_checks
-            else "Existing multi-tool proof does not prove the default DSV4 native prefix/paged/L2 cache path."
+            else "Historical multi-tool diagnostic does not prove current DSV4 native prefix/paged/L2 cache reuse."
         ),
         details={
+            "historical_diagnostic_only": True,
+            "current_release_clearance": False,
+            "native_reuse_equivalence_deferred": True,
             "artifact_status": default_cache_tool_loop.get("status"),
             "artifact_reason": default_cache_tool_loop.get("reason"),
             "executed_tool_names": default_tool_names,

@@ -195,13 +195,14 @@ def test_ui_defaults_prefix_on_paged_off_and_hy3_mtp_native_type_visible():
     # DEFAULT_CONFIG pre-detection fallback stays false; the effective default now
     # comes from the detection layer (see registry assertion below).
     assert "usePagedCache: false" in form
-    # Paged cache default-ON reversal (Eric directive): the launch default now
-    # honors the detected per-family policy (text ON / MLLM OFF) instead of a
-    # hardcoded false. DSV4 still follows its composite opt-in.
+    # The launch default honors the detected per-family policy (text ON / MLLM
+    # OFF) while DSV4 fails closed until composite-cache output equivalence is
+    # independently proven.
     assert (
-        "const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : (detectedUsePaged ?? false)"
+        "const defaultUsePagedCache = !dsv4Active && (detectedUsePaged ?? false)"
         in sessions
     )
+    assert "dsv4PrefixOptIn" not in sessions
     # Registry resolves paged ON for autodetected text families, OFF for multimodal.
     assert "usePagedCache: config.usePagedCache ?? (config.isMultimodal ? false : true)" in registry
     assert "'hy_v3'" in registry

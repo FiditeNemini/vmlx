@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  cacheControlUpdatesForDsv4BlockDiskToggle,
-  cacheControlUpdatesForDsv4CompositeToggle,
-  cacheControlUpdatesForDsv4PoolQuantToggle,
   cacheControlUpdatesForBlockDiskToggle,
   cacheControlUpdatesForDiskToggle,
   cacheControlUpdatesForPagedToggle,
@@ -252,48 +249,4 @@ describe('cache control policy', () => {
     expect(policy.enableBlockDiskCache).toBe(false)
   })
 
-  it('DSV4 composite cache opt-in updates the DSV4 master flag and prerequisites together', () => {
-    expect(cacheControlUpdatesForDsv4CompositeToggle(true)).toEqual([
-      ['dsv4PrefixCache', true],
-      ['enablePrefixCache', true],
-      ['usePagedCache', true],
-      ['enableBlockDiskCache', true],
-    ])
-
-    expect(cacheControlUpdatesForDsv4CompositeToggle(false)).toEqual([
-      ['dsv4PrefixCache', false],
-      ['dsv4PoolQuant', false],
-      ['enablePrefixCache', false],
-      ['usePagedCache', false],
-      ['enableBlockDiskCache', false],
-    ])
-  })
-
-  it('DSV4 block L2 opt-in enables the native composite cache prerequisites', () => {
-    expect(cacheControlUpdatesForDsv4BlockDiskToggle(true)).toEqual([
-      ['dsv4PrefixCache', true],
-      ['enablePrefixCache', true],
-      ['usePagedCache', true],
-      ['enableDiskCache', false],
-      ['enableBlockDiskCache', true],
-    ])
-
-    expect(cacheControlUpdatesForDsv4BlockDiskToggle(false)).toEqual([
-      ['enableBlockDiskCache', false],
-    ])
-  })
-
-  it('DSV4 pool quant opt-in enables the native composite cache prerequisites', () => {
-    expect(cacheControlUpdatesForDsv4PoolQuantToggle(true)).toEqual([
-      ['dsv4PrefixCache', true],
-      ['enablePrefixCache', true],
-      ['usePagedCache', true],
-      ['enableBlockDiskCache', true],
-      ['dsv4PoolQuant', true],
-    ])
-
-    expect(cacheControlUpdatesForDsv4PoolQuantToggle(false)).toEqual([
-      ['dsv4PoolQuant', false],
-    ])
-  })
 })

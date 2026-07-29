@@ -815,10 +815,11 @@ def _write_passing_base_artifacts(tmp_path: Path) -> None:
         {
             "status": "pass",
             "checks": {
-                "dsv4_default_native_prefix_on": True,
-                "dsv4_explicit_prefix_off_disables_native_flags": True,
-                "dsv4_l2_explicit_off_preserves_prefix": True,
-                "dsv4_generic_kv_flags_suppressed": True,
+                "dsv4_default_full_prefill": True,
+                "dsv4_default_native_prefix_off": True,
+                "dsv4_stale_cache_controls_fail_closed": True,
+                "dsv4_product_cache_opt_in_hidden": True,
+                "dsv4_generic_tq_stays_off": True,
                 "max_output_context_cli_split": True,
                 "chat_max_output_is_per_chat_override": True,
                 "non_dsv4_cache_toggles_preserved": True,
@@ -1245,7 +1246,7 @@ def test_objective_proof_digest_keeps_dsv4_long_quality_open(tmp_path):
     assert rows["DSV4 long-output/code/file-generation quality is release-cleared"][
         "status"
     ] == "open"
-    assert rows["DSV4 Flash prefix/paged/L2 cache is enabled by default from app launch"][
+    assert rows["DSV4 product sessions default to fail-closed full prefill"][
         "status"
     ] == "pass"
     assert rows["Ling/Bailing multilingual output quality is release-cleared"][
@@ -1255,6 +1256,8 @@ def test_objective_proof_digest_keeps_dsv4_long_quality_open(tmp_path):
         item["requirement"] for item in digest["requirements"] if item["status"] == "open"
     ]
     assert open_requirements == [
+        "DSV4 native composite same-process reuse is cold-prefill equivalent",
+        "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
         "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
         "Cross-family live multi-turn smoke matrix is release-cleared",
         "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared",
@@ -5353,12 +5356,9 @@ def test_objective_proof_digest_does_not_require_legacy_ui_smoke_for_max_output_
     assert "build/dev-ui-smoke-20260521/summary.json" not in row["details"]["evidence_files_present"]
 
 
-def test_objective_proof_digest_uses_current_panel_and_dsv4_default_cache_artifacts(
+def test_objective_proof_digest_uses_current_panel_for_dsv4_fail_closed_default(
     tmp_path,
 ):
-    from tests.cross_matrix.summarize_objective_proof import (
-        DSV4_DEFAULT_CACHE_TOOL_LOOP_REL,
-    )
     from tests.cross_matrix.summarize_objective_proof import PANEL_SETTINGS_CONTRACT_REL
     from tests.cross_matrix.summarize_objective_proof import build_digest
 
@@ -5369,21 +5369,19 @@ def test_objective_proof_digest_uses_current_panel_and_dsv4_default_cache_artifa
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows[
-        "DSV4 Flash prefix/paged/L2 cache is enabled by default from app launch"
-    ]
+    row = rows["DSV4 product sessions default to fail-closed full prefill"]
     assert row["status"] == "pass"
-    assert row["evidence"] == [
-        PANEL_SETTINGS_CONTRACT_REL,
-        DSV4_DEFAULT_CACHE_TOOL_LOOP_REL,
-    ]
+    assert row["evidence"] == [PANEL_SETTINGS_CONTRACT_REL]
     assert row["details"]["current_panel_settings_status"] == "pass"
     assert (
-        row["details"]["current_panel_settings_dsv4_default_native_prefix_on"]
+        row["details"]["current_panel_settings_dsv4_default_native_prefix_off"]
         is True
     )
-    assert row["details"]["current_default_native_cache_ok"] is True
-    assert row["details"]["current_app_launch_default_cache_ok"] is True
+    assert row["details"]["current_panel_settings_dsv4_stale_cache_controls_fail_closed"] is True
+    assert row["details"]["current_panel_settings_dsv4_product_cache_opt_in_hidden"] is True
+    assert row["details"]["current_panel_settings_dsv4_generic_tq_stays_off"] is True
+    assert row["details"]["current_fail_closed_product_policy_ok"] is True
+    assert row["details"]["native_reuse_equivalence_deferred"] is True
     assert (
         "build/current-dsv4-cache-proof-digest-20260521.json"
         not in row["evidence"]
@@ -5454,7 +5452,7 @@ def test_objective_proof_digest_rejects_no_cache_dsv4_multi_tool_proof(tmp_path)
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 default-cache multi-tool agent loop is proven"]
+    row = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"]
     assert row["status"] == "open"
     assert row["details"]["launch_has_disable_prefix_cache"] is True
     assert row["details"]["native_cache_prefix"] is False
@@ -5480,7 +5478,7 @@ def test_objective_proof_digest_rejects_default_cache_multi_tool_without_cache_h
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 default-cache multi-tool agent loop is proven"]
+    row = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"]
     assert row["status"] == "open"
     assert row["details"]["tool_loop_cached_tokens"] == 0
     assert row["details"]["tool_loop_cache_detail_has_dsv4"] is False
@@ -5510,7 +5508,7 @@ def test_objective_proof_digest_rejects_shallow_default_cache_tool_loop_proof(
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 default-cache multi-tool agent loop is proven"]
+    row = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"]
     assert row["status"] == "open"
     assert row["details"]["tool_loop_checks"]["tool_sequence_ordered"] is False
     assert row["details"]["tool_loop_checks"]["code_file_written_exact"] is False
@@ -5547,7 +5545,7 @@ def test_objective_proof_digest_surfaces_default_cache_tool_loop_round_diagnosti
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 default-cache multi-tool agent loop is proven"]
+    row = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"]
     assert row["status"] == "open"
     assert row["details"]["tool_loop_round_outputs"][1] == "<｜DSML｜tool_c"
     assert row["details"]["tool_loop_round_response_diagnostics"][1] == {
@@ -5608,7 +5606,7 @@ def test_objective_proof_digest_accepts_default_cache_tool_loop_mechanics_despit
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 default-cache multi-tool agent loop is proven"]
+    row = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"]
     assert row["status"] == "pass"
     assert row["details"]["code_tool_expected_content"].startswith(
         "const renderer = new THREE.WebGLRenderer();"
@@ -5633,10 +5631,13 @@ def test_objective_proof_digest_accepts_default_cache_tool_loop_mechanics_despit
     assert row["details"]["tool_loop_checks"]["code_file_written_exact"] is False
 
 
-def test_objective_proof_digest_uses_current_default_cache_artifact_for_native_cache_row(
+def test_objective_proof_digest_uses_fail_closed_contract_for_dsv4_cache_architecture_row(
     tmp_path,
 ):
-    from tests.cross_matrix.summarize_objective_proof import build_digest
+    from tests.cross_matrix.summarize_objective_proof import (
+        PANEL_SETTINGS_CONTRACT_REL,
+        build_digest,
+    )
 
     _write_passing_base_artifacts(tmp_path)
     (
@@ -5647,19 +5648,16 @@ def test_objective_proof_digest_uses_current_default_cache_artifact_for_native_c
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
     row = rows[
-        "DSV4 cache is native SWA+CSA/HCA composite, not generic KV/TurboQuant KV"
+        "DSV4 cache opt-in remains native SWA+CSA/HCA composite with generic TurboQuant KV off"
     ]
     assert row["status"] == "pass"
-    assert "build/current-dsv4-default-cache-tool-loop/result.json" in row["evidence"]
-    assert row["details"]["current_default_cache_native_cache_type"] == (
-        "native_composite"
-    )
-    assert row["details"]["current_default_cache_generic_turboquant_kv"] == {
-        "enabled": False
-    }
+    assert row["evidence"] == [PANEL_SETTINGS_CONTRACT_REL]
+    assert row["details"]["current_fail_closed_product_policy_ok"] is True
+    assert row["details"]["current_generic_tq_stays_off"] is True
+    assert row["details"]["native_positive_hit_functionality_deferred"] is True
 
 
-def test_objective_proof_digest_uses_current_default_cache_artifact_for_multi_tool_row(
+def test_objective_proof_digest_retains_historical_native_cache_artifact_for_multi_tool_diagnostic(
     tmp_path,
 ):
     from tests.cross_matrix.summarize_objective_proof import build_digest
@@ -5673,18 +5671,22 @@ def test_objective_proof_digest_uses_current_default_cache_artifact_for_multi_to
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 can perform multiple tool iterations then final answer"]
+    row = rows[
+        "Historical DSV4 multi-tool diagnostic completed iterations and final answer"
+    ]
     assert row["status"] == "pass"
     assert "build/current-dsv4-default-cache-tool-loop/result.json" in row["evidence"]
-    assert row["details"]["current_default_cache_executed_tool_names"] == [
+    assert row["details"]["historical_native_cache_executed_tool_names"] == [
         "list_directory",
         "write_file",
         "write_file",
     ]
-    assert row["details"]["current_default_cache_final_text"] == "DONE"
+    assert row["details"]["historical_native_cache_final_text"] == "DONE"
+    assert row["details"]["historical_diagnostic_only"] is True
+    assert row["details"]["current_release_clearance"] is False
 
 
-def test_objective_proof_digest_uses_current_responses_cache_gate_for_same_process_hit(
+def test_objective_proof_digest_keeps_dsv4_same_process_equivalence_open_despite_historical_hit(
     tmp_path,
 ):
     from tests.cross_matrix.summarize_objective_proof import build_digest
@@ -5729,19 +5731,22 @@ def test_objective_proof_digest_uses_current_responses_cache_gate_for_same_proce
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
     row = rows[
-        "DSV4 same-process cache hit improves latency/TTFT and records paged+dsv4 hit"
+        "DSV4 native composite same-process reuse is cold-prefill equivalent"
     ]
-    assert row["status"] == "pass"
+    assert row["status"] == "open"
     assert row["evidence"] == ["build/current-dsv4-responses-cache-gate-20260606.json"]
-    assert row["details"]["current_responses_cache_gate_status"] == "pass"
-    assert row["details"]["current_responses_cached_tokens"] == 5195
-    assert row["details"]["current_responses_cache_detail"] == "paged+dsv4"
-    assert row["details"]["current_responses_stream_ttft_sec"] == 0.33
-    assert row["details"]["current_responses_cached_wall_sec"] == 0.8
-    assert row["details"]["current_responses_no_cache_wall_sec"] == 22.17
+    assert row["details"]["historical_responses_cache_gate_status"] == "pass"
+    assert row["details"]["historical_responses_cached_tokens"] == 5195
+    assert row["details"]["historical_responses_cache_detail"] == "paged+dsv4"
+    assert row["details"]["historical_responses_stream_ttft_sec"] == 0.33
+    assert row["details"]["historical_responses_cached_wall_sec"] == 0.8
+    assert row["details"]["historical_responses_no_cache_wall_sec"] == 22.17
+    assert row["details"]["historical_hit_telemetry_ok"] is True
+    assert row["details"]["current_cold_prefill_equivalence_proven"] is False
+    assert row["details"]["deferred_release"] == "v1.6.20"
 
 
-def test_objective_proof_digest_uses_current_responses_restart_l2_gate(
+def test_objective_proof_digest_keeps_dsv4_restart_l2_equivalence_open_despite_historical_hit(
     tmp_path,
 ):
     from tests.cross_matrix.summarize_objective_proof import build_digest
@@ -5799,15 +5804,20 @@ def test_objective_proof_digest_uses_current_responses_restart_l2_gate(
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 block disk L2 stores and hits after restart"]
-    assert row["status"] == "pass"
+    row = rows[
+        "DSV4 native composite restart/L2 restore is cold-prefill equivalent"
+    ]
+    assert row["status"] == "open"
     assert row["evidence"] == [
         "build/current-dsv4-responses-restart-l2-gate-20260606.json"
     ]
-    assert row["details"]["current_restart_l2_gate_status"] == "pass"
-    assert row["details"]["current_restart_cached_tokens"] == 2048
-    assert row["details"]["current_restart_cache_detail"] == "paged+dsv4"
-    assert row["details"]["current_restart_l2_disk_hits"] == 6
+    assert row["details"]["historical_restart_l2_gate_status"] == "pass"
+    assert row["details"]["historical_restart_cached_tokens"] == 2048
+    assert row["details"]["historical_restart_cache_detail"] == "paged+dsv4"
+    assert row["details"]["historical_restart_l2_disk_hits"] == 6
+    assert row["details"]["historical_restart_hit_telemetry_ok"] is True
+    assert row["details"]["current_restart_cold_prefill_equivalence_proven"] is False
+    assert row["details"]["deferred_release"] == "v1.6.20"
 
 
 def test_objective_proof_digest_uses_current_one_tool_stop_gate(
@@ -5900,7 +5910,7 @@ def test_objective_proof_digest_surfaces_default_cache_tool_loop_dry_run_control
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 default-cache multi-tool agent loop is proven"]
+    row = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"]
     diagnostic = row["details"]["default_cache_tool_loop_dry_run_controls"]
     assert diagnostic["artifact_status"] == "dry_run"
     assert diagnostic["artifact_present"] is True
@@ -5966,7 +5976,7 @@ def test_objective_proof_digest_surfaces_explicit_thinking_tool_loop_diagnostic(
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 default-cache multi-tool agent loop is proven"]
+    row = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"]
     diagnostic = row["details"]["explicit_thinking_tool_loop_diagnostic"]
     assert diagnostic["artifact_status"] == "review"
     assert diagnostic["request_thinking_mode"]["enable_thinking"] is True
@@ -6039,7 +6049,7 @@ def test_objective_proof_digest_surfaces_no_cache_tool_loop_diagnostic(
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 default-cache multi-tool agent loop is proven"]
+    row = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"]
     diagnostic = row["details"]["no_cache_tool_loop_diagnostic"]
     assert diagnostic["artifact_status"] == "review"
     assert diagnostic["diagnostic_cache_mode"] == "disabled"
@@ -6112,7 +6122,7 @@ def test_objective_proof_digest_surfaces_prompt_guard_tool_loop_diagnostic(
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 default-cache multi-tool agent loop is proven"]
+    row = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"]
     diagnostic = row["details"]["prompt_guard_tool_loop_diagnostic"]
     assert diagnostic["artifact_status"] == "review"
     assert diagnostic["tool_loop_checks"]["tool_sequence_ordered"] is True
@@ -6179,7 +6189,7 @@ def test_objective_proof_digest_surfaces_copy_block_tool_loop_diagnostic(
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 default-cache multi-tool agent loop is proven"]
+    row = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"]
     diagnostic = row["details"]["copy_block_tool_loop_diagnostic"]
     assert diagnostic["artifact_status"] == "review"
     assert diagnostic["diagnostic_code_prompt_variant"] == "copy_block"
@@ -6240,7 +6250,7 @@ def test_objective_proof_digest_surfaces_thinking_copy_block_tool_loop_attempt(
 
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
-    diagnostic = rows["DSV4 default-cache multi-tool agent loop is proven"][
+    diagnostic = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"][
         "details"
     ]["thinking_copy_block_tool_loop_diagnostic"]
 
@@ -9021,7 +9031,7 @@ def test_objective_proof_digest_surfaces_skipped_default_cache_multi_tool_gate(
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    row = rows["DSV4 default-cache multi-tool agent loop is proven"]
+    row = rows["Historical DSV4 native-cache multi-tool diagnostic is retained"]
     assert row["status"] == "open"
     assert row["details"]["artifact_status"] == "skipped"
     assert row["details"]["artifact_reason"] == "insufficient_free_memory"
@@ -9067,7 +9077,8 @@ def test_objective_proof_digest_accepts_panel_settings_contract_artifact(tmp_pat
 
     row = rows["Panel settings keep DSV4 cache, max output, and max context controls unambiguous"]
     assert row["status"] == "pass"
-    assert row["details"]["contract_checks"]["dsv4_explicit_prefix_off_disables_native_flags"] is True
+    assert row["details"]["contract_checks"]["dsv4_stale_cache_controls_fail_closed"] is True
+    assert row["details"]["contract_checks"]["dsv4_product_cache_opt_in_hidden"] is True
     assert row["details"]["contract_checks"]["max_output_context_cli_split"] is True
     assert row["details"]["missing_evidence"] == []
     assert row["details"]["stale_source_hashes"] == []
@@ -10294,6 +10305,8 @@ def test_objective_proof_digest_accepts_dsv4_quality_clearance_artifact(tmp_path
         item["requirement"] for item in digest["requirements"] if item["status"] == "open"
     ]
     assert open_requirements == [
+        "DSV4 native composite same-process reuse is cold-prefill equivalent",
+        "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
         "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
         "Cross-family live multi-turn smoke matrix is release-cleared",
         "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared",

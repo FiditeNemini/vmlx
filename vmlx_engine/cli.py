@@ -28,14 +28,13 @@ def _env_truthy(name: str) -> bool:
 
 
 def _dsv4_prefix_cache_opt_in(args=None) -> bool:
-    """Return whether DSV4 composite prefix reuse should be active."""
+    """Return whether direct-engine DSV4 cache diagnostics were explicitly enabled."""
 
     if bool(getattr(args, "disable_prefix_cache", False)):
         return False
     return (
         bool(getattr(args, "dsv4_enable_prefix_cache", False))
         or _env_truthy(DSV4_PREFIX_CACHE_ENV)
-        or os.environ.get(DSV4_PREFIX_CACHE_ENV) is None
     )
 
 
@@ -262,22 +261,21 @@ def _apply_openpangu_cache_policy(args, logger):
 
 
 def _apply_dsv4_cache_policy(args, logger):
-    """Apply DSV4's composite SWA+CSA/HCA prefix-cache contract.
+    """Fail closed unless DSV4 composite cache diagnostics are explicit.
 
     DSV4 paged-prefix entries hold prompt-boundary DeepseekV4Cache snapshots
-    for SWA plus CSA/HCA compressed pools. Treating those records like generic
-    KV pages makes stale app defaults too easy to launch. DSV4 uses this
-    native composite path by default; explicit --disable-prefix-cache remains
-    a full opt-out and also suppresses paged/L2 dependent state.
+    for SWA plus CSA/HCA compressed pools. Current retained live controls show
+    that restored entries are not output-equivalent to cold prefill, so the
+    scheduler rejects every positive hit. Defaulting this path on would still
+    pay snapshot and SSD-write cost for records that cannot be consumed.
+
+    Keep the path available only for explicit diagnostic work. Normal serving
+    disables prefix/paged/block-disk state and uses full prefill. The scheduler
+    equivalence guard remains the final correctness boundary for opt-in runs.
     """
 
     changed = []
     opt_in = _dsv4_prefix_cache_opt_in(args)
-
-    old_block_size = int(getattr(args, "paged_cache_block_size", 0) or 0)
-    if old_block_size != DSV4_PAGED_CACHE_BLOCK_SIZE:
-        args.paged_cache_block_size = DSV4_PAGED_CACHE_BLOCK_SIZE
-        changed.append(f"block_size={old_block_size}->{DSV4_PAGED_CACHE_BLOCK_SIZE}")
 
     if not opt_in:
         if getattr(args, "enable_prefix_cache", True) or not getattr(
@@ -293,12 +291,19 @@ def _apply_dsv4_cache_policy(args, logger):
             args.enable_block_disk_cache = False
             changed.append("L2 disk=disabled_without_prefix")
         logger.warning(
-            "DSV4-Flash native composite prefix cache is explicitly disabled. "
-            "Serving will use full prefill for this session unless it enables "
-            "--dsv4-enable-prefix-cache or leaves %s unset/default-on.",
+            "DSV4-Flash native composite prefix/paged/L2 cache is disabled by "
+            "default because restored-cache output equivalence is not proven. "
+            "Serving will use full prefill. %s=1 or "
+            "--dsv4-enable-prefix-cache is diagnostic-only; the scheduler still "
+            "rejects unsafe hits.",
             DSV4_PREFIX_CACHE_ENV,
         )
         return tuple(changed)
+
+    old_block_size = int(getattr(args, "paged_cache_block_size", 0) or 0)
+    if old_block_size != DSV4_PAGED_CACHE_BLOCK_SIZE:
+        args.paged_cache_block_size = DSV4_PAGED_CACHE_BLOCK_SIZE
+        changed.append(f"block_size={old_block_size}->{DSV4_PAGED_CACHE_BLOCK_SIZE}")
 
     prefix_active = (
         getattr(args, "enable_prefix_cache", True)
@@ -380,7 +385,7 @@ def _apply_dsv4_runtime_policy(args, logger, *, clamp_max_num_seqs: bool = False
         changes.append("continuous_batching=off->on")
         logger.warning(
             "DSV4-Flash detected — forcing continuous batching on because "
-            "the production path depends on the DSV4BatchGenerator cache stack."
+            "inference uses the DSV4BatchGenerator execution path."
         )
 
     if getattr(args, "kv_cache_quantization", "none") != "none":
@@ -495,7 +500,8 @@ def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
         capacity = int(args.paged_cache_block_size) * int(args.max_cache_blocks)
         lines = [
             (
-                "DSV4 native composite prefix cache: schema=deepseek_v4_v8, "
+                "DSV4 diagnostic native composite prefix cache: "
+                "schema=deepseek_v4_v8, "
                 f"block_size={args.paged_cache_block_size}, "
                 f"max_blocks={args.max_cache_blocks}, "
                 f"capacity={capacity} tokens (not generic paged KV)"
@@ -1035,19 +1041,18 @@ def serve_command(args):
         # so the real codec must be exercised by the same CLI and Electron
         # settings instead of being bypassed before it can be validated.
         # DSV4-Flash auto-config. DSV4_LONG_CTX=1 is the only supported
-        # runtime mode (tri-mode SWA+CSA/HCA). The native composite prefix
-        # cache and materialized CSA/HCA pool codec are the default path;
-        # explicit disable flags/env overrides are preserved for debug/bisect.
+        # runtime mode (tri-mode SWA+CSA/HCA). Native composite prefix/paged/L2
+        # reuse fails closed by default; only the direct CLI/env diagnostic
+        # opt-in can request it, and the scheduler still rejects unsafe hits.
+        # DSV4_POOL_QUANT configures the model's internal CSA/HCA pool codec;
+        # it is distinct from reusable prefix-cache publication/restoration.
         if _mc.family_name == "deepseek_v4":
             _is_dsv4_model = True
             _apply_dsv4_runtime_policy(args, logger)
-            # The DSV4-aware paged schema (scheduler.py: deepseek_v4_v8
-            # nested-state serialization) handles the mixed KVCache /
-            # DeepseekV4Cache layer layout after load_jangtq_dsv4 verifies
-            # the installed native JANG attention mask/compressed-pool
-            # contract. Short prompts store composite prompt-boundary state
-            # with N-1 prompt keys; stale 64-token app defaults are upgraded
-            # to 256-token DSV4 pages at CLI entry.
+            # Diagnostic opt-in uses the DSV4-aware paged schema
+            # (scheduler.py: deepseek_v4_v8 nested-state serialization) for
+            # the mixed KVCache / DeepseekV4Cache layer layout. The default
+            # path performs full prefill and does not publish reusable state.
         elif (
             _mc.family_name == "zaya"
             or getattr(_mc, "cache_subtype", None) == "zaya_cca"
@@ -2609,9 +2614,9 @@ Examples:
     serve_parser.add_argument(
         "--dsv4-enable-prefix-cache",
         action="store_true",
-        help="Enable DeepSeek-V4 Flash native SWA+CSA/HCA composite prefix "
-             "cache reuse. This is the default when neither --disable-prefix-cache "
-             "nor VMLX_DSV4_ENABLE_PREFIX_CACHE=0 is set.",
+        help="Diagnostic-only opt-in for DeepSeek-V4 Flash native SWA+CSA/HCA "
+             "composite prefix reuse. Product/default serving uses full prefill "
+             "because restored-cache output equivalence is not proven.",
     )
     serve_parser.add_argument(
         "--prefix-cache-size",
@@ -3327,9 +3332,9 @@ Examples:
     bench_parser.add_argument(
         "--dsv4-enable-prefix-cache",
         action="store_true",
-        help="Enable DeepSeek-V4 Flash native composite prefix cache reuse. "
-             "This is the default when neither --disable-prefix-cache nor "
-             "VMLINUX_DSV4_ENABLE_PREFIX_CACHE=0 is set.",
+        help="Diagnostic-only opt-in for DeepSeek-V4 Flash native composite "
+             "prefix reuse. Default benchmarking uses full prefill because "
+             "restored-cache output equivalence is not proven.",
     )
     bench_parser.add_argument(
         "--prefix-cache-size",

@@ -58,8 +58,15 @@ def test_cache_architecture_contract_pins_named_cache_edges():
     required_api_command = gate.REQUIRED_API_CACHE_COMMAND_MARKERS
     required_panel = gate.REQUIRED_PANEL_CACHE_MARKERS
 
-    assert "test_memory_pressure_reuses_shorter_dsv4_terminal_composite_prefix" in required_pytest
-    assert "test_memory_pressure_refuses_dsv4_partial_without_terminal_composite" in required_pytest
+    assert "test_dsv4_cli_cache_policy_defaults_composite_cache_off" in required_pytest
+    assert "test_dsv4_runtime_policy_applies_to_bench_like_cli_args" in required_pytest
+    assert "test_dsv4_ui_defaults_composite_cache_off_and_exposes_no_false_reuse_toggle" in required_pytest
+    assert "test_dsv4_launch_filters_stale_saved_and_additional_args" in required_pytest
+    assert "test_dsv4_product_ui_has_no_cache_opt_in_but_cli_env_remains_explicit" in required_pytest
+    assert "test_dsv4_untrimmed_composite_is_never_stored_under_shorter_key" in required_pytest
+    assert "test_dsv4_paged_restore_requires_full_prefill" in required_pytest
+    assert "test_dsv4_storage_quantization_is_forced_off_for_composite_cache" in required_pytest
+    assert "test_dsv4_scheduler_forces_generic_kv_quantization_off" in required_pytest
     assert "test_memory_pressure_partially_reuses_hybrid_ssm_with_aligned_checkpoint" in required_pytest
     assert "test_prompt_tq_disk_l2_hit_skips_synchronous_plain_paged_backfill" in required_pytest
     assert "test_hybrid_ssm_checkpoint_alignment_falls_back_to_exact_aligned_state" in required_pytest
@@ -80,13 +87,12 @@ def test_cache_architecture_contract_pins_named_cache_edges():
     assert "hybrid_ssm_partial_reuse" in required_api
     assert "turboquant_disk_roundtrip" in required_api
 
-    assert "deepseek-v4 enables native composite prefix cache by default even with stale cache config" in required_panel
-    assert "deepseek-v4 native cache path uses DS4 page-sized blocks" in required_panel
-    assert "DSV4 pool quant and native prefix controls stay DSV4-only" in required_panel
-    assert (
-        "enables DSV4 pool quant by default only under DSV4 native composite cache"
-        in required_panel
-    )
+    assert "deepseek-v4 disables native composite reuse even with stale cache config" in required_panel
+    assert "defaults production DSV4 runtime env to full-prefill serving" in required_panel
+    assert "deepseek-v4 stale native-cache settings remain fail-closed" in required_panel
+    assert "deepseek-v4 cache launch flags are singular and fail closed" in required_panel
+    assert "DSV4 stale cache settings fail closed and stay family-scoped" in required_panel
+    assert "renders the fail-closed DSV4 cache boundary without unusable toggles" in required_panel
     assert "detected Qwen3.6 hybrid cache forces paged cache over stale saved false" in required_panel
     assert "detected Mamba cache forces paged cache while regular KV respects saved false" in required_panel
     assert "disabling prefix cache disables all dependent features" in required_panel
@@ -101,7 +107,12 @@ def test_cache_architecture_contract_pins_panel_launch_cache_policy():
 
     assert "vmlx_engine/paged_cache.py" in gate.SOURCE_HASH_FILES
     assert "vmlx_engine/block_disk_store.py" in gate.SOURCE_HASH_FILES
+    assert "vmlx_engine/cli.py" in gate.SOURCE_HASH_FILES
     assert "panel/src/main/sessions.ts" in gate.SOURCE_HASH_FILES
+    assert "panel/src/renderer/src/components/sessions/CreateSession.tsx" in gate.SOURCE_HASH_FILES
+    assert "panel/src/renderer/src/components/sessions/ServerSettingsDrawer.tsx" in gate.SOURCE_HASH_FILES
+    assert "panel/src/renderer/src/components/sessions/SessionConfigForm.tsx" in gate.SOURCE_HASH_FILES
+    assert "panel/src/renderer/src/components/sessions/SessionSettings.tsx" in gate.SOURCE_HASH_FILES
     assert "panel/src/shared/dsv4Env.ts" in gate.SOURCE_HASH_FILES
     assert "panel/src/shared/cacheControlPolicy.ts" in gate.SOURCE_HASH_FILES
     assert "panel/src/renderer/src/components/sessions/CachePanel.tsx" in gate.SOURCE_HASH_FILES
@@ -155,23 +166,25 @@ def test_cache_architecture_contract_publishes_structured_family_matrix():
 
     dsv4 = gate.REQUIRED_CACHE_FAMILY_MATRIX["dsv4_native_composite"]
     assert "dsv4_native_composite_cache_status" in dsv4["checks"]
-    assert "dsv4_terminal_composite_contracts" in dsv4["checks"]
-    assert (
-        "test_memory_pressure_refuses_dsv4_partial_without_terminal_composite"
-        in dsv4["markers"]
+    assert "dsv4_product_full_prefill_policy" in dsv4["checks"]
+    assert "dsv4_invalid_snapshot_store_guard" in dsv4["checks"]
+    assert "dsv4_generic_tq_disabled" in dsv4["checks"]
+    assert "test_dsv4_untrimmed_composite_is_never_stored_under_shorter_key" in dsv4["markers"]
+    assert "test_dsv4_paged_restore_requires_full_prefill" in dsv4["markers"]
+    assert dsv4["deferred_open"] == (
+        "same-process cold-vs-restored cache state and output equivalence",
+        "restart and SSD-only L2 refault cold-vs-restored equivalence",
     )
 
     dsv4_components = gate.REQUIRED_CACHE_FAMILY_MATRIX[
         "dsv4_swa_hca_csa_components"
     ]
     assert "dsv4_swa_hca_csa_component_contracts" in dsv4_components["checks"]
-    assert (
-        "test_memory_pressure_reuses_shorter_dsv4_terminal_composite_prefix"
-        in dsv4_components["markers"]
-    )
-    assert (
-        "test_memory_pressure_refuses_dsv4_partial_without_terminal_composite"
-        in dsv4_components["markers"]
+    assert "test_pool_quantized_v4_cache_is_detected_as_dsv4_composite" in dsv4_components["markers"]
+    assert "test_dsv4_block_disk_serialization_round_trips_nested_state" in dsv4_components["markers"]
+    assert "test_dsv4_untrimmed_composite_is_never_stored_under_shorter_key" in dsv4_components["markers"]
+    assert dsv4_components["deferred_open"] == (
+        "native SWA+CSA/HCA positive-hit reconstruction equivalence",
     )
 
     qwen = gate.REQUIRED_CACHE_FAMILY_MATRIX["qwen36_hybrid_tq"]

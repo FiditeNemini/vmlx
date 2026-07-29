@@ -145,10 +145,12 @@ def _installed_runner_fixture(
     app_root = tmp_path / "installed" / "vMLX.app"
     resources = app_root / "Contents/Resources"
     python_root = resources / "bundled-python/python"
-    python_executable = python_root / "bin/python3"
+    python_invocation = python_root / "bin/python3"
+    python_executable = python_root / "bin/python3.12"
     python_executable.parent.mkdir(parents=True)
     python_executable.write_bytes(b"installed-python-binary\n")
     python_executable.chmod(0o755)
+    python_invocation.symlink_to("python3.12")
     electron_executable = app_root / "Contents/MacOS/vMLX"
     electron_executable.parent.mkdir(parents=True)
     electron_executable.write_bytes(b"installed-electron-binary\n")
@@ -189,7 +191,7 @@ def _installed_runner_fixture(
             python_executable.read_bytes()
         ).hexdigest(),
         "bundled_python_executable_fingerprint_sha256": matrix._sha256(
-            str(python_executable.absolute())
+            str(python_executable.resolve(strict=True))
         ),
     }
     manifest_path = tmp_path / "private" / "installed-release.json"
@@ -197,7 +199,11 @@ def _installed_runner_fixture(
     manifest_path.write_text(json.dumps(manifest) + "\n")
     manifest_path.chmod(0o600)
 
-    monkeypatch.setattr(matrix.sys, "executable", str(python_executable))
+    monkeypatch.setattr(
+        matrix.sys,
+        "executable",
+        str(python_executable.resolve(strict=True)),
+    )
     monkeypatch.setattr(matrix.sys, "prefix", str(python_root))
     runner = matrix.observe_runner_environment(
         repo_root,
@@ -352,6 +358,15 @@ def test_installed_runner_is_bound_to_external_manifest_and_bundled_python(
     assert matrix._runner_environment_failures(runner) == []
 
     installed = runner["installed_runtime"]
+    packaged_invocation = (
+        Path(installed["app_path"])
+        / matrix.INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+    )
+    assert packaged_invocation.is_symlink()
+    assert Path(runner["python_executable_path"]).name == "python3.12"
+    assert packaged_invocation.resolve(strict=True) == Path(
+        runner["python_executable_path"]
+    )
     assert (
         installed["bundled_python"]["sha256"]
         == runner["producer_executable_sha256"]
@@ -403,7 +418,11 @@ def test_installed_runner_health_binding_uses_manifest_attested_python(
         ("wrong-source", "source commit does not match"),
         ("mutated-asar", "app asar does not match"),
         ("mutated-python", "bundled Python does not match"),
-        ("python-symlink-escape", "resolves outside the installed app"),
+        (
+            "python-symlink-escape",
+            "manifest-attested bundled Python|resolves outside the installed app",
+        ),
+        ("python-versioned-mismatch", "exact packaged bundled-Python target"),
     ],
 )
 def test_installed_runner_rejects_unbound_release_material(
@@ -453,6 +472,18 @@ def test_installed_runner_rejects_unbound_release_material(
         escaped.chmod(0o755)
         python_path.unlink()
         python_path.symlink_to(escaped)
+    elif failure_mode == "python-versioned-mismatch":
+        wrong_versioned_python = (
+            Path(installed["app_path"])
+            / "Contents/Resources/bundled-python/python/bin/python3.11"
+        )
+        wrong_versioned_python.write_bytes(b"other-versioned-python\n")
+        wrong_versioned_python.chmod(0o755)
+        monkeypatch.setattr(
+            matrix.sys,
+            "executable",
+            str(wrong_versioned_python),
+        )
 
     with pytest.raises(ValueError, match=expected):
         matrix.observe_runner_environment(

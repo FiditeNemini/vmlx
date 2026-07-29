@@ -1248,10 +1248,11 @@ def test_packaged_renderer_dsv4_cache_ui_check_rejects_stale_duplicate_labels(tm
     app_asar = tmp_path / runner.PACKAGED_RENDERER_ASAR
     app_asar.parent.mkdir(parents=True)
     app_asar.write_bytes(
+        b"DSV4 Native Composite Prefix Cache\n"
         b"DSV4 Native Cache\n"
         b"DSV4 Composite Prefix Cache\n"
         b"DSV4 Pool Quantization\n"
-        b"DSV4 Flash composite prefix cache is disabled by default\n"
+        b"DSV4 CSA/HCA Pool Codec\n"
     )
 
     assert runner._check_packaged_renderer_dsv4_cache_ui(tmp_path) is False
@@ -1261,9 +1262,8 @@ def test_packaged_renderer_dsv4_cache_ui_check_accepts_deduped_labels(tmp_path):
     app_asar = tmp_path / runner.PACKAGED_RENDERER_ASAR
     app_asar.parent.mkdir(parents=True)
     app_asar.write_bytes(
-        b"DSV4 Native Composite Prefix Cache\n"
-        b"DSV4 CSA/HCA Pool Codec\n"
-        b"DSV4_POOL_QUANT=1 native CSA/HCA pool codec\n"
+        b"restored SWA+CSA/HCA state has not proven output-equivalent\n"
+        b"unsafe hits are still rejected\n"
     )
 
     assert runner._check_packaged_renderer_dsv4_cache_ui(tmp_path) is True
@@ -1385,6 +1385,18 @@ def _r19_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
             flavor=flavor,
             source_commit=source_commit,
         )
+        (resources / "app.asar").write_bytes(
+            f"fixture renderer source commit {source_commit}\n".encode()
+        )
+        electron = app / "Contents/MacOS/vMLX"
+        electron.parent.mkdir(parents=True, exist_ok=True)
+        electron.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        electron.chmod(0o755)
+        python312 = resources / "bundled-python/python/bin/python3.12"
+        python312.parent.mkdir(parents=True, exist_ok=True)
+        python312.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        python312.chmod(0o755)
+        (python312.parent / "python3").symlink_to("python3.12")
         helper = (
             app
             / "Contents/Frameworks/vMLX Helper.app/Contents/MacOS/vMLX Helper"
@@ -1453,6 +1465,385 @@ def _r19_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
             for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS
         },
     }
+
+
+def _prepare_installed_manifest_fixture(
+    paths: dict[str, Path],
+    *,
+    flavor: str = "sequoia",
+) -> Path:
+    return runner.find_exact_staged_app(paths["staged_outputs"][flavor])
+
+
+def _sealed_installed_manifest_fixture(
+    tmp_path: Path,
+    *,
+    flavor: str = "sequoia",
+) -> tuple[dict[str, Path], Path, Path, dict[str, object]]:
+    paths = _r19_artifact_chain_fixture(tmp_path)
+    return _seal_installed_manifest_paths(paths, flavor=flavor)
+
+
+def _seal_installed_manifest_paths(
+    paths: dict[str, Path],
+    *,
+    flavor: str = "sequoia",
+) -> tuple[dict[str, Path], Path, Path, dict[str, object]]:
+    pre = _write_pre_manifest(paths)
+    snapshots = _create_snapshots(paths, pre)
+    submission_ids = _submission_ids()
+    for current_flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS:
+        stem = f"vMLX-1.6.19-{current_flavor}-arm64.dmg"
+        (paths["dist"] / stem).write_bytes(
+            f"{current_flavor}-stapled-dmg".encode()
+        )
+        (paths["dist"] / f"{stem}.blockmap").write_bytes(
+            f"{current_flavor}-post-staple-blockmap".encode()
+        )
+    snapshot_records = snapshots["snapshots"]
+    assert isinstance(snapshot_records, dict)
+    snapshot_paths = {
+        current_flavor: Path(str(snapshot_records[current_flavor]["dmg_path"]))
+        for current_flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS
+    }
+    final_manifest = (
+        paths["private_root"] / "handoffs/r19-post-notary-manifest.json"
+    )
+    final = _write_final(
+        paths,
+        pre,
+        submission_ids,
+        snapshot_paths,
+        final_manifest,
+    )
+    handoff = _pre_handoff(paths, pre)
+    app = _prepare_installed_manifest_fixture(paths, flavor=flavor)
+    arguments: dict[str, object] = {
+        "root": paths["root"],
+        "app": app,
+        "dist_dir": paths["dist"],
+        "version": "1.6.19",
+        "flavor": flavor,
+        "private_root": paths["private_root"],
+        "final_manifest_path": final_manifest,
+        "expected_final_manifest_sha256": str(final["sha256"]),
+        "expected_pre_manifest_sha256": handoff["expected_manifest_sha256"],
+        "expected_source_commit": handoff["expected_source_commit"],
+        "expected_source_tree": handoff["expected_source_tree"],
+        "expected_preflight_sha256": handoff["expected_preflight_sha256"],
+        "extracted_asar": paths["extracted_asars"][flavor],
+    }
+    return paths, app, final_manifest, arguments
+
+
+def _installed_manifest_cli_arguments(
+    arguments: dict[str, object],
+    *,
+    output_path: Path,
+) -> list[str]:
+    return [
+        "write-installed-release-manifest",
+        "--root",
+        str(arguments["root"]),
+        "--app",
+        str(arguments["app"]),
+        "--dist",
+        str(arguments["dist_dir"]),
+        "--version",
+        str(arguments["version"]),
+        "--flavor",
+        str(arguments["flavor"]),
+        "--private-root",
+        str(arguments["private_root"]),
+        "--out",
+        str(output_path),
+        "--final-manifest",
+        str(arguments["final_manifest_path"]),
+        "--expected-final-manifest-sha256",
+        str(arguments["expected_final_manifest_sha256"]),
+        "--expected-pre-manifest-sha256",
+        str(arguments["expected_pre_manifest_sha256"]),
+        "--expected-source-commit",
+        str(arguments["expected_source_commit"]),
+        "--expected-source-tree",
+        str(arguments["expected_source_tree"]),
+        "--expected-preflight-sha256",
+        str(arguments["expected_preflight_sha256"]),
+        "--extracted-asar",
+        str(arguments["extracted_asar"]),
+    ]
+
+
+@pytest.mark.parametrize("flavor", runner.R19_ARTIFACT_CHAIN_FLAVORS)
+def test_r19_installed_manifest_producer_writes_exact_deterministic_private_schema(
+    tmp_path,
+    capsys,
+    monkeypatch,
+    flavor,
+):
+    paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(
+        tmp_path,
+        flavor=flavor,
+    )
+    invoked_python = app / runner.INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+    canonical_python = invoked_python.resolve(strict=True)
+    monkeypatch.setattr(runner.sys, "executable", str(canonical_python))
+    first = paths["private_root"] / f"installed/{flavor}-first.json"
+    second = paths["private_root"] / f"installed/{flavor}-second.json"
+
+    assert runner.artifact_chain_main(
+        _installed_manifest_cli_arguments(
+            producer_arguments,
+            output_path=first,
+        )
+    ) == 0
+    summary = json.loads(capsys.readouterr().out)
+    direct = runner.write_installed_release_manifest(
+        **producer_arguments,
+        output_path=second,
+    )
+    manifest = json.loads(first.read_text(encoding="utf-8"))
+
+    assert first.read_bytes() == second.read_bytes()
+    assert summary["manifest"] == str(first)
+    assert summary["sha256"] == direct["sha256"]
+    assert set(manifest) == runner.INSTALLED_RELEASE_MANIFEST_FIELDS
+    assert manifest["schema"] == runner.INSTALLED_RELEASE_MANIFEST_SCHEMA
+    assert manifest["source_commit"] == _git(paths["root"], "rev-parse", "HEAD")
+    assert manifest["source_tree"] == _git(
+        paths["root"], "rev-parse", "HEAD^{tree}"
+    )
+    assert manifest["bundled_python_executable_fingerprint_sha256"] == (
+        hashlib.sha256(str(canonical_python).encode("utf-8")).hexdigest()
+    )
+    assert manifest["bundled_python_executable_sha256"] == runner._sha256(
+        canonical_python
+    )
+    assert stat.S_IMODE(first.stat().st_mode) == 0o600
+    assert first.stat().st_nlink == 1
+
+
+def test_r19_installed_manifest_producer_rejects_mismatched_app_identity(tmp_path):
+    paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
+    info_path = app / "Contents/Info.plist"
+    with info_path.open("rb") as handle:
+        info = plistlib.load(handle)
+    info["CFBundleIdentifier"] = "invalid.example.app"
+    with info_path.open("wb") as handle:
+        plistlib.dump(info, handle)
+
+    with pytest.raises(runner.ArtifactChainError, match="app identity/version"):
+        runner.write_installed_release_manifest(
+            **producer_arguments,
+            output_path=paths["private_root"] / "installed/manifest.json",
+            producer_executable=(
+                app / runner.INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+            ),
+        )
+
+
+def test_r19_installed_manifest_producer_rejects_mismatched_source_provenance(
+    tmp_path,
+):
+    paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
+    provenance_path = (
+        app
+        / "Contents/Resources/bundled-python/vmlx-bundle-provenance.json"
+    )
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["vmlx"]["commit"] = "0" * 40
+    provenance_path.write_text(
+        json.dumps(provenance, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        runner.ArtifactChainError,
+        match="runtime/minimum-OS contract differs from final manifest",
+    ):
+        runner.write_installed_release_manifest(
+            **producer_arguments,
+            output_path=paths["private_root"] / "installed/manifest.json",
+            producer_executable=(
+                app / runner.INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+            ),
+        )
+
+
+def test_r19_installed_manifest_producer_rejects_mismatched_bundled_python_source(
+    tmp_path,
+):
+    paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
+    bundled_engine = (
+        app
+        / "Contents/Resources/bundled-python/python/lib/python3.12/"
+        "site-packages/vmlx_engine/__init__.py"
+    )
+    bundled_engine.write_text('VERSION = "stale"\n', encoding="utf-8")
+
+    with pytest.raises(runner.ArtifactChainError, match="bundled-runtime.*differs"):
+        runner.write_installed_release_manifest(
+            **producer_arguments,
+            output_path=paths["private_root"] / "installed/manifest.json",
+            producer_executable=(
+                app / runner.INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+            ),
+        )
+
+
+def test_r19_installed_manifest_producer_rejects_unbound_renderer_asar(tmp_path):
+    paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
+    (app / "Contents/Resources/app.asar").write_bytes(b"stale renderer bytes\n")
+
+    with pytest.raises(runner.ArtifactChainError, match="app payload/modes differ"):
+        runner.write_installed_release_manifest(
+            **producer_arguments,
+            output_path=paths["private_root"] / "installed/manifest.json",
+            producer_executable=(
+                app / runner.INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+            ),
+        )
+
+
+def test_r19_installed_manifest_producer_cli_rejects_checkout_python(
+    tmp_path,
+    capsys,
+):
+    paths, _, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
+    output = paths["private_root"] / "installed/manifest.json"
+
+    assert runner.artifact_chain_main(
+        _installed_manifest_cli_arguments(
+            producer_arguments,
+            output_path=output,
+        )
+    ) == 1
+    assert "must run under the exact bundled Python" in capsys.readouterr().err
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("mutated_surface", ["app-payload", "extracted-asar"])
+def test_r19_installed_manifest_producer_rejects_payload_swaps(
+    tmp_path,
+    mutated_surface,
+):
+    paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
+    if mutated_surface == "app-payload":
+        (app / "Contents/Resources/rogue.bin").write_bytes(b"swapped app payload\n")
+        expected = "app payload/modes differ"
+    else:
+        (Path(producer_arguments["extracted_asar"]) / "out/main.js").write_text(
+            "console.log('swapped asar')\n",
+            encoding="utf-8",
+        )
+        expected = "renderer/main output.*differs|ASAR payload/modes differ"
+
+    with pytest.raises(runner.ArtifactChainError, match=expected):
+        runner.write_installed_release_manifest(
+            **producer_arguments,
+            output_path=paths["private_root"] / "installed/manifest.json",
+            producer_executable=(
+                app / runner.INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+            ),
+        )
+
+
+def test_r19_installed_manifest_producer_rejects_versioned_python_mismatch(tmp_path):
+    paths = _r19_artifact_chain_fixture(tmp_path)
+    app = _prepare_installed_manifest_fixture(paths)
+    other_python = app / "Contents/Resources/bundled-python/python/bin/python3.11"
+    other_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    other_python.chmod(0o755)
+    paths, app, _, producer_arguments = _seal_installed_manifest_paths(paths)
+
+    with pytest.raises(runner.ArtifactChainError, match="exact bundled Python"):
+        runner.write_installed_release_manifest(
+            **producer_arguments,
+            output_path=paths["private_root"] / "installed/manifest.json",
+            producer_executable=other_python,
+        )
+
+
+def test_r19_installed_manifest_producer_rechecks_provenance_before_write(
+    tmp_path,
+    monkeypatch,
+):
+    paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
+    provenance = (
+        app
+        / "Contents/Resources/bundled-python/vmlx-bundle-provenance.json"
+    )
+    real_tree_payload_records = runner._tree_payload_records
+
+    def mutate_after_first_app_observation(path, *, label):
+        result = real_tree_payload_records(path, label=label)
+        if label == "installed release-manifest application payload":
+            provenance.write_bytes(provenance.read_bytes() + b" ")
+        return result
+
+    monkeypatch.setattr(
+        runner,
+        "_tree_payload_records",
+        mutate_after_first_app_observation,
+    )
+    with pytest.raises(runner.ArtifactChainError, match="changed during manifest production"):
+        runner.write_installed_release_manifest(
+            **producer_arguments,
+            output_path=paths["private_root"] / "installed/manifest.json",
+            producer_executable=(
+                app / runner.INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+            ),
+        )
+
+
+@pytest.mark.parametrize("late_surface", ["app-tree", "extracted-asar"])
+def test_r19_installed_manifest_producer_rejects_late_full_tree_mutation(
+    tmp_path,
+    monkeypatch,
+    late_surface,
+):
+    paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
+    extracted_asar = Path(producer_arguments["extracted_asar"])
+    output = paths["private_root"] / "installed/manifest.json"
+    real_tree_payload_records = runner._tree_payload_records
+
+    def mutate_after_penultimate_tree_observation(path, *, label):
+        result = real_tree_payload_records(path, label=label)
+        if (
+            late_surface == "app-tree"
+            and label == "installed release-manifest application payload recheck"
+        ):
+            (app / "Contents/Resources/late-rogue.bin").write_bytes(
+                b"late app mutation\n"
+            )
+        elif (
+            late_surface == "extracted-asar"
+            and label
+            == "installed release-manifest extracted ASAR payload recheck"
+        ):
+            (extracted_asar / "late-rogue.js").write_text(
+                "console.log('late asar mutation')\n",
+                encoding="utf-8",
+            )
+        return result
+
+    monkeypatch.setattr(
+        runner,
+        "_tree_payload_records",
+        mutate_after_penultimate_tree_observation,
+    )
+    with pytest.raises(
+        runner.ArtifactChainError,
+        match="changed before manifest serialization",
+    ):
+        runner.write_installed_release_manifest(
+            **producer_arguments,
+            output_path=output,
+            producer_executable=(
+                app / runner.INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+            ),
+        )
+    assert not output.exists()
 
 
 def _write_hook_and_parity_attestations(

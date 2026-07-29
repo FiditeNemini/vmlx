@@ -479,6 +479,10 @@ const checkMedia = envBool('VMLINUX_REAL_UI_CHECK_MEDIA', false)
 const checkVideo = envBool('VMLINUX_REAL_UI_CHECK_VIDEO', false)
 const expectPagedCacheLocked = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE_LOCKED', false)
 const expectPagedCache = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE', false)
+const expectDsv4CacheDisabled = envBool(
+  'VMLINUX_REAL_UI_EXPECT_DSV4_CACHE_DISABLED',
+  false,
+)
 const enableThinkingOverride = (
   process.env.VMLINUX_REAL_UI_ENABLE_THINKING != null
   || process.env.VMLX_REAL_UI_ENABLE_THINKING != null
@@ -4347,6 +4351,7 @@ export function validateServerCacheEvidence(result) {
   const argv = Array.isArray(evidence.argv) ? evidence.argv.map(String) : []
   const visible = evidence.initialCacheControls || {}
   const nativeCache = health?.native_cache || {}
+  const expectDsv4Disabled = result?.expectedDsv4CacheDisabled === true
   if (evidence.runningSessionDrawer !== true) failures.push('cache controls were not inspected on the running session')
   if (evidence.controlScope !== 'running-session-toolbar') {
     failures.push('cache controls were not opened from the running-session toolbar')
@@ -4355,6 +4360,43 @@ export function validateServerCacheEvidence(result) {
     if (typeof visible[field] !== 'boolean') {
       failures.push(`running-session visible cache control ${field} is missing`)
     }
+  }
+  if (expectDsv4Disabled) {
+    if (evidence.dsv4DisabledWarningVisible !== true) {
+      failures.push('DSV4 fail-closed cache warning was not visible in Server Settings')
+    }
+    if (evidence.dsv4CacheControlsAbsent !== true) {
+      failures.push('DSV4 product cache controls were still exposed')
+    }
+    for (const field of ['enablePrefixCache', 'usePagedCache', 'enableBlockDiskCache']) {
+      if (visible[field] !== false) {
+        failures.push(`DSV4 running-session ${field} was not visibly fail-closed`)
+      }
+      if (config[field] !== false) {
+        failures.push(`DSV4 persisted session ${field} was not fail-closed`)
+      }
+    }
+    if (!argv.includes('--disable-prefix-cache')) {
+      failures.push('DSV4 engine argv omitted --disable-prefix-cache')
+    }
+    for (const option of [
+      '--dsv4-enable-prefix-cache',
+      '--use-paged-cache',
+      '--enable-block-disk-cache',
+    ]) {
+      if (argv.includes(option)) {
+        failures.push(`DSV4 engine argv unexpectedly included ${option}`)
+      }
+    }
+    for (const field of ['prefix', 'paged', 'block_disk_l2']) {
+      if (nativeCache[field] !== false) {
+        failures.push(`/health native_cache.${field} was not false for DSV4 full-prefill mode`)
+      }
+    }
+    if (evidence.verified !== true) {
+      failures.push('DSV4 fail-closed cache controls were not verified end to end')
+    }
+    return failures
   }
   if (visible.enableBlockDiskCache !== true) failures.push('running-session SSD/L2 control was not visibly enabled')
   if (visible.enablePrefixCache !== config.enablePrefixCache) {
@@ -4730,8 +4772,17 @@ export function validateUiRuntimeProvenance(result) {
     || !validSha256(backend.executable_sha256)
     || !validSha256(backend.executable_path_fingerprint_sha256)
     || !validSha256(backend.invoked_executable_path_fingerprint_sha256)
-    || backend.invoked_executable_path_fingerprint_sha256
-      !== healthBinding.runtime_source_hashes?.python_executable_fingerprint_sha256
+    || (
+      provenance.mode === 'installed-app'
+        ? ![
+          backend.invoked_executable_path_fingerprint_sha256,
+          backend.executable_path_fingerprint_sha256,
+        ].includes(
+          healthBinding.runtime_source_hashes?.python_executable_fingerprint_sha256,
+        )
+        : backend.invoked_executable_path_fingerprint_sha256
+          !== healthBinding.runtime_source_hashes?.python_executable_fingerprint_sha256
+    )
     || sha256Text(path.resolve(backend.invoked_executable_path || ''))
       !== backend.invoked_executable_path_fingerprint_sha256
   ) {
@@ -4826,6 +4877,8 @@ export function validateUiRuntimeProvenance(result) {
     if (
       manifest.bundled_python_executable_fingerprint_sha256
         !== runtimeSource.python_executable_fingerprint_sha256
+      || manifest.bundled_python_executable_fingerprint_sha256
+        !== backend.executable_path_fingerprint_sha256
     ) {
       failures.push('installed backend did not import from the manifest-attested bundled Python')
     }
@@ -5329,6 +5382,17 @@ function collectProtocolNonstream(protocol, raw, label) {
 
 const expectedPairedApiProtocols = Object.keys(pairedApiProtocolRoutes)
 const expectedPairedApiModes = ['stream', 'nonstream']
+const fullPairedApiProfiles = new Set([
+  'full-agentic',
+  'full-agentic-plus-cache-store',
+  'full-agentic-native-cache',
+])
+const scopedPairedApiProfiles = new Set([
+  'cache-probe',
+  'cache-evict-refault',
+  'cache-restart-probe',
+  'cache-tq-off-store-probe',
+])
 const pairedToolParameters = {
   file_info: {
     type: 'object',
@@ -5348,6 +5412,61 @@ function exactStringSet(value, expected) {
   return Array.isArray(value)
     && value.length === expected.length
     && canonicalJson([...value].sort()) === canonicalJson([...expected].sort())
+}
+
+export function expectedPairedApiContract(result) {
+  const topLevelProfile = String(result?.apiActionProfile || '')
+  const requestProfile = String(
+    result?.requestContract?.apiActionProfile || '',
+  )
+  const profilesAgree = (
+    (!topLevelProfile && !requestProfile)
+    || (
+      Boolean(topLevelProfile)
+      && Boolean(requestProfile)
+      && topLevelProfile === requestProfile
+    )
+  )
+  const profile = requestProfile || topLevelProfile
+  if (!profilesAgree) {
+    return {
+      valid: false,
+      profile,
+      protocols: [],
+      modes: [],
+      requireFrozenChatParity: false,
+    }
+  }
+  // Legacy/non-orchestrated proof callers predate named action profiles and
+  // own the original full matrix contract. Named full profiles retain that
+  // exact contract. Cache-only phases are deliberately scoped to Chat stream;
+  // phases 0 and 5 independently own the full matrix, so inflating phases 1-4
+  // would only repeat already-attested protocol work.
+  if (!profile || fullPairedApiProfiles.has(profile)) {
+    return {
+      valid: true,
+      profile,
+      protocols: expectedPairedApiProtocols,
+      modes: expectedPairedApiModes,
+      requireFrozenChatParity: true,
+    }
+  }
+  if (scopedPairedApiProfiles.has(profile)) {
+    return {
+      valid: true,
+      profile,
+      protocols: ['chat'],
+      modes: ['stream'],
+      requireFrozenChatParity: false,
+    }
+  }
+  return {
+    valid: false,
+    profile,
+    protocols: [],
+    modes: [],
+    requireFrozenChatParity: false,
+  }
 }
 
 function expectedFlowTerminals(protocol, mode, roundIndex) {
@@ -5867,10 +5986,14 @@ function validateMatrixIdentity(value, result) {
     const invokedPythonPath = path.resolve(
       String(installed.invoked_python_path || ''),
     )
-    const expectedPythonPath = path.join(
+    const expectedPythonInvocationPath = path.join(
       appPath,
       installedBundledPythonRelativePath,
     )
+    let expectedPythonPath = expectedPythonInvocationPath
+    try {
+      expectedPythonPath = realpathSync(expectedPythonInvocationPath)
+    } catch {}
     let expectedPythonPrefix = path.dirname(path.dirname(expectedPythonPath))
     try {
       expectedPythonPrefix = realpathSync(expectedPythonPrefix)
@@ -5952,7 +6075,7 @@ function validateMatrixIdentity(value, result) {
     const bundledPython = installed.bundled_python || {}
     try {
       const reopenedPython = readExternalExecutableIdentity(
-        expectedPythonPath,
+        expectedPythonInvocationPath,
         'Paired installed bundled Python',
       )
       if (
@@ -5975,9 +6098,9 @@ function validateMatrixIdentity(value, result) {
           !== runnerBefore.python_executable_fingerprint_sha256
         || manifest.bundled_python_executable_fingerprint_sha256
           !== uiRuntime.backend_python_process_binding
-            ?.invoked_executable_path_fingerprint_sha256
+            ?.executable_path_fingerprint_sha256
       ) {
-        failures.push('paired matrix bundled Python lexical path fingerprint is not manifest/UI bound')
+        failures.push('paired matrix bundled Python canonical path fingerprint is not manifest/UI bound')
       }
       if (
         manifest.bundled_python_executable_sha256
@@ -6155,7 +6278,7 @@ function captureHeadersAreSanitized(headers) {
   })
 }
 
-function validateRawMatrixCapture(value, result) {
+function validateRawMatrixCapture(value, result, contract) {
   const failures = []
   const rawCapture = value?.raw_capture || {}
   if (
@@ -6211,14 +6334,18 @@ function validateRawMatrixCapture(value, result) {
   ]
   const expectedRoutes = []
   for (const baseLabel of ['direct', 'gateway']) {
-    for (const protocol of expectedPairedApiProtocols) {
-      for (const captureLabel of streamLabels) {
-        expectedRoutes.push(`${baseLabel}\0${protocol}\0${captureLabel}`)
+    for (const protocol of contract.protocols) {
+      if (contract.modes.includes('stream')) {
+        for (const captureLabel of streamLabels) {
+          expectedRoutes.push(`${baseLabel}\0${protocol}\0${captureLabel}`)
+        }
       }
-      for (const roundNumber of [1, 2, 3]) {
-        expectedRoutes.push(
-          `${baseLabel}\0${protocol}\0nonstream-flow-round${roundNumber}`,
-        )
+      if (contract.modes.includes('nonstream')) {
+        for (const roundNumber of [1, 2, 3]) {
+          expectedRoutes.push(
+            `${baseLabel}\0${protocol}\0nonstream-flow-round${roundNumber}`,
+          )
+        }
       }
     }
   }
@@ -6446,6 +6573,12 @@ export function validatePairedApiEvidence(result) {
     failures.push('paired raw API metadata does not match its safely reopened artifact bytes')
   }
   const value = reopened.value || {}
+  const contract = expectedPairedApiContract(result)
+  if (!contract.valid) {
+    failures.push(
+      `paired API action profile is missing, inconsistent, or unsupported: ${contract.profile || 'unnamed'}`,
+    )
+  }
   if (
     value.schema !== 'vmlx-agentic-protocol-matrix-v2'
     || Number(value.schema_version) !== 2
@@ -6454,8 +6587,8 @@ export function validatePairedApiEvidence(result) {
     || value.requested_model !== result?.servedModel
     || path.resolve(value.repo_root || '') !== realpathSync(repoDir)
     || value.second_tool_choice !== 'explicit'
-    || !exactStringSet(value.protocols, expectedPairedApiProtocols)
-    || !exactStringSet(value.modes, expectedPairedApiModes)
+    || !exactStringSet(value.protocols, contract.protocols)
+    || !exactStringSet(value.modes, contract.modes)
   ) {
     failures.push('paired API artifact is not the exact passing vmlx-agentic-protocol-matrix-v2 run')
   }
@@ -6486,17 +6619,17 @@ export function validatePairedApiEvidence(result) {
     failures.push('paired API matrix flow bases are not exactly direct+gateway')
   } else {
     for (const baseLabel of ['direct', 'gateway']) {
-      if (!exactStringSet(Object.keys(flowBases[baseLabel] || {}), expectedPairedApiProtocols)) {
+      if (!exactStringSet(Object.keys(flowBases[baseLabel] || {}), contract.protocols)) {
         failures.push(`${baseLabel} matrix protocols are incomplete`)
         continue
       }
-      for (const protocol of expectedPairedApiProtocols) {
+      for (const protocol of contract.protocols) {
         const modes = flowBases[baseLabel]?.[protocol] || {}
-        if (!exactStringSet(Object.keys(modes), expectedPairedApiModes)) {
+        if (!exactStringSet(Object.keys(modes), contract.modes)) {
           failures.push(`${baseLabel}/${protocol} matrix modes are incomplete`)
           continue
         }
-        for (const mode of expectedPairedApiModes) {
+        for (const mode of contract.modes) {
           failures.push(...validateMatrixFlow(
             modes[mode],
             protocol,
@@ -6508,8 +6641,8 @@ export function validatePairedApiEvidence(result) {
       }
     }
   }
-  for (const protocol of expectedPairedApiProtocols) {
-    for (const mode of expectedPairedApiModes) {
+  for (const protocol of contract.protocols) {
+    for (const mode of contract.modes) {
       const directRequests = flowBases?.direct?.[protocol]?.[mode]?.requests || []
       const gatewayRequests = flowBases?.gateway?.[protocol]?.[mode]?.requests || []
       // Only the initial request is byte-comparable. Later direct and gateway
@@ -6534,8 +6667,12 @@ export function validatePairedApiEvidence(result) {
       }
     }
   }
-  failures.push(...validateFrozenChatParity(value))
-  failures.push(...validateRawMatrixCapture(value, result))
+  if (contract.requireFrozenChatParity) {
+    failures.push(...validateFrozenChatParity(value))
+  } else if (Object.keys(value?.paired_replays || {}).length !== 0) {
+    failures.push('scoped paired API matrix unexpectedly contains frozen nonstream replay evidence')
+  }
+  failures.push(...validateRawMatrixCapture(value, result, contract))
   if (claimsDualSurface && !isServerRequestCorrelationVerified(result)) {
     failures.push('dual-surface status was claimed without request/cache/settings correlation')
   }
@@ -8170,13 +8307,42 @@ async function main() {
           proseAnswer?.querySelectorAll(
             '[data-vmlx-proof-tool-card], [data-vmlx-proof-tool-container]'
           ).forEach((element) => element.remove());
+          // innerText only preserves rendered separators such as <br> and
+          // block boundaries while a node participates in layout. The
+          // scrubbed clone is detached, so falling back to textContent would
+          // silently join visible lines (for example, "DONE<br>The" becomes
+          // "DONEThe") and make byte-identical persisted content look
+          // unlinked. Mount the clone offscreen for the synchronous read, then
+          // always remove it. Opacity keeps it invisible without disabling
+          // layout, and tool-card text remains excluded from the proof.
+          let proseAnswerText = '';
+          if (proseAnswer) {
+            const proseProbe = document.createElement('div');
+            proseProbe.setAttribute('aria-hidden', 'true');
+            proseProbe.style.cssText = [
+              'position:fixed',
+              'left:-100000px',
+              'top:0',
+              'width:1024px',
+              'opacity:0',
+              'pointer-events:none',
+              'z-index:-2147483648',
+            ].join(';');
+            proseProbe.appendChild(proseAnswer);
+            document.body.appendChild(proseProbe);
+            try {
+              proseAnswerText = proseAnswer.innerText.trim();
+            } finally {
+              proseProbe.remove();
+            }
+          }
           return {
             cause,
             t: performance.now(),
             messageId: String(messageId || ''),
             role: root.getAttribute('data-vmlx-proof-message-role') || '',
             visible: isVisible(root),
-            answerText: (proseAnswer?.innerText || proseAnswer?.textContent || '').trim(),
+            answerText: proseAnswerText,
             answerState: answer?.getAttribute('data-vmlx-proof-answer-state') || '',
             answerFullLength: Number(
               answer?.getAttribute('data-vmlx-proof-answer-full-length') || -1
@@ -9785,6 +9951,7 @@ async function main() {
           const cacheExpectRegex = ${JSON.stringify(cacheExpectRegex)};
           const expectPagedCacheLocked = ${JSON.stringify(expectPagedCacheLocked)};
           const expectPagedCache = ${JSON.stringify(expectPagedCache)};
+          const expectDsv4CacheDisabled = ${JSON.stringify(expectDsv4CacheDisabled)};
           const serverButton = await wait(() =>
             [...document.querySelectorAll(
               '[data-vmlx-control="server-settings"]'
@@ -9847,14 +10014,25 @@ async function main() {
           ]
             .filter((label) => bodyText.includes(label));
           const cacheExpectationMatches = !cacheExpectRegex || new RegExp(cacheExpectRegex, 'i').test(bodyText);
-          const verified = initialCacheControls.enablePrefixCache === true
-            && initialCacheControls.enableBlockDiskCache === true
-            && initialCacheControls.blockDiskCachePresent === true
-            && !!prefixInput
-            && !!pagedInput
-            && initialCacheControls.usePagedCache === expectPagedCache
-            && (!expectPagedCacheLocked || initialCacheControls.usePagedCacheDisabled === true)
-            && cacheExpectationMatches;
+          const dsv4DisabledWarningVisible = bodyText.includes(
+            'DSV4 Flash native composite prefix/paged/L2 reuse is disabled in product sessions'
+          );
+          const dsv4CacheControlsAbsent = !prefixInput && !pagedInput && !blockDiskInput;
+          const verified = expectDsv4CacheDisabled
+            ? initialCacheControls.enablePrefixCache === false
+              && initialCacheControls.usePagedCache === false
+              && initialCacheControls.enableBlockDiskCache === false
+              && dsv4DisabledWarningVisible
+              && dsv4CacheControlsAbsent
+              && cacheExpectationMatches
+            : initialCacheControls.enablePrefixCache === true
+              && initialCacheControls.enableBlockDiskCache === true
+              && initialCacheControls.blockDiskCachePresent === true
+              && !!prefixInput
+              && !!pagedInput
+              && initialCacheControls.usePagedCache === expectPagedCache
+              && (!expectPagedCacheLocked || initialCacheControls.usePagedCacheDisabled === true)
+              && cacheExpectationMatches;
           const close = [...(drawer?.querySelectorAll('button') || [])]
             .find((button) => button.getAttribute('aria-label') === 'Close');
           close?.click();
@@ -9867,6 +10045,9 @@ async function main() {
             cacheExpectRegex,
             expectPagedCacheLocked,
             expectPagedCache,
+            expectDsv4CacheDisabled,
+            dsv4DisabledWarningVisible,
+            dsv4CacheControlsAbsent,
             cacheExpectationMatches,
             labels,
             initialCacheControls,
@@ -10029,10 +10210,22 @@ async function main() {
         healthNativeCache: healthAfter?.native_cache || {},
       }
       serverCacheControls.verified = (
-        serverCacheControls.verified === true
-        && rendererResult.effectiveSessionConfig?.enableBlockDiskCache === true
-        && argv.includes('--enable-block-disk-cache')
-        && healthAfter?.native_cache?.block_disk_l2 === true
+        expectDsv4CacheDisabled
+          ? serverCacheControls.verified === true
+            && rendererResult.effectiveSessionConfig?.enablePrefixCache === false
+            && rendererResult.effectiveSessionConfig?.usePagedCache === false
+            && rendererResult.effectiveSessionConfig?.enableBlockDiskCache === false
+            && argv.includes('--disable-prefix-cache')
+            && !argv.includes('--dsv4-enable-prefix-cache')
+            && !argv.includes('--use-paged-cache')
+            && !argv.includes('--enable-block-disk-cache')
+            && healthAfter?.native_cache?.prefix === false
+            && healthAfter?.native_cache?.paged === false
+            && healthAfter?.native_cache?.block_disk_l2 === false
+          : serverCacheControls.verified === true
+            && rendererResult.effectiveSessionConfig?.enableBlockDiskCache === true
+            && argv.includes('--enable-block-disk-cache')
+            && healthAfter?.native_cache?.block_disk_l2 === true
       )
     }
     const visibleText = rendererResult.thirdAssistantContent
@@ -10460,6 +10653,7 @@ async function main() {
       requestedEnableThinking: enableThinkingOverride,
       reasoningExpectation,
       requestedServerCacheControls: checkServerCacheControls,
+      expectedDsv4CacheDisabled: expectDsv4CacheDisabled,
       requestedMedia: checkMedia,
       requestedVideo: checkVideo,
       requestedRetainedPids: releaseRetainedPids,
@@ -10485,6 +10679,7 @@ async function main() {
         checkMedia,
         checkVideo,
         expectPagedCacheLocked,
+        expectDsv4CacheDisabled,
         imageExpectRegex,
         videoExpectRegex,
         cacheExpectRegex,

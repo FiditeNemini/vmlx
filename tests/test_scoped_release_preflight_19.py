@@ -1425,6 +1425,139 @@ def test_v5_owned_command_preserves_authoritative_venv_invocation(tmp_path: Path
     assert str(ROOT / ".venv/lib") in result["__stdout_bytes"].decode()
 
 
+def test_v5_owned_command_removes_only_its_exclusive_temporary_payload(
+    tmp_path: Path,
+):
+    module = load_module()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    retained = run_dir / "retained-release-evidence"
+    retained.write_text("keep", encoding="utf-8")
+    python = ROOT / ".venv/bin/python"
+    result = module._v5_run_command(
+        "full_python_suite",
+        {
+            "command_id": "large-fixture-cleanup",
+            "argv": [
+                str(python),
+                "-I",
+                "-c",
+                (
+                    "import os,pathlib;"
+                    "p=pathlib.Path(os.environ['TMPDIR']);"
+                    "(p/'nested').mkdir();"
+                    "(p/'nested'/'fixture.bin').write_bytes(b'x'*1048576);"
+                    "print(p)"
+                ),
+            ],
+            "cwd": tmp_path,
+            "env": {},
+        },
+        {"run_id": "tmp-cleanup", "nonce": "6" * 32},
+        run_dir,
+    )
+    child_tmpdir = Path(result["__stdout_bytes"].decode().strip())
+    assert result["exit_code"] == 0
+    assert result["temporary_directory_removed"] is True
+    assert not child_tmpdir.exists()
+    assert retained.read_text(encoding="utf-8") == "keep"
+
+
+def test_v5_owned_command_removes_temporary_payload_after_nonzero_exit(
+    tmp_path: Path,
+):
+    module = load_module()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    python = ROOT / ".venv/bin/python"
+    result = module._v5_run_command(
+        "full_python_suite",
+        {
+            "command_id": "failed-fixture-cleanup",
+            "argv": [
+                str(python),
+                "-I",
+                "-c",
+                (
+                    "import os,pathlib,sys;"
+                    "p=pathlib.Path(os.environ['TMPDIR']);"
+                    "(p/'failed.bin').write_bytes(b'x'*1048576);"
+                    "print(p);sys.exit(7)"
+                ),
+            ],
+            "cwd": tmp_path,
+            "env": {},
+        },
+        {"run_id": "tmp-cleanup-fail", "nonce": "7" * 32},
+        run_dir,
+    )
+    child_tmpdir = Path(result["__stdout_bytes"].decode().strip())
+    assert result["exit_code"] == 7
+    assert result["temporary_directory_removed"] is True
+    assert not child_tmpdir.exists()
+
+
+def test_v5_owned_command_removes_temporary_payload_after_setup_exception(
+    tmp_path: Path,
+):
+    module = load_module()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    python = ROOT / ".venv/bin/python"
+    with pytest.raises(ValueError, match="PATH prefix is unavailable"):
+        module._v5_run_command(
+            "full_python_suite",
+            {
+                "command_id": "setup-failure-cleanup",
+                "argv": [str(python), "-I", "-c", "print('must not run')"],
+                "cwd": tmp_path,
+                "env": {},
+                "path_prefix": str(tmp_path / "missing-path-prefix"),
+            },
+            {"run_id": "tmp-setup-fail", "nonce": "8" * 32},
+            run_dir,
+        )
+    assert list(run_dir.glob("tmp-*")) == []
+
+
+def test_v5_owned_command_scrubs_and_rejects_renamed_temporary_payload(
+    tmp_path: Path,
+):
+    module = load_module()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    python = ROOT / ".venv/bin/python"
+    with pytest.raises(
+        RuntimeError,
+        match="temporary directory identity changed: relocated",
+    ):
+        module._v5_run_command(
+            "full_python_suite",
+            {
+                "command_id": "renamed-fixture-cleanup",
+                "argv": [
+                    str(python),
+                    "-I",
+                    "-c",
+                    (
+                        "import os,pathlib;"
+                        "p=pathlib.Path(os.environ['TMPDIR']);"
+                        "m=p.with_name(p.name+'-relocated');"
+                        "p.rename(m);"
+                        "(m/'nested').mkdir();"
+                        "(m/'nested'/'payload.bin').write_bytes(b'x'*1048576);"
+                        "print(m)"
+                    ),
+                ],
+                "cwd": tmp_path,
+                "env": {},
+            },
+            {"run_id": "tmp-rename-fail", "nonce": "9" * 32},
+            run_dir,
+        )
+    assert list(run_dir.glob("tmp-*")) == []
+
+
 def test_v5_owned_command_pins_executable_script_argument_even_when_mode_0755(
     tmp_path: Path,
 ):
@@ -2217,7 +2350,7 @@ def test_r19_responses_dynamic_final_uses_retained_results_and_response_chain():
     module = load_module()
     final = (
         "AGENTIC-RESPONSES-STREAM-DONE SIZE=5.3 KB "
-        "PWD=/Users/eric/mlx/vllm-mlx-r19-release-build"
+        "PWD=/Users/example/mlx/vllm-mlx-r19-release-build"
     )
     requests = [
         {
@@ -2269,7 +2402,7 @@ def test_r19_responses_dynamic_final_uses_retained_results_and_response_chain():
                             "command": "pwd",
                             "exit_code": 0,
                             "stdout": (
-                                "/Users/eric/mlx/"
+                                "/Users/example/mlx/"
                                 "vllm-mlx-r19-release-build"
                             ),
                         },
@@ -3719,6 +3852,7 @@ def test_r19_v5_main_owned_children_fail_closed_on_unowned_release_rows(
     private_root = tmp_path / "private"
     private_root.mkdir(mode=0o700)
     output = tmp_path / "manifest.json"
+    release_diff_bytes = _v5_exact_release_diff(module)
     source = {
         "commit": release["source_commit"],
         "tree": release["source_tree"],
@@ -3728,10 +3862,8 @@ def test_r19_v5_main_owned_children_fail_closed_on_unowned_release_rows(
         "main_only": 0,
         "branch_only": 0,
         "remote_identity": "jjang-ai/vmlx",
-        "release_diff_bytes": b"M\tpanel/src/main/index.ts\n",
-        "release_diff_sha256": hashlib.sha256(
-            b"M\tpanel/src/main/index.ts\n"
-        ).hexdigest(),
+        "release_diff_bytes": release_diff_bytes,
+        "release_diff_sha256": hashlib.sha256(release_diff_bytes).hexdigest(),
     }
     python = str(Path(sys.executable).resolve())
 
@@ -4065,7 +4197,6 @@ def test_r19_v5_main_owned_children_fail_closed_on_unowned_release_rows(
         if row["status"] != "pass"
     }
     assert blocked == {
-        "cache_restart_and_size_eviction",
         "settings_defaults_and_persistence",
         "i18n_katex_responsive_ui",
     }
@@ -4074,12 +4205,21 @@ def test_r19_v5_main_owned_children_fail_closed_on_unowned_release_rows(
         manifest["checks"]["cache_paged_on_eviction_refault"]["status"]
         == "pass"
     )
-    assert not manifest["checks"]["cache_restart_and_size_eviction"][
-        "assertions"
-    ]["ram_percentage_limit_enforced"]
-    assert not manifest["checks"]["cache_restart_and_size_eviction"][
-        "assertions"
-    ]["ram_oom_warning_checked"]
+    assert manifest["checks"]["cache_restart_and_size_eviction"]["status"] == "pass"
+    assert set(
+        manifest["checks"]["cache_restart_and_size_eviction"]["assertions"]
+    ) == {
+        "restart_disk_restore",
+        "disk_size_limit_enforced",
+        "disk_oldest_unused_evicted",
+    }
+    assert {
+        (row["check"], row["assertion"])
+        for row in manifest["deferred_assertions"]
+    } == {
+        ("cache_restart_and_size_eviction", "ram_percentage_limit_enforced"),
+        ("cache_restart_and_size_eviction", "ram_oom_warning_checked"),
+    }
     assert manifest["checks"]["turboquant_policy"]["assertions"][
         "explicit_off_honored"
     ]
@@ -5564,6 +5704,21 @@ def test_r19_v5_canonicalizes_retained_pids_for_the_ui_worker(monkeypatch):
         module._v5_release_retained_pid_environment()
 
 
+def test_r19_v5_ui_emits_dsv4_cache_disabled_expectation_only_for_dsv4():
+    module = load_module()
+    dsv4 = {"derived": {"native_cache": "dsv4_composite"}}
+    for not_dsv4 in (
+        {"derived": {"native_cache": "standard_kv"}},
+        {"derived": {"native_cache": "minimax_m3_sparse"}},
+        {"derived": {}},
+        {},
+    ):
+        assert module._v5_ui_cache_expectation_environment(not_dsv4) == {}
+    assert module._v5_ui_cache_expectation_environment(dsv4) == {
+        "VMLINUX_REAL_UI_EXPECT_DSV4_CACHE_DISABLED": "1"
+    }
+
+
 def test_r19_v5_owned_producer_rejects_wrong_nonce_and_stale_capture(
     tmp_path: Path,
 ):
@@ -6480,6 +6635,176 @@ def test_r19_v5_git_drift_invalidates_source_and_scope_facts(tmp_path: Path):
     )
     assert source_facts == set()
     assert scope_facts == set()
+
+
+def _v5_exact_release_diff(module) -> bytes:
+    return b"".join(
+        f"M\t{path}\n".encode()
+        for path in sorted(module.V5_RELEASE_INTENDED_PATH_OWNER)
+    )
+
+
+def test_r19_v5_release_scope_review_requires_the_exact_checkpoint_inventory():
+    module = load_module()
+    diff_bytes = _v5_exact_release_diff(module)
+    review = module._v5_release_scope_review(diff_bytes)
+    assert review is not None
+    assert review["diff_sha256"] == hashlib.sha256(diff_bytes).hexdigest()
+    assert review["schema"] == "vmlx-r19-release-scope-review-v2"
+    assert review["path_count"] == len(module.V5_RELEASE_INTENDED_PATH_OWNER)
+    assert review["expected_path_count"] == len(
+        module.V5_RELEASE_INTENDED_PATH_OWNER
+    )
+    assert review["unexpected"] == []
+    assert review["missing"] == []
+    assert review["public_forbidden"] == []
+    assert review["mapped"]["ci_publication"] == [
+        ".github/workflows/publish-pypi.yml"
+    ]
+    assert review["mapped"]["release_benchmarks"] == [
+        "bench/native_mtp_speed_ab.py",
+        "bench/native_mtp_vl_gate.py",
+    ]
+    assert review["mapped"]["public_release_docs"] == [
+        "CHANGELOG.md",
+        "README.md",
+        "docs/mlxstudio-releases-readme.md",
+    ]
+    assert review["mapped"]["release_metadata"] == [
+        "latest.json",
+        "panel/package-lock.json",
+        "panel/package.json",
+        "pyproject.toml",
+        "uv.lock",
+    ]
+
+
+def test_r19_v5_release_scope_review_fails_closed_on_unrelated_panel_source():
+    module = load_module()
+    diff_bytes = _v5_exact_release_diff(module) + (
+        b"M\tpanel/src/unrelated.ts\n"
+    )
+    review = module._v5_release_scope_review(diff_bytes)
+    assert review is not None
+    assert review["unexpected"] == ["panel/src/unrelated.ts"]
+    assert review["missing"] == []
+    assert review["public_forbidden"] == []
+
+
+@pytest.mark.parametrize(
+    "private_path",
+    [
+        ".agents/private-ledger.md",
+        ".agent/private-ledger.md",
+        ".claude/private-ledger.md",
+        ".codex/private-ledger.md",
+        ".sisyphus/private-ledger.md",
+        ".factory/private-ledger.md",
+        "docs/internal/private-ledger.md",
+        "notes/private-ledger.md",
+        "botes/private-ledger.md",
+        "evidence/live.json",
+        "private-evidence/live.json",
+        "vmlx-proof/live.json",
+        "screenshot/live.png",
+        "screenshots/live.png",
+        "screen-recording/live.mov",
+        "screen-recordings/live.mov",
+        "cdp-capture/live.json",
+        "cdp-captures/live.json",
+        "raw-sse/chat.txt",
+        "runtime-log/engine.log",
+        "runtime-logs/engine.log",
+        "state/session.sqlite",
+        "state/session.db",
+    ],
+)
+def test_r19_v5_release_scope_review_rejects_every_private_artifact_category(
+    private_path: str,
+):
+    module = load_module()
+    diff_bytes = _v5_exact_release_diff(module) + (
+        f"M\t{private_path}\n".encode()
+    )
+    review = module._v5_release_scope_review(diff_bytes)
+    assert review is not None
+    assert review["unexpected"] == [private_path]
+    assert review["missing"] == []
+    assert review["public_forbidden"] == [private_path]
+
+
+def test_r19_v5_release_scope_review_fails_closed_when_an_intended_path_is_missing():
+    module = load_module()
+    missing = "panel/src/main/index.ts"
+    diff_bytes = b"".join(
+        f"M\t{path}\n".encode()
+        for path in sorted(module.V5_RELEASE_INTENDED_PATH_OWNER)
+        if path != missing
+    )
+    review = module._v5_release_scope_review(diff_bytes)
+    assert review is not None
+    assert review["unexpected"] == []
+    assert review["missing"] == [missing]
+
+
+def test_r19_v5_scope_facts_require_exact_paths_not_self_classification(
+    tmp_path: Path,
+):
+    module = load_module()
+    bundle, _ = bundle_attestation(module, tmp_path / "model")
+    diff_bytes = _v5_exact_release_diff(module)
+    snapshot = {
+        "commit": "a" * 40,
+        "tree": "b" * 40,
+        "status_porcelain": "",
+        "upstream_commit": "a" * 40,
+        "remote_main_commit": "a" * 40,
+        "main_only": 0,
+        "branch_only": 0,
+        "remote_identity": "jjang-ai/vmlx",
+        "release_diff_sha256": hashlib.sha256(diff_bytes).hexdigest(),
+        "release_diff_bytes": diff_bytes,
+    }
+    _source_facts, exact_scope_facts = module._v5_source_and_scope_facts(
+        snapshot,
+        deepcopy(snapshot),
+        {
+            "expected_source_attestation": (
+                module.release_runtime_source_attestation()
+            )
+        },
+        bundle,
+    )
+    assert exact_scope_facts == {
+        "v1_6_18_to_head_diff_reviewed",
+        "all_intended_fixes_mapped",
+        "unintended_changes_none_or_documented",
+        "public_repository_hygiene_passed",
+    }
+
+    unrelated = diff_bytes + b"M\tpanel/src/unrelated.ts\n"
+    drifted = deepcopy(snapshot)
+    drifted["release_diff_bytes"] = unrelated
+    drifted["release_diff_sha256"] = hashlib.sha256(unrelated).hexdigest()
+    _source_facts, unrelated_scope_facts = module._v5_source_and_scope_facts(
+        drifted,
+        deepcopy(drifted),
+        {
+            "expected_source_attestation": (
+                module.release_runtime_source_attestation()
+            )
+        },
+        bundle,
+    )
+    assert unrelated_scope_facts == {"v1_6_18_to_head_diff_reviewed"}
+
+
+def test_r19_v5_release_scope_review_rejects_malformed_name_status_bytes():
+    module = load_module()
+    assert module._v5_release_scope_review(b"") is None
+    assert module._v5_release_scope_review(b"M\n") is None
+    assert module._v5_release_scope_review(b"R100\tone-path-only\n") is None
+    assert module._v5_release_scope_review(b"M\tbad\xffpath\n") is None
 
 
 def test_r19_v5_cli_has_no_author_pass_attestation_option(tmp_path: Path):

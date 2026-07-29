@@ -84,7 +84,7 @@ def _write_dsv4_tq_artifact(tmp_path, *, layer_bits=None, sidecar=True):
         "layers.0.attn.attn_sink": np.zeros((1,), dtype=np.float32),
     }
     for layer, bits in layer_bits.items():
-        for proj, out_dim, in_features in [
+        for proj, _out_dim, in_features in [
             ("gate_proj", 2048, 4096),
             ("up_proj", 2048, 4096),
             ("down_proj", 4096, 2048),
@@ -92,10 +92,14 @@ def _write_dsv4_tq_artifact(tmp_path, *, layer_bits=None, sidecar=True):
             packed_cols = in_features // (32 // bits)
             stem = f"layers.{layer}.mlp.switch_mlp.{proj}"
             tensors[f"{stem}.tq_bits"] = np.array([bits], dtype=np.uint8)
+            # The header-only audit derives the codebook input width from the
+            # packed tensor's final dimension; expert/output dimensions are
+            # irrelevant. Keep them minimal so this fixture does not allocate
+            # tens of gigabytes or make the full suite depend on free disk.
             tensors[f"{stem}.tq_packed"] = np.zeros(
-                (256, out_dim, packed_cols), dtype=np.uint32
+                (1, 1, packed_cols), dtype=np.uint32
             )
-            tensors[f"{stem}.tq_norms"] = np.zeros((256, out_dim), dtype=np.float16)
+            tensors[f"{stem}.tq_norms"] = np.zeros((1, 1), dtype=np.float16)
 
     save_file(tensors, str(tmp_path / "model.safetensors"))
 

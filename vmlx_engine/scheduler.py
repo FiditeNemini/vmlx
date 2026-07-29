@@ -171,16 +171,27 @@ def _rebuild_meta_state_after_truncation(
     """
     if "Rotating" in cls_name:
         if not orig_meta or len(orig_meta) < 4:
-            return (str(0), str(safe_len), str(safe_len), str(safe_len))
+            # Without the original keep/max_size/offset/_idx tuple there is no
+            # proof that tensor order is temporal rather than already wrapped
+            # circular order. Never invent metadata for a rotating cache.
+            return None
         try:
             keep = int(orig_meta[0])
             max_size = int(orig_meta[1])
             offset = int(orig_meta[2])
+            idx = int(orig_meta[3])
         except (ValueError, TypeError):
-            return (str(0), str(safe_len), str(safe_len), str(safe_len))
-        if offset > max_size:
-            # Circular buffer has wrapped — slot order != token order, so
-            # a head-aligned slice is meaningless. Refuse to store.
+            return None
+        if (
+            keep < 0
+            or max_size <= 0
+            or offset < 0
+            or keep > offset
+            or offset > max_size
+            or idx != offset
+            or safe_len < keep
+            or safe_len > offset
+        ):
             return None
         return (
             str(keep),
@@ -221,14 +232,14 @@ def _truncate_minimax_m3_state_dict(
         return None
     if any(len(value.shape) != 4 for value in state):
         return None
-    safe = min(
-        int(target),
+    lengths = (
         int(keys.shape[2]),
         int(values.shape[2]),
         int(idx_keys.shape[2]),
     )
-    if safe <= 0:
+    if int(target) <= 0 or len(set(lengths)) != 1 or lengths[0] < int(target):
         return None
+    safe = int(target)
     meta = _rebuild_meta_state_after_truncation(
         "MiniMaxM3SparseCache",
         state_dict.get("meta_state", ()),
@@ -8242,6 +8253,21 @@ class Scheduler:
                                     # cache_data is extracted state dicts (not raw objects),
                                     # so truncate the tensors within each dict directly.
                                     target = len(prompt_tokens) - 1  # N-1 for re-feed
+                                    if target <= 0:
+                                        # A reusable paged entry must represent at
+                                        # least one cache-key token. Publishing any
+                                        # extracted state under an empty/negative
+                                        # generation-prefix-stripped key cannot prove
+                                        # key/state alignment, even when the layer
+                                        # format itself is recognized.
+                                        cache_data = None
+                                        logger.warning(
+                                            "Skipping paged/L2 store for %s: "
+                                            "generation-prompt stripping leaves no "
+                                            "positive cache boundary (target=%d)",
+                                            request_id,
+                                            target,
+                                        )
                                     if target > 0:
                                         truncated_dicts = []
                                         trunc_ok = True
@@ -8276,6 +8302,18 @@ class Scheduler:
                                                     current_len = int(
                                                         getattr(cache, "offset", 0) or 0
                                                     )
+                                                    if current_len < target:
+                                                        logger.warning(
+                                                            "Skipping DSV4 paged cache "
+                                                            "store for %s: native state "
+                                                            "represents %d tokens but "
+                                                            "shortened key requires %d",
+                                                            request_id,
+                                                            current_len,
+                                                            target,
+                                                        )
+                                                        trunc_ok = False
+                                                        break
                                                     to_trim = max(0, current_len - target)
                                                     # SAFETY: gen_prompt_len stripping
                                                     # also calls cache.trim() on a
@@ -8293,6 +8331,34 @@ class Scheduler:
                                                     _swa = int(
                                                         getattr(local, "max_size", 128) or 128
                                                     )
+                                                    local_state = getattr(local, "state", None)
+
+                                                    def _uniform_seq_len(value):
+                                                        if hasattr(value, "shape"):
+                                                            if len(value.shape) < 2:
+                                                                return None
+                                                            return int(value.shape[-2])
+                                                        if isinstance(value, (tuple, list)) and value:
+                                                            lengths = [_uniform_seq_len(item) for item in value]
+                                                            if any(length is None for length in lengths):
+                                                                return None
+                                                            unique = set(lengths)
+                                                            return lengths[0] if len(unique) == 1 else None
+                                                        return None
+
+                                                    local_len = _uniform_seq_len(local_state)
+                                                    if local_len != current_len:
+                                                        logger.warning(
+                                                            "Skipping DSV4 paged cache "
+                                                            "store for %s: local K/V "
+                                                            "represents %s tokens but "
+                                                            "native metadata reports %d",
+                                                            request_id,
+                                                            local_len,
+                                                            current_len,
+                                                        )
+                                                        trunc_ok = False
+                                                        break
                                                     if to_trim > 0 and current_len > _swa:
                                                         logger.info(
                                                             f"DSV4 gen_prompt_len strip "
@@ -8306,6 +8372,17 @@ class Scheduler:
                                                         break
                                                     if to_trim:
                                                         cache.trim(to_trim)
+                                                    if int(getattr(cache, "offset", 0) or 0) != target:
+                                                        logger.warning(
+                                                            "Skipping DSV4 paged cache "
+                                                            "store for %s: trimmed native "
+                                                            "state did not reach exact "
+                                                            "target=%d",
+                                                            request_id,
+                                                            target,
+                                                        )
+                                                        trunc_ok = False
+                                                        break
                                                     truncated_dicts.append(
                                                         {
                                                             **sd,
@@ -8317,12 +8394,72 @@ class Scheduler:
                                                 except Exception:
                                                     trunc_ok = False
                                                     break
+                                            sub_caches = sd.get("sub_caches")
+                                            if cls_name == "CacheList":
+                                                # Extracted CacheList layers carry
+                                                # state=None plus real nested cache
+                                                # payloads in sub_caches. Passing that
+                                                # wrapper through unchanged stores the
+                                                # longer nested states under a shorter
+                                                # key. Until recursive alignment is
+                                                # implemented, only a truly empty
+                                                # CacheList placeholder is safe.
+                                                if state is None and not sub_caches:
+                                                    truncated_dicts.append(sd)
+                                                    continue
+                                                logger.warning(
+                                                    "Skipping paged cache store for %s: "
+                                                    "cannot align nonempty CacheList "
+                                                    "sub-caches to generation-prompt-"
+                                                    "stripped target=%d",
+                                                    request_id,
+                                                    target,
+                                                )
+                                                trunc_ok = False
+                                                break
                                             if (
-                                                state is None
-                                                or cls_name == "CacheList"
+                                                (state is None and not sub_caches)
+                                                or (
+                                                    sd.get("no_state") is True
+                                                    and not sub_caches
+                                                )
                                             ):
-                                                # CacheList/skip: pass through
+                                                # Proven no-state placeholders do not
+                                                # encode a token position and may pass.
                                                 truncated_dicts.append(sd)
+                                                continue
+                                            if (
+                                                self._is_hybrid
+                                                and not self._uses_dsv4_cache
+                                                and not self._uses_zaya_cache
+                                                and not self._mixed_attention_cache_model
+                                                and cls_name
+                                                in {
+                                                    "MambaCache",
+                                                    "BatchMambaCache",
+                                                    "ArraysCache",
+                                                }
+                                            ):
+                                                # Generic hybrid SSM/GDN state is
+                                                # cumulative and therefore cannot be
+                                                # shortened to the generation-prefix-
+                                                # stripped boundary.  This lane stores
+                                                # it in the typed external companion;
+                                                # store_cache(...,
+                                                # store_cumulative_state=False) already
+                                                # writes a positional placeholder for
+                                                # these layers. Canonicalize the payload
+                                                # to an explicit skip while retaining
+                                                # its layer slot, so aligned KV blocks
+                                                # remain reusable without publishing
+                                                # contaminated cumulative state.
+                                                truncated_dicts.append(
+                                                    {
+                                                        **sd,
+                                                        "state": None,
+                                                        "meta_state": None,
+                                                    }
+                                                )
                                                 continue
                                             if cls_name == "MiniMaxM3SparseCache":
                                                 truncated_m3 = (
@@ -8346,13 +8483,17 @@ class Scheduler:
                                                 keys, values = state
                                                 if (
                                                     hasattr(keys, "shape")
-                                                    and len(keys.shape) >= 3
+                                                    and hasattr(values, "shape")
+                                                    and len(keys.shape) in (3, 4)
+                                                    and len(values.shape) == len(keys.shape)
                                                 ):
                                                     seq_dim = (
                                                         2 if len(keys.shape) == 4 else 1
                                                     )
-                                                    safe = min(target, keys.shape[seq_dim])
-                                                    if safe > 0:
+                                                    key_len = int(keys.shape[seq_dim])
+                                                    value_len = int(values.shape[seq_dim])
+                                                    if key_len == value_len and key_len >= target:
+                                                        safe = target
                                                         if len(keys.shape) == 4:
                                                             keys = keys[:, :, :safe, :]
                                                             values = values[:, :, :safe, :]
@@ -8392,14 +8533,35 @@ class Scheduler:
                                                         continue
                                                 elif (
                                                     isinstance(keys, (tuple, list))
+                                                    and isinstance(values, (tuple, list))
                                                     and len(keys) >= 1
+                                                    and len(values) == len(keys)
                                                 ):
                                                     # QuantizedKVCache: tuple of (data, scales, zeros)
-                                                    first_k = keys[0]
-                                                    if hasattr(first_k, "shape"):
-                                                        safe = min(
-                                                            target, first_k.shape[-2]
-                                                        )
+                                                    quantized_lengths = []
+                                                    quantized_aligned = True
+                                                    for key_part, value_part in zip(keys, values):
+                                                        if (
+                                                            not hasattr(key_part, "shape")
+                                                            or not hasattr(value_part, "shape")
+                                                            or len(key_part.shape) < 2
+                                                            or len(value_part.shape) < 2
+                                                        ):
+                                                            quantized_aligned = False
+                                                            break
+                                                        key_len = int(key_part.shape[-2])
+                                                        value_len = int(value_part.shape[-2])
+                                                        if key_len != value_len:
+                                                            quantized_aligned = False
+                                                            break
+                                                        quantized_lengths.append(key_len)
+                                                    if (
+                                                        quantized_aligned
+                                                        and quantized_lengths
+                                                        and len(set(quantized_lengths)) == 1
+                                                        and quantized_lengths[0] >= target
+                                                    ):
+                                                        safe = target
                                                         if safe > 0:
                                                             keys = tuple(
                                                                 t[..., :safe, :]
@@ -8437,10 +8599,60 @@ class Scheduler:
                                                                 }
                                                             )
                                                             continue
-                                            # Unknown format: pass through
-                                            truncated_dicts.append(sd)
+                                            # Unknown nonempty state cannot be assumed
+                                            # token-independent. Fail closed rather
+                                            # than publish a longer state under the
+                                            # shortened generation-prefix key.
+                                            logger.warning(
+                                                "Skipping paged cache store for %s: "
+                                                "unknown nonempty cache state format "
+                                                "class=%s target=%d",
+                                                request_id,
+                                                cls_name or type(state).__name__,
+                                                target,
+                                            )
+                                            trunc_ok = False
+                                            break
                                         if trunc_ok and truncated_dicts:
                                             cache_data = truncated_dicts
+                                        else:
+                                            # Never publish an original longer cache
+                                            # state under the generation-prefix-
+                                            # stripped token key.  A failed trim means
+                                            # key/state equivalence is unknown for every
+                                            # cache family, not only DSV4.  Known mixed-
+                                            # SWA paths normally materialize a clean
+                                            # prompt-boundary snapshot before this
+                                            # fallback, but any unalignable/unknown
+                                            # state must still fail closed here.
+                                            cache_data = None
+                                            if not self._uses_dsv4_cache:
+                                                logger.warning(
+                                                    "Skipping paged/L2 store for %s: "
+                                                    "cache state could not be aligned "
+                                                    "to the generation-prompt-stripped "
+                                                    "key (%d tokens)",
+                                                    request_id,
+                                                    target,
+                                                )
+                                            else:
+                                                # A DSV4 prompt snapshot may include the
+                                                # assistant generation-prefix suffix even
+                                                # though the reusable key intentionally
+                                                # excludes it. Once local SWA has wrapped,
+                                                # DeepseekV4Cache cannot be rewound without
+                                                # also proving CSA/HCA pool equivalence.
+                                                # The existing clean re-prefill path remains
+                                                # the only valid way to materialize that
+                                                # boundary.
+                                                logger.warning(
+                                                    "Skipping DSV4 paged/L2 store for %s: "
+                                                    "native composite state could not be "
+                                                    "aligned to the generation-prompt-"
+                                                    "stripped key (%d tokens)",
+                                                    request_id,
+                                                    target,
+                                                )
                                 # Paged prefix cache entries must be keyed by the
                                 # same token count represented by cache_data:
                                 # prompt_len - 1. The generator re-feeds the last
@@ -8457,46 +8669,47 @@ class Scheduler:
                             # token and returned an empty/stop response. This
                             # is especially visible with block disk L2 because
                             # full-key stale blocks survive process restarts.
-                            _t_store = time.perf_counter()
-                            _paged_store_kwargs = {
-                                "cache_type": self._pick_cache_type_for_request(request),
-                            }
-                            if getattr(request, "_cache_extra_keys", None):
-                                _paged_store_kwargs["cache_extra_keys"] = dict(
-                                    request._cache_extra_keys
+                            if cache_data is not None:
+                                _t_store = time.perf_counter()
+                                _paged_store_kwargs = {
+                                    "cache_type": self._pick_cache_type_for_request(request),
+                                }
+                                if getattr(request, "_cache_extra_keys", None):
+                                    _paged_store_kwargs["cache_extra_keys"] = dict(
+                                        request._cache_extra_keys
+                                    )
+                                if (
+                                    self._is_hybrid
+                                    and not self._uses_dsv4_cache
+                                    and not self._uses_zaya_cache
+                                    and not self._mixed_attention_cache_model
+                                ):
+                                    _paged_store_kwargs["store_cumulative_state"] = False
+                                _stored_block_table = self.block_aware_cache.store_cache(
+                                    request_id,
+                                    store_tokens,
+                                    cache_data,
+                                    **_paged_store_kwargs,
                                 )
-                            if (
-                                self._is_hybrid
-                                and not self._uses_dsv4_cache
-                                and not self._uses_zaya_cache
-                                and not self._mixed_attention_cache_model
-                            ):
-                                _paged_store_kwargs["store_cumulative_state"] = False
-                            _stored_block_table = self.block_aware_cache.store_cache(
-                                request_id,
-                                store_tokens,
-                                cache_data,
-                                **_paged_store_kwargs,
-                            )
-                            self._retarget_ssm_rederive_to_paged_boundary(
-                                request_id,
-                                store_tokens,
-                                _stored_block_table,
-                            )
-                            self._dsv4_trace_timing(
-                                "store_cache",
-                                _t_store,
-                                request_id,
-                                tokens=len(store_tokens),
-                                layers=len(cache_data or []),
-                            )
-                            logger.info(
-                                f"Stored paged cache for request {request_id} "
-                                f"({len(store_tokens)} cache-key tokens from "
-                                f"{len(prompt_tokens)} prompt tokens, "
-                                f"{len(request._extracted_cache)} layers, "
-                                f"cache truncated to {max(len(prompt_tokens) - 1, 0)} tokens)"
-                            )
+                                self._retarget_ssm_rederive_to_paged_boundary(
+                                    request_id,
+                                    store_tokens,
+                                    _stored_block_table,
+                                )
+                                self._dsv4_trace_timing(
+                                    "store_cache",
+                                    _t_store,
+                                    request_id,
+                                    tokens=len(store_tokens),
+                                    layers=len(cache_data or []),
+                                )
+                                logger.info(
+                                    f"Stored paged cache for request {request_id} "
+                                    f"({len(store_tokens)} cache-key tokens from "
+                                    f"{len(prompt_tokens)} prompt tokens, "
+                                    f"{len(request._extracted_cache)} layers, "
+                                    f"cache truncated to {max(len(prompt_tokens) - 1, 0)} tokens)"
+                                )
                         except Exception as e:
                             logger.warning(
                                 f"Failed to store paged cache for {request_id}: {e}"

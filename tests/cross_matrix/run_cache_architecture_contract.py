@@ -2,8 +2,10 @@
 """Run no-heavy cache architecture/family classification contracts.
 
 This gate protects the release row that spans cache-family behavior: DSV4
-native composite cache, ZAYA CCA, hybrid SSM/Mamba, MLA, MLLM media-salted
-caches, TurboQuant KV runtime, and L2/disk serialization.
+native composite cache safety (fail-closed in product sessions), ZAYA CCA,
+hybrid SSM/Mamba, MLA, MLLM media-salted caches, TurboQuant KV runtime, and
+L2/disk serialization. DSV4 positive-hit equivalence is deliberately not
+claimed by this no-heavy gate.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ CACHE_PATTERN = (
 
 SOURCE_HASH_FILES = (
     "tests/cross_matrix/output_counts.py",
+    "vmlx_engine/cli.py",
     "vmlx_engine/server.py",
     "vmlx_engine/scheduler.py",
     "vmlx_engine/prefix_cache.py",
@@ -67,6 +70,10 @@ SOURCE_HASH_FILES = (
     "tests/test_model_config_registry.py",
     "tests/test_cache_architecture_contract.py",
     "panel/src/main/sessions.ts",
+    "panel/src/renderer/src/components/sessions/CreateSession.tsx",
+    "panel/src/renderer/src/components/sessions/ServerSettingsDrawer.tsx",
+    "panel/src/renderer/src/components/sessions/SessionConfigForm.tsx",
+    "panel/src/renderer/src/components/sessions/SessionSettings.tsx",
     "panel/src/shared/dsv4Env.ts",
     "panel/src/shared/cacheControlPolicy.ts",
     "panel/src/renderer/src/components/sessions/CachePanel.tsx",
@@ -78,10 +85,22 @@ SOURCE_HASH_FILES = (
 )
 
 REQUIRED_CACHE_TEST_MARKERS = (
-    # DSV4 composite cache can only reuse partial prefixes when the terminal
-    # SWA+CSA/HCA composite block is present.
-    "test_memory_pressure_reuses_shorter_dsv4_terminal_composite_prefix",
-    "test_memory_pressure_refuses_dsv4_partial_without_terminal_composite",
+    # DSV4 product sessions stay on full prefill until native SWA+CSA/HCA
+    # restore equivalence is reproved. Unsafe shortened-key stores and generic
+    # TurboQuant KV must remain impossible.
+    "test_dsv4_cli_cache_policy_defaults_composite_cache_off",
+    "test_dsv4_runtime_policy_applies_to_bench_like_cli_args",
+    "test_dsv4_ui_defaults_composite_cache_off_and_exposes_no_false_reuse_toggle",
+    "test_dsv4_launch_filters_stale_saved_and_additional_args",
+    "test_dsv4_product_ui_has_no_cache_opt_in_but_cli_env_remains_explicit",
+    "test_dsv4_storage_quantization_is_forced_off_for_composite_cache",
+    "test_dsv4_scheduler_forces_generic_kv_quantization_off",
+    "test_dsv4_untrimmed_composite_is_never_stored_under_shorter_key",
+    "test_dsv4_paged_restore_requires_full_prefill",
+    # Diagnostic-only codec mechanics stay classified without clearing live
+    # positive-hit correctness.
+    "test_pool_quantized_v4_cache_is_detected_as_dsv4_composite",
+    "test_dsv4_block_disk_serialization_round_trips_nested_state",
     "test_dsv4_pool_quant_appends_only_new_pool_rows",
     "test_dsv4_pool_quant_reuses_materialized_pool_between_appends",
     "test_dsv4_timing_probe_is_env_gated_and_covers_cache_boundaries",
@@ -153,11 +172,12 @@ REQUIRED_API_CACHE_COMMAND_MARKERS = (
 )
 
 REQUIRED_PANEL_CACHE_MARKERS = (
-    "deepseek-v4 enables native composite prefix cache by default even with stale cache config",
-    "deepseek-v4 native cache path uses DS4 page-sized blocks",
-    "deepseek-v4 respects explicit prefix cache disable",
-    "enables DSV4 pool quant by default only under DSV4 native composite cache",
-    "DSV4 pool quant and native prefix controls stay DSV4-only",
+    "defaults production DSV4 runtime env to full-prefill serving",
+    "deepseek-v4 disables native composite reuse even with stale cache config",
+    "deepseek-v4 stale native-cache settings remain fail-closed",
+    "deepseek-v4 cache launch flags are singular and fail closed",
+    "DSV4 stale cache settings fail closed and stay family-scoped",
+    "renders the fail-closed DSV4 cache boundary without unusable toggles",
     "detected Qwen3.6 hybrid cache forces paged cache over stale saved false",
     "detected Mamba cache forces paged cache while regular KV respects saved false",
     "continuous batching off is a real master switch for LLM cache flags",
@@ -176,36 +196,53 @@ REQUIRED_CACHE_FAMILY_MATRIX: dict[str, dict[str, tuple[str, ...]]] = {
     "dsv4_native_composite": {
         "checks": (
             "dsv4_native_composite_cache_status",
-            "dsv4_terminal_composite_contracts",
+            "dsv4_product_full_prefill_policy",
+            "dsv4_invalid_snapshot_store_guard",
+            "dsv4_generic_tq_disabled",
         ),
         "markers": (
-            "test_memory_pressure_reuses_shorter_dsv4_terminal_composite_prefix",
-            "test_memory_pressure_refuses_dsv4_partial_without_terminal_composite",
-            "test_dsv4_pool_quant_appends_only_new_pool_rows",
-            "test_dsv4_pool_quant_reuses_materialized_pool_between_appends",
+            "test_dsv4_cli_cache_policy_defaults_composite_cache_off",
+            "test_dsv4_runtime_policy_applies_to_bench_like_cli_args",
+            "test_dsv4_ui_defaults_composite_cache_off_and_exposes_no_false_reuse_toggle",
+            "test_dsv4_launch_filters_stale_saved_and_additional_args",
+            "test_dsv4_product_ui_has_no_cache_opt_in_but_cli_env_remains_explicit",
+            "test_dsv4_untrimmed_composite_is_never_stored_under_shorter_key",
+            "test_dsv4_paged_restore_requires_full_prefill",
+            "test_dsv4_storage_quantization_is_forced_off_for_composite_cache",
+            "test_dsv4_scheduler_forces_generic_kv_quantization_off",
         ),
         "api_checks": ("dsv4_native_cache_status",),
         "api_command_markers": (
             "native_cache_status_reports_dsv4_separately_from_tq_kv",
         ),
         "panel_markers": (
-            "deepseek-v4 enables native composite prefix cache by default even with stale cache config",
-            "DSV4 pool quant and native prefix controls stay DSV4-only",
+            "defaults production DSV4 runtime env to full-prefill serving",
+            "deepseek-v4 disables native composite reuse even with stale cache config",
+            "DSV4 stale cache settings fail closed and stay family-scoped",
+            "renders the fail-closed DSV4 cache boundary without unusable toggles",
+        ),
+        "deferred_open": (
+            "same-process cold-vs-restored cache state and output equivalence",
+            "restart and SSD-only L2 refault cold-vs-restored equivalence",
         ),
     },
     "dsv4_swa_hca_csa_components": {
         "checks": ("dsv4_swa_hca_csa_component_contracts",),
         "markers": (
-            "test_memory_pressure_reuses_shorter_dsv4_terminal_composite_prefix",
-            "test_memory_pressure_refuses_dsv4_partial_without_terminal_composite",
+            "test_pool_quantized_v4_cache_is_detected_as_dsv4_composite",
+            "test_dsv4_block_disk_serialization_round_trips_nested_state",
+            "test_dsv4_storage_quantization_is_forced_off_for_composite_cache",
+            "test_dsv4_untrimmed_composite_is_never_stored_under_shorter_key",
         ),
         "api_checks": ("dsv4_native_cache_status",),
         "api_command_markers": (
             "native_cache_status_reports_dsv4_separately_from_tq_kv",
         ),
         "panel_markers": (
-            "deepseek-v4 native cache path uses DS4 page-sized blocks",
-            "DSV4 pool quant and native prefix controls stay DSV4-only",
+            "DSV4 stale cache settings fail closed and stay family-scoped",
+        ),
+        "deferred_open": (
+            "native SWA+CSA/HCA positive-hit reconstruction equivalence",
         ),
     },
     "zaya_typed_cca": {
@@ -538,6 +575,7 @@ def _build_cache_family_matrix(
             "missing_api_command_markers": row_missing_api_command_markers,
             "required_panel_markers": list(requirement["panel_markers"]),
             "missing_panel_markers": row_missing_panel_markers,
+            "deferred_open": list(requirement.get("deferred_open", ())),
         }
     return matrix
 
@@ -633,19 +671,37 @@ def build_artifact(root: Path) -> dict[str, Any]:
             and "test_native_cache_status_reports_mimo_v2_asymmetric_swa_from_registry_subtype" not in missing_markers
             and "test_mimo_v2_cache_extraction_preserves_swa_kv_heads" not in missing_markers
         ),
-        "dsv4_terminal_composite_contracts": (
+        "dsv4_product_full_prefill_policy": (
             not failed
-            and "test_memory_pressure_reuses_shorter_dsv4_terminal_composite_prefix" not in missing_markers
-            and "test_memory_pressure_refuses_dsv4_partial_without_terminal_composite" not in missing_markers
+            and "test_dsv4_cli_cache_policy_defaults_composite_cache_off" not in missing_markers
+            and "test_dsv4_runtime_policy_applies_to_bench_like_cli_args" not in missing_markers
+            and "test_dsv4_ui_defaults_composite_cache_off_and_exposes_no_false_reuse_toggle" not in missing_markers
+            and "test_dsv4_launch_filters_stale_saved_and_additional_args" not in missing_markers
+            and "test_dsv4_product_ui_has_no_cache_opt_in_but_cli_env_remains_explicit" not in missing_markers
+            and "test_dsv4_paged_restore_requires_full_prefill" not in missing_markers
+            and "defaults production DSV4 runtime env to full-prefill serving" not in missing_panel_markers
+            and "deepseek-v4 disables native composite reuse even with stale cache config" not in missing_panel_markers
+            and "DSV4 stale cache settings fail closed and stay family-scoped" not in missing_panel_markers
+            and "renders the fail-closed DSV4 cache boundary without unusable toggles" not in missing_panel_markers
+        ),
+        "dsv4_invalid_snapshot_store_guard": (
+            not failed
+            and "test_dsv4_untrimmed_composite_is_never_stored_under_shorter_key" not in missing_markers
+        ),
+        "dsv4_generic_tq_disabled": (
+            not failed
+            and "test_dsv4_storage_quantization_is_forced_off_for_composite_cache" not in missing_markers
+            and "test_dsv4_scheduler_forces_generic_kv_quantization_off" not in missing_markers
         ),
         "dsv4_swa_hca_csa_component_contracts": (
             not failed
             and "dsv4_native_cache_status" not in missing_api_checks
             and "native_cache_status_reports_dsv4_separately_from_tq_kv" not in missing_api_command_markers
-            and "deepseek-v4 native cache path uses DS4 page-sized blocks" not in missing_panel_markers
-            and "DSV4 pool quant and native prefix controls stay DSV4-only" not in missing_panel_markers
-            and "test_memory_pressure_reuses_shorter_dsv4_terminal_composite_prefix" not in missing_markers
-            and "test_memory_pressure_refuses_dsv4_partial_without_terminal_composite" not in missing_markers
+            and "DSV4 stale cache settings fail closed and stay family-scoped" not in missing_panel_markers
+            and "test_pool_quantized_v4_cache_is_detected_as_dsv4_composite" not in missing_markers
+            and "test_dsv4_block_disk_serialization_round_trips_nested_state" not in missing_markers
+            and "test_dsv4_storage_quantization_is_forced_off_for_composite_cache" not in missing_markers
+            and "test_dsv4_untrimmed_composite_is_never_stored_under_shorter_key" not in missing_markers
         ),
         "prompt_disk_l2_backfill_contracts": (
             not failed
@@ -704,6 +760,14 @@ def build_artifact(root: Path) -> dict[str, Any]:
             for name, result in results.items()
         },
         "api_cache_artifact_status": api_artifact.get("status"),
+        "deferred_open_capabilities": {
+            "dsv4_native_same_process_reuse_equivalence": (
+                "Requires exact-source cold-vs-restored SWA+CSA/HCA state and output comparison."
+            ),
+            "dsv4_native_restart_l2_equivalence": (
+                "Requires exact-source restart and SSD-only refault comparison against cold full prefill."
+            ),
+        },
     }
 
 

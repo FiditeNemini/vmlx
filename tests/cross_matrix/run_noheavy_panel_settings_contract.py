@@ -4,9 +4,11 @@
 This helper intentionally does not load models. It runs focused Electron panel
 tests that pin the settings behavior Eric called out:
 
-- DSV4 has one native composite prefix-cache switch under Prefix Cache;
-- explicit DSV4 prefix-cache opt-out disables DSV4/paged/L2 launch flags;
-- DSV4 L2 can be disabled without falling back to generic KV codecs;
+- DSV4 product sessions default to fail-closed full-prefill serving;
+- stale saved UI and launch cache settings cannot re-enable DSV4 reuse;
+- DSV4 cache opt-in is hidden from product UI while remaining an explicit
+  diagnostic-only CLI/environment path;
+- generic TurboQuant KV stays disabled for DSV4 native composite state;
 - Server Default Max Output Tokens maps to --max-tokens;
 - Max Context Tokens maps to --max-prompt-tokens;
 - Chat Max Output Tokens remains a per-chat/API override;
@@ -71,7 +73,11 @@ SOURCE_HASH_FILES = (
 )
 
 REQUIRED_PANEL_SETTINGS_SOURCE_MARKERS = (
-    "DSV4 pool quant and native prefix controls stay DSV4-only",
+    "defaults production DSV4 runtime env to full-prefill serving",
+    "deepseek-v4 disables native composite reuse even with stale cache config",
+    "renders the fail-closed DSV4 cache boundary without unusable toggles",
+    "deepseek-v4 cache launch flags are singular and fail closed",
+    "DSV4 stale cache settings fail closed and stay family-scoped",
     "allows lazy-mmap launches when reclaimable macOS pages cover the freemem gap",
     "test_panel_serve_flags_are_registered_engine_cli_flags",
     "test_runtime_and_preview_additional_arg_filters_share_blocklists",
@@ -189,13 +195,11 @@ def build_artifact(root: Path) -> dict[str, Any]:
     missing_markers = missing_source_markers(root)
     checks = {
         "panel_settings_contract_count": settings_ok and settings_coverage_ok and not missing_markers,
-        "dsv4_default_native_prefix_on": settings_ok and settings_coverage_ok,
-        "dsv4_explicit_prefix_off_disables_native_flags": settings_ok and settings_coverage_ok,
-        "dsv4_l2_explicit_off_preserves_prefix": settings_ok and settings_coverage_ok,
-        "dsv4_generic_kv_flags_suppressed": settings_ok and settings_coverage_ok,
-        "dsv4_pool_quant_controls_are_dsv4_only": (
-            settings_ok and settings_coverage_ok and not missing_markers
-        ),
+        "dsv4_default_full_prefill": settings_ok and settings_coverage_ok and not missing_markers,
+        "dsv4_default_native_prefix_off": settings_ok and settings_coverage_ok and not missing_markers,
+        "dsv4_stale_cache_controls_fail_closed": settings_ok and settings_coverage_ok and not missing_markers,
+        "dsv4_product_cache_opt_in_hidden": settings_ok and settings_coverage_ok and not missing_markers,
+        "dsv4_generic_tq_stays_off": settings_ok and settings_coverage_ok and not missing_markers,
         "max_output_context_cli_split": settings_ok and settings_coverage_ok,
         "chat_max_output_is_per_chat_override": settings_ok and settings_coverage_ok,
         "non_dsv4_cache_toggles_preserved": settings_ok and settings_coverage_ok,

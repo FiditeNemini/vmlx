@@ -33,8 +33,8 @@ def test_current_regression_suite_keeps_declared_known_blockers_open(tmp_path, m
         {
             "requirements": [
                 {"requirement": "Ling/Bailing multilingual output quality is release-cleared", "status": "pass"},
-                {"requirement": "DSV4 Flash prefix/paged/L2 cache is enabled by default from app launch", "status": "pass"},
-                {"requirement": "DSV4 default-cache multi-tool agent loop is proven", "status": "pass"},
+                {"requirement": "DSV4 product sessions default to fail-closed full prefill", "status": "pass"},
+                {"requirement": "Historical DSV4 native-cache multi-tool diagnostic is retained", "status": "pass"},
                 {"requirement": "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared", "status": "pass"},
                 *(
                     {"requirement": requirement, "status": "open"}
@@ -67,15 +67,15 @@ def test_current_regression_suite_does_not_keep_cleared_unblocked_non_mimo_gap_o
     )
 
 
-def test_current_regression_suite_does_not_keep_proven_dsv4_default_cache_tool_loop_open():
+def test_current_regression_suite_keeps_dsv4_safe_default_and_historical_tool_diagnostic_closed():
     from tests.cross_matrix import run_current_regression_suite as suite
 
     assert (
-        "DSV4 Flash prefix/paged/L2 cache is enabled by default from app launch"
+        "DSV4 product sessions default to fail-closed full prefill"
         not in suite.EXPECTED_OPEN_REQUIREMENTS
     )
     assert (
-        "DSV4 default-cache multi-tool agent loop is proven"
+        "Historical DSV4 native-cache multi-tool diagnostic is retained"
         not in suite.EXPECTED_OPEN_REQUIREMENTS
     )
 
@@ -89,34 +89,42 @@ def test_current_regression_suite_tracks_n2_pro_397b_as_known_open_requirement()
     )
 
 
-def test_current_regression_suite_does_not_keep_proven_dsv4_native_cache_or_multi_tool_open():
+def test_current_regression_suite_keeps_dsv4_classification_and_historical_tool_diagnostic_nonblocking():
     from tests.cross_matrix import run_current_regression_suite as suite
 
     assert (
-        "DSV4 cache is native SWA+CSA/HCA composite, not generic KV/TurboQuant KV"
+        "DSV4 cache opt-in remains native SWA+CSA/HCA composite with generic TurboQuant KV off"
         not in suite.EXPECTED_OPEN_REQUIREMENTS
     )
     assert (
-        "DSV4 can perform multiple tool iterations then final answer"
-        not in suite.EXPECTED_OPEN_REQUIREMENTS
-    )
-
-
-def test_current_regression_suite_does_not_keep_proven_dsv4_same_process_cache_hit_open():
-    from tests.cross_matrix import run_current_regression_suite as suite
-
-    assert (
-        "DSV4 same-process cache hit improves latency/TTFT and records paged+dsv4 hit"
+        "Historical DSV4 multi-tool diagnostic completed iterations and final answer"
         not in suite.EXPECTED_OPEN_REQUIREMENTS
     )
 
 
-def test_current_regression_suite_does_not_keep_proven_dsv4_restart_l2_open():
+def test_current_regression_suite_defers_dsv4_same_process_equivalence():
     from tests.cross_matrix import run_current_regression_suite as suite
 
     assert (
-        "DSV4 block disk L2 stores and hits after restart"
-        not in suite.EXPECTED_OPEN_REQUIREMENTS
+        "DSV4 native composite same-process reuse is cold-prefill equivalent"
+        in suite.EXPECTED_OPEN_REQUIREMENTS
+    )
+    assert (
+        "DSV4 native composite same-process reuse is cold-prefill equivalent"
+        in suite.DEFERRED_RELEASE_OPEN_REQUIREMENTS
+    )
+
+
+def test_current_regression_suite_defers_dsv4_restart_l2_equivalence():
+    from tests.cross_matrix import run_current_regression_suite as suite
+
+    assert (
+        "DSV4 native composite restart/L2 restore is cold-prefill equivalent"
+        in suite.EXPECTED_OPEN_REQUIREMENTS
+    )
+    assert (
+        "DSV4 native composite restart/L2 restore is cold-prefill equivalent"
+        in suite.DEFERRED_RELEASE_OPEN_REQUIREMENTS
     )
 
 
@@ -194,7 +202,7 @@ def test_current_regression_suite_preserves_expected_open_requirement_details(
         {
             "requirements": [
                 {
-                    "requirement": "DSV4 default-cache multi-tool agent loop is proven",
+                    "requirement": "Historical DSV4 native-cache multi-tool diagnostic is retained",
                     "status": "pass",
                     "caveat": None,
                     "evidence": ["build/current-dsv4-default-cache-tool-loop/result.json"],
@@ -254,7 +262,7 @@ def test_current_regression_suite_preserves_expected_open_requirement_details(
     artifact = suite.build_suite_artifact(tmp_path, include_release_gate=False)
 
     details = artifact["open_requirement_details"]
-    assert "DSV4 default-cache multi-tool agent loop is proven" not in details
+    assert "Historical DSV4 native-cache multi-tool diagnostic is retained" not in details
     assert (
         "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared"
         not in details
@@ -301,6 +309,11 @@ def test_current_regression_suite_hashes_dsv4_generation_boundary_sources():
     required = {
         "vmlx_engine/scheduler.py",
         "vmlx_engine/utils/dsv4_batch_generator.py",
+        "panel/src/renderer/src/components/sessions/CreateSession.tsx",
+        "panel/src/renderer/src/components/sessions/ServerSettingsDrawer.tsx",
+        "panel/src/renderer/src/components/sessions/SessionConfigForm.tsx",
+        "panel/src/renderer/src/components/sessions/SessionSettings.tsx",
+        "panel/src/shared/dsv4Env.ts",
         "tests/cross_matrix/run_dsv4_route_mode_code_exactness.py",
         "tests/cross_matrix/run_dsv4_default_cache_tool_loop_gate.py",
         "tests/cross_matrix/run_dsv4_responses_restart_l2_gate.py",
@@ -918,7 +931,7 @@ def test_current_regression_suite_fails_on_step_failure_even_if_digest_is_expect
         {
             "requirements": [
                 {"requirement": "Ling/Bailing multilingual output quality is release-cleared", "status": "pass"},
-                {"requirement": "DSV4 default-cache multi-tool agent loop is proven", "status": "pass"},
+                {"requirement": "Historical DSV4 native-cache multi-tool diagnostic is retained", "status": "pass"},
                 {"requirement": "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared", "status": "pass"},
                 {"requirement": "Cross-family live multi-turn smoke matrix is release-cleared", "status": "open"},
                 {"requirement": "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared", "status": "open"},
@@ -1275,6 +1288,27 @@ def test_noheavy_panel_settings_contract_default_out_tracks_current_release_proo
     assert gate.DEFAULT_OUT == Path(
         "build/current-panel-settings-contract-proof-20260601-cache-ui-storage-quant.json"
     )
+
+
+def test_noheavy_panel_settings_contract_uses_fail_closed_dsv4_semantics():
+    from tests.cross_matrix import run_noheavy_panel_settings_contract as gate
+
+    source = Path(gate.__file__).read_text(encoding="utf-8")
+    for key in (
+        "dsv4_default_full_prefill",
+        "dsv4_default_native_prefix_off",
+        "dsv4_stale_cache_controls_fail_closed",
+        "dsv4_product_cache_opt_in_hidden",
+        "dsv4_generic_tq_stays_off",
+    ):
+        assert f'"{key}"' in source
+    for legacy_key in (
+        "dsv4_default_native_prefix_on",
+        "dsv4_explicit_prefix_off_disables_native_flags",
+        "dsv4_l2_explicit_off_preserves_prefix",
+        "dsv4_pool_quant_controls_are_dsv4_only",
+    ):
+        assert legacy_key not in source
 
 
 def test_current_regression_suite_runs_panel_settings_contract_to_current_artifact(monkeypatch, tmp_path):

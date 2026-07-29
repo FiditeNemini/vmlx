@@ -249,11 +249,13 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         if (detected && detected.family !== 'unknown') {
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
-            base.dsv4PrefixCache = true
-            base.dsv4PoolQuant = detected.dsv4PoolQuantDefault ?? true
-            base.enablePrefixCache = true
-            base.usePagedCache = true
-            base.enableBlockDiskCache = true
+            base.dsv4PrefixCache = false
+            base.dsv4PoolQuant = typeof detected.dsv4PoolQuantDefault === 'boolean'
+              ? detected.dsv4PoolQuantDefault
+              : undefined
+            base.enablePrefixCache = false
+            base.usePagedCache = false
+            base.enableBlockDiskCache = false
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
           } else if (detected.family === 'openpangu_v2') {
             base.enablePrefixCache = true

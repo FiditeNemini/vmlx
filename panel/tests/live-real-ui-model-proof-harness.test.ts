@@ -659,7 +659,10 @@ describe("generated CDP expression syntax", () => {
       '"VMLINUX_REAL_UI_EXPECT_PAGED_CACHE": (',
     );
     expect(preflightSource).toContain(
-      '"VMLINUX_REAL_UI_MAX_TOKENS": "2048"',
+      'if int(phase["index"]) != 0:',
+    );
+    expect(preflightSource).toContain(
+      'environment["VMLINUX_REAL_UI_MAX_TOKENS"] = "2048"',
     );
   });
 });
@@ -1805,6 +1808,36 @@ function goodResult(): Record<string, any> {
   return result;
 }
 
+function dsv4FailClosedResult(): Record<string, any> {
+  const result = goodResult();
+  result.expectedDsv4CacheDisabled = true;
+  result.serverCacheControls = {
+    runningSessionDrawer: true,
+    controlScope: "running-session-toolbar",
+    verified: true,
+    dsv4DisabledWarningVisible: true,
+    dsv4CacheControlsAbsent: true,
+    initialCacheControls: {
+      enablePrefixCache: false,
+      usePagedCache: false,
+      enableBlockDiskCache: false,
+    },
+    argv: ["--disable-prefix-cache"],
+  };
+  result.session.effective_config = {
+    ...result.session.effective_config,
+    enablePrefixCache: false,
+    usePagedCache: false,
+    enableBlockDiskCache: false,
+  };
+  result.server.health.native_cache = {
+    prefix: false,
+    paged: false,
+    block_disk_l2: false,
+  };
+  return result;
+}
+
 function sse(...objects: Array<Record<string, unknown> | "[DONE]">) {
   return objects
     .map((object) =>
@@ -2567,6 +2600,7 @@ function createInstalledPairedArtifact(result: Record<string, any>) {
   const resources = path.join(appPath, "Contents", "Resources");
   const pythonPrefix = path.join(resources, "bundled-python", "python");
   const pythonPath = path.join(pythonPrefix, "bin", "python3");
+  const pythonTargetPath = path.join(pythonPrefix, "bin", "python3.12");
   const electronPath = path.join(appPath, "Contents", "MacOS", "vMLX");
   const appAsarPath = path.join(resources, "app.asar");
   const bundledProvenancePath = path.join(
@@ -2576,8 +2610,9 @@ function createInstalledPairedArtifact(result: Record<string, any>) {
   );
   mkdirSync(path.dirname(pythonPath), { recursive: true });
   mkdirSync(path.dirname(electronPath), { recursive: true });
-  writeFileSync(pythonPath, testExecutableBytes);
-  chmodSync(pythonPath, 0o755);
+  writeFileSync(pythonTargetPath, testExecutableBytes);
+  chmodSync(pythonTargetPath, 0o755);
+  symlinkSync("python3.12", pythonPath);
   writeFileSync(electronPath, testExecutableBytes);
   chmodSync(electronPath, 0o755);
   writeFileSync(appAsarPath, "installed-renderer-asar\n");
@@ -2603,13 +2638,14 @@ function createInstalledPairedArtifact(result: Record<string, any>) {
     };
   };
   const pythonIdentity = fileIdentity(pythonPath);
+  const canonicalPythonPath = pythonIdentity.path;
   const canonicalPythonPrefix = realpathSync(pythonPrefix);
   const appAsarIdentity = fileIdentity(appAsarPath);
   const electronIdentity = fileIdentity(electronPath);
   const provenanceIdentity = fileIdentity(bundledProvenancePath);
   const pythonPathSha = crypto
     .createHash("sha256")
-    .update(pythonPath)
+    .update(canonicalPythonPath)
     .digest("hex");
   const pythonPrefixSha = crypto
     .createHash("sha256")
@@ -2656,7 +2692,7 @@ function createInstalledPairedArtifact(result: Record<string, any>) {
     execution_mode: "installed-runtime",
     repo_venv: false,
     repo_python: false,
-    python_executable_path: pythonPath,
+    python_executable_path: canonicalPythonPath,
     python_executable_fingerprint_sha256: pythonPathSha,
     checkout_python_invocation_fingerprints_sha256: [],
     installed_python_invocation_fingerprints_sha256: [pythonPathSha],
@@ -2675,7 +2711,7 @@ function createInstalledPairedArtifact(result: Record<string, any>) {
       manifest_nlink: openedManifest.nlink,
       manifest_opened_nofollow: true,
       app_path: appPath,
-      invoked_python_path: pythonPath,
+      invoked_python_path: canonicalPythonPath,
       invoked_python_fingerprint_sha256: pythonPathSha,
       python_prefix_path: canonicalPythonPrefix,
       bundled_python: {
@@ -2727,7 +2763,10 @@ function createInstalledPairedArtifact(result: Record<string, any>) {
     backend_python_process_binding: {
       ...result.uiRuntimeProvenance.backend_python_process_binding,
       invoked_executable_path: pythonPath,
-      invoked_executable_path_fingerprint_sha256: pythonPathSha,
+      invoked_executable_path_fingerprint_sha256: crypto
+        .createHash("sha256")
+        .update(pythonPath)
+        .digest("hex"),
       executable_path: pythonIdentity.path,
       executable_sha256: pythonIdentity.sha256,
       executable_path_fingerprint_sha256: crypto
@@ -2756,6 +2795,7 @@ function createInstalledPairedArtifact(result: Record<string, any>) {
     appPath,
     manifestPath,
     pythonPath,
+    pythonTargetPath,
     artifact: writePairedArtifactValue(
       fixture.directory,
       "installed-paired-api-proof.json",
@@ -2779,6 +2819,41 @@ function refreshRawCaptureManifest(value: Record<string, any>) {
     .createHash("sha256")
     .update(manifestText)
     .digest("hex");
+}
+
+function restrictPairedArtifactToContract(
+  value: Record<string, any>,
+  protocols: string[],
+  modes: string[],
+) {
+  value.protocols = [...protocols];
+  value.modes = [...modes];
+  for (const baseLabel of ["direct", "gateway"]) {
+    for (const protocol of Object.keys(value.flows[baseLabel])) {
+      if (!protocols.includes(protocol)) {
+        delete value.flows[baseLabel][protocol];
+        continue;
+      }
+      for (const mode of Object.keys(value.flows[baseLabel][protocol])) {
+        if (!modes.includes(mode)) {
+          delete value.flows[baseLabel][protocol][mode];
+        }
+      }
+    }
+  }
+  value.paired_replays = {};
+  value.raw_capture.routes = value.raw_capture.routes.filter(
+    (route: Record<string, any>) => {
+      const mode = String(route.capture_label || "").startsWith("nonstream-")
+        ? "nonstream"
+        : "stream";
+      return protocols.includes(route.protocol) && modes.includes(mode);
+    },
+  );
+  for (const field of ["expected", "started", "finished"]) {
+    value.raw_capture[field] = value.raw_capture.routes.length;
+  }
+  refreshRawCaptureManifest(value);
 }
 
 function rewriteRawCaptureBody(
@@ -3542,6 +3617,94 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("keeps cache-positive evidence mandatory for non-DSV4 sessions", () => {
+    const result = goodResult();
+    expect(validateServerCacheEvidence(result)).toEqual([]);
+
+    result.serverCacheControls.initialCacheControls.enableBlockDiskCache = false;
+    expect(validateServerCacheEvidence(result).join("\n")).toMatch(
+      /SSD\/L2 control was not visibly enabled/,
+    );
+  });
+
+  it("accepts DSV4 only with the complete visible and runtime fail-closed contract", () => {
+    expect(validateServerCacheEvidence(dsv4FailClosedResult())).toEqual([]);
+  });
+
+  it.each([
+    [
+      "missing warning",
+      (result: Record<string, any>) => {
+        result.serverCacheControls.dsv4DisabledWarningVisible = false;
+      },
+      /fail-closed cache warning was not visible/,
+    ],
+    [
+      "exposed cache controls",
+      (result: Record<string, any>) => {
+        result.serverCacheControls.dsv4CacheControlsAbsent = false;
+      },
+      /product cache controls were still exposed/,
+    ],
+    ...(["enablePrefixCache", "usePagedCache", "enableBlockDiskCache"] as const)
+      .flatMap((field) => [
+        [
+          `visible ${field} ON`,
+          (result: Record<string, any>) => {
+            result.serverCacheControls.initialCacheControls[field] = true;
+          },
+          new RegExp(`running-session ${field} was not visibly fail-closed`),
+        ],
+        [
+          `persisted ${field} ON`,
+          (result: Record<string, any>) => {
+            result.session.effective_config[field] = true;
+          },
+          new RegExp(`persisted session ${field} was not fail-closed`),
+        ],
+      ]),
+    [
+      "missing --disable-prefix-cache",
+      (result: Record<string, any>) => {
+        result.serverCacheControls.argv = [];
+      },
+      /argv omitted --disable-prefix-cache/,
+    ],
+    ...([
+      "--dsv4-enable-prefix-cache",
+      "--use-paged-cache",
+      "--enable-block-disk-cache",
+    ] as const).map((option) => [
+      `forbidden argv ${option}`,
+      (result: Record<string, any>) => {
+        result.serverCacheControls.argv.push(option);
+      },
+      new RegExp(`unexpectedly included ${option}`),
+    ]),
+    ...(["prefix", "paged", "block_disk_l2"] as const).map((field) => [
+      `health native_cache.${field} ON`,
+      (result: Record<string, any>) => {
+        result.server.health.native_cache[field] = true;
+      },
+      new RegExp(`native_cache\\.${field} was not false`),
+    ]),
+    [
+      "unverified evidence",
+      (result: Record<string, any>) => {
+        result.serverCacheControls.verified = false;
+      },
+      /cache controls were not verified end to end/,
+    ],
+  ] as Array<[
+    string,
+    (result: Record<string, any>) => void,
+    RegExp,
+  ]>)("rejects the DSV4 stale cache surface: %s", (_name, mutate, expected) => {
+    const result = dsv4FailClosedResult();
+    mutate(result);
+    expect(validateServerCacheEvidence(result).join("\n")).toMatch(expected);
+  });
+
   it("rejects cumulative resets, transient parser markers, and final/persisted mismatch", () => {
     const result = structuredClone(goodResult());
     result.messageEventTrace[0].events[1].cumulativeReset = true;
@@ -3739,6 +3902,13 @@ describe("real UI model proof harness", () => {
     expect(source).toContain(
       "'[data-vmlx-proof-tool-card], [data-vmlx-proof-tool-container]'",
     );
+    expect(source).toContain("proseProbe.appendChild(proseAnswer);");
+    expect(source).toContain("document.body.appendChild(proseProbe);");
+    expect(source).toContain("proseAnswer.innerText.trim()");
+    expect(source).not.toContain(
+      "proseAnswer.innerText || proseAnswer.textContent",
+    );
+    expect(source).toContain("proseProbe.remove();");
 
     const valid = structuredClone(goodResult());
     valid.renderedDom.messages[0].toolCards[0].text =
@@ -3824,6 +3994,72 @@ describe("real UI model proof harness", () => {
     }
   });
 
+  it("enforces the exact phase-scoped paired API contract without weakening full phases", () => {
+    const result = structuredClone(goodResult());
+    result.surfaceStatus = "dual_surface_attested";
+    result.apiActionProfile = "cache-probe";
+    result.requestContract.apiActionProfile = "cache-probe";
+    const fixture = createValidPairedArtifact(result);
+    try {
+      result.apiActionProfile = "full-agentic";
+      result.requestContract.apiActionProfile = "full-agentic";
+      result.pairedApiArtifact = fixture.artifact;
+      expect(validatePairedApiEvidence(result)).toEqual([]);
+
+      delete result.apiActionProfile;
+      expect(validatePairedApiEvidence(result).join("\n")).toMatch(
+        /action profile is missing, inconsistent, or unsupported/,
+      );
+      result.apiActionProfile = "full-agentic";
+      delete result.requestContract.apiActionProfile;
+      expect(validatePairedApiEvidence(result).join("\n")).toMatch(
+        /action profile is missing, inconsistent, or unsupported/,
+      );
+
+      result.apiActionProfile = "cache-probe";
+      result.requestContract.apiActionProfile = "cache-probe";
+      const scoped = structuredClone(fixture.artifact.value);
+      restrictPairedArtifactToContract(scoped, ["chat"], ["stream"]);
+      result.pairedApiArtifact = writePairedArtifactValue(
+        fixture.directory,
+        "scoped-chat-stream.json",
+        scoped,
+      );
+      expect(validatePairedApiEvidence(result)).toEqual([]);
+
+      const extraProtocol = structuredClone(scoped);
+      extraProtocol.protocols.push("responses");
+      result.pairedApiArtifact = writePairedArtifactValue(
+        fixture.directory,
+        "scoped-extra-protocol.json",
+        extraProtocol,
+      );
+      expect(validatePairedApiEvidence(result).join("\n")).toMatch(
+        /exact passing vmlx-agentic-protocol-matrix-v2 run/,
+      );
+
+      result.apiActionProfile = "full-agentic-plus-cache-store";
+      result.requestContract.apiActionProfile =
+        "full-agentic-plus-cache-store";
+      result.pairedApiArtifact = writePairedArtifactValue(
+        fixture.directory,
+        "subset-on-full-profile.json",
+        scoped,
+      );
+      expect(validatePairedApiEvidence(result).join("\n")).toMatch(
+        /exact passing vmlx-agentic-protocol-matrix-v2 run|matrix protocols are incomplete/,
+      );
+
+      result.apiActionProfile = "cache-probe";
+      result.requestContract.apiActionProfile = "cache-restart-probe";
+      expect(validatePairedApiEvidence(result).join("\n")).toMatch(
+        /action profile is missing, inconsistent, or unsupported/,
+      );
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
   it("binds an installed paired producer to the same private manifest and packaged bytes", () => {
     const result = goodResult();
     result.surfaceStatus = "dual_surface_attested";
@@ -3836,6 +4072,10 @@ describe("real UI model proof harness", () => {
       expect(installed.bundled_python.path).toBe(
         realpathSync(fixture.pythonPath),
       );
+      expect(path.basename(installed.invoked_python_path)).toBe("python3.12");
+      expect(
+        fixture.artifact.value.identity.runner.before.python_executable_path,
+      ).toBe(realpathSync(fixture.pythonPath));
       expect(path.relative(realpathSync(installed.app_path), installed.bundled_python.path))
         .not.toMatch(/^\.\.(?:\/|$)/);
       expect(validateUiRuntimeProvenance(result)).toEqual([]);
@@ -3847,6 +4087,26 @@ describe("real UI model proof harness", () => {
       );
       expect(validatePairedApiEvidence(result).join("\n")).toMatch(
         /producer executable\/harness bytes|bundled Python path\/bytes|canonical executable identity/,
+      );
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an in-app versioned Python target that differs from exact python3", () => {
+    const result = goodResult();
+    result.surfaceStatus = "dual_surface_attested";
+    const fixture = createInstalledPairedArtifact(result);
+    try {
+      result.pairedApiArtifact = fixture.artifact;
+      expect(validatePairedApiEvidence(result)).toEqual([]);
+      const otherVersion = path.join(path.dirname(fixture.pythonPath), "python3.11");
+      writeFileSync(otherVersion, testExecutableBytes);
+      chmodSync(otherVersion, 0o755);
+      rmSync(fixture.pythonPath);
+      symlinkSync("python3.11", fixture.pythonPath);
+      expect(validatePairedApiEvidence(result).join("\n")).toMatch(
+        /installed app\/Python paths|canonical path escapes or differs/,
       );
     } finally {
       rmSync(fixture.directory, { recursive: true, force: true });

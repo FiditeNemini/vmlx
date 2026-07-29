@@ -370,7 +370,6 @@ function buildCommandPreview(
   const dsv4Active = detectedFamily === 'deepseek-v4'
   const m3Active = detectedFamily === 'minimax_m3'
   const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
-  const dsv4PrefixCacheOptIn = dsv4Active && config.dsv4PrefixCache !== false
   const effectiveSmelt = !!(config as any).smelt && !dsv4Active
   // User explicitly toggled multimodal OFF (Force Off) — must beat detected VL.
   // Mirror buildArgs (sessions.ts): m3Active stands in for m3VlRoute since the
@@ -477,19 +476,18 @@ function buildCommandPreview(
   const zayaTypedCacheRequiresPaged = zayaCcaActive
   const architectureRequiresPagedCache =
     zayaTypedCacheRequiresPaged ||
-    dsv4PrefixCacheOptIn ||
     ((cacheTypeRequiresPaged(detected?.cacheType) || subtypePagedCacheActive) && detected?.usePagedCache === true)
   const cacheLaunchPolicy = resolveCacheLaunchPolicy({
     continuousBatching: cacheStackActive,
     enablePrefixCache: dsv4Active
-      ? dsv4PrefixCacheOptIn && config.enablePrefixCache !== false
+      ? false
       : config.enablePrefixCache !== false,
     usePagedCache: dsv4Active
-      ? dsv4PrefixCacheOptIn
+      ? false
       : config.usePagedCache ?? detected?.usePagedCache ?? false,
     enableDiskCache: !!config.enableDiskCache,
     enableBlockDiskCache: dsv4Active
-      ? dsv4PrefixCacheOptIn && !!config.enableBlockDiskCache
+      ? false
       : !!config.enableBlockDiskCache,
     architectureRequiresPagedCache,
     architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
@@ -511,8 +509,9 @@ function buildCommandPreview(
       // H1 parity: --cache-memory-mb/--cache-memory-percent set the paged L1 RAM
       // byte ceiling and DO reach the engine under paged (sessions.ts emits them
       // unconditionally). The preview must show them in both modes or it lies
-      // about the launch, including DSV4 native composite L1. Only
-      // --cache-ttl-minutes is genuinely inert under paged.
+      // about the launch. Only --cache-ttl-minutes is genuinely inert under
+      // paged. DSV4 never reaches this branch because product prefix reuse is
+      // fail-closed.
       const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
       if (!blockDiskOnly && cacheMemoryMb != null) parts.push('--cache-memory-mb', cacheMemoryMb.toString())
       const cacheMemoryPercent = finitePositiveNumber(config.cacheMemoryPercent)
@@ -586,8 +585,6 @@ function buildCommandPreview(
     enableAutoToolChoice: effectiveAutoTool,
   }))
   if (effectiveReasoningParser) parts.push('--reasoning-parser', effectiveReasoningParser)
-  if (dsv4PrefixCacheOptIn) parts.push('--dsv4-enable-prefix-cache')
-
   if (config.mcpConfig) parts.push('--mcp-config', config.mcpConfig)
   parts.push(...buildMcpPolicyArgs(config))
 
@@ -702,7 +699,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
   const [restarting, setRestarting] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [showPreview, setShowPreview] = useState(false)
-  const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; architectureHints?: Record<string, string | number | boolean>; maxContextLength?: number; dsv4PoolQuantDefault?: boolean; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; blockedReason?: string } } | null>(null)
+  const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; dsv4PoolQuantDefault?: boolean; architectureHints?: Record<string, string | number | boolean>; maxContextLength?: number; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; blockedReason?: string } } | null>(null)
   const sessionIdRef = useRef(sessionId)
   const resetRequestRef = useRef(0)
   sessionIdRef.current = sessionId
@@ -871,12 +868,14 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
           // Reset restores model-derived Auto, not a sticky explicit On/Off.
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
-            base.dsv4PrefixCache = true
-            base.dsv4PoolQuant = detected.dsv4PoolQuantDefault ?? true
-            base.enablePrefixCache = true
-            base.usePagedCache = true
+            base.dsv4PrefixCache = false
+            base.dsv4PoolQuant = typeof detected.dsv4PoolQuantDefault === 'boolean'
+              ? detected.dsv4PoolQuantDefault
+              : undefined
+            base.enablePrefixCache = false
+            base.usePagedCache = false
             base.enableDiskCache = false
-            base.enableBlockDiskCache = true
+            base.enableBlockDiskCache = false
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
           } else if (detected.family === 'openpangu_v2') {
             base.enablePrefixCache = true

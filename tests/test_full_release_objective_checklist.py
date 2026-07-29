@@ -347,11 +347,11 @@ def _write_green_family_smokes(tmp_path: Path) -> None:
 def _write_green_panel_settings_artifact(tmp_path: Path) -> None:
     checks = {
         "panel_settings_contract_count": True,
-        "dsv4_default_native_prefix_on": True,
-        "dsv4_explicit_prefix_off_disables_native_flags": True,
-        "dsv4_l2_explicit_off_preserves_prefix": True,
-        "dsv4_generic_kv_flags_suppressed": True,
-        "dsv4_pool_quant_controls_are_dsv4_only": True,
+        "dsv4_default_full_prefill": True,
+        "dsv4_default_native_prefix_off": True,
+        "dsv4_stale_cache_controls_fail_closed": True,
+        "dsv4_product_cache_opt_in_hidden": True,
+        "dsv4_generic_tq_stays_off": True,
         "max_output_context_cli_split": True,
         "chat_max_output_is_per_chat_override": True,
         "non_dsv4_cache_toggles_preserved": True,
@@ -374,7 +374,7 @@ def _write_green_panel_settings_artifact(tmp_path: Path) -> None:
             "commands": {
                 "panel_settings_contracts": {
                     "returncode": 0,
-                    "counts": {"test_files_passed": 6, "tests_passed": 314},
+                    "counts": {"test_files_passed": 7, "tests_passed": 314},
                 }
             },
         },

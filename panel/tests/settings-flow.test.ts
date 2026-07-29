@@ -165,8 +165,8 @@ const DEFAULT_CONFIG: SessionConfig = {
     defaultRepetitionPenalty: 0,
     defaultMaxNewTokens: 0,
     defaultEnableThinking: undefined,
-    dsv4PrefixCache: true,
-    dsv4PoolQuant: true,
+    dsv4PrefixCache: false,
+    dsv4PoolQuant: undefined,
     nativeMtpMode: 'auto',
     nativeMtpDepth: 3,
     nativeMtpDepthOverride: false,
@@ -344,7 +344,6 @@ function buildCommandPreview(
     const turboQuantActive = !!detected?.isTurboQuant
     const dsv4Active = detectedFamily === 'deepseek-v4'
     const m3Active = detectedFamily === 'minimax_m3'
-    const dsv4PrefixCacheOptIn = dsv4Active && config.dsv4PrefixCache !== false
     const effectiveSmelt = !!config.smelt && !dsv4Active
     // Mirror buildArgs (sessions.ts): user Force-Off (isMultimodal===false) beats
     // detected VL; m3Active stands in for m3VlRoute (registry sets it for every
@@ -430,18 +429,17 @@ function buildCommandPreview(
     const cacheLaunchPolicy = resolveCacheLaunchPolicy({
         continuousBatching: cacheStackActive,
         enablePrefixCache: dsv4Active
-            ? dsv4PrefixCacheOptIn && config.enablePrefixCache !== false
+            ? false
             : config.enablePrefixCache !== false,
         usePagedCache: dsv4Active
-            ? dsv4PrefixCacheOptIn
+            ? false
             : config.usePagedCache ?? detected?.usePagedCache ?? false,
         enableDiskCache: !!config.enableDiskCache,
         enableBlockDiskCache: dsv4Active
-            ? dsv4PrefixCacheOptIn && !!config.enableBlockDiskCache
+            ? false
             : !!config.enableBlockDiskCache,
         architectureRequiresPagedCache:
             zayaCcaActive ||
-            dsv4PrefixCacheOptIn ||
             ((cacheTypeRequiresPaged(detected?.cacheType) || cacheSubtypeRequiresPaged(detected?.cacheSubtype)) && detected?.usePagedCache === true),
         architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
     })
@@ -523,7 +521,6 @@ function buildCommandPreview(
         enableAutoToolChoice: effectiveAutoTool,
     }))
     if (effectiveReasoningParser) parts.push('--reasoning-parser', effectiveReasoningParser)
-    if (dsv4PrefixCacheOptIn) parts.push('--dsv4-enable-prefix-cache')
 
     if (config.mcpConfig) parts.push('--mcp-config', config.mcpConfig)
     parts.push(...buildMcpPolicyArgs(config))
@@ -1186,7 +1183,7 @@ describe('Disk Cache', () => {
         expect(source).toContain('cacheControlUpdatesForBlockDiskToggle')
         expect(source).toContain('const genericPagedCacheToggleDisabled = !dsv4Active && (cachePolicy.pagedCacheDisabled || openPanguExactTypedCache)')
         expect(source).toContain('disabled={genericPagedCacheToggleDisabled}')
-        expect(source).toContain('disabled={cachePolicy.legacyDiskCacheDisabled}')
+        expect(source).toContain('disabled={dsv4Active || cachePolicy.legacyDiskCacheDisabled}')
         expect(source).toContain('checked={cachePolicy.legacyDiskCacheChecked}')
         expect(source).not.toContain('disabled={batchingOff || prefixOff || zayaTypedCacheRequiresPaged || dsv4CompositeRequiresPaged}')
         expect(source).not.toContain('disabled={batchingOff || prefixOff || effectiveUsePagedCache}')
@@ -2160,7 +2157,8 @@ describe('Additional Arguments', () => {
         expect(normalized).not.toContain('--native-mtp-sampling-policy')
         expect(normalized).not.toContain('deterministic-defaults')
         expect(normalized).not.toContain('--disable-native-mtp')
-        expect((normalized.match(/--dsv4-enable-prefix-cache/g) || []).length).toBe(1)
+        expect((normalized.match(/--dsv4-enable-prefix-cache/g) || []).length).toBe(0)
+        expect(normalized).toContain('--disable-prefix-cache')
         expect(normalized).not.toContain('--default-temperature')
         expect(normalized).not.toContain('--max-tokens')
         expect(normalized).not.toContain('--log-level DEBUG')
@@ -2322,7 +2320,7 @@ describe('No Hardcoded Values', () => {
         expect(getFlagValue(preview({ enablePrefixCache: true, usePagedCache: true, pagedCacheBlockSize: 256 }), '--paged-cache-block-size')).toBe('256')
     })
 
-    it('deepseek-v4 enables native composite prefix cache by default even with stale cache config', () => {
+    it('deepseek-v4 disables native composite reuse even with stale cache config', () => {
         const out = preview(
             {
                 dsv4PoolQuant: true,
@@ -2341,13 +2339,13 @@ describe('No Hardcoded Values', () => {
             { family: 'deepseek-v4', usePagedCache: false },
         )
 
-        expect(hasFlag(out, '--dsv4-enable-prefix-cache')).toBe(true)
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
-        expect(getFlagValue(out, '--paged-cache-block-size')).toBe('256')
+        expect(hasFlag(out, '--dsv4-enable-prefix-cache')).toBe(false)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(getFlagValue(out, '--paged-cache-block-size')).toBe(undefined)
         expect(getFlagValue(out, '--max-num-seqs')).toBe('1')
         expect(hasFlag(out, '--no-continuous-batching')).toBe(false)
         expect(hasFlag(out, '--continuous-batching')).toBe(true)
-        expect(hasFlag(out, '--disable-prefix-cache')).toBe(false)
+        expect(hasFlag(out, '--disable-prefix-cache')).toBe(true)
         expect(hasFlag(out, '--prefill-batch-size')).toBe(false)
         expect(getFlagValue(out, '--prefill-step-size')).toBe('2048')
         expect(hasFlag(out, '--completion-batch-size')).toBe(false)
@@ -2368,7 +2366,7 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(out, '--completion-batch-size')).toBe(false)
     })
 
-    it('deepseek-v4 native cache path uses DS4 page-sized blocks', () => {
+    it('deepseek-v4 stale native-cache settings remain fail-closed', () => {
         const out = preview(
             {
                 dsv4PrefixCache: true,
@@ -2380,11 +2378,11 @@ describe('No Hardcoded Values', () => {
             { family: 'deepseek-v4', usePagedCache: false },
         )
 
-        expect(hasFlag(out, '--dsv4-enable-prefix-cache')).toBe(true)
-        expect(hasFlag(out, '--disable-prefix-cache')).toBe(false)
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
-        expect(getFlagValue(out, '--paged-cache-block-size')).toBe('256')
-        expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
+        expect(hasFlag(out, '--dsv4-enable-prefix-cache')).toBe(false)
+        expect(hasFlag(out, '--disable-prefix-cache')).toBe(true)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(getFlagValue(out, '--paged-cache-block-size')).toBe(undefined)
+        expect(hasFlag(out, '--enable-block-disk-cache')).toBe(false)
     })
 
     it('Step3.7 full/sliding KV cache subtype honors typed SSD-only mode with Block L2', () => {
@@ -2440,7 +2438,7 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
     })
 
-    it('deepseek-v4 cache launch flags are singular and match the native-cache UI switch', () => {
+    it('deepseek-v4 cache launch flags are singular and fail closed', () => {
         const enabled = preview(
             {
                 dsv4PrefixCache: true,
@@ -2456,15 +2454,16 @@ describe('No Hardcoded Values', () => {
             { family: 'deepseek-v4', cacheType: 'hybrid', usePagedCache: false },
         ).replace(/\s*\\\n\s*/g, ' ')
 
-        expect(countOccurrences(enabled, '--dsv4-enable-prefix-cache')).toBe(1)
-        expect(countOccurrences(enabled, '--use-paged-cache')).toBe(1)
-        expect(countOccurrences(enabled, '--enable-block-disk-cache')).toBe(1)
-        expect(getFlagValue(enabled, '--paged-cache-block-size')).toBe('256')
+        expect(countOccurrences(enabled, '--dsv4-enable-prefix-cache')).toBe(0)
+        expect(countOccurrences(enabled, '--use-paged-cache')).toBe(0)
+        expect(countOccurrences(enabled, '--enable-block-disk-cache')).toBe(0)
+        expect(getFlagValue(enabled, '--paged-cache-block-size')).toBe(undefined)
+        expect(countOccurrences(enabled, '--disable-prefix-cache')).toBe(1)
         expect(hasFlag(enabled, '--enable-disk-cache')).toBe(false)
         expect(hasFlag(enabled, '--kv-cache-quantization')).toBe(false)
         expect(hasFlag(enabled, '--no-memory-aware-cache')).toBe(false)
         expect(hasFlag(enabled, '--prefix-cache-size')).toBe(false)
-        expect(getFlagValue(enabled, '--cache-memory-percent')).toBe('0.25')
+        expect(hasFlag(enabled, '--cache-memory-percent')).toBe(false)
 
         const disabled = preview(
             {
@@ -2482,7 +2481,7 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(disabled, '--enable-block-disk-cache')).toBe(false)
     })
 
-    it('DSV4 pool quant and native prefix controls stay DSV4-only', () => {
+    it('DSV4 stale cache settings fail closed and stay family-scoped', () => {
         const staleDsv4Config = {
             dsv4PrefixCache: true,
             dsv4PoolQuant: true,
@@ -2507,19 +2506,23 @@ describe('No Hardcoded Values', () => {
             family: 'deepseek-v4',
             usePagedCache: true,
         })
-        expect(hasFlag(dsv4, '--dsv4-enable-prefix-cache')).toBe(true)
-        expect(hasFlag(dsv4, '--use-paged-cache')).toBe(true)
-        expect(getFlagValue(dsv4, '--paged-cache-block-size')).toBe('256')
+        expect(hasFlag(dsv4, '--dsv4-enable-prefix-cache')).toBe(false)
+        expect(hasFlag(dsv4, '--use-paged-cache')).toBe(false)
+        expect(getFlagValue(dsv4, '--paged-cache-block-size')).toBe(undefined)
+        expect(hasFlag(dsv4, '--disable-prefix-cache')).toBe(true)
         expect(hasFlag(dsv4, '--kv-cache-quantization')).toBe(false)
         expect(hasFlag(dsv4, '--kv-cache-group-size')).toBe(false)
     })
 
-    it('deepseek-v4 family defaults preserve explicit pool quant and initialize from the bundle stamp', () => {
+    it('deepseek-v4 family defaults clear stale panel cache controls', () => {
         const source = readFileSync(resolve(__dirname, '../src/main/sessions.ts'), 'utf8')
-        expect(source).toContain('config.dsv4PoolQuant == null')
-        expect(source).toContain('const dsv4PoolQuantDefault = detected.dsv4PoolQuantDefault ?? true')
-        expect(source).toContain('config.dsv4PoolQuant = dsv4PrefixOptIn && dsv4PoolQuantDefault')
-        expect(source).toContain('dsv4PoolQuant: dsv4DefaultCacheOptIn && (detected.dsv4PoolQuantDefault ?? true)')
+        expect(source).toContain('config.dsv4PrefixCache = false')
+        expect(source).not.toContain('config.dsv4PoolQuant = false')
+        expect(source).not.toContain('const dsv4DefaultCacheOptIn = false')
+        expect(source).toContain('config.dsv4PoolQuant = detected.dsv4PoolQuantDefault')
+        expect(source).toContain('delete config.dsv4PoolQuant')
+        expect(source).toContain("dsv4PoolQuant: detectedFamily === 'deepseek-v4'")
+        expect(source).toContain('? detected.dsv4PoolQuantDefault')
     })
 
     it('detected Qwen3.6 hybrid cache honors paged Off when block SSD L2 owns the prefix backend', () => {
@@ -2803,7 +2806,7 @@ describe('Default IP and New Settings', () => {
         expect(form).toContain("normalizedDetectedFamily === 'openpangu_v2'")
         expect(form).toContain('openPangu v2 uses exact typed N-1 prompt snapshots')
         expect(form).toContain('disabled={openPanguExactTypedCache}')
-        expect(form).toContain('Cache Memory Limit / % controls its real L1 RAM byte ceiling')
+        expect(form).toContain("Memory-aware mode is required for openPangu's non-aliasing typed cache clone")
         expect(form).toContain('cachePolicy.blockDiskCacheDisabled || openPanguExactTypedCache')
     })
 
@@ -2835,9 +2838,9 @@ describe('Default IP and New Settings', () => {
         const launchEnd = source.indexOf('const handleLaunchRemote', launchStart)
         const launchBlock = source.slice(launchStart, launchEnd)
 
-        expect(detectBlock).toContain("usePagedCache: detected?.family === 'deepseek-v4' ? true : detected?.usePagedCache")
+        expect(detectBlock).toContain("usePagedCache: detected?.family === 'deepseek-v4' ? false : detected?.usePagedCache")
         expect(detectBlock).toContain("enableDiskCache: detected?.family === 'openpangu_v2'")
-        expect(detectBlock).toContain("enableBlockDiskCache: detected?.family !== 'openpangu_v2'")
+        expect(detectBlock).toContain("enableBlockDiskCache: detected?.family !== 'openpangu_v2' && detected?.family !== 'deepseek-v4'")
         expect(launchBlock).toContain('const normalizedCacheConfig = config')
         expect(launchBlock).not.toContain('enableDiskCache: false, enableBlockDiskCache: true')
         expect(launchBlock).toContain('window.api.sessions.create(selectedModel, launchConfig)')
@@ -2856,12 +2859,11 @@ describe('Default IP and New Settings', () => {
         expect(helper).toContain("setConfigValue(mutable, 'kvCacheQuantization', openPanguExactTypedCache ? 'none' : 'auto')")
         // v8 paged-default-ON (2026-07-12): fresh sessions inherit the detected
         // per-family paged capability — paged ON for autodetected TEXT families,
-        // OFF for VL/MLLM (#98) and arch-incompatible families. DSV4 keeps its
-        // prefix opt-in. SSD block-disk L2 is independent of paged RAM.
-        expect(helper).toContain('const defaultUsePagedCache = dsv4Active ? dsv4PrefixOptIn : (detectedUsePaged ?? false)')
+        // OFF for VL/MLLM (#98) and arch-incompatible families. DSV4 fails
+        // closed. SSD block-disk L2 is independent of paged RAM.
+        expect(helper).toContain('const defaultUsePagedCache = !dsv4Active && (detectedUsePaged ?? false)')
         expect(helper).toContain('const defaultEnableDiskCache = openPanguExactTypedCache')
-        expect(helper).toContain("const defaultEnableBlockDiskCache = openPanguExactTypedCache")
-        expect(helper).toContain(': true')
+        expect(helper).toContain('const defaultEnableBlockDiskCache = !openPanguExactTypedCache && !dsv4Active')
     })
 
     it('v9 migrates only the pre-v9 stale impossible paged plus legacy-L2 tuple to block L2', () => {
@@ -2965,8 +2967,7 @@ describe('Default IP and New Settings', () => {
         const block = source.slice(start, end)
 
         expect(block).toContain("enableDiskCache: detectedFamily === 'openpangu_v2'")
-        expect(block).toContain("enableBlockDiskCache: detectedFamily === 'openpangu_v2'")
-        expect(block).toContain(': true')
+        expect(block).toContain("detectedFamily !== 'openpangu_v2' && detectedFamily !== 'deepseek-v4'")
     })
 
     it('reset persists detected paged L2 and force-text-only values explicitly', () => {
@@ -3596,7 +3597,7 @@ describe('JIT Toggle', () => {
         expect(envTypes).toContain('cacheSubtype?: string')
     })
 
-    it('settings form and launch code surface one DSV4 native composite cache switch', () => {
+    it('settings form and launch code fail closed for DSV4 native composite reuse', () => {
         const fs = require('fs')
         const form = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
@@ -3608,42 +3609,42 @@ describe('JIT Toggle', () => {
         )
         const sessions = fs.readFileSync('src/main/sessions.ts', 'utf-8')
 
-        expect(form).toContain('dsv4CompositeRequiresPaged')
-        expect(form).toContain('dsv4CompositeCacheOptIn')
-        expect(form).toContain('DSV4 Native Composite Prefix Cache')
-        expect(form).toContain('DSV4 CSA/HCA Pool Codec')
-        expect(form).toContain('native composite prefix cache is off for this session')
-        expect(form).toContain('cacheControlUpdatesForDsv4CompositeToggle')
-        expect(form).toContain('cacheControlUpdatesForDsv4BlockDiskToggle')
-        expect(form).toContain('applyDsv4CompositeCacheToggle')
+        expect(form).not.toContain('dsv4CompositeRequiresPaged')
+        expect(form).not.toContain('dsv4CompositeCacheOptIn')
+        expect(form).not.toContain('DSV4 Native Composite Prefix Cache')
+        expect(form).not.toContain('DSV4 CSA/HCA Pool Codec')
+        expect(form).toContain('restored SWA+CSA/HCA state has not proven output-equivalent')
+        expect(form).not.toContain('cacheControlUpdatesForDsv4CompositeToggle')
+        expect(form).not.toContain('cacheControlUpdatesForDsv4BlockDiskToggle')
+        expect(form).not.toContain('applyDsv4CompositeCacheToggle')
         expect(form).not.toContain('DSV4 Native Cache')
         expect(form).not.toContain('DSV4 Composite Prefix Cache')
         expect(form).not.toContain('DSV4 Pool Quantization')
         expect(form).not.toContain('DSV4 Flash composite prefix cache is disabled')
         expect(form).not.toContain("dsv4Active ? applyDsv4CompositeCacheToggle(v) : applyCacheControlUpdates(cacheControlUpdatesForPagedToggle")
-        expect(form).toContain("dsv4Active ? cacheControlUpdatesForDsv4BlockDiskToggle(v) : cacheControlUpdatesForBlockDiskToggle")
+        expect(form).not.toContain("dsv4Active ? cacheControlUpdatesForDsv4BlockDiskToggle(v) : cacheControlUpdatesForBlockDiskToggle")
         expect(form).toContain('const genericPagedCacheToggleDisabled = !dsv4Active && (cachePolicy.pagedCacheDisabled || openPanguExactTypedCache)')
         expect(form).toContain('disabled={genericPagedCacheToggleDisabled}')
-        expect(form).toContain('block size is fixed to 256 tokens')
-        expect(form).toContain('checked={config.dsv4PrefixCache !== false}')
+        expect(form).not.toContain('block size is fixed to 256 tokens')
+        expect(form).not.toContain('checked={config.dsv4PrefixCache !== false}')
         expect(form).not.toContain('checked={dsv4Active ? true : config.enablePrefixCache}')
         expect(settings).toContain('DSV4_PAGED_CACHE_BLOCK_SIZE = 256')
-        expect(settings).toContain('dsv4PrefixCacheOptIn')
+        expect(settings).not.toContain('dsv4PrefixCacheOptIn')
         expect(sessions).toContain('DSV4_PAGED_CACHE_BLOCK_SIZE = 256')
         expect(sessions).toContain('--dsv4-enable-prefix-cache')
-        expect(sessions).toContain('native composite prefix/paged/L2 cache explicitly disabled for this session')
+        expect(sessions).toContain('native composite prefix/paged/L2 cache disabled until restored output equivalence is proven')
         expect(sessions).not.toContain('const prefixCacheOff = dsv4Active ? false')
     })
 
-    it('settings form keeps DSV4 native cache controls deduped and names generic controls distinctly', () => {
+    it('settings form hides all unusable DSV4 cache controls and names generic controls distinctly', () => {
         const form = readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
             'utf-8',
         )
 
-        expect(countOccurrences(form, 'label="DSV4 Native Composite Prefix Cache"')).toBe(1)
-        expect(countOccurrences(form, 'label="DSV4 CSA/HCA Pool Codec"')).toBe(1)
-        expect(countOccurrences(form, 'label={dsv4Active ? "DSV4 Block Disk Cache (SSD / L2)" : "Block Disk Cache (SSD / L2)"}')).toBe(1)
+        expect(countOccurrences(form, 'label="DSV4 Native Composite Prefix Cache"')).toBe(0)
+        expect(countOccurrences(form, 'label="DSV4 CSA/HCA Pool Codec"')).toBe(0)
+        expect(countOccurrences(form, 'label="Block Disk Cache (SSD / L2)"')).toBe(1)
         expect(countOccurrences(form, 'label="In-Memory Paged Cache (RAM)"')).toBe(1)
         expect(form).toContain('{!dsv4Active && (')
         expect(form).not.toContain('LOCKED OFF')
@@ -3653,7 +3654,7 @@ describe('JIT Toggle', () => {
         expect(form).not.toContain('limited GPU RAM')
         expect(form).toContain("e.preventDefault()")
         expect(form).toContain('className="relative inline-flex ml-1"\n      onClick={handleClick}')
-        expect(form).toContain('disabled={dsv4CompositeRequiresPaged}')
+        expect(form).not.toContain('disabled={dsv4CompositeRequiresPaged}')
         expect(form).toContain('disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}')
         expect(form).not.toContain('DSV4 Native Cache')
         expect(form).not.toContain('DSV4 Composite Prefix Cache')
@@ -3729,20 +3730,21 @@ describe('JIT Toggle', () => {
         expect(form).toContain('disabled={genericPagedCacheToggleDisabled}')
     })
 
-    it('settings form hides generic paged-cache warnings for the DSV4 native cache path', () => {
+    it('settings form hides generic cache controls and shows DSV4 fail-closed truth', () => {
         const fs = require('fs')
         const form = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
             'utf-8',
         )
 
-        expect(form).toContain('{!dsv4Active && !dsv4CompositeRequiresPaged && config.enableDiskCache &&')
-        expect(form).toContain('{!dsv4Active && !dsv4CompositeRequiresPaged && !batchingOff && prefixOff &&')
-        expect(form).toContain('Persist DeepSeek-V4 native SWA+CSA/HCA composite cache records to SSD')
+        expect(form).toContain('{!dsv4Active && config.enableDiskCache &&')
+        expect(form).toContain('{!dsv4Active && !batchingOff && prefixOff &&')
+        expect(form).not.toContain('Persist DeepSeek-V4 native SWA+CSA/HCA composite cache records to SSD')
         expect(form).toContain("cachePolicy.legacyDiskCacheUnavailableReason === 'paged-cache-active'")
         expect(form).toContain("cachePolicy.legacyDiskCacheUnavailableReason === 'architecture-requires-paged-cache'")
-        expect(form).toContain('This is not generic paged KV')
-        expect(form).toContain('DSV4 Native Composite Prefix Cache')
+        expect(form).toContain('Requests use full prefill')
+        expect(form).toContain('{!dsv4Active && showCachingHelp && (')
+        expect(form).not.toContain('DSV4 Native Composite Prefix Cache')
     })
 
     it('enableJit does not affect other flags', () => {
@@ -3949,7 +3951,7 @@ describe('Feature Interaction', () => {
         expect(hasFlag(out, '--cache-ttl-minutes')).toBe(false)
     })
 
-    it('DSV4 native composite paged L1 receives the visible cache memory budget', () => {
+    it('DSV4 stale cache settings do not emit a paged L1 memory budget', () => {
         const out = preview({
             enablePrefixCache: true,
             dsv4PrefixCache: true,
@@ -3958,10 +3960,11 @@ describe('Feature Interaction', () => {
             cacheMemoryPercent: 15,
         }, { family: 'deepseek-v4' })
 
-        expect(hasFlag(out, '--dsv4-enable-prefix-cache')).toBe(true)
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
-        expect(getFlagValue(out, '--cache-memory-mb')).toBe('4096')
-        expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.15')
+        expect(hasFlag(out, '--dsv4-enable-prefix-cache')).toBe(false)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--disable-prefix-cache')).toBe(true)
+        expect(hasFlag(out, '--cache-memory-mb')).toBe(false)
+        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
     })
 
     it('DSV4 launch and preview source do not suppress paged L1 memory flags', () => {

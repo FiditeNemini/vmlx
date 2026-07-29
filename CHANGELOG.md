@@ -21,6 +21,14 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ### Fixed
 
+- DeepSeek-V4 Flash now fails closed on misaligned or incomplete native
+  composite-cache state. Product sessions keep reusable prefix, paged, and L2
+  cache paths disabled until cached-output equivalence is independently proven,
+  while pool quantization remains bundle-derived and generic TurboQuant KV stays
+  disabled for this architecture.
+- Electron session adoption cannot silently inherit an unsafe or malformed
+  DeepSeek-V4 cache configuration; unsupported cache controls and contradictory
+  cache help are hidden for these sessions.
 - Qwen native-MTP loading preserves already converted backbone normalization
   tensors while applying conversion only to MTP-owned tensors.
 - Hybrid TurboQuant prompt-batch splits preserve MLX dtype metadata without

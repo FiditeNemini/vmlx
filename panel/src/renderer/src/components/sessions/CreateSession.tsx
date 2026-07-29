@@ -80,14 +80,16 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         enableAutoToolChoice: undefined,
         toolCallParser: 'auto',
         reasoningParser: 'auto',
-        dsv4PrefixCache: detected?.family === 'deepseek-v4' ? true : prev.dsv4PrefixCache,
+        dsv4PrefixCache: detected?.family === 'deepseek-v4' ? false : prev.dsv4PrefixCache,
         dsv4PoolQuant: detected?.family === 'deepseek-v4'
-          ? detected?.dsv4PoolQuantDefault ?? true
+          ? (typeof detected?.dsv4PoolQuantDefault === 'boolean'
+              ? detected.dsv4PoolQuantDefault
+              : undefined)
           : prev.dsv4PoolQuant,
-        enablePrefixCache: detected?.family === 'openpangu_v2' ? true : detected?.family === 'deepseek-v4' ? true : prev.enablePrefixCache,
-        usePagedCache: detected?.family === 'deepseek-v4' ? true : detected?.usePagedCache,
+        enablePrefixCache: detected?.family === 'openpangu_v2' ? true : detected?.family === 'deepseek-v4' ? false : prev.enablePrefixCache,
+        usePagedCache: detected?.family === 'deepseek-v4' ? false : detected?.usePagedCache,
         enableDiskCache: detected?.family === 'openpangu_v2',
-        enableBlockDiskCache: detected?.family !== 'openpangu_v2',
+        enableBlockDiskCache: detected?.family !== 'openpangu_v2' && detected?.family !== 'deepseek-v4',
         kvCacheQuantization: detected?.family === 'openpangu_v2' ? 'none' : prev.kvCacheQuantization,
         pagedCacheBlockSize: detected?.family === 'deepseek-v4' ? 256 : prev.pagedCacheBlockSize,
       }
@@ -203,11 +205,13 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
             base.timeout = 900
-            base.dsv4PrefixCache = true
-            base.dsv4PoolQuant = detected.dsv4PoolQuantDefault ?? true
-            base.enablePrefixCache = true
-            base.usePagedCache = true
-            base.enableBlockDiskCache = true
+            base.dsv4PrefixCache = false
+            base.dsv4PoolQuant = typeof detected.dsv4PoolQuantDefault === 'boolean'
+              ? detected.dsv4PoolQuantDefault
+              : undefined
+            base.enablePrefixCache = false
+            base.usePagedCache = false
+            base.enableBlockDiskCache = false
             base.pagedCacheBlockSize = 256
           } else if (detected.family === 'openpangu_v2') {
             base.enablePrefixCache = true

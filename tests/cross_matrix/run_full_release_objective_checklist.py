@@ -469,11 +469,11 @@ def _panel_settings_contract_checks(data: dict[str, Any]) -> list[dict[str, Any]
     )
     required = [
         "panel_settings_contract_count",
-        "dsv4_default_native_prefix_on",
-        "dsv4_explicit_prefix_off_disables_native_flags",
-        "dsv4_l2_explicit_off_preserves_prefix",
-        "dsv4_generic_kv_flags_suppressed",
-        "dsv4_pool_quant_controls_are_dsv4_only",
+        "dsv4_default_full_prefill",
+        "dsv4_default_native_prefix_off",
+        "dsv4_stale_cache_controls_fail_closed",
+        "dsv4_product_cache_opt_in_hidden",
+        "dsv4_generic_tq_stays_off",
         "max_output_context_cli_split",
         "chat_max_output_is_per_chat_override",
         "non_dsv4_cache_toggles_preserved",
@@ -501,7 +501,7 @@ def _panel_settings_contract_checks(data: dict[str, Any]) -> list[dict[str, Any]
         ),
         _check(
             "panel_settings_contract_coverage",
-            _get(settings_counts, "test_files_passed") == 6
+            _get(settings_counts, "test_files_passed") == 7
             and (_get(settings_counts, "tests_passed") or 0) >= 260,
             str(PANEL_SETTINGS_CONTRACT),
             settings_counts,

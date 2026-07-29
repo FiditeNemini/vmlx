@@ -15163,9 +15163,9 @@ def test_release_regression_manifest_tracks_tool_calls_with_runner_artifact():
     assert "live DSV4 write_file DSML degradation is repaired schema-safely" in joined
     assert "current-tool-call-contract-20260522-dsv4-live-write-file-repair.json" in joined
     assert "current-dsv4-default-cache-tool-loop-thinking-on-20260525.json" in joined
-    assert "explicit-thinking DSV4 default-cache tool-loop diagnostic remains review" in joined
+    assert "explicit-thinking DSV4 native-cache diagnostic remains review" in joined
     assert "current-dsv4-default-cache-tool-loop-poolon-materialized-parserfix-20260522/result.json" in joined
-    assert "default-cache live loop reaches three tools but still fails exact WebGLRenderer fidelity" in joined
+    assert "historical native-cache loop reaches three tools but still fails exact WebGLRenderer fidelity" in joined
 
 
 def test_release_regression_manifest_tracks_panel_cache_family_gating():
@@ -15179,7 +15179,8 @@ def test_release_regression_manifest_tracks_panel_cache_family_gating():
     assert "current-panel-settings-contract-proof-20260601-cache-ui-storage-quant.json" in joined
     assert "current-panel-settings-contract-proof-20260524-text-additional-args-sanitizer.json" in joined
     assert "current-panel-settings-contract-proof-20260522-launch-memory-warning.json" in joined
-    assert "DSV4 pool quant" in joined
+    assert "DSV4 stale cache settings fail closed" in joined
+    assert "DSV4 native composite prefix/paged/L2 reuse defaults off" in joined
     assert "JANG/JANGTQ/MXFP" in joined
     assert "stale Additional Args cannot override app-owned server, template, model-name, MCP, max output/context" in joined
     assert "warning-only for lazy-mmap" in joined
@@ -15925,13 +15926,13 @@ def test_release_regression_manifest_tracks_cache_architecture_with_runner_artif
     assert "current-cache-architecture-contract-20260522-dsv4-pool-quant-append.json" in joined
     assert "current-cache-architecture-contract-20260522-dsv4-timing.json" in joined
     assert "current-cache-architecture-contract-20260522-dsv4-pool-env-gate.json" in joined
-    assert "DSV4 pool quant reads reuse a materialized pool view" in joined
+    assert "Diagnostic-only DSV4 pool quant reads reuse a materialized pool view" in joined
     assert "current-cache-architecture-contract-20260522-dsv4-pool-materialized-cache.json" in joined
-    assert "pool quant codec appends only newly generated CSA/HCA pool rows" in joined
-    assert "DSV4 panel env mapping enables pool quant by default only under DSV4 native composite cache" in joined
+    assert "Diagnostic-only JANG DSV4 pool quant codec appends only newly generated CSA/HCA pool rows" in joined
+    assert "DSV4 panel UI/env mapping hides product cache opt-in and keeps pool quant off by default" in joined
     assert "current-cache-architecture-contract-20260522-dsv4-pool-ui-wired.json" in joined
-    assert "DSV4 timing probe covers prefix-cache replay and cold-store boundaries" in joined
-    assert "Panel session launch builder preserves DSV4 default-on native prefix-cache policy" in joined
+    assert "Historical DSV4 timing probes remain diagnostics" in joined
+    assert "Panel session launch builder keeps DSV4 composite reuse fail-closed" in joined
     assert "Qwen3.6 hybrid and Mamba paged-cache forcing" in joined
     assert "regular KV stale saved false semantics" in joined
     assert "Gemma4" in joined

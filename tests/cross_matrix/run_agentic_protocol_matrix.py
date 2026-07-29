@@ -396,12 +396,24 @@ def observe_source_checkout(repo_root: Path) -> dict[str, Any]:
 
 
 def _installed_app_root_from_python(executable: Path) -> Path:
-    candidate = executable
+    requested = executable.expanduser().absolute()
+    try:
+        canonical_executable = requested.resolve(strict=True)
+    except (FileNotFoundError, RuntimeError, OSError) as exc:
+        raise ValueError("installed proof runner executable is unavailable") from exc
+    candidate = requested
     for _ in INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH.parts:
         candidate = candidate.parent
-    if candidate / INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH != executable:
+    packaged_invocation = candidate / INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+    try:
+        canonical_packaged_invocation = packaged_invocation.resolve(strict=True)
+    except (FileNotFoundError, RuntimeError, OSError) as exc:
         raise ValueError(
-            "installed proof runner is not the packaged bundled-Python path"
+            "installed app exact bundled-Python invocation is unavailable"
+        ) from exc
+    if canonical_packaged_invocation != canonical_executable:
+        raise ValueError(
+            "installed proof runner is not the exact packaged bundled-Python target"
         )
     if candidate.name != "vMLX.app":
         raise ValueError("installed proof runner is not inside vMLX.app")
@@ -461,9 +473,10 @@ def _observe_installed_runtime(
         if not _valid_sha256(manifest.get(field)):
             raise ValueError(f"installed release manifest {field} is invalid")
 
-    lexical_executable = invoked_executable.absolute()
-    app_root = _installed_app_root_from_python(lexical_executable)
-    invoked_fingerprint = _sha256(str(lexical_executable))
+    requested_executable = invoked_executable.expanduser().absolute()
+    app_root = _installed_app_root_from_python(requested_executable)
+    canonical_executable = requested_executable.resolve(strict=True)
+    invoked_fingerprint = _sha256(str(canonical_executable))
     if (
         invoked_fingerprint
         != manifest["bundled_python_executable_fingerprint_sha256"]
@@ -473,7 +486,7 @@ def _observe_installed_runtime(
             "bundled Python"
         )
     bundled_python = _opened_regular_file_identity(
-        lexical_executable,
+        canonical_executable,
         "installed bundled Python",
     )
     if not _is_within_directory(Path(bundled_python["path"]), app_root):
@@ -583,10 +596,10 @@ def _observe_installed_runtime(
         "manifest_nlink": manifest_record["nlink"],
         "manifest_opened_nofollow": manifest_record["opened_nofollow"],
         "app_path": str(app_root),
-        "invoked_python_path": str(lexical_executable),
+        "invoked_python_path": str(canonical_executable),
         "invoked_python_fingerprint_sha256": invoked_fingerprint,
         "python_prefix_path": str(
-            lexical_executable.parent.parent.resolve(strict=True)
+            canonical_executable.parent.parent.resolve(strict=True)
         ),
         "bundled_python": bundled_python,
         "artifacts": artifacts,
@@ -661,14 +674,18 @@ def observe_runner_environment(
         if installed_runtime is not None
         else checkout_python_invocation_fingerprints
     )
+    effective_executable = (
+        Path(installed_runtime["invoked_python_path"])
+        if installed_runtime is not None
+        else executable
+    )
+    effective_executable_fingerprint = _sha256(str(effective_executable))
     return {
         "execution_mode": execution_mode,
         "repo_venv": actual_prefix == expected_prefix,
         "repo_python": executable in expected_executables,
-        "python_executable_path": str(executable),
-        "python_executable_fingerprint_sha256": hashlib.sha256(
-            str(executable).encode()
-        ).hexdigest(),
+        "python_executable_path": str(effective_executable),
+        "python_executable_fingerprint_sha256": effective_executable_fingerprint,
         "checkout_python_invocation_fingerprints_sha256": (
             checkout_python_invocation_fingerprints
         ),
@@ -4948,11 +4965,24 @@ def _runner_environment_failures(runner: dict[str, Any]) -> list[str]:
             invoked_python_path = Path(
                 str(installed_runtime.get("invoked_python_path") or "")
             )
+            packaged_python_path = (
+                app_path / INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+            )
+            try:
+                canonical_invoked_python_path = invoked_python_path.resolve(
+                    strict=True
+                )
+                packaged_python_matches = (
+                    packaged_python_path.resolve(strict=True)
+                    == canonical_invoked_python_path
+                )
+            except (FileNotFoundError, RuntimeError, OSError):
+                canonical_invoked_python_path = None
+                packaged_python_matches = False
             if (
                 not app_path.is_absolute()
                 or app_path.name != "vMLX.app"
-                or app_path / INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
-                != invoked_python_path
+                or not packaged_python_matches
             ):
                 failures.append("installed app and bundled Python paths are invalid")
             if (
@@ -4981,7 +5011,7 @@ def _runner_environment_failures(runner: dict[str, Any]) -> list[str]:
                 or bundled_python.get("size_bytes")
                 != runner.get("producer_executable_size_bytes")
                 or bundled_python.get("path")
-                != str(invoked_python_path.resolve(strict=False))
+                != str(canonical_invoked_python_path)
                 or installed_runtime.get("invoked_python_path")
                 != runner.get("python_executable_path")
                 or installed_runtime.get("invoked_python_fingerprint_sha256")

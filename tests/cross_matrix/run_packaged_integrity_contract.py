@@ -69,15 +69,15 @@ SIGNING_KEYCHAINS = (
     Path("~/Library/Keychains/login.keychain-db").expanduser(),
 )
 PACKAGED_RENDERER_REQUIRED_DSV4_CACHE_UI_STRINGS = (
-    b"DSV4 Native Composite Prefix Cache",
-    b"DSV4 CSA/HCA Pool Codec",
-    b"DSV4_POOL_QUANT=1 native CSA/HCA pool codec",
+    b"restored SWA+CSA/HCA state has not proven output-equivalent",
+    b"unsafe hits are still rejected",
 )
 PACKAGED_RENDERER_FORBIDDEN_DSV4_CACHE_UI_STRINGS = (
+    b"DSV4 Native Composite Prefix Cache",
     b"DSV4 Native Cache",
     b"DSV4 Composite Prefix Cache",
     b"DSV4 Pool Quantization",
-    b"DSV4 Flash composite prefix cache is disabled",
+    b"DSV4 CSA/HCA Pool Codec",
 )
 PACKAGED_RENDERER_REQUIRED_MAX_THINKING_STRINGS = (
     b"Max Thinking Tokens",
@@ -192,6 +192,20 @@ R19_ARTIFACT_CHAIN_SCHEMA_VERSION = 4
 R19_ARTIFACT_CHAIN_SCOPE = "r19_production"
 R19_ARTIFACT_CHAIN_VERSION = "1.6.19"
 R19_ARTIFACT_CHAIN_FLAVORS = ("sequoia", "tahoe")
+INSTALLED_RELEASE_MANIFEST_SCHEMA = "vmlx-installed-release-manifest-v1"
+INSTALLED_RELEASE_MANIFEST_FIELDS = {
+    "app_asar_sha256",
+    "bundled_provenance_sha256",
+    "bundled_python_executable_fingerprint_sha256",
+    "bundled_python_executable_sha256",
+    "electron_executable_sha256",
+    "schema",
+    "source_commit",
+    "source_tree",
+}
+INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH = Path(
+    "Contents/Resources/bundled-python/python/bin/python3"
+)
 R19_FLAVOR_RUNTIME_CONTRACTS = {
     "sequoia": {
         "mlx_wheel_platform": "macosx_14_0_arm64",
@@ -2501,6 +2515,226 @@ def _inspect_app_runtime_contract(
     }
 
 
+def write_installed_release_manifest(
+    *,
+    root: Path,
+    app: Path,
+    dist_dir: Path,
+    version: str,
+    flavor: str,
+    private_root: Path,
+    output_path: Path,
+    final_manifest_path: Path,
+    expected_final_manifest_sha256: str,
+    expected_pre_manifest_sha256: str,
+    expected_source_commit: str,
+    expected_source_tree: str,
+    expected_preflight_sha256: str,
+    extracted_asar: Path,
+    producer_executable: Path | None = None,
+) -> dict[str, Any]:
+    """Write the external manifest consumed by installed UI/API proof.
+
+    The manifest intentionally contains only stable source and installed-byte
+    identities.  Its authority comes from the existing sealed post-notary
+    chain and mounted app/ASAR parity validator; there is no standalone weaker
+    app self-attestation path.
+    """
+    if version != R19_ARTIFACT_CHAIN_VERSION:
+        raise ArtifactChainError(
+            f"r19 installed manifest requires version {R19_ARTIFACT_CHAIN_VERSION}"
+        )
+    if flavor not in R19_ARTIFACT_CHAIN_FLAVORS:
+        raise ArtifactChainError(f"unsupported installed app flavor: {flavor}")
+
+    private_root = ensure_private_evidence_root(private_root)
+    output_path = _assert_within_private_root(
+        private_root,
+        output_path,
+        label="installed release manifest",
+    )
+    app = _absolute_path(app)
+    extracted_asar = _absolute_path(extracted_asar)
+    _reject_symlinked_ancestors(app, label="installed vMLX.app")
+    if app.name != "vMLX.app" or app.is_symlink() or not app.is_dir():
+        raise ArtifactChainError(
+            "installed application must be a real directory named vMLX.app"
+        )
+    mounted = validate_mounted_app_against_final_manifest(
+        root=root,
+        dist_dir=dist_dir,
+        version=version,
+        private_root=private_root,
+        final_manifest_path=final_manifest_path,
+        expected_final_manifest_sha256=expected_final_manifest_sha256,
+        expected_pre_manifest_sha256=expected_pre_manifest_sha256,
+        expected_source_commit=expected_source_commit,
+        expected_source_tree=expected_source_tree,
+        expected_preflight_sha256=expected_preflight_sha256,
+        flavor=flavor,
+        mounted_app=app,
+        extracted_asar=extracted_asar,
+    )
+    source = _git_source_identity(root)
+    resources = app / "Contents/Resources"
+    app_asar_path = resources / "app.asar"
+    electron_path = app / "Contents/MacOS/vMLX"
+    provenance_path = resources / "bundled-python/vmlx-bundle-provenance.json"
+    invoked_python_path = app / INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+
+    def observe_bound_artifacts() -> dict[str, Any]:
+        try:
+            invoked_python_metadata = invoked_python_path.lstat()
+            resolved_python_path = invoked_python_path.resolve(strict=True)
+            resolved_python_path.relative_to(app.resolve(strict=True))
+        except (FileNotFoundError, RuntimeError, ValueError, OSError) as exc:
+            raise ArtifactChainError(
+                "installed bundled Python does not resolve inside vMLX.app"
+            ) from exc
+        if not (
+            stat.S_ISREG(invoked_python_metadata.st_mode)
+            or stat.S_ISLNK(invoked_python_metadata.st_mode)
+        ):
+            raise ArtifactChainError(
+                "installed bundled Python invocation is not a file or symlink"
+            )
+        electron = _safe_regular_file(
+            electron_path,
+            label="installed Electron executable",
+        )
+        bundled_python = _safe_regular_file(
+            resolved_python_path,
+            label="installed bundled Python executable",
+        )
+        if not os.access(electron_path, os.X_OK):
+            raise ArtifactChainError("installed Electron executable is not executable")
+        if not os.access(resolved_python_path, os.X_OK):
+            raise ArtifactChainError("installed bundled Python is not executable")
+        return {
+            "app_asar": _safe_regular_file(
+                app_asar_path,
+                label="installed app.asar",
+            ),
+            "electron": electron,
+            "provenance": _safe_regular_file(
+                provenance_path,
+                label="installed bundled provenance",
+            ),
+            "bundled_python": bundled_python,
+            "python_invocation_lstat": {
+                "device": invoked_python_metadata.st_dev,
+                "inode": invoked_python_metadata.st_ino,
+                "mode": invoked_python_metadata.st_mode,
+                "mtime_ns": invoked_python_metadata.st_mtime_ns,
+                "size": invoked_python_metadata.st_size,
+            },
+            "resolved_python_path": str(resolved_python_path),
+        }
+
+    first = observe_bound_artifacts()
+    if (
+        first["provenance"]["sha256"]
+        != mounted["runtime_contract"]["bundle_provenance_sha256"]
+    ):
+        raise ArtifactChainError(
+            "installed bundled provenance differs from mounted release attestation"
+        )
+    if producer_executable is None:
+        producer_executable = Path(sys.executable)
+    else:
+        producer_executable = Path(producer_executable)
+    try:
+        resolved_producer_executable = producer_executable.resolve(strict=True)
+    except (FileNotFoundError, RuntimeError, OSError) as exc:
+        raise ArtifactChainError(
+            "installed manifest producer executable is unavailable"
+        ) from exc
+    if str(resolved_producer_executable) != first["resolved_python_path"]:
+        raise ArtifactChainError(
+            "installed manifest producer must run under the exact bundled Python"
+        )
+
+    first_app_payload = _tree_payload_records(
+        app,
+        label="installed release-manifest application payload",
+    )
+    first_asar_payload = _tree_payload_records(
+        extracted_asar,
+        label="installed release-manifest extracted ASAR payload",
+    )
+    if (
+        first_app_payload["tree_sha256"] != mounted["app_tree_sha256"]
+        or first_asar_payload["tree_sha256"] != mounted["asar_tree_sha256"]
+    ):
+        raise ArtifactChainError(
+            "installed app/ASAR payload changed after mounted release validation"
+        )
+
+    second_app_payload = _tree_payload_records(
+        app,
+        label="installed release-manifest application payload recheck",
+    )
+    second_asar_payload = _tree_payload_records(
+        extracted_asar,
+        label="installed release-manifest extracted ASAR payload recheck",
+    )
+    second = observe_bound_artifacts()
+    if (
+        second_app_payload != first_app_payload
+        or second_asar_payload != first_asar_payload
+        or second != first
+        or second["provenance"]["sha256"]
+        != mounted["runtime_contract"]["bundle_provenance_sha256"]
+    ):
+        raise ArtifactChainError(
+            "installed app/ASAR/provenance changed during manifest production"
+        )
+
+    # The final complete payload observation must come after the last
+    # core-artifact observation.  Otherwise a non-core app or extracted-ASAR
+    # mutation in that interval would not affect any field serialized below.
+    final_app_payload = _tree_payload_records(
+        app,
+        label="installed release-manifest final application payload",
+    )
+    final_asar_payload = _tree_payload_records(
+        extracted_asar,
+        label="installed release-manifest final extracted ASAR payload",
+    )
+    if (
+        final_app_payload != first_app_payload
+        or final_asar_payload != first_asar_payload
+    ):
+        raise ArtifactChainError(
+            "installed app/ASAR payload changed before manifest serialization"
+        )
+
+    payload = {
+        "schema": INSTALLED_RELEASE_MANIFEST_SCHEMA,
+        "source_commit": source["commit"],
+        "source_tree": source["tree"],
+        "app_asar_sha256": second["app_asar"]["sha256"],
+        "electron_executable_sha256": second["electron"]["sha256"],
+        "bundled_provenance_sha256": second["provenance"]["sha256"],
+        "bundled_python_executable_sha256": second["bundled_python"]["sha256"],
+        "bundled_python_executable_fingerprint_sha256": hashlib.sha256(
+            second["resolved_python_path"].encode("utf-8")
+        ).hexdigest(),
+    }
+    if set(payload) != INSTALLED_RELEASE_MANIFEST_FIELDS:
+        raise ArtifactChainError("installed release manifest fields are not exact")
+    encoded = (
+        json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    _exclusive_sealed_write(output_path, encoded, mode=0o600)
+    return {
+        "manifest": str(output_path),
+        "sha256": digest,
+        "payload": payload,
+    }
+
+
 def write_bundle_runtime_attestation(
     *,
     root: Path,
@@ -4627,6 +4861,38 @@ def artifact_chain_main(argv: list[str]) -> int:
         "--flavor", choices=R19_ARTIFACT_CHAIN_FLAVORS, required=True
     )
 
+    installed_manifest_parser = subparsers.add_parser(
+        "write-installed-release-manifest"
+    )
+    installed_manifest_parser.add_argument("--root", type=Path, required=True)
+    installed_manifest_parser.add_argument("--app", type=Path, required=True)
+    installed_manifest_parser.add_argument("--dist", type=Path, required=True)
+    installed_manifest_parser.add_argument("--version", required=True)
+    installed_manifest_parser.add_argument(
+        "--flavor", choices=R19_ARTIFACT_CHAIN_FLAVORS, required=True
+    )
+    installed_manifest_parser.add_argument(
+        "--private-root", type=Path, required=True
+    )
+    installed_manifest_parser.add_argument("--out", type=Path, required=True)
+    installed_manifest_parser.add_argument(
+        "--final-manifest", type=Path, required=True
+    )
+    installed_manifest_parser.add_argument(
+        "--expected-final-manifest-sha256", required=True
+    )
+    installed_manifest_parser.add_argument(
+        "--expected-pre-manifest-sha256", required=True
+    )
+    installed_manifest_parser.add_argument("--expected-source-commit", required=True)
+    installed_manifest_parser.add_argument("--expected-source-tree", required=True)
+    installed_manifest_parser.add_argument(
+        "--expected-preflight-sha256", required=True
+    )
+    installed_manifest_parser.add_argument(
+        "--extracted-asar", type=Path, required=True
+    )
+
     write_final_parser = subparsers.add_parser("write-final")
     write_final_parser.add_argument("--root", type=Path, required=True)
     write_final_parser.add_argument("--dist", type=Path, required=True)
@@ -4880,6 +5146,25 @@ def artifact_chain_main(argv: list[str]) -> int:
                 extracted_asar=args.extracted_asar,
                 version=args.version,
                 flavor=args.flavor,
+            )
+        elif args.command == "write-installed-release-manifest":
+            result = write_installed_release_manifest(
+                root=args.root,
+                app=args.app,
+                dist_dir=args.dist,
+                version=args.version,
+                flavor=args.flavor,
+                private_root=args.private_root,
+                output_path=args.out,
+                final_manifest_path=args.final_manifest,
+                expected_final_manifest_sha256=(
+                    args.expected_final_manifest_sha256
+                ),
+                expected_pre_manifest_sha256=args.expected_pre_manifest_sha256,
+                expected_source_commit=args.expected_source_commit,
+                expected_source_tree=args.expected_source_tree,
+                expected_preflight_sha256=args.expected_preflight_sha256,
+                extracted_asar=args.extracted_asar,
             )
         elif args.command == "write-final":
             result = write_final_notary_artifact_manifest(

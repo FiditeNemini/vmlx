@@ -1003,7 +1003,7 @@ class Scheduler:
             logger.info(
                 "DSV4 DeepseekV4Cache-aware paged prefix cache enabled — "
                 "terminal blocks store full SWA+CSA/HCA composite state and "
-                "block disk L2 uses deepseek_v4_v8 nested-state serialization "
+                "block disk L2 uses deepseek_v4_v9 nested-state serialization "
                 "with N-1 prompt-token keys."
             )
 
@@ -1065,7 +1065,7 @@ class Scheduler:
                                 f":dsv4_pool_quant={os.environ.get('DSV4_POOL_QUANT', '')}"
                                 f":dsv4_unsafe_trim={_unsafe_trim}"
                                 f":dsv4_paged_block_size={self.config.paged_cache_block_size}"
-                                ":dsv4_cache_schema=deepseek_v4_v8"
+                                ":dsv4_cache_schema=deepseek_v4_v9"
                             )
                         elif self._uses_zaya_cache:
                             zaya_scope = ":zaya_cache_schema=zaya_cca_v1"
@@ -1218,7 +1218,7 @@ class Scheduler:
                     logger.info(
                         "DSV4 native composite block index enabled: "
                         "block_size=%s, max_blocks=%s "
-                        "(not generic paged KV; records deepseek_v4_v8 "
+                        "(not generic paged KV; records deepseek_v4_v9 "
                         "SWA+CSA/HCA state)",
                         self.config.paged_cache_block_size,
                         self.config.max_cache_blocks,
@@ -2389,13 +2389,26 @@ class Scheduler:
 
             fresh_cache = self.model.make_cache()
 
-            # Process in chunks to avoid Metal GPU timeout on generic/hybrid
-            # prompts. DSV4 is the exception: its CSA/HCA compressor/indexer
-            # pools are path-sensitive, and earlier live probes showed chunked
-            # prefill can corrupt the composite state. Re-derive DSV4 prompt
-            # cache in one shot, matching DSV4BatchGenerator's production
-            # prefill rail.
-            chunk_size = len(prompt_tokens) if self._uses_dsv4_cache else 2048
+            # Process in chunks to avoid Metal GPU timeout. DSV4 must use the
+            # same architecture-aligned policy as DSV4BatchGenerator; the old
+            # single-shot exception timed out at long context and diverged from
+            # the actual request path.
+            if self._uses_dsv4_cache:
+                from .utils.dsv4_batch_generator import (
+                    dsv4_effective_prefill_step,
+                    dsv4_prefill_step_policy,
+                )
+
+                configured_step, single_shot = dsv4_prefill_step_policy(
+                    getattr(getattr(self, "config", None), "prefill_step_size", 2048)
+                )
+                chunk_size = dsv4_effective_prefill_step(
+                    configured_step,
+                    len(prompt_tokens),
+                    single_shot=single_shot,
+                )
+            else:
+                chunk_size = 2048
             for start in range(0, len(prompt_tokens), chunk_size):
                 chunk = prompt_tokens[start : start + chunk_size]
                 input_ids = mx.array([chunk])
@@ -2421,10 +2434,15 @@ class Scheduler:
                         for sub_cache in cache_obj.caches:
                             _collect_cache_arrays(sub_cache)
                         return
-                    if Scheduler._is_dsv4_cache_object(cache_obj) and hasattr(
-                        cache_obj, "state"
-                    ):
-                        _collect_tree_arrays(cache_obj.state)
+                    if Scheduler._is_dsv4_cache_object(cache_obj):
+                        state = (
+                            cache_obj.storage_state
+                            if type(cache_obj).__name__ == "PoolQuantizedV4Cache"
+                            and getattr(type(cache_obj), "storage_state", None)
+                            is not None
+                            else cache_obj.state
+                        )
+                        _collect_tree_arrays(state)
                         return
                     if hasattr(cache_obj, "keys") and cache_obj.keys is not None:
                         # QuantizedKVCache: keys/values are tuples of arrays
@@ -3499,28 +3517,6 @@ class Scheduler:
             return list(fetch_tokens[cached_tokens:]) + list(suffix)
         cached_tokens = min(cached_tokens, len(prompt_tokens))
         return list(prompt_tokens[cached_tokens:])
-
-    @staticmethod
-    def _dsv4_paged_hit_requires_full_prefill(
-        *,
-        fetch_token_count: int,
-        cached_token_count: int,
-    ) -> bool:
-        """Reject DSV4 paged restores until composite state is equivalent.
-
-        DSV4 paged/L2 snapshots are native composite N-1 checkpoints: the
-        final cache-key token is deliberately re-fed to produce first-token
-        logits. Exact N-1 restore can succeed for a simple one-turn prompt, but
-        a live three-turn Responses replay restored an exact 336/337 checkpoint
-        and then looped instead of matching the cold full-prefill answer.
-
-        A shorter 269/337 checkpoint also replayed stale visible output. Until
-        both exact and partial CSA/HCA/SWA restore are cold-vs-warm equivalent,
-        correctness requires full prefill for every DSV4 paged/L2 hit.
-        """
-        fetch_token_count = max(0, int(fetch_token_count or 0))
-        cached_token_count = max(0, int(cached_token_count or 0))
-        return cached_token_count > 0
 
     def _release_unusable_paged_hit(self, request: Request) -> None:
         """Drop refs and optimistic credit for a paged hit not actually used."""
@@ -4790,6 +4786,7 @@ class Scheduler:
         class_counts: Dict[str, int] = {}
         for i, layer_cache in enumerate(raw_cache):
             try:
+                cls_name = type(layer_cache).__name__
                 # CacheList (MoE models like DeepSeek V3.2, Falcon H1):
                 # wrapper with .caches attribute containing sub-caches.
                 # Extract each sub-cache's state and store as a list.
@@ -4923,12 +4920,28 @@ class Scheduler:
                             }
                         )
                     continue
-                elif hasattr(layer_cache, "state") and hasattr(
-                    layer_cache, "meta_state"
+                elif (
+                    (
+                        self._is_dsv4_cache_class_name(cls_name)
+                        and hasattr(layer_cache, "meta_state")
+                    )
+                    or (
+                        hasattr(layer_cache, "state")
+                        and hasattr(layer_cache, "meta_state")
+                    )
                 ):
-                    state = layer_cache.state  # (keys, values) MLX arrays
+                    # PoolQuantizedV4Cache.state materializes its retained q8
+                    # pools as BF16 for attention. Cache transport must use the
+                    # native encoded tree or restore would quantize those rows
+                    # a second time and change their codes.
+                    state_attr = (
+                        "storage_state"
+                        if cls_name == "PoolQuantizedV4Cache"
+                        and hasattr(layer_cache, "storage_state")
+                        else "state"
+                    )
+                    state = getattr(layer_cache, state_attr)
                     meta = layer_cache.meta_state  # (offset,) as strings
-                    cls_name = type(layer_cache).__name__
                     if self._is_dsv4_cache_class_name(cls_name):
                         # DSV4 may store q4/q8-compressed local SWA KV inside
                         # the composite cache. In that case .meta_state belongs
@@ -5034,6 +5047,12 @@ class Scheduler:
                         entry["pool_quant"] = (
                             cls_name == "PoolQuantizedV4Cache"
                         )
+                        if state_attr == "storage_state":
+                            entry["pool_storage_schema"] = (
+                                state[0]
+                                if isinstance(state, (tuple, list)) and state
+                                else None
+                            )
                     extracted.append(entry)
                 else:
                     logger.debug(
@@ -5225,35 +5244,6 @@ class Scheduler:
             # Re-append gpl suffix to remaining so model sees template trailer.
             if _gpl_suffix_tokens:
                 remaining = list(remaining or []) + list(_gpl_suffix_tokens)
-            if (
-                block_table
-                and block_table.num_tokens > 0
-                and self._uses_dsv4_cache
-                and self._dsv4_paged_hit_requires_full_prefill(
-                    fetch_token_count=len(_fetch_tokens),
-                    cached_token_count=block_table.num_tokens,
-                )
-            ):
-                _dsv4_cached_tokens = int(block_table.num_tokens)
-                _dsv4_fetch_tokens = len(_fetch_tokens)
-                request.block_table = block_table
-                request.cached_tokens = _dsv4_cached_tokens
-                request.shared_prefix_blocks = len(block_table.block_ids)
-                self._release_unusable_paged_hit(request)
-                request.cached_tokens = 0
-                request.remaining_tokens = list(request.prompt_token_ids)
-                request._paged_block_table_needs_worker_reconstruct = False
-                request._paged_disk_hit = False
-                logger.warning(
-                    "Request %s: rejecting unsafe DSV4 paged/L2 "
-                    "extension (%d cached of %d cache-key tokens); exact N-1 "
-                    "and partial restore both require full prefill until "
-                    "CSA/HCA/SWA equivalence is proven.",
-                    request.request_id,
-                    _dsv4_cached_tokens,
-                    _dsv4_fetch_tokens,
-                )
-                block_table = None
             if block_table and block_table.num_tokens > 0:
                 paged_cold_tokens = self._paged_cold_block_tokens(block_table)
                 warm_cache = None

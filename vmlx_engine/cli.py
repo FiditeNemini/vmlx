@@ -264,14 +264,15 @@ def _apply_dsv4_cache_policy(args, logger):
     """Fail closed unless DSV4 composite cache diagnostics are explicit.
 
     DSV4 paged-prefix entries hold prompt-boundary DeepseekV4Cache snapshots
-    for SWA plus CSA/HCA compressed pools. Current retained live controls show
-    that restored entries are not output-equivalent to cold prefill, so the
-    scheduler rejects every positive hit. Defaulting this path on would still
-    pay snapshot and SSD-write cost for records that cannot be consumed.
+    for SWA plus CSA/HCA compressed pools. Exact terminal prompt-boundary
+    snapshots are reusable, including after L2 reconstruction. Intermediate
+    blocks intentionally carry ``deepseek_v4_pending`` state and remain
+    ineligible until they contain a complete native pool checkpoint, so the
+    general arbitrary-partial-prefix contract is not yet complete.
 
     Keep the path available only for explicit diagnostic work. Normal serving
     disables prefix/paged/block-disk state and uses full prefill. The scheduler
-    equivalence guard remains the final correctness boundary for opt-in runs.
+    typed-terminal guard remains the final correctness boundary for opt-in runs.
     """
 
     changed = []
@@ -292,7 +293,9 @@ def _apply_dsv4_cache_policy(args, logger):
             changed.append("L2 disk=disabled_without_prefix")
         logger.warning(
             "DSV4-Flash native composite prefix/paged/L2 cache is disabled by "
-            "default because restored-cache output equivalence is not proven. "
+            "default because arbitrary partial CSA/HCA checkpoint reuse is not "
+            "yet proven. Exact terminal prompt-boundary snapshots are available "
+            "only in the diagnostic cache path. "
             "Serving will use full prefill. %s=1 or "
             "--dsv4-enable-prefix-cache is diagnostic-only; the scheduler still "
             "rejects unsafe hits.",
@@ -501,7 +504,7 @@ def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
         lines = [
             (
                 "DSV4 diagnostic native composite prefix cache: "
-                "schema=deepseek_v4_v8, "
+                "schema=deepseek_v4_v9, "
                 f"block_size={args.paged_cache_block_size}, "
                 f"max_blocks={args.max_cache_blocks}, "
                 f"capacity={capacity} tokens (not generic paged KV)"
@@ -1050,8 +1053,8 @@ def serve_command(args):
             _is_dsv4_model = True
             _apply_dsv4_runtime_policy(args, logger)
             # Diagnostic opt-in uses the DSV4-aware paged schema
-            # (scheduler.py: deepseek_v4_v8 nested-state serialization) for
-            # the mixed KVCache / DeepseekV4Cache layer layout. The default
+            # (scheduler.py: deepseek_v4_v9 nested-state serialization) for
+            # the mixed RotatingKVCache / DeepseekV4Cache layer layout. The default
             # path performs full prefill and does not publish reusable state.
         elif (
             _mc.family_name == "zaya"

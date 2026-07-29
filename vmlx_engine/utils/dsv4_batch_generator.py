@@ -41,6 +41,51 @@ DSV4_EOS_ID = 1
 DSV4_USER_ID = 128803
 DSV4_ASSISTANT_ID = 128804
 DEFAULT_DSV4_PROMPT_SNAPSHOT_MIN_TOKENS = 256
+DEFAULT_DSV4_LONG_PREFILL_THRESHOLD_TOKENS = 12_288
+DEFAULT_DSV4_LONG_PREFILL_STEP_TOKENS = 512
+
+
+def dsv4_prefill_step_policy(default_step: int) -> tuple[int, bool]:
+    """Resolve the configured DSV4 prefill ceiling and diagnostic override."""
+    try:
+        raw = os.environ.get("DSV4_PREFILL_STEP_SIZE")
+        configured = int(raw) if raw is not None else int(default_step or 2048)
+    except (TypeError, ValueError):
+        configured = int(default_step or 2048)
+    if configured <= 0:
+        return 1 << 30, True
+    return max(1, configured), False
+
+
+def dsv4_effective_prefill_step(
+    configured_step: int,
+    prompt_tokens: int,
+    *,
+    cached_tokens: int = 0,
+    single_shot: bool = False,
+) -> int:
+    """Bound a DSV4 prefill chunk by the final native-pool context size.
+
+    Ratio-4 CSA/HCA layers form query-by-compressed-pool score tensors.  A
+    2,048-token chunk is live-proven through 12,288 total tokens, while the
+    same chunk size triggers the Metal command-buffer watchdog at 32,768.
+    A 512-token chunk completes the 32,768-token native q8 snapshot/L2
+    discriminator exactly.  Both sizes align with every shipped compression
+    ratio (4 and 128), so chunk boundaries do not split compressor windows.
+
+    ``DSV4_PREFILL_STEP_SIZE=0`` remains an explicit diagnostic single-shot
+    override.  Normal callers treat the configured value as an upper bound.
+    """
+    prompt_tokens = max(0, int(prompt_tokens or 0))
+    if prompt_tokens <= 0:
+        return 1
+    if single_shot:
+        return prompt_tokens
+    step = max(1, int(configured_step or 2048))
+    final_context = max(0, int(cached_tokens or 0)) + prompt_tokens
+    if final_context > DEFAULT_DSV4_LONG_PREFILL_THRESHOLD_TOKENS:
+        step = min(step, DEFAULT_DSV4_LONG_PREFILL_STEP_TOKENS)
+    return min(prompt_tokens, step)
 
 
 def dsv4_prompt_snapshot_min_tokens() -> int:
@@ -185,21 +230,9 @@ class DSV4BatchGenerator:
         # the 2048-token step path preserved native block/L2 cache hits and kept
         # peak memory near the resident model size. Operators can still force
         # legacy single-shot with DSV4_PREFILL_STEP_SIZE=0 for diagnostics.
-        try:
-            _dsv4_step_env = os.environ.get("DSV4_PREFILL_STEP_SIZE")
-            _dsv4_step = (
-                int(_dsv4_step_env)
-                if _dsv4_step_env is not None
-                else int(prefill_step_size or 2048)
-            )
-        except (TypeError, ValueError):
-            _dsv4_step = int(prefill_step_size or 2048)
-        if _dsv4_step <= 0:
-            # Single-shot — set step to a sentinel larger than any real
-            # prompt so the chunked loop runs exactly once.
-            self.prefill_step_size = 1 << 30
-        else:
-            self.prefill_step_size = _dsv4_step
+        self.prefill_step_size, self._prefill_single_shot = (
+            dsv4_prefill_step_policy(prefill_step_size)
+        )
         self.prefill_batch_size = 1  # always 1 for DSV4
         self.completion_batch_size = 1
         self.max_kv_size = max_kv_size
@@ -347,6 +380,20 @@ class DSV4BatchGenerator:
                 copy_errors.append(f"{type(a).__name__}/{getattr(a,'dtype','?')}: {e}")
                 return None
 
+        def _tree_copy(value):
+            """Deep-copy every MLX leaf while preserving tagged state trees."""
+            if value is None:
+                return None
+            if hasattr(value, "shape") and hasattr(value, "dtype"):
+                return _arr_copy(value)
+            if isinstance(value, tuple):
+                return tuple(_tree_copy(item) for item in value)
+            if isinstance(value, list):
+                return [_tree_copy(item) for item in value]
+            if isinstance(value, dict):
+                return {key: _tree_copy(item) for key, item in value.items()}
+            return value
+
         snapshots: List[Any] = []
 
         def _is_dsv4_cache(obj) -> bool:
@@ -384,33 +431,49 @@ class DSV4BatchGenerator:
                         compress_ratio=compress_ratio,
                     )
 
-                    # Read state tuple via @property (returns nested tuples
-                    # of mx.arrays). Deep-copy each leaf array.
-                    state = layer_cache.state
+                    # PoolQuantizedV4Cache exposes a separate lossless storage
+                    # tree containing its retained q8 codes.  The attention-
+                    # facing ``state`` property materializes those pools as
+                    # BF16; assigning that view to a new cache would perform a
+                    # second lossy encode at every prompt snapshot.
+                    state_attr = (
+                        "storage_state"
+                        if cls_name == "PoolQuantizedV4Cache"
+                        and hasattr(layer_cache, "storage_state")
+                        else "state"
+                    )
+                    state = getattr(layer_cache, state_attr)
                     if state is not None:
-                        snap_state = []
-                        for sub in state:
-                            if sub is None:
-                                snap_state.append(None)
-                            elif isinstance(sub, (tuple, list)):
-                                snap_state.append(tuple(_arr_copy(x) for x in sub))
-                            else:
-                                snap_state.append(_arr_copy(sub))
-                        new_cache.state = tuple(snap_state)
+                        setattr(new_cache, state_attr, _tree_copy(state))
                     try:
                         new_cache.meta_state = layer_cache.meta_state
                     except Exception:
                         pass
                     snapshots.append(new_cache)
                 elif hasattr(layer_cache, "keys") and hasattr(layer_cache, "values"):
-                    from mlx_lm.models.cache import KVCache
-                    nc = type(layer_cache)() if "Cache" in cls_name else KVCache()
+                    from mlx_lm.models.cache import KVCache, RotatingKVCache
+                    if isinstance(layer_cache, RotatingKVCache):
+                        # DSV4's zero-compression layers are still native SWA
+                        # layers.  Their cache constructor requires the exact
+                        # window geometry, and their physical ring pointer is
+                        # part of the prompt-boundary state.  Calling the class
+                        # with no arguments used to reject the whole DSV4
+                        # snapshot as soon as these layers became bounded.
+                        nc = RotatingKVCache(
+                            max_size=int(getattr(layer_cache, "max_size", 128)),
+                            keep=int(getattr(layer_cache, "keep", 0)),
+                        )
+                    else:
+                        nc = type(layer_cache)() if "Cache" in cls_name else KVCache()
                     try:
                         k = layer_cache.keys
                         v = layer_cache.values
                         if k is not None and v is not None:
                             nc.keys = _arr_copy(k)
                             nc.values = _arr_copy(v)
+                        try:
+                            nc.meta_state = layer_cache.meta_state
+                        except Exception:
                             try:
                                 nc.offset = int(getattr(layer_cache, "offset", 0) or 0)
                             except Exception:
@@ -461,7 +524,16 @@ class DSV4BatchGenerator:
             if isinstance(nbytes, (int, float)):
                 return max(0, int(nbytes))
             try:
-                state = getattr(value, "state")
+                # PoolQuantizedV4Cache.state is the attention-facing view and
+                # materializes every retained q8 pool segment.  Admission is
+                # specifically meant to avoid a long-context memory spike, so
+                # count the lossless encoded tree without decoding it.
+                state = (
+                    getattr(value, "storage_state")
+                    if type(value).__name__ == "PoolQuantizedV4Cache"
+                    and hasattr(value, "storage_state")
+                    else getattr(value, "state")
+                )
             except Exception:
                 return 0
             return 0 if state is value else _walk(state)
@@ -588,7 +660,34 @@ class DSV4BatchGenerator:
         all_ids = mx.array(token_ids, dtype=mx.int32)[None, :]
         last_logits = None
         total = len(token_ids)
-        step = max(1, self.prefill_step_size)
+        cached_tokens = 0
+        for layer_cache in cache or ():
+            try:
+                cached_tokens = max(
+                    cached_tokens,
+                    int(getattr(layer_cache, "offset", 0) or 0),
+                )
+            except (TypeError, ValueError):
+                continue
+        step = dsv4_effective_prefill_step(
+            self.prefill_step_size,
+            total,
+            cached_tokens=cached_tokens,
+            single_shot=self._prefill_single_shot,
+        )
+        if (
+            not self._prefill_single_shot
+            and cached_tokens + total
+            > DEFAULT_DSV4_LONG_PREFILL_THRESHOLD_TOKENS
+            and step < self.prefill_step_size
+        ):
+            logger.info(
+                "DSV4Gen: adaptive long-context prefill step=%s "
+                "configured=%s final_context=%s",
+                step,
+                self.prefill_step_size,
+                cached_tokens + total,
+            )
         for off in range(0, total, step):
             chunk = all_ids[:, off:min(off + step, total)]
             logits = self.model(chunk, cache=cache)

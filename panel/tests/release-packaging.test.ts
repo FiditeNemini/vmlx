@@ -107,7 +107,7 @@ function writeR19RuntimeFixture(
       {
         schema_version: 1,
         vmlx: { commit: sourceCommit, version: "1.6.19" },
-        jang: { commit: "f".repeat(40), version: "2.5.35" },
+        jang: { commit: "f".repeat(40), version: "2.5.36" },
         mlx_wheel_platform: contract.mlx_wheel_platform,
       },
       null,

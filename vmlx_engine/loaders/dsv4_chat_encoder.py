@@ -44,9 +44,10 @@ Long-context mode (``DSV4_LONG_CTX``):
 
   * ``1`` is the supported runtime mode. ``Model.make_cache()`` returns
     ``DeepseekV4Cache`` on ``compress_ratio>0`` layers (CSA/HCA + SWA
-    composite) and plain ``KVCache`` on local-only layers.
+    composite) and bounded ``RotatingKVCache`` on ratio-zero local SWA
+    layers, preserving the native 128-token ring geometry.
   * Paged prefix cache uses a dedicated ``deepseek_v4`` block record with
-    ``deepseek_v4_v8`` metadata; v8 keys DSV4 prompt cache blocks at N-1
+    ``deepseek_v4_v9`` metadata; v9 keys DSV4 prompt cache blocks at N-1
     tokens so the last prompt token is re-fed on prefix hits. The loader
     installs the prefill mask-trim patch required for prompts beyond the
     sliding window.

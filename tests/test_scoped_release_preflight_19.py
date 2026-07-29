@@ -1227,11 +1227,11 @@ def _fixture_v5_jang_source(tmp_path: Path) -> Path:
     package.mkdir(parents=True)
     tests.mkdir()
     (root / "pyproject.toml").write_text(
-        '[project]\nname = "jang"\nversion = "2.5.35"\n',
+        '[project]\nname = "jang"\nversion = "2.5.36"\n',
         encoding="utf-8",
     )
     (package / "__init__.py").write_text(
-        '__version__ = "2.5.35"\n',
+        '__version__ = "2.5.36"\n',
         encoding="utf-8",
     )
     (tests / "test_laguna_jang_affine_policy.py").write_text(
@@ -1864,7 +1864,7 @@ def test_v5_production_build_accepts_actual_electron_vite_contract(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"fixture {relative}\n", encoding="utf-8")
     terminal = (
-        b"ok bundled JANG provenance matches source (2.5.35 @ 6c5e5a8)\n"
+        b"ok bundled JANG provenance matches source (2.5.36 @ 966b2a0)\n"
         b"bundled-python: all critical imports ok\n"
     )
     facts, details = module._v5_owned_check_facts(
@@ -7952,15 +7952,15 @@ def _v5_fixture_child(argv: list[str]) -> int:
             path = args.output_root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"fixture {relative}\n", encoding="utf-8")
-        print("ok bundled JANG provenance matches source (2.5.35 @ 6c5e5a8)")
+        print("ok bundled JANG provenance matches source (2.5.36 @ 966b2a0)")
         print("bundled-python: all critical imports ok")
     elif command == "jang_build":
         assert args.distribution_root
         args.distribution_root.mkdir(parents=True, exist_ok=True)
-        (args.distribution_root / "jang_tools-2.5.35-py3-none-any.whl").write_bytes(
+        (args.distribution_root / "jang_tools-2.5.36-py3-none-any.whl").write_bytes(
             b"fixture-wheel"
         )
-        (args.distribution_root / "jang_tools-2.5.35.tar.gz").write_bytes(
+        (args.distribution_root / "jang_tools-2.5.36.tar.gz").write_bytes(
             b"fixture-sdist"
         )
     elif command == "jang_venv":
@@ -7970,7 +7970,7 @@ def _v5_fixture_child(argv: list[str]) -> int:
             / "lib/python3.13/site-packages/jang_tools/__init__.py"
         )
         package.parent.mkdir(parents=True, exist_ok=True)
-        package.write_text('__version__ = "2.5.35"\n', encoding="utf-8")
+        package.write_text('__version__ = "2.5.36"\n', encoding="utf-8")
     elif command == "jang_import":
         assert args.isolated_venv
         package = (
@@ -7980,7 +7980,7 @@ def _v5_fixture_child(argv: list[str]) -> int:
         print(
             "VMLINUX_INSTALLED_IMPORT="
             + json.dumps(
-                {"file": str(package), "version": "2.5.35"},
+                {"file": str(package), "version": "2.5.36"},
                 sort_keys=True,
             )
         )
@@ -7995,7 +7995,7 @@ def _v5_fixture_child(argv: list[str]) -> int:
             + json.dumps(
                 {
                     "file": str(package),
-                    "version": "2.5.35",
+                    "version": "2.5.36",
                     "source_manifest_sha256": "a" * 64,
                     "installed_manifest_sha256": "a" * 64,
                     "package_file_count": 1,

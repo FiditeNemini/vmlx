@@ -585,7 +585,7 @@ class TestServerForwarding:
         assert "force-disabling paged cache" not in sched
         assert '"deepseek_v4"' in prefix
         assert '"deepseek_v4"' in disk
-        assert "dsv4_cache_schema=deepseek_v4_v8" in sched
+        assert "dsv4_cache_schema=deepseek_v4_v9" in sched
 
     def test_paged_l2_schema_invalidates_old_block_namespaces_for_all_families(self):
         """Global paged-cache contract changes must move every family to a

@@ -65,14 +65,62 @@ def _make_pool_quantized_dsv4_state_cache():
 
 
 def _state_dict(c):
-    return {
-        "state": c.state,
+    state = (
+        c.storage_state
+        if type(c).__name__ == "PoolQuantizedV4Cache"
+        and hasattr(c, "storage_state")
+        else c.state
+    )
+    result = {
+        "state": state,
         "meta_state": c.meta_state,
         "class_name": type(c).__name__,
         "compress_ratio": 4,
         "sliding_window": 128,
         "pool_quant": type(c).__name__ == "PoolQuantizedV4Cache",
     }
+    if type(c).__name__ == "PoolQuantizedV4Cache" and hasattr(c, "storage_state"):
+        result["pool_storage_schema"] = state[0]
+    return result
+
+
+def _make_encoded_pool_quantized_dsv4_cache(monkeypatch):
+    import jang_tools.dsv4.pool_quant_cache as pool_quant_cache
+    from jang_tools.dsv4.pool_quant_cache import PoolQuantizedV4Cache
+
+    monkeypatch.setattr(pool_quant_cache, "_POOL_BF16_MAX_BYTES", 1)
+    cache = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+    local_k = mx.random.normal((1, 1, 7, 64), dtype=mx.bfloat16)
+    local_v = mx.random.normal((1, 1, 7, 64), dtype=mx.bfloat16)
+    cache.local.state = (local_k, local_v)
+    cache.meta_state = ("0", "128", "7", "7")
+    cache.update_pool(
+        mx.random.normal((1, 129, 64), dtype=mx.bfloat16),
+        "compressor_state",
+    )
+    cache.update_pool(
+        mx.random.normal((1, 129, 64), dtype=mx.bfloat16),
+        "indexer_state",
+    )
+    return cache
+
+
+def _assert_pool_q_segments_equal(source, restored):
+    for source_branch, restored_branch in (
+        (source.compressor_state, restored.compressor_state),
+        (source.indexer_state, restored.indexer_state),
+    ):
+        source_segments = source_branch._pooled_q_segments
+        restored_segments = restored_branch._pooled_q_segments
+        assert len(restored_segments) == len(source_segments)
+        for source_segment, restored_segment in zip(
+            source_segments, restored_segments
+        ):
+            for source_leaf, restored_leaf in zip(
+                source_segment[:3], restored_segment[:3]
+            ):
+                assert mx.array_equal(source_leaf, restored_leaf).item()
+            assert source_segment[3:] == restored_segment[3:]
 
 
 def test_pool_quantized_v4_cache_is_detected_as_dsv4_composite():
@@ -100,6 +148,40 @@ def test_dsv4_prompt_snapshot_preserves_pool_quantized_cache_type():
     assert snapshot[0].state[1][2].shape == (1, 2, 512)
 
 
+def test_dsv4_prompt_snapshot_preserves_encoded_pool_segments(monkeypatch):
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    cache = _make_encoded_pool_quantized_dsv4_cache(monkeypatch)
+    snapshot = DSV4BatchGenerator._snapshot_dsv4_cache([cache])
+
+    assert snapshot is not None
+    _assert_pool_q_segments_equal(cache, snapshot[0])
+
+
+def test_dsv4_prompt_snapshot_preserves_zero_ratio_swa_ring():
+    from mlx_lm.models.cache import RotatingKVCache
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    cache = RotatingKVCache(max_size=8, keep=0)
+    keys = mx.arange(12, dtype=mx.float32).reshape(1, 1, 12, 1)
+    values = keys + 100
+    cache.update_and_fetch(keys, values)
+    # Cross the in-place wrap so the physical order and insertion pointer are
+    # both meaningful state, not just a temporally ordered short prefix.
+    cache.update_and_fetch(mx.array([[[[12.0]]]]), mx.array([[[[112.0]]]]))
+    mx.eval(cache.keys, cache.values)
+
+    snapshot = DSV4BatchGenerator._snapshot_dsv4_cache([cache])
+
+    assert snapshot is not None
+    assert len(snapshot) == 1
+    restored = snapshot[0]
+    assert isinstance(restored, RotatingKVCache)
+    assert restored.meta_state == cache.meta_state
+    assert restored.keys.tolist() == cache.keys.tolist()
+    assert restored.values.tolist() == cache.values.tolist()
+
+
 def test_dsv4_extraction_reports_pool_quantized_native_codec():
     from vmlx_engine.scheduler import Scheduler
 
@@ -110,6 +192,21 @@ def test_dsv4_extraction_reports_pool_quantized_native_codec():
 
     assert extracted[0]["class_name"] == "PoolQuantizedV4Cache"
     assert extracted[0]["pool_quant"] is True
+
+
+def test_dsv4_extraction_uses_lossless_pool_storage_state(monkeypatch):
+    from jang_tools.dsv4.pool_quant_cache import POOL_STORAGE_SCHEMA
+    from vmlx_engine.scheduler import Scheduler
+
+    cache = _make_encoded_pool_quantized_dsv4_cache(monkeypatch)
+    scheduler = Scheduler.__new__(Scheduler)
+    extracted = scheduler._extract_cache_states([cache])
+
+    assert extracted[0]["pool_storage_schema"] == POOL_STORAGE_SCHEMA
+    assert extracted[0]["state"][0] == POOL_STORAGE_SCHEMA
+    # Reading extraction metadata must not materialize a retained BF16 pool.
+    assert cache.compressor_state._pooled_bf16 is None
+    assert cache.compressor_state._pooled_q_segments
 
 
 def test_pool_quantized_v4_cache_does_not_route_to_hybrid_ssm():
@@ -195,7 +292,7 @@ def test_dsv4_cli_cache_policy_defaults_composite_cache_off(caplog, monkeypatch)
     assert "paged=disabled_without_prefix" in changed
     assert "L2 disk=disabled_without_prefix" in changed
     assert "block_size=64->256" not in changed
-    assert "output equivalence is not proven" in caplog.text
+    assert "arbitrary partial CSA/HCA checkpoint reuse is not yet proven" in caplog.text
 
 
 def test_dsv4_cli_cache_policy_opt_in_uses_ds4_page_sized_blocks(monkeypatch):
@@ -655,6 +752,38 @@ def test_dsv4_block_disk_serialization_round_trips_nested_state():
     assert local_state[0].shape == (1, 1, 7, 512)
     assert compressor_state[2].shape == (1, 2, 512)
     assert indexer_state[2].shape == (1, 2, 512)
+
+
+def test_dsv4_pool_q8_disk_tree_and_reconstruction_are_lossless(
+    monkeypatch,
+):
+    from jang_tools.dsv4.pool_quant_cache import PoolQuantizedV4Cache
+    from vmlx_engine.block_disk_store import _deserialize_block, _serialize_block
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+    from vmlx_engine.scheduler import Scheduler
+
+    source = _make_encoded_pool_quantized_dsv4_cache(monkeypatch)
+    scheduler = Scheduler.__new__(Scheduler)
+    extracted = scheduler._extract_cache_states([source])
+    paged = PagedCacheManager(block_size=4, max_blocks=8)
+    prefix = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+    table = prefix.store_cache(
+        "dsv4-lossless-pool-l2",
+        [11, 12, 13, 14, 15, 16, 17],
+        extracted,
+    )
+    assert table is not None
+
+    terminal = paged.allocated_blocks[table.block_ids[-1]]
+    tensors, dtype, num_layers = _serialize_block(terminal.cache_data)
+    terminal.cache_data = _deserialize_block(dict(tensors), dtype)
+    rebuilt = prefix.reconstruct_cache(table)
+
+    assert num_layers == 1
+    assert rebuilt is not None
+    assert isinstance(rebuilt[0], PoolQuantizedV4Cache)
+    _assert_pool_q_segments_equal(source, rebuilt[0])
 
 
 def test_dsv4_numpy_disk_slice_keeps_composite_layers_when_only_two_kv_sources():
@@ -1278,7 +1407,7 @@ def test_dsv4_cli_cache_summary_names_diagnostic_native_composite_cache():
 
     joined = "\n".join(lines)
     assert "DSV4 diagnostic native composite prefix cache" in joined
-    assert "deepseek_v4_v8" in joined
+    assert "deepseek_v4_v9" in joined
     assert "generic paged KV" in joined
     assert "Paged cache:" not in joined
 
@@ -1292,8 +1421,39 @@ def test_dsv4_scheduler_log_names_native_composite_block_index():
     source = inspect.getsource(Scheduler.__init__)
     assert "DSV4 native composite block index enabled" in source
     assert "not generic paged KV" in source
-    assert "deepseek_v4_v8" in source
+    assert "deepseek_v4_v9" in source
     assert 'f"Paged cache enabled: block_size=' in source
+
+
+def test_dsv4_health_reports_rotating_swa_layers_as_ratio_zero(monkeypatch):
+    """Instantiated DSV4 RotatingKVCache layers are ratio-zero, not unknown."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.server import _native_cache_status
+
+    class RotatingKVCache:
+        pass
+
+    rotating = RotatingKVCache()
+    composite = SimpleNamespace(
+        compress_ratio=4,
+        local=SimpleNamespace(max_size=128),
+    )
+    scheduler = SimpleNamespace(
+        _uses_dsv4_cache=True,
+        _model_type_for_runtime="deepseek_v4",
+        model=SimpleNamespace(make_cache=lambda: [rotating, composite]),
+        block_aware_cache=None,
+        paged_cache_manager=None,
+        disk_cache=None,
+    )
+    monkeypatch.setenv("DSV4_POOL_QUANT", "0")
+
+    status = _native_cache_status(scheduler)
+
+    assert status["compress_ratios"] == [0, 4]
+    assert status["compress_ratio_counts"] == {"0": 1, "4": 1}
+    assert status["layer_cache_roles"]["ratio_0"] == "swa_local_only"
 
 
 def test_dsv4_cached_prefix_kickoff_avoids_cross_thread_mx_eval():
@@ -1603,29 +1763,22 @@ def test_dsv4_length_capped_clean_snapshot_is_cacheable():
     )
 
 
-def test_dsv4_paged_restore_requires_full_prefill():
-    """All DSV4 paged/L2 checkpoints currently fail closed.
+def test_dsv4_v9_paged_restore_is_not_unconditionally_rejected():
+    """The v9 native-state namespace may reach normal paged reconstruction.
 
-    A live Responses A/B proved that 269 cached tokens plus a 68-token tail
-    replayed stale output, while a full prefill of the identical 337-token
-    history returned the requested answer. A subsequent exact 336/337 restore
-    looped in reasoning, so exact N-1 reconstruction is not sufficient proof of
-    composite-state equivalence either.
+    v9 invalidates the old lossy pool records, preserves ratio-zero rotating
+    SWA, and transports q8 pool segments without materialize/requantize.  A
+    blanket DSV4 rejection here would silently discard every otherwise-valid
+    exact or partial L2 hit and force full prefill.
     """
     from vmlx_engine.scheduler import Scheduler
-
-    requires_full = Scheduler._dsv4_paged_hit_requires_full_prefill
-
-    assert requires_full(fetch_token_count=337, cached_token_count=269) is True
-    assert requires_full(fetch_token_count=1292, cached_token_count=1291) is True
-    assert requires_full(fetch_token_count=1, cached_token_count=0) is False
-    assert requires_full(fetch_token_count=337, cached_token_count=337) is True
 
     import inspect
 
     add_request = inspect.getsource(Scheduler.add_request)
-    assert "_dsv4_paged_hit_requires_full_prefill" in add_request
-    assert "_release_unusable_paged_hit(request)" in add_request
+    assert not hasattr(Scheduler, "_dsv4_paged_hit_requires_full_prefill")
+    assert "rejecting unsafe DSV4 paged/L2 extension" not in add_request
+    assert "if block_table and block_table.num_tokens > 0:" in add_request
 
 
 def test_failed_generation_prefix_trim_never_stores_original_state_under_shorter_key():
@@ -2230,7 +2383,8 @@ def test_dsv4_cache_hit_store_skips_sync_full_reprefill_when_snapshot_missing():
     )
     assert "_prefill_for_prompt_only_cache" in cleanup_src
     helper_src = inspect.getsource(scheduler.Scheduler._prefill_for_prompt_only_cache)
-    assert "chunk_size = len(prompt_tokens) if self._uses_dsv4_cache else 2048" in helper_src
+    assert "dsv4_effective_prefill_step" in helper_src
+    assert "chunk_size = len(prompt_tokens) if self._uses_dsv4_cache" not in helper_src
 
 
 def test_dsv4_short_prompt_snapshot_skip_does_not_sync_reprefill_for_store():
@@ -2369,6 +2523,27 @@ def test_dsv4_generator_rejects_oversize_nested_snapshot_before_copy(monkeypatch
     assert prompt_responses[0].prompt_cache_snapshot is None
     assert gen.prompt_snapshot_last_estimated_bytes == (8 + 16 + 32) * 4
     assert gen.prompt_snapshot_oversize_skips == 1
+
+
+def test_dsv4_snapshot_estimator_counts_encoded_pool_without_dequantizing(
+    monkeypatch,
+):
+    import jang_tools.dsv4.pool_quant_cache as pool_quant_cache
+
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    cache = _make_encoded_pool_quantized_dsv4_cache(monkeypatch)
+
+    def _unexpected_dequant(_qpool):
+        raise AssertionError("snapshot admission must not dequantize DSV4 pools")
+
+    with monkeypatch.context() as context:
+        context.setattr(pool_quant_cache, "_dequant_pool", _unexpected_dequant)
+        estimated = DSV4BatchGenerator._estimate_dsv4_cache_nbytes([cache])
+
+    assert estimated == cache.nbytes
+    assert cache.compressor_state._pooled_bf16 is None
+    assert cache.compressor_state._pooled_q_segments
 
 
 def test_dsv4_generator_rejects_snapshot_that_exceeds_metal_headroom(monkeypatch):
@@ -2537,7 +2712,10 @@ def test_dsv4_long_prefill_guard_describes_bounded_chunk_default():
 
 
 def test_dsv4_batch_generator_prefill_step_default_and_legacy_override(monkeypatch):
-    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+    from vmlx_engine.utils.dsv4_batch_generator import (
+        DSV4BatchGenerator,
+        dsv4_effective_prefill_step,
+    )
 
     monkeypatch.delenv("DSV4_PREFILL_STEP_SIZE", raising=False)
     gen = DSV4BatchGenerator(object(), prefill_step_size=2048)
@@ -2550,6 +2728,80 @@ def test_dsv4_batch_generator_prefill_step_default_and_legacy_override(monkeypat
     monkeypatch.setenv("DSV4_PREFILL_STEP_SIZE", "0")
     gen = DSV4BatchGenerator(object(), prefill_step_size=2048)
     assert gen.prefill_step_size == 1 << 30
+
+    assert dsv4_effective_prefill_step(2048, 12_288) == 2048
+    assert dsv4_effective_prefill_step(2048, 12_289) == 512
+    assert dsv4_effective_prefill_step(2048, 32_768) == 512
+    assert dsv4_effective_prefill_step(256, 32_768) == 256
+    assert (
+        dsv4_effective_prefill_step(
+            1 << 30,
+            32_768,
+            single_shot=True,
+        )
+        == 32_768
+    )
+
+
+def test_dsv4_prompt_only_prefill_uses_adaptive_long_context_chunks(monkeypatch):
+    from types import SimpleNamespace
+
+    from vmlx_engine.scheduler import Scheduler
+
+    monkeypatch.delenv("DSV4_PREFILL_STEP_SIZE", raising=False)
+    calls = []
+
+    class _Model:
+        def make_cache(self):
+            return [_make_dsv4_state_cache()]
+
+        def __call__(self, input_ids, cache=None):
+            calls.append(int(input_ids.shape[-1]))
+            return SimpleNamespace(logits=input_ids)
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.model = _Model()
+    scheduler.config = SimpleNamespace(prefill_step_size=2048)
+    scheduler._uses_dsv4_cache = True
+
+    cache = scheduler._prefill_for_prompt_only_cache(list(range(12_289)))
+
+    assert cache is not None
+    assert calls
+    assert max(calls) == 512
+    assert sum(calls) == 12_289
+
+
+def test_dsv4_prompt_only_prefill_materializes_encoded_pool_without_dequantizing(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    import jang_tools.dsv4.pool_quant_cache as pool_quant_cache
+
+    from vmlx_engine.scheduler import Scheduler
+
+    encoded = _make_encoded_pool_quantized_dsv4_cache(monkeypatch)
+
+    class _Model:
+        def make_cache(self):
+            return [encoded]
+
+        def __call__(self, input_ids, cache=None):
+            return SimpleNamespace(logits=input_ids)
+
+    def _unexpected_dequant(_qpool):
+        raise AssertionError("prompt-only prefill must not dequantize DSV4 pools")
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.model = _Model()
+    scheduler.config = SimpleNamespace(prefill_step_size=2048)
+    scheduler._uses_dsv4_cache = True
+    with monkeypatch.context() as context:
+        context.setattr(pool_quant_cache, "_dequant_pool", _unexpected_dequant)
+        cache = scheduler._prefill_for_prompt_only_cache([1, 2, 3])
+
+    assert cache == [encoded]
 
 
 def test_dsv4_prompt_only_prefill_collects_composite_state_without_values_attr():

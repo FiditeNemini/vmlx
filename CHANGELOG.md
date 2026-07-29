@@ -26,6 +26,11 @@ All notable changes to vMLX Engine will be documented in this file.
   cache paths disabled until cached-output equivalence is independently proven,
   while pool quantization remains bundle-derived and generic TurboQuant KV stays
   disabled for this architecture.
+- DeepSeek-V4 Flash native long-context state now preserves ratio-zero SWA
+  rings and lossless, dtype-aware q8 CSA/HCA pool segments through prompt
+  snapshots and SSD/L2 reconstruction. Long prefills use smaller
+  compression-ratio-aligned chunks beyond the proven short-context band to
+  avoid Metal command-buffer timeouts.
 - Electron session adoption cannot silently inherit an unsafe or malformed
   DeepSeek-V4 cache configuration; unsupported cache controls and contradictory
   cache help are hidden for these sessions.
@@ -44,7 +49,7 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ### Distribution hardening
 
-- Public source and bundled Python attest the exact clean JANG 2.5.35 source
+- Public source and bundled Python attest the exact clean JANG 2.5.36 source
   tree used by the release.
 - Sequoia and Tahoe artifacts remain separate, signed, notarized outputs bound
   to one exact source revision.

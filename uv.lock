@@ -2188,7 +2188,7 @@ wheels = [
 
 [[package]]
 name = "jang"
-version = "2.5.35"
+version = "2.5.36"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
@@ -2197,9 +2197,9 @@ dependencies = [
     { name = "safetensors" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5b/a9/2850689567b38ce5251a994ff93ee3a00b7b0574564d7e7f95e62f536947/jang-2.5.35.tar.gz", hash = "sha256:115d7915762570415dad382397234acad63a996f4f03f159e1a179f6ff3d83ae", size = 822669, upload-time = "2026-07-28T20:37:25.392Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/af/cd/87bb272a38af071c001d53432921bf1a0092ed095edb2d6757312a77e934/jang-2.5.36.tar.gz", hash = "sha256:99ac342a637d2e46a28f0ace83a4811edd78b09d725f5987b98f96a463fdca91", size = 824786, upload-time = "2026-07-29T17:36:06.789Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ac/b0/98b6fcb71185ad7ccc85e022a91891ea63b7436099dd99e538ba7fa8b7c2/jang-2.5.35-py3-none-any.whl", hash = "sha256:bbc4f5cbd684063cccd3a5707c7add8c4b7327b45ea978c5bd8c91ff2798015b", size = 891232, upload-time = "2026-07-28T20:37:24.016Z" },
+    { url = "https://files.pythonhosted.org/packages/51/a7/df7ab9c01cc9984ee91c5adcead36beca6bd9d0e2a594fad634ab56f4573/jang-2.5.36-py3-none-any.whl", hash = "sha256:e0615c8287baebad5fd62df726798e2f3aa04b96b63023ef61c5eee01572a107", size = 892920, upload-time = "2026-07-29T17:36:04.629Z" },
 ]
 
 [[package]]
@@ -7885,9 +7885,9 @@ requires-dist = [
     { name = "fugashi", marker = "extra == 'audio'", specifier = ">=1.3.0" },
     { name = "gradio", marker = "extra == 'ui'", specifier = ">=4.0.0" },
     { name = "huggingface-hub", specifier = ">=0.23.0" },
-    { name = "jang", specifier = ">=2.5.35" },
-    { name = "jang", marker = "extra == 'jang'", specifier = ">=2.5.35" },
-    { name = "jang", marker = "extra == 'mxtq'", specifier = ">=2.5.35" },
+    { name = "jang", specifier = ">=2.5.36" },
+    { name = "jang", marker = "extra == 'jang'", specifier = ">=2.5.36" },
+    { name = "jang", marker = "extra == 'mxtq'", specifier = ">=2.5.36" },
     { name = "jieba", marker = "extra == 'audio'", specifier = ">=0.42.0" },
     { name = "jsonschema", specifier = ">=4.0.0" },
     { name = "librosa", specifier = ">=0.10.0" },

@@ -299,7 +299,7 @@ def compute_model_cache_key(
         # keys so the last prompt token is always re-fed on prefix hits. This
         # intentionally invalidates older v2 disk blocks that were keyed by
         # the full prompt despite holding truncated cache state.
-        parts.append("dsv4_cache_schema=deepseek_v4_v8")
+        parts.append("dsv4_cache_schema=deepseek_v4_v9")
 
     if not parts:
         # Defensive: fall back to identity
@@ -980,6 +980,8 @@ def _copy_mlx_tree(obj):
         return tuple(_copy_mlx_tree(x) for x in obj)
     if isinstance(obj, list):
         return [_copy_mlx_tree(x) for x in obj]
+    if isinstance(obj, dict):
+        return {key: _copy_mlx_tree(value) for key, value in obj.items()}
     return obj
 
 
@@ -1371,6 +1373,8 @@ def _dsv4_cache_meta(layer_state: Dict[str, Any]) -> Dict[str, Any]:
             meta["sliding_window"] = sw
     if "pool_quant" in layer_state:
         meta["pool_quant"] = layer_state.get("pool_quant")
+    if "pool_storage_schema" in layer_state:
+        meta["pool_storage_schema"] = layer_state.get("pool_storage_schema")
     if "local_quant_meta" in layer_state:
         try:
             meta["local_quant_meta"] = [
@@ -4834,7 +4838,32 @@ class BlockAwarePrefixCache:
                             compress_ratio=compress_ratio,
                         )
                         local_quant_meta = cache_meta.get("local_quant_meta")
-                        if local_quant_meta:
+                        pool_storage_schema = cache_meta.get("pool_storage_schema")
+                        if pool_storage_schema:
+                            if class_name != "PoolQuantizedV4Cache":
+                                raise ValueError(
+                                    "DSV4 pool storage schema belongs to a non-pool cache"
+                                )
+                            if local_quant_meta:
+                                raise ValueError(
+                                    "DSV4 native pool storage cannot be combined with "
+                                    "generic local KV quantization"
+                                )
+                            if (
+                                not isinstance(state, (tuple, list))
+                                or not state
+                                or state[0] != pool_storage_schema
+                            ):
+                                raise ValueError(
+                                    "DSV4 pool storage-state tag does not match cache metadata"
+                                )
+                            if not hasattr(cache, "storage_state"):
+                                raise ValueError(
+                                    "installed JANG runtime lacks lossless DSV4 pool restore"
+                                )
+                            cache.storage_state = state
+                            cache.meta_state = meta
+                        elif local_quant_meta:
                             # DSV4 q4/q8 storage keeps CSA/HCA pool buffers
                             # native but stores local SWA KV as QuantizedKVCache.
                             # Rebuild that composite explicitly; assigning this

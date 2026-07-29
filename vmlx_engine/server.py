@@ -892,105 +892,12 @@ def _effective_max_prompt_tokens(request_or_value: Any | int | None = None) -> i
     return session_limit
 
 
-def _text_prompt_token_estimate(text: str | None) -> int:
-    if not text:
-        return 0
-    return max(1, (len(str(text)) + 2) // 3)
-
-
-def _configured_media_prompt_token_floor(media_type: str) -> int:
-    """Best-effort pre-tokenization floor for media placeholders.
-
-    Exact VLM media token counts are processor-dependent and are only known
-    after the VLM processor expands the prompt. This guard is route-level
-    preflight, so it counts text exactly by character estimate and includes a
-    conservative media floor instead of treating images/videos/audio as zero.
-    """
-    media_type = (media_type or "").lower()
-    try:
-        cfg = getattr(get_engine(), "model", None)
-        cfg = getattr(cfg, "config", None) or cfg
-        candidates = [cfg]
-        text_cfg = getattr(cfg, "text_config", None) if cfg is not None else None
-        vision_cfg = getattr(cfg, "vision_config", None) if cfg is not None else None
-        candidates.extend([text_cfg, vision_cfg])
-        keys = (
-            "image_seq_length",
-            "image_token_length",
-            "num_image_tokens",
-            "image_tokens_per_image",
-            "tokens_per_image",
-        )
-        for obj in candidates:
-            if obj is None:
-                continue
-            for key in keys:
-                value = getattr(obj, key, None)
-                if isinstance(value, int) and value > 0:
-                    image_tokens = value
-                    if "video" in media_type:
-                        return max(image_tokens, image_tokens * 8)
-                    return image_tokens
-    except Exception:
-        pass
-    if "video" in media_type:
-        return 8192
-    return 1024
-
-
-def _prompt_content_token_estimate(content: Any) -> int:
-    if content is None:
-        return 0
-    if isinstance(content, str):
-        return _text_prompt_token_estimate(content)
-    if hasattr(content, "model_dump"):
-        try:
-            content = content.model_dump(exclude_none=True)
-        except Exception:
-            pass
-    if isinstance(content, list):
-        return sum(_prompt_content_token_estimate(part) for part in content)
-    if isinstance(content, dict):
-        part_type = str(content.get("type") or "").lower()
-        if part_type in {"text", "input_text", "output_text"}:
-            return _text_prompt_token_estimate(content.get("text"))
-        if part_type in {
-            "image",
-            "image_url",
-            "input_image",
-            "video",
-            "video_url",
-            "input_video",
-            "audio",
-            "audio_url",
-            "input_audio",
-        }:
-            return _configured_media_prompt_token_floor(part_type)
-        # Unknown dict-shaped content is rare. Count user-visible string values
-        # but do not count base64/media payload bytes as language tokens.
-        total = 0
-        for key, value in content.items():
-            if key in {"image", "image_url", "video", "video_url", "audio", "audio_url", "input_audio"}:
-                total += _configured_media_prompt_token_floor(key)
-            elif isinstance(value, str):
-                total += _text_prompt_token_estimate(value)
-            elif isinstance(value, (list, dict)):
-                total += _prompt_content_token_estimate(value)
-        return total
-    return _text_prompt_token_estimate(str(content))
-
-
-def _message_prompt_token_estimate(messages: list[Any] | None) -> int:
-    total = 0
-    for msg in messages or []:
-        if hasattr(msg, "model_dump"):
-            try:
-                msg = msg.model_dump(exclude_none=True)
-            except Exception:
-                pass
-        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
-        total += _prompt_content_token_estimate(content)
-    return total
+# Do not add a route-level characters-per-token rejection here. The production
+# chat template can tokenize very differently from a generic character ratio;
+# DSV4 proved that a rendered 32,763-token prompt was falsely rejected as
+# ~37,895 tokens before it reached the model. BatchedEngine/SimpleEngine and the
+# MLLM processor enforce this exact limit after production rendering and before
+# prefill/cache mutation, and every API route forwards the resolved limit there.
 
 
 def _prompt_too_long_response(
@@ -1066,34 +973,6 @@ def _unsupported_media_modality_response_from_error(
             }
         },
     )
-
-
-def _reject_if_prompt_too_long_for_messages(
-    messages: list[Any] | None,
-    *,
-    max_prompt_tokens: int | None = None,
-):
-    limit = int(_max_prompt_tokens if max_prompt_tokens is None else max_prompt_tokens)
-    if limit <= 0 or not messages:
-        return None
-    estimated_tokens = _message_prompt_token_estimate(messages)
-    if estimated_tokens > limit:
-        return _prompt_too_long_response(estimated_tokens, max_prompt_tokens=limit)
-    return None
-
-
-def _reject_if_prompt_too_long_for_prompts(
-    prompts: list[str] | None,
-    *,
-    max_prompt_tokens: int | None = None,
-):
-    limit = int(_max_prompt_tokens if max_prompt_tokens is None else max_prompt_tokens)
-    if limit <= 0 or not prompts:
-        return None
-    estimated_tokens = sum(_text_prompt_token_estimate(str(prompt)) for prompt in prompts)
-    if estimated_tokens > limit:
-        return _prompt_too_long_response(estimated_tokens, max_prompt_tokens=limit)
-    return None
 
 
 def _merge_ct_kwargs(request_kwargs: dict | None) -> dict:
@@ -9199,6 +9078,16 @@ def _native_cache_status(
                 windows: list[int] = []
                 for layer_cache in cache_layers:
                     ratio = getattr(layer_cache, "compress_ratio", None)
+                    if (
+                        ratio is None
+                        and type(layer_cache).__name__ == "RotatingKVCache"
+                    ):
+                        # DSV4 ratio-zero layers intentionally use mlx-lm's
+                        # bounded rotating SWA cache rather than a
+                        # DeepseekV4Cache object with compress_ratio=0. Report
+                        # the instantiated topology as ratio 0 instead of
+                        # presenting those proven runtime layers as unknown.
+                        ratio = 0
                     try:
                         ratios.append(int(ratio) if ratio is not None else None)
                     except (TypeError, ValueError):
@@ -9229,7 +9118,7 @@ def _native_cache_status(
             layout = {}
         status = {
             "family": "deepseek_v4",
-            "schema": "deepseek_v4_v8",
+            "schema": "deepseek_v4_v9",
             "cache_type": "native_composite",
             "components": [
                 "swa_local",
@@ -12904,12 +12793,6 @@ async def create_anthropic_message(
     )
 
     _msg_max_prompt_tokens = _effective_max_prompt_tokens(chat_req)
-    prompt_limit_response = _reject_if_prompt_too_long_for_messages(
-        chat_req.messages,
-        max_prompt_tokens=_msg_max_prompt_tokens,
-    )
-    if prompt_limit_response is not None:
-        return prompt_limit_response
 
     # Nemotron-Omni multimodal dispatch (Anthropic /v1/messages parity
     # with /v1/chat/completions; live test 2026-04-30 surfaced that
@@ -13816,12 +13699,6 @@ async def ollama_chat(fastapi_request: Request):
         _messages_multimodal_summary(chat_req.messages),
     )
     _ollama_max_prompt_tokens = _effective_max_prompt_tokens(chat_req)
-    prompt_limit_response = _reject_if_prompt_too_long_for_messages(
-        chat_req.messages,
-        max_prompt_tokens=_ollama_max_prompt_tokens,
-    )
-    if prompt_limit_response is not None:
-        return prompt_limit_response
 
     if not is_streaming:
         result = await create_chat_completion(chat_req, fastapi_request)
@@ -14246,12 +14123,6 @@ async def ollama_generate(fastapi_request: Request):
 
         chat_req = ChatCompletionRequest(**openai_chat_req)
         _ollama_gen_max_prompt_tokens = _effective_max_prompt_tokens(chat_req)
-        prompt_limit_response = _reject_if_prompt_too_long_for_messages(
-            chat_req.messages,
-            max_prompt_tokens=_ollama_gen_max_prompt_tokens,
-        )
-        if prompt_limit_response is not None:
-            return prompt_limit_response
         if not is_streaming:
             result = await create_chat_completion(chat_req, fastapi_request)
             if hasattr(result, "model_dump"):
@@ -14326,12 +14197,6 @@ async def ollama_generate(fastapi_request: Request):
         comp_req = CompletionRequest(**openai_req)
         prompts = [comp_req.prompt] if isinstance(comp_req.prompt, str) else comp_req.prompt
         _ollama_raw_max_prompt_tokens = _effective_max_prompt_tokens(comp_req)
-        prompt_limit_response = _reject_if_prompt_too_long_for_prompts(
-            prompts,
-            max_prompt_tokens=_ollama_raw_max_prompt_tokens,
-        )
-        if prompt_limit_response is not None:
-            return prompt_limit_response
         # create_completion takes only the CompletionRequest — no
         # fastapi_request arg (unlike create_chat_completion which uses
         # it for disconnect detection). Pre-session regression from
@@ -14367,12 +14232,6 @@ async def ollama_generate(fastapi_request: Request):
     engine = get_engine()
     prompts = [comp_req.prompt] if isinstance(comp_req.prompt, str) else comp_req.prompt
     _ollama_raw_max_prompt_tokens = _effective_max_prompt_tokens(comp_req)
-    prompt_limit_response = _reject_if_prompt_too_long_for_prompts(
-        prompts,
-        max_prompt_tokens=_ollama_raw_max_prompt_tokens,
-    )
-    if prompt_limit_response is not None:
-        return prompt_limit_response
 
     async def ndjson_stream():
         done_sent = False
@@ -15530,12 +15389,6 @@ async def create_completion(request: CompletionRequest):
     prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
 
     _completion_max_prompt_tokens = _effective_max_prompt_tokens(request)
-    prompt_limit_response = _reject_if_prompt_too_long_for_prompts(
-        prompts,
-        max_prompt_tokens=_completion_max_prompt_tokens,
-    )
-    if prompt_limit_response is not None:
-        return prompt_limit_response
 
     if request.stream:
         return StreamingResponse(
@@ -15794,12 +15647,6 @@ async def create_chat_completion(
     )
 
     _chat_max_prompt_tokens = _effective_max_prompt_tokens(request)
-    prompt_limit_response = _reject_if_prompt_too_long_for_messages(
-        request.messages,
-        max_prompt_tokens=_chat_max_prompt_tokens,
-    )
-    if prompt_limit_response is not None:
-        return prompt_limit_response
 
     if request.logprobs:
         _logprobs_engine = get_engine()
@@ -18997,12 +18844,6 @@ async def create_response(
     # coercions and request-scoped instructions remain generation-local.
     history_messages = _normalize_leading_system_messages(history_messages)
     _responses_max_prompt_tokens = _effective_max_prompt_tokens(request)
-    prompt_limit_response = _reject_if_prompt_too_long_for_messages(
-        messages,
-        max_prompt_tokens=_responses_max_prompt_tokens,
-    )
-    if prompt_limit_response is not None:
-        return prompt_limit_response
 
     # Strip <think> blocks from history when thinking is OFF (same as Chat Completions path)
     _ct_kwargs = _merge_ct_kwargs(request.chat_template_kwargs)

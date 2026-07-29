@@ -412,43 +412,20 @@ class TestHelperFunctions:
         src = Path(server.__file__).read_text()
         assert "_max_context_length" not in src
 
-    def test_prompt_limit_guard_rejects_chat_messages(self, monkeypatch):
-        from vmlx_engine import server
-        from vmlx_engine.api.models import Message
+    def test_prompt_limit_has_no_character_heuristic_preflight(self):
+        """Near-limit requests must reach the authoritative loaded tokenizer.
 
-        monkeypatch.setattr(server, "_max_prompt_tokens", 2)
-
-        response = server._reject_if_prompt_too_long_for_messages([
-            Message(role="user", content="x" * 30)
-        ])
-
-        assert response is not None
-        assert response.status_code == 413
-        assert b"prompt_too_long" in response.body
-
-    def test_prompt_limit_guard_allows_chat_messages_under_limit(self, monkeypatch):
-        from vmlx_engine import server
-        from vmlx_engine.api.models import Message
-
-        monkeypatch.setattr(server, "_max_prompt_tokens", 100)
-
-        assert server._reject_if_prompt_too_long_for_messages([
-            Message(role="user", content="hello")
-        ]) is None
-
-    def test_prompt_limit_guard_rejects_completion_prompt_list(self, monkeypatch):
+        Character ratios can overestimate a valid prompt by thousands of
+        tokens for a concrete bundle. The scheduler/SimpleEngine exact-token
+        guards own rejection after production chat-template rendering.
+        """
         from vmlx_engine import server
 
-        monkeypatch.setattr(server, "_max_prompt_tokens", 2)
+        source = Path(server.__file__).read_text()
 
-        response = server._reject_if_prompt_too_long_for_prompts([
-            "short",
-            "x" * 30,
-        ])
-
-        assert response is not None
-        assert response.status_code == 413
-        assert b"prompt_too_long" in response.body
+        assert "_text_prompt_token_estimate" not in source
+        assert "_reject_if_prompt_too_long_for_messages" not in source
+        assert "_reject_if_prompt_too_long_for_prompts" not in source
 
     def test_vlm_image_prefill_budget_response_is_client_error(self):
         """Predictable media-prefill budget rejection is a 413, not 500."""
@@ -493,27 +470,7 @@ class TestHelperFunctions:
         assert body["error"]["family"] == "mimo_v2"
         assert "not wired" in body["error"]["message"]
 
-    def test_prompt_limit_guard_counts_vlm_media_parts(self, monkeypatch):
-        from vmlx_engine import server
-        from vmlx_engine.api.models import Message
-
-        monkeypatch.setattr(server, "_max_prompt_tokens", 100)
-
-        response = server._reject_if_prompt_too_long_for_messages([
-            Message(
-                role="user",
-                content=[
-                    {"type": "text", "text": "describe"},
-                    {"type": "image_url", "image_url": {"url": "file:///tmp/x.png"}},
-                ],
-            )
-        ])
-
-        assert response is not None
-        assert response.status_code == 413
-        assert b"prompt_too_long" in response.body
-
-    def test_prompt_limit_guard_is_used_by_all_generation_entrypoints(self):
+    def test_exact_prompt_limit_is_forwarded_by_all_generation_entrypoints(self):
         import inspect
         from vmlx_engine import server
 
@@ -536,9 +493,11 @@ class TestHelperFunctions:
         source = Path("vmlx_engine/server.py").read_text()
 
         assert "_effective_max_prompt_tokens(request)" in source
-        assert "max_prompt_tokens=_chat_max_prompt_tokens" in source
         assert '"max_prompt_tokens": _chat_max_prompt_tokens' in source
         assert '"max_prompt_tokens": _responses_max_prompt_tokens' in source
+        assert '"max_prompt_tokens": _completion_max_prompt_tokens' in source
+        assert '"max_prompt_tokens": _msg_max_prompt_tokens' in source
+        assert '"max_prompt_tokens": _ollama_max_prompt_tokens' in source
         assert "except PromptTooLongError" in source
 
     def test_streaming_routes_map_prompt_limit_to_prompt_too_long(self):

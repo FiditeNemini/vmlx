@@ -1407,6 +1407,47 @@ def _listener_pids(port: int) -> set[int]:
     }
 
 
+def _stable_listener_pid(
+    port: int,
+    *,
+    required_consecutive: int = 3,
+    max_attempts: int = 20,
+    interval_seconds: float = 0.05,
+) -> tuple[int, list[list[int]]]:
+    """Require a stable singleton listener while retaining transient evidence.
+
+    Electron restarts can briefly overlap a retiring/inheriting process with
+    the new backend.  A single lsof sample is therefore not an ownership
+    attestation.  Accept only the same singleton PID in consecutive samples;
+    persistent duplicates, gaps, or alternating owners still fail closed.
+    """
+
+    observations: list[list[int]] = []
+    candidate: int | None = None
+    consecutive = 0
+    for attempt in range(max_attempts):
+        pids = _listener_pids(port)
+        observations.append(sorted(pids))
+        if len(pids) == 1:
+            observed = next(iter(pids))
+            if observed == candidate:
+                consecutive += 1
+            else:
+                candidate = observed
+                consecutive = 1
+            if consecutive >= required_consecutive:
+                return observed, observations
+        else:
+            candidate = None
+            consecutive = 0
+        if attempt + 1 < max_attempts:
+            time.sleep(interval_seconds)
+    raise RuntimeError(
+        f"expected one stable LISTEN PID on localhost:{port}; "
+        f"observed PID sets {observations}"
+    )
+
+
 def _listener_cwd(pid: int) -> Path:
     output = _run_text(
         [
@@ -1513,21 +1554,17 @@ def _observe_local_listener_identity(base_url: str) -> dict[str, Any]:
     if port is None:
         port = 443 if parsed.scheme == "https" else 80
 
-    pids_before = _listener_pids(port)
-    if len(pids_before) != 1:
-        raise RuntimeError(
-            f"expected one LISTEN PID on localhost:{port}, found {sorted(pids_before)}"
-        )
-    pid = next(iter(pids_before))
+    pid, observations_before = _stable_listener_pid(port)
     started_at = _run_text(["/bin/ps", "-p", str(pid), "-o", "lstart="])
     command = _run_text(["/bin/ps", "-p", str(pid), "-o", "command="])
     cwd = _listener_cwd(pid)
     python_executable, launch_shape = _listener_launch(command, cwd)
-    pids_after = _listener_pids(port)
-    if pids_after != {pid}:
+    pid_after, observations_after = _stable_listener_pid(port)
+    if pid_after != pid:
         raise RuntimeError(
             f"listener changed while observing localhost:{port}: "
-            f"{sorted(pids_before)} -> {sorted(pids_after)}"
+            f"{pid} -> {pid_after}; observed PID sets "
+            f"{observations_before + observations_after}"
         )
     if not started_at or not command:
         raise RuntimeError(f"could not capture start time and command for PID {pid}")
@@ -1553,6 +1590,13 @@ def _observe_local_listener_identity(base_url: str) -> dict[str, Any]:
         "method": "macos-lsof-ps",
         **fingerprint_payload,
         "fingerprint_sha256": fingerprint,
+        "stabilization": {
+            "required_consecutive": 3,
+            "max_attempts": 20,
+            "interval_seconds": 0.05,
+            "initial_observed_pid_sets": observations_before,
+            "final_observed_pid_sets": observations_after,
+        },
     }
 
 

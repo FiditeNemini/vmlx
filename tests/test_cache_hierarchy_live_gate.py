@@ -3182,9 +3182,47 @@ def test_observed_listener_identity_uses_unique_lsof_pid_and_ps_provenance(
 
 def test_observed_listener_identity_rejects_ambiguous_listener_pids(monkeypatch):
     monkeypatch.setattr(gate, "_run_text", lambda _command: "p4321\np9876")
+    monkeypatch.setattr(gate.time, "sleep", lambda _seconds: None)
 
-    with pytest.raises(RuntimeError, match="expected one LISTEN PID"):
+    with pytest.raises(RuntimeError, match="expected one stable LISTEN PID"):
         _observe_local_listener_identity("http://localhost:8001")
+
+
+def test_observed_listener_identity_waits_out_transient_duplicate(monkeypatch):
+    listener_samples = iter(
+        ["p4321\np9876", "p4321", "p4321", "p4321"]
+    )
+
+    def fake_run_text(command):
+        if command[0] == "/usr/sbin/lsof":
+            if "-iTCP:8001" in command:
+                return next(listener_samples, "p4321")
+            if "cwd" in command:
+                return f"p4321\nfcwd\nn{GIT_ROOT}"
+            raise AssertionError(command)
+        if command[-1] == "lstart=":
+            return "Fri Jul 24 10:00:00 2026"
+        if command[-1] == "command=":
+            return f"{TEST_PYTHON} -m vmlx_engine.cli serve test/model --port 8001"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(gate, "_run_text", fake_run_text)
+    monkeypatch.setattr(gate.time, "sleep", lambda _seconds: None)
+
+    identity = _observe_local_listener_identity("http://localhost:8001")
+
+    assert identity["pid"] == 4321
+    assert identity["stabilization"]["initial_observed_pid_sets"] == [
+        [4321, 9876],
+        [4321],
+        [4321],
+        [4321],
+    ]
+    assert identity["stabilization"]["final_observed_pid_sets"] == [
+        [4321],
+        [4321],
+        [4321],
+    ]
 
 
 def test_health_runtime_provenance_binds_listener_pid_and_source_hashes():

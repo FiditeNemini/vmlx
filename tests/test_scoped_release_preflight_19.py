@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 import importlib.util
 import json
@@ -1461,6 +1462,57 @@ def test_v5_owned_command_removes_only_its_exclusive_temporary_payload(
     assert result["temporary_directory_removed"] is True
     assert not child_tmpdir.exists()
     assert retained.read_text(encoding="utf-8") == "keep"
+
+
+def test_v5_owned_tmp_cleanup_retries_transient_nonempty_directory(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    (owned / ".DS_Store").write_bytes(b"metadata")
+    real_rmtree = module.shutil.rmtree
+    calls = 0
+
+    def transient_rmtree(path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+        real_rmtree(path)
+
+    monkeypatch.setattr(module.shutil, "rmtree", transient_rmtree)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    module._v5_remove_reserved_tmp_entry(owned)
+
+    assert calls == 2
+    assert not owned.exists()
+
+
+def test_v5_owned_tmp_cleanup_rejects_persistent_nonempty_directory(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = load_module()
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    calls = 0
+
+    def persistent_rmtree(path):
+        nonlocal calls
+        calls += 1
+        raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+
+    monkeypatch.setattr(module.shutil, "rmtree", persistent_rmtree)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(OSError) as error:
+        module._v5_remove_reserved_tmp_entry(owned)
+
+    assert error.value.errno == errno.ENOTEMPTY
+    assert calls == 8
 
 
 def test_v5_owned_command_removes_temporary_payload_after_nonzero_exit(

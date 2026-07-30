@@ -15,6 +15,7 @@ import base64
 import binascii
 import contextlib
 import ctypes
+import errno
 import hashlib
 import http.client
 import importlib.util
@@ -7848,9 +7849,39 @@ def _v5_remove_reserved_tmp_entry(path: Path) -> None:
     except FileNotFoundError:
         return
     if stat.S_ISDIR(entry_stat.st_mode) and not stat.S_ISLNK(entry_stat.st_mode):
-        shutil.rmtree(path)
+        _v5_rmtree_owned_entry(path)
     else:
         path.unlink()
+
+
+def _v5_rmtree_owned_entry(
+    path: Path,
+    *,
+    max_attempts: int = 8,
+    interval_seconds: float = 0.05,
+) -> None:
+    """Remove an owned tree despite bounded macOS metadata-file races.
+
+    Finder can create ``.DS_Store`` between ``shutil.rmtree`` scanning a
+    directory and its final ``rmdir``.  Retry only the resulting non-empty
+    directory errors.  Persistent writers, permission errors, and every other
+    cleanup failure remain fatal, and the caller still verifies the pinned
+    directory identity is gone.
+    """
+
+    for attempt in range(max_attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if (
+                exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}
+                or attempt + 1 >= max_attempts
+            ):
+                raise
+            time.sleep(interval_seconds)
 
 
 def _v5_cleanup_owned_command_tmpdir(
@@ -7907,7 +7938,7 @@ def _v5_cleanup_owned_command_tmpdir(
                 or os.pread(marker_fd, len(marker_payload), 0) != marker_payload
             ):
                 tamper_reasons.append("marker changed")
-        shutil.rmtree(actual_path)
+        _v5_rmtree_owned_entry(actual_path)
         if actual_path != original_path:
             _v5_remove_reserved_tmp_entry(original_path)
     else:

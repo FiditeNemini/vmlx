@@ -8305,8 +8305,11 @@ async function main() {
           }
           const proseAnswer = answer?.cloneNode(true);
           proseAnswer?.querySelectorAll(
-            '[data-vmlx-proof-tool-card], [data-vmlx-proof-tool-container]'
+            '[data-vmlx-proof-tool-card], [data-vmlx-proof-tool-container], .code-header'
           ).forEach((element) => element.remove());
+          // The code-block language/copy header is renderer chrome, not model
+          // output.  Keep the rendered <code> body in the persisted-content
+          // linkage check while excluding that UI-owned label and button.
           // innerText only preserves rendered separators such as <br> and
           // block boundaries while a node participates in layout. The
           // scrubbed clone is detached, so falling back to textContent would

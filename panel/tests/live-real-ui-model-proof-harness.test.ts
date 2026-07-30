@@ -3893,14 +3893,14 @@ describe("real UI model proof harness", () => {
     );
   });
 
-  it("attests answer prose without folding rendered tool-card text into it", () => {
+  it("attests answer prose without folding renderer chrome into it", () => {
     const source = readFileSync(
       path.resolve("scripts/live-real-ui-model-proof.mjs"),
       "utf8",
     );
     expect(source).toContain("const proseAnswer = answer?.cloneNode(true);");
     expect(source).toContain(
-      "'[data-vmlx-proof-tool-card], [data-vmlx-proof-tool-container]'",
+      "'[data-vmlx-proof-tool-card], [data-vmlx-proof-tool-container], .code-header'",
     );
     expect(source).toContain("proseProbe.appendChild(proseAnswer);");
     expect(source).toContain("document.body.appendChild(proseProbe);");

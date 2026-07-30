@@ -38,6 +38,7 @@ import {
   parseResolvedSamplingKwargs,
   privateCacheAttestationSessionArgs,
   readPrivateExternalJson,
+  releasePrimarySharedPrefix,
   reattestRequiredScreenshot,
   runPostSentinelWorkWithCleanup,
   resolveIndependentBundleGenerationDefaults,
@@ -4392,6 +4393,23 @@ describe("real UI model proof harness", () => {
     expect(validateExactToolLoopEvidence(errorStatus).join("\n")).toMatch(
       /tool call\/result\/status residue/,
     );
+  });
+
+  it("requires positive cache reuse only on probes with a complete shared block", () => {
+    const store = goodResult();
+    store.requestContract.uiActionProfile =
+      "primary-history-paged-evict-refault";
+    expect(uiProfileRequiresPositiveCacheReuse(store)).toBe(false);
+
+    const restart = goodResult();
+    restart.requestContract.uiActionProfile = "primary-restart-followup";
+    expect(uiProfileRequiresPositiveCacheReuse(restart)).toBe(true);
+
+    const sharedAnchors = releasePrimarySharedPrefix.match(
+      /cache-token-\d{3}/g,
+    );
+    expect(sharedAnchors).toHaveLength(96);
+    expect(new Set(sharedAnchors).size).toBe(96);
   });
 
   it("uses the canonical Ollama fallback ID when the backend omits one", () => {

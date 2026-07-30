@@ -3473,11 +3473,23 @@ export function expectedUiToolCallCount(result) {
 export function uiProfileRequiresPositiveCacheReuse(result) {
   return new Set([
     'primary-tool-restart-probe',
-    'primary-history-paged-evict-refault',
     'primary-restart-followup',
     'native-three-turn-switch',
   ]).has(String(result?.requestContract?.uiActionProfile || ''))
 }
+
+// The restart probes must share at least one complete 64-token cache block
+// with their corresponding store phase. Keep this deliberately longer than
+// one block even for tokenizers that split the numbered anchors efficiently.
+export const releasePrimarySharedPrefix = [
+  'R19_PRIMARY_SHARED_PREFIX',
+  'cache-anchor-9f4b7d2a',
+  ...Array.from(
+    { length: 96 },
+    (_, index) => `cache-token-${String(index).padStart(3, '0')}`,
+  ),
+  'Keep the response coherent and finite.',
+].join(' ')
 
 export function validateRenderedDomEvidence(result) {
   const failures = []
@@ -8144,37 +8156,32 @@ async function main() {
     chmodSync(path.dirname(releaseBlockDiskCacheDir), 0o700)
     chmodSync(releaseBlockDiskCacheDir, 0o700)
   }
-  const primarySharedPrefix = [
-    'R19_PRIMARY_SHARED_PREFIX',
-    'cache-anchor-9f4b7d2a',
-    'Keep the response coherent and finite.',
-  ].join(' ')
   const profilePromptOne = {
     'primary-reasoning-render-store': [
-      primarySharedPrefix,
+      releasePrimarySharedPrefix,
       'Do not call tools.',
       'Privately compare 47 times 19 with 46 times 20.',
       'Reply exactly two lines: R19-PRIMARY-STORE-DONE and',
       'The literal currency string is $43 and $47 \\times 19 = 893 < 920 = 46 \\times 20$.',
     ].join(' '),
     'primary-tool-restart-probe': [
-      primarySharedPrefix,
+      releasePrimarySharedPrefix,
       'Call the built-in run_command tool exactly once with this exact command:',
       'printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt && cat real_ui_tool_probe_1.txt',
       'After the tool result, include REAL_UI_LIVE_TOOL_ONE in the visible answer.',
     ].join(' '),
     'primary-history-paged-evict-refault': [
-      primarySharedPrefix,
+      releasePrimarySharedPrefix,
       'Do not call tools.',
       'Reply exactly R19-PRIMARY-EVICT-REFAULT-DONE.',
     ].join(' '),
     'primary-restart-followup': [
-      primarySharedPrefix,
+      releasePrimarySharedPrefix,
       'Do not call tools.',
       'Reply exactly R19-PRIMARY-RESTART-FOLLOWUP-DONE.',
     ].join(' '),
     'primary-tq-off-probe': [
-      primarySharedPrefix,
+      releasePrimarySharedPrefix,
       'Do not call tools.',
       'Reply exactly R19-PRIMARY-TQ-OFF-DONE.',
     ].join(' '),

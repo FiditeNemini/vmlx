@@ -619,6 +619,7 @@ V5_RELEASE_INTENDED_PATHS_BY_OWNER = {
         "panel/src/main/sessions.ts",
         "panel/src/renderer/src/components/chat/ChatSettings.tsx",
         "panel/src/renderer/src/components/chat/MessageBubble.tsx",
+        "panel/src/renderer/src/components/chat/ReasoningBox.tsx",
         "panel/src/renderer/src/components/chat/mathMarkdown.ts",
         "panel/src/renderer/src/components/layout/ChatModeToolbar.tsx",
         "panel/src/renderer/src/components/sessions/CreateSession.tsx",

@@ -1159,6 +1159,7 @@ try:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, output)
+    os.chmod(output, 0o400)
 finally:
     try:
         temporary.unlink()

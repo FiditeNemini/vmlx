@@ -449,6 +449,21 @@ def test_r19_release_toolchain_plan_is_sealed_before_bound_actions():
     assert replace_idx < seal_idx < digest_idx
 
 
+def test_r19_release_driver_plan_is_sealed_before_bound_actions():
+    script = Path("panel/scripts/build-release-dmgs.sh").read_text()
+    writer = script[
+        script.index("write_r19_build_plan()") : script.index(
+            "assert_r19_source_identity()"
+        )
+    ]
+
+    replace_idx = writer.index("os.replace(temporary, output)")
+    seal_idx = writer.index("os.chmod(output, 0o400)")
+    digest_idx = writer.index("print(hashlib.sha256(encoded).hexdigest())")
+
+    assert replace_idx < seal_idx < digest_idx
+
+
 def test_r19_release_source_suite_drops_outer_action_and_release_environment():
     script = Path("panel/scripts/build-release-dmgs.sh").read_text()
     start = script.index("run_complete_python_source_suite()")

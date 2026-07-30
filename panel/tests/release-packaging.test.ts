@@ -516,13 +516,33 @@ describe("release packaging", () => {
         join(repo, "scripts/release-python-action.cjs"),
         join(fakeScripts, "release-python-action.cjs"),
       );
+      const authoritativePython = join(
+        repo,
+        "..",
+        ".venv",
+        "bin",
+        "python",
+      );
+      const fakePythonSource = join(
+        fakeRoot,
+        ".venv",
+        "bin",
+        "python-real",
+      );
+      writeFileSync(
+        fakePythonSource,
+        "#!/bin/sh\n" +
+          "unset __PYVENV_LAUNCHER__\n" +
+          `exec ${JSON.stringify(authoritativePython)} "$@"\n`,
+      );
+      chmodSync(fakePythonSource, 0o755);
       symlinkSync(
-        join(repo, "..", ".venv", "bin", "python"),
+        fakePythonSource,
         join(fakeRoot, ".venv", "bin", "python"),
       );
-      copyFileSync(
-        join(repo, "..", ".venv", "pyvenv.cfg"),
+      writeFileSync(
         join(fakeRoot, ".venv", "pyvenv.cfg"),
+        "home = /usr/bin\n",
       );
       writeFileSync(
         join(fakePanel, "package.json"),
@@ -1265,11 +1285,23 @@ describe("release packaging", () => {
       "VMLX_R19_OFFICIAL_PACKAGING",
       "VMLX_R19_EXPECTED_TEAM_ID",
       "VMLX_R19_EXPECTED_CODESIGN_IDENTITY",
+      "VMLX_R19_PREPACKAGE_MANIFEST",
+      "VMLX_R19_PREPACKAGE_MANIFEST_SHA256",
+      "VMLX_R19_RELEASE_PLAN",
+      "VMLX_R19_RELEASE_PLAN_SHA256",
       "CSC_NAME",
     ];
     const previous = Object.fromEntries(
       envNames.map((name) => [name, process.env[name]]),
     );
+    for (const name of [
+      "VMLX_R19_PREPACKAGE_MANIFEST",
+      "VMLX_R19_PREPACKAGE_MANIFEST_SHA256",
+      "VMLX_R19_RELEASE_PLAN",
+      "VMLX_R19_RELEASE_PLAN_SHA256",
+    ]) {
+      delete process.env[name];
+    }
 
     try {
       writeFileSync(
@@ -1609,14 +1641,24 @@ describe("release packaging", () => {
     let bound = false;
     try {
       process.env.PATH = helper.FIXED_PATH;
-      const binding = helper.bindReleasePython(python);
-      bound = true;
+      const inherited = helper.bindingFromEnvironment();
+      const hasInherited = Boolean(
+        inherited.planPath && inherited.expectedSha256,
+      );
+      let binding;
+      if (hasInherited) {
+        const plan = JSON.parse(readFileSync(inherited.planPath, "utf8"));
+        binding = { actionPath: plan.action.path };
+      } else {
+        binding = helper.bindReleasePython(python);
+        bound = true;
+        process.env.VMLX_R19_RELEASE_PYTHON_PLAN = binding.planPath;
+        process.env.VMLX_R19_RELEASE_PYTHON_PLAN_SHA256 =
+          binding.planSha256;
+      }
       expect(dirname(binding.actionPath)).toBe(
         dirname(realpathSync(python)),
       );
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN = binding.planPath;
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN_SHA256 =
-        binding.planSha256;
       const probe = JSON.parse(
         helper.runPinnedReleasePythonAction(
           [

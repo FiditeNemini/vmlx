@@ -434,6 +434,34 @@ def test_release_dmg_staging_uses_recursive_signer_before_final_audit():
     assert "verify_release_macho_leaves" in script
 
 
+def test_release_dmg_macho_audit_scans_full_tree_once_without_suffix_filtering():
+    script = Path("panel/scripts/build-release-dmgs.sh").read_text()
+    audit = script[
+        script.index("verify_release_macho_leaves()") : script.index(
+            "verify_release_signature_identity()"
+        )
+    ]
+
+    assert "os.walk(root, followlinks=False)" in audit
+    assert "os.path.islink(path) or not os.path.isfile(path)" in audit
+    for magic in (
+        "feedface",
+        "cefaedfe",
+        "feedfacf",
+        "cffaedfe",
+        "cafebabe",
+        "bebafeca",
+        "cafebabf",
+        "bfbafeca",
+    ):
+        assert f'"{magic}"' in audit
+    assert 'is_macho_file "$native_file"' not in audit
+    assert (
+        'capture_toolchain_action find "$app_path/Contents" -type f -print'
+        not in audit
+    )
+
+
 def test_r19_release_toolchain_plan_is_sealed_before_bound_actions():
     script = Path("panel/scripts/build-release-dmgs.sh").read_text()
     writer = script[

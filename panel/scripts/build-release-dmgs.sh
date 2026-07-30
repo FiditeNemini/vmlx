@@ -1326,13 +1326,11 @@ verify_release_macho_leaves() {
   local app_path="$1"
   local failed=0
   local checked_count=0
+  local native_file
   local signature
 
   echo "==> Verifying every app Mach-O leaf has Developer ID, timestamp, and hardened runtime"
   while IFS= read -r native_file; do
-    if ! is_macho_file "$native_file"; then
-      continue
-    fi
     checked_count=$((checked_count + 1))
     signature="$("$APPLE_CODESIGN" -dv --verbose=4 "$native_file" 2>&1 || true)"
     if ! printf '%s\n' "$signature" | grep -Fqx "Authority=$EXPECTED_CODESIGN_IDENTITY" ||
@@ -1343,7 +1341,42 @@ verify_release_macho_leaves() {
       printf '%s\n' "$signature" >&2
       failed=1
     fi
-  done < <(capture_toolchain_action find "$app_path/Contents" -type f -print)
+  # Classify the complete tree in one pinned-Python pass. Spawning the sealed
+  # action wrapper once per file makes this audit take hours for bundled Python.
+  # Magic inspection keeps full coverage without relying on filename suffixes.
+  done < <(run_release_python -I - "$app_path/Contents" <<'PY'
+import os
+import sys
+
+MACHO_MAGICS = {
+    bytes.fromhex(value)
+    for value in (
+        "feedface",
+        "cefaedfe",
+        "feedfacf",
+        "cffaedfe",
+        "cafebabe",
+        "bebafeca",
+        "cafebabf",
+        "bfbafeca",
+    )
+}
+
+root = os.path.realpath(sys.argv[1])
+for directory, _, filenames in os.walk(root, followlinks=False):
+    for filename in filenames:
+        path = os.path.join(directory, filename)
+        if os.path.islink(path) or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "rb") as handle:
+                magic = handle.read(4)
+        except OSError:
+            continue
+        if magic in MACHO_MAGICS:
+            print(path)
+PY
+  )
 
   if [[ "$failed" -ne 0 ]]; then
     exit 1

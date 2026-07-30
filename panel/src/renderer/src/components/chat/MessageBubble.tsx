@@ -75,7 +75,16 @@ function sanitizeHtml(html: string): string {
     ADD_TAGS: ['pre', 'code'],
     // KaTeX's HTML renderer uses inline layout styles and aria-hidden spans.
     // DOMPurify still owns the allowlist; scripts/events remain forbidden.
-    ADD_ATTR: ['class', 'style', 'aria-hidden', 'aria-label', 'role']
+    ADD_ATTR: [
+      'class',
+      'style',
+      'aria-hidden',
+      'aria-label',
+      'role',
+      'data-vmlx-math-source-codepoints',
+      'data-vmlx-math-delimiter',
+      'data-vmlx-math-display-mode'
+    ]
   })
 }
 

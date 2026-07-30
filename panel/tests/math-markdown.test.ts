@@ -102,6 +102,42 @@ describe('prepareMarkdownWithMath', () => {
     expect(rendered).not.toContain('\\×')
   })
 
+  it('retains canonical TeX identity in inert source, delimiter, and mode attributes', () => {
+    const rawSource = '47 \\× 19 = 893 < 920'
+    const rendered = prepareMarkdownWithMath(
+      `CURRENCY=$43 TEX=\\(${rawSource}\\)`,
+    )
+    const encodedSource = Array.from(
+      rawSource,
+      (char) => char.codePointAt(0)!.toString(16),
+    ).join('-')
+
+    expect(rendered).toContain(
+      `data-vmlx-math-source-codepoints="${encodedSource}"`,
+    )
+    expect(rendered).toContain('data-vmlx-math-delimiter="paren"')
+    expect(rendered).toContain('data-vmlx-math-display-mode="inline"')
+    expect(rendered).toContain('class="katex"')
+    expect(rendered).not.toContain('math-fallback')
+
+    const hostile = prepareMarkdownWithMath(
+      '\\(x" data-vmlx-injected="yes < y\\)',
+    )
+    expect(hostile).toMatch(/data-vmlx-math-source-codepoints="[0-9a-f-]+"/)
+    expect(hostile).not.toContain('data-vmlx-injected="yes')
+  })
+
+  it('retains distinct display delimiter identities for bracket and dollar math', () => {
+    const rendered = prepareMarkdownWithMath(
+      '\\[x + 1\\]\n$$y + 2$$',
+    )
+
+    expect(rendered).toContain('data-vmlx-math-delimiter="bracket"')
+    expect(rendered).toContain('data-vmlx-math-delimiter="double-dollar"')
+    expect(rendered.match(/data-vmlx-math-display-mode="display"/g)).toHaveLength(2)
+    expect(rendered.match(/class="katex-display"/g)).toHaveLength(2)
+  })
+
   it('keeps duplicated adjacent delimiters readable during reasoning streaming', () => {
     const rendered = prepareStreamingPlainTextMath(
       'Draft: \\(\\(47 \\times 19 = 893 < 920',

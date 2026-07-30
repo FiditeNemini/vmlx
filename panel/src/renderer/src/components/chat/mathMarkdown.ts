@@ -26,6 +26,13 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;')
 }
 
+function encodeMathSourceCodepoints(text: string): string {
+  // Hex code points survive every later Markdown/TeX normalization pass
+  // byte-for-byte, including lone surrogates, backslashes, quotes, and `*`.
+  // The live attestor decodes this inert value from the completed DOM.
+  return Array.from(text, (char) => char.codePointAt(0)!.toString(16)).join('-')
+}
+
 function looksLikeSingleDollarMath(text: string): boolean {
   const trimmed = text.trim()
   if (!trimmed || trimmed !== text) return false
@@ -133,9 +140,31 @@ function normalizeEscapedUnicodeMath(text: string): string {
   return text.replace(/\\([×÷·≈≤≥≠±→←∞π])/g, '$1')
 }
 
-function renderMath(raw: string, displayMode: boolean): string {
-  const source = normalizeEscapedUnicodeMath(raw.trim())
+type MathDelimiter = 'bracket' | 'double-dollar' | 'paren' | 'single-dollar'
+
+function renderMath(
+  raw: string,
+  displayMode: boolean,
+  delimiter: MathDelimiter,
+): string {
+  const rawSource = raw.trim()
+  const source = normalizeEscapedUnicodeMath(rawSource)
   if (!source) return ''
+
+  // Bind the completed KaTeX node to the canonical source-span identity:
+  // trimmed body, delimiter kind, and inline/display intent after explicit
+  // duplicate-delimiter normalization. The stream and SQLite checks separately
+  // retain the model's raw bytes. Keep the pre-KaTeX body here—including a
+  // possible stray slash before a known Unicode operator—so the DOM remains
+  // attributable to the persisted source even when the renderer safely
+  // normalizes that operator for KaTeX. Code-point encoding keeps untrusted
+  // model text out of HTML syntax and prevents later Markdown/TeX normalization
+  // from rewriting the evidence value.
+  const sourceAttributes = [
+    `data-vmlx-math-source-codepoints="${encodeMathSourceCodepoints(rawSource)}"`,
+    `data-vmlx-math-delimiter="${delimiter}"`,
+    `data-vmlx-math-display-mode="${displayMode ? 'display' : 'inline'}"`,
+  ].join(' ')
 
   try {
     const html = renderToString(source, {
@@ -143,13 +172,13 @@ function renderMath(raw: string, displayMode: boolean): string {
       displayMode,
     })
     return displayMode
-      ? `<div class="math-block">${html}</div>`
-      : `<span class="math-inline">${html}</span>`
+      ? `<div class="math-block" ${sourceAttributes}>${html}</div>`
+      : `<span class="math-inline" ${sourceAttributes}>${html}</span>`
   } catch (_error) {
     const fallback = escapeHtml(source)
     return displayMode
-      ? `<div class="math-block math-fallback">${fallback}</div>`
-      : `<span class="math-inline math-fallback">${fallback}</span>`
+      ? `<div class="math-block math-fallback" ${sourceAttributes}>${fallback}</div>`
+      : `<span class="math-inline math-fallback" ${sourceAttributes}>${fallback}</span>`
   }
 }
 
@@ -249,13 +278,17 @@ export function prepareStreamingPlainTextMath(markdown: string): string {
 
 function transformMath(markdown: string): string {
   let out = markdown
-    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body) => renderMath(body, true))
-    .replace(/\$\$([\s\S]*?)\$\$/g, (_match, body) => renderMath(body, true))
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body) =>
+      renderMath(body, true, 'bracket'))
+    .replace(/\$\$([\s\S]*?)\$\$/g, (_match, body) =>
+      renderMath(body, true, 'double-dollar'))
     // Inline math must not consume later paragraphs when a model leaves one
     // opener unmatched in a reasoning stream.
-    .replace(/\\\(([^\n]*?)\\\)/g, (_match, body) => renderMath(body, false))
+    .replace(/\\\(([^\n]*?)\\\)/g, (_match, body) =>
+      renderMath(body, false, 'paren'))
 
-  out = replaceSingleDollarMath(out, (body) => renderMath(body, false))
+  out = replaceSingleDollarMath(out, (body) =>
+    renderMath(body, false, 'single-dollar'))
 
   out = normalizeBareLatexCommands(out)
   return escapeBareArithmeticAsterisks(out)

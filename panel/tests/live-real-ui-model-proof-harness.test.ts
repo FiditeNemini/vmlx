@@ -27,6 +27,7 @@ import {
   correlateTerminalResponseToCacheExecution,
   cssEscapeIdentifier,
   expectedUiToolCallCount,
+  extractPersistedReasoningMathLinkage,
   isCacheRequestCorrelationVerified,
   isServerRequestCorrelationVerified,
   localRendererModuleEvidence,
@@ -3846,6 +3847,171 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("binds KaTeX reasoning to persisted canonical TeX identity without comparing presentation text", () => {
+    const result = structuredClone(goodResult());
+    const persistedReasoning =
+      "Keep literal $43, then inspect $47 \\times 19 = 893 < 920 = 46 \\× 20$ exactly.";
+    const renderedReasoning =
+      "Keep literal $43, then inspect 47×19=893<920=46×20 exactly.";
+    const linkage = extractPersistedReasoningMathLinkage(persistedReasoning);
+    expect(linkage.mathSources).toEqual([
+      {
+        source: "47 \\times 19 = 893 < 920 = 46 \\× 20",
+        delimiter: "single-dollar",
+        displayMode: "inline",
+      },
+    ]);
+    expect(linkage.linkedText).toBe(
+      "Keep literal $43, then inspect VMLXPROOFMATH0 exactly.",
+    );
+
+    const trace = result.messageEventTrace[0];
+    const prefix = persistedReasoning.slice(
+      0,
+      Math.max(1, Math.floor(persistedReasoning.length / 2)),
+    );
+    trace.events[0] = streamEvent(1, "reasoning", prefix, prefix);
+    trace.events[1] = streamEvent(
+      2,
+      "reasoning",
+      persistedReasoning,
+      persistedReasoning.slice(prefix.length),
+    );
+    result.persistedReasoningByMessage[0] = [persistedReasoning];
+    result.renderedDom.messages[0].reasoningText = renderedReasoning;
+    result.renderedDom.messages[0].reasoningSegments = [renderedReasoning];
+    result.renderedDom.messages[0].reasoningLinkedSegments = [
+      linkage.linkedText,
+    ];
+    result.renderedDom.messages[0].reasoningMathSources = [
+      linkage.mathSources,
+    ];
+    result.renderedDom.messages[0].reasoningMathDisplayModes = [[
+      { wrapperDisplayMode: "inline", katexDisplayMode: "inline" },
+    ]];
+    result.renderedDom.messages[0].reasoningKatexCounts = [1];
+    result.renderedDom.messages[0].reasoningKatexErrorCounts = [0];
+
+    expect(validateReasoningEvidence(result, "required")).toEqual([]);
+
+    const changedSource = structuredClone(result);
+    changedSource.renderedDom.messages[0].reasoningMathSources[0][0].source =
+      "48 \\times 19 = 912";
+    expect(validateReasoningEvidence(changedSource, "required").join("\n")).toMatch(
+      /math identity is not exactly linked/,
+    );
+
+    const changedMode = structuredClone(result);
+    changedMode.renderedDom.messages[0].reasoningMathDisplayModes[0][0] = {
+      wrapperDisplayMode: "display",
+      katexDisplayMode: "display",
+    };
+    expect(validateReasoningEvidence(changedMode, "required").join("\n")).toMatch(
+      /inline\/display mode does not match/,
+    );
+
+    const changedProse = structuredClone(result);
+    changedProse.renderedDom.messages[0].reasoningLinkedSegments[0] =
+      "Different prose VMLXPROOFMATH0 exactly.";
+    expect(validateReasoningEvidence(changedProse, "required").join("\n")).toMatch(
+      /reasoning rail segments are not linked/,
+    );
+
+    const missingKatex = structuredClone(result);
+    missingKatex.renderedDom.messages[0].reasoningKatexCounts = [0];
+    expect(validateReasoningEvidence(missingKatex, "required").join("\n")).toMatch(
+      /did not render cleanly through KaTeX/,
+    );
+  });
+
+  it("does not classify literal currency or protected code as reasoning math", () => {
+    const linkage = extractPersistedReasoningMathLinkage(
+      "Prices stay $5 < $10 and `$47 \\times 19$`; render $6 \\times 7 = 42$.",
+    );
+    expect(linkage.mathSources).toEqual([{
+      source: "6 \\times 7 = 42",
+      delimiter: "single-dollar",
+      displayMode: "inline",
+    }]);
+    expect(linkage.linkedText).toBe(
+      "Prices stay $5 < $10 and `$47 \\times 19$`; render VMLXPROOFMATH0.",
+    );
+  });
+
+  it("mirrors repeated-delimiter normalization before binding persisted TeX", () => {
+    const linkage = extractPersistedReasoningMathLinkage(
+      "Draft: \\(\\(47 \\times 19 = 893 < 920\\)",
+    );
+    expect(linkage).toEqual({
+      linkedText: "Draft: VMLXPROOFMATH0",
+      mathSources: [{
+        source: "47 \\times 19 = 893 < 920",
+        delimiter: "paren",
+        displayMode: "inline",
+      }],
+    });
+  });
+
+  it("mirrors the renderer when whitespace-only math produces no KaTeX node", () => {
+    expect(extractPersistedReasoningMathLinkage(
+      "Before \\(   \\) after.",
+    )).toEqual({
+      linkedText: "Before  after.",
+      mathSources: [],
+    });
+  });
+
+  it("rejects unexpected rendered math when persisted reasoning has no math", () => {
+    const result = structuredClone(goodResult());
+    result.renderedDom.messages[0].reasoningMathSources = [[{
+      source: "2 + 2 = 4",
+      delimiter: "paren",
+      displayMode: "inline",
+    }]];
+    result.renderedDom.messages[0].reasoningMathDisplayModes = [[{
+      wrapperDisplayMode: "inline",
+      katexDisplayMode: "inline",
+    }]];
+    result.renderedDom.messages[0].reasoningKatexCounts = [1];
+    result.renderedDom.messages[0].reasoningKatexErrorCounts = [0];
+
+    expect(validateReasoningEvidence(result, "required").join("\n")).toMatch(
+      /unexpected reasoning math absent from persisted reasoning/,
+    );
+  });
+
+  it("does not erase ordinary prose punctuation during reasoning linkage", () => {
+    const result = structuredClone(goodResult());
+    const persisted = "Check (scope) before $2 + 2 = 4$.";
+    const linkage = extractPersistedReasoningMathLinkage(persisted);
+    result.persistedReasoningByMessage[0] = [persisted];
+    const trace = result.messageEventTrace[0];
+    const prefix = persisted.slice(0, Math.floor(persisted.length / 2));
+    trace.events[0] = streamEvent(1, "reasoning", prefix, prefix);
+    trace.events[1] = streamEvent(
+      2,
+      "reasoning",
+      persisted,
+      persisted.slice(prefix.length),
+    );
+    result.renderedDom.messages[0].reasoningText = "Check scope before 2+2=4.";
+    result.renderedDom.messages[0].reasoningSegments = ["Check scope before 2+2=4."];
+    result.renderedDom.messages[0].reasoningLinkedSegments = [
+      "Check scope before VMLXPROOFMATH0.",
+    ];
+    result.renderedDom.messages[0].reasoningMathSources = [linkage.mathSources];
+    result.renderedDom.messages[0].reasoningMathDisplayModes = [[{
+      wrapperDisplayMode: "inline",
+      katexDisplayMode: "inline",
+    }]];
+    result.renderedDom.messages[0].reasoningKatexCounts = [1];
+    result.renderedDom.messages[0].reasoningKatexErrorCounts = [0];
+
+    expect(validateReasoningEvidence(result, "required").join("\n")).toMatch(
+      /reasoning rail segments are not linked/,
+    );
+  });
+
   it("rejects duplicate/error tool records and missing probe cleanup", () => {
     const result = structuredClone(goodResult());
     result.persistedOaiCallsByMessage[1][0].id = "call-1";
@@ -3902,13 +4068,14 @@ describe("real UI model proof harness", () => {
     expect(source).toContain(
       "'[data-vmlx-proof-tool-card], [data-vmlx-proof-tool-container], .code-header'",
     );
-    expect(source).toContain("proseProbe.appendChild(proseAnswer);");
-    expect(source).toContain("document.body.appendChild(proseProbe);");
-    expect(source).toContain("proseAnswer.innerText.trim()");
+    expect(source).toContain("const readMountedInnerText = (element) =>");
+    expect(source).toContain("probe.appendChild(element);");
+    expect(source).toContain("document.body.appendChild(probe);");
+    expect(source).toContain("return element.innerText.trim();");
     expect(source).not.toContain(
       "proseAnswer.innerText || proseAnswer.textContent",
     );
-    expect(source).toContain("proseProbe.remove();");
+    expect(source).toContain("probe.remove();");
 
     const valid = structuredClone(goodResult());
     valid.renderedDom.messages[0].toolCards[0].text =

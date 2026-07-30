@@ -19,7 +19,16 @@ function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
     ADD_TAGS: ['pre', 'code'],
-    ADD_ATTR: ['class', 'style', 'aria-hidden', 'aria-label', 'role']
+    ADD_ATTR: [
+      'class',
+      'style',
+      'aria-hidden',
+      'aria-label',
+      'role',
+      'data-vmlx-math-source-codepoints',
+      'data-vmlx-math-delimiter',
+      'data-vmlx-math-display-mode'
+    ]
   })
 }
 

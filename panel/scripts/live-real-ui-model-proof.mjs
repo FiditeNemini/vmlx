@@ -3273,16 +3273,140 @@ function normalizeVisibleLinkText(value) {
   return normalizeProofText(
     String(value || '')
       .replace(/^\s*(?:[-+*]|\d+[.)])\s+/gm, '')
-      .replace(/[•◦]\s*/g, ''),
+      .replace(/[•◦]\s*/g, '')
+      .replace(/\[([^\]]+)]\(([^)]+)\)/g, '$1'),
   )
-    .replace(/\\?\(|\\?\)|\\?\[|\\?\]/g, '')
+    .replace(/\\([×÷·≈≤≥≠±→←∞π])/g, '$1')
     .replace(/\\times\b/g, '×')
     .replace(/\\div\b/g, '÷')
+    .replace(/\\cdot\b/g, '·')
     .replace(/\\approx\b/g, '≈')
-    .replace(/\[([^\]]+)]\(([^)]+)\)/g, '$1')
+    .replace(/\\leq?\b/g, '≤')
+    .replace(/\\geq?\b/g, '≥')
+    .replace(/\\neq\b/g, '≠')
+    .replace(/\\pm\b/g, '±')
     .replace(/[*_`#>~]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+const PROOF_CODE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g
+
+function looksLikeProofSingleDollarMath(text) {
+  const trimmed = text.trim()
+  if (!trimmed || trimmed !== text) return false
+  if (/^[+\-*/=<>]/.test(trimmed) || /[+\-*/=<>]$/.test(trimmed)) return false
+  if (/^\d+(?:[.,]\d{2})?$/.test(trimmed)) return false
+  const lexicalView = trimmed
+    .replace(/\\text\s*\{[^{}]*\}/g, '')
+    .replace(/\\[A-Za-z]+/g, '')
+  const proseWords = lexicalView.match(/[A-Za-z]{2,}/g) || []
+  if (
+    proseWords.some(
+      (word) =>
+        !/^(?:sin|cos|tan|cot|sec|csc|log|ln|exp|lim|max|min|mod|gcd|lcm|det)$/i.test(
+          word,
+        ),
+    )
+  ) {
+    return false
+  }
+  if (/\\[A-Za-z]+/.test(trimmed)) return true
+  if (/[{}_^=<>]/.test(trimmed)) return true
+  if (/(?:[\dA-Za-z])\s*[+\-*/]\s*(?:[\dA-Za-z])/.test(trimmed)) return true
+  if (/^[A-Za-z]$/.test(trimmed)) return true
+  return false
+}
+
+function isProofDollarEscaped(text, index) {
+  let precedingBackslashes = 0
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor--) {
+    precedingBackslashes += 1
+  }
+  return precedingBackslashes % 2 === 1
+}
+
+function findNextProofDollar(text, start) {
+  for (let index = start; index < text.length; index++) {
+    if (text[index] === '$' && !isProofDollarEscaped(text, index)) return index
+  }
+  return -1
+}
+
+function replaceProofSingleDollarMathLine(line, captureMath) {
+  let output = ''
+  let unchangedStart = 0
+  let opener = findNextProofDollar(line, 0)
+  while (opener >= 0) {
+    let closer = findNextProofDollar(line, opener + 1)
+    while (closer >= 0) {
+      const body = line.slice(opener + 1, closer)
+      if (looksLikeProofSingleDollarMath(body)) {
+        output += line.slice(unchangedStart, opener)
+        output += captureMath(body, 'single-dollar', 'inline')
+        unchangedStart = closer + 1
+        opener = findNextProofDollar(line, unchangedStart)
+        break
+      }
+      // A rejected currency pair may end at the opener of a following valid
+      // expression (`$43 and $47 \\times 19$`). Preserve the literal dollar
+      // and retry from that candidate exactly as the product renderer does.
+      output += line.slice(unchangedStart, opener + 1)
+      unchangedStart = opener + 1
+      opener = closer
+      closer = findNextProofDollar(line, opener + 1)
+    }
+    if (closer < 0) return output + line.slice(unchangedStart)
+  }
+  return output + line.slice(unchangedStart)
+}
+
+function normalizeProofRepeatedMathDelimiters(markdown) {
+  return String(markdown || '')
+    .replace(/(?:\\\(\s*){2,}/g, '\\(')
+    .replace(/(?:\\\)\s*){2,}/g, '\\)')
+    .replace(/(?:\\\[\s*){2,}/g, '\\[')
+    .replace(/(?:\\\]\s*){2,}/g, '\\]')
+}
+
+/**
+ * Replace only renderer-recognized TeX spans with stable markers while
+ * retaining each canonical source-span identity: trimmed body, delimiter kind, and
+ * inline/display intent. Raw stream-to-SQLite equality is attested separately.
+ * The DOM collector applies the same markers to completed sanitized KaTeX
+ * nodes, proving that rendering did not hide changed, missing, or reordered
+ * model text.
+ */
+export function extractPersistedReasoningMathLinkage(value) {
+  const protectedSegments = []
+  const mathSources = []
+  let linkedText = normalizeProofRepeatedMathDelimiters(
+    String(value || '').replace(PROOF_CODE_RE, (segment) => {
+      const index = protectedSegments.push(segment) - 1
+      return `\u0000PROOFCODE${index}\u0000`
+    }),
+  )
+  const captureMath = (body, delimiter, displayMode) => {
+    const source = String(body || '').trim()
+    if (!source) return ''
+    const index = mathSources.push({ source, delimiter, displayMode }) - 1
+    return `VMLXPROOFMATH${index}`
+  }
+  linkedText = linkedText
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body) =>
+      captureMath(body, 'bracket', 'display'))
+    .replace(/\$\$([\s\S]*?)\$\$/g, (_match, body) =>
+      captureMath(body, 'double-dollar', 'display'))
+    .replace(/\\\(([^\n]*?)\\\)/g, (_match, body) =>
+      captureMath(body, 'paren', 'inline'))
+  linkedText = linkedText
+    .split('\n')
+    .map((line) => replaceProofSingleDollarMathLine(line, captureMath))
+    .join('\n')
+    .replace(/\u0000PROOFCODE(\d+)\u0000/g, (_match, indexText) => (
+      protectedSegments[Number(indexText)] || ''
+    ))
+  return { linkedText, mathSources }
 }
 
 const rawProtocolMarkerRegex =
@@ -3842,9 +3966,115 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
       : persistedSegments.length <= 1 && String(rendered?.reasoningText || '').trim()
         ? [String(rendered.reasoningText)]
         : []
+    const persistedMathLinkage = persistedSegments.map(
+      extractPersistedReasoningMathLinkage,
+    )
+    const persistedMathSources = persistedMathLinkage.map(
+      (segment) => segment.mathSources,
+    )
+    const persistedLinkedSegments = persistedMathLinkage.map(
+      (segment) => segment.linkedText,
+    )
+    const hasPersistedMath = persistedMathSources.some((sources) => sources.length > 0)
+    const renderedLinkedSegments = Array.isArray(rendered?.reasoningLinkedSegments)
+      ? rendered.reasoningLinkedSegments.map(String).filter(Boolean)
+      : []
+    const renderedMathSources = Array.isArray(rendered?.reasoningMathSources)
+      ? rendered.reasoningMathSources.map((sources) => (
+          Array.isArray(sources)
+            ? sources.map((identity) => {
+                const value = identity && typeof identity === 'object' ? identity : {}
+                return {
+                  source: String(value.source || ''),
+                  delimiter: String(value.delimiter || ''),
+                  displayMode: String(value.displayMode || ''),
+                }
+              })
+            : []
+        ))
+      : []
+    const renderedMathDisplayModes = Array.isArray(rendered?.reasoningMathDisplayModes)
+      ? rendered.reasoningMathDisplayModes.map((modes) => (
+          Array.isArray(modes)
+            ? modes.map((mode) => {
+                const value = mode && typeof mode === 'object' ? mode : {}
+                return {
+                  wrapperDisplayMode: String(value.wrapperDisplayMode || ''),
+                  katexDisplayMode: String(value.katexDisplayMode || ''),
+                }
+              })
+            : []
+        ))
+      : []
+    const renderedMathIdentityCount = renderedMathSources
+      .reduce((total, sources) => total + sources.length, 0)
+    const renderedKatexCount = Array.isArray(rendered?.reasoningKatexCounts)
+      ? rendered.reasoningKatexCounts.reduce((total, count) => total + Number(count || 0), 0)
+      : 0
+    const renderedKatexErrorCount = Array.isArray(rendered?.reasoningKatexErrorCounts)
+      ? rendered.reasoningKatexErrorCounts.reduce(
+          (total, count) => total + Number(count || 0),
+          0,
+        )
+      : 0
     if (
-      canonicalJson(renderedReasoningSegments.map(normalizeVisibleLinkText))
-      !== canonicalJson(persistedSegments.map(normalizeVisibleLinkText))
+      !hasPersistedMath
+      && (renderedMathIdentityCount > 0 || renderedKatexCount > 0 || renderedKatexErrorCount > 0)
+    ) {
+      failures.push(
+        `message ${row.messageId} rendered unexpected reasoning math absent from persisted reasoning`,
+      )
+    }
+    const linkedSegmentsForComparison = hasPersistedMath
+      ? renderedLinkedSegments
+      : renderedReasoningSegments
+    const persistedSegmentsForComparison = hasPersistedMath
+      ? persistedLinkedSegments
+      : persistedSegments
+    if (
+      hasPersistedMath
+      && canonicalJson(renderedMathSources) !== canonicalJson(persistedMathSources)
+    ) {
+      failures.push(
+        `message ${row.messageId} visible reasoning math identity is not exactly linked to persisted canonical TeX`,
+      )
+    }
+    const hasMathDisplayMismatch = persistedMathSources.some((sources, segmentIndex) => {
+      const renderedModes = renderedMathDisplayModes[segmentIndex]
+      if (!Array.isArray(renderedModes) || renderedModes.length !== sources.length) return true
+      return sources.some((identity, mathIndex) => {
+        const renderedMode = renderedModes[mathIndex] || {}
+        return (
+          renderedMode.wrapperDisplayMode !== identity.displayMode
+          || renderedMode.katexDisplayMode !== identity.displayMode
+        )
+      })
+    })
+    if (hasPersistedMath && hasMathDisplayMismatch) {
+      failures.push(
+        `message ${row.messageId} visible reasoning math inline/display mode does not match persisted delimiters`,
+      )
+    }
+    if (
+      hasPersistedMath
+      && (
+        !Array.isArray(rendered?.reasoningKatexCounts)
+        || rendered.reasoningKatexCounts.length !== persistedMathSources.length
+        || rendered.reasoningKatexCounts.some(
+          (count, index) => Number(count) !== persistedMathSources[index].length,
+        )
+        || !Array.isArray(rendered?.reasoningKatexErrorCounts)
+        || rendered.reasoningKatexErrorCounts.length !== persistedMathSources.length
+        || rendered.reasoningKatexErrorCounts.some((count) => Number(count) > 0)
+      )
+    ) {
+      failures.push(
+        `message ${row.messageId} persisted reasoning TeX did not render cleanly through KaTeX`,
+      )
+    }
+    if (
+      canonicalJson(linkedSegmentsForComparison.map(normalizeVisibleLinkText))
+      !== canonicalJson(persistedSegmentsForComparison.map(normalizeVisibleLinkText))
     ) {
       failures.push(
         `message ${row.messageId} normalized visible reasoning rail segments are not linked to persisted reasoning segments`,
@@ -8276,9 +8506,77 @@ async function main() {
           const reasoningNodes = [...root.querySelectorAll(
             '[data-vmlx-proof-reasoning-content="true"]'
           )];
-          const reasoningSegments = reasoningNodes
-            .map((node) => (node.innerText || node.textContent || '').trim())
-            .filter(Boolean);
+          const readMountedInnerText = (element) => {
+            if (!element) return '';
+            const probe = document.createElement('div');
+            probe.setAttribute('aria-hidden', 'true');
+            probe.style.cssText = [
+              'position:fixed',
+              'left:-100000px',
+              'top:0',
+              'width:1024px',
+              'opacity:0',
+              'pointer-events:none',
+              'z-index:-2147483648',
+            ].join(';');
+            probe.appendChild(element);
+            document.body.appendChild(probe);
+            try {
+              return element.innerText.trim();
+            } finally {
+              probe.remove();
+            }
+          };
+          const reasoningEvidence = reasoningNodes.map((node) => {
+            const linkedClone = node.cloneNode(true);
+            const mathSources = [];
+            const mathDisplayModes = [];
+            linkedClone.querySelectorAll('[data-vmlx-math-source-codepoints]').forEach((mathNode) => {
+              const encodedSource = mathNode.getAttribute(
+                'data-vmlx-math-source-codepoints'
+              ) || '';
+              let source = '';
+              try {
+                if (!/^[0-9a-f]+(?:-[0-9a-f]+)*$/i.test(encodedSource)) {
+                  throw new Error('invalid encoded math source');
+                }
+                source = encodedSource
+                  .split('-')
+                  .map((value) => String.fromCodePoint(Number.parseInt(value, 16)))
+                  .join('');
+              } catch (_) {
+                source = '__INVALID_VMLX_MATH_SOURCE__';
+              }
+              const delimiter = mathNode.getAttribute(
+                'data-vmlx-math-delimiter'
+              ) || '';
+              const displayMode = mathNode.getAttribute(
+                'data-vmlx-math-display-mode'
+              ) || '';
+              const wrapperDisplayMode = mathNode.classList.contains('math-block')
+                ? 'display'
+                : mathNode.classList.contains('math-inline') ? 'inline' : 'unknown';
+              const katexDisplayMode = mathNode.querySelector('.katex-display')
+                ? 'display'
+                : mathNode.querySelector('.katex') ? 'inline' : 'missing';
+              const markerIndex = mathSources.push({
+                source,
+                delimiter,
+                displayMode,
+              }) - 1;
+              mathDisplayModes.push({ wrapperDisplayMode, katexDisplayMode });
+              mathNode.replaceWith(document.createTextNode('VMLXPROOFMATH' + markerIndex));
+            });
+            return {
+              renderedText: (node.innerText || node.textContent || '').trim(),
+              linkedText: readMountedInnerText(linkedClone),
+              mathSources,
+              mathDisplayModes,
+              katexCount: node.querySelectorAll('.katex').length,
+              katexErrorCount: node.querySelectorAll('.katex-error').length,
+            };
+          }).filter((segment) => segment.renderedText);
+          const reasoningSegments = reasoningEvidence.map((segment) => segment.renderedText);
           const toolCards = [...root.querySelectorAll('[data-vmlx-proof-tool-card]')].map((card) => ({
             kind: card.getAttribute('data-vmlx-proof-tool-card') || '',
             name: card.getAttribute('data-vmlx-proof-tool-name') || '',
@@ -8320,24 +8618,7 @@ async function main() {
           // layout, and tool-card text remains excluded from the proof.
           let proseAnswerText = '';
           if (proseAnswer) {
-            const proseProbe = document.createElement('div');
-            proseProbe.setAttribute('aria-hidden', 'true');
-            proseProbe.style.cssText = [
-              'position:fixed',
-              'left:-100000px',
-              'top:0',
-              'width:1024px',
-              'opacity:0',
-              'pointer-events:none',
-              'z-index:-2147483648',
-            ].join(';');
-            proseProbe.appendChild(proseAnswer);
-            document.body.appendChild(proseProbe);
-            try {
-              proseAnswerText = proseAnswer.innerText.trim();
-            } finally {
-              proseProbe.remove();
-            }
+            proseAnswerText = readMountedInnerText(proseAnswer);
           }
           return {
             cause,
@@ -8355,6 +8636,15 @@ async function main() {
             ),
             reasoningText: reasoningSegments.join('\\n'),
             reasoningSegments,
+            reasoningLinkedSegments: reasoningEvidence.map((segment) => segment.linkedText),
+            reasoningMathSources: reasoningEvidence.map((segment) => segment.mathSources),
+            reasoningMathDisplayModes: reasoningEvidence.map(
+              (segment) => segment.mathDisplayModes
+            ),
+            reasoningKatexCounts: reasoningEvidence.map((segment) => segment.katexCount),
+            reasoningKatexErrorCounts: reasoningEvidence.map(
+              (segment) => segment.katexErrorCount
+            ),
             html: answer?.innerHTML || '',
             katexCount: answer?.querySelectorAll('.katex').length || 0,
             katexErrorCount: answer?.querySelectorAll('.katex-error').length || 0,

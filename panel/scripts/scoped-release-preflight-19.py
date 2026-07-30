@@ -73,7 +73,7 @@ CONTROL_MARKER_RE = re.compile(
 )
 JANG_VERSION = "2.5.37"
 JANG_COMMIT = "bbeddf0a231292d02bef54a2c6253bd3740df689"
-JANG_TREE = "5f1ccf494a03ab48a646aa4c824b6448a82eecbc"
+JANG_TREE = "1502230998e8e05b9cf6fd93ba9e1ce97042deb0"
 
 BUNDLE_CONFIG_FILES = (
     "config.json",
@@ -671,6 +671,7 @@ V5_RELEASE_INTENDED_PATHS_BY_OWNER = {
         "vmlx_engine/engine_core.py",
         "vmlx_engine/global_disk_cache_budget.py",
         "vmlx_engine/loaders/dsv4_chat_encoder.py",
+        "vmlx_engine/loaders/load_laguna.py",
         "vmlx_engine/mllm_batch_generator.py",
         "vmlx_engine/mllm_scheduler.py",
         "vmlx_engine/model_configs.py",
@@ -729,6 +730,7 @@ V5_RELEASE_INTENDED_PATHS_BY_OWNER = {
         "tests/test_hybrid_live_tq_kv.py",
         "tests/test_impl_campaign_20260710.py",
         "tests/test_installed_app_runtime_parity_audit.py",
+        "tests/test_laguna_loader.py",
         "tests/test_memory_limits.py",
         "tests/test_minimax_m3_cache_paths.py",
         "tests/test_mllm_scheduler_cache.py",

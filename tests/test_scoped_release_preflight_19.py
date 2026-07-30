@@ -1221,6 +1221,51 @@ def load_module():
     return module
 
 
+def test_expected_visible_final_extracts_literal_three_line_contract():
+    module = load_module()
+    expected = (
+        "Third UI turn: REAL_UI_LIVE_TOOL_ONE REAL_UI_LIVE_TOOL_TWO\n"
+        "Currency: $43\n"
+        r"Math: \(2 + 2 = 4\)"
+    )
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "\n".join(
+                    (
+                        "Do not call another tool.",
+                        "Your complete visible answer must be exactly the following "
+                        "three lines and nothing else.",
+                        "Copy every character literally, including the dollar sign "
+                        "and both backslashes:",
+                        expected,
+                    )
+                ),
+            }
+        ]
+    }
+
+    assert module._expected_visible_final(request) == expected
+
+
+def test_expected_visible_final_does_not_misread_exactly_as_the_answer():
+    module = load_module()
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "Your visible answer must be exactly the following block and "
+                    "nothing else."
+                ),
+            }
+        ]
+    }
+
+    assert module._expected_visible_final(request) == ""
+
+
 def _fixture_v5_jang_source(tmp_path: Path) -> Path:
     root = tmp_path / "jang-source"
     package = root / "jang_tools"

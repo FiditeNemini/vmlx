@@ -2806,6 +2806,15 @@ def _expected_visible_final(
                 visit(nested)
 
     visit(body)
+    literal_three_line_pattern = re.compile(
+        r"(?is)visible answer must be exactly the following three lines "
+        r"and nothing else\.\s*copy every character literally,[^:\n]*:\s*\n"
+        r"([^\n]+\n[^\n]+\n[^\n]+)"
+    )
+    for value in reversed(strings):
+        match = literal_three_line_pattern.search(value)
+        if match:
+            return match.group(1).strip()
     dynamic_pattern = re.compile(
         r"(?is)reply with exactly one line in this format:\s*"
         r"([A-Z0-9][A-Z0-9_.:/-]{4,}-DONE)\s+"
@@ -2838,7 +2847,8 @@ def _expected_visible_final(
             )
         return ""
     patterns = (
-        r"(?i)visible answer (?:must be|exactly)\s+[`'\"]?([A-Z0-9][A-Z0-9_.:=/-]{4,})",
+        r"(?i)visible answer (?:must be|exactly)\s+"
+        r"(?!exactly\b|the\b)[`'\"]?([A-Z0-9][A-Z0-9_.:=/-]{4,})",
         r"(?i)reply exactly\s+[`'\"]?([A-Z0-9][A-Z0-9_.:=/-]{4,})",
     )
     for value in reversed(strings):

@@ -1171,6 +1171,7 @@ PY
   export VMLX_R19_RELEASE_PLAN_SHA256="$plan_hash"
   export VMLX_R19_RELEASE_CURRENT_FLAVOR="$flavor"
   export VMLX_R19_RELEASE_PHASE="$phase"
+  export VMLX_EXPECTED_MLX_WHEEL_PLATFORM="$R19_CURRENT_MLX_WHEEL_PLATFORM"
   export VMLX_R19_RELEASE_EXPECTED_ARTIFACT="$(
     run_release_python -I -c \
       'import pathlib, sys; print(pathlib.Path(sys.argv[1]).absolute())' \

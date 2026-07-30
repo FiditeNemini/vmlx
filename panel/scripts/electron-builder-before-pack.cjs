@@ -803,6 +803,10 @@ function verifyR19ReleasePlan(
   }
   verifyPinnedToolchain(plan);
   validatePlanBundleRuntime(plan);
+  requireExactEnv(
+    "VMLX_EXPECTED_MLX_WHEEL_PLATFORM",
+    plan.flavor_contract.mlx_wheel_platform,
+  );
   try {
     process.kill(driverPid, 0);
   } catch {

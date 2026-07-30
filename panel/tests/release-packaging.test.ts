@@ -805,6 +805,7 @@ describe("release packaging", () => {
       "VMLX_R19_RELEASE_DRIVER_NONCE",
       "VMLX_R19_HOOK_ATTESTATION_DIR",
       "VMLX_R19_FIXED_PATH",
+      "VMLX_EXPECTED_MLX_WHEEL_PLATFORM",
       "PATH",
       ...Object.keys(tools).flatMap((name) => [
         `VMLX_R19_TOOL_${name.toUpperCase()}_PATH`,
@@ -826,6 +827,8 @@ describe("release packaging", () => {
       VMLX_R19_RELEASE_DRIVER_NONCE: plan.nonce,
       VMLX_R19_HOOK_ATTESTATION_DIR: hookDirectory,
       VMLX_R19_FIXED_PATH: fixedPath,
+      VMLX_EXPECTED_MLX_WHEEL_PLATFORM:
+        r19RuntimeContracts.sequoia.mlx_wheel_platform,
       PATH: fixedPath,
     });
     for (const [name, tool] of Object.entries(tools)) {
@@ -848,6 +851,41 @@ describe("release packaging", () => {
           },
         ),
       ).toEqual(plan);
+
+      delete process.env.VMLX_EXPECTED_MLX_WHEEL_PLATFORM;
+      expect(() =>
+        beforePack.verifyR19ReleasePlan(
+          temp,
+          manifestSha256,
+          sourceCommit,
+          sourceTree,
+          {
+            targetPresentableName: "DMG",
+            file: expectedArtifact,
+            arch: null,
+          },
+        ),
+      ).toThrow(
+        "packaging requires VMLX_EXPECTED_MLX_WHEEL_PLATFORM=macosx_14_0_arm64",
+      );
+      process.env.VMLX_EXPECTED_MLX_WHEEL_PLATFORM = "macosx_26_0_arm64";
+      expect(() =>
+        beforePack.verifyR19ReleasePlan(
+          temp,
+          manifestSha256,
+          sourceCommit,
+          sourceTree,
+          {
+            targetPresentableName: "DMG",
+            file: expectedArtifact,
+            arch: null,
+          },
+        ),
+      ).toThrow(
+        "packaging requires VMLX_EXPECTED_MLX_WHEEL_PLATFORM=macosx_14_0_arm64",
+      );
+      process.env.VMLX_EXPECTED_MLX_WHEEL_PLATFORM =
+        r19RuntimeContracts.sequoia.mlx_wheel_platform;
 
       const buildResultContext = {
         outDir: join(temp, "release"),
@@ -1121,6 +1159,7 @@ describe("release packaging", () => {
       "VMLX_R19_RELEASE_DRIVER_NONCE",
       "VMLX_R19_HOOK_ATTESTATION_DIR",
       "VMLX_R19_FIXED_PATH",
+      "VMLX_EXPECTED_MLX_WHEEL_PLATFORM",
       "PATH",
       ...Object.keys(tools).flatMap((name) => [
         `VMLX_R19_TOOL_${name.toUpperCase()}_PATH`,
@@ -1163,6 +1202,8 @@ describe("release packaging", () => {
         VMLX_R19_RELEASE_DRIVER_NONCE: plan.nonce,
         VMLX_R19_HOOK_ATTESTATION_DIR: hookDirectory,
         VMLX_R19_FIXED_PATH: fixedPath,
+        VMLX_EXPECTED_MLX_WHEEL_PLATFORM:
+          r19RuntimeContracts.sequoia.mlx_wheel_platform,
         PATH: fixedPath,
       });
       for (const [name, tool] of Object.entries(tools)) {
@@ -1434,6 +1475,9 @@ describe("release packaging", () => {
     );
     expect(source).toContain("write_r19_build_plan");
     expect(source).toContain("VMLX_R19_RELEASE_REQUESTED_FLAVOR");
+    expect(source).toContain(
+      'export VMLX_EXPECTED_MLX_WHEEL_PLATFORM="$R19_CURRENT_MLX_WHEEL_PLATFORM"',
+    );
     expect(source).toContain("run_bound_release_action");
     expect(source).toContain("capture_bound_release_action");
     expect(source).toContain("run-bound-tool-action");

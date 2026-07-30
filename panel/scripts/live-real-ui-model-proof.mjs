@@ -461,16 +461,19 @@ const defaultPromptTwo = builtinToolsEnabled
 const defaultPromptThree = builtinToolsEnabled
   ? [
       'Do not call another tool.',
-      'Using the prior tool results, reply briefly in English and include REAL_UI_LIVE_TOOL_ONE and REAL_UI_LIVE_TOOL_TWO once each.',
-      'Mention that this is the third UI turn.',
-      'Also include the literal currency string $43 and this exact inline TeX expression: $47 \\times 19 = 893 < 920 = 46 \\times 20$.',
-      'Copy that TeX byte-for-byte: keep both \\times commands and do not replace either one with a Unicode multiplication sign.',
-    ].join(' ')
+      'Your complete visible answer must be exactly the following three lines and nothing else.',
+      'Copy every character literally, including the dollar sign and both backslashes:',
+      'Third UI turn: REAL_UI_LIVE_TOOL_ONE REAL_UI_LIVE_TOOL_TWO',
+      'Currency: $43',
+      'Math: \\(2 + 2 = 4\\)',
+    ].join('\n')
   : [
-      'Repeat the phrase REAL_UI_LIVE once and mention that this is the third UI turn.',
-      'Also include the literal currency string $43 and this exact inline TeX expression: $47 \\times 19 = 893 < 920 = 46 \\times 20$.',
-      'Copy that TeX byte-for-byte: keep both \\times commands and do not replace either one with a Unicode multiplication sign.',
-    ].join(' ')
+      'Your complete visible answer must be exactly the following three lines and nothing else.',
+      'Copy every character literally, including the dollar sign and both backslashes:',
+      'Third UI turn: REAL_UI_LIVE',
+      'Currency: $43',
+      'Math: \\(2 + 2 = 4\\)',
+    ].join('\n')
 const promptOne = promptOneOverride || defaultPromptOne
 const promptTwo = promptTwoOverride || defaultPromptTwo
 const promptThree = promptThreeOverride || defaultPromptThree

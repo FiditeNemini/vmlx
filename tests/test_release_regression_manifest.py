@@ -4381,7 +4381,10 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "REAL_UI_LIVE_TOOL_ONE" in source
     assert "REAL_UI_LIVE_TOOL_TWO" in source
     assert "VMLINUX_REAL_UI_PROMPT_3" in source
-    assert "third UI turn" in source
+    assert "Third UI turn" in source
+    assert "Currency: $43" in source
+    assert "Math: \\\\(2 + 2 = 4\\\\)" in source
+    assert "exactly the following three lines and nothing else" in source
     assert "VMLINUX_REAL_UI_WORKING_DIRECTORY" in source
     assert "VMLINUX_REAL_UI_ENABLE_THINKING" in source
     assert "VMLINUX_REAL_UI_CHECK_SERVER_CACHE_CONTROLS" in source

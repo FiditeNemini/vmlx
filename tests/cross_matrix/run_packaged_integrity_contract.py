@@ -758,13 +758,26 @@ def _git_source_identity(root: Path, *, require_clean: bool = True) -> dict[str,
     if commit.returncode != 0 or tree.returncode != 0:
         raise ArtifactChainError("release source Git identity is unavailable")
     if require_clean:
+        status_arguments = [
+            "-C",
+            str(root),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ]
         status_result = _run_git(
             root,
             "status",
             "--porcelain",
             "--untracked-files=all",
         )
-        if status_result.returncode != 0 or status_result.stdout:
+        status_stdout = status_result.stdout
+        if status_result.returncode == 0:
+            status_stdout = _strip_verified_release_python_action_from_git_status(
+                arguments=status_arguments,
+                stdout=status_stdout,
+            )
+        if status_result.returncode != 0 or status_stdout:
             raise ArtifactChainError("release source is not clean")
     return {
         "root": str(root),

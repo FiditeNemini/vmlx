@@ -2711,6 +2711,37 @@ def test_r19_git_status_excludes_only_its_verified_release_python_action(
     assert filtered == dirty_row
 
 
+def test_r19_git_source_identity_excludes_only_its_verified_release_python_action(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    scripts = repo / "tests" / "cross_matrix"
+    scripts.mkdir(parents=True)
+    original = scripts / "run_packaged_integrity_contract.py"
+    original.write_text("# verified runner\n", encoding="utf-8")
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "Artifact Chain Test")
+    _git(repo, "config", "user.email", "artifact-chain@example.invalid")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "fixture")
+
+    action = scripts / (
+        ".run_packaged_integrity_contract.py.vmlx-r19-"
+        "0123456789abcdef0123456789abcdef"
+    )
+    os.link(original, action)
+    monkeypatch.setattr(runner, "__file__", str(action))
+
+    identity = runner._git_source_identity(repo)
+    assert identity["commit"] == _git(repo, "rev-parse", "HEAD")
+    assert identity["tree"] == _git(repo, "rev-parse", "HEAD^{tree}")
+
+    (repo / "actual-untracked.txt").write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(runner.ArtifactChainError, match="source is not clean"):
+        runner._git_source_identity(repo)
+
+
 def test_r19_git_status_refuses_to_hide_an_unverified_lookalike(
     tmp_path,
     monkeypatch,

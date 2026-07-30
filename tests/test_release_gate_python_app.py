@@ -469,6 +469,22 @@ def test_r19_release_source_suite_drops_outer_action_and_release_environment():
     assert "observed_python_realpath" in block
 
 
+def test_r19_release_source_suite_rebind_persists_in_driver_shell():
+    script = Path("panel/scripts/build-release-dmgs.sh").read_text()
+    start = script.index(
+        'echo "==> Running complete Python source suite on the attested release head"'
+    )
+    end = script.index(
+        'assert_r19_source_identity "after complete Python source suite"', start
+    )
+    call_site = script[start:end]
+
+    assert 'pushd "$ROOT_DIR" >/dev/null' in call_site
+    assert "run_complete_python_source_suite" in call_site
+    assert "popd >/dev/null" in call_site
+    assert '(\n    cd "$ROOT_DIR"\n    run_complete_python_source_suite\n  )' not in call_site
+
+
 def test_bundled_verifier_rejects_non_relocatable_console_shebangs():
     verifier = Path("panel/scripts/verify-bundled-python.sh").read_text()
 

@@ -1251,10 +1251,13 @@ if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
   run_toolchain_action npm ci
   assert_r19_source_identity "after npm ci"
   echo "==> Running complete Python source suite on the attested release head"
-  (
-    cd "$ROOT_DIR"
-    run_complete_python_source_suite
-  )
+  # This must run in the release driver's shell. The suite helper deliberately
+  # tears down and recreates the pinned-Python binding; a subshell would discard
+  # the rebound environment and its EXIT trap would delete the new binding,
+  # leaving the parent pointed at the already-removed pre-suite plan.
+  pushd "$ROOT_DIR" >/dev/null
+  run_complete_python_source_suite
+  popd >/dev/null
   assert_r19_source_identity "after complete Python source suite"
   echo "==> Running complete panel suite on the attested release head"
   run_toolchain_action npm test

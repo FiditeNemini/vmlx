@@ -5,6 +5,7 @@ import pytest
 
 from vmlx_engine.loaders.load_laguna import (
     _load_laguna_tokenizer,
+    _mixed_affine_runtime_version_required,
     _require_mixed_affine_runtime,
     _uses_mixed_affine_modules,
 )
@@ -51,6 +52,28 @@ def test_laguna_mixed_affine_runtime_contract_accepts_capable_wheel():
         Path("/models/Laguna-S-2.1-JANG_4M"),
         cfg,
         SimpleNamespace(LAGUNA_MIXED_AFFINE_RUNTIME_VERSION=1),
+    )
+
+
+def test_laguna_mixed_group_size_requires_v2_runtime_contract():
+    cfg = _mixed_affine_config()
+    cfg["quantization"]["model.layers.1.mlp.switch_mlp.gate_proj"] = {
+        "bits": 4,
+        "group_size": 128,
+        "mode": "affine",
+    }
+
+    assert _mixed_affine_runtime_version_required(cfg) == 2
+    with pytest.raises(RuntimeError, match=r"jang>=2\.5\.37"):
+        _require_mixed_affine_runtime(
+            Path("/models/Raptor-1.0-16B-A3B-qat-JANG_4M"),
+            cfg,
+            SimpleNamespace(LAGUNA_MIXED_AFFINE_RUNTIME_VERSION=1),
+        )
+    _require_mixed_affine_runtime(
+        Path("/models/Raptor-1.0-16B-A3B-qat-JANG_4M"),
+        cfg,
+        SimpleNamespace(LAGUNA_MIXED_AFFINE_RUNTIME_VERSION=2),
     )
 
 

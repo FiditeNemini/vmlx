@@ -39,22 +39,39 @@ from typing import Any, Tuple
 logger = logging.getLogger("vmlx_engine.loaders.laguna")
 
 
-def _uses_mixed_affine_modules(config: dict[str, Any]) -> bool:
-    """Return whether Laguna needs per-module affine bit-width dispatch."""
+def _mixed_affine_runtime_version_required(config: dict[str, Any]) -> int:
+    """Return the JANG runtime contract required by Laguna affine metadata.
+
+    Version 1 added per-module bit-width dispatch. Version 2 couples each
+    module's group size to that dispatch as well; packed affine shapes cannot
+    distinguish, for example, 8b/gs64 from 4b/gs128 without the explicit
+    module metadata.
+    """
     if config.get("weight_format") in ("mxtq", "mxfp4"):
-        return False
+        return 0
     quantization = config.get("quantization") or {}
     if not isinstance(quantization, dict):
-        return False
+        return 0
     default_bits = quantization.get("bits")
-    if not isinstance(default_bits, int):
-        return False
-    return any(
-        isinstance(spec, dict)
-        and isinstance(spec.get("bits"), int)
-        and spec["bits"] != default_bits
-        for spec in quantization.values()
-    )
+    default_group_size = quantization.get("group_size")
+    if not isinstance(default_bits, int) or not isinstance(default_group_size, int):
+        return 0
+    required = 0
+    for spec in quantization.values():
+        if not isinstance(spec, dict):
+            continue
+        bits = spec.get("bits")
+        group_size = spec.get("group_size")
+        if isinstance(bits, int) and bits != default_bits:
+            required = max(required, 1)
+        if isinstance(group_size, int) and group_size != default_group_size:
+            required = max(required, 2)
+    return required
+
+
+def _uses_mixed_affine_modules(config: dict[str, Any]) -> bool:
+    """Return whether Laguna needs per-module affine dispatch."""
+    return _mixed_affine_runtime_version_required(config) > 0
 
 
 def _require_mixed_affine_runtime(
@@ -63,16 +80,19 @@ def _require_mixed_affine_runtime(
     runtime: Any,
 ) -> None:
     """Reject stale JANG wheels before mixed-bit Laguna model execution."""
-    if not _uses_mixed_affine_modules(config):
+    required = _mixed_affine_runtime_version_required(config)
+    if required == 0:
         return
     marker = getattr(runtime, "LAGUNA_MIXED_AFFINE_RUNTIME_VERSION", 0)
-    if isinstance(marker, int) and marker >= 1:
+    if isinstance(marker, int) and marker >= required:
         return
     runtime_path = getattr(runtime, "__file__", "unknown")
+    minimum = "2.5.37" if required >= 2 else "2.5.34"
     raise RuntimeError(
-        "This Laguna bundle uses mixed affine bit widths, but the imported "
-        "JANG runtime predates the per-module loader contract. Upgrade with "
-        "`pip install -U 'jang>=2.5.34'` and restart vMLX. "
+        "This Laguna bundle uses mixed affine bit widths or group sizes, but "
+        "the imported JANG runtime predates the required per-module loader "
+        f"contract version {required}. Upgrade with "
+        f"`pip install -U 'jang>={minimum}'` and restart vMLX. "
         f"Imported runtime: {runtime_path}; model: {path}"
     )
 

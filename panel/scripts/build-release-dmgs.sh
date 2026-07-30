@@ -361,10 +361,6 @@ PY
 
 assert_r19_release_output_safe
 
-R19_RELEASE_PYTHON_INIT_SHA256=""
-R19_RELEASE_PYTHON_SERVER_SHA256=""
-R19_RELEASE_PYTHON_EXECUTABLE_SHA256=""
-R19_RELEASE_PYTHON_PYVENV_SHA256=""
 GIT_REALPATH="$GIT_BIN"
 GIT_SHA256=""
 NODE_REALPATH="$NODE_BIN"
@@ -741,14 +737,13 @@ PY
     echo "ERROR: release Python import/prefix attestation is not source-exact" >&2
     exit 1
   fi
-  R19_RELEASE_PYTHON_INIT_SHA256="$(toolchain_sha256 "$init_path")"
-  R19_RELEASE_PYTHON_SERVER_SHA256="$(toolchain_sha256 "$server_path")"
-  R19_RELEASE_PYTHON_EXECUTABLE_SHA256="$VMLX_R19_RELEASE_PYTHON_SOURCE_SHA256"
-  R19_RELEASE_PYTHON_PYVENV_SHA256="$VMLX_R19_RELEASE_PYTHON_PYVENV_SHA256"
-  if [[ ! "$R19_RELEASE_PYTHON_INIT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-    || [[ ! "$R19_RELEASE_PYTHON_SERVER_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-    || [[ ! "$R19_RELEASE_PYTHON_EXECUTABLE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-    || [[ ! "$R19_RELEASE_PYTHON_PYVENV_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  VMLX_R19_RELEASE_PYTHON_INIT_SHA256="$(toolchain_sha256 "$init_path")"
+  VMLX_R19_RELEASE_PYTHON_SERVER_SHA256="$(toolchain_sha256 "$server_path")"
+  VMLX_R19_RELEASE_PYTHON_EXECUTABLE_SHA256="$VMLX_R19_RELEASE_PYTHON_SOURCE_SHA256"
+  if [[ ! "$VMLX_R19_RELEASE_PYTHON_INIT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || [[ ! "$VMLX_R19_RELEASE_PYTHON_SERVER_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || [[ ! "$VMLX_R19_RELEASE_PYTHON_EXECUTABLE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || [[ ! "$VMLX_R19_RELEASE_PYTHON_PYVENV_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "ERROR: vMLX 1.6.19 release Python provenance hashes are invalid" >&2
     exit 1
   fi

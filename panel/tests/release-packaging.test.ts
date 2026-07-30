@@ -1378,9 +1378,15 @@ describe("release packaging", () => {
     expect(source).toContain("release Python prefix mismatch");
     expect(source).toContain("run_release_python -I -");
     expect(source).not.toContain('"$PYTHON_BIN" -I -');
-    expect(source).toContain("VMLX_R19_RELEASE_PYTHON_INIT_SHA256");
-    expect(source).toContain("VMLX_R19_RELEASE_PYTHON_SERVER_SHA256");
-    expect(source).toContain("VMLX_R19_RELEASE_PYTHON_EXECUTABLE_SHA256");
+    expect(source).toContain(
+      'VMLX_R19_RELEASE_PYTHON_INIT_SHA256="$(toolchain_sha256 "$init_path")"',
+    );
+    expect(source).toContain(
+      'VMLX_R19_RELEASE_PYTHON_SERVER_SHA256="$(toolchain_sha256 "$server_path")"',
+    );
+    expect(source).toContain(
+      'VMLX_R19_RELEASE_PYTHON_EXECUTABLE_SHA256="$VMLX_R19_RELEASE_PYTHON_SOURCE_SHA256"',
+    );
     expect(source).toContain("VMLX_R19_RELEASE_PYTHON_PYVENV_SHA256");
     expect(source).toContain(
       '"$ROOT_DIR/scripts/check-public-repo-hygiene.sh"',

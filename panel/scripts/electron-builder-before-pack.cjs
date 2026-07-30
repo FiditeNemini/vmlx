@@ -93,6 +93,57 @@ function runCapture(cmd, args, cwd) {
   return (proc.stdout || "").trim();
 }
 
+function stripVerifiedReleasePythonActionFromGitStatus(rootDir, stdout) {
+  const rows = String(stdout || "").split(/\r?\n/);
+  const originalRelative =
+    "tests/cross_matrix/run_packaged_integrity_contract.py";
+  const actionPattern =
+    /^\?\? tests\/cross_matrix\/\.run_packaged_integrity_contract\.py\.vmlx-r19-[0-9a-f]{32}$/;
+  const matching = rows
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => actionPattern.test(row));
+
+  if (matching.length === 0) {
+    return String(stdout || "");
+  }
+  if (matching.length !== 1) {
+    throw new Error(
+      "vMLX release Python git-status action appeared more than once",
+    );
+  }
+
+  const expectedPrefix = "?? tests/cross_matrix/";
+  const actionRelative = matching[0].row.slice(expectedPrefix.length);
+  const originalPath = join(rootDir, originalRelative);
+  const actionPath = join(rootDir, "tests", "cross_matrix", actionRelative);
+  let originalStat;
+  let actionStat;
+  try {
+    originalStat = lstatSync(originalPath, { bigint: true });
+    actionStat = lstatSync(actionPath, { bigint: true });
+  } catch (error) {
+    throw new Error(
+      "vMLX release Python script action disappeared during git status",
+      { cause: error },
+    );
+  }
+  if (
+    !originalStat.isFile() ||
+    !actionStat.isFile() ||
+    actionStat.nlink < 2n ||
+    actionStat.dev !== originalStat.dev ||
+    actionStat.ino !== originalStat.ino ||
+    actionStat.size !== originalStat.size
+  ) {
+    throw new Error(
+      "vMLX release Python git-status action is not the verified runner hardlink",
+    );
+  }
+
+  rows.splice(matching[0].index, 1);
+  return rows.join("\n");
+}
+
 function readFileSnapshot(filePath, requireSingleLink = true) {
   const fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
   const digest = createHash("sha256");
@@ -1004,13 +1055,16 @@ function verifyR19PackagingContext(panelDir, context) {
     }).stdout;
   const head = runPinnedGit(["-C", rootDir, "rev-parse", "HEAD"]);
   const tree = runPinnedGit(["-C", rootDir, "rev-parse", "HEAD^{tree}"]);
-  const dirty = runPinnedGit([
-    "-C",
+  const dirty = stripVerifiedReleasePythonActionFromGitStatus(
     rootDir,
-    "status",
-    "--porcelain",
-    "--untracked-files=all",
-  ]);
+    runPinnedGit([
+      "-C",
+      rootDir,
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+    ]),
+  );
   if (manifest?.source?.commit !== head || manifest?.source?.tree !== tree) {
     throw new Error(
       `vMLX ${R19_VERSION} prepackage manifest is not bound to the packaging source`,
@@ -1231,6 +1285,8 @@ module.exports.inspectBundleRuntimeContract = inspectBundleRuntimeContract;
 module.exports.inspectAppRuntimeContract = inspectAppRuntimeContract;
 module.exports.emitR19CompletionAttestation = emitR19CompletionAttestation;
 module.exports.runR19ReleasePythonAction = runR19ReleasePythonAction;
+module.exports.stripVerifiedReleasePythonActionFromGitStatus =
+  stripVerifiedReleasePythonActionFromGitStatus;
 module.exports.treePayload = treePayload;
 module.exports.R19_CODESIGN_IDENTITY = R19_CODESIGN_IDENTITY;
 module.exports.R19_CSC_NAME = R19_CSC_NAME;

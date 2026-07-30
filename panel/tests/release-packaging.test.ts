@@ -1,6 +1,7 @@
 import {
   chmodSync,
   copyFileSync,
+  linkSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -1451,6 +1452,54 @@ describe("release packaging", () => {
     expect(beforePackSource).not.toContain(
       "run(plan.tools.node.realpath",
     );
+  });
+
+  it("ignores only the verified release Python action hardlink in git status", () => {
+    const beforePack = requireCjs(
+      join(repo, "scripts/electron-builder-before-pack.cjs"),
+    );
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-status-action-"));
+    const runnerDir = join(temp, "tests", "cross_matrix");
+    const runner = join(runnerDir, "run_packaged_integrity_contract.py");
+    const nonce = "a".repeat(32);
+    const actionRelative =
+      `tests/cross_matrix/.run_packaged_integrity_contract.py.vmlx-r19-${nonce}`;
+    const action = join(temp, actionRelative);
+    try {
+      mkdirSync(runnerDir, { recursive: true });
+      writeFileSync(runner, "print('release gate')\n");
+      linkSync(runner, action);
+
+      expect(
+        beforePack.stripVerifiedReleasePythonActionFromGitStatus(
+          temp,
+          `?? ${actionRelative}`,
+        ),
+      ).toBe("");
+      expect(
+        beforePack.stripVerifiedReleasePythonActionFromGitStatus(
+          temp,
+          ` M panel/package.json\n?? ${actionRelative}`,
+        ),
+      ).toBe(" M panel/package.json");
+
+      rmSync(action);
+      writeFileSync(action, "not the runner\n");
+      expect(() =>
+        beforePack.stripVerifiedReleasePythonActionFromGitStatus(
+          temp,
+          `?? ${actionRelative}`,
+        ),
+      ).toThrow("is not the verified runner hardlink");
+      expect(
+        beforePack.stripVerifiedReleasePythonActionFromGitStatus(
+          temp,
+          "?? unrelated.txt",
+        ),
+      ).toBe("?? unrelated.txt");
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
   });
 
   it("digest-binds manifest tools and safely creates fresh notary result directories", () => {

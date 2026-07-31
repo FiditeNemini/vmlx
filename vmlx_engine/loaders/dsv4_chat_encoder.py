@@ -8,7 +8,11 @@ server.py can encode chat messages the way the model expects — without
 needing every caller to locate the source-model directory and ``sys.path``
 hack.
 
-Three reasoning modes (research/DSV4-RUNTIME-ARCHITECTURE.md §4):
+Native reasoning is bundle-owned.  The adapter loads the selected bundle's
+``encoding_dsv4.py`` and validates explicit effort names against that encoder
+instead of applying a family-wide alias.  The 0731 encoder exposes
+``low``, ``high``, and ``max`` (default ``low``); older bundles may expose a
+different subset.
 
   +------------------+---------------------+---------------------+
   |  API input       |  DSV4 encoding call |  Prompt suffix      |
@@ -31,9 +35,9 @@ Multi-turn: ``drop_earlier_reasoning=True`` (default) — DSV4 encoder
 strips prior ``<think>…</think>`` blocks from history when building the
 next prompt. Honors ``jang_config.chat.reasoning.drop_earlier_reasoning``.
 
-Sampling defaults pulled from ``jang_config.chat.sampling_defaults``
-(typically ``temperature=0.6``, ``top_p=0.95``) when the caller doesn't
-override them. Our chat.ts layer already reads ``generation_config.json``
+Sampling defaults are pulled from ``jang_config.chat.sampling_defaults``
+when the caller doesn't override them. Our chat.ts layer already reads
+``generation_config.json``
 on new chat creation (chat.ts:441-469) — the jang_config.chat defaults
 layer on top as JANG-stamp capabilities.
 
@@ -47,7 +51,7 @@ Long-context mode (``DSV4_LONG_CTX``):
     composite) and bounded ``RotatingKVCache`` on ratio-zero local SWA
     layers, preserving the native 128-token ring geometry.
   * Paged prefix cache uses a dedicated ``deepseek_v4`` block record with
-    ``deepseek_v4_v9`` metadata; v9 keys DSV4 prompt cache blocks at N-1
+    ``deepseek_v4_v10_delta`` metadata; v9 keys DSV4 prompt cache blocks at N-1
     tokens so the last prompt token is re-fed on prefix hits. The loader
     installs the prefill mask-trim patch required for prompts beyond the
     sliding window.
@@ -270,43 +274,48 @@ def _get_encoding(model_path: Optional[Path] = None):
 def _resolve_mode_and_effort(
     enable_thinking: Optional[bool],
     reasoning_effort: Optional[str],
+    *,
+    supported_efforts: Optional[set[str]] = None,
 ) -> tuple[str, Optional[str]]:
     """Map vmlx chat API semantics → DSV4 encoder kwargs.
 
-    **Strict DSV4 encoder contract** (verified against
-    ``encoding_dsv4.py:261``): the encoder ``assert``s
-    ``reasoning_effort in {None, "high", "max"}``. ``"low"`` and
-    ``"medium"`` MUST be normalised to ``"high"`` before we call it, or
-    the encoder raises ``AssertionError`` mid-request.
+    DSV4 encoder revisions do not all expose the same effort vocabulary.  An
+    explicit effort is therefore preserved only when it is accepted by the
+    selected bundle's encoder.  Unsupported values fail clearly; silently
+    promoting ``low`` to ``high`` changes the prompt and is not a compatibility
+    fix.
 
     API contract (shared with other reasoning models like Mistral 4):
       - enable_thinking False  → thinking suppressed. DSV4 calls this
         "chat" mode; the encoder appends </think> to the prompt to tell
         the model "skip thinking, go straight to answer".
-      - enable_thinking True + reasoning_effort in (None, "low", "medium",
-        "high") → "thinking" mode with reasoning_effort="high" (DSV4
-        only distinguishes high vs max below/above).
-      - reasoning_effort == "max" → "thinking" mode with max effort.
+      - enable_thinking True + no effort → "thinking" mode using the native
+        encoder default.
+      - an explicit supported effort → "thinking" mode with that exact effort.
 
-    Returns (thinking_mode, reasoning_effort). ``reasoning_effort`` is
-    always one of ``{None, "high", "max"}`` — safe for direct passthrough to
-    the encoder.
+    Returns ``(thinking_mode, reasoning_effort)`` for direct passthrough to the
+    selected encoder.
     """
-    if reasoning_effort == "max":
-        return "thinking", "max"
+    effort = (
+        str(reasoning_effort).strip().lower()
+        if reasoning_effort is not None
+        else None
+    )
+    if effort:
+        allowed = supported_efforts or {"low", "high", "max"}
+        if effort not in allowed:
+            raise ValueError(
+                "Unsupported DSV4 reasoning_effort "
+                f"{effort!r}; selected encoder supports: "
+                f"{', '.join(sorted(allowed))}"
+            )
+        return "thinking", effort
 
     if enable_thinking is False:
         return "chat", None
 
     if enable_thinking is True:
-        # Pass "high" when user asked for any non-None low/medium/high
-        # tier; otherwise None (plain thinking without effort modifier).
-        effort = "high" if reasoning_effort in ("low", "medium", "high") else None
-        return "thinking", effort
-
-    if reasoning_effort in ("low", "medium", "high"):
-        # Effort without enable_thinking implies thinking mode at "high".
-        return "thinking", "high"
+        return "thinking", None
 
     # Default when both fields omitted: fall through to "chat" (instruct),
     # matching the conservative default the rest of the engine uses.
@@ -332,8 +341,8 @@ def apply_chat_template(
             via its ``tools`` field — DSV4's encoder reads them from there.
         enable_thinking: Whether to allow the model to emit a ``<think>``
             block. None ≡ False (default chat mode).
-        reasoning_effort: ``"low" | "medium" | "high" | "max" | None``.
-            See ``_resolve_mode_and_effort`` for mapping semantics.
+        reasoning_effort: An effort accepted by the selected bundle encoder,
+            or None for its native default. See ``_resolve_mode_and_effort``.
         drop_earlier_reasoning: Multi-turn rule — strip prior
             ``<think>...</think>`` blocks from history. Follows the
             ``jang_config.chat.reasoning.drop_earlier_reasoning`` flag
@@ -350,7 +359,18 @@ def apply_chat_template(
         The encoded prompt string. Pass directly to ``mlx_lm.generate``
         or the vmlx generation loop.
     """
-    thinking_mode, effort = _resolve_mode_and_effort(enable_thinking, reasoning_effort)
+    enc = _get_encoding(model_path=Path(model_path) if model_path else None)
+    effort_prompts = getattr(enc, "REASONING_EFFORT_PROMPTS", None)
+    supported_efforts = (
+        {str(key).strip().lower() for key in effort_prompts}
+        if isinstance(effort_prompts, dict) and effort_prompts
+        else None
+    )
+    thinking_mode, effort = _resolve_mode_and_effort(
+        enable_thinking,
+        reasoning_effort,
+        supported_efforts=supported_efforts,
+    )
     messages = copy.deepcopy(messages)
     prompt_tools = select_tools_for_explicit_request(messages, tools)
     if prompt_tools and tools and len(prompt_tools) < len(tools):
@@ -398,7 +418,6 @@ def apply_chat_template(
                 msgs_out.extend(messages)
             messages = msgs_out
 
-    enc = _get_encoding(model_path=Path(model_path) if model_path else None)
     return enc.encode_messages(
         messages,
         thinking_mode=thinking_mode,

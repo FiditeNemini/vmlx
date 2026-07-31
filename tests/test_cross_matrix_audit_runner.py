@@ -1060,7 +1060,7 @@ def test_dsv4_capability_contract_uses_native_cache_not_experimental_mode():
         "cache": {
             "native": {
                 "family": "deepseek_v4",
-                "schema": "deepseek_v4_v9",
+                "schema": "deepseek_v4_v10_delta",
                 "cache_type": "native_composite",
                 "generic_turboquant_kv": {"enabled": False},
             }

@@ -1810,32 +1810,38 @@ function goodResult(): Record<string, any> {
   return result;
 }
 
-function dsv4FailClosedResult(): Record<string, any> {
+function dsv4EnabledResult(): Record<string, any> {
   const result = goodResult();
-  result.expectedDsv4CacheDisabled = true;
+  result.expectedDsv4PoolQuant = true;
   result.serverCacheControls = {
     runningSessionDrawer: true,
     controlScope: "running-session-toolbar",
     verified: true,
-    dsv4DisabledWarningVisible: true,
-    dsv4CacheControlsAbsent: true,
     initialCacheControls: {
-      enablePrefixCache: false,
+      enablePrefixCache: true,
       usePagedCache: false,
-      enableBlockDiskCache: false,
+      enableBlockDiskCache: true,
     },
-    argv: ["--disable-prefix-cache"],
+    argv: ["--no-paged-cache", "--enable-block-disk-cache"],
   };
   result.session.effective_config = {
     ...result.session.effective_config,
-    enablePrefixCache: false,
+    enablePrefixCache: true,
     usePagedCache: false,
-    enableBlockDiskCache: false,
+    enableBlockDiskCache: true,
   };
   result.server.health.native_cache = {
-    prefix: false,
+    prefix: true,
     paged: false,
-    block_disk_l2: false,
+    block_disk_only: true,
+    block_disk_l2: true,
+    pool_quant: {
+      requested: true,
+      enabled: true,
+      observed: true,
+      matches_request: true,
+      error: null,
+    },
   };
   return result;
 }
@@ -3629,80 +3635,66 @@ describe("real UI model proof harness", () => {
     );
   });
 
-  it("accepts DSV4 only with the complete visible and runtime fail-closed contract", () => {
-    expect(validateServerCacheEvidence(dsv4FailClosedResult())).toEqual([]);
+  it("accepts DSV4 only with visible SSD-only native cache and observed pool quant", () => {
+    expect(validateServerCacheEvidence(dsv4EnabledResult())).toEqual([]);
   });
 
   it.each([
     [
-      "missing warning",
+      "visible prefix disabled",
       (result: Record<string, any>) => {
-        result.serverCacheControls.dsv4DisabledWarningVisible = false;
+        result.serverCacheControls.initialCacheControls.enablePrefixCache = false;
       },
-      /fail-closed cache warning was not visible/,
+      /visible prefix-cache state does not match persisted session config/,
     ],
     [
-      "exposed cache controls",
+      "visible SSD disabled",
       (result: Record<string, any>) => {
-        result.serverCacheControls.dsv4CacheControlsAbsent = false;
+        result.serverCacheControls.initialCacheControls.enableBlockDiskCache = false;
       },
-      /product cache controls were still exposed/,
+      /SSD\/L2 control was not visibly enabled/,
     ],
-    ...(["enablePrefixCache", "usePagedCache", "enableBlockDiskCache"] as const)
-      .flatMap((field) => [
-        [
-          `visible ${field} ON`,
-          (result: Record<string, any>) => {
-            result.serverCacheControls.initialCacheControls[field] = true;
-          },
-          new RegExp(`running-session ${field} was not visibly fail-closed`),
-        ],
-        [
-          `persisted ${field} ON`,
-          (result: Record<string, any>) => {
-            result.session.effective_config[field] = true;
-          },
-          new RegExp(`persisted session ${field} was not fail-closed`),
-        ],
-      ]),
     [
-      "missing --disable-prefix-cache",
+      "missing --no-paged-cache",
       (result: Record<string, any>) => {
-        result.serverCacheControls.argv = [];
+        result.serverCacheControls.argv = ["--enable-block-disk-cache"];
       },
-      /argv omitted --disable-prefix-cache/,
+      /argv omitted --no-paged-cache/,
     ],
-    ...([
-      "--dsv4-enable-prefix-cache",
-      "--use-paged-cache",
-      "--enable-block-disk-cache",
-    ] as const).map((option) => [
-      `forbidden argv ${option}`,
-      (result: Record<string, any>) => {
-        result.serverCacheControls.argv.push(option);
-      },
-      new RegExp(`unexpectedly included ${option}`),
-    ]),
-    ...(["prefix", "paged", "block_disk_l2"] as const).map((field) => [
-      `health native_cache.${field} ON`,
-      (result: Record<string, any>) => {
-        result.server.health.native_cache[field] = true;
-      },
-      new RegExp(`native_cache\\.${field} was not false`),
-    ]),
     [
-      "unverified evidence",
+      "missing SSD argv",
       (result: Record<string, any>) => {
-        result.serverCacheControls.verified = false;
+        result.serverCacheControls.argv = ["--no-paged-cache"];
       },
-      /cache controls were not verified end to end/,
+      /argv omitted --enable-block-disk-cache/,
+    ],
+    [
+      "health prefix mismatch",
+      (result: Record<string, any>) => {
+        result.server.health.native_cache.prefix = false;
+      },
+      /native prefix state does not match/,
+    ],
+    [
+      "pool cache class mismatch",
+      (result: Record<string, any>) => {
+        result.server.health.native_cache.pool_quant.observed = false;
+      },
+      /observed cache class does not match/,
+    ],
+    [
+      "pool attestation error",
+      (result: Record<string, any>) => {
+        result.server.health.native_cache.pool_quant.error = "cache construction failed";
+      },
+      /attestation reported an error/,
     ],
   ] as Array<[
     string,
     (result: Record<string, any>) => void,
     RegExp,
-  ]>)("rejects the DSV4 stale cache surface: %s", (_name, mutate, expected) => {
-    const result = dsv4FailClosedResult();
+  ]>)("rejects an unproven DSV4 cache surface: %s", (_name, mutate, expected) => {
+    const result = dsv4EnabledResult();
     mutate(result);
     expect(validateServerCacheEvidence(result).join("\n")).toMatch(expected);
   });

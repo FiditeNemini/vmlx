@@ -1,10 +1,10 @@
 #!/bin/bash
 set -euo pipefail
-R19_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-export PATH="$R19_FIXED_PATH"
+R20_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$R20_FIXED_PATH"
 umask 077
 
-# Verify the final public r19 DMG chain after signing, notarization, stapling,
+# Verify the final public r20 DMG chain after signing, notarization, stapling,
 # and post-staple blockmap regeneration. This token-free script does not build,
 # sign, notarize, upload, tag, publish, or mutate release feeds.
 
@@ -27,12 +27,12 @@ ARTIFACT_CHAIN_HELPER="$ROOT_DIR/tests/cross_matrix/run_packaged_integrity_contr
 EXPECTED_APPLE_TEAM_ID="55KGF2S5AY"
 EXPECTED_CODESIGN_IDENTITY="Developer ID Application: ShieldStack LLC (55KGF2S5AY)"
 RELEASE_SCOPE="${VMLX_RELEASE_SCOPE:-${VMLINUX_RELEASE_SCOPE:-}}"
-PRIVATE_EVIDENCE_ROOT="${VMLX_R19_PRIVATE_EVIDENCE_ROOT:-${VMLINUX_R19_PRIVATE_EVIDENCE_ROOT:-}}"
-EXPECTED_PRE_MANIFEST_SHA256="${VMLX_R19_PRE_NOTARY_MANIFEST_SHA256:-${VMLINUX_R19_PRE_NOTARY_MANIFEST_SHA256:-}}"
-EXPECTED_FINAL_MANIFEST_SHA256="${VMLX_R19_FINAL_NOTARY_MANIFEST_SHA256:-${VMLINUX_R19_FINAL_NOTARY_MANIFEST_SHA256:-}}"
-EXPECTED_SOURCE_COMMIT="${VMLX_R19_EXPECTED_SOURCE_COMMIT:-${VMLINUX_R19_EXPECTED_SOURCE_COMMIT:-}}"
-EXPECTED_SOURCE_TREE="${VMLX_R19_EXPECTED_SOURCE_TREE:-${VMLINUX_R19_EXPECTED_SOURCE_TREE:-}}"
-EXPECTED_PREFLIGHT_SHA256="${VMLX_R19_EXPECTED_PREFLIGHT_SHA256:-${VMLINUX_R19_EXPECTED_PREFLIGHT_SHA256:-}}"
+PRIVATE_EVIDENCE_ROOT="${VMLX_R20_PRIVATE_EVIDENCE_ROOT:-${VMLINUX_R20_PRIVATE_EVIDENCE_ROOT:-}}"
+EXPECTED_PRE_MANIFEST_SHA256="${VMLX_R20_PRE_NOTARY_MANIFEST_SHA256:-${VMLINUX_R20_PRE_NOTARY_MANIFEST_SHA256:-}}"
+EXPECTED_FINAL_MANIFEST_SHA256="${VMLX_R20_FINAL_NOTARY_MANIFEST_SHA256:-${VMLINUX_R20_FINAL_NOTARY_MANIFEST_SHA256:-}}"
+EXPECTED_SOURCE_COMMIT="${VMLX_R20_EXPECTED_SOURCE_COMMIT:-${VMLINUX_R20_EXPECTED_SOURCE_COMMIT:-}}"
+EXPECTED_SOURCE_TREE="${VMLX_R20_EXPECTED_SOURCE_TREE:-${VMLINUX_R20_EXPECTED_SOURCE_TREE:-}}"
+EXPECTED_PREFLIGHT_SHA256="${VMLX_R20_EXPECTED_PREFLIGHT_SHA256:-${VMLINUX_R20_EXPECTED_PREFLIGHT_SHA256:-}}"
 NOTARY_PROFILE="${VMLINUX_NOTARY_KEYCHAIN_PROFILE:-${VMLX_NOTARY_KEYCHAIN_PROFILE:-}}"
 NOTARY_KEYCHAIN="${VMLINUX_NOTARY_KEYCHAIN:-${VMLX_NOTARY_KEYCHAIN:-}}"
 APPLE_XCRUN="/usr/bin/xcrun"
@@ -112,10 +112,10 @@ if [[ -n "${VMLX_RELEASE_SCOPE:-}" && -n "${VMLINUX_RELEASE_SCOPE:-}" ]] \
   echo "ERROR: VMLX_RELEASE_SCOPE and VMLINUX_RELEASE_SCOPE disagree" >&2
   exit 1
 fi
-if [[ -n "${VMLX_R19_PRIVATE_EVIDENCE_ROOT:-}" ]] \
-  && [[ -n "${VMLINUX_R19_PRIVATE_EVIDENCE_ROOT:-}" ]] \
-  && [[ "$VMLX_R19_PRIVATE_EVIDENCE_ROOT" != "$VMLINUX_R19_PRIVATE_EVIDENCE_ROOT" ]]; then
-  echo "ERROR: VMLX_R19_PRIVATE_EVIDENCE_ROOT and VMLINUX_R19_PRIVATE_EVIDENCE_ROOT disagree" >&2
+if [[ -n "${VMLX_R20_PRIVATE_EVIDENCE_ROOT:-}" ]] \
+  && [[ -n "${VMLINUX_R20_PRIVATE_EVIDENCE_ROOT:-}" ]] \
+  && [[ "$VMLX_R20_PRIVATE_EVIDENCE_ROOT" != "$VMLINUX_R20_PRIVATE_EVIDENCE_ROOT" ]]; then
+  echo "ERROR: VMLX_R20_PRIVATE_EVIDENCE_ROOT and VMLINUX_R20_PRIVATE_EVIDENCE_ROOT disagree" >&2
   exit 1
 fi
 
@@ -173,7 +173,7 @@ require_pre_notary_handoff_environment() {
     EXPECTED_SOURCE_TREE \
     EXPECTED_PREFLIGHT_SHA256; do
     if [[ -z "${!name}" ]]; then
-      echo "ERROR: missing independent r19 build handoff value: $name" >&2
+      echo "ERROR: missing independent r20 build handoff value: $name" >&2
       exit 1
     fi
   done
@@ -182,27 +182,27 @@ require_pre_notary_handoff_environment() {
 require_final_notary_handoff_environment() {
   require_pre_notary_handoff_environment
   if [[ -z "$EXPECTED_FINAL_MANIFEST_SHA256" ]]; then
-    echo "ERROR: VMLX_R19_FINAL_NOTARY_MANIFEST_SHA256 is required from the notarization handoff" >&2
+    echo "ERROR: VMLX_R20_FINAL_NOTARY_MANIFEST_SHA256 is required from the notarization handoff" >&2
     exit 1
   fi
 }
 
-require_r19_release_context() {
+require_r20_release_context() {
   assert_unshadowed_apple_tools
-  if [[ "$PATH" != "$R19_FIXED_PATH" ]]; then
-    echo "ERROR: r19 verification PATH is not sanitized" >&2
+  if [[ "$PATH" != "$R20_FIXED_PATH" ]]; then
+    echo "ERROR: r20 verification PATH is not sanitized" >&2
     exit 1
   fi
   if [[ -n "${VMLX_RELEASE_OUTPUT_DIR:-}" || -n "${VMLINUX_RELEASE_OUTPUT_DIR:-}" ]]; then
-    echo "ERROR: r19 verification output is fixed at $PANEL_DIR/release; overrides are forbidden" >&2
+    echo "ERROR: r20 verification output is fixed at $PANEL_DIR/release; overrides are forbidden" >&2
     exit 1
   fi
-  if [[ "$VERSION" != "1.6.19" ]]; then
-    echo "ERROR: the r19 artifact-chain verifier requires package version 1.6.19, found $VERSION" >&2
+  if [[ "$VERSION" != "1.6.20" ]]; then
+    echo "ERROR: the r20 artifact-chain verifier requires package version 1.6.20, found $VERSION" >&2
     exit 1
   fi
-  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
-    echo "ERROR: set VMLX_RELEASE_SCOPE=r19_production for final r19 verification" >&2
+  if [[ "$RELEASE_SCOPE" != "r20_production" ]]; then
+    echo "ERROR: set VMLX_RELEASE_SCOPE=r20_production for final r20 verification" >&2
     exit 1
   fi
   if [[ ! -x "$PYTHON_BIN" ]]; then
@@ -214,7 +214,7 @@ require_r19_release_context() {
     exit 1
   fi
   if [[ -z "$PRIVATE_EVIDENCE_ROOT" ]]; then
-    echo "ERROR: VMLX_R19_PRIVATE_EVIDENCE_ROOT is required and must be outside every Git worktree" >&2
+    echo "ERROR: VMLX_R20_PRIVATE_EVIDENCE_ROOT is required and must be outside every Git worktree" >&2
     exit 1
   fi
   artifact_chain check-private-root --private-root "$PRIVATE_EVIDENCE_ROOT"
@@ -400,13 +400,13 @@ PY
 }
 
 verify_final_release_chain() {
-  require_r19_release_context
+  require_r20_release_context
   require_final_notary_handoff_environment
-  local final_manifest="${VMLX_R19_FINAL_NOTARY_MANIFEST:-${VMLINUX_R19_FINAL_NOTARY_MANIFEST:-$PRIVATE_EVIDENCE_ROOT/vmlx-${VERSION}-r19-post-notary-manifest.json}}"
-  if [[ -n "${VMLX_R19_FINAL_NOTARY_MANIFEST:-}" ]] \
-    && [[ -n "${VMLINUX_R19_FINAL_NOTARY_MANIFEST:-}" ]] \
-    && [[ "$VMLX_R19_FINAL_NOTARY_MANIFEST" != "$VMLINUX_R19_FINAL_NOTARY_MANIFEST" ]]; then
-    echo "ERROR: VMLX_R19_FINAL_NOTARY_MANIFEST and VMLINUX_R19_FINAL_NOTARY_MANIFEST disagree" >&2
+  local final_manifest="${VMLX_R20_FINAL_NOTARY_MANIFEST:-${VMLINUX_R20_FINAL_NOTARY_MANIFEST:-$PRIVATE_EVIDENCE_ROOT/vmlx-${VERSION}-r20-post-notary-manifest.json}}"
+  if [[ -n "${VMLX_R20_FINAL_NOTARY_MANIFEST:-}" ]] \
+    && [[ -n "${VMLINUX_R20_FINAL_NOTARY_MANIFEST:-}" ]] \
+    && [[ "$VMLX_R20_FINAL_NOTARY_MANIFEST" != "$VMLINUX_R20_FINAL_NOTARY_MANIFEST" ]]; then
+    echo "ERROR: VMLX_R20_FINAL_NOTARY_MANIFEST and VMLINUX_R20_FINAL_NOTARY_MANIFEST disagree" >&2
     exit 1
   fi
 
@@ -520,7 +520,7 @@ verify_final_release_chain() {
     --expected-source-commit "$EXPECTED_SOURCE_COMMIT" \
     --expected-source-tree "$EXPECTED_SOURCE_TREE" \
     --expected-preflight-sha256 "$EXPECTED_PREFLIGHT_SHA256"
-  echo "==> Final r19 DMG artifact chain verified: $final_manifest"
+  echo "==> Final r20 DMG artifact chain verified: $final_manifest"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

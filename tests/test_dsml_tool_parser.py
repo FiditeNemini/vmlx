@@ -24,11 +24,10 @@ DeepSeek's other special tokens (`<｜begin▁of▁sentence｜>`, `<｜User｜>`
 """
 
 import json
-from pathlib import Path
 
 import pytest
 
-from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser, DSML_PREFIX
+from vmlx_engine.tool_parsers.dsml_tool_parser import DSML_PREFIX, DSMLToolParser
 
 
 @pytest.fixture
@@ -107,8 +106,8 @@ class TestDSMLToolParser:
         assert "THREE.WebGLRenderer" in args["content"]
         assert args["content"].endswith("renderer.render(scene, camera);")
 
-    def test_repairs_schema_keyed_dsml_parameter_without_rewriting_code(self, parser):
-        """Repair `<parameter content ...>` but preserve generated code bytes."""
+    def test_rejects_schema_keyed_noncanonical_dsml_parameter(self, parser):
+        """A schema-looking attribute must not become an executable argument."""
         generated_code = (
             "const scene = new THREE.Scene();\n"
             "const renderer = new THREE.WebWebGLRenderer();\n"
@@ -146,12 +145,8 @@ class TestDSMLToolParser:
 
         out = parser.extract_tool_calls(text, request=request)
 
-        assert out.tools_called is True
-        assert out.tool_calls[0]["name"] == "write_file"
-        args = json.loads(out.tool_calls[0]["arguments"])
-        assert args == {"path": "landing-p/scene.js", "content": generated_code}
-        assert "THREE.WebWebGLRenderer" in args["content"]
-        assert "THREE.MMeshBasicMaterial" in args["content"]
+        assert out.tools_called is False
+        assert out.tool_calls == []
         assert out.content is None
 
     def test_invoke_with_typed_params_string_false_decodes_json(self, parser):
@@ -242,6 +237,8 @@ class TestDSMLToolParser:
         keeps the raw template's tool affordances rather than injecting the
         generic JSON-tools instructions block."""
         assert DSMLToolParser.supports_native_format() is True
+        assert DSMLToolParser.STRICT_NATIVE_TOOL_FORMAT is True
+        assert DSMLToolParser.SUPPRESS_INVALID_NATIVE_MARKUP is True
 
     def test_complete_dsml_wrapper_opts_into_stream_early_stop(self, parser):
         parser._stream_stop_request = {
@@ -328,7 +325,10 @@ class TestDSMLToolParser:
         assert parser.stream_tool_calls_complete(malformed) is False
         assert parser.stream_tool_call_stop_truncate(malformed) == malformed
 
-    def test_stream_early_stop_allows_schema_valid_bare_invoke(self, parser):
+    def test_stream_early_stop_allows_bare_invoke_without_canonical_encoder(
+        self, parser
+    ):
+        """Older-bundle compatibility remains explicit without model_path."""
         parser._stream_stop_request = {
             "tools": [
                 {
@@ -354,6 +354,57 @@ class TestDSMLToolParser:
         assert parser.stream_tool_calls_complete(call) is True
         assert parser.stream_tool_call_stop_truncate(call + " trailing") == call
 
+    def test_canonical_encoder_rejection_blocks_regex_only_bare_invoke(
+        self, parser, monkeypatch
+    ):
+        """A selected 0731 encoder owns rejection of non-wrapper DSML."""
+        from vmlx_engine.loaders import dsv4_chat_encoder
+
+        class RejectingCanonicalEncoder:
+            eos_token = "<DSV4_EOS>"
+
+            @staticmethod
+            def parse_message_from_completion_text(_text, thinking_mode):
+                assert thinking_mode == "chat"
+                raise ValueError("official parser requires tool_calls wrapper")
+
+        monkeypatch.setattr(
+            dsv4_chat_encoder,
+            "_load_encoding_dsv4_module",
+            lambda model_path=None: RejectingCanonicalEncoder,
+        )
+        request = {
+            "model_path": "/models/dsv4-0731",
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ],
+        }
+        call = (
+            f'<{DSML_PREFIX}invoke name="file_info">\n'
+            f'<{DSML_PREFIX}parameter name="path" string="true">README.md'
+            f"</{DSML_PREFIX}parameter>\n"
+            f"</{DSML_PREFIX}invoke>"
+        )
+
+        complete = parser.extract_tool_calls(call, request=request)
+        parser._stream_stop_request = request
+
+        assert complete.tools_called is False
+        assert complete.tool_calls == []
+        assert complete.content is None
+        assert parser.stream_tool_calls_complete(call) is False
+        assert parser.stream_tool_call_stop_truncate(call) == call
+
     def test_tools_called_implies_no_dsml_in_content(self, parser):
         """Cross-cutting invariant: whenever tools_called=True the visible
         content field must be free of every DSML token form. Regression guard
@@ -373,8 +424,8 @@ class TestDSMLToolParser:
                 assert "<" + DSML_PREFIX not in content
                 assert "</" + DSML_PREFIX not in content
 
-    def test_repairs_dsml_invoke_with_plain_param_tags(self, parser):
-        """Issue #165: DSV4 can emit a DSML invoke with plain <param> tags."""
+    def test_rejects_dsml_invoke_with_plain_param_tags(self, parser):
+        """Plain HTML params are not canonical DSML and cannot execute."""
         text = (
             f'<{DSML_PREFIX}invoke name="read_file">\n'
             '    <param name="path">docs/vendor_memo.md</param>\n'
@@ -398,17 +449,14 @@ class TestDSMLToolParser:
 
         out = parser.extract_tool_calls(text, request=request)
 
-        assert out.tools_called is True
-        assert out.tool_calls[0]["name"] == "read_file"
-        assert json.loads(out.tool_calls[0]["arguments"]) == {
-            "path": "docs/vendor_memo.md"
-        }
+        assert out.tools_called is False
+        assert out.tool_calls == []
         assert out.content is None
 
-    def test_repairs_self_closing_dsml_parameter_with_value_in_string_attr(
+    def test_rejects_self_closing_dsml_parameter_with_value_in_string_attr(
         self, parser
     ):
-        """Live JANGTQ-K can put the value in string="." on a self-closing tag."""
+        """A malformed string attribute must not be reinterpreted as a value."""
         text = (
             f'<{DSML_PREFIX}tool_calls>\n'
             f'<{DSML_PREFIX}invoke name="list_directory">\n'
@@ -435,13 +483,12 @@ class TestDSMLToolParser:
 
         out = parser.extract_tool_calls(text, request=request)
 
-        assert out.tools_called is True
-        assert out.tool_calls[0]["name"] == "list_directory"
-        assert json.loads(out.tool_calls[0]["arguments"]) == {"path": "."}
+        assert out.tools_called is False
+        assert out.tool_calls == []
         assert out.content is None
 
-    def test_repairs_dsml_invuse_typo_with_complete_parameters(self, parser):
-        """Live JANGTQ-K can typo invoke as invuse while keeping parameters."""
+    def test_rejects_dsml_invuse_typo_with_complete_parameters(self, parser):
+        """A typoed invoke name is malformed protocol, not a tool call."""
         text = (
             f'<{DSML_PREFIX}tool_calls>\n'
             f'<{DSML_PREFIX}invuse name="write_file">\n'
@@ -471,16 +518,12 @@ class TestDSMLToolParser:
 
         out = parser.extract_tool_calls(text, request=request)
 
-        assert out.tools_called is True
-        assert out.tool_calls[0]["name"] == "write_file"
-        assert json.loads(out.tool_calls[0]["arguments"]) == {
-            "path": "landing-p/scene.js",
-            "content": "const camera = new THREE.PersPerspectiveCamera();",
-        }
+        assert out.tools_called is False
+        assert out.tool_calls == []
         assert out.content is None
 
-    def test_repairs_dsml_invue_typo_with_complete_parameters(self, parser):
-        """Live JANGTQ-K can typo invoke as invue while keeping parameters."""
+    def test_rejects_dsml_invue_typo_with_complete_parameters(self, parser):
+        """A degraded invoke close must fail closed."""
         text = (
             f'<{DSML_PREFIX}tool_calls>\n'
             f'<{DSML_PREFIX}invue name="write_file">\n'
@@ -510,18 +553,14 @@ class TestDSMLToolParser:
 
         out = parser.extract_tool_calls(text, request=request)
 
-        assert out.tools_called is True
-        assert out.tool_calls[0]["name"] == "write_file"
-        assert json.loads(out.tool_calls[0]["arguments"]) == {
-            "path": "landing-p/scene.js",
-            "content": "const renderer = new THREE.WebGLRenderer();",
-        }
+        assert out.tools_called is False
+        assert out.tool_calls == []
         assert out.content is None
 
-    def test_rejects_canonical_string_equals_args_and_repairs_raw_dsml(
+    def test_rejects_canonical_string_equals_args_without_raw_repair(
         self, parser, monkeypatch
     ):
-        """Canonical parser can recover a name but bogus string= arguments."""
+        """Bogus canonical output must not trigger a second repair parser."""
         from vmlx_engine.loaders import dsv4_chat_encoder
 
         text = (
@@ -577,16 +616,14 @@ class TestDSMLToolParser:
 
         out = parser.extract_tool_calls(text, request=request)
 
-        assert out.tools_called is True
-        assert json.loads(out.tool_calls[0]["arguments"]) == {
-            "path": "landing-p/scene.js",
-            "content": "const camera = new THREE.PersPerspectiveCamera();",
-        }
+        assert out.tools_called is False
+        assert out.tool_calls == []
+        assert out.content is None
 
-    def test_repairs_dsml_tool_calls_wrapper_with_truncated_plain_param_invokes(
+    def test_rejects_dsml_tool_calls_wrapper_with_truncated_plain_param_invokes(
         self, parser
     ):
-        """Issue #165: recover multiple plain-param invokes under DSML wrapper."""
+        """Truncated mixed-dialect invokes must never execute."""
         text = (
             f'<{DSML_PREFIX}tool_calls>\n'
             f'<{DSML_PREFIX}invoke name="read_file">\n'
@@ -615,26 +652,14 @@ class TestDSMLToolParser:
 
         out = parser.extract_tool_calls(text, request=request)
 
-        assert out.tools_called is True
-        assert [call["name"] for call in out.tool_calls] == [
-            "read_file",
-            "read_file",
-        ]
-        assert [json.loads(call["arguments"]) for call in out.tool_calls] == [
-            {"path": "docs/vendor_memo.md"},
-            {"path": "docs/release_excerpt.md"},
-        ]
+        assert out.tools_called is False
+        assert out.tool_calls == []
         assert out.content is None
 
-    def test_canonical_encoder_empty_required_args_falls_through_to_repair(
+    def test_canonical_encoder_empty_required_args_does_not_trigger_repair(
         self, parser, monkeypatch
     ):
-        """Issue #165: canonical DSV4 parser can return names with empty args.
-
-        If the canonical bundle parser extracts a tool name but drops required
-        parameters, the DSML parser must treat that as unactionable and fall
-        through to the schema-gated degraded-DSML repair path.
-        """
+        """Missing canonical arguments remain non-executable."""
         from vmlx_engine.loaders import dsv4_chat_encoder
 
         class FakeEncoding:
@@ -682,17 +707,14 @@ class TestDSMLToolParser:
 
         out = parser.extract_tool_calls(text, request=request)
 
-        assert out.tools_called is True
-        assert out.tool_calls[0]["name"] == "read_file"
-        assert json.loads(out.tool_calls[0]["arguments"]) == {
-            "path": "docs/vendor_memo.md"
-        }
+        assert out.tools_called is False
+        assert out.tool_calls == []
         assert out.content is None
 
-    def test_canonical_encoder_uses_request_model_path(
+    def test_strict_extraction_does_not_synthesize_encoder_arguments(
         self, parser, monkeypatch, tmp_path
     ):
-        """DSML canonical parsing must use the loaded bundle encoder."""
+        """An encoder cannot invent required args absent from emitted DSML."""
         from vmlx_engine.loaders import dsv4_chat_encoder
 
         captured = {}
@@ -744,14 +766,13 @@ class TestDSMLToolParser:
             request=request,
         )
 
-        assert Path(captured["model_path"]) == tmp_path
-        assert out.tools_called is True
-        assert json.loads(out.tool_calls[0]["arguments"]) == {
-            "path": "docs/vendor_memo.md"
-        }
+        assert captured == {}
+        assert out.tools_called is False
+        assert out.tool_calls == []
+        assert out.content is None
 
-    def test_canonical_parser_strips_wrapper_residue(self, parser, monkeypatch):
-        """Canonical parser can return a valid call plus leftover wrapper text."""
+    def test_malformed_wrapper_cannot_be_overridden_by_encoder(self, parser, monkeypatch):
+        """Malformed wrapper residue must remain non-executable."""
         from vmlx_engine.loaders import dsv4_chat_encoder
 
         class FakeEncoding:
@@ -795,9 +816,8 @@ class TestDSMLToolParser:
             request=request,
         )
 
-        assert out.tools_called is True
-        assert out.tool_calls[0]["name"] == "get_weather"
-        assert json.loads(out.tool_calls[0]["arguments"]) == {"city": "Tokyo"}
+        assert out.tools_called is False
+        assert out.tool_calls == []
         assert out.content is None
 
     def test_streaming_buffers_dsml_tool_calls_wrapper_before_invoke(self, parser):
@@ -816,6 +836,404 @@ class TestDSMLToolParser:
             delta_token_ids=[],
         )
         assert out is None
+
+    def test_streaming_and_nonstreaming_share_strict_completed_call(
+        self, parser
+    ):
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        text = (
+            f"<{DSML_PREFIX}tool_calls>\n"
+            f'<{DSML_PREFIX}invoke name="file_info">\n'
+            f'<{DSML_PREFIX}parameter name="path" string="true">README.md'
+            f"</{DSML_PREFIX}parameter>\n"
+            f"</{DSML_PREFIX}invoke>\n"
+            f"</{DSML_PREFIX}tool_calls>"
+        )
+
+        complete = parser.extract_tool_calls(text, request=request)
+        stream = parser.extract_tool_calls_streaming(
+            previous_text=text[:-1],
+            current_text=text,
+            delta_text=text[-1:],
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+
+        assert complete.tools_called is True
+        assert complete.content is None
+        assert complete.tool_calls[0]["name"] == "file_info"
+        assert json.loads(complete.tool_calls[0]["arguments"]) == {
+            "path": "README.md"
+        }
+        assert stream is not None
+        assert "file_info" in str(stream)
+        assert "README.md" in str(stream)
+
+    @pytest.mark.parametrize(
+        ("parameters", "parameter"),
+        [
+            (
+                {"type": "object", "properties": {}, "required": []},
+                (
+                    f'<{DSML_PREFIX}parameter name="unexpected" string="true">'
+                    f"owned</{DSML_PREFIX}parameter>"
+                ),
+            ),
+            (
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+                (
+                    f'<{DSML_PREFIX}parameter name="path" string="false">'
+                    f"123</{DSML_PREFIX}parameter>"
+                ),
+            ),
+        ],
+    )
+    def test_schema_invalid_arguments_fail_closed_in_every_dsml_path(
+        self, parser, parameters, parameter
+    ):
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": parameters,
+                    },
+                }
+            ]
+        }
+        text = (
+            f'<{DSML_PREFIX}invoke name="file_info">\n'
+            f"{parameter}\n"
+            f"</{DSML_PREFIX}invoke>"
+        )
+
+        complete = parser.extract_tool_calls(text, request=request)
+        stream = parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=text,
+            delta_text=text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        parser._stream_stop_request = request
+
+        assert complete.tools_called is False
+        assert complete.tool_calls == []
+        assert complete.content is None
+        assert stream is None
+        assert parser.stream_tool_calls_complete(text) is False
+
+    @pytest.mark.parametrize("partial", ["<｜DSML", "</｜DSML"])
+    def test_terminal_split_dsml_prefix_never_streams_or_leaks(
+        self, parser, partial
+    ):
+        text = "Safe visible prefix.\n" + partial
+
+        complete = parser.extract_tool_calls(text, request={"tools": []})
+        stream = parser.extract_tool_calls_streaming(
+            previous_text="Safe visible prefix.\n",
+            current_text=text,
+            delta_text=partial,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request={"tools": []},
+        )
+
+        assert complete.tools_called is False
+        assert complete.tool_calls == []
+        assert complete.content == "Safe visible prefix."
+        assert stream is None
+
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            (
+                f'<{DSML_PREFIX}invoke name="file_info">\n'
+                f'<{DSML_PREFIX}parameter name="path" string="true">README.md'
+                f"</{DSML_PREFIX}parameter>\n</"
+            ),
+            '<invoke_file_info><param name="path">README.md</param></inv',
+            (
+                f'<{DSML_PREFIX}invuse name="file_info">\n'
+                f'<{DSML_PREFIX}parameter name="path" string="true">README.md'
+                f"</{DSML_PREFIX}parameter>\n</{DSML_PREFIX}invuse>"
+            ),
+            (
+                f'<{DSML_PREFIX}invoke name="file_info">\n'
+                f'<{DSML_PREFIX}parameter name="path" string="false">not-json'
+                f"</{DSML_PREFIX}parameter>\n</{DSML_PREFIX}invoke>"
+            ),
+            (
+                f'<{DSML_PREFIX}invoke name="file_info">\n'
+                f"</{DSML_PREFIX}invoke>"
+            ),
+            (
+                f'<{DSML_PREFIX}invoke name="file_info">\n'
+                f'<{DSML_PREFIX}parameter name="path" string="true">README.md'
+                f"</{DSML_PREFIX}parameter>\n"
+                f'<{DSML_PREFIX}parameter name="path" string="true">other.md'
+                f"</{DSML_PREFIX}parameter>\n</{DSML_PREFIX}invoke>"
+            ),
+            (
+                f'<{DSML_PREFIX}invoke name="run_command">\n'
+                f'<{DSML_PREFIX}parameter name="command" string="true">pwd'
+                f"</{DSML_PREFIX}parameter>\n</{DSML_PREFIX}invoke>"
+            ),
+        ],
+    )
+    def test_malformed_native_protocol_never_executes_streams_or_leaks(
+        self, parser, malformed
+    ):
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+        }
+        text = "Safe visible prefix.\n" + malformed
+
+        complete = parser.extract_tool_calls(text, request=request)
+        stream = parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=text,
+            delta_text=text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+
+        assert complete.tools_called is False
+        assert complete.tool_calls == []
+        assert complete.content == "Safe visible prefix."
+        assert DSML_PREFIX not in complete.content
+        assert "<invoke_" not in complete.content
+        assert stream is None
+
+    def test_plain_tool_result_continuation_remains_visible(self, parser):
+        text = "Tool result received. The README is 5.2 KB."
+
+        complete = parser.extract_tool_calls(text, request={"tools": []})
+        stream = parser.extract_tool_calls_streaming(
+            previous_text="Tool result received. ",
+            current_text=text,
+            delta_text="The README is 5.2 KB.",
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request={"tools": []},
+        )
+
+        assert complete.tools_called is False
+        assert complete.content == text
+        assert stream is not None
+        assert "The README is 5.2 KB." in str(stream)
+
+    def test_server_strict_dsml_path_never_restores_malformed_markup(
+        self, monkeypatch
+    ):
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+
+        monkeypatch.setattr(server, "_tool_call_parser", "dsml")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        monkeypatch.setattr(server, "_engine", None)
+        monkeypatch.setattr(server, "_model_path", "/models/dsv4")
+        request = ResponsesRequest(
+            model="dsv4",
+            input="Call file_info for README.md.",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ],
+        )
+        malformed = (
+            "Safe visible prefix.\n"
+            f'<{DSML_PREFIX}invoke name="file_info">\n'
+            f'<{DSML_PREFIX}parameter name="path" string="true">README.md'
+            f"</{DSML_PREFIX}parameter>\n</"
+        )
+
+        cleaned, calls = server._parse_tool_calls_with_parser(malformed, request)
+
+        assert cleaned == "Safe visible prefix."
+        assert calls is None
+        assert DSML_PREFIX not in cleaned
+
+    def test_server_strict_dsml_rejects_calls_without_effective_tools(
+        self, monkeypatch
+    ):
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+
+        monkeypatch.setattr(server, "_tool_call_parser", "dsml")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        monkeypatch.setattr(server, "_engine", None)
+        monkeypatch.setattr(server, "_model_path", "/models/dsv4")
+        monkeypatch.setattr(
+            server,
+            "_effective_tools_for_tool_parsing",
+            lambda _request: [],
+        )
+        request = ResponsesRequest(model="dsv4", input="Answer plainly.")
+        canonical = (
+            "Safe visible prefix.\n"
+            f'<{DSML_PREFIX}invoke name="delete_everything">\n'
+            f'<{DSML_PREFIX}parameter name="target" string="true">all'
+            f"</{DSML_PREFIX}parameter>\n"
+            f"</{DSML_PREFIX}invoke>"
+        )
+
+        direct = DSMLToolParser(None)
+        direct_result = direct.extract_tool_calls(
+            canonical,
+            request={"tools": []},
+        )
+        cleaned, calls = server._parse_tool_calls_with_parser(canonical, request)
+        plain, plain_calls = server._parse_tool_calls_with_parser(
+            "Ordinary visible answer.", request
+        )
+
+        assert direct_result.tools_called is False
+        assert direct_result.tool_calls == []
+        assert direct_result.content == "Safe visible prefix."
+        assert cleaned == "Safe visible prefix."
+        assert calls is None
+        assert plain == "Ordinary visible answer."
+        assert plain_calls is None
+
+    def test_server_strict_dsml_suppresses_terminal_split_namespace(
+        self, monkeypatch
+    ):
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+
+        monkeypatch.setattr(server, "_tool_call_parser", "dsml")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        monkeypatch.setattr(server, "_engine", None)
+        monkeypatch.setattr(server, "_model_path", "/models/dsv4")
+        request = ResponsesRequest(
+            model="dsv4",
+            input="Call file_info.",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ],
+        )
+
+        cleaned, calls = server._parse_tool_calls_with_parser(
+            "Safe visible prefix.\n<｜DSML", request
+        )
+
+        assert cleaned == "Safe visible prefix."
+        assert calls is None
+
+    def test_server_strict_dsml_init_failure_never_uses_generic_repair(
+        self, monkeypatch
+    ):
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+
+        class BrokenStrictDSMLParser:
+            STRICT_NATIVE_TOOL_FORMAT = True
+            SUPPRESS_INVALID_NATIVE_MARKUP = True
+
+            def __init__(self, _tokenizer):
+                raise RuntimeError("strict parser init failed")
+
+        monkeypatch.setattr(server, "_tool_call_parser", "dsml")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        monkeypatch.setattr(server, "_engine", None)
+        monkeypatch.setattr(
+            server.ToolParserManager,
+            "get_tool_parser",
+            lambda _name: BrokenStrictDSMLParser,
+        )
+
+        def generic_repair_must_not_run(_text):
+            pytest.fail("strict DSML initialization failure reached generic repair")
+
+        monkeypatch.setattr(server, "parse_tool_calls", generic_repair_must_not_run)
+        request = ResponsesRequest(
+            model="dsv4",
+            input="Call file_info.",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "file_info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ],
+        )
+        native = (
+            "Safe visible prefix.\n"
+            f'<{DSML_PREFIX}invoke name="file_info">\n'
+            f'<{DSML_PREFIX}parameter name="path" string="true">README.md'
+            f"</{DSML_PREFIX}parameter>\n"
+            f"</{DSML_PREFIX}invoke>"
+        )
+
+        cleaned, calls = server._parse_tool_calls_with_parser(native, request)
+        plain, plain_calls = server._parse_tool_calls_with_parser(
+            "Ordinary visible answer.", request
+        )
+
+        assert cleaned == "Safe visible prefix."
+        assert calls is None
+        assert DSML_PREFIX not in cleaned
+        assert plain == "Ordinary visible answer."
+        assert plain_calls is None
 
     def test_server_buffers_dsml_wrapper_marker_before_invoke(self):
         """Server marker list must catch DSV4 wrapper chunks before invoke."""

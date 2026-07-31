@@ -89,9 +89,14 @@ def test_dsv4_normalize_effort_passes_max_without_env_guard(monkeypatch):
     monkeypatch.setenv("VMLX_DSV4_RAW_MAX", "0")
     assert _normalize_dsv4_reasoning_effort("max") == "max"
     assert _normalize_dsv4_reasoning_effort("high") == "high"
-    assert _normalize_dsv4_reasoning_effort("low") == "high"
+    assert _normalize_dsv4_reasoning_effort("low") == "low"
     assert _normalize_dsv4_reasoning_effort(None) is None
-    assert _normalize_dsv4_reasoning_effort("invalid") is None
+    try:
+        _normalize_dsv4_reasoning_effort("invalid")
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    else:  # pragma: no cover - assertion clarity
+        raise AssertionError("invalid DSV4 effort must be rejected")
 
 
 def test_dsv4_encoder_adapter_max_passes_through_without_env_guard(monkeypatch):

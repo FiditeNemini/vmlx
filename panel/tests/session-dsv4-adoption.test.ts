@@ -102,6 +102,62 @@ describe('DSV4 existing-engine adoption policy', () => {
     }
   })
 
+  it('migrates only the exact v11 DSV4 fail-closed cache tuple to native SSD-only defaults', () => {
+    const modelPath = modelBundle('deepseek_v4')
+    state.sessions = [localSession('dsv4-v11', modelPath, {
+      cacheStackStartupDefaultsVersion: 11,
+      dsv4PrefixCache: false,
+      enablePrefixCache: false,
+      usePagedCache: false,
+      enableBlockDiskCache: false,
+      pagedCacheBlockSize: 256,
+      maxCacheBlocks: 1000,
+    })]
+
+    new SessionManager()
+
+    const migrated = JSON.parse(state.sessions[0].config)
+    expect(migrated.cacheStackStartupDefaultsVersion).toBe(12)
+    expect(migrated.dsv4PrefixCache).toBe(true)
+    expect(migrated.enablePrefixCache).toBe(true)
+    expect(migrated.usePagedCache).toBe(false)
+    expect(migrated.enableDiskCache).toBe(false)
+    expect(migrated.enableBlockDiskCache).toBe(true)
+    expect(migrated.pagedCacheBlockSize).toBe(256)
+    expect(migrated.maxCacheBlocks).toBe(4097)
+    expect(migrated.kvCacheQuantization).toBe('auto')
+  })
+
+  it.each([
+    { label: 'prefix already enabled', patch: { enablePrefixCache: true } },
+    { label: 'paged RAM explicitly enabled', patch: { usePagedCache: true } },
+    { label: 'SSD block cache already enabled', patch: { enableBlockDiskCache: true } },
+    { label: 'cache block capacity customized', patch: { maxCacheBlocks: 2048 } },
+    { label: 'already current', patch: { cacheStackStartupDefaultsVersion: 12 } },
+  ])('preserves a near-miss DSV4 v11 cache tuple: $label', ({ patch }) => {
+    const modelPath = modelBundle('deepseek_v4')
+    const original = {
+      cacheStackStartupDefaultsVersion: 11,
+      dsv4PrefixCache: false,
+      enablePrefixCache: false,
+      usePagedCache: false,
+      enableBlockDiskCache: false,
+      pagedCacheBlockSize: 256,
+      maxCacheBlocks: 1000,
+      ...patch,
+    }
+    state.sessions = [localSession('dsv4-near-miss', modelPath, original)]
+
+    new SessionManager()
+
+    const preserved = JSON.parse(state.sessions[0].config)
+    expect(preserved.enablePrefixCache).toBe(original.enablePrefixCache)
+    expect(preserved.usePagedCache).toBe(original.usePagedCache)
+    expect(preserved.enableBlockDiskCache).toBe(original.enableBlockDiskCache)
+    expect(preserved.maxCacheBlocks).toBe(original.maxCacheBlocks)
+    expect(preserved.cacheStackStartupDefaultsVersion).toBe(12)
+  })
+
   it.each([
     {
       label: 'stale cache-on process',

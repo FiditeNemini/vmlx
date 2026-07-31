@@ -462,10 +462,10 @@ def test_release_dmg_macho_audit_scans_full_tree_once_without_suffix_filtering()
     )
 
 
-def test_r19_release_toolchain_plan_is_sealed_before_bound_actions():
+def test_r20_release_toolchain_plan_is_sealed_before_bound_actions():
     script = Path("panel/scripts/build-release-dmgs.sh").read_text()
     writer = script[
-        script.index("write_r19_toolchain_plan()") : script.index(
+        script.index("write_r20_toolchain_plan()") : script.index(
             "run_bound_release_action()"
         )
     ]
@@ -477,11 +477,11 @@ def test_r19_release_toolchain_plan_is_sealed_before_bound_actions():
     assert replace_idx < seal_idx < digest_idx
 
 
-def test_r19_release_driver_plan_is_sealed_before_bound_actions():
+def test_r20_release_driver_plan_is_sealed_before_bound_actions():
     script = Path("panel/scripts/build-release-dmgs.sh").read_text()
     writer = script[
-        script.index("write_r19_build_plan()") : script.index(
-            "assert_r19_source_identity()"
+        script.index("write_r20_build_plan()") : script.index(
+            "assert_r20_source_identity()"
         )
     ]
 
@@ -492,7 +492,7 @@ def test_r19_release_driver_plan_is_sealed_before_bound_actions():
     assert replace_idx < seal_idx < digest_idx
 
 
-def test_r19_release_builder_reuses_consumed_v5_checks_without_rerunning_suites():
+def test_r20_release_builder_reuses_consumed_v5_checks_without_rerunning_suites():
     script = Path("panel/scripts/build-release-dmgs.sh").read_text()
     start = script.index(
         'echo "==> Reinstalling exact panel dependencies from package-lock.json"'
@@ -509,7 +509,7 @@ def test_r19_release_builder_reuses_consumed_v5_checks_without_rerunning_suites(
         in production_gate
     )
     assert (
-        'assert_r19_source_identity "after exact-head V5 check reuse"'
+        'assert_r20_source_identity "after exact-head V5 check reuse"'
         in production_gate
     )
 
@@ -1180,7 +1180,7 @@ def test_electron_builder_before_pack_hook_rejects_skip_vite_in_pack_context(tmp
     assert "only allowed for direct hook smoke tests" in proc.stderr
 
 
-def test_electron_builder_before_pack_rejects_direct_r19_packaging_before_verifier(
+def test_electron_builder_before_pack_rejects_direct_r20_packaging_before_verifier(
     tmp_path,
 ):
     scripts = tmp_path / "scripts"
@@ -1188,7 +1188,7 @@ def test_electron_builder_before_pack_rejects_direct_r19_packaging_before_verifi
     (tmp_path / "package.json").write_text(
         json.dumps(
             {
-                "version": "1.6.19",
+                "version": "1.6.20",
                 "build": {
                     "mac": {
                         "notarize": {
@@ -1217,9 +1217,9 @@ def test_electron_builder_before_pack_rejects_direct_r19_packaging_before_verifi
     env = dict(os.environ)
     for name in (
         "VMLX_RELEASE_SCOPE",
-        "VMLX_R19_OFFICIAL_PACKAGING",
-        "VMLX_R19_EXPECTED_TEAM_ID",
-        "VMLX_R19_EXPECTED_CODESIGN_IDENTITY",
+        "VMLX_R20_OFFICIAL_PACKAGING",
+        "VMLX_R20_EXPECTED_TEAM_ID",
+        "VMLX_R20_EXPECTED_CODESIGN_IDENTITY",
         "CSC_NAME",
     ):
         env.pop(name, None)
@@ -1233,11 +1233,11 @@ def test_electron_builder_before_pack_rejects_direct_r19_packaging_before_verifi
     )
 
     assert proc.returncode == 3
-    assert "requires VMLX_RELEASE_SCOPE=r19_production" in proc.stderr
+    assert "requires VMLX_RELEASE_SCOPE=r20_production" in proc.stderr
     assert not (tmp_path / "verify-ran").exists()
 
 
-def test_r19_release_builder_rejects_single_flavor_python_override_and_wrong_team(
+def test_r20_release_builder_rejects_single_flavor_python_override_and_wrong_team(
     tmp_path,
 ):
     panel = tmp_path / "panel"
@@ -1263,7 +1263,7 @@ def test_r19_release_builder_rejects_single_flavor_python_override_and_wrong_tea
     (panel / "package.json").write_text(
         json.dumps(
             {
-                "version": "1.6.19",
+                "version": "1.6.20",
                 "build": {
                     "mac": {
                         "notarize": {
@@ -1287,7 +1287,7 @@ def test_r19_release_builder_rejects_single_flavor_python_override_and_wrong_tea
         "CSC_NAME",
     ):
         base_env.pop(name, None)
-    base_env["VMLX_RELEASE_SCOPE"] = "r19_production"
+    base_env["VMLX_RELEASE_SCOPE"] = "r20_production"
 
     single = subprocess.run(
         [str(builder), "sequoia"],
@@ -1354,7 +1354,7 @@ def test_r19_release_builder_rejects_single_flavor_python_override_and_wrong_tea
     )
     assert wrong_version.returncode == 1
     assert (
-        "VMLX_RELEASE_SCOPE=r19_production requires package version 1.6.19"
+        "VMLX_RELEASE_SCOPE=r20_production requires package version 1.6.20"
         in wrong_version.stderr
     )
     generic_wrong_version = subprocess.run(
@@ -1371,7 +1371,7 @@ def test_r19_release_builder_rejects_single_flavor_python_override_and_wrong_tea
         in generic_wrong_version.stderr
     )
 
-    package["version"] = "1.6.19"
+    package["version"] = "1.6.20"
     (panel / "package.json").write_text(json.dumps(package), encoding="utf-8")
     release_python.unlink()
     release_python.symlink_to(sys._base_executable)

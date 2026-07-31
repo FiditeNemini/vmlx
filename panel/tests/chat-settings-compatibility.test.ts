@@ -92,7 +92,7 @@ describe('chat settings cross-family compatibility warnings', () => {
     expect(source).toContain('const resolvedReasoningParser = resolveEffectiveReasoningParser({')
     expect(source).toContain("const thinkingSupported = resolvedReasoningParser !== 'none' && (")
     expect(source).toContain('reasoningParserIsEnabled(resolvedReasoningParser)')
-    expect(source).toContain("const showReasoningEffort = (detectedReasoningEfforts?.length ?? 0) > 0")
+    expect(source).toContain('const showReasoningEffort = selectableReasoningEfforts.length > 0')
     expect(source).toContain('const displayedEnableThinking = thinkingSupported ? displayedOverrides.enableThinking : undefined')
     expect(source).toContain('disabled={!thinkingSupported}')
   })
@@ -100,9 +100,9 @@ describe('chat settings cross-family compatibility warnings', () => {
   it('shows Hy3 low/high effort controls without exposing medium', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 
-    expect(source).toContain("detectedFamily === 'hy3' || effectiveReasoningParser === 'openai_gptoss' || effectiveReasoningParser === 'mistral'")
-    expect(source).toContain("detectedReasoningEfforts.includes('medium')")
-    expect(source).toContain("detectedFamily !== 'hy3'")
+    expect(source).toContain("detectedFamily === 'hy3'")
+    expect(source).toContain("? ['low', 'high']")
+    expect(source).toContain('selectableReasoningEfforts.map(effort => (')
   })
 
   it('hides Thinking Off and exposes native effort levels when instruct mode is unsupported', () => {
@@ -117,22 +117,47 @@ describe('chat settings cross-family compatibility warnings', () => {
     expect(ipc).toContain('if (supportsInstructMode === false) return;')
   })
 
-  it('exposes DSV4 Max without consulting legacy force-direct session state', () => {
+  it('renders DSV4 effort buttons from bundle metadata instead of a family-hardcoded tier list', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 
-    expect(source).toContain('const dsv4MaxEnabled =')
+    expect(source).toContain('detectedReasoningEfforts ?? (')
+    expect(source).toContain('setDetectedDefaultReasoningEffort(detected?.defaultReasoningEffort)')
+    expect(source).toContain('data-reasoning-effort={effort}')
+    expect(source).toContain('onClick={() => updateThinkingMode(true, effort)}')
+    expect(source).toContain("return t('chat.settings.effortMax')")
+    expect(source).not.toContain('const dsv4MaxEnabled =')
     expect(source).not.toContain("sessionConfig?.dsv4ForceDirect")
     expect(source).not.toContain("sessionConfig?.dsv4RawMax === true")
-    expect(source).toContain("disabled={!dsv4MaxEnabled}")
-    expect(source).toContain("displayedOverrides.reasoningEffort !== 'max' || !dsv4MaxEnabled")
   })
 
-  it('keeps DSV4 model-default reasoning visible as a real Auto state', () => {
+  it('distinguishes model-default effort from the separate Auto thinking mode', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 
     expect(source).toContain('onClick={() => updateThinkingMode(undefined, undefined)}')
-    expect(source).toContain('displayedOverrides.enableThinking == null')
-    expect(source).toContain("{t('chat.settings.thinkingAuto')}")
+    expect(source).toContain('displayedEnableThinking == null')
+    expect(source).toContain("t('chat.settings.effortDefault', {")
+    expect(source).toContain("t('chat.settings.effortDefaultNoValue')")
+    expect(source).toContain('reasoningEffortLabel(detectedDefaultReasoningEffort)')
+  })
+
+  it('accepts only the exact DSV4-0731 sidecar levels and flags stale Medium', () => {
+    const contract = {
+      detectedFamily: 'deepseek-v4',
+      reasoningParser: 'deepseek_r1',
+      supportedReasoningEfforts: ['low', 'high', 'max'] as const,
+    }
+    for (const effort of ['low', 'high', 'max'] as const) {
+      expect(warnings({
+        ...contract,
+        supportedReasoningEfforts: [...contract.supportedReasoningEfforts],
+        overrides: { reasoningEffort: effort },
+      })).toEqual([])
+    }
+    expect(warnings({
+      ...contract,
+      supportedReasoningEfforts: [...contract.supportedReasoningEfforts],
+      overrides: { reasoningEffort: 'medium' },
+    })).toContain('Saved reasoning effort "medium" is not supported by this DSV4 bundle. Use Auto or Low/High/Max.')
   })
 
   it('does not silently mutate DSV4 output budgets when the user changes reasoning mode', () => {

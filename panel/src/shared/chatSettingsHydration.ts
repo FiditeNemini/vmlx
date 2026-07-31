@@ -22,6 +22,7 @@ export interface ChatSettingsDetectedConfig {
   supportsThinking?: boolean
   supportsInstructMode?: boolean
   supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>
+  defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'max'
   supportsThinkingBudget?: boolean
   nativeMtp?: { supported?: boolean }
 }

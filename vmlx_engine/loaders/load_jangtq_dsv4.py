@@ -1256,8 +1256,8 @@ def _install_dsv4_memory_defaults() -> None:
                     target_gb = int(max_ws_bytes / 1e9)
                     os.environ["JANGTQ_WIRED_LIMIT_GB"] = str(target_gb)
                     print(
-                        "  [dsv4] JANGTQ_WIRED_LIMIT_GB defaulted to "
-                        f"{target_gb} GB (from OS sysctl iogpu.wired_limit_mb)",
+                        "  [dsv4] MLX wired working-set limit defaulted to "
+                        f"{target_gb} GB from OS sysctl iogpu.wired_limit_mb",
                         flush=True,
                     )
         except Exception:

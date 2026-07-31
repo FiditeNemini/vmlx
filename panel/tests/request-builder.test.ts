@@ -7,6 +7,10 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dsv4OutputBudget } from '../src/shared/dsv4RequestBudget'
+import {
+    applyReasoningRequestFields,
+    type ReasoningEffort,
+} from '../src/shared/reasoningEffortPolicy'
 
 // ─── buildRequestBody logic (extracted from chat.ts) ─────────────────────────
 
@@ -37,15 +41,11 @@ function buildRequestBody(
     detectedFamily?: string,
     thinkingBudgetSupported?: boolean,
     supportsThinkingBudget?: boolean,
+    supportedReasoningEfforts?: ReasoningEffort[],
 ): Record<string, any> {
     const stopSequences = overrides?.stopSequences
         ? overrides.stopSequences.split(',').map(s => s.trim()).filter(Boolean)
         : undefined
-    const shouldForwardReasoningEffort =
-        !!overrides?.reasoningEffort &&
-        overrides.enableThinking !== false &&
-        (detectedFamily !== 'hy3' || overrides.enableThinking === true) &&
-        (sessionHasReasoningParser || detectedFamily === 'deepseek-v4')
     const outputBudget = dsv4OutputBudget(
         overrides?.maxTokens,
         overrides?.enableThinking,
@@ -111,12 +111,15 @@ function buildRequestBody(
                 parameters: t.function.parameters
             }))
         }
-        if (effectiveEnableThinkingOverride !== undefined) {
-            obj.enable_thinking = effectiveEnableThinkingOverride
-        }
-        if (!isRemote && obj.enable_thinking !== undefined) obj.chat_template_kwargs = { enable_thinking: obj.enable_thinking }
+        applyReasoningRequestFields(obj, {
+            enableThinking: effectiveEnableThinkingOverride,
+            reasoningEffort: overrides?.reasoningEffort,
+            isRemote,
+            sessionHasReasoningParser,
+            detectedFamily,
+            supportedReasoningEfforts,
+        })
         applyLocalThinkingBudget(obj)
-        if (shouldForwardReasoningEffort) obj.reasoning_effort = overrides.reasoningEffort
         return obj
     } else {
         const obj: Record<string, any> = {
@@ -136,12 +139,15 @@ function buildRequestBody(
         if (tools) {
             obj.tools = tools
         }
-        if (effectiveEnableThinkingOverride !== undefined) {
-            obj.enable_thinking = effectiveEnableThinkingOverride
-        }
-        if (!isRemote && obj.enable_thinking !== undefined) obj.chat_template_kwargs = { enable_thinking: obj.enable_thinking }
+        applyReasoningRequestFields(obj, {
+            enableThinking: effectiveEnableThinkingOverride,
+            reasoningEffort: overrides?.reasoningEffort,
+            isRemote,
+            sessionHasReasoningParser,
+            detectedFamily,
+            supportedReasoningEfforts,
+        })
         applyLocalThinkingBudget(obj)
-        if (shouldForwardReasoningEffort) obj.reasoning_effort = overrides.reasoningEffort
         return obj
     }
 }
@@ -782,8 +788,88 @@ describe('buildRequestBody — Responses API', () => {
     })
 })
 
+describe('DSV4-0731 bundle reasoning payload', () => {
+    const levels: ReasoningEffort[] = ['low', 'high', 'max']
+    const messages = [{ role: 'user', content: 'Use the requested reasoning mode.' }]
+    const build = (
+        wireApi: 'completions' | 'responses',
+        overrides: ChatOverrides,
+        requestMessages = messages,
+    ) => buildRequestBody(
+        wireApi,
+        'dsv4-0731',
+        requestMessages,
+        overrides,
+        false,
+        true,
+        undefined,
+        'deepseek-v4',
+        undefined,
+        undefined,
+        levels,
+    )
+
+    it.each(['completions', 'responses'] as const)(
+        '%s Auto omits all reasoning kwargs so the bundle owns native Low',
+        wireApi => {
+            const body = build(wireApi, {})
+            expect(body.enable_thinking).toBeUndefined()
+            expect(body.reasoning_effort).toBeUndefined()
+            expect(body.thinking_mode).toBeUndefined()
+            expect(body.chat_template_kwargs).toBeUndefined()
+        },
+    )
+
+    it.each(['completions', 'responses'] as const)(
+        '%s Off selects the native Chat rail without an effort',
+        wireApi => {
+            const body = build(wireApi, { enableThinking: false })
+            expect(body.enable_thinking).toBe(false)
+            expect(body.chat_template_kwargs).toEqual({ enable_thinking: false })
+            expect(body.thinking_mode).toBeUndefined()
+            expect(body.reasoning_effort).toBeUndefined()
+        },
+    )
+
+    it.each(['low', 'high', 'max'] as const)(
+        'preserves explicit %s exactly on Chat and Responses payloads',
+        effort => {
+            for (const wireApi of ['completions', 'responses'] as const) {
+                const body = build(wireApi, { enableThinking: true, reasoningEffort: effort })
+                expect(body.enable_thinking).toBe(true)
+                expect(body.chat_template_kwargs).toEqual({ enable_thinking: true })
+                expect(body.reasoning_effort).toBe(effort)
+                expect(body.thinking_mode).toBeUndefined()
+            }
+        },
+    )
+
+    it('rejects stale Medium instead of mapping or dropping it to native Low', () => {
+        expect(() => build('responses', {
+            enableThinking: true,
+            reasoningEffort: 'medium',
+        })).toThrow('Reasoning effort "medium" is not supported by the loaded bundle. Choose Auto or Low/High/Max.')
+    })
+
+    it('keeps explicit High unchanged on the built-in-tool continuation body', () => {
+        const overrides = { enableThinking: true, reasoningEffort: 'high' as const }
+        const initial = build('responses', overrides)
+        const continuation = build('responses', overrides, [
+            ...messages,
+            { type: 'function_call', call_id: 'call_1', name: 'read_file', arguments: '{}' },
+            { type: 'function_call_output', call_id: 'call_1', output: 'result' },
+        ])
+
+        for (const body of [initial, continuation]) {
+            expect(body.enable_thinking).toBe(true)
+            expect(body.reasoning_effort).toBe('high')
+            expect(body.thinking_mode).toBeUndefined()
+        }
+    })
+})
+
 describe('buildRequestBody source parity', () => {
-    it('actual chat IPC Responses branch forwards local reasoning controls exactly once', () => {
+    it('actual chat IPC uses the shared reasoning policy for Responses payloads', () => {
         const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
         const branchStart = source.indexOf('if (useResponsesApi) {')
         expect(branchStart).toBeGreaterThanOrEqual(0)
@@ -791,14 +877,19 @@ describe('buildRequestBody source parity', () => {
         expect(branchReturn).toBeGreaterThan(branchStart)
         const responsesBranch = source.slice(branchStart, branchReturn)
 
-        expect(responsesBranch).toContain('effectiveEnableThinkingOverride !== undefined')
-        expect(responsesBranch).toContain('obj.enable_thinking = effectiveEnableThinkingOverride')
-        expect(responsesBranch).toContain('enable_thinking: obj.enable_thinking')
+        expect(responsesBranch).toContain('applyReasoningRequestFields(obj, {')
+        expect(responsesBranch).toContain('enableThinking: effectiveEnableThinkingOverride')
+        expect(responsesBranch).toContain('supportedReasoningEfforts,')
         expect(responsesBranch).toContain('applyLocalThinkingBudget(obj);')
-        expect(responsesBranch).toContain('shouldForwardReasoningEffort(')
-        expect(responsesBranch).toContain('obj.reasoning_effort = overrides.reasoningEffort')
+        expect(responsesBranch.match(/applyReasoningRequestFields\(obj, \{/g)?.length).toBe(1)
         expect(responsesBranch.match(/applyLocalThinkingBudget\(obj\);/g)?.length).toBe(1)
-        expect(responsesBranch.match(/obj\.enable_thinking = effectiveEnableThinkingOverride/g)?.length).toBe(1)
+    })
+
+    it('serializes both the initial request and built-in-tool continuation through the same builder', () => {
+        const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+        expect(source.match(/JSON\.stringify\(buildRequestBody\(\)\)/g)).toHaveLength(2)
+        expect(source).toContain('const requestBody = JSON.stringify(buildRequestBody());')
+        expect(source).toContain('const followUpBody = JSON.stringify(buildRequestBody());')
     })
 })
 

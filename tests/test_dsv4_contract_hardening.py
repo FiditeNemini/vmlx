@@ -15,7 +15,7 @@ Specifically:
 2. The capabilities payload for ``family == "deepseek_v4"`` must report empty
    ``experimental_modes`` (no leftover ``raw-thinking`` shape).
 3. ``_native_cache_status`` for the DSV4 branch must report the
-   ``deepseek_v4_v9`` schema, ``cache_type == "native_composite"``, and
+   ``deepseek_v4_v10_delta`` schema, ``cache_type == "native_composite"``, and
    ``generic_turboquant_kv.enabled is False`` (per
    ``~/wiki/research/topics/path-dependent-cache-restore.md`` the composite
    cache IS the cache-size strategy; layering generic TQ-KV on top would
@@ -65,7 +65,7 @@ def test_removed_dsv4_force_flip_env_vars_absent_from_vmlx_engine():
     )
 
 
-def test_dsv4_capabilities_endpoint_emits_current_contract(monkeypatch):
+def test_dsv4_capabilities_endpoint_emits_current_contract(monkeypatch, tmp_path):
     """The actual capabilities endpoint must emit the current DSV4 contract.
 
     This pins the endpoint behavior directly instead of grepping source text.
@@ -96,12 +96,28 @@ def test_dsv4_capabilities_endpoint_emits_current_contract(monkeypatch):
         memory_aware_cache=None,
         prefix_cache=None,
     )
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps(
+            {
+                "chat": {
+                    "reasoning": {
+                        "supported": True,
+                        "modes": ["chat", "thinking"],
+                        "default_mode": "thinking",
+                        "default_effort": "low",
+                        "reasoning_effort_levels": ["low", "high", "max"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(model_config_registry, "get_model_config_registry", lambda: FakeRegistry())
     monkeypatch.setattr(server, "_get_scheduler", lambda: fake_scheduler)
     monkeypatch.setattr(server, "_loaded_omni_modalities", lambda: None)
     monkeypatch.setattr(server, "_bundle_sampling_default", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(server, "_model_path", "/tmp/DeepSeek-V4-Flash-JANGTQ-V3-F32-MIXED")
+    monkeypatch.setattr(server, "_model_path", str(tmp_path))
     monkeypatch.setattr(server, "_model_name", None)
     monkeypatch.setattr(server, "_engine", None)
 
@@ -110,9 +126,10 @@ def test_dsv4_capabilities_endpoint_emits_current_contract(monkeypatch):
     assert payload["supports_thinking"] is True
     assert payload["supported_modes"] == ["instruct", "reasoning"]
     assert payload["experimental_modes"] == []
-    assert payload["reasoning_efforts"] == ["high", "max"]
+    assert payload["reasoning_efforts"] == ["low", "high", "max"]
+    assert payload["default_reasoning_effort"] == "low"
     assert payload["cache"]["native"]["family"] == "deepseek_v4"
-    assert payload["cache"]["native"]["schema"] == "deepseek_v4_v9"
+    assert payload["cache"]["native"]["schema"] == "deepseek_v4_v10_delta"
     assert payload["cache"]["native"]["cache_type"] == "native_composite"
     assert payload["cache"]["native"]["generic_turboquant_kv"]["enabled"] is False
 
@@ -136,7 +153,7 @@ def test_dsv4_native_cache_status_reports_native_composite_v9_schema():
     status = server._native_cache_status(fake_scheduler, family="deepseek_v4", cfg=None)
 
     assert status["family"] == "deepseek_v4"
-    assert status["schema"] == "deepseek_v4_v9"
+    assert status["schema"] == "deepseek_v4_v10_delta"
     assert status["cache_type"] == "native_composite"
     assert status["generic_turboquant_kv"]["enabled"] is False
     assert status["generic_turboquant_kv"]["reason"] == "native_dsv4_composite"
@@ -217,7 +234,7 @@ def test_dsv4_capability_runner_check_accepts_current_contract_only():
         "cache": {
             "native": {
                 "family": "deepseek_v4",
-                "schema": "deepseek_v4_v9",
+                "schema": "deepseek_v4_v10_delta",
                 "cache_type": "native_composite",
                 "generic_turboquant_kv": {"enabled": False},
             }

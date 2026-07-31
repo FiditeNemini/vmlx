@@ -1,10 +1,10 @@
 #!/bin/bash
 set -euo pipefail
-R19_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-export PATH="$R19_FIXED_PATH"
+R20_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$R20_FIXED_PATH"
 umask 077
 
-# Submit immutable private snapshots of the exact r19 build-manifest DMGs to
+# Submit immutable private snapshots of the exact r20 build-manifest DMGs to
 # Apple, corroborate each Accepted submission with independent info and log
 # records, then staple and verify the original public artifacts. This generic,
 # token-free script never uploads a release, tags Git, publishes packages, or
@@ -16,8 +16,8 @@ source "$SCRIPT_DIR/verify-release-dmgs.sh"
 
 NOTARY_PROFILE="${VMLINUX_NOTARY_KEYCHAIN_PROFILE:-${VMLX_NOTARY_KEYCHAIN_PROFILE:-}}"
 NOTARY_KEYCHAIN="${VMLINUX_NOTARY_KEYCHAIN:-${VMLX_NOTARY_KEYCHAIN:-}}"
-PRE_NOTARY_MANIFEST="${VMLX_R19_PRE_NOTARY_MANIFEST:-${VMLINUX_R19_PRE_NOTARY_MANIFEST:-}}"
-FINAL_NOTARY_MANIFEST="${VMLX_R19_FINAL_NOTARY_MANIFEST:-${VMLINUX_R19_FINAL_NOTARY_MANIFEST:-}}"
+PRE_NOTARY_MANIFEST="${VMLX_R20_PRE_NOTARY_MANIFEST:-${VMLINUX_R20_PRE_NOTARY_MANIFEST:-}}"
+FINAL_NOTARY_MANIFEST="${VMLX_R20_FINAL_NOTARY_MANIFEST:-${VMLINUX_R20_FINAL_NOTARY_MANIFEST:-}}"
 
 if [[ -n "${VMLX_NOTARY_KEYCHAIN_PROFILE:-}" ]] \
   && [[ -n "${VMLINUX_NOTARY_KEYCHAIN_PROFILE:-}" ]] \
@@ -35,16 +35,16 @@ if [[ -n "${VMLX_NOTARY_KEYCHAIN:-}" ]] \
   echo "ERROR: VMLX_NOTARY_KEYCHAIN and VMLINUX_NOTARY_KEYCHAIN disagree" >&2
   exit 1
 fi
-if [[ -n "${VMLX_R19_PRE_NOTARY_MANIFEST:-}" ]] \
-  && [[ -n "${VMLINUX_R19_PRE_NOTARY_MANIFEST:-}" ]] \
-  && [[ "$VMLX_R19_PRE_NOTARY_MANIFEST" != "$VMLINUX_R19_PRE_NOTARY_MANIFEST" ]]; then
-  echo "ERROR: VMLX_R19_PRE_NOTARY_MANIFEST and VMLINUX_R19_PRE_NOTARY_MANIFEST disagree" >&2
+if [[ -n "${VMLX_R20_PRE_NOTARY_MANIFEST:-}" ]] \
+  && [[ -n "${VMLINUX_R20_PRE_NOTARY_MANIFEST:-}" ]] \
+  && [[ "$VMLX_R20_PRE_NOTARY_MANIFEST" != "$VMLINUX_R20_PRE_NOTARY_MANIFEST" ]]; then
+  echo "ERROR: VMLX_R20_PRE_NOTARY_MANIFEST and VMLINUX_R20_PRE_NOTARY_MANIFEST disagree" >&2
   exit 1
 fi
-if [[ -n "${VMLX_R19_FINAL_NOTARY_MANIFEST:-}" ]] \
-  && [[ -n "${VMLINUX_R19_FINAL_NOTARY_MANIFEST:-}" ]] \
-  && [[ "$VMLX_R19_FINAL_NOTARY_MANIFEST" != "$VMLINUX_R19_FINAL_NOTARY_MANIFEST" ]]; then
-  echo "ERROR: VMLX_R19_FINAL_NOTARY_MANIFEST and VMLINUX_R19_FINAL_NOTARY_MANIFEST disagree" >&2
+if [[ -n "${VMLX_R20_FINAL_NOTARY_MANIFEST:-}" ]] \
+  && [[ -n "${VMLINUX_R20_FINAL_NOTARY_MANIFEST:-}" ]] \
+  && [[ "$VMLX_R20_FINAL_NOTARY_MANIFEST" != "$VMLINUX_R20_FINAL_NOTARY_MANIFEST" ]]; then
+  echo "ERROR: VMLX_R20_FINAL_NOTARY_MANIFEST and VMLINUX_R20_FINAL_NOTARY_MANIFEST disagree" >&2
   exit 1
 fi
 
@@ -239,10 +239,10 @@ staple_and_verify_original() {
 }
 
 notarize_release_chain() {
-  require_r19_release_context
+  require_r20_release_context
   require_pre_notary_handoff_environment
   if [[ -z "$PRE_NOTARY_MANIFEST" ]]; then
-    echo "ERROR: VMLX_R19_PRE_NOTARY_MANIFEST is required from the build handoff" >&2
+    echo "ERROR: VMLX_R20_PRE_NOTARY_MANIFEST is required from the build handoff" >&2
     exit 1
   fi
   if [[ -z "$FINAL_NOTARY_MANIFEST" ]]; then
@@ -342,18 +342,18 @@ notarize_release_chain() {
     --expected-source-tree "$EXPECTED_SOURCE_TREE" \
     --expected-preflight-sha256 "$EXPECTED_PREFLIGHT_SHA256" >/dev/null
   EXPECTED_FINAL_MANIFEST_SHA256="$final_sha256"
-  export VMLX_R19_FINAL_NOTARY_MANIFEST="$FINAL_NOTARY_MANIFEST"
-  export VMLX_R19_FINAL_NOTARY_MANIFEST_SHA256="$final_sha256"
+  export VMLX_R20_FINAL_NOTARY_MANIFEST="$FINAL_NOTARY_MANIFEST"
+  export VMLX_R20_FINAL_NOTARY_MANIFEST_SHA256="$final_sha256"
   echo "==> Running final owner verification with fresh Apple queries and private mounts"
   verify_final_release_chain
 
   echo "==> Private no-clobber post-notary artifact handoff"
-  printf 'VMLX_R19_FINAL_NOTARY_MANIFEST=%s\n' "$FINAL_NOTARY_MANIFEST"
-  printf 'VMLX_R19_FINAL_NOTARY_MANIFEST_SHA256=%s\n' "$final_sha256"
-  printf 'VMLX_R19_PRE_NOTARY_MANIFEST_SHA256=%s\n' "$EXPECTED_PRE_MANIFEST_SHA256"
-  printf 'VMLX_R19_EXPECTED_SOURCE_COMMIT=%s\n' "$EXPECTED_SOURCE_COMMIT"
-  printf 'VMLX_R19_EXPECTED_SOURCE_TREE=%s\n' "$EXPECTED_SOURCE_TREE"
-  printf 'VMLX_R19_EXPECTED_PREFLIGHT_SHA256=%s\n' "$EXPECTED_PREFLIGHT_SHA256"
+  printf 'VMLX_R20_FINAL_NOTARY_MANIFEST=%s\n' "$FINAL_NOTARY_MANIFEST"
+  printf 'VMLX_R20_FINAL_NOTARY_MANIFEST_SHA256=%s\n' "$final_sha256"
+  printf 'VMLX_R20_PRE_NOTARY_MANIFEST_SHA256=%s\n' "$EXPECTED_PRE_MANIFEST_SHA256"
+  printf 'VMLX_R20_EXPECTED_SOURCE_COMMIT=%s\n' "$EXPECTED_SOURCE_COMMIT"
+  printf 'VMLX_R20_EXPECTED_SOURCE_TREE=%s\n' "$EXPECTED_SOURCE_TREE"
+  printf 'VMLX_R20_EXPECTED_PREFLIGHT_SHA256=%s\n' "$EXPECTED_PREFLIGHT_SHA256"
 }
 
 notarize_release_chain "$@"

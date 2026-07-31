@@ -2216,8 +2216,25 @@ describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {
     })
   }
 
-  it('declares DSV4 model-default reasoning and supported effort controls', () => {
-    const dir = makeModelDir({ model_type: 'deepseek_v4' })
+  it('derives the DSV4-0731 reasoning contract from the selected bundle sidecar', () => {
+    const dir = makeModelDir(
+      { model_type: 'deepseek_v4' },
+      {
+        chat: {
+          reasoning: {
+            supported: true,
+            modes: ['chat', 'thinking'],
+            default_mode: 'thinking',
+            default_effort: 'low',
+            reasoning_effort_levels: ['low', 'high', 'max'],
+          },
+          tool_calling: {
+            supported: true,
+            parser: 'dsml',
+          },
+        },
+      },
+    )
     const detected = detectModelConfigFromDir(dir)
 
     expect(detected.family).toBe('deepseek-v4')
@@ -2225,7 +2242,19 @@ describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {
     expect(detected.supportsThinking).toBe(true)
     expect(detected.supportsInstructMode).toBe(true)
     expect(detected.defaultEnableThinking).toBe(true)
-    expect(detected.supportedReasoningEfforts).toEqual(['high', 'max'])
+    expect(detected.defaultReasoningEffort).toBe('low')
+    expect(detected.supportedReasoningEfforts).toEqual(['low', 'high', 'max'])
     expect(detected.supportsThinkingBudget).toBeUndefined()
+  })
+
+  it('does not invent DSV4 effort levels or a default for an unstamped bundle', () => {
+    const dir = makeModelDir({ model_type: 'deepseek_v4' })
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('deepseek-v4')
+    expect(detected.supportedReasoningEfforts).toBeUndefined()
+    expect(detected.defaultReasoningEffort).toBeUndefined()
+    expect(detected.defaultEnableThinking).toBeUndefined()
+    expect(detected.supportsInstructMode).toBeUndefined()
   })
 })

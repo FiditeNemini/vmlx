@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ─── ResponsesToolDefinition Conversion ──────────────────────────────────────
 
 
@@ -2936,7 +2935,7 @@ class TestFallbackToolPromptFormat:
             tool["function"]["name"] for tool in tokenizer.last_kwargs["tools"]
         ] == ["file_info"]
 
-    def test_dsml_parser_repairs_schema_gated_malformed_old_dsv4_tool_call(self):
+    def test_dsml_parser_rejects_schema_gated_malformed_old_dsv4_tool_call(self):
         from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
 
         text = (
@@ -2961,12 +2960,11 @@ class TestFallbackToolPromptFormat:
 
         result = DSMLToolParser(None).extract_tool_calls(text, request=req)
 
-        assert result.tools_called
-        assert result.tool_calls[0]["name"] == "list_directory"
-        assert '"path": "."' in result.tool_calls[0]["arguments"]
+        assert not result.tools_called
+        assert result.tool_calls == []
         assert result.content is None
 
-    def test_dsml_parser_repairs_partial_canonical_invoke(self):
+    def test_dsml_parser_rejects_partial_canonical_invoke(self):
         from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
 
         text = (
@@ -2992,12 +2990,11 @@ class TestFallbackToolPromptFormat:
 
         result = DSMLToolParser(None).extract_tool_calls(text, request=req)
 
-        assert result.tools_called
-        assert result.tool_calls[0]["name"] == "list_directory"
-        assert '"path": "."' in result.tool_calls[0]["arguments"]
+        assert not result.tools_called
+        assert result.tool_calls == []
         assert result.content is None
 
-    def test_dsml_parser_repairs_dsv4_live_degraded_dsml_params(self):
+    def test_dsml_parser_rejects_dsv4_live_degraded_dsml_params(self):
         from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
 
         text = (
@@ -3043,17 +3040,11 @@ class TestFallbackToolPromptFormat:
 
         result = DSMLToolParser(None).extract_tool_calls(text, request=req)
 
-        assert result.tools_called
-        assert [tc["name"] for tc in result.tool_calls] == [
-            "list_directory",
-            "write_file",
-        ]
-        assert '"path": "."' in result.tool_calls[0]["arguments"]
-        assert '"path": "x.txt"' in result.tool_calls[1]["arguments"]
-        assert '"content": "ok"' in result.tool_calls[1]["arguments"]
+        assert not result.tools_called
+        assert result.tool_calls == []
         assert result.content is None
 
-    def test_dsml_parser_rejects_canonical_attr_residue_and_repairs_live_write_file(self):
+    def test_dsml_parser_rejects_canonical_attr_residue_without_repair(self):
         from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
 
         text = (
@@ -3086,11 +3077,8 @@ class TestFallbackToolPromptFormat:
 
         result = DSMLToolParser(None).extract_tool_calls(text, request=req)
 
-        assert result.tools_called
-        assert result.tool_calls[0]["name"] == "write_file"
-        assert '"path": "landing-p/proof.html"' in result.tool_calls[0]["arguments"]
-        assert '"content": "<html><body>dsv4-default-cache-tool-ok</body></html>"' in result.tool_calls[0]["arguments"]
-        assert " string=" not in result.tool_calls[0]["arguments"]
+        assert not result.tools_called
+        assert result.tool_calls == []
         assert result.content is None
 
     def test_dsml_parser_rejects_schema_placeholder_as_tool_argument(self):
@@ -3260,6 +3248,9 @@ class TestFallbackToolPromptFormat:
         assert api_calls
         assert api_calls[0].function.name == "run_command"
         assert api_calls[0].function.arguments == '{"command": "pwd"}'
+        # Public extraction first validates the strict completed grammar, then
+        # requires the bundle encoder to agree on the same call.
+        assert len(calls) == 3
         assert calls[-1] == (
             "\n\n" + canonical_fragment + "<DSV4_EOS>",
             "chat",
@@ -3268,7 +3259,6 @@ class TestFallbackToolPromptFormat:
     def test_dsml_parser_does_not_hide_internal_canonical_type_error(
         self, monkeypatch
     ):
-        import pytest
 
         from vmlx_engine.loaders import dsv4_chat_encoder
         from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
@@ -3298,7 +3288,7 @@ class TestFallbackToolPromptFormat:
         assert len(calls) == 1
         assert calls[0][1] == "chat"
 
-    def test_dsml_parser_repairs_partial_invoke_with_malformed_value_attr(self):
+    def test_dsml_parser_rejects_partial_invoke_with_malformed_value_attr(self):
         from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
 
         text = (
@@ -3323,12 +3313,11 @@ class TestFallbackToolPromptFormat:
 
         result = DSMLToolParser(None).extract_tool_calls(text, request=req)
 
-        assert result.tools_called
-        assert result.tool_calls[0]["name"] == "list_directory"
-        assert '"path": "."' in result.tool_calls[0]["arguments"]
+        assert not result.tools_called
+        assert result.tool_calls == []
         assert result.content is None
 
-    def test_dsml_parser_repairs_htmlish_invoke_degradation(self):
+    def test_dsml_parser_rejects_htmlish_invoke_degradation(self):
         from vmlx_engine.tool_parsers.dsml_tool_parser import DSMLToolParser
 
         text = (
@@ -3354,9 +3343,8 @@ class TestFallbackToolPromptFormat:
 
         result = DSMLToolParser(None).extract_tool_calls(text, request=req)
 
-        assert result.tools_called
-        assert result.tool_calls[0]["name"] == "list_directory"
-        assert '"path": "."' in result.tool_calls[0]["arguments"]
+        assert not result.tools_called
+        assert result.tool_calls == []
         assert result.content is None
 
     def test_generic_parser_handles_laguna_arg_key_value_tool_call(self):

@@ -32,7 +32,7 @@ else:
     pytest = _FixturePytest()
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "panel/scripts/scoped-release-preflight-19.py"
+SCRIPT = ROOT / "panel/scripts/scoped-release-preflight-20.py"
 STAMP = "2026-07-25T00:00:00Z"
 
 
@@ -124,7 +124,7 @@ def _fixture_protocol_response(protocol: str, turn: int) -> bytes:
                     {
                         "choices": [
                             {
-                                "delta": {"content": "R19-"},
+                                "delta": {"content": "R20-"},
                                 "finish_reason": None,
                             }
                         ]
@@ -181,7 +181,7 @@ def _fixture_protocol_response(protocol: str, turn: int) -> bytes:
                         "response.output_text.delta",
                         {
                             "type": "response.output_text.delta",
-                            "delta": "R19-",
+                            "delta": "R20-",
                         },
                     ),
                     (
@@ -256,7 +256,7 @@ def _fixture_protocol_response(protocol: str, turn: int) -> bytes:
                         {
                             "type": "content_block_delta",
                             "index": 1,
-                            "delta": {"type": "text_delta", "text": "R19-"},
+                            "delta": {"type": "text_delta", "text": "R20-"},
                         },
                     ),
                     (
@@ -307,7 +307,7 @@ def _fixture_protocol_response(protocol: str, turn: int) -> bytes:
     else:
         rows.extend(
             [
-                {"message": {"content": "R19-"}, "done": False},
+                {"message": {"content": "R20-"}, "done": False},
                 {"message": {"content": "V5-DONE"}, "done": False},
             ]
         )
@@ -381,7 +381,7 @@ def _fixture_sampling_attestation(
         ("override", override_request),
         ("after_override", {}),
     ):
-        proof_request_id = f"r19-sampling-{label}-fixture"
+        proof_request_id = f"r20-sampling-{label}-fixture"
         request_id = f"{proof_request_id}-request"
         message_id = f"{proof_request_id}-message"
         request = {
@@ -441,7 +441,7 @@ def _fixture_sampling_attestation(
         )
         resolved_rows.append(resolved_values)
     return {
-        "schema": "vmlx-r19-owned-sampling-attestation-v1",
+        "schema": "vmlx-r20-owned-sampling-attestation-v1",
         "health_effective_defaults": health_defaults,
         "default_resolved": resolved_rows[0],
         "override_request": override_request,
@@ -489,7 +489,7 @@ def _fixture_api_capture(
             "messages": [
                 {"role": "tool", "tool_call_id": "c1", "content": "5.2 KB"},
                 {"role": "tool", "tool_call_id": "c2", "content": str(ROOT)},
-                {"role": "user", "content": "Reply exactly R19-V5-DONE"},
+                {"role": "user", "content": "Reply exactly R20-V5-DONE"},
             ],
         },
     ]
@@ -568,7 +568,7 @@ def _fixture_ui_capture(
     turn_count = phase["ui_turn_count"]
     if evidence_root is None:
         evidence_root = Path(
-            tempfile.mkdtemp(prefix="vmlx-r19-ui-health-fixture-")
+            tempfile.mkdtemp(prefix="vmlx-r20-ui-health-fixture-")
         )
     else:
         evidence_root.mkdir(parents=True, exist_ok=True)
@@ -1392,11 +1392,11 @@ def test_v5_panel_owned_plans_launch_pinned_node_with_pinned_npm_cli(
     assert python_suite["env"] == {
         "VMLX_JANG_TOOLS_SOURCE": str(jang_source.resolve()),
         "VMLINUX_JANG_TOOLS_SOURCE": str(jang_source.resolve()),
-        "VMLINUX_R19_PINNED_NODE_REALPATH": expected_node,
-        "VMLINUX_R19_PINNED_NPM_CLI_REALPATH": expected_npm_cli,
+        "VMLINUX_R20_PINNED_NODE_REALPATH": expected_node,
+        "VMLINUX_R20_PINNED_NPM_CLI_REALPATH": expected_npm_cli,
     }
     production = plans["production_build"]["commands"][0]
-    assert production["env"]["VMLX_RELEASE_SCOPE"] == "r19_production"
+    assert production["env"]["VMLX_RELEASE_SCOPE"] == "r20_production"
     assert production["env"]["VMLX_JANG_TOOLS_SOURCE"] == str(
         jang_source.resolve()
     )
@@ -1409,8 +1409,8 @@ def test_v5_panel_owned_plans_launch_pinned_node_with_pinned_npm_cli(
         == "macosx_14_0_arm64"
     )
     for name in ("NODE", "GIT", "SHASUM", "AWK", "FIND"):
-        assert production["env"][f"VMLX_R19_TOOL_{name}_REALPATH"]
-        assert len(production["env"][f"VMLX_R19_TOOL_{name}_SHA256"]) == 64
+        assert production["env"][f"VMLX_R20_TOOL_{name}_REALPATH"]
+        assert len(production["env"][f"VMLX_R20_TOOL_{name}_SHA256"]) == 64
 
 
 def test_v5_jang_tests_use_installed_wheel_and_compare_package_manifest(
@@ -1661,7 +1661,7 @@ def test_v5_owned_command_pins_executable_script_argument_even_when_mode_0755(
     module = load_module()
     node = _v5_pinned_tool_path(
         "node",
-        "VMLINUX_R19_PINNED_NODE_REALPATH",
+        "VMLINUX_R20_PINNED_NODE_REALPATH",
     )
     script = tmp_path / "npm-cli.js"
     script.write_text(
@@ -1708,7 +1708,7 @@ def test_v5_owned_command_can_pin_readonly_system_tool_file(tmp_path: Path):
     module = load_module()
     node = _v5_pinned_tool_path(
         "node",
-        "VMLINUX_R19_PINNED_NODE_REALPATH",
+        "VMLINUX_R20_PINNED_NODE_REALPATH",
     )
     run_dir = tmp_path / "run"
     run_dir.mkdir(mode=0o700)
@@ -1756,7 +1756,7 @@ def test_v5_owned_command_rejects_executable_script_tampering(
     module = load_module()
     node = _v5_pinned_tool_path(
         "node",
-        "VMLINUX_R19_PINNED_NODE_REALPATH",
+        "VMLINUX_R20_PINNED_NODE_REALPATH",
     )
     script = tmp_path / "npm-cli.js"
     script.write_text(
@@ -1788,11 +1788,11 @@ def test_v5_owned_node_path_supports_nested_env_node_without_ambient_path(
     module = load_module()
     node_value = _v5_pinned_tool_path(
         "node",
-        "VMLINUX_R19_PINNED_NODE_REALPATH",
+        "VMLINUX_R20_PINNED_NODE_REALPATH",
     )
     npm_value = _v5_pinned_tool_path(
         "npm",
-        "VMLINUX_R19_PINNED_NPM_CLI_REALPATH",
+        "VMLINUX_R20_PINNED_NPM_CLI_REALPATH",
     )
     run_dir = tmp_path / "run"
     run_dir.mkdir(mode=0o700)
@@ -2234,7 +2234,7 @@ def write_author_pass_attestation(module, path: Path) -> None:
     )
 
 
-def test_r19_has_no_parallel_measured_or_live_feature_self_certification():
+def test_r20_has_no_parallel_measured_or_live_feature_self_certification():
     module = load_module()
     source = SCRIPT.read_text(encoding="utf-8")
     assert "measured_observation" not in source
@@ -2285,7 +2285,7 @@ def test_r19_has_no_parallel_measured_or_live_feature_self_certification():
         ),
     ],
 )
-def test_r19_parses_retained_raw_protocol_bytes(protocol: str, raw: bytes):
+def test_r20_parses_retained_raw_protocol_bytes(protocol: str, raw: bytes):
     module = load_module()
     parsed = module._parse_raw_protocol_stream(protocol, raw)
     assert parsed is not None
@@ -2298,7 +2298,7 @@ def test_r19_parses_retained_raw_protocol_bytes(protocol: str, raw: bytes):
     assert parsed["raw_sha256"] == hashlib.sha256(raw).hexdigest()
 
 
-def test_r19_raw_protocol_parser_rejects_malformed_and_missing_terminal():
+def test_r20_raw_protocol_parser_rejects_malformed_and_missing_terminal():
     module = load_module()
     assert module._parse_raw_protocol_stream("chat", b"data: not-json\n") is None
     assert (
@@ -2326,7 +2326,7 @@ def test_r19_raw_protocol_parser_rejects_malformed_and_missing_terminal():
 
 
 @pytest.mark.parametrize("protocol", ["chat", "responses", "anthropic"])
-def test_r19_raw_sse_parser_accepts_interspersed_comments(protocol: str):
+def test_r20_raw_sse_parser_accepts_interspersed_comments(protocol: str):
     module = load_module()
     raw = _fixture_protocol_response(protocol, 3)
     lines = raw.splitlines(keepends=True)
@@ -2341,7 +2341,7 @@ def test_r19_raw_sse_parser_accepts_interspersed_comments(protocol: str):
     assert module._parse_raw_protocol_stream_v5(protocol, with_comments) is not None
 
 
-def test_r19_raw_sse_parser_rejects_comment_only_stream():
+def test_r20_raw_sse_parser_rejects_comment_only_stream():
     module = load_module()
     assert (
         module._parse_raw_protocol_stream(
@@ -2353,7 +2353,7 @@ def test_r19_raw_sse_parser_rejects_comment_only_stream():
 
 
 @pytest.mark.parametrize("status", ["failed", "cancelled", "incomplete", ""])
-def test_r19_responses_completed_event_requires_successful_completed_status(
+def test_r20_responses_completed_event_requires_successful_completed_status(
     status: str,
 ):
     module = load_module()
@@ -2373,7 +2373,7 @@ def test_r19_responses_completed_event_requires_successful_completed_status(
     assert module._parse_raw_protocol_stream("responses", raw) is None
 
 
-def test_r19_responses_added_and_done_tool_name_is_idempotent():
+def test_r20_responses_added_and_done_tool_name_is_idempotent():
     module = load_module()
     raw = (
         _fixture_sse(
@@ -2433,7 +2433,7 @@ def test_r19_responses_added_and_done_tool_name_is_idempotent():
     ]
 
 
-def test_r19_chat_tool_name_fragments_still_accumulate():
+def test_r20_chat_tool_name_fragments_still_accumulate():
     module = load_module()
     calls = {}
 
@@ -2443,11 +2443,11 @@ def test_r19_chat_tool_name_fragments_still_accumulate():
     assert calls[0]["name"] == "file_info"
 
 
-def test_r19_responses_dynamic_final_uses_retained_results_and_response_chain():
+def test_r20_responses_dynamic_final_uses_retained_results_and_response_chain():
     module = load_module()
     final = (
         "AGENTIC-RESPONSES-STREAM-DONE SIZE=5.3 KB "
-        "PWD=/Users/example/mlx/vllm-mlx-r19-release-build"
+        "PWD=/Users/example/mlx/vllm-mlx-r20-release-build"
     )
     requests = [
         {
@@ -2500,7 +2500,7 @@ def test_r19_responses_dynamic_final_uses_retained_results_and_response_chain():
                             "exit_code": 0,
                             "stdout": (
                                 "/Users/example/mlx/"
-                                "vllm-mlx-r19-release-build"
+                                "vllm-mlx-r20-release-build"
                             ),
                         },
                         separators=(",", ":"),
@@ -2641,7 +2641,7 @@ def test_r19_responses_dynamic_final_uses_retained_results_and_response_chain():
     "event_type",
     ["response.failed", "response.cancelled", "response.incomplete", "error"],
 )
-def test_r19_rejects_failure_terminal_event_types(event_type: str):
+def test_r20_rejects_failure_terminal_event_types(event_type: str):
     module = load_module()
     raw = (
         f"event: {event_type}\n"
@@ -2652,7 +2652,7 @@ def test_r19_rejects_failure_terminal_event_types(event_type: str):
     assert module._parse_raw_protocol_stream("responses", raw) is None
 
 
-def test_r19_rejects_multiple_terminals():
+def test_r20_rejects_multiple_terminals():
     module = load_module()
     raw = (
         b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
@@ -2662,7 +2662,7 @@ def test_r19_rejects_multiple_terminals():
     assert module._parse_raw_protocol_stream("chat", raw) is None
 
 
-def test_r19_current_ui_summary_and_echo_fixture_fail_closed():
+def test_r20_current_ui_summary_and_echo_fixture_fail_closed():
     module = load_module()
     source = source_payload()
     summary = {
@@ -2693,7 +2693,7 @@ def test_r19_current_ui_summary_and_echo_fixture_fail_closed():
     assert module._semantic_electron_turn(summary, source, [summary]) is None
 
 
-def test_r19_api_matrix_summary_and_predecoded_events_cannot_certify():
+def test_r20_api_matrix_summary_and_predecoded_events_cannot_certify():
     module = load_module()
     source = source_payload()
     artifact = {
@@ -2718,7 +2718,7 @@ def test_r19_api_matrix_summary_and_predecoded_events_cannot_certify():
     assert module._semantic_api_stream(artifact, source, [artifact]) is None
 
 
-def test_r19_cache_summary_and_synthetic_token_arrays_cannot_certify():
+def test_r20_cache_summary_and_synthetic_token_arrays_cannot_certify():
     module = load_module()
     source = source_payload()
     artifact = {
@@ -2733,7 +2733,7 @@ def test_r19_cache_summary_and_synthetic_token_arrays_cannot_certify():
     assert module._semantic_cache_observation(artifact, source, [artifact]) is None
 
 
-def test_r19_architecture_matrix_stays_blocked_without_native_state_captures():
+def test_r20_architecture_matrix_stays_blocked_without_native_state_captures():
     module = load_module()
     required = set(module.REQUIRED_ASSERTIONS["cache_architecture_native_matrix"])
     records = [
@@ -2762,7 +2762,7 @@ def test_r19_architecture_matrix_stays_blocked_without_native_state_captures():
     )
 
 
-def test_r19_author_written_command_receipt_with_forged_pid_is_blocked():
+def test_r20_author_written_command_receipt_with_forged_pid_is_blocked():
     module = load_module()
     artifact = {
         "schema": module.COMMAND_RESULT_SCHEMA,
@@ -2788,7 +2788,7 @@ def test_r19_author_written_command_receipt_with_forged_pid_is_blocked():
     )
 
 
-def test_r19_focused_suite_cannot_pass_complete_python_gate():
+def test_r20_focused_suite_cannot_pass_complete_python_gate():
     module = load_module()
     artifact = {
         "schema": module.COMMAND_RESULT_SCHEMA,
@@ -2802,7 +2802,7 @@ def test_r19_focused_suite_cannot_pass_complete_python_gate():
     assert module._semantic_command_result(artifact, source_payload(), [artifact]) is None
 
 
-def test_r19_owned_runner_captures_child_and_derives_full_suite(
+def test_r20_owned_runner_captures_child_and_derives_full_suite(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -2849,7 +2849,7 @@ def test_r19_owned_runner_captures_child_and_derives_full_suite(
     ).hexdigest()
 
 
-def test_r19_v5_failed_owned_child_seals_private_streams(
+def test_r20_v5_failed_owned_child_seals_private_streams(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -2910,7 +2910,7 @@ def test_r19_v5_failed_owned_child_seals_private_streams(
     assert (stderr_path.stat().st_mode & 0o777) == 0o600
 
 
-def test_r19_v5_cache_phase_wait_seals_private_streams_on_early_exit(
+def test_r20_v5_cache_phase_wait_seals_private_streams_on_early_exit(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -2982,7 +2982,7 @@ def test_r19_v5_cache_phase_wait_seals_private_streams_on_early_exit(
     assert (stderr_path.stat().st_mode & 0o777) == 0o600
 
 
-def test_r19_v5_ui_probe_phases_reuse_prior_store_block_disk_root():
+def test_r20_v5_ui_probe_phases_reuse_prior_store_block_disk_root():
     source = (ROOT / "panel/scripts/live-real-ui-model-proof.mjs").read_text(
         encoding="utf-8",
     )
@@ -2993,7 +2993,7 @@ def test_r19_v5_ui_probe_phases_reuse_prior_store_block_disk_root():
     assert "ui-shared-block-disk-cache" in source
 
 
-def test_r19_owned_jang_runner_requires_build_import_and_test(
+def test_r20_owned_jang_runner_requires_build_import_and_test(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -3053,7 +3053,7 @@ def test_r19_owned_jang_runner_requires_build_import_and_test(
     assert len(results["jang_runtime_provenance"]["executions"]) == 3
 
 
-def test_r19_v5_jang_source_argument_is_authoritative_without_environment(
+def test_r20_v5_jang_source_argument_is_authoritative_without_environment(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -3096,7 +3096,7 @@ def test_r19_v5_jang_source_argument_is_authoritative_without_environment(
     assert observed["tree"] == module.JANG_TREE
 
 
-def test_r19_v5_jang_source_argument_rejects_environment_mismatch(
+def test_r20_v5_jang_source_argument_rejects_environment_mismatch(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -3114,7 +3114,7 @@ def test_r19_v5_jang_source_argument_rejects_environment_mismatch(
     )
 
 
-def test_r19_health_family_contract_requires_actual_bundle_path_and_hashes(
+def test_r20_health_family_contract_requires_actual_bundle_path_and_hashes(
     tmp_path: Path,
 ):
     module = load_module()
@@ -3147,7 +3147,7 @@ def test_r19_health_family_contract_requires_actual_bundle_path_and_hashes(
     assert module._health_family_contract(changed) is None
 
 
-def test_r19_bundle_attestation_accepts_production_path_free_health_shape(
+def test_r20_bundle_attestation_accepts_production_path_free_health_shape(
     tmp_path: Path,
 ):
     module = load_module()
@@ -3186,7 +3186,7 @@ def test_r19_bundle_attestation_accepts_production_path_free_health_shape(
     ) is None
 
 
-def test_r19_v5_runtime_bundle_attestation_requires_production_nested_shape(
+def test_r20_v5_runtime_bundle_attestation_requires_production_nested_shape(
     tmp_path: Path,
 ):
     module = load_module()
@@ -3220,7 +3220,7 @@ def test_r19_v5_runtime_bundle_attestation_requires_production_nested_shape(
     )
 
 
-def test_r19_v5_hold_observation_accepts_path_free_nested_bundle_health(
+def test_r20_v5_hold_observation_accepts_path_free_nested_bundle_health(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -3286,7 +3286,7 @@ def test_r19_v5_hold_observation_accepts_path_free_nested_bundle_health(
     assert observation["gateway_listener"]["owner_pid"] == 1202
 
 
-def test_r19_v5_runtime_source_attestation_requires_path_free_health_shape():
+def test_r20_v5_runtime_source_attestation_requires_path_free_health_shape():
     module = load_module()
     runtime = {
         "package_init_relpath": "vmlx_engine/__init__.py",
@@ -3318,7 +3318,7 @@ def test_r19_v5_runtime_source_attestation_requires_path_free_health_shape():
     assert module._v5_runtime_source_attestation(unreadable) is None
 
 
-def test_r19_v5_backend_invocation_fingerprint_preserves_venv_symlink(
+def test_r20_v5_backend_invocation_fingerprint_preserves_venv_symlink(
     tmp_path: Path,
 ):
     module = load_module()
@@ -3337,7 +3337,7 @@ def test_r19_v5_backend_invocation_fingerprint_preserves_venv_symlink(
     assert module._v5_backend_invocation_fingerprint(mismatched) is None
 
 
-def test_r19_v5_runtime_backend_argv_is_bracketed_by_libproc_identity(
+def test_r20_v5_runtime_backend_argv_is_bracketed_by_libproc_identity(
     monkeypatch,
     tmp_path: Path,
 ):
@@ -3409,7 +3409,7 @@ def test_r19_v5_runtime_backend_argv_is_bracketed_by_libproc_identity(
         ("executable_sha256", "b" * 64),
     ],
 )
-def test_r19_v5_runtime_backend_argv_rejects_libproc_identity_drift(
+def test_r20_v5_runtime_backend_argv_rejects_libproc_identity_drift(
     monkeypatch,
     changed_field,
     changed_value,
@@ -3443,7 +3443,7 @@ def test_r19_v5_runtime_backend_argv_rejects_libproc_identity_drift(
     assert module._v5_observe_runtime_process_with_argv(7123) is None
 
 
-def test_r19_bundle_attestation_rejects_symlink_and_hardlink_files(
+def test_r20_bundle_attestation_rejects_symlink_and_hardlink_files(
     tmp_path: Path,
 ):
     module = load_module()
@@ -3477,7 +3477,7 @@ def test_r19_bundle_attestation_rejects_symlink_and_hardlink_files(
     )
 
 
-def test_r19_evidence_reader_rejects_links_and_path_replacement(
+def test_r20_evidence_reader_rejects_links_and_path_replacement(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -3513,7 +3513,7 @@ def test_r19_evidence_reader_rejects_links_and_path_replacement(
     assert module._read_regular_file_once(replace_target, evidence_root) is None
 
 
-def test_r19_bundle_snapshot_rejects_directory_swap(
+def test_r20_bundle_snapshot_rejects_directory_swap(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -3536,7 +3536,7 @@ def test_r19_bundle_snapshot_rejects_directory_swap(
     assert module._read_bundle_directory_snapshot(tmp_path / "model") is None
 
 
-def test_r19_source_trace_rejects_fake_electron_and_nonexistent_process(
+def test_r20_source_trace_rejects_fake_electron_and_nonexistent_process(
     tmp_path: Path,
 ):
     module = load_module()
@@ -3596,7 +3596,7 @@ def test_r19_source_trace_rejects_fake_electron_and_nonexistent_process(
     assert module._semantic_source_trace(echo, source) is None
 
 
-def test_r19_v4_ui_semantic_accepts_raw_bound_dom_and_events(
+def test_r20_v4_ui_semantic_accepts_raw_bound_dom_and_events(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -3736,7 +3736,7 @@ def chat_stream(
     return "\n\n".join(rows) + "\n\n"
 
 
-def test_r19_v4_api_semantic_accepts_raw_requests_and_streams(
+def test_r20_v4_api_semantic_accepts_raw_requests_and_streams(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -3821,7 +3821,7 @@ def test_r19_v4_api_semantic_accepts_raw_requests_and_streams(
     } <= set(semantic["facts_by_protocol"]["chat"])
 
 
-def test_r19_v4_cache_semantic_derives_lcp_and_telemetry(
+def test_r20_v4_cache_semantic_derives_lcp_and_telemetry(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -3863,7 +3863,7 @@ def test_r19_v4_cache_semantic_derives_lcp_and_telemetry(
     } <= set(semantic["facts"])
 
 
-def test_r19_jang_receipt_with_forged_pid_is_blocked():
+def test_r20_jang_receipt_with_forged_pid_is_blocked():
     module = load_module()
     artifact = {
         "schema": module.JANG_RESULT_SCHEMA,
@@ -3883,7 +3883,7 @@ def test_r19_jang_receipt_with_forged_pid_is_blocked():
     assert module._semantic_jang_result(artifact, source_payload(), [artifact]) is None
 
 
-def test_r19_validate_attestation_sanitizes_author_passes(
+def test_r20_validate_attestation_sanitizes_author_passes(
     tmp_path: Path,
 ):
     module = load_module()
@@ -3924,7 +3924,7 @@ def test_r19_validate_attestation_sanitizes_author_passes(
     assert failures
 
 
-def test_r19_main_manifest_reports_owned_pass_and_blocked_rows(
+def test_r20_main_manifest_reports_owned_pass_and_blocked_rows(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -4008,7 +4008,7 @@ def test_r19_main_manifest_reports_owned_pass_and_blocked_rows(
     assert manifest["owned_executions"]["full_python_suite"][0]["pid"] == 777
 
 
-def test_r19_release_source_attestation_reads_head_blobs(monkeypatch):
+def test_r20_release_source_attestation_reads_head_blobs(monkeypatch):
     module = load_module()
     module.release_runtime_source_attestation.cache_clear()
     blobs = {
@@ -4042,7 +4042,7 @@ def test_r19_release_source_attestation_reads_head_blobs(monkeypatch):
     module.release_runtime_source_attestation.cache_clear()
 
 
-def test_r19_v5_main_owned_children_fail_closed_on_unowned_release_rows(
+def test_r20_v5_main_owned_children_fail_closed_on_unowned_release_rows(
     tmp_path: Path,
 ):
     module = load_module()
@@ -4260,7 +4260,7 @@ def test_r19_v5_main_owned_children_fail_closed_on_unowned_release_rows(
     runtime_package = tmp_path / "runtime/vmlx_engine"
     runtime_package.mkdir(parents=True)
     (runtime_package / "__init__.py").write_text(
-        '__version__ = "1.6.19"\n',
+        '__version__ = "1.6.20"\n',
         encoding="utf-8",
     )
     (runtime_package / "server.py").write_text(
@@ -4458,7 +4458,7 @@ def test_r19_v5_main_owned_children_fail_closed_on_unowned_release_rows(
         )
 
 
-def test_r19_v5_six_phase_cache_facts_are_raw_and_do_not_invent_cross_surface_policy(
+def test_r20_v5_six_phase_cache_facts_are_raw_and_do_not_invent_cross_surface_policy(
     tmp_path: Path,
 ):
     module = load_module()
@@ -4874,7 +4874,7 @@ def test_r19_v5_six_phase_cache_facts_are_raw_and_do_not_invent_cross_surface_po
         ) == (set(), [])
 
 
-def test_r19_v5_run_intent_is_canonical_ordered_and_non_circular(
+def test_r20_v5_run_intent_is_canonical_ordered_and_non_circular(
     tmp_path: Path,
 ):
     module = load_module()
@@ -5025,7 +5025,7 @@ def test_r19_v5_run_intent_is_canonical_ordered_and_non_circular(
         module._v5_build_run_intent(run_context, invalid_health)
 
 
-def test_r19_v5_cache_gate_scenarios_bind_strict_l2_phase_pair():
+def test_r20_v5_cache_gate_scenarios_bind_strict_l2_phase_pair():
     module = load_module()
     assert [
         module._v5_cache_gate_scenario(phase)
@@ -5040,7 +5040,7 @@ def test_r19_v5_cache_gate_scenarios_bind_strict_l2_phase_pair():
     ]
 
 
-def test_r19_v5_python_suite_accepts_selected_pass_skip_summary():
+def test_r20_v5_python_suite_accepts_selected_pass_skip_summary():
     module = load_module()
     execution = {
         "exit_code": 0,
@@ -5071,7 +5071,7 @@ def test_r19_v5_python_suite_accepts_selected_pass_skip_summary():
         b"6760 passed, 108 skipped, 1 failed, 92 deselected in 123.45s\n",
     ],
 )
-def test_r19_v5_python_suite_rejects_incomplete_or_failed_summary(summary):
+def test_r20_v5_python_suite_rejects_incomplete_or_failed_summary(summary):
     module = load_module()
     facts, details = module._v5_owned_check_facts(
         "full_python_suite",
@@ -5089,7 +5089,7 @@ def test_r19_v5_python_suite_rejects_incomplete_or_failed_summary(summary):
     assert details == {}
 
 
-def test_r19_v5_sampling_log_parser_binds_all_request_identities():
+def test_r20_v5_sampling_log_parser_binds_all_request_identities():
     module = load_module()
     line = (
         "INFO Resolved sampling kwargs route=/v1/chat/completions "
@@ -5114,7 +5114,7 @@ def test_r19_v5_sampling_log_parser_binds_all_request_identities():
     assert parsed["values"]["enable_thinking"] is False
 
 
-def test_r19_v5_reasoning_mode_request_maps_auto_on_off_labels():
+def test_r20_v5_reasoning_mode_request_maps_auto_on_off_labels():
     module = load_module()
     payload = {
         "model": "fixture",
@@ -5149,7 +5149,7 @@ def test_r19_v5_reasoning_mode_request_maps_auto_on_off_labels():
     )
 
 
-def test_r19_v5_transmitted_request_metadata_replaces_pretransform_summaries():
+def test_r20_v5_transmitted_request_metadata_replaces_pretransform_summaries():
     module = load_module()
     matrix_result = {
         "flows": {
@@ -5228,7 +5228,7 @@ def test_r19_v5_transmitted_request_metadata_replaces_pretransform_summaries():
     )
 
 
-def test_r19_v5_replay_payload_is_rebound_to_the_transmitted_off_body():
+def test_r20_v5_replay_payload_is_rebound_to_the_transmitted_off_body():
     module = load_module()
     retained = {
         "model": "fixture",
@@ -5258,7 +5258,7 @@ def test_r19_v5_replay_payload_is_rebound_to_the_transmitted_off_body():
     )
 
 
-def test_r19_v5_sampling_log_lookup_survives_ring_wrap_and_rejects_duplicates(
+def test_r20_v5_sampling_log_lookup_survives_ring_wrap_and_rejects_duplicates(
     monkeypatch,
 ):
     module = load_module()
@@ -5400,7 +5400,7 @@ def _run_sampling_capture_fixture(
     return capture, requests
 
 
-def test_r19_v5_sampling_capture_allows_dynamic_metal_output_cap(
+def test_r20_v5_sampling_capture_allows_dynamic_metal_output_cap(
     monkeypatch,
 ):
     module = load_module()
@@ -5437,7 +5437,7 @@ def test_r19_v5_sampling_capture_allows_dynamic_metal_output_cap(
     } == {module.V5_SAMPLING_PROBE_MAX_TOKENS}
 
 
-def test_r19_v5_sampling_capture_rejects_persisted_sampler_override(
+def test_r20_v5_sampling_capture_rejects_persisted_sampler_override(
     monkeypatch,
 ):
     module = load_module()
@@ -5461,7 +5461,7 @@ def test_r19_v5_sampling_capture_rejects_persisted_sampler_override(
         )
 
 
-def test_r19_v5_api_sampling_uses_bundle_sampler_keys_not_probe_output_fields(
+def test_r20_v5_api_sampling_uses_bundle_sampler_keys_not_probe_output_fields(
     tmp_path: Path,
 ):
     module = load_module()
@@ -5507,7 +5507,7 @@ def test_r19_v5_api_sampling_uses_bundle_sampler_keys_not_probe_output_fields(
     assert "api_request_override_request_scoped" in facts
 
 
-def test_r19_v5_ui_facts_do_not_invent_unobserved_settings_or_layout(
+def test_r20_v5_ui_facts_do_not_invent_unobserved_settings_or_layout(
     tmp_path: Path,
 ):
     module = load_module()
@@ -5620,7 +5620,7 @@ def test_r19_v5_ui_facts_do_not_invent_unobserved_settings_or_layout(
     ) == (set(), [])
 
 
-def test_r19_v5_ui_facts_preserve_interleaved_reasoning_boundaries(
+def test_r20_v5_ui_facts_preserve_interleaved_reasoning_boundaries(
     tmp_path: Path,
 ):
     module = load_module()
@@ -5714,7 +5714,7 @@ def test_r19_v5_ui_facts_preserve_interleaved_reasoning_boundaries(
     assert module._v5_ui_facts(mismatched, runtime, bundle) == (set(), [])
 
 
-def test_r19_v5_ui_facts_detects_common_namespace_translation_key(
+def test_r20_v5_ui_facts_detects_common_namespace_translation_key(
     tmp_path: Path,
 ):
     module = load_module()
@@ -5772,7 +5772,7 @@ def test_r19_v5_ui_facts_detects_common_namespace_translation_key(
     assert "no_raw_translation_keys" not in leaked_facts
 
 
-def test_r19_v5_ui_defaults_require_exact_wire_request_correlation(
+def test_r20_v5_ui_defaults_require_exact_wire_request_correlation(
     tmp_path: Path,
 ):
     module = load_module()
@@ -5876,7 +5876,7 @@ def test_r19_v5_ui_defaults_require_exact_wire_request_correlation(
         ("ollama", b'"done_reason":"stop"', b'"done_reason":"length"'),
     ],
 )
-def test_r19_v5_rejects_non_success_protocol_terminals(
+def test_r20_v5_rejects_non_success_protocol_terminals(
     protocol: str,
     old: bytes,
     new: bytes,
@@ -5889,7 +5889,7 @@ def test_r19_v5_rejects_non_success_protocol_terminals(
     assert module._parse_raw_protocol_stream_v5(protocol, invalid) is None
 
 
-def test_r19_v5_nonstream_responses_checks_only_visible_control_markup():
+def test_r20_v5_nonstream_responses_checks_only_visible_control_markup():
     module = load_module()
     reasoning_marker = (
         "Privately prepare one native <tool_call><function=run_command>."
@@ -5930,7 +5930,7 @@ def test_r19_v5_nonstream_responses_checks_only_visible_control_markup():
     )
 
 
-def test_r19_v5_child_environment_is_fixed_and_rejects_injection(
+def test_r20_v5_child_environment_is_fixed_and_rejects_injection(
     tmp_path: Path,
 ):
     module = load_module()
@@ -5953,7 +5953,7 @@ def test_r19_v5_child_environment_is_fixed_and_rejects_injection(
             module._v5_minimal_env(tmp_path, {name: "unsafe"})
 
 
-def test_r19_v5_canonicalizes_retained_pids_for_the_ui_worker(monkeypatch):
+def test_r20_v5_canonicalizes_retained_pids_for_the_ui_worker(monkeypatch):
     module = load_module()
     monkeypatch.delenv("VMLINUX_REAL_UI_RETAINED_PIDS", raising=False)
     monkeypatch.setenv("VMLX_REAL_UI_RETAINED_PIDS", "49053, 61126")
@@ -6001,7 +6001,7 @@ def test_r19_v5_canonicalizes_retained_pids_for_the_ui_worker(monkeypatch):
         module._v5_release_retained_pid_environment()
 
 
-def test_r19_v5_ui_emits_dsv4_cache_disabled_expectation_only_for_dsv4():
+def test_r20_v5_ui_emits_dsv4_cache_disabled_expectation_only_for_dsv4():
     module = load_module()
     dsv4 = {"derived": {"native_cache": "dsv4_composite"}}
     for not_dsv4 in (
@@ -6016,7 +6016,7 @@ def test_r19_v5_ui_emits_dsv4_cache_disabled_expectation_only_for_dsv4():
     }
 
 
-def test_r19_v5_owned_producer_rejects_wrong_nonce_and_stale_capture(
+def test_r20_v5_owned_producer_rejects_wrong_nonce_and_stale_capture(
     tmp_path: Path,
 ):
     module = load_module()
@@ -6209,7 +6209,7 @@ def _fixture_orchestration(
     )
 
 
-def test_r19_v5_concurrent_producers_are_held_until_both_children_finish(
+def test_r20_v5_concurrent_producers_are_held_until_both_children_finish(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -6282,7 +6282,7 @@ def test_r19_v5_concurrent_producers_are_held_until_both_children_finish(
     }
 
 
-def test_r19_v5_cache_worker_uses_prior_backend_pid_for_restart_phases(
+def test_r20_v5_cache_worker_uses_prior_backend_pid_for_restart_phases(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -6494,7 +6494,7 @@ def test_r19_v5_cache_worker_uses_prior_backend_pid_for_restart_phases(
     ]
 
 
-def test_r19_v5_phase2_extends_only_the_long_tq_durability_window():
+def test_r20_v5_phase2_extends_only_the_long_tq_durability_window():
     module = load_module()
     phase2 = next(
         phase
@@ -6528,7 +6528,7 @@ def test_r19_v5_phase2_extends_only_the_long_tq_durability_window():
         ("stale_release", "UI"),
     ],
 )
-def test_r19_v5_concurrent_orchestration_rejects_invalid_ui_lifecycle(
+def test_r20_v5_concurrent_orchestration_rejects_invalid_ui_lifecycle(
     tmp_path: Path,
     ui_mode: str,
     message: str,
@@ -6549,7 +6549,7 @@ def test_r19_v5_concurrent_orchestration_rejects_invalid_ui_lifecycle(
         )
 
 
-def test_r19_v5_concurrent_orchestration_rejects_mismatched_child_session(
+def test_r20_v5_concurrent_orchestration_rejects_mismatched_child_session(
     tmp_path: Path,
 ):
     module = load_module()
@@ -6568,7 +6568,7 @@ def test_r19_v5_concurrent_orchestration_rejects_mismatched_child_session(
         )
 
 
-def test_r19_v5_production_worker_cli_rejects_stale_coordination_path(
+def test_r20_v5_production_worker_cli_rejects_stale_coordination_path(
     tmp_path: Path,
 ):
     run_dir = tmp_path / "private-run"
@@ -6666,7 +6666,7 @@ def test_r19_v5_production_worker_cli_rejects_stale_coordination_path(
     assert output_path.read_bytes() == b""
 
 
-def test_r19_v5_ui_adapter_translates_real_harness_terminal_and_tools():
+def test_r20_v5_ui_adapter_translates_real_harness_terminal_and_tools():
     module = load_module()
     run_id = "ui-adapter"
     nonce = "5" * 32
@@ -6862,7 +6862,7 @@ def test_r19_v5_ui_adapter_translates_real_harness_terminal_and_tools():
         )
 
 
-def test_r19_v5_pins_reject_links_and_bundle_identity_comes_from_bundle(
+def test_r20_v5_pins_reject_links_and_bundle_identity_comes_from_bundle(
     tmp_path: Path,
 ):
     module = load_module()
@@ -6907,7 +6907,7 @@ def test_r19_v5_pins_reject_links_and_bundle_identity_comes_from_bundle(
     assert contract["quantization"]["weight_format"] == "mxfp"
 
 
-def test_r19_v5_git_drift_invalidates_source_and_scope_facts(tmp_path: Path):
+def test_r20_v5_git_drift_invalidates_source_and_scope_facts(tmp_path: Path):
     module = load_module()
     bundle, _ = bundle_attestation(module, tmp_path / "model")
     before = {
@@ -6941,13 +6941,13 @@ def _v5_exact_release_diff(module) -> bytes:
     )
 
 
-def test_r19_v5_release_scope_review_requires_the_exact_checkpoint_inventory():
+def test_r20_v5_release_scope_review_requires_the_exact_checkpoint_inventory():
     module = load_module()
     diff_bytes = _v5_exact_release_diff(module)
     review = module._v5_release_scope_review(diff_bytes)
     assert review is not None
     assert review["diff_sha256"] == hashlib.sha256(diff_bytes).hexdigest()
-    assert review["schema"] == "vmlx-r19-release-scope-review-v2"
+    assert review["schema"] == "vmlx-r20-release-scope-review-v2"
     assert review["path_count"] == len(module.V5_RELEASE_INTENDED_PATH_OWNER)
     assert review["expected_path_count"] == len(
         module.V5_RELEASE_INTENDED_PATH_OWNER
@@ -6976,7 +6976,7 @@ def test_r19_v5_release_scope_review_requires_the_exact_checkpoint_inventory():
     ]
 
 
-def test_r19_v5_release_scope_review_fails_closed_on_unrelated_panel_source():
+def test_r20_v5_release_scope_review_fails_closed_on_unrelated_panel_source():
     module = load_module()
     diff_bytes = _v5_exact_release_diff(module) + (
         b"M\tpanel/src/unrelated.ts\n"
@@ -7016,7 +7016,7 @@ def test_r19_v5_release_scope_review_fails_closed_on_unrelated_panel_source():
         "state/session.db",
     ],
 )
-def test_r19_v5_release_scope_review_rejects_every_private_artifact_category(
+def test_r20_v5_release_scope_review_rejects_every_private_artifact_category(
     private_path: str,
 ):
     module = load_module()
@@ -7030,7 +7030,7 @@ def test_r19_v5_release_scope_review_rejects_every_private_artifact_category(
     assert review["public_forbidden"] == [private_path]
 
 
-def test_r19_v5_release_scope_review_fails_closed_when_an_intended_path_is_missing():
+def test_r20_v5_release_scope_review_fails_closed_when_an_intended_path_is_missing():
     module = load_module()
     missing = "panel/src/main/index.ts"
     diff_bytes = b"".join(
@@ -7044,7 +7044,7 @@ def test_r19_v5_release_scope_review_fails_closed_when_an_intended_path_is_missi
     assert review["missing"] == [missing]
 
 
-def test_r19_v5_scope_facts_require_exact_paths_not_self_classification(
+def test_r20_v5_scope_facts_require_exact_paths_not_self_classification(
     tmp_path: Path,
 ):
     module = load_module()
@@ -7073,7 +7073,7 @@ def test_r19_v5_scope_facts_require_exact_paths_not_self_classification(
         bundle,
     )
     assert exact_scope_facts == {
-        "v1_6_18_to_head_diff_reviewed",
+        "v1_6_19_to_head_diff_reviewed",
         "all_intended_fixes_mapped",
         "unintended_changes_none_or_documented",
         "public_repository_hygiene_passed",
@@ -7093,10 +7093,10 @@ def test_r19_v5_scope_facts_require_exact_paths_not_self_classification(
         },
         bundle,
     )
-    assert unrelated_scope_facts == {"v1_6_18_to_head_diff_reviewed"}
+    assert unrelated_scope_facts == {"v1_6_19_to_head_diff_reviewed"}
 
 
-def test_r19_v5_release_scope_review_rejects_malformed_name_status_bytes():
+def test_r20_v5_release_scope_review_rejects_malformed_name_status_bytes():
     module = load_module()
     assert module._v5_release_scope_review(b"") is None
     assert module._v5_release_scope_review(b"M\n") is None
@@ -7104,7 +7104,7 @@ def test_r19_v5_release_scope_review_rejects_malformed_name_status_bytes():
     assert module._v5_release_scope_review(b"M\tbad\xffpath\n") is None
 
 
-def test_r19_v5_cli_has_no_author_pass_attestation_option(tmp_path: Path):
+def test_r20_v5_cli_has_no_author_pass_attestation_option(tmp_path: Path):
     module = load_module()
     argv = [
         "--private-evidence-root",
@@ -7144,7 +7144,7 @@ def test_r19_v5_cli_has_no_author_pass_attestation_option(tmp_path: Path):
         module._v5_parser().parse_args(argv)
 
 
-def test_r19_v5_packaging_consumer_revalidates_exact_source_and_jang(
+def test_r20_v5_packaging_consumer_revalidates_exact_source_and_jang(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -7226,7 +7226,7 @@ def test_r19_v5_packaging_consumer_revalidates_exact_source_and_jang(
     assert json.loads(output.read_text(encoding="utf-8")) == manifest
 
 
-def test_r19_v5_ui_attestation_binds_parent_owned_worker_pid():
+def test_r20_v5_ui_attestation_binds_parent_owned_worker_pid():
     module = load_module()
     phase = module.V5_CACHE_PHASES[0]
     binding = {

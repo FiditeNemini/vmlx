@@ -1,6 +1,14 @@
 import { useState, useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
-import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG, SliderField, DSV4_PAGED_CACHE_BLOCK_SIZE, commitActiveSettingsInput } from './SessionConfigForm'
+import {
+  SessionConfigForm,
+  SessionConfig,
+  DEFAULT_CONFIG,
+  SliderField,
+  DSV4_MAX_CACHE_BLOCKS,
+  DSV4_PAGED_CACHE_BLOCK_SIZE,
+  commitActiveSettingsInput,
+} from './SessionConfigForm'
 import { useInferenceMode } from '../layout/InferenceMode'
 import { useTranslation } from '../../i18n'
 import { applyBundleGenerationDefaultsToSessionConfig } from '../../../../shared/sessionGenerationDefaults'
@@ -249,14 +257,17 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         if (detected && detected.family !== 'unknown') {
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
-            base.dsv4PrefixCache = false
+            base.dsv4PrefixCache = true
             base.dsv4PoolQuant = typeof detected.dsv4PoolQuantDefault === 'boolean'
               ? detected.dsv4PoolQuantDefault
               : undefined
-            base.enablePrefixCache = false
+            base.enablePrefixCache = true
             base.usePagedCache = false
-            base.enableBlockDiskCache = false
+            base.enableDiskCache = false
+            base.enableBlockDiskCache = true
+            base.kvCacheQuantization = 'auto'
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
+            base.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
           } else if (detected.family === 'openpangu_v2') {
             base.enablePrefixCache = true
             base.usePagedCache = false

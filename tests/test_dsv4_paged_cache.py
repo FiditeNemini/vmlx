@@ -267,39 +267,58 @@ def test_dsv4_pool_quant_default_reads_bundle_cache_stamp(
     assert _configure_dsv4_pool_quant_default(str(tmp_path)) == "1"
 
 
-def test_dsv4_cli_cache_policy_defaults_composite_cache_off(caplog, monkeypatch):
-    """DSV4 serve defaults to full prefill until cached output is equivalent."""
+def test_dsv4_cli_cache_policy_keeps_prefix_and_independent_ram_l2_tiers():
+    """DSV4 uses native 256-token transport without forcing either tier off."""
     from vmlx_engine.cli import _apply_dsv4_cache_policy
 
-    monkeypatch.delenv("VMLX_DSV4_ENABLE_PREFIX_CACHE", raising=False)
     args = SimpleNamespace(
         enable_prefix_cache=True,
         disable_prefix_cache=False,
         use_paged_cache=True,
         paged_cache_block_size=64,
+        max_cache_blocks=1000,
+        max_cache_blocks_explicit=False,
         enable_block_disk_cache=True,
         dsv4_enable_prefix_cache=False,
     )
 
     changed = _apply_dsv4_cache_policy(args, logger=__import__("logging").getLogger("test"))
 
-    assert args.enable_prefix_cache is False
-    assert args.disable_prefix_cache is True
-    assert args.use_paged_cache is False
-    assert args.enable_block_disk_cache is False
-    assert args.paged_cache_block_size == 64
-    assert "prefix_cache=explicitly_disabled" in changed
-    assert "paged=disabled_without_prefix" in changed
-    assert "L2 disk=disabled_without_prefix" in changed
-    assert "block_size=64->256" not in changed
-    assert "arbitrary partial CSA/HCA checkpoint reuse is not yet proven" in caplog.text
+    assert args.enable_prefix_cache is True
+    assert args.disable_prefix_cache is False
+    assert args.use_paged_cache is True
+    assert args.enable_block_disk_cache is True
+    assert args.paged_cache_block_size == 256
+    assert args.max_cache_blocks == 4097
+    assert changed == ("block_size=64->256", "max_blocks=1000->4097")
 
 
-def test_dsv4_cli_cache_policy_opt_in_uses_ds4_page_sized_blocks(monkeypatch):
-    """Explicit diagnostic opt-in keeps the native 256-token composite path."""
+def test_dsv4_cli_cache_policy_preserves_explicit_max_cache_blocks():
+    """An explicit user block budget wins over the DSV4 family default."""
     from vmlx_engine.cli import _apply_dsv4_cache_policy
 
-    monkeypatch.delenv("VMLX_DSV4_ENABLE_PREFIX_CACHE", raising=False)
+    args = SimpleNamespace(
+        enable_prefix_cache=True,
+        disable_prefix_cache=False,
+        use_paged_cache=False,
+        paged_cache_block_size=256,
+        max_cache_blocks=2048,
+        max_cache_blocks_explicit=True,
+        enable_block_disk_cache=True,
+    )
+
+    changed = _apply_dsv4_cache_policy(
+        args, logger=__import__("logging").getLogger("test")
+    )
+
+    assert args.max_cache_blocks == 2048
+    assert not any(item.startswith("max_blocks=") for item in changed)
+
+
+def test_dsv4_cli_cache_policy_does_not_force_paged_ram_on():
+    """SSD-only DSV4 keeps paged RAM off while using native 256-token blocks."""
+    from vmlx_engine.cli import _apply_dsv4_cache_policy
+
     args = SimpleNamespace(
         enable_prefix_cache=True,
         disable_prefix_cache=False,
@@ -313,30 +332,40 @@ def test_dsv4_cli_cache_policy_opt_in_uses_ds4_page_sized_blocks(monkeypatch):
 
     assert args.enable_prefix_cache is True
     assert args.disable_prefix_cache is False
-    assert args.use_paged_cache is True
+    assert args.use_paged_cache is False
     assert args.enable_block_disk_cache is True
     assert args.paged_cache_block_size == 256
-    assert "paged=required_for_dsv4_composite" in changed
     assert "block_size=64->256" in changed
 
 
-def test_dsv4_cli_cache_policy_env_opt_in_remains_available(monkeypatch):
-    """Direct engine diagnostics may opt in through the documented env knob."""
-    from vmlx_engine.cli import _dsv4_prefix_cache_opt_in
+def test_dsv4_cli_cache_policy_explicit_prefix_off_disables_both_storage_tiers():
+    """Turning the owning prefix index off also disables RAM and SSD payloads."""
+    from vmlx_engine.cli import _apply_dsv4_cache_policy
 
-    monkeypatch.setenv("VMLX_DSV4_ENABLE_PREFIX_CACHE", "1")
     args = SimpleNamespace(
-        disable_prefix_cache=False,
-        dsv4_enable_prefix_cache=False,
+        enable_prefix_cache=True,
+        disable_prefix_cache=True,
+        use_paged_cache=True,
+        paged_cache_block_size=64,
+        enable_block_disk_cache=True,
     )
 
-    assert _dsv4_prefix_cache_opt_in(args) is True
+    changed = _apply_dsv4_cache_policy(
+        args, logger=__import__("logging").getLogger("test")
+    )
+
+    assert args.use_paged_cache is False
+    assert args.enable_block_disk_cache is False
+    assert args.paged_cache_block_size == 256
+    assert "block_size=64->256" in changed
+    assert "paged=disabled_without_prefix" in changed
+    assert "L2 disk=disabled_without_prefix" in changed
 
 
 def test_dsv4_runtime_policy_applies_to_bench_like_cli_args(
     tmp_path, monkeypatch, request
 ):
-    """Bench/CLI paths must share the default-off DSV4 cache boundary."""
+    """Bench/CLI paths share native DSV4 topology and preserve cache controls."""
     from vmlx_engine.cli import _apply_dsv4_runtime_policy
 
     _restore_process_env_after_test(
@@ -381,11 +410,11 @@ def test_dsv4_runtime_policy_applies_to_bench_like_cli_args(
     )
 
     assert applied is True
-    assert args.enable_prefix_cache is False
-    assert args.disable_prefix_cache is True
-    assert args.use_paged_cache is False
-    assert args.enable_block_disk_cache is False
-    assert args.paged_cache_block_size == 64
+    assert args.enable_prefix_cache is True
+    assert args.disable_prefix_cache is False
+    assert args.use_paged_cache is True
+    assert args.enable_block_disk_cache is True
+    assert args.paged_cache_block_size == 256
     assert args.kv_cache_quantization == "none"
     assert args.kv_cache_quantization_explicit is True
     assert args.max_num_seqs == 1
@@ -404,10 +433,7 @@ def test_dsv4_runtime_policy_applies_to_bench_like_cli_args(
     assert os.environ["VMLX_DISABLE_TQ_KV"] == "1"
     assert "VMLX_FORCE_TQ_AUTO" not in os.environ
     assert "continuous_batching=off->on" in changes
-    assert "prefix_cache=explicitly_disabled" in changes
-    assert "paged=disabled_without_prefix" in changes
-    assert "L2 disk=disabled_without_prefix" in changes
-    assert "block_size=64->256" not in changes
+    assert "block_size=64->256" in changes
     assert "max_num_seqs=9->1" in changes
     assert "prefill_batch_size=2048->1" in changes
     assert "completion_batch_size=99->1" in changes
@@ -421,7 +447,7 @@ def test_dsv4_runtime_policy_applies_to_bench_like_cli_args(
 
 
 def test_dsv4_runtime_policy_respects_explicit_prefix_cache_disable(monkeypatch):
-    """Explicit prefix Off wins even when the diagnostic flag is present."""
+    """Explicit prefix Off wins and disables both DSV4 storage tiers."""
     from vmlx_engine.cli import _apply_dsv4_runtime_policy
 
     args = SimpleNamespace(
@@ -459,11 +485,10 @@ def test_dsv4_runtime_policy_respects_explicit_prefix_cache_disable(monkeypatch)
     assert args.disable_prefix_cache is True
     assert args.use_paged_cache is False
     assert args.enable_block_disk_cache is False
-    assert args.paged_cache_block_size == 64
-    assert "prefix_cache=explicitly_disabled" in changes
+    assert args.paged_cache_block_size == 256
     assert "paged=disabled_without_prefix" in changes
     assert "L2 disk=disabled_without_prefix" in changes
-    assert "block_size=64->256" not in changes
+    assert "block_size=64->256" in changes
 
 
 def test_panel_suppresses_generic_kv_quantization_controls_for_dsv4():
@@ -1300,25 +1325,23 @@ def test_dsv4_pool_quant_appends_only_new_pool_rows(monkeypatch):
         return original_quant(pool, *args, **kwargs)
 
     monkeypatch.setattr(pq, "_quant_pool", recording_quant)
-    # The current codec keeps a bounded BF16 hot tier before promoting it to
-    # quantized segments. Lower only that threshold so this focused test
-    # exercises the quantized append path without allocating a multi-MB pool.
+    # Lower the small-pool BF16 threshold so this focused test exercises the
+    # quantized append path without allocating a multi-MB pool.
     monkeypatch.setattr(pq, "_POOL_BF16_MAX_BYTES", 64)
 
     cache = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
     first = mx.ones((1, 3, 16), dtype=mx.bfloat16)
     second = mx.ones((1, 1, 16), dtype=mx.bfloat16) * 2
 
-    pool_a = cache.update_pool(first, "compressor_state")
-    pool_b = cache.update_pool(second, "compressor_state")
-    mx.eval(pool_a, pool_b)
+    pool_a = cache.update_pool_view(first, "compressor_state")
+    pool_b = cache.update_pool_view(second, "compressor_state")
 
     assert tuple(pool_b.shape) == (1, 4, 16)
     assert quant_shapes == [(1, 3, 16), (1, 1, 16)]
 
 
-def test_dsv4_pool_quant_reuses_materialized_pool_between_appends(monkeypatch):
-    """Pool-on DSV4 must not dequant/concat the full historical pool per read."""
+def test_dsv4_pool_quant_uses_tiled_view_without_retained_full_bf16(monkeypatch):
+    """Pool-on DSV4 retains q8 while attention reads bounded BF16 tiles."""
     import jang_tools.dsv4.pool_quant_cache as pq
     from jang_tools.dsv4.pool_quant_cache import PoolQuantizedV4Cache
 
@@ -1331,20 +1354,27 @@ def test_dsv4_pool_quant_reuses_materialized_pool_between_appends(monkeypatch):
         return original_dequant(qpool, *args, **kwargs)
 
     monkeypatch.setattr(pq, "_dequant_pool", recording_dequant)
+    monkeypatch.setattr(pq, "_POOL_BF16_MAX_BYTES", 0)
 
     cache = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
     first = mx.ones((1, 3, 16), dtype=mx.bfloat16)
     second = mx.ones((1, 1, 16), dtype=mx.bfloat16) * 2
 
-    pool_a = cache.update_pool(first, "compressor_state")
-    first_read = cache.compressor_state["pooled"]
-    second_read = cache.compressor_state["pooled"]
-    pool_b = cache.update_pool(second, "compressor_state")
-    mx.eval(pool_a, first_read, second_read, pool_b)
+    pool_a = cache.update_pool_view(first, "compressor_state")
+    pool_b = cache.update_pool_view(second, "compressor_state")
+    retained_bytes = cache.nbytes
+    tiles = list(pool_b.iter_dequantized_tiles(max_rows=2))
+    mx.eval([tile for _start, tile in tiles])
 
-    assert dequant_count == 0
+    assert tuple(pool_a.shape) == (1, 4, 16)
     assert tuple(pool_b.shape) == (1, 4, 16)
-    assert cache.nbytes >= pool_b.nbytes
+    assert [start for start, _tile in tiles] == [0, 2]
+    assert all(int(tile.shape[1]) <= 2 for _start, tile in tiles)
+    assert dequant_count > 0
+    assert cache.nbytes == retained_bytes
+    assert cache.compressor_state._pooled_bf16 is None
+    assert "_pooled_attention_view" not in vars(cache.compressor_state)
+    assert cache.nbytes < 4 * 16 * 2
 
 
 def test_dsv4_timing_probe_is_env_gated_and_covers_cache_boundaries():
@@ -1388,8 +1418,8 @@ def test_dsv4_serve_path_forces_generic_kv_quantization_off():
     assert 'os.environ["VMLX_DISABLE_TQ_KV"] = "1"' in policy_src
 
 
-def test_dsv4_cli_cache_summary_names_diagnostic_native_composite_cache():
-    """Diagnostic startup summary must not advertise generic paged KV."""
+def test_dsv4_cli_cache_summary_names_native_composite_cache():
+    """Startup summary must not advertise DSV4 as generic paged KV."""
     from types import SimpleNamespace
 
     from vmlx_engine.cli import _cache_stack_summary_lines
@@ -1398,7 +1428,7 @@ def test_dsv4_cli_cache_summary_names_diagnostic_native_composite_cache():
         SimpleNamespace(
             use_paged_cache=True,
             paged_cache_block_size=256,
-            max_cache_blocks=1000,
+            max_cache_blocks=4097,
             enable_block_disk_cache=True,
             block_disk_cache_max_gb=10,
         ),
@@ -1406,10 +1436,36 @@ def test_dsv4_cli_cache_summary_names_diagnostic_native_composite_cache():
     )
 
     joined = "\n".join(lines)
-    assert "DSV4 diagnostic native composite prefix cache" in joined
-    assert "deepseek_v4_v9" in joined
+    assert "DSV4 native composite in-memory prefix cache" in joined
+    assert "deepseek_v4_v10_delta" in joined
+    assert "max_blocks=4097" in joined
+    assert "usable_blocks=4096" in joined
+    assert "capacity=1048576 tokens" in joined
     assert "generic paged KV" in joined
     assert "Paged cache:" not in joined
+
+
+def test_dsv4_cli_disk_only_summary_reports_usable_index_capacity():
+    """Disk-only DSV4 summaries exclude the manager's reserved null block."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.cli import _cache_stack_summary_lines
+
+    lines = _cache_stack_summary_lines(
+        SimpleNamespace(
+            use_paged_cache=False,
+            paged_cache_block_size=256,
+            max_cache_blocks=4097,
+            enable_block_disk_cache=True,
+            block_disk_cache_max_gb=10,
+        ),
+        dsv4_model=True,
+    )
+
+    joined = "\n".join(lines)
+    assert "max_index_blocks=4097" in joined
+    assert "usable_blocks=4096" in joined
+    assert "indexed_capacity=1048576 tokens" in joined
 
 
 def test_dsv4_scheduler_log_names_native_composite_block_index():
@@ -1421,7 +1477,7 @@ def test_dsv4_scheduler_log_names_native_composite_block_index():
     source = inspect.getsource(Scheduler.__init__)
     assert "DSV4 native composite block index enabled" in source
     assert "not generic paged KV" in source
-    assert "deepseek_v4_v9" in source
+    assert "deepseek_v4_v10_delta" in source
     assert 'f"Paged cache enabled: block_size=' in source
 
 
@@ -2498,9 +2554,17 @@ def test_dsv4_generator_captures_prompt_snapshot_when_cache_store_enabled(monkey
 
     monkeypatch.setenv("DSV4_PROMPT_SNAPSHOT_MIN_TOKENS", "0")
 
+    class DeepseekV4Cache:
+        """Mutable production-shaped composite cache test double."""
+
+        def export_block_delta(self, start, end, **_kwargs):
+            return {"start_token": start, "end_token": end}
+
     class _Model:
         def make_cache(self):
-            return [object()]
+            # Production DSV4 cache layers are mutable Python objects and the
+            # native block-delta collector attaches transient capture state.
+            return [DeepseekV4Cache()]
 
         def __call__(self, ids, cache=None):
             return mx.array([[[0.0, 1.0, 0.0]]], dtype=mx.float32)
@@ -2511,7 +2575,11 @@ def test_dsv4_generator_captures_prompt_snapshot_when_cache_store_enabled(monkey
         calls.append("snapshot")
         return ["snapshot"]
 
-    monkeypatch.setattr(DSV4BatchGenerator, "_snapshot_dsv4_cache", staticmethod(_snapshot))
+    monkeypatch.setattr(
+        DSV4BatchGenerator,
+        "_snapshot_admissible_dsv4_cache",
+        staticmethod(_snapshot),
+    )
     gen = DSV4BatchGenerator(_Model(), capture_prompt_snapshot=True)
     gen._warmed_up = True
     gen.insert([[42, 43]], max_tokens=[2])
@@ -2683,7 +2751,15 @@ def test_dsv4_cache_hit_extends_clean_snapshot_from_uncached_tail(monkeypatch):
         "_snapshot_dsv4_cache",
         staticmethod(_snapshot),
     )
-    restored_cache = [object()]
+    # Delta transport has dedicated real-topology coverage.  This test isolates
+    # the cache-hit extension/snapshot boundary, so do not ask its minimal fake
+    # cache layer to manufacture a native rotating anchor.
+    monkeypatch.setattr(
+        DSV4BatchGenerator,
+        "_capture_dsv4_terminal_anchor",
+        classmethod(lambda cls, cache, target_token: None),
+    )
+    restored_cache = [SimpleNamespace()]
     gen = DSV4BatchGenerator(_Model(), capture_prompt_snapshot=True)
     gen._warmed_up = True
     gen.insert(
@@ -2700,6 +2776,47 @@ def test_dsv4_cache_hit_extends_clean_snapshot_from_uncached_tail(monkeypatch):
     assert model_calls == [[70, 71], [72]]
     assert snapshots == [restored_cache]
     assert prompt_responses[0].prompt_cache_snapshot == ["extended-snapshot"]
+
+
+def test_dsv4_exact_n_minus_one_hit_skips_zero_delta_full_snapshot(monkeypatch):
+    """An exact terminal hit must not duplicate the full composite cache."""
+    import mlx.core as mx
+
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    monkeypatch.setenv("DSV4_PROMPT_SNAPSHOT_MIN_TOKENS", "0")
+
+    model_calls = []
+
+    class _Model:
+        def __call__(self, ids, cache=None):
+            model_calls.append(ids.tolist()[0])
+            return mx.array([[[0.0, 1.0, 0.0]]], dtype=mx.float32)
+
+    def _unexpected_snapshot(_cache):
+        raise AssertionError("exact N-1 hit must not copy a zero-delta snapshot")
+
+    monkeypatch.setattr(
+        DSV4BatchGenerator,
+        "_snapshot_admissible_dsv4_cache",
+        _unexpected_snapshot,
+    )
+    restored_cache = [object()]
+    gen = DSV4BatchGenerator(_Model(), capture_prompt_snapshot=True)
+    gen._warmed_up = True
+    gen.insert(
+        [[72]],
+        max_tokens=[2],
+        caches=[restored_cache],
+        all_tokens=[[10, 11, 12, 70, 71, 72]],
+    )
+
+    prompt_responses, generation_responses = gen.next()
+
+    assert prompt_responses
+    assert not generation_responses
+    assert model_calls == [[72]]
+    assert prompt_responses[0].prompt_cache_snapshot is None
 
 
 def test_dsv4_generator_skips_prompt_snapshot_for_short_cache_store_prompt_by_default(monkeypatch):

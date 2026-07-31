@@ -6350,7 +6350,7 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         "DSV4 native composite same-process reuse is cold-prefill equivalent",
         _status(False),
         [DSV4_RESPONSES_CACHE_GATE_REL],
-        caveat="Deferred beyond v1.6.19: historical hit/latency telemetry does not prove byte-equivalent cache state or output against cold full prefill, so product sessions stay fail-closed.",
+        caveat="Deferred beyond v1.6.20: historical hit/latency telemetry does not prove byte-equivalent cache state or output against cold full prefill, so product sessions stay fail-closed.",
         details={
             "deferred_release": "v1.6.20",
             "required_proof": "same-prompt cold-vs-restored cache state and output equivalence on the exact release source",
@@ -6384,7 +6384,7 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
         _status(False),
         [DSV4_RESPONSES_RESTART_L2_GATE_REL],
-        caveat="Deferred beyond v1.6.19: historical disk-write/hit telemetry does not prove restored SWA+CSA/HCA state or output equivalence after restart.",
+        caveat="Deferred beyond v1.6.20: historical disk-write/hit telemetry does not prove restored SWA+CSA/HCA state or output equivalence after restart.",
         details={
             "deferred_release": "v1.6.20",
             "required_proof": "restart and SSD-only refault cold-vs-restored cache state and output equivalence on the exact release source",
@@ -6489,7 +6489,7 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
             else [DSV4_DEFAULT_CACHE_TOOL_LOOP_REL]
         ),
         caveat=(
-            "This proof used --disable-prefix-cache, which matches the v1.6.19 "
+            "This proof used --disable-prefix-cache, which matches the v1.6.20 "
             "fail-closed product policy and proves DSML multi-tool loop behavior "
             "separately from deferred native-cache reuse."
             if two_tool_names == ["list_directory", "write_file"]

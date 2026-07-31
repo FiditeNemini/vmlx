@@ -11,6 +11,11 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { formatJangQuantizationLabel } from '../shared/jangQuantization'
+import {
+  normalizeReasoningEffort,
+  normalizeReasoningEffortLevels,
+  type ReasoningEffort,
+} from '../shared/reasoningEffortPolicy'
 
 /**
  * Resolve an HF repo id (e.g. `mlx-community/gemma-4-e2b-it-4bit`) to the
@@ -58,7 +63,8 @@ interface ModelConfig {
   reasoningParser?: string
   supportsThinking?: boolean
   supportsInstructMode?: boolean
-  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>
+  supportedReasoningEfforts?: ReasoningEffort[]
+  defaultReasoningEffort?: ReasoningEffort
   supportsThinkingBudget?: boolean
   thinkInTemplate?: boolean
   defaultEnableThinking?: boolean
@@ -76,7 +82,8 @@ export interface DetectedConfig {
   reasoningParser?: string
   supportsThinking?: boolean
   supportsInstructMode?: boolean
-  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>
+  supportedReasoningEfforts?: ReasoningEffort[]
+  defaultReasoningEffort?: ReasoningEffort
   supportsThinkingBudget?: boolean
   thinkInTemplate?: boolean
   defaultEnableThinking?: boolean
@@ -167,9 +174,6 @@ registerFamily('deepseek-v4', {
   toolParser: 'dsml',
   reasoningParser: 'deepseek_r1',
   supportsThinking: true,
-  supportsInstructMode: true,
-  supportedReasoningEfforts: ['high', 'max'],
-  defaultEnableThinking: true,
   enableAutoToolChoice: true,
   description: 'DeepSeek V4 Flash',
   priority: 4,
@@ -590,6 +594,9 @@ function readJangDefaultEnableThinking(jangCfg: any): boolean | undefined {
   if (reasoning && typeof reasoning === 'object') {
     const value = reasoning.default_enabled
     if (typeof value === 'boolean') return value
+    const defaultMode = String(reasoning.default_mode || '').trim().toLowerCase()
+    if (['thinking', 'reasoning', 'think', 'on', 'true'].includes(defaultMode)) return true
+    if (['chat', 'direct', 'instruct', 'off', 'false'].includes(defaultMode)) return false
   }
   return undefined
 }
@@ -612,6 +619,8 @@ function readJangChatMetadata(
       next.supportsThinking = false
       next.thinkInTemplate = false
       next.defaultEnableThinking = false
+      delete next.supportedReasoningEfforts
+      delete next.defaultReasoningEffort
     } else if (reasoning.supported === true) {
       next.supportsThinking = true
       if (typeof reasoning.parser === 'string') {
@@ -631,6 +640,29 @@ function readJangChatMetadata(
         // older capabilities stamp. Preserve Auto reasoning in the UI by
         // deriving the same template ownership before the capabilities guard.
         next.thinkInTemplate = true
+      }
+
+      const modes = Array.isArray(reasoning.modes)
+        ? reasoning.modes.map((mode: unknown) => String(mode || '').trim().toLowerCase())
+        : undefined
+      if (modes) {
+        next.supportsInstructMode = modes.some((mode: string) =>
+          ['chat', 'direct', 'instruct', 'off'].includes(mode),
+        )
+      }
+
+      const effortLevels = normalizeReasoningEffortLevels(reasoning.reasoning_effort_levels)
+      if (effortLevels !== undefined) {
+        next.supportedReasoningEfforts = effortLevels
+      }
+      const defaultEffort = normalizeReasoningEffort(reasoning.default_effort)
+      if (
+        defaultEffort &&
+        (effortLevels === undefined || effortLevels.includes(defaultEffort))
+      ) {
+        next.defaultReasoningEffort = defaultEffort
+      } else if (reasoning.default_effort != null) {
+        delete next.defaultReasoningEffort
       }
     }
   }
@@ -1194,6 +1226,7 @@ function configToDetected(family: string, config: Omit<ModelConfig, 'pattern' | 
     supportsThinking: config.supportsThinking,
     supportsInstructMode: config.supportsInstructMode,
     supportedReasoningEfforts: config.supportedReasoningEfforts,
+    defaultReasoningEffort: config.defaultReasoningEffort,
     supportsThinkingBudget: config.supportsThinkingBudget,
     thinkInTemplate: config.thinkInTemplate,
     defaultEnableThinking: config.defaultEnableThinking,

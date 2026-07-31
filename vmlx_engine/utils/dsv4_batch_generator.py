@@ -43,6 +43,8 @@ DSV4_ASSISTANT_ID = 128804
 DEFAULT_DSV4_PROMPT_SNAPSHOT_MIN_TOKENS = 256
 DEFAULT_DSV4_LONG_PREFILL_THRESHOLD_TOKENS = 12_288
 DEFAULT_DSV4_LONG_PREFILL_STEP_TOKENS = 512
+DSV4_NATIVE_BLOCK_SIZE = 256
+DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS = 8
 
 
 def dsv4_prefill_step_policy(default_step: int) -> tuple[int, bool]:
@@ -133,6 +135,10 @@ class _Request:
     # that has no output-side contamination — solves the SWA wrap +
     # CSA/HCA pool-drift problem without sacrificing cache hit rate.
     prompt_snapshot: Optional[List[Any]] = None
+    # Request-local cache bypass.  The generator can be configured to capture
+    # prompt snapshots globally, but skip_prefix_cache/cache_salt must suppress
+    # the associated native block-delta work for this individual request too.
+    capture_prompt_snapshot: bool = True
 
 
 @dataclass
@@ -156,7 +162,8 @@ class DSV4BatchGenerator:
     DSV4-Flash. Single-request at a time. Idempotent stream pinning.
 
     Public API mirrors the subset that vmlx scheduler uses:
-        insert(prompts, max_tokens, caches, samplers, logits_processors, state_machines)
+        insert(prompts, max_tokens, caches, samplers, logits_processors,
+               state_machines, capture_prompt_snapshots)
         next() -> (prompt_responses, generation_responses)
         next_generated() -> generation_responses
         remove(uids, return_prompt_caches=False) -> dict | None
@@ -540,10 +547,255 @@ class DSV4BatchGenerator:
 
         return _walk(cache_list)
 
+    @staticmethod
+    def _copy_delta_tree(value: Any) -> Any:
+        """Detach cache-record leaves from the live mutable DSV4 cache."""
+        if value is None:
+            return None
+        if hasattr(value, "shape") and hasattr(value, "dtype"):
+            copied = value + mx.zeros_like(value)
+            mx.eval(copied)
+            return copied
+        if isinstance(value, tuple):
+            return tuple(DSV4BatchGenerator._copy_delta_tree(item) for item in value)
+        if isinstance(value, list):
+            return [DSV4BatchGenerator._copy_delta_tree(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: DSV4BatchGenerator._copy_delta_tree(item)
+                for key, item in value.items()
+            }
+        return value
+
+    @staticmethod
+    def _is_dsv4_composite_cache(cache: Any) -> bool:
+        try:
+            return any(
+                cls.__name__ in {"DeepseekV4Cache", "PoolQuantizedV4Cache"}
+                for cls in type(cache).__mro__
+            )
+        except Exception:
+            return False
+
+    @classmethod
+    def _reset_dsv4_block_records(
+        cls, cache_list: List[Any], start_token: int
+    ) -> None:
+        start = int(start_token)
+        if start < 0 or start % DSV4_NATIVE_BLOCK_SIZE:
+            raise ValueError(
+                "DSV4 delta capture must start at a 256-token checkpoint; "
+                f"got {start}"
+            )
+        for cache in cache_list:
+            cache._vmlx_dsv4_block_records = []
+            cache._vmlx_dsv4_delta_next_token = start
+
+    @classmethod
+    def _rotating_block_record(
+        cls,
+        cache: Any,
+        start_token: int,
+        end_token: int,
+        *,
+        force_anchor: bool,
+    ) -> tuple:
+        interval = DSV4_NATIVE_BLOCK_SIZE * DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS
+        anchored = bool(force_anchor or int(end_token) % interval == 0)
+        if not anchored:
+            return ("rotating_kv_pending", type(cache).__name__)
+        try:
+            from jang_tools.dsv4.cache_delta import canonical_rotating_window
+
+            keys, values, max_size, keep, offset, idx = (
+                canonical_rotating_window(
+                    cache,
+                    expected_offset=int(end_token),
+                )
+            )
+        except Exception as exc:
+            raise ValueError("cannot canonicalize DSV4 rotating anchor") from exc
+        return (
+            "rotating_kv",
+            keys,
+            values,
+            max_size,
+            keep,
+            offset,
+            idx,
+        )
+
+    @classmethod
+    def _capture_dsv4_block_record(
+        cls,
+        cache_list: List[Any],
+        start_token: int,
+        end_token: int,
+        *,
+        force_anchor: bool = False,
+        replace_last: bool = False,
+    ) -> None:
+        start = int(start_token)
+        end = int(end_token)
+        for cache in cache_list:
+            records = getattr(cache, "_vmlx_dsv4_block_records", None)
+            if not isinstance(records, list):
+                raise ValueError("DSV4 cache layer has no block-record collector")
+            if cls._is_dsv4_composite_cache(cache):
+                export = getattr(cache, "export_block_delta", None)
+                if not callable(export):
+                    raise ValueError(
+                        "installed jang-tools lacks DSV4 native block-delta export"
+                    )
+                record = export(
+                    start,
+                    end,
+                    block_size=DSV4_NATIVE_BLOCK_SIZE,
+                    anchor_interval_blocks=DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS,
+                    force_anchor=force_anchor,
+                )
+            else:
+                record = cls._rotating_block_record(
+                    cache,
+                    start,
+                    end,
+                    force_anchor=force_anchor,
+                )
+            if replace_last:
+                if not records:
+                    raise ValueError("cannot replace an absent DSV4 block record")
+                records[-1] = record
+            else:
+                records.append(record)
+            cache._vmlx_dsv4_delta_next_token = end
+
+    @classmethod
+    def _capture_dsv4_completed_blocks(
+        cls, cache_list: List[Any], target_token: int
+    ) -> None:
+        if not cache_list:
+            return
+        next_token = int(
+            getattr(cache_list[0], "_vmlx_dsv4_delta_next_token", 0) or 0
+        )
+        complete_end = (int(target_token) // DSV4_NATIVE_BLOCK_SIZE) * DSV4_NATIVE_BLOCK_SIZE
+        while next_token + DSV4_NATIVE_BLOCK_SIZE <= complete_end:
+            cls._capture_dsv4_block_record(
+                cache_list,
+                next_token,
+                next_token + DSV4_NATIVE_BLOCK_SIZE,
+            )
+            next_token += DSV4_NATIVE_BLOCK_SIZE
+
+    @classmethod
+    def _capture_dsv4_terminal_anchor(
+        cls, cache_list: List[Any], target_token: int
+    ) -> None:
+        if not cache_list:
+            return
+        target = int(target_token)
+        next_token = int(
+            getattr(cache_list[0], "_vmlx_dsv4_delta_next_token", 0) or 0
+        )
+        if next_token < target:
+            cls._capture_dsv4_block_record(
+                cache_list,
+                next_token,
+                target,
+                force_anchor=True,
+            )
+            return
+        if next_token != target:
+            raise ValueError(
+                "DSV4 terminal anchor is behind captured records: "
+                f"target={target} captured={next_token}"
+            )
+        for cache in cache_list:
+            records = getattr(cache, "_vmlx_dsv4_block_records", None)
+            if not records:
+                raise ValueError("DSV4 terminal anchor has no block record")
+        start = target - DSV4_NATIVE_BLOCK_SIZE
+        cls._capture_dsv4_block_record(
+            cache_list,
+            start,
+            target,
+            force_anchor=True,
+            replace_last=True,
+        )
+
+    @classmethod
+    def _dsv4_delta_transport(cls, cache_list: List[Any]) -> Optional[List[Any]]:
+        """Return a zero-copy layer transport for native block/L2 storage."""
+        transport: List[dict[str, Any]] = []
+        expected_intervals = None
+        expected_record_count = None
+        for cache in cache_list or ():
+            records = getattr(cache, "_vmlx_dsv4_block_records", None)
+            if not isinstance(records, list) or not records:
+                return None
+            if expected_record_count is None:
+                expected_record_count = len(records)
+            elif len(records) != expected_record_count:
+                return None
+            intervals = []
+            for record in records:
+                if isinstance(record, dict):
+                    intervals.append(
+                        (int(record["start_token"]), int(record["end_token"]))
+                    )
+                else:
+                    # Rotating records share the composite layers' interval
+                    # sequence; their tuple payload intentionally omits token
+                    # duplication and is paired by list position.
+                    intervals.append(None)
+            known = [item for item in intervals if item is not None]
+            if known:
+                if expected_intervals is None:
+                    expected_intervals = known
+                elif known != expected_intervals:
+                    return None
+            local = getattr(cache, "local", cache)
+            transport.append(
+                {
+                    "state": None,
+                    "class_name": type(cache).__name__,
+                    "compress_ratio": getattr(cache, "compress_ratio", None),
+                    "sliding_window": int(
+                        getattr(local, "max_size", 128) or 128
+                    ),
+                    "pool_quant": type(cache).__name__ == "PoolQuantizedV4Cache",
+                    "dsv4_block_records": tuple(records),
+                }
+            )
+        if not transport or not expected_intervals:
+            return None
+        for layer in transport:
+            layer["dsv4_record_intervals"] = tuple(expected_intervals)
+        return transport
+
     def _snapshot_admissible_dsv4_cache(
         self, cache_list: List[Any]
     ) -> Optional[List[Any]]:
         """Copy a prompt boundary only when cache budget and Metal permit it."""
+
+        delta_transport = self._dsv4_delta_transport(cache_list)
+        if delta_transport is not None:
+            # The block records were detached at their owning prefill
+            # boundaries. Returning this layer map does not copy the live
+            # composite cache or materialize attention-facing q8 pools.
+            estimated = self._estimate_dsv4_cache_nbytes(delta_transport)
+            self.prompt_snapshot_last_estimated_bytes = estimated
+            backend_limit = self.prompt_snapshot_max_bytes
+            if backend_limit is not None and estimated > backend_limit:
+                self.prompt_snapshot_oversize_skips += 1
+                logger.warning(
+                    "DSV4Gen: skipping native delta transport: estimated %.1fMB "
+                    "exceeds every enabled cache backend limit (%.1fMB)",
+                    estimated / (1024 * 1024),
+                    backend_limit / (1024 * 1024),
+                )
+                return None
+            return delta_transport
 
         estimated = self._estimate_dsv4_cache_nbytes(cache_list)
         self.prompt_snapshot_last_estimated_bytes = estimated
@@ -644,6 +896,8 @@ class DSV4BatchGenerator:
         cache: List[Any],
         *,
         realize_before_clear: bool = True,
+        capture_block_deltas: bool = False,
+        force_terminal_anchor: bool = False,
     ):
         """DSV4 prefill returning logits for the last prompt token.
 
@@ -688,8 +942,21 @@ class DSV4BatchGenerator:
                 self.prefill_step_size,
                 cached_tokens + total,
             )
-        for off in range(0, total, step):
-            chunk = all_ids[:, off:min(off + step, total)]
+        if capture_block_deltas:
+            self._reset_dsv4_block_records(cache, cached_tokens)
+        off = 0
+        while off < total:
+            end_off = min(off + step, total)
+            if capture_block_deltas:
+                absolute_start = cached_tokens + off
+                anchor_interval = (
+                    DSV4_NATIVE_BLOCK_SIZE * DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS
+                )
+                next_anchor = (
+                    (absolute_start // anchor_interval) + 1
+                ) * anchor_interval
+                end_off = min(end_off, next_anchor - cached_tokens)
+            chunk = all_ids[:, off:end_off]
             logits = self.model(chunk, cache=cache)
             last_logits = logits[:, -1, :]
             # Force the logits graph and cache side effects to materialize
@@ -703,6 +970,11 @@ class DSV4BatchGenerator:
                 mx.eval(last_logits)
             if hasattr(mx, "clear_cache"):
                 mx.clear_cache()
+            off = end_off
+            if capture_block_deltas:
+                self._capture_dsv4_completed_blocks(cache, cached_tokens + off)
+        if capture_block_deltas and force_terminal_anchor:
+            self._capture_dsv4_terminal_anchor(cache, cached_tokens + total)
         return last_logits
 
     # ---------- BatchGenerator API ----------
@@ -715,6 +987,7 @@ class DSV4BatchGenerator:
         samplers: Optional[List[Callable]] = None,
         logits_processors: Optional[List[List[Callable]]] = None,
         state_machines: Optional[List[Any]] = None,
+        capture_prompt_snapshots: Optional[List[bool]] = None,
     ):
         # Auto-evict any already-finished requests so the scheduler can
         # queue the next one. Without this, the scheduler keeps retrying
@@ -732,6 +1005,7 @@ class DSV4BatchGenerator:
         samplers = samplers or [None] * len(prompts)
         logits_processors = logits_processors or [None] * len(prompts)
         state_machines = state_machines or [None] * len(prompts)
+        capture_prompt_snapshots = capture_prompt_snapshots or [True] * len(prompts)
         for i, p in enumerate(prompts):
             req = _Request(
                 uid=self._uid_count,
@@ -742,6 +1016,7 @@ class DSV4BatchGenerator:
                 sampler=samplers[i],
                 logits_processors=logits_processors[i] or self.logits_processors,
                 state_machine=state_machines[i],
+                capture_prompt_snapshot=bool(capture_prompt_snapshots[i]),
             )
             if state_machines[i] is not None and hasattr(state_machines[i], "make_state"):
                 req.matcher_state = state_machines[i].make_state()
@@ -873,6 +1148,7 @@ class DSV4BatchGenerator:
                     #          decode logits).
                     should_capture_snapshot = (
                         self.capture_prompt_snapshot
+                        and r.capture_prompt_snapshot
                         and len(r.prompt_tokens) >= 2
                         and len(r.prompt_tokens) - 1 >= self.prompt_snapshot_min_tokens
                     )
@@ -882,7 +1158,12 @@ class DSV4BatchGenerator:
                         last_token = r.prompt_tokens[-1:]
                         # Phase 1
                         _t_prefill_head = time.perf_counter()
-                        _ = self._prefill_last_logits(head_tokens, r.cache)
+                        _ = self._prefill_last_logits(
+                            head_tokens,
+                            r.cache,
+                            capture_block_deltas=True,
+                            force_terminal_anchor=True,
+                        )
                         self._trace_timing(
                             "prefill_head",
                             _t_prefill_head,
@@ -922,7 +1203,11 @@ class DSV4BatchGenerator:
                             tokens=len(last_token),
                         )
                     else:
-                        if self.capture_prompt_snapshot and len(r.prompt_tokens) >= 2:
+                        if (
+                            self.capture_prompt_snapshot
+                            and r.capture_prompt_snapshot
+                            and len(r.prompt_tokens) >= 2
+                        ):
                             _t_snapshot_skip = time.perf_counter()
                             self._trace_timing(
                                 "prompt_snapshot_skipped",
@@ -1005,6 +1290,7 @@ class DSV4BatchGenerator:
                     # re-prefills the matched prefix.
                     should_capture_extension_snapshot = (
                         self.capture_prompt_snapshot
+                        and r.capture_prompt_snapshot
                         and len(r.context_tokens) >= 2
                         and len(r.context_tokens) - 1
                         >= self.prompt_snapshot_min_tokens
@@ -1017,34 +1303,46 @@ class DSV4BatchGenerator:
                             _ = self._prefill_last_logits(
                                 tail_head,
                                 r.cache,
+                                capture_block_deltas=True,
+                                force_terminal_anchor=True,
                             )
-                        try:
-                            _t_snapshot = time.perf_counter()
-                            r.prompt_snapshot = self._snapshot_admissible_dsv4_cache(
-                                r.cache
-                            )
-                            self._trace_timing(
-                                "cache_hit_extension_snapshot",
-                                _t_snapshot,
-                                r.uid,
-                                layers=len(r.prompt_snapshot or []),
-                                tail_tokens=len(tail_head),
-                            )
-                            if r.prompt_snapshot is not None:
-                                logger.info(
-                                    "DSV4Gen: captured cache-hit N-1 extension "
-                                    "snapshot (%d layers, uncached_head=%d, "
-                                    "full_N_minus_1=%d) for uid=%s",
-                                    len(r.prompt_snapshot),
-                                    len(tail_head),
-                                    len(r.context_tokens) - 1,
-                                    r.uid,
+                            try:
+                                _t_snapshot = time.perf_counter()
+                                r.prompt_snapshot = self._snapshot_admissible_dsv4_cache(
+                                    r.cache
                                 )
-                        except Exception as _snap_err:
-                            logger.warning(
-                                "DSV4Gen: cache-hit extension snapshot failed: %s",
-                                _snap_err,
-                            )
+                                self._trace_timing(
+                                    "cache_hit_extension_snapshot",
+                                    _t_snapshot,
+                                    r.uid,
+                                    layers=len(r.prompt_snapshot or []),
+                                    tail_tokens=len(tail_head),
+                                )
+                                if r.prompt_snapshot is not None:
+                                    logger.info(
+                                        "DSV4Gen: captured cache-hit N-1 extension "
+                                        "snapshot (%d layers, uncached_head=%d, "
+                                        "full_N_minus_1=%d) for uid=%s",
+                                        len(r.prompt_snapshot),
+                                        len(tail_head),
+                                        len(r.context_tokens) - 1,
+                                        r.uid,
+                                    )
+                            except Exception as _snap_err:
+                                logger.warning(
+                                    "DSV4Gen: cache-hit extension snapshot failed: %s",
+                                    _snap_err,
+                                )
+                                r.prompt_snapshot = None
+                        else:
+                            # An exact N-1 hit already owns the required prompt
+                            # boundary. Snapshotting here has no new delta to
+                            # transport, so it falls back to a full composite
+                            # cache copy that store_cache() immediately discards
+                            # as a zero-token extension. Feed only the final
+                            # prompt token and retain the existing terminal
+                            # record without allocating a hidden whole-cache
+                            # duplicate.
                             r.prompt_snapshot = None
                         last_logits = self._prefill_last_logits(
                             final_prompt_token,

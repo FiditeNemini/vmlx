@@ -175,6 +175,12 @@ class CacheBlock:
     # List of (keys, values) per layer, shape: (1, n_kv_heads, block_tokens, head_dim)
     cache_data: Optional[List[Tuple[Any, Any]]] = None
     cache_data_from_disk: bool = False
+    # True when an L2 payload is request-owned reconstruction workspace rather
+    # than an admitted persistent L1 mirror. This lets a prefix larger than
+    # the RAM slider refault completely from SSD without lying that those bytes
+    # are resident cache; reconstruction drops the payload before request refs
+    # are released.
+    cache_data_transient: bool = False
     # Resident RAM bytes currently attributed to this block's cache_data mirror
     # (0 when cache_data is None). Tracked so the manager can hold a byte ceiling
     # like the memory-aware path instead of an unbounded block count.
@@ -186,6 +192,12 @@ class CacheBlock:
     # otherwise reconstruct as None. Blocks flagged here are excluded from the
     # byte-ceiling LRU so enforce_byte_budget can't drop that guarantee.
     keep_resident: bool = False
+    # Native composite records cannot be recycled until their asynchronous L2
+    # copy is index-readable. A successful queue admission sets this marker;
+    # allocation then applies bounded backpressure instead of repeatedly
+    # serializing the same payload or discarding its only restorable copy.
+    durability_write_pending: bool = False
+    durability_retry_after: float = 0.0
 
     # Metadata
     token_count: int = 0
@@ -206,11 +218,14 @@ class CacheBlock:
         self.parent_hash = None
         self.hash_value = None
         self.cache_data_from_disk = False
+        self.cache_data_transient = False
         # Protection is scoped to the native composite payload currently held
         # by this block. Once the hash/payload is evicted, carrying the flag
         # into a later ordinary KV/TQ allocation makes that unrelated block
         # permanently ineligible for byte-budget eviction.
         self.keep_resident = False
+        self.durability_write_pending = False
+        self.durability_retry_after = 0.0
 
     def touch(self) -> None:
         """Update last access time."""
@@ -513,6 +528,13 @@ class BlockTable:
     request_id: str
     block_ids: List[int] = field(default_factory=list)
     num_tokens: int = 0
+    # Native path-dependent caches can discover a longer token prefix than
+    # they can safely restore without replay. ``num_tokens`` remains the
+    # actual checkpoint consumed by generation; these fields preserve the
+    # independently attested longest match and replay cost for telemetry.
+    matched_tokens: Optional[int] = None
+    checkpoint_tokens: Optional[int] = None
+    replayed_tokens: int = 0
 
     def add_block(self, block_id: int, num_tokens: int) -> None:
         """Add a block to the table."""
@@ -528,6 +550,9 @@ class BlockTable:
             request_id=new_request_id,
             block_ids=self.block_ids.copy(),
             num_tokens=self.num_tokens,
+            matched_tokens=self.matched_tokens,
+            checkpoint_tokens=self.checkpoint_tokens,
+            replayed_tokens=self.replayed_tokens,
         )
 
 
@@ -629,6 +654,8 @@ class PagedCacheManager:
         # ratcheting resident GPU memory upward with distinct prefixes.
         self.max_resident_bytes = max(0, int(max_resident_bytes or 0))
         self.resident_bytes = 0
+        self.transient_disk_promotions = 0
+        self.transient_disk_peak_bytes = 0
 
         # Create all blocks
         self.blocks: List[CacheBlock] = [
@@ -697,6 +724,28 @@ class PagedCacheManager:
     # Block Allocation (vLLM style)
     # =========================================================================
 
+    def _pop_recyclable_free_block_locked(self) -> Optional[CacheBlock]:
+        """Return one free block whose prior payload can be discarded safely.
+
+        Free native blocks may still own the only restorable SWA/CSA/HCA state
+        while their asynchronous L2 write is pending or rejected. Scan the
+        current free queue at most once, rotating protected entries to MRU, and
+        return ``None`` when every candidate is durability-pending. This is an
+        explicit bounded backpressure path: callers can prefill uncached work,
+        but cannot recycle path-dependent state behind a still-advertised hash.
+        The caller must hold ``self._lock``.
+        """
+        attempts = self.free_block_queue.num_free_blocks
+        for _ in range(attempts):
+            block = self.free_block_queue.popleft()
+            reusable = block.block_hash is None
+            if not reusable:
+                reusable = self._maybe_evict_cached_block(block)
+            if reusable:
+                return block
+            self.free_block_queue.append(block)
+        return None
+
     def allocate_block(self) -> Optional[CacheBlock]:
         """
         Allocate a new cache block.
@@ -709,11 +758,13 @@ class PagedCacheManager:
                 logger.warning("Out of cache blocks")
                 return None
 
-            block = self.free_block_queue.popleft()
-
-            # Evict from hash cache if needed
-            if self.enable_caching:
-                self._maybe_evict_cached_block(block)
+            block = self._pop_recyclable_free_block_locked()
+            if block is None:
+                logger.warning(
+                    "Out of recyclable cache blocks: all free candidates are "
+                    "waiting for durable L2 admission"
+                )
+                return None
 
             block.ref_count = 1
             block.touch()
@@ -744,12 +795,18 @@ class PagedCacheManager:
                     f"only {self.free_block_queue.num_free_blocks} available"
                 )
 
-            blocks = self.free_block_queue.popleft_n(num_blocks)
+            blocks = []
+            for _ in range(num_blocks):
+                block = self._pop_recyclable_free_block_locked()
+                if block is None:
+                    self.free_block_queue.append_n(blocks)
+                    raise ValueError(
+                        f"Cannot allocate {num_blocks} recyclable blocks; "
+                        "remaining free blocks are waiting for durable L2 admission"
+                    )
+                blocks.append(block)
 
             for block in blocks:
-                if self.enable_caching:
-                    self._maybe_evict_cached_block(block)
-
                 block.ref_count = 1
                 block.touch()
                 self.allocated_blocks[block.block_id] = block
@@ -758,6 +815,110 @@ class PagedCacheManager:
             self.stats.free_blocks -= num_blocks
 
             return blocks
+
+    @staticmethod
+    def _payload_requires_durable_l2(cache_data: Any) -> bool:
+        """Identify path-dependent native records that cannot be dropped early."""
+        native_tags = {
+            "deepseek_v4",
+            "deepseek_v4_pending",
+            "deepseek_v4_delta_v1",
+            "zaya_cca",
+            "rotating_kv",
+            "rotating_kv_pending",
+        }
+
+        def _contains(value: Any) -> bool:
+            if not isinstance(value, (tuple, list)):
+                return False
+            if value and isinstance(value[0], str) and value[0] in native_tags:
+                return True
+            return any(_contains(item) for item in value)
+
+        try:
+            return _contains(cache_data)
+        except Exception:
+            return False
+
+    def _persist_before_cached_block_eviction(self, block: CacheBlock) -> bool:
+        """Fence eviction against L2 admission for path-dependent state.
+
+        Ordinary payloads can be released once the disk writer accepts an
+        immutable detached copy. Native composite payloads remain resident
+        until ``has_block`` confirms the copy is index-readable. Synchronous
+        admission failure retains every payload and its hash mapping, allowing
+        a later bounded allocator scan to retry without corrupting ancestry.
+        """
+        if block.cache_data is None:
+            return True
+        disk_store = self._disk_store
+        native = bool(block.keep_resident) or self._payload_requires_durable_l2(
+            block.cache_data
+        )
+        if disk_store is None:
+            return not block.keep_resident
+
+        has_block = getattr(disk_store, "has_block", None)
+        if callable(has_block):
+            try:
+                if bool(has_block(block.block_hash)):
+                    block.keep_resident = False
+                    block.durability_write_pending = False
+                    block.durability_retry_after = 0.0
+                    return True
+            except Exception as exc:
+                logger.warning(
+                    "Unable to confirm L2 durability for cache block %s: %s",
+                    block.block_id,
+                    exc,
+                )
+
+        now = time.monotonic()
+        if (
+            native
+            and block.durability_write_pending
+            and now < block.durability_retry_after
+        ):
+            block.keep_resident = True
+            return False
+
+        try:
+            admitted = bool(
+                disk_store.write_block_async(
+                    block.block_hash,
+                    block.cache_data,
+                    block.token_count,
+                    parent_hash=block.parent_hash,
+                )
+            )
+        except Exception as exc:
+            admitted = False
+            logger.warning(
+                "L2 write admission raised while retaining cache block %s: %s",
+                block.block_id,
+                exc,
+            )
+        if not admitted:
+            if native:
+                block.keep_resident = True
+            block.durability_write_pending = False
+            block.durability_retry_after = now
+            logger.warning(
+                "L2 write admission rejected cache block %s; retaining its "
+                "RAM payload and hash ancestry",
+                block.block_id,
+            )
+            return False
+
+        if native:
+            # Admission detached an immutable writer-owned copy, but the native
+            # source remains the only readable checkpoint until publication.
+            # Retry at most once per five seconds if publication never arrives.
+            block.keep_resident = True
+            block.durability_write_pending = True
+            block.durability_retry_after = now + 5.0
+            return False
+        return True
 
     def _maybe_evict_cached_block(self, block: CacheBlock) -> bool:
         """
@@ -772,32 +933,27 @@ class PagedCacheManager:
         """
         if block.block_hash is None:
             return False
+        block_hash = block.block_hash
+        if not self._persist_before_cached_block_eviction(block):
+            return False
 
-        evicted = self.cached_block_hash_to_block.pop(block.block_hash, block.block_id)
+        # Remove the L1 mapping only after persistence is either already
+        # readable or safely queued. If this particular duplicate is no longer
+        # mapped, its local payload is stale and can still be reclaimed without
+        # disturbing another block registered under the same content hash.
+        self.cached_block_hash_to_block.pop(block_hash, block.block_id)
 
-        if evicted:
-            # Persist to disk L2 before freeing tensor memory
-            if self._disk_store is not None and block.cache_data is not None:
-                self._disk_store.write_block_async(
-                    block.block_hash,
-                    block.cache_data,
-                    block.token_count,
-                    parent_hash=block.parent_hash,
-                )
+        # Also remove from legacy hash index
+        if block.hash_value and block.hash_value in self.hash_to_block:
+            if self.hash_to_block[block.hash_value] == block.block_id:
+                del self.hash_to_block[block.hash_value]
 
-            # Also remove from legacy hash index
-            if block.hash_value and block.hash_value in self.hash_to_block:
-                if self.hash_to_block[block.hash_value] == block.block_id:
-                    del self.hash_to_block[block.hash_value]
-
-            block.reset_hash()
-            block.cache_data = None  # Free tensor memory
-            self._release_resident(block)
-            block.cache_data_from_disk = False
-            self.stats.evictions += 1
-            return True
-
-        return False
+        block.reset_hash()
+        block.cache_data = None  # Free tensor memory
+        self._release_resident(block)
+        block.cache_data_from_disk = False
+        self.stats.evictions += 1
+        return True
 
     def _note_resident(self, block: CacheBlock, nbytes: int) -> None:
         """Attribute ``nbytes`` of resident RAM to ``block``'s cache_data mirror.
@@ -833,7 +989,10 @@ class PagedCacheManager:
         with self._lock:
             block.cache_data = None
             block.cache_data_from_disk = False
+            block.cache_data_transient = False
             block.keep_resident = False
+            block.durability_write_pending = False
+            block.durability_retry_after = 0.0
             self._release_resident(block)
 
     def make_resident_payload_evictable(self, block: CacheBlock) -> None:
@@ -847,7 +1006,10 @@ class PagedCacheManager:
         """
         with self._lock:
             block.cache_data_from_disk = False
+            block.cache_data_transient = False
             block.keep_resident = False
+            block.durability_write_pending = False
+            block.durability_retry_after = 0.0
 
     @staticmethod
     def estimate_block_nbytes(cache_data: Any) -> int:
@@ -1363,14 +1525,16 @@ class PagedCacheManager:
             The promoted CacheBlock, or None if allocation failed.
         """
         resident_nbytes = self.estimate_block_nbytes(cache_data)
+        persistent_l1_admitted = not self.disk_only and not self.paged_frugal
         if self.max_resident_bytes > 0 and resident_nbytes > 0:
             # L2 prefix lookup promotes blocks one at a time. Reserve room
             # before assigning the request ref: after promotion ref_count=1,
             # so normal byte-budget eviction must (correctly) leave the block
             # alone. Without this gate a long disk prefix can promote far past
             # the configured L1 ceiling and thrash during worker reconstruction.
-            # Returning None stops the chain at the largest admitted prefix;
-            # the scheduler safely prefills the remaining prompt tail.
+            # If the persistent tier cannot admit another request-owned block,
+            # keep the L2 payload transient instead of truncating the longest
+            # match. Reconstruction releases transient bytes immediately.
             self.enforce_byte_budget(required_bytes=resident_nbytes)
             with self._lock:
                 if (
@@ -1378,39 +1542,25 @@ class PagedCacheManager:
                     or self.resident_bytes + resident_nbytes
                     > self.max_resident_bytes
                 ):
+                    persistent_l1_admitted = False
                     logger.info(
-                        "Skipping L2 block promotion: resident cache would "
-                        "exceed byte ceiling (%d + %d > %d bytes)",
+                        "Using transient L2 reconstruction payload: persistent "
+                        "RAM cache would exceed byte ceiling (%d + %d > %d bytes)",
                         self.resident_bytes,
                         resident_nbytes,
                         self.max_resident_bytes,
                     )
-                    return None
 
-        if self.free_block_queue.num_free_blocks == 0:
-            return None
-
-        block = self.free_block_queue.popleft()
-
-        # If the free block had old cached data, persist to disk before freeing RAM
-        if block.block_hash is not None:
-            self.cached_block_hash_to_block.pop(block.block_hash, block.block_id)
-            # Persist to disk L2 before discarding tensor memory
-            if self._disk_store is not None and block.cache_data is not None:
-                self._disk_store.write_block_async(
-                    block.block_hash,
-                    block.cache_data,
-                    block.token_count,
-                    parent_hash=block.parent_hash,
+        with self._lock:
+            if self.free_block_queue.num_free_blocks == 0:
+                return None
+            block = self._pop_recyclable_free_block_locked()
+            if block is None:
+                logger.warning(
+                    "Cannot promote L2 block: every free L1 slot is waiting "
+                    "for durable write admission"
                 )
-            if block.hash_value and block.hash_value in self.hash_to_block:
-                if self.hash_to_block[block.hash_value] == block.block_id:
-                    del self.hash_to_block[block.hash_value]
-            block.reset_hash()
-            block.cache_data = None
-            self._release_resident(block)
-            block.cache_data_from_disk = False
-            self.stats.evictions += 1
+                return None
 
         # Populate
         block.ref_count = 1
@@ -1418,10 +1568,17 @@ class PagedCacheManager:
         block.parent_hash = parent_hash
         block.cache_data = cache_data
         block.cache_data_from_disk = True
+        block.cache_data_transient = not persistent_l1_admitted
         block.token_count = token_count
         block.touch()
-        if self.max_resident_bytes > 0:
+        if self.max_resident_bytes > 0 or self.disk_only:
             self._note_resident(block, resident_nbytes)
+        if block.cache_data_transient:
+            self.transient_disk_promotions += 1
+            self.transient_disk_peak_bytes = max(
+                self.transient_disk_peak_bytes,
+                self.resident_bytes,
+            )
         self.allocated_blocks[block.block_id] = block
 
         # Register in hash cache
@@ -1556,7 +1713,14 @@ class PagedCacheManager:
                         self.stats.free_blocks += 1
                     released += 1
 
-            return released
+        # A just-completed request kept every one of its blocks ineligible for
+        # eviction while ref_count was positive. Enforce the configured RAM
+        # byte ceiling immediately after those refs become free; otherwise a
+        # large native DSV4 prompt can remain above the user's limit until an
+        # unrelated later request happens to store or promote another block.
+        if released and self.max_resident_bytes > 0:
+            self.enforce_byte_budget()
+        return released
 
     def add_block_to_table(
         self,
@@ -1718,10 +1882,13 @@ class PagedCacheManager:
             for _ in range(min(num_blocks, self.free_block_queue.num_free_blocks)):
                 try:
                     block = self.free_block_queue.popleft()
-                    self._maybe_evict_cached_block(block)
-                    # Put back at end (now available for allocation)
+                    was_clean = block.block_hash is None
+                    did_evict = self._maybe_evict_cached_block(block)
+                    # Put back at MRU. A durability-pending block remains in
+                    # the queue but allocator scans will skip it safely.
                     self.free_block_queue.append(block)
-                    evicted += 1
+                    if was_clean or did_evict:
+                        evicted += 1
                 except ValueError:
                     break
 
@@ -1813,6 +1980,8 @@ class PagedCacheManager:
                 "disk_misses": stats.disk_misses,
                 "cow_copies": stats.cow_copies,
                 "evictions": stats.evictions,
+                "transient_disk_promotions": self.transient_disk_promotions,
+                "transient_disk_peak_bytes": self.transient_disk_peak_bytes,
             }
 
     def reset_stats(self) -> None:

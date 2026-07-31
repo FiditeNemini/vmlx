@@ -467,6 +467,7 @@ class Scheduler:
 
         # TTFT EWMA tracking (alpha = 0.1 gives ~10-sample effective window)
         self._ewma_ttft: float = 0.0
+        self._ttft_sample_count: int = 0
         self._ttft_alpha: float = 0.1
 
         self._model_type_for_runtime = self._detect_model_type_for_runtime(model)
@@ -1003,7 +1004,7 @@ class Scheduler:
             logger.info(
                 "DSV4 DeepseekV4Cache-aware paged prefix cache enabled — "
                 "terminal blocks store full SWA+CSA/HCA composite state and "
-                "block disk L2 uses deepseek_v4_v9 nested-state serialization "
+                "block disk L2 uses deepseek_v4_v10_delta nested-state serialization "
                 "with N-1 prompt-token keys."
             )
 
@@ -1065,13 +1066,33 @@ class Scheduler:
                                 f":dsv4_pool_quant={os.environ.get('DSV4_POOL_QUANT', '')}"
                                 f":dsv4_unsafe_trim={_unsafe_trim}"
                                 f":dsv4_paged_block_size={self.config.paged_cache_block_size}"
-                                ":dsv4_cache_schema=deepseek_v4_v9"
+                                ":dsv4_cache_schema=deepseek_v4_v10_delta"
                             )
                         elif self._uses_zaya_cache:
                             zaya_scope = ":zaya_cache_schema=zaya_cca_v1"
+                        # Bind persisted block payloads to the loaded bundle,
+                        # not only its filesystem path.  Prefix-cache keys
+                        # already use this content-derived identity (config /
+                        # JANG metadata, weight artifacts, runtime schema, and
+                        # loader/cache representation); block L2 must use the
+                        # same identity so an in-place bundle replacement
+                        # cannot refault stale tensors from the old model.
+                        bundle_cache_key = compute_model_cache_key(
+                            self.model,
+                            model_path=self.config.model_path,
+                            smelt_enabled=self.config.smelt_enabled,
+                            smelt_pct=self.config.smelt_pct,
+                            tq_enabled=(
+                                self._tq_active
+                                and not self._uses_dsv4_cache
+                                and not self._uses_zaya_cache
+                            ),
+                            kv_quant_bits=self._kv_cache_bits,
+                        )
                         block_scope_key = (
                             f"{self.config.model_path}:quant={quant_tag}"
                             f":tq_native={tq_native_tag}"
+                            f":bundle={bundle_cache_key}"
                             f":paged_cache_schema={PAGED_CACHE_SCHEMA_VERSION}"
                             f":{runtime_cache_fingerprint()}"
                             f"{dsv4_scope}"
@@ -1218,7 +1239,7 @@ class Scheduler:
                     logger.info(
                         "DSV4 native composite block index enabled: "
                         "block_size=%s, max_blocks=%s "
-                        "(not generic paged KV; records deepseek_v4_v9 "
+                        "(not generic paged KV; records deepseek_v4_v10_delta "
                         "SWA+CSA/HCA state)",
                         self.config.paged_cache_block_size,
                         self.config.max_cache_blocks,
@@ -3549,6 +3570,9 @@ class Scheduler:
                 )
         request.block_table = None
         request.shared_prefix_blocks = 0
+        request._cache_matched_tokens = 0
+        request._cache_checkpoint_tokens = 0
+        request._cache_replayed_tokens = 0
 
     def _accept_paged_hit_credit(self, request: Request, accepted_tokens: int) -> None:
         """Reconcile a fetched block hit to the prefix generation really used."""
@@ -4786,6 +4810,19 @@ class Scheduler:
         class_counts: Dict[str, int] = {}
         for i, layer_cache in enumerate(raw_cache):
             try:
+                if (
+                    isinstance(layer_cache, dict)
+                    and layer_cache.get("dsv4_block_records")
+                ):
+                    # DSV4BatchGenerator already detached immutable native
+                    # pool deltas and exact SWA/buffer anchors at their true
+                    # prefill boundaries. Passing this transport through
+                    # avoids re-materializing one full composite snapshot at
+                    # terminal dispatch.
+                    extracted.append(dict(layer_cache))
+                    cls_name = str(layer_cache.get("class_name") or "")
+                    class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
+                    continue
                 cls_name = type(layer_cache).__name__
                 # CacheList (MoE models like DeepSeek V3.2, Falcon H1):
                 # wrapper with .caches attribute containing sub-caches.
@@ -5336,6 +5373,19 @@ class Scheduler:
                     # one reconstruction path avoids thread-dependent behavior.
                     request.block_table = block_table
                     request.cached_tokens = block_table.num_tokens
+                    request._cache_matched_tokens = int(
+                        block_table.matched_tokens
+                        if block_table.matched_tokens is not None
+                        else block_table.num_tokens
+                    )
+                    request._cache_checkpoint_tokens = int(
+                        block_table.checkpoint_tokens
+                        if block_table.checkpoint_tokens is not None
+                        else block_table.num_tokens
+                    )
+                    request._cache_replayed_tokens = int(
+                        block_table.replayed_tokens or 0
+                    )
                     request.shared_prefix_blocks = len(block_table.block_ids)
                     request.remaining_tokens = remaining
                     request._paged_block_table_needs_worker_reconstruct = True
@@ -5369,11 +5419,16 @@ class Scheduler:
                         else "paged"
                     )
                     logger.info(
-                        f"Request {request.request_id}: {_block_backend_label} cache hit, "
-                        f"{request.cached_tokens} tokens in "
-                        f"{request.shared_prefix_blocks} blocks, "
-                        f"{len(remaining)} remaining to process "
-                        f"(worker reconstruct pending)"
+                        "Request %s: %s cache hit, matched_tokens=%d "
+                        "checkpoint_tokens=%d replayed_tokens=%d in %d blocks, "
+                        "%d remaining to process (worker reconstruct pending)",
+                        request.request_id,
+                        _block_backend_label,
+                        request._cache_matched_tokens,
+                        request._cache_checkpoint_tokens,
+                        request._cache_replayed_tokens,
+                        request.shared_prefix_blocks,
+                        len(remaining),
                     )
             else:
                 request.remaining_tokens = request.prompt_token_ids
@@ -6274,6 +6329,15 @@ class Scheduler:
                 "prompt_tokens": _prompt_tokens,
                 "attempted_cached_tokens": _attempted_cached_tokens,
                 "cached_tokens": _accepted_cached_tokens,
+                "matched_tokens": int(
+                    getattr(request, "_cache_matched_tokens", 0) or 0
+                ),
+                "checkpoint_tokens": int(
+                    getattr(request, "_cache_checkpoint_tokens", 0) or 0
+                ),
+                "replayed_tokens": int(
+                    getattr(request, "_cache_replayed_tokens", 0) or 0
+                ),
                 "uncached_prompt_tokens": max(
                     _prompt_tokens - _accepted_cached_tokens, 0
                 ),
@@ -6680,6 +6744,16 @@ class Scheduler:
                         # target identifiers in the prompt; penalizing that
                         # entire prompt corrupts valid repeats.
                         insert_kwargs["all_tokens"] = [request.prompt_token_ids]
+                        # A request-level cache bypass must suppress DSV4's
+                        # N-1 snapshot and native block-delta capture as well
+                        # as scheduler lookup/store.  The generator otherwise
+                        # sees the globally enabled block cache and can attempt
+                        # an export for a request that explicitly opted out.
+                        insert_kwargs["capture_prompt_snapshots"] = [
+                            not bool(
+                                getattr(request, "_bypass_prefix_cache", False)
+                            )
+                        ]
                         request_processors = self._request_logits_processors(
                             request, list(request.prompt_token_ids)
                         )
@@ -6772,6 +6846,15 @@ class Scheduler:
                             == "DSV4BatchGenerator"
                         ):
                             insert_kwargs["all_tokens"] = [request.prompt_token_ids]
+                            insert_kwargs["capture_prompt_snapshots"] = [
+                                not bool(
+                                    getattr(
+                                        request,
+                                        "_bypass_prefix_cache",
+                                        False,
+                                    )
+                                )
+                            ]
                             request_processors = self._request_logits_processors(
                                 request, list(request.prompt_token_ids)
                             )
@@ -6924,6 +7007,24 @@ class Scheduler:
             )
         )
 
+    def _record_ttft_sample(self, ttft_seconds: float) -> None:
+        """Seed the TTFT EWMA from its first observation, then smooth it.
+
+        Treating the initial ``0.0`` telemetry value as a real historical
+        sample reports the first request at only ``alpha`` times its actual
+        TTFT (10% with the production alpha). The zero is an empty-state
+        sentinel, so the first real sample owns the baseline.
+        """
+        sample = float(ttft_seconds)
+        if self._ttft_sample_count == 0:
+            self._ewma_ttft = sample
+        else:
+            self._ewma_ttft = (
+                self._ttft_alpha * sample
+                + (1 - self._ttft_alpha) * self._ewma_ttft
+            )
+        self._ttft_sample_count += 1
+
     def _process_batch_responses(
         self, responses: List[Any]
     ) -> Tuple[List[RequestOutput], Set[str]]:
@@ -6954,10 +7055,7 @@ class Scheduler:
                 request.append_output_token(response.token)
                 if is_first_token and hasattr(request, "_schedule_time"):
                     ttft = time.perf_counter() - request._schedule_time
-                    self._ewma_ttft = (
-                        self._ttft_alpha * ttft
-                        + (1 - self._ttft_alpha) * self._ewma_ttft
-                    )
+                    self._record_ttft_sample(ttft)
             else:
                 continue
 
@@ -8036,16 +8134,42 @@ class Scheduler:
                 else:
                     self._materialize_deferred_prompt_cache(request_id, request)
 
-            # Always clean up paged cache tracking entries regardless of
-            # cache skip, to prevent unbounded memory growth on benchmarks.
-            # Release request refs here so completed-request blocks can enter
-            # the free LRU queue while remaining cache-resident.
-            if self.block_aware_cache is not None:
-                _entry = self.block_aware_cache._request_tables.pop(request_id, None)
-                self.block_aware_cache.paged_cache.release_request_refs(
-                    _entry.block_table if _entry else None
+            # Native DSV4 extension snapshots contain only immutable deltas
+            # beginning at the restored periodic checkpoint. Preserve the
+            # fetched table until store_cache() appends those deltas; detaching
+            # it here would make the store start at token zero and reject the
+            # first non-zero interval. Every other path retains the normal
+            # pre-store release, and the post-store finally block releases the
+            # preserved table as well.
+            _extracted_for_store = (
+                getattr(request, "_extracted_cache", None)
+                if request is not None
+                else None
+            )
+            _preserve_dsv4_extension_table = bool(
+                self._uses_dsv4_cache
+                and not _skip_cache_store
+                and getattr(request, "block_table", None) is not None
+                and isinstance(_extracted_for_store, list)
+                and _extracted_for_store
+                and all(
+                    isinstance(layer, dict)
+                    and bool(layer.get("dsv4_block_records"))
+                    for layer in _extracted_for_store
                 )
-                self.block_aware_cache.paged_cache.detach_request(request_id)
+            )
+
+            # Always clean up paged cache tracking entries unless a DSV4
+            # delta extension still owns the table for the imminent append.
+            if self.block_aware_cache is not None:
+                if not _preserve_dsv4_extension_table:
+                    _entry = self.block_aware_cache._request_tables.pop(
+                        request_id, None
+                    )
+                    self.block_aware_cache.paged_cache.release_request_refs(
+                        _entry.block_table if _entry else None
+                    )
+                    self.block_aware_cache.paged_cache.detach_request(request_id)
 
             # Hybrid SSM companion state capture.
             # MUST run BEFORE the paged cache store below, because
@@ -8991,6 +9115,31 @@ class Scheduler:
                         finally:
                             # Clear extracted cache reference to help GC
                             request._extracted_cache = None
+
+            # DSV4BatchGenerator retains terminal requests (and therefore the
+            # live native SWA/CSA/HCA cache) until remove() is called.  Do this
+            # only after every cache consumer above has finished with the
+            # response-owned snapshot/extracted state.  Deferring removal to
+            # the next insert or generator replacement shifts cache teardown
+            # onto the next request's TTFT and looks like an admission hang.
+            if (
+                request is not None
+                and self.batch_generator is not None
+                and self.batch_generator.__class__.__name__
+                == "DSV4BatchGenerator"
+            ):
+                uid = self.request_id_to_uid.get(request_id)
+                if uid is not None:
+                    try:
+                        self.batch_generator.remove([uid])
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to release finished DSV4 generator request "
+                            "%s (uid=%s): %s",
+                            request_id,
+                            uid,
+                            exc,
+                        )
 
             # H1 parity: Remove per-request stop tokens from batch generator
             if (

@@ -14398,8 +14398,15 @@ class TestTurboQuantKVTelemetry:
         from types import SimpleNamespace
         from vmlx_engine.server import _native_cache_status
 
+        class _PoolCache:
+            compress_ratio = 4
+            local = SimpleNamespace(max_size=128)
+
+        _PoolCache.__name__ = "PoolQuantizedV4Cache"
+
         scheduler = SimpleNamespace(
             _uses_dsv4_cache=True,
+            model=SimpleNamespace(make_cache=lambda: [_PoolCache()]),
             block_aware_cache=object(),
             paged_cache_manager=SimpleNamespace(_disk_store=object()),
         )
@@ -14408,15 +14415,52 @@ class TestTurboQuantKVTelemetry:
         status = _native_cache_status(scheduler)
 
         assert status["family"] == "deepseek_v4"
-        assert status["schema"] == "deepseek_v4_v9"
+        assert status["schema"] == "deepseek_v4_v10_delta"
         assert status["cache_type"] == "native_composite"
         assert "swa_local" in status["components"]
         assert "csa_compressed_pool" in status["components"]
         assert "hca_compressed_pool" in status["components"]
         assert status["generic_turboquant_kv"]["enabled"] is False
         assert status["pool_quant"]["enabled"] is True
+        assert status["pool_quant"]["requested"] is True
+        assert status["pool_quant"]["observed"] is True
+        assert status["pool_quant"]["matches_request"] is True
         assert status["paged"] is True
         assert status["block_disk_l2"] is True
+
+    @pytest.mark.parametrize("requested", [False, True])
+    def test_native_cache_status_rejects_mixed_dsv4_pool_quant_layout(
+        self, monkeypatch, requested
+    ):
+        from types import SimpleNamespace
+        from vmlx_engine.server import _native_cache_status
+
+        class _PoolCache:
+            compress_ratio = 4
+            local = SimpleNamespace(max_size=128)
+
+        class _DeepCache:
+            compress_ratio = 128
+            local = SimpleNamespace(max_size=128)
+
+        _PoolCache.__name__ = "PoolQuantizedV4Cache"
+        _DeepCache.__name__ = "DeepseekV4Cache"
+
+        scheduler = SimpleNamespace(
+            _uses_dsv4_cache=True,
+            model=SimpleNamespace(make_cache=lambda: [_PoolCache(), _DeepCache()]),
+            block_aware_cache=object(),
+            paged_cache_manager=SimpleNamespace(_disk_store=object()),
+        )
+        monkeypatch.setenv("DSV4_POOL_QUANT", "1" if requested else "0")
+
+        status = _native_cache_status(scheduler)
+
+        assert status["pool_quant"]["requested"] is requested
+        assert status["pool_quant"]["enabled"] is False
+        assert status["pool_quant"]["observed"] is None
+        assert status["pool_quant"]["matches_request"] is False
+        assert "mixed DSV4 compressed cache classes" in status["pool_quant"]["error"]
 
     def test_native_cache_status_reports_minimax_m3_msa_cache(self):
         from types import SimpleNamespace

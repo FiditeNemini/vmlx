@@ -804,11 +804,13 @@ def check_and_inject_fallback_tools(
 
         if normalized_tool == "run_command" and normalized_param == "command":
             direct_patterns = (
+                # Electron's default proof prompt says "Use this command:".
+                r'\buse\s+(?:this\s+)?(?:exact\s+)?command\s*:\s*([^\n]{1,240}?)(?=\s+(?:(?:After|Then|Do\s+not|Don\x27t|Never)\b)|$)',
                 # Electron's built-in tool prompt uses this exact wording.
                 # Keep the whole unquoted shell command through the explicit
                 # follow-up boundary; the generic scalar matcher below only
                 # captured its first word (usually ``printf`` or ``test``).
-                r'\b(?:this\s+)?exact\s+command\s*:\s*([^\n]{1,240}?)(?=\s+(?:After|Then)\b|$)',
+                r'\b(?:this\s+)?exact\s+command\s*:\s*([^\n]{1,240}?)(?=\s+(?:(?:After|Then|Do\s+not|Don\x27t|Never)\b)|$)',
                 r'\brun\s+exactly:\s*`([^`\n]{1,240})`',
                 r'\brun\s+exactly:\s*([^\n]{1,240}?)(?:\s+\.\s+(?:After|Then)\b|$)',
                 r'\bto\s+run:\s*([^\n]{1,240}?)(?:\s*\.\s+(?:After|Then)\b|$)',

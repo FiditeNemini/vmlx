@@ -280,6 +280,67 @@ class TestHelperFunctions:
 
         assert server._estimate_max_prompt_tokens() == 32768
 
+    def test_estimate_max_prompt_tokens_returns_zero_without_loaded_config(
+        self, monkeypatch
+    ):
+        from vmlx_engine import server
+
+        monkeypatch.setattr(
+            server,
+            "_loaded_model_config_for_memory_projection",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            server,
+            "_metal_projection_stats",
+            lambda: (0, 8 * 1024**3),
+        )
+
+        assert server._estimate_max_prompt_tokens() == 0
+
+    def test_estimate_max_prompt_tokens_uses_native_dsv4_pool_geometry(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        from vmlx_engine import server
+
+        config = SimpleNamespace(
+            model_type="deepseek_v4",
+            architectures=["DeepseekV4ForCausalLM"],
+            num_hidden_layers=43,
+            num_attention_heads=64,
+            num_key_value_heads=1,
+            head_dim=512,
+            hidden_size=4096,
+            sliding_window=128,
+            index_head_dim=128,
+            torch_dtype="bfloat16",
+            max_position_embeddings=1_048_576,
+            compress_ratios=[0, 0]
+            + [value for _ in range(20) for value in (4, 128)]
+            + [4, 0],
+        )
+        engine = SimpleNamespace(_model=SimpleNamespace(args=config))
+        monkeypatch.setattr(server, "get_engine", lambda: engine)
+        # 60% of 20 GiB is enough for the architecture-native q8 estimate plus
+        # its attention-ready hot view at 1M tokens. Generic 43-layer full-KV
+        # geometry would still falsely cap this far below the declared limit.
+        monkeypatch.setattr(
+            server,
+            "_metal_projection_stats",
+            lambda: (0, 20 * 1024**3),
+        )
+        monkeypatch.setenv("DSV4_POOL_QUANT", "1")
+        monkeypatch.delenv("DSV4_MAX_PREFILL_TOKENS", raising=False)
+
+        # Architecture-aware admission can fit the declared context, but the
+        # independent production long-prefill guard remains authoritative.
+        assert server._estimate_max_prompt_tokens() == 32_768
+
+        monkeypatch.setenv("DSV4_MAX_PREFILL_TOKENS", "0")
+        assert server._estimate_max_prompt_tokens() == 1_048_576
+
     def test_declared_context_limit_prefers_smaller_nested_text_ceiling(self):
         from types import SimpleNamespace
         from vmlx_engine import server

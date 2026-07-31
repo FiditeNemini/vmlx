@@ -12,7 +12,7 @@ cached blocks — LRU first, disk-L2 write-through first — until under budget.
 These tests drive the accounting/eviction directly (no model needed).
 """
 
-from vmlx_engine.paged_cache import PagedCacheManager
+from vmlx_engine.paged_cache import BlockTable, PagedCacheManager
 
 
 def _cache_a_block(mgr, block, block_hash, nbytes, ref_count=0, last_access=0.0):
@@ -56,12 +56,14 @@ def test_release_resident_payload_clears_bytes_flags_and_data():
     block = mgr.blocks[1]
     _cache_a_block(mgr, block, 111, 4000)
     block.cache_data_from_disk = True
+    block.cache_data_transient = True
     block.keep_resident = True
 
     mgr.release_resident_payload(block)
 
     assert block.cache_data is None
     assert block.cache_data_from_disk is False
+    assert block.cache_data_transient is False
     assert block.keep_resident is False
     assert block.resident_bytes == 0
     assert mgr.resident_bytes == 0
@@ -73,12 +75,14 @@ def test_make_resident_payload_evictable_keeps_data_and_accounting():
     block = mgr.blocks[1]
     _cache_a_block(mgr, block, 111, 4000)
     block.cache_data_from_disk = True
+    block.cache_data_transient = False
     block.keep_resident = True
 
     mgr.make_resident_payload_evictable(block)
 
     assert block.cache_data is not None
     assert block.cache_data_from_disk is False
+    assert block.cache_data_transient is False
     assert block.keep_resident is False
     assert block.resident_bytes == 4000
     assert mgr.resident_bytes == 4000
@@ -127,6 +131,28 @@ def test_enforce_never_evicts_referenced_blocks():
     assert mgr.resident_bytes == 900  # only the free 100 reclaimed
 
 
+def test_request_ref_release_immediately_enforces_lru_byte_ceiling():
+    """Completed native blocks must rotate out of RAM without a later request."""
+    mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=500)
+    first = mgr.allocate_block()
+    second = mgr.allocate_block()
+    assert first is not None and second is not None
+    _cache_a_block(mgr, first, b"a" * 32, 400, ref_count=1, last_access=1.0)
+    _cache_a_block(mgr, second, b"b" * 32, 400, ref_count=1, last_access=2.0)
+    table = BlockTable(
+        request_id="native-complete",
+        block_ids=[first.block_id, second.block_id],
+        num_tokens=8,
+    )
+
+    assert mgr.release_request_refs(table) == 2
+
+    assert mgr.resident_bytes == 400
+    assert first.cache_data is None
+    assert second.cache_data is not None
+    assert mgr.stats.evictions == 1
+
+
 def test_enforce_noop_when_within_budget():
     mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=10_000)
     _cache_a_block(mgr, mgr.blocks[1], 111, 400)
@@ -134,8 +160,8 @@ def test_enforce_noop_when_within_budget():
     assert mgr.blocks[1].cache_data is not None
 
 
-def test_disk_promotion_reserves_budget_before_request_ref_is_pinned():
-    """A disk-prefix chain stops before active refs exceed the L1 cap."""
+def test_disk_promotion_uses_transient_payload_beyond_persistent_l1_cap():
+    """A long SSD prefix must not be truncated by the persistent RAM cap."""
 
     class _Arr:
         def __init__(self, nbytes):
@@ -151,9 +177,19 @@ def test_disk_promotion_reserves_budget_before_request_ref_is_pinned():
 
     assert first is not None
     assert first.ref_count == 1
-    assert second is None
+    assert first.cache_data_transient is False
+    assert second is not None
+    assert second.ref_count == 1
+    assert second.cache_data_transient is True
+    assert mgr.resident_bytes == 1200
+    assert sum(b.cache_data is not None for b in mgr.blocks) == 2
+    assert mgr.transient_disk_promotions == 1
+    assert mgr.transient_disk_peak_bytes == 1200
+
+    mgr.release_resident_payload(second)
+
     assert mgr.resident_bytes == 600
-    assert sum(b.cache_data is not None for b in mgr.blocks) == 1
+    assert second.cache_data is None
 
 
 def test_disk_promotion_evicts_free_lru_mirror_to_make_room():

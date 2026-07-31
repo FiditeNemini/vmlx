@@ -66,8 +66,85 @@ if [ -n "$forbidden" ]; then
   exit 1
 fi
 
+# Historical checks must describe the candidate release plus refs that are
+# actually public. `git log --all` also walks stale local branches, refs from
+# unrelated remotes, and local-only tags, so it can both misreport private
+# scratch history as published and inspect tag histories that were rewritten
+# on the public remote. Fetch origin's advertised branch/tag refs into a
+# process-private namespace, inspect those exact objects, then remove the
+# temporary refs. The object fetch is required because rewritten public tags
+# may not exist under the checkout's stale local tag names.
+public_remote=origin
+public_ref_namespace="refs/vmlx-public-hygiene/$$"
+
+cleanup_public_refs() {
+  git for-each-ref --format='%(refname)' "$public_ref_namespace" |
+    while IFS= read -r ref; do
+      git update-ref -d "$ref"
+    done
+}
+trap cleanup_public_refs EXIT
+trap 'exit 1' HUP INT TERM
+
+if ! git fetch --quiet --force --no-tags --no-write-fetch-head \
+  "$public_remote" \
+  "+refs/heads/*:$public_ref_namespace/heads/*" \
+  "+refs/tags/*:$public_ref_namespace/tags/*"; then
+  printf '%s\n' \
+    "ERROR: unable to fetch public refs from remote $public_remote." >&2
+  exit 1
+fi
+
+public_ref_commits=$(
+  git for-each-ref \
+    --format='%(objecttype) %(objectname) %(*objectname)' \
+    "$public_ref_namespace" |
+    awk '
+      $1 == "commit" {
+        print $2
+        next
+      }
+      $1 == "tag" && $3 ~ /^[0-9a-f]+$/ {
+        print $3
+      }
+    '
+)
+
+if [ -z "$public_ref_commits" ]; then
+  printf '%s\n' \
+    "ERROR: public remote $public_remote advertises no branch or commit tag refs." >&2
+  exit 1
+fi
+
+public_history_commits=$(
+  {
+    git rev-parse --verify 'HEAD^{commit}'
+    printf '%s\n' "$public_ref_commits"
+  } |
+    awk '/^[0-9a-f]+$/ {print}' |
+    sort -u
+)
+
+if [ -z "$public_history_commits" ]; then
+  printf '%s\n' 'ERROR: no candidate or public history commits were resolved.' >&2
+  exit 1
+fi
+
+for commit in $public_history_commits; do
+  if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+    printf '%s\n' \
+      "ERROR: advertised public ref object $commit does not resolve to an inspectable commit." >&2
+    exit 1
+  fi
+done
+
+public_git_log() {
+  printf '%s\n' "$public_history_commits" |
+    git log --stdin --no-renames "$@"
+}
+
 historical_forbidden=$(
-  git log --all --name-only --format= |
+  public_git_log --name-only --format= |
     awk '
       /^docs\// &&
         !/^docs\/ARCHITECTURE\.md$/ &&
@@ -154,7 +231,7 @@ if [ -n "$sensitive_paths" ]; then
 fi
 
 historical_sensitive_paths=$(
-  git log --all --name-only --format= |
+  public_git_log --name-only --format= |
     awk '
       /(^|\/)\.(pypirc|npmrc|netrc)$/ ||
       /(^|\/)\.env($|\.)/ ||
@@ -202,7 +279,7 @@ if [ -n "$private_strings" ]; then
 fi
 
 invalid_commit_emails=$(
-  git log --all --format='%ae%n%ce' |
+  public_git_log --format='%ae%n%ce' |
     awk '$0 !~ /^[^[:space:]<>@]+@[^[:space:]<>@]+$/ {print}' |
     sort -u
 )
@@ -214,7 +291,7 @@ if [ -n "$invalid_commit_emails" ]; then
 fi
 
 private_message_commits=$(
-  git log --all --format='@@%H%n%B' |
+  public_git_log --format='@@%H%n%B' |
     awk \
       -v private_host_pattern="$private_host_pattern" \
       -v private_volume_pattern="$private_volume_pattern" \

@@ -12,6 +12,7 @@ export interface ChatSettingsCompatibilityInput {
   reasoningParser?: string
   toolParser?: string
   detectedFamily?: string
+  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>
 }
 
 function basename(path?: string): string {
@@ -24,12 +25,25 @@ function samePath(a?: string, b?: string): boolean {
   return a.replace(/\/+$/, '') === b.replace(/\/+$/, '')
 }
 
-function parserUsesEffortLevels(parser?: string, detectedFamily?: string): boolean {
+function parserUsesEffortLevels(
+  parser?: string,
+  detectedFamily?: string,
+  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>,
+): boolean {
+  if (supportedReasoningEfforts !== undefined) return supportedReasoningEfforts.length > 0
   if (detectedFamily === 'hy3') return true
   return parser === 'openai_gptoss' || parser === 'mistral'
 }
 
-function parserAcceptsEffort(effort: string, parser?: string, detectedFamily?: string): boolean {
+function parserAcceptsEffort(
+  effort: string,
+  parser?: string,
+  detectedFamily?: string,
+  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>,
+): boolean {
+  if (supportedReasoningEfforts !== undefined) {
+    return supportedReasoningEfforts.includes(effort as 'low' | 'medium' | 'high' | 'max')
+  }
   if (detectedFamily === 'hy3') {
     return effort === 'low' || effort === 'high'
   }
@@ -40,7 +54,16 @@ function parserAcceptsEffort(effort: string, parser?: string, detectedFamily?: s
 }
 
 export function buildChatSettingsCompatibilityWarnings(input: ChatSettingsCompatibilityInput): string[] {
-  const { messageCount, savedChatModelPath, currentModelPath, overrides, reasoningParser, toolParser, detectedFamily } = input
+  const {
+    messageCount,
+    savedChatModelPath,
+    currentModelPath,
+    overrides,
+    reasoningParser,
+    toolParser,
+    detectedFamily,
+    supportedReasoningEfforts,
+  } = input
   if (messageCount <= 0) return []
 
   const warnings: string[] = []
@@ -60,10 +83,24 @@ export function buildChatSettingsCompatibilityWarnings(input: ChatSettingsCompat
       warnings.push(
         `Saved reasoning effort "${overrides.reasoningEffort}" cannot take effect because this model has no detected reasoning parser.`,
       )
-    } else if (!parserAcceptsEffort(overrides.reasoningEffort, reasoningParser, detectedFamily)) {
-      const modelName = detectedFamily === 'hy3' ? 'Hy3' : reasoningParser === 'mistral' ? 'Mistral' : reasoningParser
-      warnings.push(`Saved reasoning effort "${overrides.reasoningEffort}" is not supported by ${modelName}. Use Auto or High.`)
-    } else if (!parserUsesEffortLevels(reasoningParser, detectedFamily)) {
+    } else if (!parserAcceptsEffort(
+      overrides.reasoningEffort,
+      reasoningParser,
+      detectedFamily,
+      supportedReasoningEfforts,
+    )) {
+      const modelName = detectedFamily === 'deepseek-v4'
+        ? 'this DSV4 bundle'
+        : detectedFamily === 'hy3'
+          ? 'Hy3'
+          : reasoningParser === 'mistral'
+            ? 'Mistral'
+            : reasoningParser
+      const choices = supportedReasoningEfforts && supportedReasoningEfforts.length > 0
+        ? `Auto or ${supportedReasoningEfforts.map(level => level[0].toUpperCase() + level.slice(1)).join('/')}`
+        : 'Auto or High'
+      warnings.push(`Saved reasoning effort "${overrides.reasoningEffort}" is not supported by ${modelName}. Use ${choices}.`)
+    } else if (!parserUsesEffortLevels(reasoningParser, detectedFamily, supportedReasoningEfforts)) {
       warnings.push(`Saved reasoning effort "${overrides.reasoningEffort}" is not used by ${reasoningParser}. Reset the chat setting or switch to Auto.`)
     }
   }

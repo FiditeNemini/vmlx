@@ -9,8 +9,8 @@
 # had the gemma4 dir cherry-picked in at some point and we want to make
 # sure we never regress the cherry-pick on a future rebuild.
 set -euo pipefail
-R19_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-export PATH="$R19_FIXED_PATH"
+R20_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$R20_FIXED_PATH"
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH PYTHONHOME VIRTUAL_ENV
 
@@ -32,11 +32,11 @@ case "$BUNDLE_ROOT" in
 esac
 PY="$BUNDLE_ROOT/python/bin/python3"
 RELEASE_SCOPE="${VMLX_RELEASE_SCOPE:-${VMLINUX_RELEASE_SCOPE:-}}"
-NODE_BIN="${VMLX_R19_TOOL_NODE_REALPATH:-/opt/homebrew/bin/node}"
-GIT_BIN="${VMLX_R19_TOOL_GIT_REALPATH:-/usr/bin/git}"
-SHASUM_BIN="${VMLX_R19_TOOL_SHASUM_REALPATH:-/usr/bin/shasum}"
-AWK_BIN="${VMLX_R19_TOOL_AWK_REALPATH:-/usr/bin/awk}"
-FIND_BIN="${VMLX_R19_TOOL_FIND_REALPATH:-/usr/bin/find}"
+NODE_BIN="${VMLX_R20_TOOL_NODE_REALPATH:-/opt/homebrew/bin/node}"
+GIT_BIN="${VMLX_R20_TOOL_GIT_REALPATH:-/usr/bin/git}"
+SHASUM_BIN="${VMLX_R20_TOOL_SHASUM_REALPATH:-/usr/bin/shasum}"
+AWK_BIN="${VMLX_R20_TOOL_AWK_REALPATH:-/usr/bin/awk}"
+FIND_BIN="${VMLX_R20_TOOL_FIND_REALPATH:-/usr/bin/find}"
 
 if [ ! -x "$PY" ]; then
   echo "❌ bundled python missing: $PY"
@@ -81,12 +81,12 @@ print(
 )
 PYEOF
 
-assert_r19_pinned_tool() {
+assert_r20_pinned_tool() {
   local name="$1"
   local path="$2"
-  local expected_sha_var="VMLX_R19_TOOL_${name}_SHA256"
+  local expected_sha_var="VMLX_R20_TOOL_${name}_SHA256"
   local expected_sha256="${!expected_sha_var:-}"
-  if [ "$RELEASE_SCOPE" != "r19_production" ]; then
+  if [ "$RELEASE_SCOPE" != "r20_production" ]; then
     return 0
   fi
   if [ -z "$expected_sha256" ]; then
@@ -116,12 +116,12 @@ PYEOF
 # if package.json bumps but bundle-python.sh wasn't re-run, the bundled
 # vmlx_engine still reports the old version. Refuse to package the .app
 # in that case so no DMG ever ships an installer/runtime version mismatch.
-assert_r19_pinned_tool NODE "$NODE_BIN"
-assert_r19_pinned_tool GIT "$GIT_BIN"
-assert_r19_pinned_tool SHASUM "$SHASUM_BIN"
-assert_r19_pinned_tool AWK "$AWK_BIN"
-assert_r19_pinned_tool FIND "$FIND_BIN"
-assert_r19_pinned_tool NODE "$NODE_BIN"
+assert_r20_pinned_tool NODE "$NODE_BIN"
+assert_r20_pinned_tool GIT "$GIT_BIN"
+assert_r20_pinned_tool SHASUM "$SHASUM_BIN"
+assert_r20_pinned_tool AWK "$AWK_BIN"
+assert_r20_pinned_tool FIND "$FIND_BIN"
+assert_r20_pinned_tool NODE "$NODE_BIN"
 PKG_VERSION="$("$NODE_BIN" -p "require('$PANEL/package.json').version")"
 BUNDLED_VERSION="$(run_bundled_python -c 'import vmlx_engine; print(vmlx_engine.__version__)' 2>/dev/null || echo "MISSING")"
 if [ "$PKG_VERSION" != "$BUNDLED_VERSION" ]; then
@@ -311,7 +311,7 @@ if [ ! -f "$PROVENANCE_FILE" ]; then
   exit 1
 fi
 EXPECTED_MLX_WHEEL_PLATFORM="${VMLX_EXPECTED_MLX_WHEEL_PLATFORM:-${VMLINUX_EXPECTED_MLX_WHEEL_PLATFORM:-}}"
-if [ "$RELEASE_SCOPE" = "r19_production" ] && [ -z "$EXPECTED_MLX_WHEEL_PLATFORM" ]; then
+if [ "$RELEASE_SCOPE" = "r20_production" ] && [ -z "$EXPECTED_MLX_WHEEL_PLATFORM" ]; then
   echo "❌ RELEASE BLOCKED — production bundle verification requires the exact MLX wheel platform"
   exit 1
 fi

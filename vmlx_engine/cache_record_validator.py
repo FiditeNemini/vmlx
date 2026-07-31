@@ -301,7 +301,8 @@ def validate_cache_record(
             is a tuple whose first element is a tag string (``"kv"``,
             ``"quantized_kv"``, ``"turboquant_kv"``, ``"rotating_kv"``,
             ``"rotating_kv_pending"``, ``"cumulative"``,
-            ``"deepseek_v4"``, ``"deepseek_v4_pending"``, ``"cache_list"``,
+            ``"deepseek_v4"``, ``"deepseek_v4_delta_v1"``,
+            ``"deepseek_v4_pending"``, ``"cache_list"``,
             ``"zaya_cca"``, ``"minimax_m3"``, ``"no_state"``, ``"skip"``).
         expected_num_layers: If not None, ``len(cache_data)`` must match.
         source: Tag for logging (e.g. ``"L2-disk"``, ``"reconstruct"``).
@@ -612,6 +613,238 @@ def validate_cache_record(
                     )
                     if not ok:
                         return False, reason, total_bytes
+
+        elif tag == "deepseek_v4_delta_v1":
+            # (tag, record, class_name, cache_meta). Every record is one
+            # immutable <=256-token native pool delta. Exact SWA/buffer state
+            # is optional and appears only on 2K-periodic or terminal anchors.
+            if len(entry) < 4 or not isinstance(entry[1], dict):
+                return False, (
+                    f"layer {i} 'deepseek_v4_delta_v1': malformed record"
+                ), total_bytes
+            record = entry[1]
+            if record.get("schema") != "deepseek_v4_block_delta_v1":
+                return False, (
+                    f"layer {i} 'deepseek_v4_delta_v1': unsupported schema"
+                ), total_bytes
+            allowed_classes = {"DeepseekV4Cache", "PoolQuantizedV4Cache"}
+            record_class = str(record.get("class_name") or "")
+            wrapper_class = str(entry[2] or "")
+            if (
+                record_class not in allowed_classes
+                or wrapper_class != record_class
+            ):
+                return False, (
+                    f"layer {i} 'deepseek_v4_delta_v1': cache class mismatch "
+                    f"record={record_class!r} wrapper={wrapper_class!r}"
+                ), total_bytes
+            cache_meta = entry[3]
+            if not isinstance(cache_meta, dict):
+                return False, (
+                    f"layer {i} 'deepseek_v4_delta_v1': malformed wrapper metadata"
+                ), total_bytes
+            try:
+                start = int(record.get("start_token", -1))
+                end = int(record.get("end_token", -1))
+                block_size = int(record.get("block_size", 0))
+                anchor_blocks = int(record.get("anchor_interval_blocks", 0))
+                ratio = int(record.get("compress_ratio", 0))
+                sliding_window = int(record.get("sliding_window", 0))
+            except (TypeError, ValueError):
+                return False, (
+                    f"layer {i} 'deepseek_v4_delta_v1': non-integral geometry"
+                ), total_bytes
+            if (
+                start < 0
+                or end <= start
+                or block_size != 256
+                or start % block_size
+                or end - start > block_size
+                or anchor_blocks != 8
+                or ratio not in (4, 128)
+                or sliding_window <= 0
+                or sliding_window > MAX_TENSOR_DIM
+            ):
+                return False, (
+                    f"layer {i} 'deepseek_v4_delta_v1': invalid geometry "
+                    f"start={start} end={end} block={block_size} "
+                    f"anchors={anchor_blocks} ratio={ratio} "
+                    f"window={sliding_window}"
+                ), total_bytes
+            try:
+                meta_ratio = int(cache_meta.get("compress_ratio", 0))
+                meta_window = int(cache_meta.get("sliding_window", 0))
+            except (TypeError, ValueError):
+                return False, (
+                    f"layer {i} 'deepseek_v4_delta_v1': non-integral wrapper geometry"
+                ), total_bytes
+            pool_quant = cache_meta.get("pool_quant")
+            if (
+                meta_ratio != ratio
+                or meta_window != sliding_window
+                or not isinstance(pool_quant, bool)
+                or pool_quant != (record_class == "PoolQuantizedV4Cache")
+            ):
+                return False, (
+                    f"layer {i} 'deepseek_v4_delta_v1': record/wrapper metadata mismatch"
+                ), total_bytes
+
+            def _validate_pool_delta(
+                pool,
+                label,
+                *,
+                allow_none,
+                expected_start,
+                expected_end,
+            ):
+                nonlocal total_bytes
+                if not isinstance(pool, dict) or pool.get("schema") != "deepseek_v4_pool_delta_v1":
+                    return False, f"layer {i} {label}: invalid pool schema"
+                try:
+                    row_start = int(pool.get("start_row", -1))
+                    row_end = int(pool.get("end_row", -1))
+                except (TypeError, ValueError):
+                    return False, f"layer {i} {label}: non-integral row span"
+                if row_start < 0 or row_end < row_start:
+                    return False, f"layer {i} {label}: invalid row span"
+                if (row_start, row_end) != (expected_start, expected_end):
+                    return False, (
+                        f"layer {i} {label}: row span does not match token geometry "
+                        f"got={row_start}:{row_end} "
+                        f"expected={expected_start}:{expected_end}"
+                    )
+                storage = pool.get("storage")
+                if storage == "none":
+                    if not allow_none or row_start or row_end:
+                        return False, f"layer {i} {label}: invalid absent pool"
+                    return True, ""
+                if storage == "bf16":
+                    value = pool.get("value")
+                    if value is None or not hasattr(value, "shape"):
+                        return False, f"layer {i} {label}: missing BF16 rows"
+                    if len(value.shape) < 2 or int(value.shape[1]) != row_end - row_start:
+                        return False, f"layer {i} {label}: BF16 row mismatch"
+                elif storage == "q8":
+                    segments = tuple(pool.get("segments") or ())
+                    rows = 0
+                    for segment in segments:
+                        if not isinstance(segment, (tuple, list)) or len(segment) not in (6, 7):
+                            return False, f"layer {i} {label}: malformed q8 segment"
+                        q, scale, minimum, raw_shape, raw_group, raw_bits, *_ = segment
+                        try:
+                            shape = tuple(int(dim) for dim in raw_shape)
+                            group = int(raw_group)
+                            bits = int(raw_bits)
+                        except (TypeError, ValueError):
+                            return False, f"layer {i} {label}: invalid q8 metadata"
+                        if len(shape) < 2 or group <= 0 or shape[-1] % group or bits != 8:
+                            return False, f"layer {i} {label}: invalid q8 geometry"
+                        groups = shape[-1] // group
+                        if (
+                            tuple(getattr(q, "shape", ())) != (*shape[:-1], groups, group)
+                            or tuple(getattr(scale, "shape", ())) != (*shape[:-1], groups, 1)
+                            or tuple(getattr(minimum, "shape", ())) != (*shape[:-1], groups, 1)
+                            or not str(getattr(q, "dtype", "")).endswith("uint8")
+                        ):
+                            return False, f"layer {i} {label}: invalid q8 tensor shapes"
+                        rows += shape[1]
+                    if rows != row_end - row_start:
+                        return False, f"layer {i} {label}: q8 row mismatch"
+                else:
+                    return False, f"layer {i} {label}: unsupported storage {storage!r}"
+                for j, tensor in enumerate(_walk_tensors(pool)):
+                    ok, nb, reason = _validate_tensor(
+                        tensor, label=f"{label}_t{j}", layer_idx=i
+                    )
+                    if not ok:
+                        return False, reason
+                    total_bytes += nb
+                return True, ""
+
+            ok, reason = _validate_pool_delta(
+                record.get("compressor_pool"),
+                "compressor_pool",
+                allow_none=False,
+                expected_start=start // ratio,
+                expected_end=end // ratio,
+            )
+            if not ok:
+                return False, reason, total_bytes
+            ok, reason = _validate_pool_delta(
+                record.get("indexer_pool"),
+                "indexer_pool",
+                allow_none=ratio != 4,
+                expected_start=start // ratio if ratio == 4 else 0,
+                expected_end=end // ratio if ratio == 4 else 0,
+            )
+            if not ok:
+                return False, reason, total_bytes
+            anchor = record.get("anchor")
+            if anchor is not None:
+                if not isinstance(anchor, dict):
+                    return False, f"layer {i} DSV4 anchor is malformed", total_bytes
+                try:
+                    anchor_tokens = int(anchor.get("tokens", -1))
+                except (TypeError, ValueError):
+                    return False, f"layer {i} DSV4 anchor token is invalid", total_bytes
+                if anchor_tokens != end:
+                    return False, f"layer {i} DSV4 anchor boundary mismatch", total_bytes
+                periodic = anchor.get("periodic")
+                terminal = anchor.get("terminal")
+                if not isinstance(periodic, bool) or not isinstance(terminal, bool):
+                    return False, f"layer {i} DSV4 anchor kind is invalid", total_bytes
+                if not periodic and not terminal:
+                    return False, f"layer {i} DSV4 anchor has no valid kind", total_bytes
+                if periodic and end % (block_size * anchor_blocks):
+                    return False, f"layer {i} DSV4 periodic anchor is misaligned", total_bytes
+                local_state = anchor.get("local_state")
+                if (
+                    not isinstance(local_state, (tuple, list))
+                    or len(local_state) != 2
+                ):
+                    return False, f"layer {i} DSV4 anchor local state is missing", total_bytes
+                key_shape = tuple(getattr(local_state[0], "shape", ()))
+                value_shape = tuple(getattr(local_state[1], "shape", ()))
+                expected_local_rows = min(end, sliding_window)
+                if (
+                    len(key_shape) < 3
+                    or key_shape != value_shape
+                    or int(key_shape[-2]) != expected_local_rows
+                ):
+                    return False, (
+                        f"layer {i} DSV4 anchor local K/V geometry is invalid"
+                    ), total_bytes
+                local_meta = anchor.get("meta_state")
+                if (
+                    not isinstance(local_meta, (tuple, list))
+                    or len(local_meta) < 4
+                ):
+                    return False, f"layer {i} DSV4 anchor metadata is missing", total_bytes
+                try:
+                    keep, max_size, offset, idx = map(int, local_meta[:4])
+                except (TypeError, ValueError):
+                    return False, f"layer {i} DSV4 anchor metadata is invalid", total_bytes
+                if (
+                    keep < 0
+                    or keep > max_size
+                    or max_size != sliding_window
+                    or offset != end
+                    or idx != expected_local_rows
+                ):
+                    return False, f"layer {i} DSV4 anchor metadata is non-canonical", total_bytes
+                for j, tensor in enumerate(_walk_tensors(anchor)):
+                    ok, nb, reason = _validate_tensor(
+                        tensor, label=f"dsv4_anchor_t{j}", layer_idx=i
+                    )
+                    if not ok:
+                        return False, reason, total_bytes
+                    total_bytes += nb
+            if end - start < block_size and (
+                not isinstance(anchor, dict) or anchor.get("terminal") is not True
+            ):
+                return False, (
+                    f"layer {i} DSV4 partial block is not a terminal anchor"
+                ), total_bytes
 
         elif tag == "cache_list":
             # ("cache_list", [sub_entries])

@@ -243,8 +243,50 @@ def compute_model_cache_key(
             index_p = os.path.join(model_path, "model.safetensors.index.json")
             if os.path.exists(index_p):
                 with open(index_p, "rb") as _f:
-                    wsig.update(_f.read())
+                    index_bytes = _f.read()
+                wsig.update(index_bytes)
                 wsig.update(str(os.path.getsize(index_p)).encode())
+                # The index normally stays byte-identical when a conversion or
+                # download replaces shards in place. Bind the namespace to the
+                # referenced files as well, without reading multi-GB tensor
+                # payloads. Size plus ns-resolution mtime is stable across
+                # process restarts while still changing for a same-path shard
+                # rewrite; inode/ctime are intentionally excluded because a
+                # faithful copy can change them without changing the bundle.
+                try:
+                    import json as _json
+
+                    index_data = _json.loads(index_bytes)
+                    weight_map = (
+                        index_data.get("weight_map")
+                        if isinstance(index_data, dict)
+                        else None
+                    )
+                    shard_names = sorted(
+                        {
+                            str(name)
+                            for name in (weight_map or {}).values()
+                            if isinstance(name, str) and name
+                        }
+                    )
+                    for shard_name in shard_names:
+                        shard_path = os.path.join(model_path, shard_name)
+                        try:
+                            shard_stat = os.stat(shard_path)
+                            shard_identity = (
+                                f"{shard_name}:{shard_stat.st_size}:"
+                                f"{shard_stat.st_mtime_ns}"
+                            )
+                        except OSError:
+                            shard_identity = f"{shard_name}:missing"
+                        wsig.update(b"\0")
+                        wsig.update(shard_identity.encode())
+                except Exception:
+                    # The index bytes still participate in the signature. A
+                    # malformed index is rejected later by the loader; cache
+                    # identity must not turn that unrelated error into startup
+                    # failure here.
+                    pass
                 hashed = True
             else:
                 for fn in sorted(
@@ -299,7 +341,7 @@ def compute_model_cache_key(
         # keys so the last prompt token is always re-fed on prefix hits. This
         # intentionally invalidates older v2 disk blocks that were keyed by
         # the full prompt despite holding truncated cache state.
-        parts.append("dsv4_cache_schema=deepseek_v4_v9")
+        parts.append("dsv4_cache_schema=deepseek_v4_v10_delta")
 
     if not parts:
         # Defensive: fall back to identity
@@ -905,6 +947,33 @@ def _cache_data_has_dsv4(cache_data) -> bool:
     return False
 
 
+def _cache_data_has_dsv4_deltas(cache_data) -> bool:
+    """Return True for generator-captured DSV4 block-delta transports."""
+    try:
+        return bool(cache_data) and all(
+            isinstance(layer_state, dict)
+            and bool(layer_state.get("dsv4_block_records"))
+            and bool(layer_state.get("dsv4_record_intervals"))
+            for layer_state in cache_data
+        )
+    except Exception:
+        return False
+
+
+def _dsv4_delta_record_for_interval(
+    layer_state: Dict[str, Any], start_idx: int, end_idx: int
+):
+    records = tuple(layer_state.get("dsv4_block_records") or ())
+    intervals = tuple(layer_state.get("dsv4_record_intervals") or ())
+    if len(records) != len(intervals):
+        raise ValueError("DSV4 block records and interval map differ in length")
+    wanted = (int(start_idx), int(end_idx))
+    for interval, record in zip(intervals, records):
+        if tuple(map(int, interval)) == wanted:
+            return record
+    raise ValueError(f"DSV4 block transport has no interval {wanted}")
+
+
 def _block_payload_has_dsv4(cache_data) -> bool:
     """Return True for a serialized DSV4 native composite block payload.
 
@@ -916,7 +985,11 @@ def _block_payload_has_dsv4(cache_data) -> bool:
         return any(
             isinstance(entry, (tuple, list))
             and bool(entry)
-            and entry[0] in ("deepseek_v4", "deepseek_v4_pending")
+            and entry[0] in (
+                "deepseek_v4",
+                "deepseek_v4_pending",
+                "deepseek_v4_delta_v1",
+            )
             for entry in cache_data or []
         )
     except Exception:
@@ -935,6 +1008,7 @@ def _block_payload_needs_native_residency(cache_data) -> bool:
     native_tags = {
         "deepseek_v4",
         "deepseek_v4_pending",
+        "deepseek_v4_delta_v1",
         "zaya_cca",
         "rotating_kv",
         "rotating_kv_pending",
@@ -951,6 +1025,54 @@ def _block_payload_needs_native_residency(cache_data) -> bool:
         return _has_native(cache_data)
     except Exception:
         return False
+
+
+def _dsv4_delta_anchor_kind(entry) -> Optional[Tuple[bool, bool]]:
+    """Return ``(periodic, terminal)`` for one anchored DSV4 delta entry."""
+    if (
+        not isinstance(entry, (tuple, list))
+        or len(entry) < 2
+        or entry[0] != "deepseek_v4_delta_v1"
+        or not isinstance(entry[1], dict)
+    ):
+        return None
+    anchor = entry[1].get("anchor")
+    if not isinstance(anchor, dict):
+        return None
+    try:
+        if int(anchor.get("tokens", -1)) != int(entry[1].get("end_token", -2)):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return bool(anchor.get("periodic")), bool(anchor.get("terminal"))
+
+
+def _block_has_complete_dsv4_delta_anchor(
+    cache_data, *, expected_layers: Optional[int] = None, periodic_only: bool = False
+) -> bool:
+    """Validate an all-layer native DSV4 checkpoint in one block payload."""
+    entries = list(cache_data or ())
+    if expected_layers is not None and len(entries) != int(expected_layers):
+        return False
+    saw_delta = False
+    for entry in entries:
+        if not isinstance(entry, (tuple, list)) or not entry:
+            return False
+        tag = entry[0]
+        if tag == "deepseek_v4_delta_v1":
+            saw_delta = True
+            kind = _dsv4_delta_anchor_kind(entry)
+            if kind is None or (periodic_only and not kind[0]):
+                return False
+        elif tag == "rotating_kv":
+            # The two ratio-zero SWA layers use the existing exact rotating
+            # window record. Periodicity is established by the composite
+            # layer records at the same token boundary.
+            if len(entry) < 7:
+                return False
+        else:
+            return False
+    return saw_delta
 
 
 def _to_numpy_tree(obj):
@@ -1445,6 +1567,25 @@ def _numpy_block_slice(
             continue
         cls = layer_state.get("class_name", "")
 
+        if layer_state.get("dsv4_block_records"):
+            record = _dsv4_delta_record_for_interval(
+                layer_state, start_idx, end_idx
+            )
+            if isinstance(record, dict):
+                block_slices.append(
+                    (
+                        "deepseek_v4_delta_v1",
+                        record,
+                        cls,
+                        _dsv4_cache_meta(layer_state),
+                    )
+                )
+            elif isinstance(record, (tuple, list)) and record:
+                block_slices.append(tuple(record))
+            else:
+                raise ValueError("invalid DSV4 block transport record")
+            continue
+
         if _is_dsv4_cache_class(cls):
             state = layer_state.get("state")
             if is_last_block and state is not None:
@@ -1685,6 +1826,11 @@ def _block_needs_cumulative_update(cache_data) -> bool:
             has_skip = True
         elif tag == "deepseek_v4_pending":
             has_skip = True
+        elif tag == "deepseek_v4_delta_v1":
+            if _dsv4_delta_anchor_kind(entry) is None:
+                has_skip = True
+            else:
+                has_cumulative = True
         elif tag in ("cumulative", "deepseek_v4"):
             has_cumulative = True
         elif tag == "zaya_cca":
@@ -2187,6 +2333,53 @@ class BlockAwarePrefixCache:
                 best_match = None
         if cached_blocks:
             _disk_store = getattr(self.paged_cache, "_disk_store", None)
+            dsv4_delta_match = self._normalize_dsv4_delta_candidate(
+                request_id=request_id,
+                blocks=cached_blocks,
+                matched_tokens=num_cached,
+                request_tokens=tokens,
+                disk_store=_disk_store,
+            )
+            dsv4_matched_tokens: Optional[int] = None
+            dsv4_replayed_tokens = 0
+            if dsv4_delta_match is not None:
+                kept_blocks, checkpoint_tokens, dsv4_replayed_tokens = (
+                    dsv4_delta_match
+                )
+                dsv4_matched_tokens = int(num_cached)
+                if not kept_blocks or checkpoint_tokens <= 0:
+                    self.paged_cache.release_request_refs(
+                        BlockTable(
+                            request_id=request_id,
+                            block_ids=[block.block_id for block in cached_blocks],
+                            num_tokens=sum(
+                                int(getattr(block, "token_count", 0) or 0)
+                                for block in cached_blocks
+                            ),
+                        )
+                    )
+                    self._misses += 1
+                    return None, tokens
+                dropped_blocks = cached_blocks[len(kept_blocks) :]
+                if dropped_blocks:
+                    self.paged_cache.release_request_refs(
+                        BlockTable(
+                            request_id=request_id,
+                            block_ids=[block.block_id for block in dropped_blocks],
+                            num_tokens=sum(
+                                int(getattr(block, "token_count", 0) or 0)
+                                for block in dropped_blocks
+                            ),
+                        )
+                    )
+                cached_blocks = kept_blocks
+                num_cached = int(checkpoint_tokens)
+
+            # DSV4 v10 delta chains deliberately carry pending rotating-SWA
+            # markers between exact periodic anchors.  Normalize such a match
+            # to its latest safe anchor before applying the generic mixed-SWA
+            # terminal guard; non-DSV4 chains still take the unchanged guard on
+            # their original matched boundary.
             if self._rotating_l2_chain_missing_terminal_state(
                 cached_blocks,
                 target_tokens=num_cached,
@@ -2255,13 +2448,26 @@ class BlockAwarePrefixCache:
                 block_table.block_ids.append(cb.block_id)
                 block_table.num_tokens += cb.token_count
 
+            if dsv4_matched_tokens is not None:
+                block_table.matched_tokens = dsv4_matched_tokens
+                block_table.checkpoint_tokens = block_table.num_tokens
+                block_table.replayed_tokens = int(dsv4_replayed_tokens)
+
             remaining = tokens[block_table.num_tokens:]
             self._hits += 1
             self._tokens_saved += block_table.num_tokens
             self._hit_credits[request_id] = block_table.num_tokens
             logger.info(
-                f"Paged cache hit for {request_id}: "
-                f"{len(cached_blocks)} blocks, {block_table.num_tokens} tokens"
+                "Paged cache hit for %s: %d blocks, checkpoint_tokens=%d%s",
+                request_id,
+                len(cached_blocks),
+                block_table.num_tokens,
+                (
+                    f", matched_tokens={dsv4_matched_tokens}, "
+                    f"replayed_tokens={dsv4_replayed_tokens}"
+                    if dsv4_matched_tokens is not None
+                    else ""
+                ),
             )
             # fetch_cache() owns one request ref for every returned block.  The
             # scheduler releases completed hits through _request_tables before
@@ -2294,9 +2500,46 @@ class BlockAwarePrefixCache:
                 ),
             )
             _disk_store = getattr(self.paged_cache, "_disk_store", None)
+            dsv4_delta_match = self._normalize_dsv4_delta_candidate(
+                request_id=request_id,
+                blocks=matched_blocks,
+                matched_tokens=len(matched_tokens),
+                request_tokens=tokens,
+                disk_store=_disk_store,
+            )
+            dsv4_matched_tokens: Optional[int] = None
+            dsv4_replayed_tokens = 0
+            if dsv4_delta_match is not None:
+                kept_blocks, checkpoint_tokens, dsv4_replayed_tokens = (
+                    dsv4_delta_match
+                )
+                dsv4_matched_tokens = len(matched_tokens)
+                if not kept_blocks or checkpoint_tokens <= 0:
+                    self.paged_cache.release_request_refs(pinned_table)
+                    self._misses += 1
+                    return None, tokens
+                dropped_blocks = matched_blocks[len(kept_blocks) :]
+                if dropped_blocks:
+                    self.paged_cache.release_request_refs(
+                        BlockTable(
+                            request_id=request_id,
+                            block_ids=[block.block_id for block in dropped_blocks],
+                            num_tokens=sum(
+                                int(getattr(block, "token_count", 0) or 0)
+                                for block in dropped_blocks
+                            ),
+                        )
+                    )
+                matched_blocks = kept_blocks
+                pinned_table.block_ids = [block.block_id for block in kept_blocks]
+                pinned_table.num_tokens = int(checkpoint_tokens)
+                pinned_table.matched_tokens = dsv4_matched_tokens
+                pinned_table.checkpoint_tokens = int(checkpoint_tokens)
+                pinned_table.replayed_tokens = int(dsv4_replayed_tokens)
+
             if self._rotating_l2_chain_missing_terminal_state(
                 matched_blocks,
-                target_tokens=len(matched_tokens),
+                target_tokens=pinned_table.num_tokens,
                 disk_store=_disk_store,
             ):
                 self.paged_cache.release_request_refs(pinned_table)
@@ -2305,7 +2548,7 @@ class BlockAwarePrefixCache:
                     "tokens: the matched boundary has no exact RotatingKV "
                     "checkpoint.",
                     request_id,
-                    len(matched_tokens),
+                    pinned_table.num_tokens,
                 )
                 self._misses += 1
                 return None, tokens
@@ -2333,14 +2576,23 @@ class BlockAwarePrefixCache:
             # paged-cache lock, so no second increment is needed here.
             block_table = pinned_table
 
-            remaining = tokens[len(matched_tokens) :]
+            consumed_tokens = int(block_table.num_tokens)
+            remaining = tokens[consumed_tokens:]
             self._hits += 1
-            self._tokens_saved += len(matched_tokens)
-            self._hit_credits[request_id] = len(matched_tokens)
+            self._tokens_saved += consumed_tokens
+            self._hit_credits[request_id] = consumed_tokens
 
-            logger.debug(
-                f"Prefix index hit for {request_id}: "
-                f"{len(matched_tokens)} tokens matched"
+            logger.info(
+                "Prefix index hit for %s: matched_tokens=%d "
+                "checkpoint_tokens=%d replayed_tokens=%d",
+                request_id,
+                (
+                    dsv4_matched_tokens
+                    if dsv4_matched_tokens is not None
+                    else len(matched_tokens)
+                ),
+                consumed_tokens,
+                dsv4_replayed_tokens,
             )
 
             # Prefix-index hits acquire refs with increment_ref(), so they need
@@ -2372,6 +2624,112 @@ class BlockAwarePrefixCache:
                 num_tokens=len(matched_tokens),
             )
         )
+
+    def _normalize_dsv4_delta_candidate(
+        self,
+        *,
+        request_id: str,
+        blocks: List[Any],
+        matched_tokens: int,
+        request_tokens: List[int],
+        disk_store: Optional[Any],
+    ) -> Optional[Tuple[List[Any], int, int]]:
+        """Map a longest DSV4 token match to its latest safe checkpoint.
+
+        Returns ``None`` for non-delta payloads. For a native delta chain the
+        tuple is ``(kept_blocks, checkpoint_tokens, replayed_tokens)``. An
+        empty kept list means the chain is DSV4 delta data but has no safe
+        checkpoint and must be treated as a cache miss.
+
+        A request that needs at most the conventional final N-1 kickoff token
+        may restore an exact terminal anchor. Any materially changed suffix
+        must restore the latest 2K-periodic anchor and replay the already-
+        matched tail, because a prior request terminal is not an append-safe
+        block boundary.
+        """
+        boundaries: List[Tuple[int, int, bool, bool]] = []
+        cumulative = 0
+        saw_delta = False
+        expected_layers = getattr(self, "_expected_num_layers", None)
+        for index, block in enumerate(blocks or ()):
+            token_count = int(getattr(block, "token_count", 0) or 0)
+            if token_count <= 0:
+                return ([], 0, max(0, int(matched_tokens)))
+            cumulative += token_count
+            entries = list(self._iter_terminal_check_entries(block, disk_store))
+            delta_entries = [
+                entry
+                for entry in entries
+                if isinstance(entry, (tuple, list))
+                and entry
+                and entry[0] == "deepseek_v4_delta_v1"
+            ]
+            if not delta_entries:
+                if saw_delta:
+                    return ([], 0, max(0, int(matched_tokens)))
+                continue
+            saw_delta = True
+            interval_start = cumulative - token_count
+            try:
+                for entry in delta_entries:
+                    record = entry[1] if len(entry) > 1 else None
+                    if (
+                        not isinstance(record, dict)
+                        or int(record.get("start_token", -1)) != interval_start
+                        or int(record.get("end_token", -1)) != cumulative
+                    ):
+                        return ([], 0, max(0, int(matched_tokens)))
+            except (TypeError, ValueError):
+                return ([], 0, max(0, int(matched_tokens)))
+            complete = _block_has_complete_dsv4_delta_anchor(
+                entries,
+                expected_layers=expected_layers,
+            )
+            periodic = complete and _block_has_complete_dsv4_delta_anchor(
+                entries,
+                expected_layers=expected_layers,
+                periodic_only=True,
+            )
+            terminal = complete and any(
+                (_dsv4_delta_anchor_kind(entry) or (False, False))[1]
+                for entry in delta_entries
+            )
+            boundaries.append((index + 1, cumulative, periodic, terminal))
+
+        if not saw_delta:
+            return None
+
+        matched = max(0, min(int(matched_tokens), len(request_tokens)))
+        allow_terminal = len(request_tokens) - matched <= 1
+        selected: Optional[Tuple[int, int, bool, bool]] = None
+        for boundary in boundaries:
+            _, boundary_tokens, periodic, terminal = boundary
+            if boundary_tokens > matched:
+                break
+            if periodic or (allow_terminal and terminal):
+                selected = boundary
+        if selected is None:
+            logger.info(
+                "DSV4 native delta match for %s reached %d tokens but has no "
+                "safe %s anchor; prefilling cleanly",
+                request_id,
+                matched,
+                "terminal/periodic" if allow_terminal else "periodic",
+            )
+            return ([], 0, matched)
+
+        keep_count, checkpoint, _, _ = selected
+        replayed = max(0, matched - checkpoint)
+        logger.info(
+            "DSV4 native delta match for %s: matched_tokens=%d "
+            "checkpoint_tokens=%d replayed_tokens=%d anchor=%s",
+            request_id,
+            matched,
+            checkpoint,
+            replayed,
+            "terminal" if allow_terminal and checkpoint == matched else "periodic",
+        )
+        return (list(blocks[:keep_count]), checkpoint, replayed)
 
     @staticmethod
     def _iter_terminal_check_entries(block: Any, disk_store: Optional[Any] = None):
@@ -2490,6 +2848,116 @@ class BlockAwarePrefixCache:
             expected_layers=len(rotating_entries),
         )
 
+    def _settle_native_write_fence(
+        self,
+        request_id: str,
+        write_fence: Dict[str, Any],
+    ) -> None:
+        """Release native RAM holds only after post-eviction L2 retention.
+
+        DSV4 and other path-dependent native records cannot use raw index
+        readability as their durability boundary: the background writer commits
+        each row before applying the aggregate SSD budget.  Seal the request
+        fence, wait for its post-eviction terminal state, and verify every exact
+        hash under the disk store's mutation guard before releasing the only RAM
+        fallback.  Every timeout, error, or retained-hash loss fails closed by
+        preserving that fallback.
+        """
+        disk_store = write_fence.get("disk_store")
+        fence_id = write_fence.get("fence_id")
+        disk_only_fallbacks = dict(
+            write_fence.get("disk_only_fallbacks") or {}
+        )
+        native_paged_holds = dict(
+            write_fence.get("native_paged_holds") or {}
+        )
+        target_hashes = set(disk_only_fallbacks) | set(native_paged_holds)
+        durable_hashes: set = set()
+
+        sealed = False
+        if disk_store is not None and fence_id is not None:
+            try:
+                sealed = bool(
+                    disk_store.seal_write_fence(
+                        fence_id,
+                        producer_aborted=False,
+                    )
+                )
+                write_fence["seal_attempted"] = True
+                write_fence["sealed"] = sealed
+            except Exception as fence_error:
+                logger.warning(
+                    "Block disk: could not seal native write fence %s for %s: %s",
+                    fence_id,
+                    request_id,
+                    fence_error,
+                )
+
+        if sealed and target_hashes:
+            wait_for_fence_blocks = getattr(
+                disk_store,
+                "wait_for_write_fence_blocks",
+                None,
+            )
+            if callable(wait_for_fence_blocks):
+                try:
+                    durable_hashes = set(
+                        wait_for_fence_blocks(
+                            fence_id,
+                            list(target_hashes),
+                            timeout=5.0,
+                        )
+                    )
+                except Exception as wait_error:
+                    logger.warning(
+                        "Native block-disk fence wait failed for %s: %s",
+                        request_id,
+                        wait_error,
+                    )
+            else:
+                logger.warning(
+                    "Native block-disk fence wait is unavailable for %s; "
+                    "retaining RAM fallbacks",
+                    request_id,
+                )
+
+        for ready_hash in durable_hashes:
+            disk_only_fallbacks.pop(ready_hash, None)
+
+        if disk_only_fallbacks:
+            for block, fallback_payload in disk_only_fallbacks.values():
+                block.cache_data = fallback_payload
+                block.cache_data_from_disk = False
+                block.keep_resident = True
+                self.paged_cache._note_resident(
+                    block,
+                    self.paged_cache.estimate_block_nbytes(fallback_payload),
+                )
+            logger.error(
+                "Block-disk-only post-eviction fence retained %d RAM fallback "
+                "block(s); SSD publication was not durably retained",
+                len(disk_only_fallbacks),
+            )
+        elif write_fence.get("disk_only_fallbacks"):
+            logger.info(
+                "Block-disk-only post-eviction fence committed %d block(s); "
+                "persistent RAM KV payloads=0",
+                len(durable_hashes),
+            )
+
+        for block_hash, block in native_paged_holds.items():
+            if block_hash in durable_hashes:
+                self.paged_cache.make_resident_payload_evictable(block)
+        pending_native = len(native_paged_holds) - len(
+            set(native_paged_holds) & durable_hashes
+        )
+        if pending_native:
+            logger.warning(
+                "Native paged cache retained %d post-eviction-pending RAM "
+                "block(s); those records are not eligible for eviction",
+                pending_native,
+            )
+
     def store_cache(
         self,
         request_id: str,
@@ -2508,7 +2976,7 @@ class BlockAwarePrefixCache:
         write_fence: Dict[str, Any] = {}
         producer_aborted = False
         try:
-            return self._store_cache_impl(
+            result = self._store_cache_impl(
                 request_id,
                 tokens,
                 cache_data,
@@ -2517,18 +2985,26 @@ class BlockAwarePrefixCache:
                 store_cumulative_state=store_cumulative_state,
                 _write_fence=write_fence,
             )
+            self._settle_native_write_fence(request_id, write_fence)
+            return result
         except BaseException:
             producer_aborted = True
             raise
         finally:
             disk_store = write_fence.get("disk_store")
             fence_id = write_fence.get("fence_id")
-            if disk_store is not None and fence_id is not None:
+            if (
+                disk_store is not None
+                and fence_id is not None
+                and not write_fence.get("seal_attempted")
+            ):
                 try:
                     sealed = disk_store.seal_write_fence(
                         fence_id,
                         producer_aborted=producer_aborted,
                     )
+                    write_fence["seal_attempted"] = True
+                    write_fence["sealed"] = bool(sealed)
                 except Exception as fence_error:
                     sealed = False
                     logger.warning(
@@ -2593,6 +3069,9 @@ class BlockAwarePrefixCache:
             and "state" in cache_data[0]
         )
         has_dsv4_cache_data = _cache_data_has_dsv4(cache_data) if is_tensor_data else False
+        has_dsv4_delta_cache_data = (
+            _cache_data_has_dsv4_deltas(cache_data) if is_tensor_data else False
+        )
         has_zaya_cca_cache_data = (
             _cache_data_has_zaya_cca(cache_data) if is_tensor_data else False
         )
@@ -2911,7 +3390,7 @@ class BlockAwarePrefixCache:
 
         pending_disk_writes: list = []
         disk_only_fallbacks: dict = {}
-        disk_only_queued_hashes: set = set()
+        native_paged_holds: dict = {}
 
         for i in range(num_new_blocks):
             start_idx = i * self.block_size
@@ -3116,14 +3595,15 @@ class BlockAwarePrefixCache:
                         not _disk_only
                         and (
                             has_dsv4_cache_data
+                            or has_dsv4_delta_cache_data
                             or has_zaya_cca_cache_data
                             or has_rotating_kv_cache_data
                         )
                     )
                     if _disk_only:
-                        # Hold a local fallback only until the durability barrier
-                        # below confirms the SSD record is index-readable. It is
-                        # installed into the block solely if persistence fails.
+                        # Hold a local fallback until the request fence confirms
+                        # that the SSD record survived aggregate eviction and is
+                        # still readable. Install it solely if that fails.
                         disk_only_fallbacks[block_chain_hash] = (
                             block,
                             block_kv_data,
@@ -3143,10 +3623,12 @@ class BlockAwarePrefixCache:
                         block.cache_data = block_kv_data
                         block.cache_data_from_disk = False
                         # Native composite state (DSV4/ZAYA/rotating-SWA) must
-                        # survive until its async L2 write is index-readable;
-                        # flag it so the byte ceiling never evicts the RAM mirror
-                        # out from under an immediate same-process repeat.
+                        # survive until its async L2 write is post-eviction
+                        # retained; flag it so the byte ceiling never evicts the
+                        # RAM mirror out from under an immediate repeat.
                         block.keep_resident = keep_in_ram
+                        if keep_in_ram and disk_store is not None:
+                            native_paged_holds[block_chain_hash] = block
                         if self.paged_cache.max_resident_bytes > 0:
                             self.paged_cache._note_resident(
                                 block,
@@ -3164,7 +3646,7 @@ class BlockAwarePrefixCache:
                     # disk payload for every block caused unbounded cleanup
                     # growth and a live SIGKILL on a 6K tool continuation.
                     if disk_store is not None:
-                        if has_minimax_m3_cache_data:
+                        if has_minimax_m3_cache_data or has_dsv4_delta_cache_data:
                             np_block = block_kv_data
                         else:
                             np_block = _numpy_block_slice(
@@ -3231,13 +3713,12 @@ class BlockAwarePrefixCache:
                                     f"{block.block_id} ({_layer_summary}, "
                                     f"{len(block_tokens)} tokens)"
                                 )
-                                if _write_block_to_disk(
+                                _write_block_to_disk(
                                     block_chain_hash,
                                     np_block,
                                     len(block_tokens),
                                     parent_hash,
-                                ):
-                                    disk_only_queued_hashes.add(block_chain_hash)
+                                )
                             else:
                                 logger.debug(
                                     f"Block disk: queuing write for block "
@@ -3296,59 +3777,26 @@ class BlockAwarePrefixCache:
                 block_parent_hash,
             ) in pending_disk_writes:
                 try:
-                    if _write_block_to_disk(
+                    _write_block_to_disk(
                         block_hash,
                         block_data,
                         tok_count,
                         block_parent_hash,
-                    ):
-                        disk_only_queued_hashes.add(block_hash)
+                    )
                 except Exception as _wbe:
                     logger.warning(
                         f"Block disk: write_block_async failed: {_wbe}"
                     )
 
+        # The lifecycle wrapper seals the request fence after every write has
+        # been admitted, waits for post-eviction completion, and only then
+        # releases these native RAM holds.  Keeping the payload references in the
+        # fence context closes the commit-before-budget-eviction race without
+        # broadening the synchronous barrier to ordinary KV blocks.
         if _disk_only and disk_only_fallbacks:
-            wait_for_blocks = getattr(disk_store, "wait_for_blocks", None)
-            ready_hashes: set = set()
-            if callable(wait_for_blocks) and disk_only_queued_hashes:
-                try:
-                    ready_hashes = set(
-                        wait_for_blocks(list(disk_only_queued_hashes), timeout=5.0)
-                    )
-                except Exception as _wait_error:
-                    logger.warning(
-                        "Block-disk-only durability wait failed: %s",
-                        _wait_error,
-                    )
-
-            for ready_hash in ready_hashes:
-                disk_only_fallbacks.pop(ready_hash, None)
-
-            if disk_only_fallbacks:
-                # Correctness first: an uncommitted block must not be advertised
-                # as SSD-only. Retain only the failed payloads as explicit,
-                # telemetry-visible RAM fallbacks; subsequent L2 eviction/retry
-                # can make them durable. A healthy run leaves this count at zero.
-                for block, fallback_payload in disk_only_fallbacks.values():
-                    block.cache_data = fallback_payload
-                    block.cache_data_from_disk = False
-                    block.keep_resident = True
-                    self.paged_cache._note_resident(
-                        block,
-                        self.paged_cache.estimate_block_nbytes(fallback_payload),
-                    )
-                logger.error(
-                    "Block-disk-only durability barrier retained %d RAM fallback "
-                    "block(s); SSD writes were not readable within the timeout",
-                    len(disk_only_fallbacks),
-                )
-            else:
-                logger.info(
-                    "Block-disk-only durability barrier committed %d block(s); "
-                    "persistent RAM KV payloads=0",
-                    len(ready_hashes),
-                )
+            _write_fence["disk_only_fallbacks"] = disk_only_fallbacks
+        if native_paged_holds:
+            _write_fence["native_paged_holds"] = native_paged_holds
 
         # Update prefix index
         self._update_prefix_index(
@@ -3518,6 +3966,25 @@ class BlockAwarePrefixCache:
                 continue
 
             class_name = layer_state.get("class_name", "")
+
+            if layer_state.get("dsv4_block_records"):
+                record = _dsv4_delta_record_for_interval(
+                    layer_state, start_idx, end_idx
+                )
+                if isinstance(record, dict):
+                    block_slices.append(
+                        (
+                            "deepseek_v4_delta_v1",
+                            record,
+                            class_name,
+                            _dsv4_cache_meta(layer_state),
+                        )
+                    )
+                elif isinstance(record, (tuple, list)) and record:
+                    block_slices.append(tuple(record))
+                else:
+                    raise ValueError("invalid DSV4 block transport record")
+                continue
 
             if _is_dsv4_cache_class(class_name):
                 state = layer_state["state"]
@@ -4297,6 +4764,16 @@ class BlockAwarePrefixCache:
                         if _disk_data is not None:
                             block.cache_data = _disk_data
                             block.cache_data_from_disk = True
+                            block.cache_data_transient = True
+                            self.paged_cache._note_resident(
+                                block,
+                                self.paged_cache.estimate_block_nbytes(_disk_data),
+                            )
+                            self.paged_cache.transient_disk_promotions += 1
+                            self.paged_cache.transient_disk_peak_bytes = max(
+                                self.paged_cache.transient_disk_peak_bytes,
+                                self.paged_cache.resident_bytes,
+                            )
                             logger.debug(
                                 f"Block {block_id} rehydrated from L2 disk "
                                 f"(hash={block.block_hash.hex()[:12] if hasattr(block.block_hash, 'hex') else block.block_hash})"
@@ -4394,6 +4871,7 @@ class BlockAwarePrefixCache:
                 # Collect entries by type, find best cumulative entry
                 best_cumulative = None
                 best_dsv4 = None
+                dsv4_delta_entries = []
                 kv_slices_keys = []
                 kv_slices_values = []
                 rotating_entries = []
@@ -4444,6 +4922,8 @@ class BlockAwarePrefixCache:
                         best_cumulative = entry  # Last cumulative entry wins
                     elif tag == "deepseek_v4":
                         best_dsv4 = entry  # Last DSV4 composite state wins
+                    elif tag == "deepseek_v4_delta_v1":
+                        dsv4_delta_entries.append(entry)
                     elif tag == "deepseek_v4_pending":
                         pass
                     elif tag == "no_state":
@@ -4876,6 +5356,120 @@ class BlockAwarePrefixCache:
                     )
                     return None
 
+                elif dsv4_delta_entries:
+                    if len(dsv4_delta_entries) != len(all_block_data):
+                        logger.warning(
+                            "Cannot reconstruct DSV4 delta layer %s: records=%s "
+                            "blocks=%s",
+                            layer_idx,
+                            len(dsv4_delta_entries),
+                            len(all_block_data),
+                        )
+                        return None
+                    try:
+                        chain_metadata = []
+                        for entry in dsv4_delta_entries:
+                            if len(entry) < 4 or not isinstance(entry[1], dict):
+                                raise ValueError("malformed DSV4 delta wrapper")
+                            record = entry[1]
+                            wrapper_class = str(entry[2] or "")
+                            record_class = str(record.get("class_name") or "")
+                            cache_meta = entry[3]
+                            if not isinstance(cache_meta, dict):
+                                raise ValueError("malformed DSV4 cache metadata")
+                            record_ratio = int(record.get("compress_ratio", 0))
+                            record_window = int(record.get("sliding_window", 0))
+                            meta_ratio = int(cache_meta.get("compress_ratio", 0))
+                            meta_window = int(cache_meta.get("sliding_window", 0))
+                            pool_quant = cache_meta.get("pool_quant")
+                            if (
+                                wrapper_class != record_class
+                                or record_ratio != meta_ratio
+                                or record_window != meta_window
+                                or not isinstance(pool_quant, bool)
+                                or pool_quant
+                                != (wrapper_class == "PoolQuantizedV4Cache")
+                            ):
+                                raise ValueError(
+                                    "DSV4 record/wrapper metadata mismatch"
+                                )
+                            chain_metadata.append(
+                                (
+                                    wrapper_class,
+                                    record_ratio,
+                                    record_window,
+                                    pool_quant,
+                                    str(cache_meta.get("pool_storage_schema") or ""),
+                                )
+                            )
+                        if len(set(chain_metadata)) != 1:
+                            raise ValueError(
+                                "DSV4 wrapper metadata changed inside delta chain"
+                            )
+                    except (TypeError, ValueError) as exc:
+                        logger.warning(
+                            "Cannot reconstruct DSV4 delta layer %s: %s",
+                            layer_idx,
+                            exc,
+                        )
+                        return None
+                    class_names = {
+                        str(entry[2])
+                        for entry in dsv4_delta_entries
+                        if len(entry) > 2
+                    }
+                    if len(class_names) != 1:
+                        logger.warning(
+                            "Cannot reconstruct DSV4 delta layer %s: cache "
+                            "class changed inside chain: %s",
+                            layer_idx,
+                            sorted(class_names),
+                        )
+                        return None
+                    class_name = next(iter(class_names))
+                    try:
+                        from jang_tools.dsv4.mlx_model import DeepseekV4Cache
+
+                        cache_cls = DeepseekV4Cache
+                        if class_name == "PoolQuantizedV4Cache":
+                            from jang_tools.dsv4.pool_quant_cache import (
+                                PoolQuantizedV4Cache,
+                            )
+
+                            cache_cls = PoolQuantizedV4Cache
+                        elif class_name != "DeepseekV4Cache":
+                            raise ValueError(
+                                f"unsupported DSV4 delta cache class {class_name!r}"
+                            )
+                        restored = cache_cls.restore_anchor_from_deltas(
+                            [entry[1] for entry in dsv4_delta_entries],
+                            target_tokens=int(block_table.num_tokens),
+                            block_size=256,
+                            anchor_interval_blocks=8,
+                        )
+                        if (
+                            int(restored.checkpoint_tokens)
+                            != int(block_table.num_tokens)
+                            or int(restored.replayed_tokens) != 0
+                        ):
+                            raise ValueError(
+                                "DSV4 restore did not land on the selected "
+                                f"checkpoint: restored={restored.checkpoint_tokens} "
+                                f"target={block_table.num_tokens} "
+                                f"replayed={restored.replayed_tokens}"
+                            )
+                        cache = restored.cache
+                    except Exception as exc:
+                        logger.warning(
+                            "Cannot reconstruct DSV4 delta layer %s: %s",
+                            layer_idx,
+                            exc,
+                        )
+                        return None
+                    reconstructed_caches.append(cache)
+                    reconstructed_indices.add(layer_idx)
+                    cumulative_count += 1
+
                 elif best_dsv4 is not None:
                     _, state, meta, class_name, cache_meta = best_dsv4
                     try:
@@ -5273,6 +5867,9 @@ class BlockAwarePrefixCache:
                     if (
                         reconstruction_succeeded
                         and not _disk_only
+                        and not bool(
+                            getattr(block, "cache_data_transient", False)
+                        )
                         and (not _paged_frugal or keep_native)
                     ):
                         # A successful reconstruction in Paged On mode promotes

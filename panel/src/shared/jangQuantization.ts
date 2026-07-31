@@ -47,9 +47,13 @@ export function formatJangQuantizationLabel(config: {
 
   if (
     format === 'jang' ||
+    format === 'affine' ||
+    format === 'jang_affine' ||
     format === 'jjqf' ||
     format === 'mxq' ||
     weightFormat === 'jang' ||
+    weightFormat === 'affine' ||
+    weightFormat === 'jang_affine' ||
     weightFormat === 'jjqf' ||
     weightFormat === 'mxq'
   ) {

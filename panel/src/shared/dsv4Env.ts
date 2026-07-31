@@ -1,9 +1,10 @@
 /**
  * DSV4 Flash runtime env mapping.
  *
- * Product sessions fail closed for native composite prefix/paged/L2 reuse.
- * This helper therefore emits only the fixed DSV4 runtime envelope used by
- * Electron. Stale saved cache fields must not turn diagnostic reuse back on.
+ * Product sessions use the normal prefix/paged/block-disk CLI controls for
+ * native composite reuse. This helper owns only the fixed DSV4 runtime
+ * envelope and the bundle-derived pool codec; saved panel cache fields must
+ * never be translated into a second hidden cache policy.
  *
  * Knobs:
  *   - `dsv4FinalizerTokens` and `dsv4ForceDirect` are retained only for
@@ -14,9 +15,8 @@
  *     is independent of reusable prefix/paged/L2 state. Electron emits it only
  *     when the live bundle detector found an explicit boolean cache stamp;
  *     otherwise the engine loader derives the value from `jang_config.json`.
- *   - Direct engine diagnostics remain available through
- *     `--dsv4-enable-prefix-cache` or `VMLX_DSV4_ENABLE_PREFIX_CACHE=1`; those
- *     controls intentionally are not mapped from product session settings.
+ *   - `--dsv4-enable-prefix-cache` is a deprecated compatibility alias. Product
+ *     sessions intentionally use only the normal prefix/paged/block-disk flags.
  *
  * Natural model behavior wins: bundle chat/generation config plus explicit
  * per-request controls are the only model-behavior inputs.

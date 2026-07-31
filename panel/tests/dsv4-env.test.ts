@@ -12,13 +12,13 @@ describe('dsv4EnvFromConfig', () => {
     expect(dsv4EnvFromConfig({ host: 'x', port: 1 })).toEqual({})
   })
 
-  it('defaults production DSV4 runtime env to full-prefill serving', () => {
+  it('keeps product cache policy out of the DSV4 env helper', () => {
     expect(dsv4EnvFromConfig({}, { dsv4Active: true })).toEqual({
       DSV4_LONG_CTX: '1',
     })
   })
 
-  it('ignores stale product cache opt-ins and leaves an unstamped pool codec model-owned', () => {
+  it('leaves standard cache controls CLI-owned and an unstamped pool codec model-owned', () => {
     expect(dsv4EnvFromConfig({ dsv4PrefixCache: true, dsv4PoolQuant: true } as any, { dsv4Active: true })).toEqual({
       DSV4_LONG_CTX: '1',
     })
@@ -178,7 +178,7 @@ describe('dsv4EnvFromConfig wired into sessions.ts spawnEnv', () => {
 })
 
 describe('DSV4 runtime controls in SessionConfigForm', () => {
-  it('keeps the reusable-cache field off without inventing a pool-codec default', () => {
+  it('keeps the legacy cache mirror inert without inventing a pool-codec default', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const formPath = path.resolve(__dirname, '../src/renderer/src/components/sessions/SessionConfigForm.tsx')
@@ -191,13 +191,13 @@ describe('DSV4 runtime controls in SessionConfigForm', () => {
     expect(source).not.toContain('dsv4FinalizerTokens')
   })
 
-  it('renders the fail-closed DSV4 cache boundary without unusable toggles', () => {
+  it('renders standard DSV4 cache controls without legacy behavior toggles', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const formPath = path.resolve(__dirname, '../src/renderer/src/components/sessions/SessionConfigForm.tsx')
     const source = fs.readFileSync(formPath, 'utf8')
 
-    expect(source).toContain('{dsv4Active && (')
+    expect(source).toContain('const effectivePrefixCacheEnabled = config.enablePrefixCache')
     expect(source).not.toContain('DSV4 Raw Max Thinking')
     expect(source).not.toContain("onChange={v => onChange('dsv4RawMax', v)}")
     expect(source).not.toContain('DSV4 Finalizer Tokens')
@@ -214,10 +214,20 @@ describe('DSV4 runtime controls in SessionConfigForm', () => {
     expect(source).not.toContain('DSV4 Composite Prefix Cache')
     expect(source).not.toContain('DSV4 Pool Quantization')
     expect(source).not.toContain('DSV4 Flash composite prefix cache is disabled')
-    expect(source).toContain('restored SWA+CSA/HCA state has not proven output-equivalent')
-    expect(source).toContain('independent CSA/HCA pool codec follows the model bundle')
+    expect(source).toContain('Prefix reuse defaults On')
+    expect(source).toContain('Block Disk Cache (SSD / L2) defaults On')
+    expect(source).toContain('CSA/HCA pool codec remains bundle-derived')
+    expect(source).toContain('<CheckField label="Enable Prefix Cache"')
+    expect(source).toContain('<CheckField label="In-Memory Paged Cache (RAM)"')
+    expect(source).toContain('label="Block Disk Cache (SSD / L2)"')
+    expect(source).toContain('require fixed 256-token blocks')
+    expect(source).toContain('disabled={dsv4Active}')
+    expect(source).toContain('Native typed codec (bundle-derived)')
+    expect(source).toContain('Native CSA/HCA Pool Codec')
+    expect(source).toContain("config.dsv4PoolQuant === true")
+    expect(source).toContain("'ON (BUNDLE)'")
+    expect(source).toContain("'OFF (BUNDLE)'")
     expect(source).toContain('{!dsv4Active && <PerformanceHint text="Keep ON for best overall behavior:')
-    expect(source).toContain('{!dsv4Active && (')
     expect(source).toContain('{!dsv4Active && showCachingHelp && (')
     expect(source).not.toContain("disabled={!dsv4CompositeCacheOptIn}")
     expect(source).not.toContain("onChange={v => onChange('dsv4PoolQuant', dsv4CompositeCacheOptIn && v)}")
@@ -225,6 +235,18 @@ describe('DSV4 runtime controls in SessionConfigForm', () => {
     expect(source).not.toContain('DSV4 Raw Max Thinking')
     expect(source).not.toContain('DSV4 Force Direct Rail')
     expect(source).not.toContain('DSV4 Finalizer Tokens')
+  })
+
+  it('renders the live DSV4 pool codec from health separately from generic TurboQuant', () => {
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const performancePath = path.resolve(__dirname, '../src/renderer/src/components/sessions/PerformancePanel.tsx')
+    const source = fs.readFileSync(performancePath, 'utf8')
+
+    expect(source).toContain('pool_quant?: {')
+    expect(source).toContain('health.native_cache?.pool_quant')
+    expect(source).toContain('label="DSV4 Pool Quant"')
+    expect(source).toContain("health.native_cache.pool_quant.enabled ? 'enabled' : 'disabled'")
   })
 
   it('does not document hidden DSV4 finalizer behavior in the settings UI', () => {

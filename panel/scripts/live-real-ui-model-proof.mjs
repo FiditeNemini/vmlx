@@ -486,10 +486,12 @@ const checkMedia = envBool('VMLINUX_REAL_UI_CHECK_MEDIA', false)
 const checkVideo = envBool('VMLINUX_REAL_UI_CHECK_VIDEO', false)
 const expectPagedCacheLocked = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE_LOCKED', false)
 const expectPagedCache = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE', false)
-const expectDsv4CacheDisabled = envBool(
-  'VMLINUX_REAL_UI_EXPECT_DSV4_CACHE_DISABLED',
-  false,
+const expectDsv4PoolQuant = (
+  process.env.VMLINUX_REAL_UI_EXPECT_DSV4_POOL_QUANT != null
+  || process.env.VMLX_REAL_UI_EXPECT_DSV4_POOL_QUANT != null
 )
+  ? envBool('VMLINUX_REAL_UI_EXPECT_DSV4_POOL_QUANT', false)
+  : undefined
 const enableThinkingOverride = (
   process.env.VMLINUX_REAL_UI_ENABLE_THINKING != null
   || process.env.VMLX_REAL_UI_ENABLE_THINKING != null
@@ -4600,7 +4602,7 @@ export function validateServerCacheEvidence(result) {
   const argv = Array.isArray(evidence.argv) ? evidence.argv.map(String) : []
   const visible = evidence.initialCacheControls || {}
   const nativeCache = health?.native_cache || {}
-  const expectDsv4Disabled = result?.expectedDsv4CacheDisabled === true
+  const expectedDsv4PoolQuant = result?.expectedDsv4PoolQuant
   if (evidence.runningSessionDrawer !== true) failures.push('cache controls were not inspected on the running session')
   if (evidence.controlScope !== 'running-session-toolbar') {
     failures.push('cache controls were not opened from the running-session toolbar')
@@ -4609,43 +4611,6 @@ export function validateServerCacheEvidence(result) {
     if (typeof visible[field] !== 'boolean') {
       failures.push(`running-session visible cache control ${field} is missing`)
     }
-  }
-  if (expectDsv4Disabled) {
-    if (evidence.dsv4DisabledWarningVisible !== true) {
-      failures.push('DSV4 fail-closed cache warning was not visible in Server Settings')
-    }
-    if (evidence.dsv4CacheControlsAbsent !== true) {
-      failures.push('DSV4 product cache controls were still exposed')
-    }
-    for (const field of ['enablePrefixCache', 'usePagedCache', 'enableBlockDiskCache']) {
-      if (visible[field] !== false) {
-        failures.push(`DSV4 running-session ${field} was not visibly fail-closed`)
-      }
-      if (config[field] !== false) {
-        failures.push(`DSV4 persisted session ${field} was not fail-closed`)
-      }
-    }
-    if (!argv.includes('--disable-prefix-cache')) {
-      failures.push('DSV4 engine argv omitted --disable-prefix-cache')
-    }
-    for (const option of [
-      '--dsv4-enable-prefix-cache',
-      '--use-paged-cache',
-      '--enable-block-disk-cache',
-    ]) {
-      if (argv.includes(option)) {
-        failures.push(`DSV4 engine argv unexpectedly included ${option}`)
-      }
-    }
-    for (const field of ['prefix', 'paged', 'block_disk_l2']) {
-      if (nativeCache[field] !== false) {
-        failures.push(`/health native_cache.${field} was not false for DSV4 full-prefill mode`)
-      }
-    }
-    if (evidence.verified !== true) {
-      failures.push('DSV4 fail-closed cache controls were not verified end to end')
-    }
-    return failures
   }
   if (visible.enableBlockDiskCache !== true) failures.push('running-session SSD/L2 control was not visibly enabled')
   if (visible.enablePrefixCache !== config.enablePrefixCache) {
@@ -4686,6 +4651,24 @@ export function validateServerCacheEvidence(result) {
     }
     if (Boolean(nativeCache.block_disk_only) !== !config.usePagedCache) {
       failures.push('/health block-disk-only state does not match persisted paged-cache state')
+    }
+  }
+  if (typeof expectedDsv4PoolQuant === 'boolean') {
+    const poolQuant = nativeCache.pool_quant || {}
+    if (poolQuant.requested !== expectedDsv4PoolQuant) {
+      failures.push('/health DSV4 pool quant requested state does not match the bundle-derived expectation')
+    }
+    if (poolQuant.observed !== expectedDsv4PoolQuant) {
+      failures.push('/health DSV4 pool quant observed cache class does not match the bundle-derived expectation')
+    }
+    if (poolQuant.enabled !== expectedDsv4PoolQuant) {
+      failures.push('/health DSV4 pool quant enabled state does not match the bundle-derived expectation')
+    }
+    if (poolQuant.matches_request !== true) {
+      failures.push('/health DSV4 pool quant requested/observed attestation did not match')
+    }
+    if (poolQuant.error) {
+      failures.push(`/health DSV4 pool quant attestation reported an error: ${poolQuant.error}`)
     }
   }
   failures.push(...validateRequestCorrelatedCacheEvidence(result))
@@ -10258,7 +10241,7 @@ async function main() {
           const cacheExpectRegex = ${JSON.stringify(cacheExpectRegex)};
           const expectPagedCacheLocked = ${JSON.stringify(expectPagedCacheLocked)};
           const expectPagedCache = ${JSON.stringify(expectPagedCache)};
-          const expectDsv4CacheDisabled = ${JSON.stringify(expectDsv4CacheDisabled)};
+          const expectDsv4PoolQuant = ${JSON.stringify(expectDsv4PoolQuant ?? null)};
           const serverButton = await wait(() =>
             [...document.querySelectorAll(
               '[data-vmlx-control="server-settings"]'
@@ -10321,25 +10304,14 @@ async function main() {
           ]
             .filter((label) => bodyText.includes(label));
           const cacheExpectationMatches = !cacheExpectRegex || new RegExp(cacheExpectRegex, 'i').test(bodyText);
-          const dsv4DisabledWarningVisible = bodyText.includes(
-            'DSV4 Flash native composite prefix/paged/L2 reuse is disabled in product sessions'
-          );
-          const dsv4CacheControlsAbsent = !prefixInput && !pagedInput && !blockDiskInput;
-          const verified = expectDsv4CacheDisabled
-            ? initialCacheControls.enablePrefixCache === false
-              && initialCacheControls.usePagedCache === false
-              && initialCacheControls.enableBlockDiskCache === false
-              && dsv4DisabledWarningVisible
-              && dsv4CacheControlsAbsent
-              && cacheExpectationMatches
-            : initialCacheControls.enablePrefixCache === true
-              && initialCacheControls.enableBlockDiskCache === true
-              && initialCacheControls.blockDiskCachePresent === true
-              && !!prefixInput
-              && !!pagedInput
-              && initialCacheControls.usePagedCache === expectPagedCache
-              && (!expectPagedCacheLocked || initialCacheControls.usePagedCacheDisabled === true)
-              && cacheExpectationMatches;
+          const verified = initialCacheControls.enablePrefixCache === true
+            && initialCacheControls.enableBlockDiskCache === true
+            && initialCacheControls.blockDiskCachePresent === true
+            && !!prefixInput
+            && !!pagedInput
+            && initialCacheControls.usePagedCache === expectPagedCache
+            && (!expectPagedCacheLocked || initialCacheControls.usePagedCacheDisabled === true)
+            && cacheExpectationMatches;
           const close = [...(drawer?.querySelectorAll('button') || [])]
             .find((button) => button.getAttribute('aria-label') === 'Close');
           close?.click();
@@ -10352,9 +10324,7 @@ async function main() {
             cacheExpectRegex,
             expectPagedCacheLocked,
             expectPagedCache,
-            expectDsv4CacheDisabled,
-            dsv4DisabledWarningVisible,
-            dsv4CacheControlsAbsent,
+            expectDsv4PoolQuant,
             cacheExpectationMatches,
             labels,
             initialCacheControls,
@@ -10517,22 +10487,10 @@ async function main() {
         healthNativeCache: healthAfter?.native_cache || {},
       }
       serverCacheControls.verified = (
-        expectDsv4CacheDisabled
-          ? serverCacheControls.verified === true
-            && rendererResult.effectiveSessionConfig?.enablePrefixCache === false
-            && rendererResult.effectiveSessionConfig?.usePagedCache === false
-            && rendererResult.effectiveSessionConfig?.enableBlockDiskCache === false
-            && argv.includes('--disable-prefix-cache')
-            && !argv.includes('--dsv4-enable-prefix-cache')
-            && !argv.includes('--use-paged-cache')
-            && !argv.includes('--enable-block-disk-cache')
-            && healthAfter?.native_cache?.prefix === false
-            && healthAfter?.native_cache?.paged === false
-            && healthAfter?.native_cache?.block_disk_l2 === false
-          : serverCacheControls.verified === true
-            && rendererResult.effectiveSessionConfig?.enableBlockDiskCache === true
-            && argv.includes('--enable-block-disk-cache')
-            && healthAfter?.native_cache?.block_disk_l2 === true
+        serverCacheControls.verified === true
+        && rendererResult.effectiveSessionConfig?.enableBlockDiskCache === true
+        && argv.includes('--enable-block-disk-cache')
+        && healthAfter?.native_cache?.block_disk_l2 === true
       )
     }
     const visibleText = rendererResult.thirdAssistantContent
@@ -10960,7 +10918,7 @@ async function main() {
       requestedEnableThinking: enableThinkingOverride,
       reasoningExpectation,
       requestedServerCacheControls: checkServerCacheControls,
-      expectedDsv4CacheDisabled: expectDsv4CacheDisabled,
+      expectedDsv4PoolQuant: expectDsv4PoolQuant,
       requestedMedia: checkMedia,
       requestedVideo: checkVideo,
       requestedRetainedPids: releaseRetainedPids,
@@ -10986,7 +10944,7 @@ async function main() {
         checkMedia,
         checkVideo,
         expectPagedCacheLocked,
-        expectDsv4CacheDisabled,
+        expectDsv4PoolQuant,
         imageExpectRegex,
         videoExpectRegex,
         cacheExpectRegex,

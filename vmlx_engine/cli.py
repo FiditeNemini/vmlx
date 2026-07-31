@@ -18,24 +18,13 @@ import os
 import sys
 
 DSV4_PAGED_CACHE_BLOCK_SIZE = 256
+DSV4_MAX_CACHE_BLOCKS = 4097  # 4096 data blocks + reserved null block
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_MAX_OUTPUT_TOKENS_REASONING = DEFAULT_MAX_OUTPUT_TOKENS * 4
-DSV4_PREFIX_CACHE_ENV = "VMLX_DSV4_ENABLE_PREFIX_CACHE"
 
 
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").lower() in ("1", "true", "yes", "on")
-
-
-def _dsv4_prefix_cache_opt_in(args=None) -> bool:
-    """Return whether direct-engine DSV4 cache diagnostics were explicitly enabled."""
-
-    if bool(getattr(args, "disable_prefix_cache", False)):
-        return False
-    return (
-        bool(getattr(args, "dsv4_enable_prefix_cache", False))
-        or _env_truthy(DSV4_PREFIX_CACHE_ENV)
-    )
 
 
 def _argv_has_option(argv: list[str], option: str) -> bool:
@@ -261,52 +250,28 @@ def _apply_openpangu_cache_policy(args, logger):
 
 
 def _apply_dsv4_cache_policy(args, logger):
-    """Fail closed unless DSV4 composite cache diagnostics are explicit.
+    """Apply DSV4's independent native RAM/L2 cache policy.
 
-    DSV4 paged-prefix entries hold prompt-boundary DeepseekV4Cache snapshots
-    for SWA plus CSA/HCA compressed pools. Exact terminal prompt-boundary
-    snapshots are reusable, including after L2 reconstruction. Intermediate
-    blocks intentionally carry ``deepseek_v4_pending`` state and remain
-    ineligible until they contain a complete native pool checkpoint, so the
-    general arbitrary-partial-prefix contract is not yet complete.
-
-    Keep the path available only for explicit diagnostic work. Normal serving
-    disables prefix/paged/block-disk state and uses full prefill. The scheduler
-    typed-terminal guard remains the final correctness boundary for opt-in runs.
+    Prefix caching owns the shared content-addressed index. The in-memory paged
+    tier and block-disk L2 are independent storage tiers behind that index:
+    paged RAM may be disabled while SSD reuse remains active. DSV4 records use
+    fixed 256-token deltas plus periodic exact native SWA/CSA/HCA anchors, so
+    generic KV block sizes and generic TurboQuant codecs are not applicable.
     """
 
     changed = []
-    opt_in = _dsv4_prefix_cache_opt_in(args)
-
-    if not opt_in:
-        if getattr(args, "enable_prefix_cache", True) or not getattr(
-            args, "disable_prefix_cache", False
-        ):
-            args.enable_prefix_cache = False
-            args.disable_prefix_cache = True
-            changed.append("prefix_cache=explicitly_disabled")
-        if getattr(args, "use_paged_cache", False):
-            args.use_paged_cache = False
-            changed.append("paged=disabled_without_prefix")
-        if getattr(args, "enable_block_disk_cache", False):
-            args.enable_block_disk_cache = False
-            changed.append("L2 disk=disabled_without_prefix")
-        logger.warning(
-            "DSV4-Flash native composite prefix/paged/L2 cache is disabled by "
-            "default because arbitrary partial CSA/HCA checkpoint reuse is not "
-            "yet proven. Exact terminal prompt-boundary snapshots are available "
-            "only in the diagnostic cache path. "
-            "Serving will use full prefill. %s=1 or "
-            "--dsv4-enable-prefix-cache is diagnostic-only; the scheduler still "
-            "rejects unsafe hits.",
-            DSV4_PREFIX_CACHE_ENV,
-        )
-        return tuple(changed)
-
     old_block_size = int(getattr(args, "paged_cache_block_size", 0) or 0)
     if old_block_size != DSV4_PAGED_CACHE_BLOCK_SIZE:
         args.paged_cache_block_size = DSV4_PAGED_CACHE_BLOCK_SIZE
         changed.append(f"block_size={old_block_size}->{DSV4_PAGED_CACHE_BLOCK_SIZE}")
+
+    old_max_blocks = int(getattr(args, "max_cache_blocks", 0) or 0)
+    if (
+        not getattr(args, "max_cache_blocks_explicit", False)
+        and old_max_blocks != DSV4_MAX_CACHE_BLOCKS
+    ):
+        args.max_cache_blocks = DSV4_MAX_CACHE_BLOCKS
+        changed.append(f"max_blocks={old_max_blocks}->{DSV4_MAX_CACHE_BLOCKS}")
 
     prefix_active = (
         getattr(args, "enable_prefix_cache", True)
@@ -321,17 +286,12 @@ def _apply_dsv4_cache_policy(args, logger):
             changed.append("L2 disk=disabled_without_prefix")
         return tuple(changed)
 
-    if not getattr(args, "use_paged_cache", False):
-        args.use_paged_cache = True
-        changed.append("paged=required_for_dsv4_composite")
-
     if changed:
         logger.info(
-            "DSV4-Flash native composite cache policy applied: %s. Paged prefix "
-            "cache stores native SWA+CSA/HCA composite prompt-boundary state; "
-            "using %d-token blocks for DS4 decode-cache compatibility.",
+            "DSV4-Flash native composite cache policy applied: %s. Prefix "
+            "reuse stores 256-token deltas plus exact SWA+CSA/HCA anchors; "
+            "in-memory paged RAM and block-disk SSD remain independent tiers.",
             ", ".join(changed),
-            DSV4_PAGED_CACHE_BLOCK_SIZE,
         )
     return tuple(changed)
 
@@ -473,7 +433,7 @@ def _apply_dsv4_runtime_policy(args, logger, *, clamp_max_num_seqs: bool = False
     logger.info(
         "DSV4-Flash detected — DSV4_LONG_CTX=1 (tri-mode SWA+CSA/HCA), "
         "DSV4_POOL_QUANT=%s. Native JANG attention contract is verified by "
-        "load_jangtq_dsv4 before inference.",
+        "the DSV4 runtime wrapper before inference.",
         dsv4_pool_quant,
     )
     return True, tuple(changes)
@@ -487,12 +447,18 @@ def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
     ):
         return []
 
+    configured_blocks = int(args.max_cache_blocks)
+    usable_blocks = max(0, configured_blocks - 1)
+    capacity = int(args.paged_cache_block_size) * usable_blocks
+
     if not getattr(args, "use_paged_cache", False):
         return [
             (
                 "Block Disk Cache (SSD / L2), disk-only mode: "
                 f"block_size={args.paged_cache_block_size}, "
-                f"max_index_blocks={args.max_cache_blocks}, "
+                f"max_index_blocks={configured_blocks}, "
+                f"usable_blocks={usable_blocks}, "
+                f"indexed_capacity={capacity} tokens, "
                 f"max={args.block_disk_cache_max_gb}GB "
                 "(In-Memory Paged Cache is disabled; KV payloads restore "
                 "from SSD transiently)"
@@ -500,13 +466,13 @@ def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
         ]
 
     if dsv4_model:
-        capacity = int(args.paged_cache_block_size) * int(args.max_cache_blocks)
         lines = [
             (
-                "DSV4 diagnostic native composite prefix cache: "
-                "schema=deepseek_v4_v9, "
+                "DSV4 native composite in-memory prefix cache: "
+                "schema=deepseek_v4_v10_delta, "
                 f"block_size={args.paged_cache_block_size}, "
-                f"max_blocks={args.max_cache_blocks}, "
+                f"max_blocks={configured_blocks}, "
+                f"usable_blocks={usable_blocks}, "
                 f"capacity={capacity} tokens (not generic paged KV)"
             )
         ]
@@ -517,12 +483,12 @@ def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
             )
         return lines
 
-    capacity = int(args.paged_cache_block_size) * int(args.max_cache_blocks)
     lines = [
         (
             "In-memory paged cache (RAM): "
             f"block_size={args.paged_cache_block_size}, "
-            f"max_blocks={args.max_cache_blocks}, "
+            f"max_blocks={configured_blocks}, "
+            f"usable_blocks={usable_blocks}, "
             f"capacity={capacity} tokens "
             "(--cache-memory-mb/--cache-memory-percent set the L1 RAM byte "
             "ceiling for the block KV mirror; --max-cache-blocks caps the "
@@ -1011,7 +977,7 @@ def serve_command(args):
         try:
             from .reasoning import get_parser
             parser_cls = get_parser(parser_name)
-            server._reasoning_parser = parser_cls()
+            server._set_active_reasoning_parser(parser_cls(), parser_name)
             server._reasoning_parser_explicit_name = parser_name
             logger.info(f"Reasoning parser enabled: {parser_name}")
         except KeyError as e:
@@ -1027,7 +993,7 @@ def serve_command(args):
             )
             sys.exit(1)
     else:
-        server._reasoning_parser = None
+        server._set_active_reasoning_parser(None, None)
 
     # Auto-apply tool/reasoning parsers from model config registry when CLI
     # flags were not explicitly set.  This lets known models "just work" for
@@ -1053,7 +1019,7 @@ def serve_command(args):
             _is_dsv4_model = True
             _apply_dsv4_runtime_policy(args, logger)
             # Diagnostic opt-in uses the DSV4-aware paged schema
-            # (scheduler.py: deepseek_v4_v9 nested-state serialization) for
+            # (scheduler.py: deepseek_v4_v10_delta nested-state serialization) for
             # the mixed RotatingKVCache / DeepseekV4Cache layer layout. The default
             # path performs full prefill and does not publish reusable state.
         elif (
@@ -1201,7 +1167,9 @@ def serve_command(args):
                 try:
                     from .reasoning import get_parser
                     _rp_cls = get_parser(_mc.reasoning_parser)
-                    server._reasoning_parser = _rp_cls()
+                    server._set_active_reasoning_parser(
+                        _rp_cls(), _mc.reasoning_parser
+                    )
                     logger.info(f"Auto-configured reasoning parser from registry: {_mc.reasoning_parser}")
                 except Exception as e:
                     logger.warning(f"Failed to auto-configure reasoning parser '{_mc.reasoning_parser}': {e}")
@@ -1357,7 +1325,9 @@ def serve_command(args):
     ):
         try:
             from .reasoning import get_parser
-            server._reasoning_parser = get_parser("deepseek_r1")()
+            server._set_active_reasoning_parser(
+                get_parser("deepseek_r1")(), "deepseek_r1"
+            )
             logger.info(
                 "Reasoning parser auto-detected from chat template "
                 "(<think> sentinel found) → deepseek_r1"
@@ -2492,9 +2462,8 @@ def _install_jangtq_wired_limit_from_sysctl() -> None:
             target_gb = int(max_ws_bytes / 1e9)
             os.environ["JANGTQ_WIRED_LIMIT_GB"] = str(target_gb)
             print(
-                f"  JANGTQ_WIRED_LIMIT_GB defaulted to {target_gb} GB "
-                f"(from OS sysctl iogpu.wired_limit_mb; overrides external "
-                f"jang_tools 70% default)",
+                f"  MLX wired working-set limit defaulted to {target_gb} GB "
+                f"from OS sysctl iogpu.wired_limit_mb",
                 flush=True,
             )
     except Exception:
@@ -2617,9 +2586,8 @@ Examples:
     serve_parser.add_argument(
         "--dsv4-enable-prefix-cache",
         action="store_true",
-        help="Diagnostic-only opt-in for DeepSeek-V4 Flash native SWA+CSA/HCA "
-             "composite prefix reuse. Product/default serving uses full prefill "
-             "because restored-cache output equivalence is not proven.",
+        help="Deprecated compatibility flag. DeepSeek-V4 Flash native SWA+CSA/HCA "
+             "prefix reuse now follows the normal prefix/paged/SSD cache controls.",
     )
     serve_parser.add_argument(
         "--prefix-cache-size",
@@ -3644,6 +3612,11 @@ Examples:
                 f"See mlxstudio#76.\n"
             )
         raise
+
+    if args.command in ("serve", "bench"):
+        args.max_cache_blocks_explicit = _argv_has_option(
+            sys.argv[1:], "--max-cache-blocks"
+        )
 
     if args.command == "serve":
         args.max_tokens_explicit = _argv_has_option(sys.argv[1:], "--max-tokens")

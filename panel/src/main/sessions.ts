@@ -155,14 +155,13 @@ function hasDsv4IdentityHint(modelPath: string): boolean {
 }
 
 /**
- * Existing DSV4 processes are not safe to adopt in the v1.6.19 product path.
+ * Existing DSV4 processes are not safe to adopt without exact provenance.
  *
- * An already-running engine can predate the fail-closed composite-cache policy
- * or can be a diagnostic CLI launch with native cache reuse explicitly enabled.
- * Its model path and port do not attest either its executable provenance or its
- * effective cache policy. Until health exposes enough immutable provenance to
- * prove both, DSV4 must be relaunched by this Electron instance. Other families
- * retain the existing adoption behavior.
+ * An already-running engine can predate the current native composite-cache
+ * contract or can use different cache controls. Its model path and port do not
+ * attest either executable provenance or effective cache policy. Until health
+ * exposes enough immutable provenance to prove both, DSV4 must be relaunched by
+ * this Electron instance. Other families retain the existing adoption behavior.
  */
 function canAdoptExistingLocalEngine(modelPath: string): boolean {
   const dsv4IdentityHint = hasDsv4IdentityHint(modelPath)
@@ -195,6 +194,7 @@ function cacheSubtypeSupportsBlockDiskOnly(cacheSubtype?: string): boolean {
 }
 
 const DSV4_PAGED_CACHE_BLOCK_SIZE = 256
+const DSV4_MAX_CACHE_BLOCKS = 4097 // 4096 data blocks + reserved null block = 1,048,576 tokens
 const GENERIC_DEFAULT_TIMEOUT_SECONDS = 300
 const DSV4_DEFAULT_TIMEOUT_SECONDS = 900
 const MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900
@@ -254,28 +254,43 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
       changed = true
     }
     if (detectedFamily === 'deepseek-v4') {
-      // DSV4 composite restores currently fail closed in the scheduler because
-      // cached output has not proven equivalent to cold prefill. Never migrate
-      // old default-on panel state into a path that only writes unusable cache
-      // records. Explicit diagnostic opt-in remains available on the engine CLI.
-      if (config.enablePrefixCache !== false) {
-        config.enablePrefixCache = false
+      // DSV4 uses the normal product cache controls with a typed
+      // SWA+CSA/HCA block record. Fill only missing user toggles here: explicit
+      // post-migration Prefix/Paged/Block-Disk choices must survive restart.
+      if (config.enablePrefixCache === undefined) {
+        config.enablePrefixCache = true
         changed = true
       }
-      if (config.usePagedCache !== false) {
+      if (config.usePagedCache === undefined) {
         config.usePagedCache = false
         changed = true
       }
-      if (config.enableBlockDiskCache !== false) {
-        config.enableBlockDiskCache = false
+      if (config.enableBlockDiskCache === undefined) {
+        config.enableBlockDiskCache = true
+        changed = true
+      }
+      // Legacy whole-prompt L2 and generic KV q4/q8 cannot represent DSV4's
+      // native composite state. Block Disk L2 and the bundle pool codec own it.
+      if (config.enableDiskCache !== false) {
+        config.enableDiskCache = false
+        changed = true
+      }
+      if (config.kvCacheQuantization !== 'auto') {
+        config.kvCacheQuantization = 'auto'
         changed = true
       }
       if (config.pagedCacheBlockSize !== DSV4_PAGED_CACHE_BLOCK_SIZE) {
         config.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
         changed = true
       }
-      if (config.dsv4PrefixCache !== false) {
-        config.dsv4PrefixCache = false
+      if (config.maxCacheBlocks === undefined) {
+        config.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
+        changed = true
+      }
+      const dsv4PrefixEnabled = config.enablePrefixCache !== false
+      if (config.dsv4PrefixCache !== dsv4PrefixEnabled) {
+        // Compatibility mirror only; launch uses the normal prefix flag.
+        config.dsv4PrefixCache = dsv4PrefixEnabled
         changed = true
       }
       if (typeof detected.dsv4PoolQuantDefault === 'boolean') {
@@ -702,7 +717,7 @@ function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   return changed
 }
 
-const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 11
+const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 12
 
 function markCacheStackStartupDefaultsCurrent(config: Partial<ServerConfig>): boolean {
   if (config.cacheStackStartupDefaultsVersion === CACHE_STACK_STARTUP_DEFAULTS_VERSION) return false
@@ -740,24 +755,29 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
 
   const dsv4Active = detectedFamily === 'deepseek-v4'
   const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
-  // 2026-07-12 (paged default ON): fresh sessions inherit the detected per-family
-  // paged default so the UI shows — and the engine launches with — paged ON for
-  // autodetected families with a safe generic or typed serializer. DSV4 stays
-  // fail-closed. Block-disk L2 is independent of paged RAM; non-paged
-  // generic families therefore use the SSD-only block-aware backend.
-  const defaultUsePagedCache = !dsv4Active && (detectedUsePaged ?? false)
+  // Fresh DSV4 sessions use native composite prefix reuse with the RAM paged
+  // tier Off. Other families inherit their detected per-family paged default.
+  // Block-disk L2 remains independent of paged RAM in both cases.
+  const defaultUsePagedCache = dsv4Active ? false : (detectedUsePaged ?? false)
   // Every supported prefix-cache lane gets block SSD L2 by default, even when
   // paged RAM is explicitly Off. openPangu is the path-dependent exact-snapshot
   // exception and continues to use prompt-level typed L2.
   const defaultEnableDiskCache = openPanguExactTypedCache
-  const defaultEnableBlockDiskCache = !openPanguExactTypedCache && !dsv4Active
+  const defaultEnableBlockDiskCache = !openPanguExactTypedCache
   const mutable = config as Record<string, any>
+  const staleV11Dsv4FailClosedCandidate =
+    dsv4Active &&
+    Number(config.cacheStackStartupDefaultsVersion || 0) === 11 &&
+    config.dsv4PrefixCache === false &&
+    config.enablePrefixCache === false &&
+    config.usePagedCache === false &&
+    config.enableBlockDiskCache === false
   let changed = false
 
   // Fill only missing values. Explicit user toggles and family-specific overrides
   // must survive, while fresh IPC-created sessions still need a complete config
   // for the Settings UI and live proof harness.
-  if (mutable.enablePrefixCache === undefined) changed = setConfigValue(mutable, 'enablePrefixCache', !dsv4Active) || changed
+  if (mutable.enablePrefixCache === undefined) changed = setConfigValue(mutable, 'enablePrefixCache', true) || changed
   if (mutable.prefixCacheSize === undefined) changed = setConfigValue(mutable, 'prefixCacheSize', 100) || changed
   if (mutable.prefixCacheMaxBytes === undefined) changed = setConfigValue(mutable, 'prefixCacheMaxBytes', 0) || changed
   if (mutable.cacheMemoryMb === undefined) changed = setConfigValue(mutable, 'cacheMemoryMb', 0) || changed
@@ -767,7 +787,13 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
   if (mutable.enableDiskCache === undefined) changed = setConfigValue(mutable, 'enableDiskCache', defaultEnableDiskCache) || changed
   if (mutable.diskCacheMaxGb === undefined) changed = setConfigValue(mutable, 'diskCacheMaxGb', 10) || changed
   if (mutable.pagedCacheBlockSize === undefined) changed = setConfigValue(mutable, 'pagedCacheBlockSize', dsv4Active ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64) || changed
-  if (mutable.maxCacheBlocks === undefined) changed = setConfigValue(mutable, 'maxCacheBlocks', 1000) || changed
+  if (mutable.maxCacheBlocks === undefined) {
+    changed = setConfigValue(
+      mutable,
+      'maxCacheBlocks',
+      staleV11Dsv4FailClosedCandidate ? 1000 : dsv4Active ? DSV4_MAX_CACHE_BLOCKS : 1000,
+    ) || changed
+  }
   if (mutable.enableBlockDiskCache === undefined) changed = setConfigValue(mutable, 'enableBlockDiskCache', defaultEnableBlockDiskCache) || changed
   if (mutable.blockDiskCacheMaxGb === undefined) changed = setConfigValue(mutable, 'blockDiskCacheMaxGb', 10) || changed
   if (mutable.kvCacheQuantization === undefined || openPanguExactTypedCache) changed = setConfigValue(mutable, 'kvCacheQuantization', openPanguExactTypedCache ? 'none' : 'auto') || changed
@@ -819,6 +845,31 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     migrationDetectedUsePaged = _migDetected.usePagedCache
   } catch {
     /* detection best-effort; leave undefined -> paged-off in the generic branch */
+  }
+  // v12: DSV4 native composite block records became a product cache lane.
+  // Migrate only the exact v11 fail-closed tuple. Any other combination is an
+  // explicit user choice and must survive the version bump unchanged.
+  const staleV11Dsv4FailClosed =
+    migrationDetectedFamily === 'deepseek-v4' &&
+    Number(config.cacheStackStartupDefaultsVersion || 0) === 11 &&
+    config.dsv4PrefixCache === false &&
+    config.enablePrefixCache === false &&
+    config.usePagedCache === false &&
+    config.enableBlockDiskCache === false &&
+    Number(config.maxCacheBlocks) === 1000 &&
+    (config.pagedCacheBlockSize === undefined || Number(config.pagedCacheBlockSize) === DSV4_PAGED_CACHE_BLOCK_SIZE)
+  if (migrationDetectedFamily === 'deepseek-v4') {
+    if (!staleV11Dsv4FailClosed) return false
+    config.enablePrefixCache = true
+    config.dsv4PrefixCache = true
+    config.usePagedCache = false
+    config.enableDiskCache = false
+    config.enableBlockDiskCache = true
+    config.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
+    config.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
+    config.kvCacheQuantization = 'auto'
+    markCacheStackStartupDefaultsCurrent(config)
+    return true
   }
   const staleContinuousDefaults =
     config.continuousBatching === true &&
@@ -1874,7 +1925,7 @@ export class SessionManager extends EventEmitter {
     if (!canAdoptExistingLocalEngine(targetPath)) {
       console.warn(
         `[SESSIONS] Refusing to adopt an existing DSV4 engine for session ${sessionId}; ` +
-        'the current Electron instance must relaunch it with source-matched fail-closed cache policy',
+        'the current Electron instance must relaunch it with source-matched executable and cache policy',
       )
       return false
     }
@@ -1996,12 +2047,14 @@ export class SessionManager extends EventEmitter {
           }
           if (freshFamily === 'deepseek-v4') {
             const dsv4PoolQuantDefault = freshConfig.dsv4PoolQuantDefault
+            const dsv4PrefixEnabled = config.enablePrefixCache !== false
             const dsv4Changed =
               config.continuousBatching !== true ||
-              config.dsv4PrefixCache !== false ||
-              config.enablePrefixCache !== false ||
-              config.usePagedCache !== false ||
-              config.enableBlockDiskCache !== false ||
+              config.enablePrefixCache === undefined ||
+              config.usePagedCache === undefined ||
+              config.enableBlockDiskCache === undefined ||
+              config.maxCacheBlocks === undefined ||
+              config.dsv4PrefixCache !== dsv4PrefixEnabled ||
               (typeof dsv4PoolQuantDefault === 'boolean'
                 ? config.dsv4PoolQuant !== dsv4PoolQuantDefault
                 : config.dsv4PoolQuant !== undefined) ||
@@ -2015,14 +2068,16 @@ export class SessionManager extends EventEmitter {
               !!config.speculativeModel ||
               config.isMultimodal !== false
             config.continuousBatching = true
-            config.dsv4PrefixCache = false
+            if (config.enablePrefixCache === undefined) config.enablePrefixCache = true
+            if (config.usePagedCache === undefined) config.usePagedCache = false
+            if (config.enableBlockDiskCache === undefined) config.enableBlockDiskCache = true
+            if (config.maxCacheBlocks === undefined) config.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
+            config.dsv4PrefixCache = config.enablePrefixCache !== false
             if (typeof dsv4PoolQuantDefault === 'boolean') {
               config.dsv4PoolQuant = dsv4PoolQuantDefault
             } else {
               delete config.dsv4PoolQuant
             }
-            config.enablePrefixCache = false
-            config.usePagedCache = false
             config.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
             config.maxNumSeqs = 1
             config.prefillBatchSize = 1
@@ -2030,7 +2085,6 @@ export class SessionManager extends EventEmitter {
             config.kvCacheQuantization = 'auto'
             config.noMemoryAwareCache = false
             config.enableDiskCache = false
-            config.enableBlockDiskCache = false
             config.enableJit = false
             ;(config as any).smelt = false
             ;(config as any).flashMoe = false
@@ -2040,7 +2094,7 @@ export class SessionManager extends EventEmitter {
             if (dsv4Changed) {
               this.pushLog(
                 sessionId,
-                '[WARN] DSV4-Flash detected; native composite prefix/paged/L2 cache is disabled until restored output equivalence is proven',
+                `[INFO] DSV4-Flash native cache policy: prefix=${config.enablePrefixCache !== false ? 'on' : 'off'}, paged_ram=${config.usePagedCache === true ? 'on' : 'off'}, block_disk_l2=${config.enableBlockDiskCache === true ? 'on' : 'off'}, block_size=${DSV4_PAGED_CACHE_BLOCK_SIZE}, generic_turboquant=off, pool_codec=bundle-derived`,
               )
             }
           } else if (freshFamily === 'minimax_m3') {
@@ -2902,13 +2956,13 @@ export class SessionManager extends EventEmitter {
         console.warn(
           `[SESSIONS] single-model mode: stopping non-adoptable DSV4 engine ` +
           `pid=${proc.pid} port=${proc.port}; executable provenance and ` +
-          `fail-closed cache policy are not attested`,
+          `effective native cache policy are not attested`,
         )
         await this.terminateDetectedLocalEngine(proc, existingSessions)
       } else {
         console.warn(
           `[SESSIONS] Skipping startup adoption for DSV4 engine pid=${proc.pid} ` +
-          `port=${proc.port}; executable provenance and fail-closed cache policy are not attested`,
+          `port=${proc.port}; executable provenance and effective native cache policy are not attested`,
         )
       }
     }
@@ -2956,7 +3010,7 @@ export class SessionManager extends EventEmitter {
           prefillStepSize: 2048,
           completionBatchSize: 512,
           continuousBatching: true,
-          enablePrefixCache: detectedFamily !== 'deepseek-v4',
+          enablePrefixCache: true,
           prefixCacheSize: 100,
           prefixCacheMaxBytes: 0, // 0 = unlimited (bounded by cacheMemoryPercent)
           cacheMemoryMb: 0,
@@ -2967,12 +3021,11 @@ export class SessionManager extends EventEmitter {
           // disk-only block-aware prefix backend; typed/path-dependent families
           // still force their detected paged contract. openPangu is the exact
           // typed exception and stays on prompt-level disk L2.
-          usePagedCache: detectedFamily !== 'deepseek-v4' && (detected.usePagedCache ?? false),
+          usePagedCache: detectedFamily === 'deepseek-v4' ? false : (detected.usePagedCache ?? false),
           enableDiskCache: detectedFamily === 'openpangu_v2',
           pagedCacheBlockSize: detectedFamily === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64,
-          maxCacheBlocks: 1000,
-          enableBlockDiskCache:
-            detectedFamily !== 'openpangu_v2' && detectedFamily !== 'deepseek-v4',
+          maxCacheBlocks: detectedFamily === 'deepseek-v4' ? DSV4_MAX_CACHE_BLOCKS : 1000,
+          enableBlockDiskCache: detectedFamily !== 'openpangu_v2',
           blockDiskCacheMaxGb: 10,
           kvCacheQuantization: detectedFamily === 'openpangu_v2' ? 'none' : 'auto',
           cacheStackStartupDefaultsVersion: CACHE_STACK_STARTUP_DEFAULTS_VERSION,
@@ -2982,7 +3035,7 @@ export class SessionManager extends EventEmitter {
           maxContextLength: 0,
           toolCallParser: 'auto',
           reasoningParser: 'auto',
-          dsv4PrefixCache: false,
+          dsv4PrefixCache: detectedFamily === 'deepseek-v4',
           dsv4PoolQuant: detectedFamily === 'deepseek-v4'
             ? detected.dsv4PoolQuantDefault
             : undefined,
@@ -3971,9 +4024,6 @@ export class SessionManager extends EventEmitter {
     }
 
     console.log(`[SESSION] Model family: ${detected.family} | tool: ${effectiveToolParser || 'none'} (user=${userToolParser}, detected=${detected.toolParser || 'none'}) | reasoning: ${effectiveReasoningParser || 'none'} (user=${userReasoningParser}, detected=${detected.reasoningParser || 'none'}) | autoTool: ${effectiveAutoTool} | VLM: ${isVLM}`)
-    if (dsv4Active) {
-      console.log('[SESSION] DSV4-Flash native composite prefix/paged/L2 cache disabled until restored output equivalence is proven')
-    }
 
     // Prefix cache — requires --continuous-batching to take effect in vmlx-engine
     // Tool sessions benefit from prefix reuse, but an explicit user opt-out must
@@ -3988,28 +4038,27 @@ export class SessionManager extends EventEmitter {
     const architectureBlockDiskOnlySupported =
       (cacheTypeSupportsBlockDiskOnly(detected.cacheType) ||
         cacheSubtypeSupportsBlockDiskOnly(detected.cacheSubtype) ||
-        m3Active) &&
+        m3Active ||
+        dsv4Active) &&
       !zayaCcaActive &&
-      !dsv4Active &&
       !openPanguExactTypedCache
     const cacheLaunchPolicy = resolveCacheLaunchPolicy({
       continuousBatching: cacheStackActive,
-      enablePrefixCache: dsv4Active
+      enablePrefixCache: config.enablePrefixCache !== false,
+      usePagedCache: openPanguExactTypedCache
         ? false
-        : config.enablePrefixCache !== false,
-      usePagedCache: dsv4Active
-        ? false
-        : openPanguExactTypedCache ? false : config.usePagedCache ?? detected.usePagedCache ?? false,
+        : dsv4Active ? config.usePagedCache === true : config.usePagedCache ?? detected.usePagedCache ?? false,
       enableDiskCache: !!config.enableDiskCache,
-      enableBlockDiskCache: dsv4Active
-        ? false
-        : openPanguExactTypedCache ? false : !!config.enableBlockDiskCache,
+      enableBlockDiskCache: openPanguExactTypedCache ? false : !!config.enableBlockDiskCache,
       architectureRequiresPagedCache,
       architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
     })
     const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
     const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache
     const blockDiskOnly = cacheLaunchPolicy.enableBlockDiskCache && !usePagedCache
+    if (dsv4Active) {
+      console.log(`[SESSION] DSV4-Flash native cache policy: prefix=${prefixCacheOff ? 'off' : 'on'}, paged_ram=${usePagedCache ? 'on' : 'off'}, block_disk_l2=${cacheLaunchPolicy.enableBlockDiskCache ? 'on' : 'off'}, block_size=${DSV4_PAGED_CACHE_BLOCK_SIZE}, generic_turboquant=off, pool_codec=bundle-derived`)
+    }
 
     if (prefixCacheOff) {
       args.push('--disable-prefix-cache')
@@ -4030,8 +4079,8 @@ export class SessionManager extends EventEmitter {
         // for memory-aware cache they cap the prefix store, and for paged cache
         // (#98) they set the L1 RAM byte ceiling for the block KV mirror that
         // evicts free blocks. Emit them regardless of usePagedCache so the UI
-        // value actually reaches the engine. DSV4 never reaches this branch
-        // because product prefix reuse is fail-closed.
+        // value actually reaches the engine. In SSD-only mode these controls
+        // stay omitted because there is no retained RAM payload tier.
         const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
         if (!blockDiskOnly && cacheMemoryMb != null) {
           args.push('--cache-memory-mb', cacheMemoryMb.toString())

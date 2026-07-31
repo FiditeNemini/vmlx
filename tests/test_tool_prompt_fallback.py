@@ -703,6 +703,77 @@ def test_dsv4_electron_exact_command_binds_the_complete_shell_command():
     ) not in injected
 
 
+def test_dsv4_exact_command_stops_before_no_tool_prose():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    command = "printf %s R20_DSV4_DSML_OK > r20_dsv4_dsml.txt"
+    user_request = (
+        "Use the run_command tool exactly once with this exact command: "
+        f"{command}. Do not answer before the tool call."
+    )
+
+    injected = check_and_inject_fallback_tools(
+        f"<｜User｜>{user_request}<｜Assistant｜>",
+        [{"role": "user", "content": user_request}],
+        tools,
+        DSV4LikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="dsml",
+    )
+
+    parameter = injected.split(
+        '<｜DSML｜parameter name="command" string="true">', 1
+    )[1].split("</｜DSML｜parameter>", 1)[0]
+    assert parameter == command
+
+
+def test_dsv4_electron_use_this_command_binds_before_after_clause():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    command = "printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt"
+    user_request = (
+        "Create a file by calling the built-in run_command tool once. "
+        "Use this command: "
+        f"{command} After the tool result returns, confirm completion briefly."
+    )
+
+    injected = check_and_inject_fallback_tools(
+        f"<｜User｜>{user_request}<｜Assistant｜>",
+        [{"role": "user", "content": user_request}],
+        tools,
+        DSV4LikeTokenizer(),
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="dsml",
+    )
+
+    parameter = injected.split(
+        '<｜DSML｜parameter name="command" string="true">', 1
+    )[1].split("</｜DSML｜parameter>", 1)[0]
+    assert parameter == command
+
+
 def test_dsv4_prior_tool_result_does_not_terminalize_new_explicit_tool():
     tools = [
         {

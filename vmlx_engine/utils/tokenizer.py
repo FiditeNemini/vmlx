@@ -1172,8 +1172,9 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
                 if _mt == "deepseek_v4" or _tc_mt == "deepseek_v4":
                     _is_dsv4_bundle = True
                     logger.info(
-                        f"DSV4 bundle detected — routing through "
-                        f"load_jangtq_dsv4 runtime wrapper."
+                        "DSV4 bundle detected — routing through the native "
+                        "DSV4 runtime wrapper (artifact format is detected "
+                        "from bundle metadata)."
                     )
                     from ..loaders.load_jangtq_dsv4 import load_jangtq_dsv4_model
                     # A started DSV4 session must own a materialized model before

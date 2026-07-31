@@ -188,10 +188,10 @@ SOURCE_HASH_FILES = (
     "tests/test_objective_proof_digest.py",
 )
 
-R19_ARTIFACT_CHAIN_SCHEMA_VERSION = 4
-R19_ARTIFACT_CHAIN_SCOPE = "r19_production"
-R19_ARTIFACT_CHAIN_VERSION = "1.6.19"
-R19_ARTIFACT_CHAIN_FLAVORS = ("sequoia", "tahoe")
+R20_ARTIFACT_CHAIN_SCHEMA_VERSION = 4
+R20_ARTIFACT_CHAIN_SCOPE = "r20_production"
+R20_ARTIFACT_CHAIN_VERSION = "1.6.20"
+R20_ARTIFACT_CHAIN_FLAVORS = ("sequoia", "tahoe")
 INSTALLED_RELEASE_MANIFEST_SCHEMA = "vmlx-installed-release-manifest-v1"
 INSTALLED_RELEASE_MANIFEST_FIELDS = {
     "app_asar_sha256",
@@ -206,7 +206,7 @@ INSTALLED_RELEASE_MANIFEST_FIELDS = {
 INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH = Path(
     "Contents/Resources/bundled-python/python/bin/python3"
 )
-R19_FLAVOR_RUNTIME_CONTRACTS = {
+R20_FLAVOR_RUNTIME_CONTRACTS = {
     "sequoia": {
         "mlx_wheel_platform": "macosx_14_0_arm64",
         "minimum_system_version": "14.5.0",
@@ -216,7 +216,7 @@ R19_FLAVOR_RUNTIME_CONTRACTS = {
         "minimum_system_version": "26.0.0",
     },
 }
-R19_PINNED_TOOL_NAMES = (
+R20_PINNED_TOOL_NAMES = (
     "git",
     "node",
     "npm",
@@ -907,7 +907,7 @@ def _expected_release_artifact_paths(
             "dmg": dist_dir / f"vMLX-{version}-{flavor}-arm64.dmg",
             "blockmap": dist_dir / f"vMLX-{version}-{flavor}-arm64.dmg.blockmap",
         }
-        for flavor in R19_ARTIFACT_CHAIN_FLAVORS
+        for flavor in R20_ARTIFACT_CHAIN_FLAVORS
     }
 
 
@@ -1071,15 +1071,15 @@ def write_build_driver_attestation(
     hook_attestations: dict[str, tuple[Path, str]],
     dmg_parity_attestations: dict[str, tuple[Path, str]],
 ) -> dict[str, Any]:
-    if version != R19_ARTIFACT_CHAIN_VERSION:
+    if version != R20_ARTIFACT_CHAIN_VERSION:
         raise ArtifactChainError(
-            f"r19 artifact chain requires version {R19_ARTIFACT_CHAIN_VERSION}"
+            f"r20 artifact chain requires version {R20_ARTIFACT_CHAIN_VERSION}"
         )
     if re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
         raise ArtifactChainError("build-driver nonce must be 256 unpredictable bits")
     _require_live_driver_ancestor(driver_pid)
     if any(
-        set(value) != set(R19_ARTIFACT_CHAIN_FLAVORS)
+        set(value) != set(R20_ARTIFACT_CHAIN_FLAVORS)
         for value in (
             staged_outputs,
             extracted_asars,
@@ -1097,10 +1097,10 @@ def write_build_driver_attestation(
     source = _git_source_identity(root)
     preflight_payload, preflight = _read_json_object_with_record(
         preflight_path,
-        label="r19 preflight manifest",
+        label="r20 preflight manifest",
     )
     if preflight_payload.get("status") != "pass":
-        raise ArtifactChainError("r19 preflight manifest is not a passing result")
+        raise ArtifactChainError("r20 preflight manifest is not a passing result")
     artifacts = _release_artifact_records(dist_dir, version)
     staged = {
         flavor: validate_staged_app_parity(
@@ -1110,13 +1110,13 @@ def write_build_driver_attestation(
             version=version,
             flavor=flavor,
         )
-        for flavor in R19_ARTIFACT_CHAIN_FLAVORS
+        for flavor in R20_ARTIFACT_CHAIN_FLAVORS
     }
     hook_completion: dict[str, dict[str, Any]] = {}
     dmg_payload_parity: dict[str, dict[str, Any]] = {}
     runtime_contracts: dict[str, dict[str, Any]] = {}
     toolchain: dict[str, Any] | None = None
-    for flavor in R19_ARTIFACT_CHAIN_FLAVORS:
+    for flavor in R20_ARTIFACT_CHAIN_FLAVORS:
         hook_path, hook_sha256 = hook_attestations[flavor]
         hook = _validate_hook_completion_attestation(
             root=root,
@@ -1174,8 +1174,8 @@ def write_build_driver_attestation(
             )
     assert toolchain is not None
     payload = {
-        "schema_version": R19_ARTIFACT_CHAIN_SCHEMA_VERSION,
-        "scope": R19_ARTIFACT_CHAIN_SCOPE,
+        "schema_version": R20_ARTIFACT_CHAIN_SCHEMA_VERSION,
+        "scope": R20_ARTIFACT_CHAIN_SCOPE,
         "stage": "build_driver",
         "version": version,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1243,8 +1243,8 @@ def _validate_build_driver_attestation(
         label="build-driver attestation",
     )
     if (
-        payload["schema_version"] != R19_ARTIFACT_CHAIN_SCHEMA_VERSION
-        or payload["scope"] != R19_ARTIFACT_CHAIN_SCOPE
+        payload["schema_version"] != R20_ARTIFACT_CHAIN_SCHEMA_VERSION
+        or payload["scope"] != R20_ARTIFACT_CHAIN_SCOPE
         or payload["stage"] != "build_driver"
         or payload["version"] != version
         or re.fullmatch(r"[0-9a-f]{64}", str(payload["nonce"])) is None
@@ -1269,19 +1269,19 @@ def _validate_build_driver_attestation(
     )
     if current_preflight_payload.get("status") != "pass":
         raise ArtifactChainError("build-driver preflight is no longer passing")
-    if set(payload["staged"]) != set(R19_ARTIFACT_CHAIN_FLAVORS):
+    if set(payload["staged"]) != set(R20_ARTIFACT_CHAIN_FLAVORS):
         raise ArtifactChainError("build-driver staged evidence is incomplete")
-    if set(payload["runtime_contracts"]) != set(R19_ARTIFACT_CHAIN_FLAVORS):
+    if set(payload["runtime_contracts"]) != set(R20_ARTIFACT_CHAIN_FLAVORS):
         raise ArtifactChainError("build-driver runtime-contract evidence is incomplete")
     _validate_pinned_toolchain(
         payload["toolchain"],
         label="build-driver toolchain",
     )
-    if set(payload["hook_completion"]) != set(R19_ARTIFACT_CHAIN_FLAVORS) or set(
+    if set(payload["hook_completion"]) != set(R20_ARTIFACT_CHAIN_FLAVORS) or set(
         payload["dmg_payload_parity"]
-    ) != set(R19_ARTIFACT_CHAIN_FLAVORS):
+    ) != set(R20_ARTIFACT_CHAIN_FLAVORS):
         raise ArtifactChainError("build-driver completion evidence is incomplete")
-    for flavor in R19_ARTIFACT_CHAIN_FLAVORS:
+    for flavor in R20_ARTIFACT_CHAIN_FLAVORS:
         staged = payload["staged"][flavor]
         expected_app = _absolute_path(Path(str(staged["app"])))
         expected_parent = _absolute_path(dist_dir) / f"{flavor}-app/mac-arm64/vMLX.app"
@@ -1366,9 +1366,9 @@ def write_pre_notary_artifact_manifest(
     expected_nonce: str,
     expected_driver_pid: int,
 ) -> dict[str, Any]:
-    if version != R19_ARTIFACT_CHAIN_VERSION:
+    if version != R20_ARTIFACT_CHAIN_VERSION:
         raise ArtifactChainError(
-            f"r19 artifact chain requires version {R19_ARTIFACT_CHAIN_VERSION}"
+            f"r20 artifact chain requires version {R20_ARTIFACT_CHAIN_VERSION}"
         )
     root = _absolute_path(root)
     private_root = ensure_private_evidence_root(private_root)
@@ -1389,8 +1389,8 @@ def write_pre_notary_artifact_manifest(
         require_current_artifacts=True,
     )
     payload = {
-        "schema_version": R19_ARTIFACT_CHAIN_SCHEMA_VERSION,
-        "scope": R19_ARTIFACT_CHAIN_SCOPE,
+        "schema_version": R20_ARTIFACT_CHAIN_SCHEMA_VERSION,
+        "scope": R20_ARTIFACT_CHAIN_SCOPE,
         "stage": "pre_notary",
         "version": version,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1430,9 +1430,9 @@ def _validate_pre_notary_artifact_manifest_metadata(
     expected_preflight_sha256: str,
     require_current_artifact_hashes: bool,
 ) -> dict[str, Any]:
-    if version != R19_ARTIFACT_CHAIN_VERSION:
+    if version != R20_ARTIFACT_CHAIN_VERSION:
         raise ArtifactChainError(
-            f"r19 artifact chain requires version {R19_ARTIFACT_CHAIN_VERSION}"
+            f"r20 artifact chain requires version {R20_ARTIFACT_CHAIN_VERSION}"
         )
     root = _absolute_path(root)
     private_root = ensure_private_evidence_root(private_root)
@@ -1469,8 +1469,8 @@ def _validate_pre_notary_artifact_manifest_metadata(
         label="pre-notary artifact manifest",
     )
     if (
-        payload["schema_version"] != R19_ARTIFACT_CHAIN_SCHEMA_VERSION
-        or payload["scope"] != R19_ARTIFACT_CHAIN_SCOPE
+        payload["schema_version"] != R20_ARTIFACT_CHAIN_SCHEMA_VERSION
+        or payload["scope"] != R20_ARTIFACT_CHAIN_SCOPE
         or payload["stage"] != "pre_notary"
         or payload["version"] != version
     ):
@@ -1499,11 +1499,11 @@ def _validate_pre_notary_artifact_manifest_metadata(
     )
     current_preflight_payload, current_preflight = _read_json_object_with_record(
         Path(str(preflight["path"])),
-        label="r19 preflight manifest",
+        label="r20 preflight manifest",
         expected_sha256=str(preflight["sha256"]),
     )
     if current_preflight_payload.get("status") != "pass":
-        raise ArtifactChainError("r19 preflight manifest is no longer passing")
+        raise ArtifactChainError("r20 preflight manifest is no longer passing")
     if expected_preflight_sha256 != preflight["sha256"]:
         raise ArtifactChainError(
             "independently supplied preflight digest does not match the build handoff"
@@ -1554,7 +1554,7 @@ def _validate_pre_notary_artifact_manifest_metadata(
         raise ArtifactChainError("pre-notary artifacts differ from build-driver attestation")
     artifacts = _require_exact_dict_keys(
         payload["artifacts"],
-        set(R19_ARTIFACT_CHAIN_FLAVORS),
+        set(R20_ARTIFACT_CHAIN_FLAVORS),
         label="pre-notary artifacts",
     )
     expected_paths = _expected_release_artifact_paths(dist_dir, version)
@@ -1572,7 +1572,7 @@ def _validate_pre_notary_artifact_manifest_metadata(
         "blockmap_sha256",
         "blockmap_size",
     }
-    for flavor in R19_ARTIFACT_CHAIN_FLAVORS:
+    for flavor in R20_ARTIFACT_CHAIN_FLAVORS:
         record = _require_exact_dict_keys(
             artifacts[flavor],
             artifact_keys,
@@ -2341,7 +2341,7 @@ def create_pre_notary_snapshots(
         )
     snapshot_dir.mkdir(parents=True, mode=0o700)
     snapshots: dict[str, dict[str, Any]] = {}
-    for flavor in R19_ARTIFACT_CHAIN_FLAVORS:
+    for flavor in R20_ARTIFACT_CHAIN_FLAVORS:
         record = pre["payload"]["artifacts"][flavor]
         dmg_destination = snapshot_dir / Path(record["dmg_path"]).name
         blockmap_destination = snapshot_dir / Path(record["blockmap_path"]).name
@@ -2371,7 +2371,7 @@ def create_pre_notary_snapshots(
         }
     snapshot_manifest_path = snapshot_dir / "snapshot-manifest.json"
     payload = {
-        "schema_version": R19_ARTIFACT_CHAIN_SCHEMA_VERSION,
+        "schema_version": R20_ARTIFACT_CHAIN_SCHEMA_VERSION,
         "source": pre["payload"]["source"],
         "pre_notary_manifest_sha256": pre["sha256"],
         "snapshots": snapshots,
@@ -2387,7 +2387,7 @@ def create_pre_notary_snapshots(
 
 def _expected_runtime_contract(flavor: str) -> dict[str, str]:
     try:
-        return dict(R19_FLAVOR_RUNTIME_CONTRACTS[flavor])
+        return dict(R20_FLAVOR_RUNTIME_CONTRACTS[flavor])
     except KeyError as exc:
         raise ArtifactChainError(f"unsupported runtime flavor: {flavor}") from exc
 
@@ -2596,11 +2596,11 @@ def write_installed_release_manifest(
     chain and mounted app/ASAR parity validator; there is no standalone weaker
     app self-attestation path.
     """
-    if version != R19_ARTIFACT_CHAIN_VERSION:
+    if version != R20_ARTIFACT_CHAIN_VERSION:
         raise ArtifactChainError(
-            f"r19 installed manifest requires version {R19_ARTIFACT_CHAIN_VERSION}"
+            f"r20 installed manifest requires version {R20_ARTIFACT_CHAIN_VERSION}"
         )
-    if flavor not in R19_ARTIFACT_CHAIN_FLAVORS:
+    if flavor not in R20_ARTIFACT_CHAIN_FLAVORS:
         raise ArtifactChainError(f"unsupported installed app flavor: {flavor}")
 
     private_root = ensure_private_evidence_root(private_root)
@@ -2803,9 +2803,9 @@ def write_bundle_runtime_attestation(
     flavor: str,
     output_path: Path,
 ) -> dict[str, Any]:
-    if version != R19_ARTIFACT_CHAIN_VERSION:
+    if version != R20_ARTIFACT_CHAIN_VERSION:
         raise ArtifactChainError(
-            f"r19 artifact chain requires version {R19_ARTIFACT_CHAIN_VERSION}"
+            f"r20 artifact chain requires version {R20_ARTIFACT_CHAIN_VERSION}"
         )
     private_root = ensure_private_evidence_root(private_root)
     output_path = _assert_within_private_root(
@@ -2825,7 +2825,7 @@ def write_bundle_runtime_attestation(
         )
     payload = {
         "schema_version": 1,
-        "scope": R19_ARTIFACT_CHAIN_SCOPE,
+        "scope": R20_ARTIFACT_CHAIN_SCOPE,
         "stage": "bundle_runtime",
         "version": version,
         "flavor": flavor,
@@ -2871,7 +2871,7 @@ def _validate_bundle_runtime_attestation(
     )
     if (
         payload["schema_version"] != 1
-        or payload["scope"] != R19_ARTIFACT_CHAIN_SCOPE
+        or payload["scope"] != R20_ARTIFACT_CHAIN_SCOPE
         or payload["stage"] != "bundle_runtime"
         or payload["version"] != version
         or payload["flavor"] != flavor
@@ -3150,7 +3150,7 @@ def _validate_pinned_toolchain(
 ) -> dict[str, Any]:
     tools = _require_exact_dict_keys(
         value,
-        set(R19_PINNED_TOOL_NAMES),
+        set(R20_PINNED_TOOL_NAMES),
         label=label,
     )
     for name, raw_tool in tools.items():
@@ -3198,7 +3198,7 @@ def _bound_release_toolchain(
         if (
             not isinstance(fixed_path, str)
             or os.environ.get("PATH") != fixed_path
-            or os.environ.get("VMLX_R19_FIXED_PATH") != fixed_path
+            or os.environ.get("VMLX_R20_FIXED_PATH") != fixed_path
         ):
             raise ArtifactChainError(
                 "release tool plan fixed PATH does not match the action environment"
@@ -3240,7 +3240,7 @@ def _strip_verified_release_python_action_from_git_status(
     repo = _absolute_path(Path(arguments[1]))
     action_path = Path(__file__).absolute()
     match = re.fullmatch(
-        r"\.(?P<original>[^/]+\.py)\.vmlx-r19-(?P<nonce>[0-9a-f]{32})",
+        r"\.(?P<original>[^/]+\.py)\.vmlx-r20-(?P<nonce>[0-9a-f]{32})",
         action_path.name,
     )
     if match is None:
@@ -3443,7 +3443,7 @@ def _validate_hook_completion_attestation(
     expected_driver_pid: int,
     require_current_artifacts: bool = True,
 ) -> dict[str, Any]:
-    if flavor not in R19_ARTIFACT_CHAIN_FLAVORS:
+    if flavor not in R20_ARTIFACT_CHAIN_FLAVORS:
         raise ArtifactChainError(f"unsupported hook-completion flavor: {flavor}")
     path = _assert_within_private_root(
         private_root,
@@ -3479,7 +3479,7 @@ def _validate_hook_completion_attestation(
     )
     if (
         payload["schema_version"] != 1
-        or payload["scope"] != R19_ARTIFACT_CHAIN_SCOPE
+        or payload["scope"] != R20_ARTIFACT_CHAIN_SCOPE
         or payload["stage"] != "electron_builder_completion"
         or payload["version"] != version
         or payload["flavor"] != flavor
@@ -3687,7 +3687,7 @@ def write_dmg_payload_parity_attestation(
     )
     payload = {
         "schema_version": 1,
-        "scope": R19_ARTIFACT_CHAIN_SCOPE,
+        "scope": R20_ARTIFACT_CHAIN_SCOPE,
         "stage": "mounted_dmg_payload_parity",
         "version": version,
         "flavor": flavor,
@@ -3734,9 +3734,9 @@ def _validate_dmg_payload_parity_attestation(
     )
     if (
         payload.get("schema_version") != 1
-        or payload.get("scope") != R19_ARTIFACT_CHAIN_SCOPE
+        or payload.get("scope") != R20_ARTIFACT_CHAIN_SCOPE
         or payload.get("stage") != "mounted_dmg_payload_parity"
-        or payload.get("version") != R19_ARTIFACT_CHAIN_VERSION
+        or payload.get("version") != R20_ARTIFACT_CHAIN_VERSION
         or payload.get("flavor") != flavor
     ):
         raise ArtifactChainError(f"{flavor} mounted DMG parity identity is invalid")
@@ -3803,13 +3803,13 @@ def write_final_notary_artifact_manifest(
         require_current_artifact_hashes=False,
     )
     post_records = _release_artifact_records(dist_dir, version)
-    if set(submission_ids) != set(R19_ARTIFACT_CHAIN_FLAVORS):
+    if set(submission_ids) != set(R20_ARTIFACT_CHAIN_FLAVORS):
         raise ArtifactChainError("Apple submission set must contain Sequoia and Tahoe")
-    if set(submitted_snapshot_paths) != set(R19_ARTIFACT_CHAIN_FLAVORS):
+    if set(submitted_snapshot_paths) != set(R20_ARTIFACT_CHAIN_FLAVORS):
         raise ArtifactChainError("submitted snapshot set must contain Sequoia and Tahoe")
     artifacts: dict[str, dict[str, Any]] = {}
     seen_submission_ids: set[str] = set()
-    for flavor in R19_ARTIFACT_CHAIN_FLAVORS:
+    for flavor in R20_ARTIFACT_CHAIN_FLAVORS:
         pre_record = pre["payload"]["artifacts"][flavor]
         post_record = post_records[flavor]
         submitted_path = _assert_within_private_root(
@@ -3872,8 +3872,8 @@ def write_final_notary_artifact_manifest(
             "notary_submission_id": submission_id,
         }
     payload = {
-        "schema_version": R19_ARTIFACT_CHAIN_SCHEMA_VERSION,
-        "scope": R19_ARTIFACT_CHAIN_SCOPE,
+        "schema_version": R20_ARTIFACT_CHAIN_SCHEMA_VERSION,
+        "scope": R20_ARTIFACT_CHAIN_SCOPE,
         "stage": "post_notary",
         "version": version,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -3939,8 +3939,8 @@ def validate_final_notary_artifact_manifest(
         label="final post-notary manifest",
     )
     if (
-        payload["schema_version"] != R19_ARTIFACT_CHAIN_SCHEMA_VERSION
-        or payload["scope"] != R19_ARTIFACT_CHAIN_SCOPE
+        payload["schema_version"] != R20_ARTIFACT_CHAIN_SCHEMA_VERSION
+        or payload["scope"] != R20_ARTIFACT_CHAIN_SCOPE
         or payload["stage"] != "post_notary"
         or payload["version"] != version
     ):
@@ -3992,7 +3992,7 @@ def validate_final_notary_artifact_manifest(
     )
     artifacts = _require_exact_dict_keys(
         payload["artifacts"],
-        set(R19_ARTIFACT_CHAIN_FLAVORS),
+        set(R20_ARTIFACT_CHAIN_FLAVORS),
         label="final post-notary artifacts",
     )
     post_records = _release_artifact_records(dist_dir, version)
@@ -4015,7 +4015,7 @@ def validate_final_notary_artifact_manifest(
         "notary_submission_id",
     }
     submission_ids: set[str] = set()
-    for flavor in R19_ARTIFACT_CHAIN_FLAVORS:
+    for flavor in R20_ARTIFACT_CHAIN_FLAVORS:
         record = _require_exact_dict_keys(
             artifacts[flavor],
             final_artifact_keys,
@@ -4111,7 +4111,7 @@ def validate_mounted_app_against_final_manifest(
     mounted_app: Path,
     extracted_asar: Path,
 ) -> dict[str, Any]:
-    if flavor not in R19_ARTIFACT_CHAIN_FLAVORS:
+    if flavor not in R20_ARTIFACT_CHAIN_FLAVORS:
         raise ArtifactChainError(f"unsupported mounted flavor: {flavor}")
     final = validate_final_notary_artifact_manifest(
         root=root,
@@ -4816,7 +4816,7 @@ def build_artifact(
 def artifact_chain_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="run_packaged_integrity_contract.py artifact-chain",
-        description="Write or validate the fail-closed vMLX r19 DMG artifact chain.",
+        description="Write or validate the fail-closed vMLX r20 DMG artifact chain.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -4850,7 +4850,7 @@ def artifact_chain_main(argv: list[str]) -> int:
     bundle_runtime_parser.add_argument("--version", required=True)
     bundle_runtime_parser.add_argument("--private-root", type=Path, required=True)
     bundle_runtime_parser.add_argument(
-        "--flavor", choices=R19_ARTIFACT_CHAIN_FLAVORS, required=True
+        "--flavor", choices=R20_ARTIFACT_CHAIN_FLAVORS, required=True
     )
     bundle_runtime_parser.add_argument("--out", type=Path, required=True)
 
@@ -4863,7 +4863,7 @@ def artifact_chain_main(argv: list[str]) -> int:
     build_attestation_parser.add_argument("--out", type=Path, required=True)
     build_attestation_parser.add_argument("--nonce", required=True)
     build_attestation_parser.add_argument("--driver-pid", type=int, required=True)
-    for flavor in R19_ARTIFACT_CHAIN_FLAVORS:
+    for flavor in R20_ARTIFACT_CHAIN_FLAVORS:
         build_attestation_parser.add_argument(
             f"--{flavor}-staged-output", type=Path, required=True
         )
@@ -4889,7 +4889,7 @@ def artifact_chain_main(argv: list[str]) -> int:
     dmg_parity_parser.add_argument("--version", required=True)
     dmg_parity_parser.add_argument("--private-root", type=Path, required=True)
     dmg_parity_parser.add_argument(
-        "--flavor", choices=R19_ARTIFACT_CHAIN_FLAVORS, required=True
+        "--flavor", choices=R20_ARTIFACT_CHAIN_FLAVORS, required=True
     )
     dmg_parity_parser.add_argument("--hook-attestation", type=Path, required=True)
     dmg_parity_parser.add_argument("--expected-hook-sha256", required=True)
@@ -5018,7 +5018,7 @@ def artifact_chain_main(argv: list[str]) -> int:
     check_staged_parser.add_argument("--extracted-asar", type=Path, required=True)
     check_staged_parser.add_argument("--version", required=True)
     check_staged_parser.add_argument(
-        "--flavor", choices=R19_ARTIFACT_CHAIN_FLAVORS, required=True
+        "--flavor", choices=R20_ARTIFACT_CHAIN_FLAVORS, required=True
     )
 
     installed_manifest_parser = subparsers.add_parser(
@@ -5029,7 +5029,7 @@ def artifact_chain_main(argv: list[str]) -> int:
     installed_manifest_parser.add_argument("--dist", type=Path, required=True)
     installed_manifest_parser.add_argument("--version", required=True)
     installed_manifest_parser.add_argument(
-        "--flavor", choices=R19_ARTIFACT_CHAIN_FLAVORS, required=True
+        "--flavor", choices=R20_ARTIFACT_CHAIN_FLAVORS, required=True
     )
     installed_manifest_parser.add_argument(
         "--private-root", type=Path, required=True
@@ -5064,7 +5064,7 @@ def artifact_chain_main(argv: list[str]) -> int:
     write_final_parser.add_argument("--expected-preflight-sha256", required=True)
     write_final_parser.add_argument("--private-root", type=Path, required=True)
     write_final_parser.add_argument("--out", type=Path, required=True)
-    for flavor in R19_ARTIFACT_CHAIN_FLAVORS:
+    for flavor in R20_ARTIFACT_CHAIN_FLAVORS:
         write_final_parser.add_argument(
             f"--{flavor}-submission-id", required=True
         )
@@ -5096,7 +5096,7 @@ def artifact_chain_main(argv: list[str]) -> int:
     mounted_parser.add_argument("--expected-source-tree", required=True)
     mounted_parser.add_argument("--expected-preflight-sha256", required=True)
     mounted_parser.add_argument(
-        "--flavor", choices=R19_ARTIFACT_CHAIN_FLAVORS, required=True
+        "--flavor", choices=R20_ARTIFACT_CHAIN_FLAVORS, required=True
     )
     mounted_parser.add_argument("--mounted-app", type=Path, required=True)
     mounted_parser.add_argument("--extracted-asar", type=Path, required=True)
@@ -5159,25 +5159,25 @@ def artifact_chain_main(argv: list[str]) -> int:
                 driver_pid=args.driver_pid,
                 staged_outputs={
                     flavor: getattr(args, f"{flavor}_staged_output")
-                    for flavor in R19_ARTIFACT_CHAIN_FLAVORS
+                    for flavor in R20_ARTIFACT_CHAIN_FLAVORS
                 },
                 extracted_asars={
                     flavor: getattr(args, f"{flavor}_extracted_asar")
-                    for flavor in R19_ARTIFACT_CHAIN_FLAVORS
+                    for flavor in R20_ARTIFACT_CHAIN_FLAVORS
                 },
                 hook_attestations={
                     flavor: (
                         getattr(args, f"{flavor}_hook_attestation"),
                         getattr(args, f"{flavor}_hook_attestation_sha256"),
                     )
-                    for flavor in R19_ARTIFACT_CHAIN_FLAVORS
+                    for flavor in R20_ARTIFACT_CHAIN_FLAVORS
                 },
                 dmg_parity_attestations={
                     flavor: (
                         getattr(args, f"{flavor}_dmg_parity_attestation"),
                         getattr(args, f"{flavor}_dmg_parity_attestation_sha256"),
                     )
-                    for flavor in R19_ARTIFACT_CHAIN_FLAVORS
+                    for flavor in R20_ARTIFACT_CHAIN_FLAVORS
                 },
             )
         elif args.command == "write-dmg-payload-parity":
@@ -5340,11 +5340,11 @@ def artifact_chain_main(argv: list[str]) -> int:
                 output_path=args.out,
                 submission_ids={
                     flavor: getattr(args, f"{flavor}_submission_id")
-                    for flavor in R19_ARTIFACT_CHAIN_FLAVORS
+                    for flavor in R20_ARTIFACT_CHAIN_FLAVORS
                 },
                 submitted_snapshot_paths={
                     flavor: getattr(args, f"{flavor}_snapshot_dmg")
-                    for flavor in R19_ARTIFACT_CHAIN_FLAVORS
+                    for flavor in R20_ARTIFACT_CHAIN_FLAVORS
                 },
             )
         elif args.command == "check-final":

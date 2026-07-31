@@ -181,6 +181,14 @@ interface HealthData {
       enabled?: boolean
       reason?: string
     }
+    pool_quant?: {
+      requested?: boolean
+      enabled?: boolean
+      observed?: boolean | null
+      matches_request?: boolean
+      env?: string
+      error?: string | null
+    }
     attention_kv_storage_quantization?: NativeStorageQuantization
     storage_quantization?: NativeStorageQuantization
   }
@@ -507,6 +515,18 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
                   health.native_cache.generic_turboquant_kv.enabled
                     ? 'enabled'
                     : `off: ${health.native_cache.generic_turboquant_kv.reason || 'native'}`
+                }
+              />
+            )}
+            {health.native_cache?.pool_quant && (
+              <InfoCard
+                label="DSV4 Pool Quant"
+                value={
+                  health.native_cache.pool_quant.error
+                    ? `error: ${health.native_cache.pool_quant.error}`
+                    : health.native_cache.pool_quant.matches_request === false
+                      ? `mismatch: requested ${health.native_cache.pool_quant.requested ? 'on' : 'off'}, observed ${health.native_cache.pool_quant.observed ? 'on' : 'off'}`
+                      : health.native_cache.pool_quant.enabled ? 'enabled' : 'disabled'
                 }
               />
             )}

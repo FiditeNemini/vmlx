@@ -1,6 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import { ArrowLeft } from 'lucide-react'
-import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG } from './SessionConfigForm'
+import {
+  SessionConfigForm,
+  SessionConfig,
+  DEFAULT_CONFIG,
+  DSV4_MAX_CACHE_BLOCKS,
+  DSV4_PAGED_CACHE_BLOCK_SIZE,
+} from './SessionConfigForm'
 import { DownloadTab } from './DownloadTab'
 import { DirectoryManager } from './DirectoryManager'
 import { useTranslation } from '../../i18n'
@@ -80,18 +86,19 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         enableAutoToolChoice: undefined,
         toolCallParser: 'auto',
         reasoningParser: 'auto',
-        dsv4PrefixCache: detected?.family === 'deepseek-v4' ? false : prev.dsv4PrefixCache,
+        dsv4PrefixCache: detected?.family === 'deepseek-v4' ? true : prev.dsv4PrefixCache,
         dsv4PoolQuant: detected?.family === 'deepseek-v4'
           ? (typeof detected?.dsv4PoolQuantDefault === 'boolean'
               ? detected.dsv4PoolQuantDefault
               : undefined)
           : prev.dsv4PoolQuant,
-        enablePrefixCache: detected?.family === 'openpangu_v2' ? true : detected?.family === 'deepseek-v4' ? false : prev.enablePrefixCache,
+        enablePrefixCache: detected?.family === 'openpangu_v2' || detected?.family === 'deepseek-v4' ? true : prev.enablePrefixCache,
         usePagedCache: detected?.family === 'deepseek-v4' ? false : detected?.usePagedCache,
         enableDiskCache: detected?.family === 'openpangu_v2',
-        enableBlockDiskCache: detected?.family !== 'openpangu_v2' && detected?.family !== 'deepseek-v4',
-        kvCacheQuantization: detected?.family === 'openpangu_v2' ? 'none' : prev.kvCacheQuantization,
-        pagedCacheBlockSize: detected?.family === 'deepseek-v4' ? 256 : prev.pagedCacheBlockSize,
+        enableBlockDiskCache: detected?.family !== 'openpangu_v2',
+        kvCacheQuantization: detected?.family === 'openpangu_v2' ? 'none' : detected?.family === 'deepseek-v4' ? 'auto' : prev.kvCacheQuantization,
+        pagedCacheBlockSize: detected?.family === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : prev.pagedCacheBlockSize,
+        maxCacheBlocks: detected?.family === 'deepseek-v4' ? DSV4_MAX_CACHE_BLOCKS : prev.maxCacheBlocks,
       }
       return applyBundleGenerationDefaultsToSessionConfig(next, gen)
     })
@@ -205,14 +212,17 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
             base.timeout = 900
-            base.dsv4PrefixCache = false
+            base.dsv4PrefixCache = true
             base.dsv4PoolQuant = typeof detected.dsv4PoolQuantDefault === 'boolean'
               ? detected.dsv4PoolQuantDefault
               : undefined
-            base.enablePrefixCache = false
+            base.enablePrefixCache = true
             base.usePagedCache = false
-            base.enableBlockDiskCache = false
-            base.pagedCacheBlockSize = 256
+            base.enableDiskCache = false
+            base.enableBlockDiskCache = true
+            base.kvCacheQuantization = 'auto'
+            base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
+            base.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
           } else if (detected.family === 'openpangu_v2') {
             base.enablePrefixCache = true
             base.usePagedCache = false

@@ -490,8 +490,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         if native.get("family") != "deepseek_v4":
             notes.append("health: missing deepseek_v4 native cache family")
-        if native.get("schema") != "deepseek_v4_v9":
-            notes.append("health: missing deepseek_v4_v9 schema")
+        if native.get("schema") != "deepseek_v4_v10_delta":
+            notes.append("health: missing deepseek_v4_v10_delta schema")
         if native.get("cache_type") != "native_composite":
             notes.append("health: missing native_composite cache_type")
         if native.get("generic_turboquant_kv", {}).get("enabled") is not False:

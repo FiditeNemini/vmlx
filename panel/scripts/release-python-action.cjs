@@ -136,8 +136,8 @@ function bindReleasePython(aliasPath, options = {}) {
   // CPython builds resolve libpython through an executable-relative @rpath;
   // moving the hardlink into a venv bin directory makes dyld search the venv
   // for a library that lives beside the physical interpreter instead.
-  const actionPath = join(sourceBinDir, `.vmlx-r19-python-${nonce}`);
-  const planPath = join(binDir, `.vmlx-r19-python-${nonce}.json`);
+  const actionPath = join(sourceBinDir, `.vmlx-r20-python-${nonce}`);
+  const planPath = join(binDir, `.vmlx-r20-python-${nonce}.json`);
   let actionCreated = false;
   let planCreated = false;
   try {
@@ -266,9 +266,9 @@ function readBinding(planPath, expectedSha256) {
 }
 
 function bindingFromEnvironment() {
-  const planPath = process.env.VMLX_R19_RELEASE_PYTHON_PLAN || "";
+  const planPath = process.env.VMLX_R20_RELEASE_PYTHON_PLAN || "";
   const expectedSha256 =
-    process.env.VMLX_R19_RELEASE_PYTHON_PLAN_SHA256 || "";
+    process.env.VMLX_R20_RELEASE_PYTHON_PLAN_SHA256 || "";
   return { planPath, expectedSha256 };
 }
 
@@ -331,7 +331,7 @@ function scriptBinding(args) {
   const original = regularFileIdentity(originalPath);
   const actionPath = join(
     dirname(originalPath),
-    `.${originalPath.split("/").at(-1)}.vmlx-r19-${randomUUID().replaceAll("-", "")}`,
+    `.${originalPath.split("/").at(-1)}.vmlx-r20-${randomUUID().replaceAll("-", "")}`,
   );
   linkSync(originalPath, actionPath);
   const action = regularFileIdentity(actionPath, { allowMultipleLinks: true });

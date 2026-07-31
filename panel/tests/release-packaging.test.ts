@@ -25,7 +25,7 @@ function read(rel: string): string {
   return readFileSync(join(repo, rel), "utf8");
 }
 
-function r19Toolchain() {
+function r20Toolchain() {
   const invocationPaths = {
     git: "/usr/bin/git",
     node: "/opt/homebrew/bin/node",
@@ -59,7 +59,7 @@ function r19Toolchain() {
   );
 }
 
-const r19RuntimeContracts = {
+const r20RuntimeContracts = {
   sequoia: {
     mlx_wheel_platform: "macosx_14_0_arm64",
     minimum_system_version: "14.5.0",
@@ -70,15 +70,15 @@ const r19RuntimeContracts = {
   },
 };
 
-function writeR19RuntimeFixture(
+function writeR20RuntimeFixture(
   beforePack: any,
   app: string,
-  flavor: keyof typeof r19RuntimeContracts,
+  flavor: keyof typeof r20RuntimeContracts,
   sourceCommit: string,
   sourceTree: string,
   attestationPath: string,
 ) {
-  const contract = r19RuntimeContracts[flavor];
+  const contract = r20RuntimeContracts[flavor];
   const bundleRoot = join(app, "Contents", "Resources", "bundled-python");
   const sitePackages = join(
     bundleRoot,
@@ -107,7 +107,7 @@ function writeR19RuntimeFixture(
     `${JSON.stringify(
       {
         schema_version: 1,
-        vmlx: { commit: sourceCommit, version: "1.6.19" },
+        vmlx: { commit: sourceCommit, version: "1.6.20" },
         jang: { commit: "f".repeat(40), version: "2.5.36" },
         mlx_wheel_platform: contract.mlx_wheel_platform,
       },
@@ -121,8 +121,8 @@ function writeR19RuntimeFixture(
     `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>net.vmlx.app</string>
-<key>CFBundleShortVersionString</key><string>1.6.19</string>
-<key>CFBundleVersion</key><string>1.6.19</string>
+<key>CFBundleShortVersionString</key><string>1.6.20</string>
+<key>CFBundleVersion</key><string>1.6.20</string>
 <key>LSMinimumSystemVersion</key><string>${contract.minimum_system_version}</string>
 </dict></plist>
 `,
@@ -133,9 +133,9 @@ function writeR19RuntimeFixture(
   );
   const payload = {
     schema_version: 1,
-    scope: "r19_production",
+    scope: "r20_production",
     stage: "bundle_runtime",
-    version: "1.6.19",
+    version: "1.6.20",
     flavor,
     source: { commit: sourceCommit, tree: sourceTree },
     runtime_contract: runtimeContract,
@@ -278,7 +278,7 @@ describe("release packaging", () => {
       },
     );
     const started = {
-      file: "/private/tmp/vMLX-1.6.19-sequoia-arm64.dmg",
+      file: "/private/tmp/vMLX-1.6.20-sequoia-arm64.dmg",
       targetPresentableName: "DMG",
     };
     const completed = {
@@ -326,17 +326,17 @@ describe("release packaging", () => {
     }
   });
 
-  it("blocks direct electron-builder packaging of 1.6.19 before expensive hooks", async () => {
+  it("blocks direct electron-builder packaging of 1.6.20 before expensive hooks", async () => {
     const beforePack = requireCjs(
       join(repo, "scripts/electron-builder-before-pack.cjs"),
     );
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-direct-pack-"));
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-direct-pack-"));
     const panelDir = join(temp, "panel");
     mkdirSync(panelDir);
     writeFileSync(
       join(panelDir, "package.json"),
       JSON.stringify({
-        version: "1.6.19",
+        version: "1.6.20",
         build: { mac: { notarize: { teamId: "55KGF2S5AY" } } },
       }),
     );
@@ -346,7 +346,7 @@ describe("release packaging", () => {
       await expect(
         beforePack({ packager: { projectDir: panelDir } }),
       ).rejects.toThrow(
-        "vMLX 1.6.19 packaging requires VMLX_RELEASE_SCOPE=r19_production",
+        "vMLX 1.6.20 packaging requires VMLX_RELEASE_SCOPE=r20_production",
       );
       expect(() => readFileSync(join(panelDir, "verify-ran"))).toThrow();
     } finally {
@@ -359,8 +359,8 @@ describe("release packaging", () => {
     }
   });
 
-  it("blocks direct prepackaged 1.6.19 artifacts at the completion hook", async () => {
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-direct-artifact-"));
+  it("blocks direct prepackaged 1.6.20 artifacts at the completion hook", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-direct-artifact-"));
     const panelDir = join(temp, "panel");
     const scriptsDir = join(panelDir, "scripts");
     mkdirSync(scriptsDir, { recursive: true });
@@ -379,7 +379,7 @@ describe("release packaging", () => {
     writeFileSync(
       join(panelDir, "package.json"),
       JSON.stringify({
-        version: "1.6.19",
+        version: "1.6.20",
         build: { mac: { notarize: { teamId: "55KGF2S5AY" } } },
       }),
     );
@@ -390,7 +390,7 @@ describe("release packaging", () => {
         join(scriptsDir, "electron-builder-after-all-artifact-build.cjs"),
       );
       await expect(afterAll({})).rejects.toThrow(
-        "vMLX 1.6.19 packaging requires VMLX_RELEASE_SCOPE=r19_production",
+        "vMLX 1.6.20 packaging requires VMLX_RELEASE_SCOPE=r20_production",
       );
     } finally {
       if (previous === undefined) {
@@ -402,8 +402,8 @@ describe("release packaging", () => {
     }
   });
 
-  it("rejects r19_production with a non-1.6.19 package in both builder hooks", async () => {
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-reciprocal-"));
+  it("rejects r20_production with a non-1.6.20 package in both builder hooks", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-reciprocal-"));
     const panelDir = join(temp, "panel");
     const scriptsDir = join(panelDir, "scripts");
     mkdirSync(scriptsDir, { recursive: true });
@@ -427,14 +427,14 @@ describe("release packaging", () => {
     const envNames = [
       "VMLX_RELEASE_SCOPE",
       "VMLINUX_RELEASE_SCOPE",
-      "VMLX_R19_OFFICIAL_PACKAGING",
+      "VMLX_R20_OFFICIAL_PACKAGING",
     ];
     const previous = Object.fromEntries(
       envNames.map((name) => [name, process.env[name]]),
     );
     delete process.env.VMLX_RELEASE_SCOPE;
     delete process.env.VMLINUX_RELEASE_SCOPE;
-    delete process.env.VMLX_R19_OFFICIAL_PACKAGING;
+    delete process.env.VMLX_R20_OFFICIAL_PACKAGING;
     try {
       const beforePack = requireCjs(
         join(scriptsDir, "electron-builder-before-pack.cjs"),
@@ -443,14 +443,14 @@ describe("release packaging", () => {
         join(scriptsDir, "electron-builder-after-all-artifact-build.cjs"),
       );
       for (const scopeName of ["VMLX_RELEASE_SCOPE", "VMLINUX_RELEASE_SCOPE"]) {
-        process.env[scopeName] = "r19_production";
+        process.env[scopeName] = "r20_production";
         await expect(
           beforePack({ packager: { projectDir: panelDir } }),
         ).rejects.toThrow(
-          "VMLX_RELEASE_SCOPE=r19_production requires package version 1.6.19, found 1.6.17",
+          "VMLX_RELEASE_SCOPE=r20_production requires package version 1.6.20, found 1.6.17",
         );
         await expect(afterAll({})).rejects.toThrow(
-          "VMLX_RELEASE_SCOPE=r19_production requires package version 1.6.19, found 1.6.17",
+          "VMLX_RELEASE_SCOPE=r20_production requires package version 1.6.20, found 1.6.17",
         );
         delete process.env[scopeName];
       }
@@ -468,7 +468,7 @@ describe("release packaging", () => {
   });
 
   it("sanitizes PATH before commands and confines production output before removal", () => {
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-output-confinement-"));
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-output-confinement-"));
     const shadow = join(temp, "shadow-bin");
     const marker = join(temp, "shadow-command-ran");
     const victim = join(temp, "victim");
@@ -491,7 +491,7 @@ describe("release packaging", () => {
           env: {
             ...process.env,
             PATH: shadow,
-            VMLX_RELEASE_SCOPE: "r19_production",
+            VMLX_RELEASE_SCOPE: "r20_production",
             VMLINUX_RELEASE_SCOPE: "",
             VMLX_RELEASE_OUTPUT_DIR: victim,
             VMLINUX_RELEASE_OUTPUT_DIR: "",
@@ -548,7 +548,7 @@ describe("release packaging", () => {
       writeFileSync(
         join(fakePanel, "package.json"),
         JSON.stringify({
-          version: "1.6.19",
+          version: "1.6.20",
           build: { mac: { notarize: { teamId: "55KGF2S5AY" } } },
         }),
       );
@@ -561,7 +561,7 @@ describe("release packaging", () => {
           env: {
             ...process.env,
             PATH: shadow,
-            VMLX_RELEASE_SCOPE: "r19_production",
+            VMLX_RELEASE_SCOPE: "r20_production",
             VMLINUX_RELEASE_SCOPE: "",
             VMLX_RELEASE_OUTPUT_DIR: "",
             VMLINUX_RELEASE_OUTPUT_DIR: "",
@@ -587,7 +587,7 @@ describe("release packaging", () => {
     const beforePack = requireCjs(
       join(repo, "scripts/electron-builder-before-pack.cjs"),
     );
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-mutated-modules-"));
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-mutated-modules-"));
     const copiedAsar = join(
       temp,
       "node_modules",
@@ -599,7 +599,7 @@ describe("release packaging", () => {
     mkdirSync(join(copiedAsar, ".."), { recursive: true });
     copyFileSync(join(repo, "node_modules/@electron/asar/bin/asar.js"), copiedAsar);
     chmodSync(copiedAsar, 0o755);
-    const tools = r19Toolchain();
+    const tools = r20Toolchain();
     const copiedRealpath = realpathSync(copiedAsar);
     tools.asar = {
       path: copiedAsar,
@@ -610,12 +610,12 @@ describe("release packaging", () => {
     };
     const fixedPath = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
     const envNames = [
-      "VMLX_R19_FIXED_PATH",
+      "VMLX_R20_FIXED_PATH",
       "PATH",
       ...Object.keys(tools).flatMap((name) => [
-        `VMLX_R19_TOOL_${name.toUpperCase()}_PATH`,
-        `VMLX_R19_TOOL_${name.toUpperCase()}_REALPATH`,
-        `VMLX_R19_TOOL_${name.toUpperCase()}_SHA256`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_PATH`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_REALPATH`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_SHA256`,
       ]),
     ];
     const previous = Object.fromEntries(
@@ -623,9 +623,9 @@ describe("release packaging", () => {
     );
     try {
       process.env.PATH = fixedPath;
-      process.env.VMLX_R19_FIXED_PATH = fixedPath;
+      process.env.VMLX_R20_FIXED_PATH = fixedPath;
       for (const [name, tool] of Object.entries(tools)) {
-        const prefix = `VMLX_R19_TOOL_${name.toUpperCase()}`;
+        const prefix = `VMLX_R20_TOOL_${name.toUpperCase()}`;
         process.env[`${prefix}_PATH`] = tool.path;
         process.env[`${prefix}_REALPATH`] = tool.realpath;
         process.env[`${prefix}_SHA256`] = tool.sha256;
@@ -654,10 +654,10 @@ describe("release packaging", () => {
     const beforePack = requireCjs(
       join(repo, "scripts/electron-builder-before-pack.cjs"),
     );
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-action-mutation-"));
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-action-mutation-"));
     const panelDir = join(temp, "panel");
     const buildDir = join(temp, "build");
-    const planPath = join(buildDir, "r19-release-driver-plan.json");
+    const planPath = join(buildDir, "r20-release-driver-plan.json");
     const fakeAsar = join(temp, "mutating-asar.js");
     const marker = join(temp, "action-ran");
     mkdirSync(panelDir, { recursive: true });
@@ -669,7 +669,7 @@ describe("release packaging", () => {
         "fs.appendFileSync(__filename, '\\n// mutated during action\\n');\n",
       { mode: 0o755 },
     );
-    const tools = r19Toolchain();
+    const tools = r20Toolchain();
     tools.asar = {
       path: fakeAsar,
       realpath: realpathSync(fakeAsar),
@@ -681,14 +681,14 @@ describe("release packaging", () => {
     writeFileSync(planPath, encoded, { mode: 0o600 });
     const planHash = createHash("sha256").update(encoded).digest("hex");
     const envNames = [
-      "VMLX_R19_RELEASE_PLAN",
-      "VMLX_R19_RELEASE_PLAN_SHA256",
-      "VMLX_R19_FIXED_PATH",
+      "VMLX_R20_RELEASE_PLAN",
+      "VMLX_R20_RELEASE_PLAN_SHA256",
+      "VMLX_R20_FIXED_PATH",
       "PATH",
       ...Object.keys(tools).flatMap((name) => [
-        `VMLX_R19_TOOL_${name.toUpperCase()}_PATH`,
-        `VMLX_R19_TOOL_${name.toUpperCase()}_REALPATH`,
-        `VMLX_R19_TOOL_${name.toUpperCase()}_SHA256`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_PATH`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_REALPATH`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_SHA256`,
       ]),
     ];
     const previous = Object.fromEntries(
@@ -696,13 +696,13 @@ describe("release packaging", () => {
     );
     try {
       Object.assign(process.env, {
-        VMLX_R19_RELEASE_PLAN: planPath,
-        VMLX_R19_RELEASE_PLAN_SHA256: planHash,
-        VMLX_R19_FIXED_PATH: fixedPath,
+        VMLX_R20_RELEASE_PLAN: planPath,
+        VMLX_R20_RELEASE_PLAN_SHA256: planHash,
+        VMLX_R20_FIXED_PATH: fixedPath,
         PATH: fixedPath,
       });
       for (const [name, tool] of Object.entries(tools)) {
-        const prefix = `VMLX_R19_TOOL_${name.toUpperCase()}`;
+        const prefix = `VMLX_R20_TOOL_${name.toUpperCase()}`;
         process.env[`${prefix}_PATH`] = tool.path;
         process.env[`${prefix}_REALPATH`] = tool.realpath;
         process.env[`${prefix}_SHA256`] = tool.sha256;
@@ -734,13 +734,13 @@ describe("release packaging", () => {
     const beforePack = requireCjs(
       join(repo, "scripts/electron-builder-before-pack.cjs"),
     );
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-plan-"));
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-plan-"));
     const buildDir = join(temp, "build");
-    const planPath = join(buildDir, "r19-release-driver-plan.json");
+    const planPath = join(buildDir, "r20-release-driver-plan.json");
     const expectedArtifact = join(
       temp,
       "release",
-      "vMLX-1.6.19-sequoia-arm64.dmg",
+      "vMLX-1.6.20-sequoia-arm64.dmg",
     );
     const expectedBlockmap = `${expectedArtifact}.blockmap`;
     const stagedApp = join(
@@ -762,8 +762,8 @@ describe("release packaging", () => {
     const sourceCommit = "b".repeat(40);
     const sourceTree = "c".repeat(40);
     const fixedPath = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-    const tools = r19Toolchain();
-    const runtime = writeR19RuntimeFixture(
+    const tools = r20Toolchain();
+    const runtime = writeR20RuntimeFixture(
       beforePack,
       stagedApp,
       "sequoia",
@@ -773,8 +773,8 @@ describe("release packaging", () => {
     );
     const plan = {
       schema_version: 3,
-      scope: "r19_production",
-      version: "1.6.19",
+      scope: "r20_production",
+      version: "1.6.20",
       source_commit: sourceCommit,
       source_tree: sourceTree,
       manifest_sha256: manifestSha256,
@@ -785,7 +785,7 @@ describe("release packaging", () => {
       staged_app: stagedApp,
       hook_attestation: hookAttestation,
       bundle_runtime: runtime.reference,
-      flavor_contract: r19RuntimeContracts.sequoia,
+      flavor_contract: r20RuntimeContracts.sequoia,
       driver_pid: process.pid,
       nonce: "d".repeat(64),
       fixed_path: fixedPath,
@@ -795,51 +795,51 @@ describe("release packaging", () => {
     writeFileSync(planPath, encoded, { mode: 0o600 });
     const planHash = createHash("sha256").update(encoded).digest("hex");
     const envNames = [
-      "VMLX_R19_RELEASE_PLAN",
-      "VMLX_R19_RELEASE_PLAN_SHA256",
-      "VMLX_R19_RELEASE_DRIVER_PID",
-      "VMLX_R19_RELEASE_REQUESTED_FLAVOR",
-      "VMLX_R19_RELEASE_CURRENT_FLAVOR",
-      "VMLX_R19_RELEASE_PHASE",
-      "VMLX_R19_RELEASE_EXPECTED_ARTIFACT",
-      "VMLX_R19_RELEASE_DRIVER_NONCE",
-      "VMLX_R19_HOOK_ATTESTATION_DIR",
-      "VMLX_R19_FIXED_PATH",
+      "VMLX_R20_RELEASE_PLAN",
+      "VMLX_R20_RELEASE_PLAN_SHA256",
+      "VMLX_R20_RELEASE_DRIVER_PID",
+      "VMLX_R20_RELEASE_REQUESTED_FLAVOR",
+      "VMLX_R20_RELEASE_CURRENT_FLAVOR",
+      "VMLX_R20_RELEASE_PHASE",
+      "VMLX_R20_RELEASE_EXPECTED_ARTIFACT",
+      "VMLX_R20_RELEASE_DRIVER_NONCE",
+      "VMLX_R20_HOOK_ATTESTATION_DIR",
+      "VMLX_R20_FIXED_PATH",
       "VMLX_EXPECTED_MLX_WHEEL_PLATFORM",
       "PATH",
       ...Object.keys(tools).flatMap((name) => [
-        `VMLX_R19_TOOL_${name.toUpperCase()}_PATH`,
-        `VMLX_R19_TOOL_${name.toUpperCase()}_REALPATH`,
-        `VMLX_R19_TOOL_${name.toUpperCase()}_SHA256`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_PATH`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_REALPATH`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_SHA256`,
       ]),
     ];
     const previous = Object.fromEntries(
       envNames.map((name) => [name, process.env[name]]),
     );
     Object.assign(process.env, {
-      VMLX_R19_RELEASE_PLAN: planPath,
-      VMLX_R19_RELEASE_PLAN_SHA256: planHash,
-      VMLX_R19_RELEASE_DRIVER_PID: String(process.pid),
-      VMLX_R19_RELEASE_REQUESTED_FLAVOR: "all",
-      VMLX_R19_RELEASE_CURRENT_FLAVOR: "sequoia",
-      VMLX_R19_RELEASE_PHASE: "dmg",
-      VMLX_R19_RELEASE_EXPECTED_ARTIFACT: expectedArtifact,
-      VMLX_R19_RELEASE_DRIVER_NONCE: plan.nonce,
-      VMLX_R19_HOOK_ATTESTATION_DIR: hookDirectory,
-      VMLX_R19_FIXED_PATH: fixedPath,
+      VMLX_R20_RELEASE_PLAN: planPath,
+      VMLX_R20_RELEASE_PLAN_SHA256: planHash,
+      VMLX_R20_RELEASE_DRIVER_PID: String(process.pid),
+      VMLX_R20_RELEASE_REQUESTED_FLAVOR: "all",
+      VMLX_R20_RELEASE_CURRENT_FLAVOR: "sequoia",
+      VMLX_R20_RELEASE_PHASE: "dmg",
+      VMLX_R20_RELEASE_EXPECTED_ARTIFACT: expectedArtifact,
+      VMLX_R20_RELEASE_DRIVER_NONCE: plan.nonce,
+      VMLX_R20_HOOK_ATTESTATION_DIR: hookDirectory,
+      VMLX_R20_FIXED_PATH: fixedPath,
       VMLX_EXPECTED_MLX_WHEEL_PLATFORM:
-        r19RuntimeContracts.sequoia.mlx_wheel_platform,
+        r20RuntimeContracts.sequoia.mlx_wheel_platform,
       PATH: fixedPath,
     });
     for (const [name, tool] of Object.entries(tools)) {
-      const prefix = `VMLX_R19_TOOL_${name.toUpperCase()}`;
+      const prefix = `VMLX_R20_TOOL_${name.toUpperCase()}`;
       process.env[`${prefix}_PATH`] = tool.path;
       process.env[`${prefix}_REALPATH`] = tool.realpath;
       process.env[`${prefix}_SHA256`] = tool.sha256;
     }
     try {
       expect(
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
@@ -854,7 +854,7 @@ describe("release packaging", () => {
 
       delete process.env.VMLX_EXPECTED_MLX_WHEEL_PLATFORM;
       expect(() =>
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
@@ -870,7 +870,7 @@ describe("release packaging", () => {
       );
       process.env.VMLX_EXPECTED_MLX_WHEEL_PLATFORM = "macosx_26_0_arm64";
       expect(() =>
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
@@ -885,7 +885,7 @@ describe("release packaging", () => {
         "packaging requires VMLX_EXPECTED_MLX_WHEEL_PLATFORM=macosx_14_0_arm64",
       );
       process.env.VMLX_EXPECTED_MLX_WHEEL_PLATFORM =
-        r19RuntimeContracts.sequoia.mlx_wheel_platform;
+        r20RuntimeContracts.sequoia.mlx_wheel_platform;
 
       const buildResultContext = {
         outDir: join(temp, "release"),
@@ -894,7 +894,7 @@ describe("release packaging", () => {
         configuration: {},
       };
       expect(
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
@@ -903,9 +903,9 @@ describe("release packaging", () => {
         ),
       ).toEqual(plan);
 
-      process.env.VMLX_R19_TOOL_GIT_PATH = join(temp, "shadowed-git");
+      process.env.VMLX_R20_TOOL_GIT_PATH = join(temp, "shadowed-git");
       expect(() =>
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
@@ -913,10 +913,10 @@ describe("release packaging", () => {
           buildResultContext,
         ),
       ).toThrow("pinned git identity changed");
-      process.env.VMLX_R19_TOOL_GIT_PATH = tools.git.path;
+      process.env.VMLX_R20_TOOL_GIT_PATH = tools.git.path;
 
       expect(() =>
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
@@ -937,7 +937,7 @@ describe("release packaging", () => {
         },
       ]) {
         expect(() =>
-          beforePack.verifyR19ReleasePlan(
+          beforePack.verifyR20ReleasePlan(
             temp,
             manifestSha256,
             sourceCommit,
@@ -947,7 +947,7 @@ describe("release packaging", () => {
         ).toThrow("unrecognized or ambiguous electron-builder hook context");
       }
       expect(() =>
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
@@ -972,7 +972,7 @@ describe("release packaging", () => {
         [expectedArtifact, join(temp, "release", "unexpected.dmg.blockmap")],
       ]) {
         expect(() =>
-          beforePack.verifyR19ReleasePlan(
+          beforePack.verifyR20ReleasePlan(
             temp,
             manifestSha256,
             sourceCommit,
@@ -987,20 +987,20 @@ describe("release packaging", () => {
         );
       }
 
-      process.env.VMLX_R19_RELEASE_REQUESTED_FLAVOR = "sequoia";
+      process.env.VMLX_R20_RELEASE_REQUESTED_FLAVOR = "sequoia";
       expect(() =>
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
           sourceTree,
           {},
         ),
-      ).toThrow("packaging requires VMLX_R19_RELEASE_REQUESTED_FLAVOR=all");
-      process.env.VMLX_R19_RELEASE_REQUESTED_FLAVOR = "all";
+      ).toThrow("packaging requires VMLX_R20_RELEASE_REQUESTED_FLAVOR=all");
+      process.env.VMLX_R20_RELEASE_REQUESTED_FLAVOR = "all";
 
       expect(() =>
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
@@ -1024,14 +1024,14 @@ describe("release packaging", () => {
       const stageEncoded = `${JSON.stringify(stagePlan)}\n`;
       writeFileSync(planPath, stageEncoded, { mode: 0o600 });
       Object.assign(process.env, {
-        VMLX_R19_RELEASE_PLAN_SHA256: createHash("sha256")
+        VMLX_R20_RELEASE_PLAN_SHA256: createHash("sha256")
           .update(stageEncoded)
           .digest("hex"),
-        VMLX_R19_RELEASE_PHASE: "stage",
-        VMLX_R19_RELEASE_EXPECTED_ARTIFACT: stageOutput,
+        VMLX_R20_RELEASE_PHASE: "stage",
+        VMLX_R20_RELEASE_EXPECTED_ARTIFACT: stageOutput,
       });
       expect(
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
@@ -1047,7 +1047,7 @@ describe("release packaging", () => {
         ),
       ).toEqual(stagePlan);
       expect(
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
@@ -1061,9 +1061,9 @@ describe("release packaging", () => {
         ),
       ).toEqual(stagePlan);
 
-      process.env.VMLX_R19_RELEASE_PLAN_SHA256 = "e".repeat(64);
+      process.env.VMLX_R20_RELEASE_PLAN_SHA256 = "e".repeat(64);
       expect(() =>
-        beforePack.verifyR19ReleasePlan(
+        beforePack.verifyR20ReleasePlan(
           temp,
           manifestSha256,
           sourceCommit,
@@ -1089,7 +1089,7 @@ describe("release packaging", () => {
       join(repo, "scripts/electron-builder-before-pack.cjs"),
     );
     const asar = requireCjs(join(repo, "node_modules/@electron/asar"));
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-hook-completion-"));
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-hook-completion-"));
     const hookPanelDir = join(temp, "panel");
     const buildDir = join(temp, "build");
     const releaseDir = join(temp, "release");
@@ -1104,7 +1104,7 @@ describe("release packaging", () => {
     const appAsar = join(resources, "app.asar");
     const expectedArtifact = join(
       releaseDir,
-      "vMLX-1.6.19-sequoia-arm64.dmg",
+      "vMLX-1.6.20-sequoia-arm64.dmg",
     );
     const expectedBlockmap = `${expectedArtifact}.blockmap`;
     const hookDirectory = join(temp, "private", "hook-completions");
@@ -1113,14 +1113,14 @@ describe("release packaging", () => {
       hookDirectory,
       "sequoia.bundle-runtime.json",
     );
-    const planPath = join(buildDir, "r19-release-driver-plan.json");
+    const planPath = join(buildDir, "r20-release-driver-plan.json");
     const fixedPath = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-    const tools = r19Toolchain();
+    const tools = r20Toolchain();
     const manifestSha256 = "a".repeat(64);
     const sourceCommit = "b".repeat(40);
     const sourceTree = "c".repeat(40);
     mkdirSync(hookDirectory, { recursive: true, mode: 0o700 });
-    const runtime = writeR19RuntimeFixture(
+    const runtime = writeR20RuntimeFixture(
       beforePack,
       stagedApp,
       "sequoia",
@@ -1130,8 +1130,8 @@ describe("release packaging", () => {
     );
     const plan = {
       schema_version: 3,
-      scope: "r19_production",
-      version: "1.6.19",
+      scope: "r20_production",
+      version: "1.6.20",
       source_commit: sourceCommit,
       source_tree: sourceTree,
       manifest_sha256: manifestSha256,
@@ -1142,29 +1142,29 @@ describe("release packaging", () => {
       staged_app: stagedApp,
       hook_attestation: hookAttestation,
       bundle_runtime: runtime.reference,
-      flavor_contract: r19RuntimeContracts.sequoia,
+      flavor_contract: r20RuntimeContracts.sequoia,
       driver_pid: process.pid,
       nonce: "d".repeat(64),
       fixed_path: fixedPath,
       tools,
     };
     const envNames = [
-      "VMLX_R19_RELEASE_PLAN",
-      "VMLX_R19_RELEASE_PLAN_SHA256",
-      "VMLX_R19_RELEASE_DRIVER_PID",
-      "VMLX_R19_RELEASE_REQUESTED_FLAVOR",
-      "VMLX_R19_RELEASE_CURRENT_FLAVOR",
-      "VMLX_R19_RELEASE_PHASE",
-      "VMLX_R19_RELEASE_EXPECTED_ARTIFACT",
-      "VMLX_R19_RELEASE_DRIVER_NONCE",
-      "VMLX_R19_HOOK_ATTESTATION_DIR",
-      "VMLX_R19_FIXED_PATH",
+      "VMLX_R20_RELEASE_PLAN",
+      "VMLX_R20_RELEASE_PLAN_SHA256",
+      "VMLX_R20_RELEASE_DRIVER_PID",
+      "VMLX_R20_RELEASE_REQUESTED_FLAVOR",
+      "VMLX_R20_RELEASE_CURRENT_FLAVOR",
+      "VMLX_R20_RELEASE_PHASE",
+      "VMLX_R20_RELEASE_EXPECTED_ARTIFACT",
+      "VMLX_R20_RELEASE_DRIVER_NONCE",
+      "VMLX_R20_HOOK_ATTESTATION_DIR",
+      "VMLX_R20_FIXED_PATH",
       "VMLX_EXPECTED_MLX_WHEEL_PLATFORM",
       "PATH",
       ...Object.keys(tools).flatMap((name) => [
-        `VMLX_R19_TOOL_${name.toUpperCase()}_PATH`,
-        `VMLX_R19_TOOL_${name.toUpperCase()}_REALPATH`,
-        `VMLX_R19_TOOL_${name.toUpperCase()}_SHA256`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_PATH`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_REALPATH`,
+        `VMLX_R20_TOOL_${name.toUpperCase()}_SHA256`,
       ]),
     ];
     const previous = Object.fromEntries(
@@ -1178,7 +1178,7 @@ describe("release packaging", () => {
       mkdirSync(hookDirectory, { recursive: true, mode: 0o700 });
       writeFileSync(
         join(asarSource, "package.json"),
-        '{"name":"vmlx-hook-fixture","version":"1.6.19"}\n',
+        '{"name":"vmlx-hook-fixture","version":"1.6.20"}\n',
       );
       writeFileSync(
         join(asarSource, "out", "main.js"),
@@ -1192,22 +1192,22 @@ describe("release packaging", () => {
       writeFileSync(planPath, encoded, { mode: 0o600 });
       const planHash = createHash("sha256").update(encoded).digest("hex");
       Object.assign(process.env, {
-        VMLX_R19_RELEASE_PLAN: planPath,
-        VMLX_R19_RELEASE_PLAN_SHA256: planHash,
-        VMLX_R19_RELEASE_DRIVER_PID: String(process.pid),
-        VMLX_R19_RELEASE_REQUESTED_FLAVOR: "all",
-        VMLX_R19_RELEASE_CURRENT_FLAVOR: "sequoia",
-        VMLX_R19_RELEASE_PHASE: "dmg",
-        VMLX_R19_RELEASE_EXPECTED_ARTIFACT: expectedArtifact,
-        VMLX_R19_RELEASE_DRIVER_NONCE: plan.nonce,
-        VMLX_R19_HOOK_ATTESTATION_DIR: hookDirectory,
-        VMLX_R19_FIXED_PATH: fixedPath,
+        VMLX_R20_RELEASE_PLAN: planPath,
+        VMLX_R20_RELEASE_PLAN_SHA256: planHash,
+        VMLX_R20_RELEASE_DRIVER_PID: String(process.pid),
+        VMLX_R20_RELEASE_REQUESTED_FLAVOR: "all",
+        VMLX_R20_RELEASE_CURRENT_FLAVOR: "sequoia",
+        VMLX_R20_RELEASE_PHASE: "dmg",
+        VMLX_R20_RELEASE_EXPECTED_ARTIFACT: expectedArtifact,
+        VMLX_R20_RELEASE_DRIVER_NONCE: plan.nonce,
+        VMLX_R20_HOOK_ATTESTATION_DIR: hookDirectory,
+        VMLX_R20_FIXED_PATH: fixedPath,
         VMLX_EXPECTED_MLX_WHEEL_PLATFORM:
-          r19RuntimeContracts.sequoia.mlx_wheel_platform,
+          r20RuntimeContracts.sequoia.mlx_wheel_platform,
         PATH: fixedPath,
       });
       for (const [name, tool] of Object.entries(tools)) {
-        const prefix = `VMLX_R19_TOOL_${name.toUpperCase()}`;
+        const prefix = `VMLX_R20_TOOL_${name.toUpperCase()}`;
         process.env[`${prefix}_PATH`] = tool.path;
         process.env[`${prefix}_REALPATH`] = tool.realpath;
         process.env[`${prefix}_SHA256`] = tool.sha256;
@@ -1219,7 +1219,7 @@ describe("release packaging", () => {
         platformToTargets: new Map(),
         configuration: {},
       };
-      const verifiedPlan = beforePack.verifyR19ReleasePlan(
+      const verifiedPlan = beforePack.verifyR20ReleasePlan(
         temp,
         manifestSha256,
         sourceCommit,
@@ -1230,7 +1230,7 @@ describe("release packaging", () => {
       rmSync(appAsar, { force: true });
       await asar.createPackage(asarSource, appAsar);
       expect(() =>
-        beforePack.emitR19CompletionAttestation(
+        beforePack.emitR20CompletionAttestation(
           hookPanelDir,
           verifiedPlan,
           planHash,
@@ -1239,7 +1239,7 @@ describe("release packaging", () => {
       rmSync(join(asarSource, ".DS_Store"));
       rmSync(appAsar, { force: true });
       await asar.createPackage(asarSource, appAsar);
-      const result = beforePack.emitR19CompletionAttestation(
+      const result = beforePack.emitR20CompletionAttestation(
         hookPanelDir,
         verifiedPlan,
         planHash,
@@ -1249,7 +1249,7 @@ describe("release packaging", () => {
       expect(result.payload.plan.sha256).toBe(planHash);
       expect(result.payload.bundle_runtime).toEqual(runtime.reference);
       expect(result.payload.runtime_contract).toMatchObject(
-        r19RuntimeContracts.sequoia,
+        r20RuntimeContracts.sequoia,
       );
       expect(result.payload.staged_app.payload).toEqual(
         beforePack.treePayload(stagedApp),
@@ -1268,7 +1268,7 @@ describe("release packaging", () => {
       );
       expect(statSync(hookAttestation).mode & 0o777).toBe(0o400);
       expect(() =>
-        beforePack.emitR19CompletionAttestation(
+        beforePack.emitR20CompletionAttestation(
           hookPanelDir,
           verifiedPlan,
           planHash,
@@ -1291,7 +1291,7 @@ describe("release packaging", () => {
     const beforePack = requireCjs(
       join(repo, "scripts/electron-builder-before-pack.cjs"),
     );
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-asar-finder-"));
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-asar-finder-"));
     try {
       mkdirSync(join(temp, "node_modules"), { recursive: true });
       writeFileSync(join(temp, "node_modules", "module.js"), "module.exports=1\n");
@@ -1316,9 +1316,9 @@ describe("release packaging", () => {
     const beforePack = requireCjs(
       join(repo, "scripts/electron-builder-before-pack.cjs"),
     );
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-dmg-set-"));
-    const sequoia = join(temp, "vMLX-1.6.19-sequoia-arm64.dmg");
-    const tahoe = join(temp, "vMLX-1.6.19-tahoe-arm64.dmg");
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-dmg-set-"));
+    const sequoia = join(temp, "vMLX-1.6.20-sequoia-arm64.dmg");
+    const tahoe = join(temp, "vMLX-1.6.20-tahoe-arm64.dmg");
     const expected = [sequoia, tahoe];
     const failure = "unexpected DMG set";
     try {
@@ -1332,7 +1332,7 @@ describe("release packaging", () => {
         "rogue.dmg",
         "rogue.DMG",
         "vMLX-1.6.17-sequoia-arm64.dmg",
-        "vMLX-1.6.19-tahoe-x64.dmg",
+        "vMLX-1.6.20-tahoe-x64.dmg",
       ]) {
         const unexpected = join(temp, unexpectedName);
         writeFileSync(unexpected, "unexpected");
@@ -1356,29 +1356,29 @@ describe("release packaging", () => {
     const beforePack = requireCjs(
       join(repo, "scripts/electron-builder-before-pack.cjs"),
     );
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-signing-selector-"));
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-signing-selector-"));
     const fullIdentity =
       "Developer ID Application: ShieldStack LLC (55KGF2S5AY)";
     const selector = "ShieldStack LLC (55KGF2S5AY)";
     const envNames = [
       "VMLX_RELEASE_SCOPE",
-      "VMLX_R19_OFFICIAL_PACKAGING",
-      "VMLX_R19_EXPECTED_TEAM_ID",
-      "VMLX_R19_EXPECTED_CODESIGN_IDENTITY",
-      "VMLX_R19_PREPACKAGE_MANIFEST",
-      "VMLX_R19_PREPACKAGE_MANIFEST_SHA256",
-      "VMLX_R19_RELEASE_PLAN",
-      "VMLX_R19_RELEASE_PLAN_SHA256",
+      "VMLX_R20_OFFICIAL_PACKAGING",
+      "VMLX_R20_EXPECTED_TEAM_ID",
+      "VMLX_R20_EXPECTED_CODESIGN_IDENTITY",
+      "VMLX_R20_PREPACKAGE_MANIFEST",
+      "VMLX_R20_PREPACKAGE_MANIFEST_SHA256",
+      "VMLX_R20_RELEASE_PLAN",
+      "VMLX_R20_RELEASE_PLAN_SHA256",
       "CSC_NAME",
     ];
     const previous = Object.fromEntries(
       envNames.map((name) => [name, process.env[name]]),
     );
     for (const name of [
-      "VMLX_R19_PREPACKAGE_MANIFEST",
-      "VMLX_R19_PREPACKAGE_MANIFEST_SHA256",
-      "VMLX_R19_RELEASE_PLAN",
-      "VMLX_R19_RELEASE_PLAN_SHA256",
+      "VMLX_R20_PREPACKAGE_MANIFEST",
+      "VMLX_R20_PREPACKAGE_MANIFEST_SHA256",
+      "VMLX_R20_RELEASE_PLAN",
+      "VMLX_R20_RELEASE_PLAN_SHA256",
     ]) {
       delete process.env[name];
     }
@@ -1387,21 +1387,21 @@ describe("release packaging", () => {
       writeFileSync(
         join(temp, "package.json"),
         JSON.stringify({
-          version: "1.6.19",
+          version: "1.6.20",
           build: { mac: { notarize: { teamId: "55KGF2S5AY" } } },
         }),
       );
-      process.env.VMLX_RELEASE_SCOPE = "r19_production";
-      process.env.VMLX_R19_OFFICIAL_PACKAGING = "1";
-      process.env.VMLX_R19_EXPECTED_TEAM_ID = "55KGF2S5AY";
-      process.env.VMLX_R19_EXPECTED_CODESIGN_IDENTITY = fullIdentity;
+      process.env.VMLX_RELEASE_SCOPE = "r20_production";
+      process.env.VMLX_R20_OFFICIAL_PACKAGING = "1";
+      process.env.VMLX_R20_EXPECTED_TEAM_ID = "55KGF2S5AY";
+      process.env.VMLX_R20_EXPECTED_CODESIGN_IDENTITY = fullIdentity;
 
-      expect(beforePack.R19_CODESIGN_IDENTITY).toBe(fullIdentity);
-      expect(beforePack.R19_CSC_NAME).toBe(selector);
-      expect(beforePack.R19_CSC_NAME).not.toBe(
-        beforePack.R19_CODESIGN_IDENTITY,
+      expect(beforePack.R20_CODESIGN_IDENTITY).toBe(fullIdentity);
+      expect(beforePack.R20_CSC_NAME).toBe(selector);
+      expect(beforePack.R20_CSC_NAME).not.toBe(
+        beforePack.R20_CODESIGN_IDENTITY,
       );
-      expect(beforePack.R19_CSC_NAME).not.toMatch(
+      expect(beforePack.R20_CSC_NAME).not.toMatch(
         /^Developer ID Application:/,
       );
 
@@ -1414,20 +1414,20 @@ describe("release packaging", () => {
       ]) {
         process.env.CSC_NAME = invalidSelector;
         expect(() =>
-          beforePack.verifyR19PackagingContext(temp, {}),
+          beforePack.verifyR20PackagingContext(temp, {}),
         ).toThrow(`packaging requires CSC_NAME=${selector}`);
       }
 
       process.env.CSC_NAME = selector;
       expect(() =>
-        beforePack.verifyR19PackagingContext(temp, {}),
+        beforePack.verifyR20PackagingContext(temp, {}),
       ).toThrow("requires the official prepackage manifest");
 
-      process.env.VMLX_R19_EXPECTED_CODESIGN_IDENTITY = selector;
+      process.env.VMLX_R20_EXPECTED_CODESIGN_IDENTITY = selector;
       expect(() =>
-        beforePack.verifyR19PackagingContext(temp, {}),
+        beforePack.verifyR20PackagingContext(temp, {}),
       ).toThrow(
-        `packaging requires VMLX_R19_EXPECTED_CODESIGN_IDENTITY=${fullIdentity}`,
+        `packaging requires VMLX_R20_EXPECTED_CODESIGN_IDENTITY=${fullIdentity}`,
       );
     } finally {
       for (const name of envNames) {
@@ -1458,15 +1458,15 @@ describe("release packaging", () => {
     expect(source).toContain("run_release_python -I -");
     expect(source).not.toContain('"$PYTHON_BIN" -I -');
     expect(source).toContain(
-      'VMLX_R19_RELEASE_PYTHON_INIT_SHA256="$(toolchain_sha256 "$init_path")"',
+      'VMLX_R20_RELEASE_PYTHON_INIT_SHA256="$(toolchain_sha256 "$init_path")"',
     );
     expect(source).toContain(
-      'VMLX_R19_RELEASE_PYTHON_SERVER_SHA256="$(toolchain_sha256 "$server_path")"',
+      'VMLX_R20_RELEASE_PYTHON_SERVER_SHA256="$(toolchain_sha256 "$server_path")"',
     );
     expect(source).toContain(
-      'VMLX_R19_RELEASE_PYTHON_EXECUTABLE_SHA256="$VMLX_R19_RELEASE_PYTHON_SOURCE_SHA256"',
+      'VMLX_R20_RELEASE_PYTHON_EXECUTABLE_SHA256="$VMLX_R20_RELEASE_PYTHON_SOURCE_SHA256"',
     );
-    expect(source).toContain("VMLX_R19_RELEASE_PYTHON_PYVENV_SHA256");
+    expect(source).toContain("VMLX_R20_RELEASE_PYTHON_PYVENV_SHA256");
     expect(source).toContain(
       '"$ROOT_DIR/scripts/check-public-repo-hygiene.sh"',
     );
@@ -1487,13 +1487,13 @@ describe("release packaging", () => {
     expect(source).toContain('export CSC_NAME="$EXPECTED_CSC_NAME"');
     expect(source).not.toContain('export CSC_NAME="$EXPECTED_CODESIGN_IDENTITY"');
     expect(beforePackSource).toContain(
-      'const R19_CSC_NAME = "ShieldStack LLC (55KGF2S5AY)"',
+      'const R20_CSC_NAME = "ShieldStack LLC (55KGF2S5AY)"',
     );
     expect(beforePackSource).toContain(
-      'requireExactEnv("CSC_NAME", R19_CSC_NAME)',
+      'requireExactEnv("CSC_NAME", R20_CSC_NAME)',
     );
     expect(beforePackSource).toContain(
-      "module.exports.R19_CSC_NAME = R19_CSC_NAME",
+      "module.exports.R20_CSC_NAME = R20_CSC_NAME",
     );
     expect(source).toContain(
       "production packaging must build both Sequoia and Tahoe via flavor=all",
@@ -1504,17 +1504,17 @@ describe("release packaging", () => {
     expect(source).toContain('export VMLX_RELEASE_SCOPE="$RELEASE_SCOPE"');
     expect(source).not.toContain("npx electron-vite build");
     expect(beforePackSource).toContain("verifyPinnedToolchain(plan)");
-    expect(beforePackSource).toContain("emitR19CompletionAttestation");
+    expect(beforePackSource).toContain("emitR20CompletionAttestation");
     expect(beforePackSource).toContain(
       '["--no-install", "electron-vite", "build"]',
     );
     expect(source).toContain(
-      'R19_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"',
+      'R20_FIXED_PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"',
     );
-    expect(source).toContain("write_r19_build_plan");
-    expect(source).toContain("VMLX_R19_RELEASE_REQUESTED_FLAVOR");
+    expect(source).toContain("write_r20_build_plan");
+    expect(source).toContain("VMLX_R20_RELEASE_REQUESTED_FLAVOR");
     expect(source).toContain(
-      'export VMLX_EXPECTED_MLX_WHEEL_PLATFORM="$R19_CURRENT_MLX_WHEEL_PLATFORM"',
+      'export VMLX_EXPECTED_MLX_WHEEL_PLATFORM="$R20_CURRENT_MLX_WHEEL_PLATFORM"',
     );
     expect(source).toContain("run_bound_release_action");
     expect(source).toContain("capture_bound_release_action");
@@ -1546,12 +1546,12 @@ describe("release packaging", () => {
     const beforePack = requireCjs(
       join(repo, "scripts/electron-builder-before-pack.cjs"),
     );
-    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-status-action-"));
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r20-status-action-"));
     const runnerDir = join(temp, "tests", "cross_matrix");
     const runner = join(runnerDir, "run_packaged_integrity_contract.py");
     const nonce = "a".repeat(32);
     const actionRelative =
-      `tests/cross_matrix/.run_packaged_integrity_contract.py.vmlx-r19-${nonce}`;
+      `tests/cross_matrix/.run_packaged_integrity_contract.py.vmlx-r20-${nonce}`;
     const action = join(temp, actionRelative);
     try {
       mkdirSync(runnerDir, { recursive: true });
@@ -1650,8 +1650,8 @@ describe("release packaging", () => {
         '#!/bin/sh\nprintf "# mutation\\n" >>"$0"\nexit 0\n',
       );
       const mutationBinding = helper.bindReleasePython(mutation.alias);
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN = mutationBinding.planPath;
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN_SHA256 =
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN = mutationBinding.planPath;
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN_SHA256 =
         mutationBinding.planSha256;
       expect(() =>
         helper.runPinnedReleasePythonAction([], { cwd: mutation.root }),
@@ -1670,8 +1670,8 @@ describe("release packaging", () => {
       );
       chmodSync(aliasSwap.source, 0o755);
       const aliasBinding = helper.bindReleasePython(aliasSwap.alias);
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN = aliasBinding.planPath;
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN_SHA256 =
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN = aliasBinding.planPath;
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN_SHA256 =
         aliasBinding.planSha256;
       expect(() =>
         helper.runPinnedReleasePythonAction([], { cwd: aliasSwap.root }),
@@ -1687,8 +1687,8 @@ describe("release packaging", () => {
           "exit 0\n",
       );
       const actionBinding = helper.bindReleasePython(actionSwap.alias);
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN = actionBinding.planPath;
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN_SHA256 =
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN = actionBinding.planPath;
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN_SHA256 =
         actionBinding.planSha256;
       expect(() =>
         helper.runPinnedReleasePythonAction([], { cwd: actionSwap.root }),
@@ -1730,8 +1730,8 @@ describe("release packaging", () => {
       process.env.PATH = helper.FIXED_PATH;
       const binding = helper.bindReleasePython(alias);
       expect(dirname(binding.actionPath)).toBe(dirname(realpathSync(source)));
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN = binding.planPath;
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN_SHA256 =
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN = binding.planPath;
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN_SHA256 =
         binding.planSha256;
       process.env.PYTHONPATH = "/private/hostile";
       expect(
@@ -1789,8 +1789,8 @@ describe("release packaging", () => {
       } else {
         binding = helper.bindReleasePython(python);
         bound = true;
-        process.env.VMLX_R19_RELEASE_PYTHON_PLAN = binding.planPath;
-        process.env.VMLX_R19_RELEASE_PYTHON_PLAN_SHA256 =
+        process.env.VMLX_R20_RELEASE_PYTHON_PLAN = binding.planPath;
+        process.env.VMLX_R20_RELEASE_PYTHON_PLAN_SHA256 =
           binding.planSha256;
       }
       expect(dirname(binding.actionPath)).toBe(
@@ -1840,9 +1840,9 @@ describe("release packaging", () => {
     try {
       process.env.PATH = helper.FIXED_PATH;
       const executableBinding = helper.bindReleasePython(python);
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN =
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN =
         executableBinding.planPath;
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN_SHA256 =
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN_SHA256 =
         executableBinding.planSha256;
       expect(() =>
         helper.runPinnedReleasePythonAction([], {
@@ -1868,13 +1868,13 @@ describe("release packaging", () => {
       chmodSync(python, 0o755);
       writeFileSync(join(venv, "pyvenv.cfg"), "home = /private/fake\n");
       const scriptBinding = helper.bindReleasePython(python);
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN = scriptBinding.planPath;
-      process.env.VMLX_R19_RELEASE_PYTHON_PLAN_SHA256 =
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN = scriptBinding.planPath;
+      process.env.VMLX_R20_RELEASE_PYTHON_PLAN_SHA256 =
         scriptBinding.planSha256;
       const script = join(temp, "gate.py");
       writeFileSync(script, "print('gate')\n");
       expect(() =>
-        beforePack.runR19ReleasePythonAction([script], {
+        beforePack.runR20ReleasePythonAction([script], {
           cwd: temp,
           beforeSpawn: ({ script: scriptRecord }: any) => {
             rmSync(scriptRecord.action.path);
@@ -1899,9 +1899,9 @@ describe("release packaging", () => {
       "utf8",
     );
     expect(driver).toContain("--consume-v5-manifest");
-    expect(driver).toContain('--manifest "$VMLX_R19_RELEASE_ATTESTATION"');
+    expect(driver).toContain('--manifest "$VMLX_R20_RELEASE_ATTESTATION"');
     expect(driver).not.toContain(
-      '--attestation "$VMLX_R19_RELEASE_ATTESTATION"',
+      '--attestation "$VMLX_R20_RELEASE_ATTESTATION"',
     );
   });
 });

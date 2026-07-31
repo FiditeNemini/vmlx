@@ -608,6 +608,133 @@ def test_explicit_strict_fence_forces_physical_reconciliation(
         store.shutdown()
 
 
+def test_fence_block_wait_rejects_commit_visible_before_budget_eviction(
+    tmp_path,
+    monkeypatch,
+):
+    """Index visibility before accounting must not release a native fallback."""
+    store = BlockDiskStore(str(tmp_path), max_size_gb=1)
+    account_entered = threading.Event()
+    allow_account = threading.Event()
+    original_account = store.global_budget.account_finalized_write_locked
+
+    def delayed_account(net_bytes_delta, *, require_reconciled=False):
+        account_entered.set()
+        if not allow_account.wait(timeout=5.0):
+            raise RuntimeError("timed out waiting to exercise budget eviction")
+        return original_account(
+            net_bytes_delta,
+            require_reconciled=require_reconciled,
+        )
+
+    monkeypatch.setattr(
+        store.global_budget,
+        "account_finalized_write_locked",
+        delayed_account,
+    )
+    # Force the just-committed payload through the eviction/error path. The
+    # SQLite index itself is larger than this ceiling, so the publication cannot
+    # be certified retained even though its row is briefly readable.
+    store.max_size_bytes = 1
+    store.global_budget._requested_max_size_bytes = 1
+    store.global_budget._publish_budget(1)
+    block_hash = b"v" * 32
+    fence_id = store.begin_write_fence("dsv4-pre-eviction-visibility")
+    result: dict[str, set[bytes]] = {}
+
+    def wait_for_retained_block():
+        result["hashes"] = store.wait_for_write_fence_blocks(
+            fence_id,
+            [block_hash],
+            timeout=5.0,
+        )
+
+    waiter = threading.Thread(target=wait_for_retained_block, daemon=True)
+    waiter_started = False
+    try:
+        assert store.write_block_async(
+            block_hash,
+            _cache_data(7),
+            8,
+            request_id="dsv4-pre-eviction-visibility",
+            fence_id=fence_id,
+        )
+        assert store.seal_write_fence(fence_id)
+        assert account_entered.wait(timeout=5.0)
+
+        # This is the old, insufficient boundary: _write_block() has committed
+        # the row/file, but aggregate accounting and eviction are still paused.
+        assert store.wait_for_blocks([block_hash], timeout=0.5) == {block_hash}
+
+        waiter.start()
+        waiter_started = True
+        time.sleep(0.05)
+        assert waiter.is_alive()
+
+        allow_account.set()
+        waiter.join(timeout=5.0)
+        assert not waiter.is_alive()
+        _stats, fence = _wait_for_fence(store, fence_id)
+    finally:
+        allow_account.set()
+        if waiter_started:
+            waiter.join(timeout=5.0)
+        store.shutdown()
+
+    assert result["hashes"] == set()
+    assert fence["post_eviction_complete"] is True
+    assert fence.get("post_eviction_error") or fence["retained"] == 0
+
+
+def test_fence_block_wait_returns_exact_hash_after_terminal_retention(tmp_path):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    block_hash = b"r" * 32
+    fence_id = store.begin_write_fence("dsv4-retained")
+    try:
+        assert store.write_block_async(
+            block_hash,
+            _cache_data(8),
+            8,
+            request_id="dsv4-retained",
+            fence_id=fence_id,
+        )
+        assert store.seal_write_fence(fence_id)
+        assert store.wait_for_write_fence_blocks(
+            fence_id,
+            [block_hash, b"m" * 32],
+            timeout=5.0,
+        ) == {block_hash}
+        _stats, fence = _wait_for_fence(store, fence_id)
+    finally:
+        store.shutdown()
+
+    assert fence["expected"] == fence["completed"] == fence["retained"] == 1
+    assert fence["failed"] == fence["dropped"] == 0
+
+
+def test_fence_block_wait_fails_closed_on_terminal_error(tmp_path):
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    fence_id = store.begin_write_fence("dsv4-terminal-error")
+    try:
+        store._fail_write_fence(fence_id, "forced terminal error")
+        assert store.wait_for_write_fence_blocks(
+            fence_id,
+            [b"e" * 32],
+            timeout=0.1,
+        ) == set()
+        stats = store.get_stats()
+    finally:
+        store.shutdown()
+
+    fence = next(
+        item
+        for item in stats["write_pipeline"]["recent_fences"]
+        if item["fence_id"] == fence_id
+    )
+    assert fence["post_eviction_complete"] is True
+    assert fence["post_eviction_error"] == "forced terminal error"
+
+
 def test_full_write_queue_skips_metal_serialization(
     tmp_path,
     monkeypatch,

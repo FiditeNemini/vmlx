@@ -1,6 +1,13 @@
 import { useState, useEffect, useRef } from 'react'
 import { ArrowLeft, ChevronRight } from 'lucide-react'
-import { SessionConfigForm, SessionConfig, DEFAULT_CONFIG, commitActiveSettingsInput } from './SessionConfigForm'
+import {
+  SessionConfigForm,
+  SessionConfig,
+  DEFAULT_CONFIG,
+  DSV4_MAX_CACHE_BLOCKS,
+  DSV4_PAGED_CACHE_BLOCK_SIZE,
+  commitActiveSettingsInput,
+} from './SessionConfigForm'
 import { useTranslation } from '../../i18n'
 import { resolveCacheLaunchPolicy } from '../../../../shared/cacheControlPolicy'
 import {
@@ -61,7 +68,6 @@ function cacheSubtypeSupportsBlockDiskOnly(cacheSubtype?: string): boolean {
   return cacheSubtype === 'mixed_swa_kv' || cacheSubtype === 'step3p7_full_sliding_kv'
 }
 
-const DSV4_PAGED_CACHE_BLOCK_SIZE = 256
 const GENERIC_DEFAULT_TIMEOUT_SECONDS = 300
 const DSV4_DEFAULT_TIMEOUT_SECONDS = 900
 
@@ -361,7 +367,7 @@ function filterAdditionalArgs(raw: string | undefined, blockedFlags: Set<string>
 function buildCommandPreview(
   modelPath: string,
   config: SessionConfig,
-  detected?: { toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; cacheType?: string; cacheSubtype?: string; family?: string; architectureHints?: Record<string, string | number | boolean>; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; blockedReason?: string } } | null
+  detected?: { toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; isMultimodal?: boolean; forceTextOnly?: boolean; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; cacheType?: string; cacheSubtype?: string; family?: string; dsv4PoolQuantDefault?: boolean; architectureHints?: Record<string, string | number | boolean>; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; blockedReason?: string } } | null
 ): string {
   const parts = ['vmlx-engine serve', modelPath]
   const requestedDistributed = !!(config as any).distributedEnabled
@@ -392,13 +398,16 @@ function buildCommandPreview(
   const architectureBlockDiskOnlySupported =
     (cacheTypeSupportsBlockDiskOnly(detected?.cacheType) ||
       cacheSubtypeSupportsBlockDiskOnly(detected?.cacheSubtype) ||
-      m3Active) &&
+      m3Active ||
+      dsv4Active) &&
     !zayaCcaActive &&
-    !dsv4Active &&
     !openPanguExactTypedCache
   const subtypePagedCacheActive = cacheSubtypeRequiresPaged(detected?.cacheSubtype)
   const effectiveDistributed = requestedDistributed && !dsv4Active
   const effectiveFlashMoe = requestedFlashMoe && !effectiveDistributed && !dsv4Active
+  if (dsv4Active && typeof detected?.dsv4PoolQuantDefault === 'boolean') {
+    parts[0] = `DSV4_POOL_QUANT=${detected.dsv4PoolQuantDefault ? '1' : '0'} ${parts[0]}`
+  }
   const lagunaMixedSwaTurboQuantActive = isLagunaMixedSwaTurboQuantEffective({
     detected,
     kvCacheQuantization: config.kvCacheQuantization,
@@ -479,16 +488,12 @@ function buildCommandPreview(
     ((cacheTypeRequiresPaged(detected?.cacheType) || subtypePagedCacheActive) && detected?.usePagedCache === true)
   const cacheLaunchPolicy = resolveCacheLaunchPolicy({
     continuousBatching: cacheStackActive,
-    enablePrefixCache: dsv4Active
-      ? false
-      : config.enablePrefixCache !== false,
+    enablePrefixCache: config.enablePrefixCache !== false,
     usePagedCache: dsv4Active
-      ? false
+      ? config.usePagedCache === true
       : config.usePagedCache ?? detected?.usePagedCache ?? false,
     enableDiskCache: !!config.enableDiskCache,
-    enableBlockDiskCache: dsv4Active
-      ? false
-      : !!config.enableBlockDiskCache,
+    enableBlockDiskCache: !!config.enableBlockDiskCache,
     architectureRequiresPagedCache,
     architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
   })
@@ -510,8 +515,8 @@ function buildCommandPreview(
       // byte ceiling and DO reach the engine under paged (sessions.ts emits them
       // unconditionally). The preview must show them in both modes or it lies
       // about the launch. Only --cache-ttl-minutes is genuinely inert under
-      // paged. DSV4 never reaches this branch because product prefix reuse is
-      // fail-closed.
+      // paged. SSD-only mode omits both controls because no RAM payload tier is
+      // retained.
       const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
       if (!blockDiskOnly && cacheMemoryMb != null) parts.push('--cache-memory-mb', cacheMemoryMb.toString())
       const cacheMemoryPercent = finitePositiveNumber(config.cacheMemoryPercent)
@@ -868,15 +873,17 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
           // Reset restores model-derived Auto, not a sticky explicit On/Off.
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
-            base.dsv4PrefixCache = false
+            base.dsv4PrefixCache = true
             base.dsv4PoolQuant = typeof detected.dsv4PoolQuantDefault === 'boolean'
               ? detected.dsv4PoolQuantDefault
               : undefined
-            base.enablePrefixCache = false
+            base.enablePrefixCache = true
             base.usePagedCache = false
             base.enableDiskCache = false
-            base.enableBlockDiskCache = false
+            base.enableBlockDiskCache = true
+            base.kvCacheQuantization = 'auto'
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
+            base.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
           } else if (detected.family === 'openpangu_v2') {
             base.enablePrefixCache = true
             base.usePagedCache = false

@@ -18,7 +18,10 @@ export interface CacheControlState {
    * disk-only KV block index with a typed companion SSD store/rederive path.
    * This is true for hybrid/Mamba SSM caches and native rotating/mixed-SWA
    * caches whose typed metadata is carried in each block record. It is not
-   * true for DSV4/ZAYA/M3/openPangu path-dependent cache contracts.
+   * This includes DSV4, M3, and hybrid/Mamba cache contracts with a complete
+   * typed block-disk representation. It remains false for ZAYA/openPangu contracts
+   * that still require their architecture-specific in-memory or prompt-level
+   * cache lane.
    */
   architectureSupportsBlockDiskOnly?: boolean
 }

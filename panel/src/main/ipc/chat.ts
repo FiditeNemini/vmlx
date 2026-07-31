@@ -46,6 +46,10 @@ import {
 } from "../../shared/toolAutoContinue";
 import { buildToolMediaFollowupContent } from "../../shared/toolMediaFollowup";
 import { dsv4OutputBudget } from "../../shared/dsv4RequestBudget";
+import {
+  applyReasoningRequestFields,
+  type ReasoningEffort,
+} from "../../shared/reasoningEffortPolicy";
 import { projectedMetalHeadroomChatErrorContent } from "../../shared/chatErrorDisplay";
 import {
   reconcileResponsesToolBufferAtStreamEnd,
@@ -105,18 +109,6 @@ function effectiveFamilyRequestTimeoutSeconds(
     return MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS;
   }
   return timeoutSeconds;
-}
-
-function shouldForwardReasoningEffort(
-  reasoningEffort: unknown,
-  enableThinking: unknown,
-  sessionHasReasoningParser: boolean,
-  detectedFamily?: string,
-): reasoningEffort is string {
-  if (typeof reasoningEffort !== "string" || !reasoningEffort) return false;
-  if (enableThinking === false) return false;
-  if (detectedFamily === "hy3" && enableThinking !== true) return false;
-  return sessionHasReasoningParser || detectedFamily === "deepseek-v4";
 }
 
 function shouldSuppressGenericAgenticPromptForNativeTools(
@@ -1080,6 +1072,7 @@ export function registerChatHandlers(
       let thinkingBudgetSupported: boolean | undefined;
       let supportsThinkingBudget: boolean | undefined;
       let supportsInstructMode: boolean | undefined;
+      let supportedReasoningEfforts: ReasoningEffort[] | undefined;
       let sessionImageTokenBudget: number | undefined;
       // VLM video sampling (Qwen 3.6, Qwen3.5-VL, etc.) — forwarded as
       // video_fps / video_max_frames on the request body when present.
@@ -1142,6 +1135,7 @@ export function registerChatHandlers(
             );
             supportsThinkingBudget = detected.supportsThinkingBudget;
             supportsInstructMode = detected.supportsInstructMode;
+            supportedReasoningEfforts = detected.supportedReasoningEfforts;
             timeoutSeconds = effectiveFamilyRequestTimeoutSeconds(
               timeoutSeconds,
               chatDetectedFamily,
@@ -2144,30 +2138,15 @@ export function registerChatHandlers(
             // reasoning.default_mode). Parser seeding is resolved by the engine
             // from that same effective policy; the presence of a parser alone is
             // not permission for the panel to force thinking on.
-            if (effectiveEnableThinkingOverride !== undefined) {
-              obj.enable_thinking = effectiveEnableThinkingOverride;
-            }
-            // chat_template_kwargs: local only (vMLX Engine internal, no remote provider supports this)
-            if (!isRemote && obj.enable_thinking !== undefined)
-              obj.chat_template_kwargs = {
-                enable_thinking: obj.enable_thinking,
-              };
+            applyReasoningRequestFields(obj, {
+              enableThinking: effectiveEnableThinkingOverride,
+              reasoningEffort: overrides?.reasoningEffort,
+              isRemote,
+              sessionHasReasoningParser,
+              detectedFamily: chatDetectedFamily,
+              supportedReasoningEfforts,
+            });
             applyLocalThinkingBudget(obj);
-            if (
-              shouldForwardReasoningEffort(
-                overrides?.reasoningEffort,
-                obj.enable_thinking,
-                sessionHasReasoningParser,
-                chatDetectedFamily,
-              )
-            )
-              obj.reasoning_effort = overrides.reasoningEffort;
-            if (!isRemote) {
-              if (obj.enable_thinking === false) obj.thinking_mode = "instruct";
-              else if (obj.enable_thinking === true && obj.reasoning_effort === "max")
-                obj.thinking_mode = "max";
-              else if (obj.enable_thinking === true) obj.thinking_mode = "reasoning";
-            }
             // VLM video sampling — forward to engine only when session
             // config has non-default values. Remote OpenAI-compatible
             // providers don't support these fields, so skip there.
@@ -2229,34 +2208,16 @@ export function registerChatHandlers(
                 apiUrl.includes("openrouter.ai") ||
                 apiUrl.includes("api.deepseek.com"));
 
-            if (!isStrictApi) {
-              if (effectiveEnableThinkingOverride !== undefined) {
-                obj.enable_thinking = effectiveEnableThinkingOverride;
-              }
-            }
-
-            // chat_template_kwargs: local only (vMLX Engine internal, no remote provider supports this)
-            if (!isRemote && obj.enable_thinking !== undefined)
-              obj.chat_template_kwargs = {
-                enable_thinking: obj.enable_thinking,
-              };
+            applyReasoningRequestFields(obj, {
+              enableThinking: effectiveEnableThinkingOverride,
+              reasoningEffort: overrides?.reasoningEffort,
+              isRemote,
+              sessionHasReasoningParser,
+              detectedFamily: chatDetectedFamily,
+              supportedReasoningEfforts,
+              allowRequestControls: !isStrictApi,
+            });
             applyLocalThinkingBudget(obj);
-            if (
-              !isStrictApi &&
-              shouldForwardReasoningEffort(
-                overrides?.reasoningEffort,
-                obj.enable_thinking,
-                sessionHasReasoningParser,
-                chatDetectedFamily,
-              )
-            )
-              obj.reasoning_effort = overrides.reasoningEffort;
-            if (!isRemote) {
-              if (obj.enable_thinking === false) obj.thinking_mode = "instruct";
-              else if (obj.enable_thinking === true && obj.reasoning_effort === "max")
-                obj.thinking_mode = "max";
-              else if (obj.enable_thinking === true) obj.thinking_mode = "reasoning";
-            }
             // VLM video sampling — local engine only (strict 3rd-party APIs
             // reject unknown fields, remote OpenAI-compat doesn't support it).
             if (!isRemote && sessionImageTokenBudget !== undefined)

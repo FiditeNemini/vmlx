@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed preflight for the vMLX 1.6.19 production checkpoint.
+"""Fail-closed preflight for the vMLX 1.6.20 production checkpoint.
 
 Private release evidence must stay outside the public repository. This gate
 consumes a sanitized external attestation, binds every required check to the
@@ -39,13 +39,13 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
-SCOPE = "r19_production"
-VERSION = "1.6.19"
-SCHEMA = "vmlx-r19-release-attestation-v1"
-PROOF_SCHEMA = "vmlx-r19-check-proof-v1"
-SOURCE_TRACE_SCHEMA = "vmlx-r19-source-trace-v1"
-COMMAND_RESULT_SCHEMA = "vmlx-r19-command-result-v1"
-JANG_RESULT_SCHEMA = "vmlx-r19-jang-runtime-result-v1"
+SCOPE = "r20_production"
+VERSION = "1.6.20"
+SCHEMA = "vmlx-r20-release-attestation-v1"
+PROOF_SCHEMA = "vmlx-r20-check-proof-v1"
+SOURCE_TRACE_SCHEMA = "vmlx-r20-source-trace-v1"
+COMMAND_RESULT_SCHEMA = "vmlx-r20-command-result-v1"
+JANG_RESULT_SCHEMA = "vmlx-r20-jang-runtime-result-v1"
 ELECTRON_PROOF_SCHEMA = "vmlx-electron-ui-proof-v2"
 API_MATRIX_SCHEMA = "vmlx-agentic-protocol-matrix-v2"
 CACHE_PROOF_SCHEMA = "vmlx-cache-hierarchy-live-gate-v2"
@@ -56,7 +56,7 @@ PRIVATE_CACHE_ATTESTATION_TOKEN_ENV = "VMLINUX_PRIVATE_CACHE_ATTESTATION_TOKEN"
 PRIVATE_CACHE_ATTESTATION_TOKEN_FILE_ENV = (
     "VMLINUX_PRIVATE_CACHE_ATTESTATION_TOKEN_FILE"
 )
-OWNED_EXECUTION_SCHEMA = "vmlx-r19-owned-execution-v1"
+OWNED_EXECUTION_SCHEMA = "vmlx-r20-owned-execution-v1"
 API_CAPTURE_LAYER = "requests.decompressed_response_parser_input"
 API_CAPTURE_SEMANTICS = (
     "Exact decompressed response-body bytes delivered to protocol parsers: "
@@ -337,7 +337,7 @@ REQUIRED_ASSERTIONS = {
         "laguna_mixed_affine_shape_checked",
     ),
     "release_scope_regression_review": (
-        "v1_6_18_to_head_diff_reviewed",
+        "v1_6_19_to_head_diff_reviewed",
         "all_intended_fixes_mapped",
         "unintended_changes_none_or_documented",
         "public_repository_hygiene_passed",
@@ -535,19 +535,19 @@ FAMILY_CONTRACTS: dict[str, dict[str, Any]] = {
     },
 }
 
-V5_MANIFEST_SCHEMA = "vmlx-r19-owned-release-preflight-v5"
-V5_PRODUCER_ENVELOPE_SCHEMA = "vmlx-r19-owned-producer-envelope-v5"
+V5_MANIFEST_SCHEMA = "vmlx-r20-owned-release-preflight-v5"
+V5_PRODUCER_ENVELOPE_SCHEMA = "vmlx-r20-owned-producer-envelope-v5"
 V5_SAMPLING_PROBE_MAX_TOKENS = 16
-V5_UI_SCHEMA = "vmlx-r19-owned-ui-capture-v5"
-V5_API_SCHEMA = "vmlx-r19-owned-api-capture-v5"
-V5_CACHE_SCHEMA = "vmlx-r19-owned-cache-capture-v5"
-V5_SESSION_BINDING_SCHEMA = "vmlx-r19-owned-session-binding-v5"
-V5_UI_READY_SCHEMA = "vmlx-r19-owned-ui-ready-v5"
-V5_UI_RELEASE_SCHEMA = "vmlx-r19-owned-ui-release-v5"
-V5_CACHE_PHASE_DONE_SCHEMA = "vmlx-r19-owned-cache-phase-done-v5"
-V5_RUN_INTENT_SCHEMA = "vmlx-r19-owned-run-intent-v5"
+V5_UI_SCHEMA = "vmlx-r20-owned-ui-capture-v5"
+V5_API_SCHEMA = "vmlx-r20-owned-api-capture-v5"
+V5_CACHE_SCHEMA = "vmlx-r20-owned-cache-capture-v5"
+V5_SESSION_BINDING_SCHEMA = "vmlx-r20-owned-session-binding-v5"
+V5_UI_READY_SCHEMA = "vmlx-r20-owned-ui-ready-v5"
+V5_UI_RELEASE_SCHEMA = "vmlx-r20-owned-ui-release-v5"
+V5_CACHE_PHASE_DONE_SCHEMA = "vmlx-r20-owned-cache-phase-done-v5"
+V5_RUN_INTENT_SCHEMA = "vmlx-r20-owned-run-intent-v5"
 V5_UI_SESSION_ATTESTATION_SCHEMA = (
-    "vmlx-r19-owned-ui-session-attestation-v5"
+    "vmlx-r20-owned-ui-session-attestation-v5"
 )
 V5_L2_EVICTION_OBSERVATION_SCHEMA = (
     "vmlx-cache-l2-size-eviction-observation-v1"
@@ -556,13 +556,13 @@ V5_L2_RESTART_OBSERVATION_SCHEMA = (
     "vmlx-cache-l2-restart-restore-observation-v1"
 )
 V5_L2_SIZE_EVICTION_ATTESTATION_SCHEMA = (
-    "vmlx-r19-owned-l2-size-eviction-attestation-v5"
+    "vmlx-r20-owned-l2-size-eviction-attestation-v5"
 )
 V5_RUN_INTENT_HARNESSES = {
     "ui": "panel/scripts/live-real-ui-model-proof.mjs",
     "api": "tests/cross_matrix/run_agentic_protocol_matrix.py",
     "cache": "tests/cross_matrix/run_cache_hierarchy_live_gate.py",
-    "semantic": "panel/scripts/scoped-release-preflight-19.py",
+    "semantic": "panel/scripts/scoped-release-preflight-20.py",
 }
 V5_PRODUCER_NAMES = ("ui", "api", "cache")
 V5_PRIMARY_REPRESENTATIVE_ID = "primary_tq_supported"
@@ -607,7 +607,7 @@ V5_RELEASE_INTENDED_PATHS_BY_OWNER = {
         "panel/scripts/release-gate-python-app.py",
         "panel/scripts/release-python-action.cjs",
         "panel/scripts/scoped-release-preflight-18.py",
-        "panel/scripts/scoped-release-preflight-19.py",
+        "panel/scripts/scoped-release-preflight-20.py",
         "panel/scripts/verify-bundled-python.sh",
         "panel/scripts/verify-release-dmgs.sh",
     ),
@@ -1360,7 +1360,7 @@ def validate_private_evidence_root(
 ) -> Path | None:
     if configured is None:
         failures.append(
-            "missing --private-evidence-root or VMLX_R19_PRIVATE_EVIDENCE_ROOT"
+            "missing --private-evidence-root or VMLX_R20_PRIVATE_EVIDENCE_ROOT"
         )
         return None
     lexical = configured.expanduser().absolute()
@@ -2223,7 +2223,7 @@ def _semantic_source_trace(
 ) -> dict[str, Any] | None:
     """Block source provenance until the producer retains raw live snapshots.
 
-    ``vmlx-r19-source-trace-v1`` is a post-hoc JSON declaration.  It does not
+    ``vmlx-r20-source-trace-v1`` is a post-hoc JSON declaration.  It does not
     retain immutable raw bytes for the process start identity, code signature,
     backend argv/import path, listener ownership, health response, CDP
     ``/json`` targets/WebSocket DOM capture, renderer URL, or build manifest.
@@ -6678,7 +6678,7 @@ def _v5_api_facts(
             tuple[dict[str, Any], dict[str, Any]]
         ] = []
         if (
-            sampling.get("schema") == "vmlx-r19-owned-sampling-attestation-v1"
+            sampling.get("schema") == "vmlx-r20-owned-sampling-attestation-v1"
             and isinstance(observations, list)
             and len(observations) == 3
         ):
@@ -7664,8 +7664,8 @@ def _v5_release_scope_review(diff_bytes: Any) -> dict[str, Any] | None:
         path for path in observed if _v5_public_repository_path_is_forbidden(path)
     )
     return {
-        "schema": "vmlx-r19-release-scope-review-v2",
-        "baseline": "v1.6.18",
+        "schema": "vmlx-r20-release-scope-review-v2",
+        "baseline": "v1.6.19",
         "diff_sha256": hashlib.sha256(diff_bytes).hexdigest(),
         "path_count": len(observed),
         "expected_path_count": len(expected),
@@ -7688,7 +7688,7 @@ def _v5_git_snapshot() -> dict[str, Any]:
         "origin/main...HEAD",
     ).split()
     diff_bytes = subprocess.run(
-        ["git", "diff", "--name-status", "v1.6.18..HEAD"],
+        ["git", "diff", "--name-status", "v1.6.19..HEAD"],
         cwd=ROOT,
         capture_output=True,
         check=True,
@@ -7782,7 +7782,7 @@ def _v5_source_and_scope_facts(
     diff_bytes = after.get("release_diff_bytes")
     scope_review = _v5_release_scope_review(diff_bytes)
     if scope_review is not None:
-        scope_facts.add("v1_6_18_to_head_diff_reviewed")
+        scope_facts.add("v1_6_19_to_head_diff_reviewed")
         exact = not scope_review["unexpected"] and not scope_review["missing"]
         if exact:
             scope_facts.add("all_intended_fixes_mapped")
@@ -8571,8 +8571,8 @@ def _v5_default_owned_check_plans(
         "VMLX_EXPECTED_MLX_WHEEL_PLATFORM": "macosx_14_0_arm64",
     }
     for name, pin in release_verifier_pins.items():
-        production_env[f"VMLX_R19_TOOL_{name}_REALPATH"] = pin["path"]
-        production_env[f"VMLX_R19_TOOL_{name}_SHA256"] = pin["sha256"]
+        production_env[f"VMLX_R20_TOOL_{name}_REALPATH"] = pin["path"]
+        production_env[f"VMLX_R20_TOOL_{name}_SHA256"] = pin["sha256"]
     production_tool_files = sorted(
         {
             *toolchain_files,
@@ -8699,8 +8699,8 @@ def _v5_default_owned_check_plans(
                         # helpers.  Preserve the exact executable identities
                         # behind the PATH wrappers so those self-tests do not
                         # mistake a shebang wrapper for the process image.
-                        "VMLINUX_R19_PINNED_NODE_REALPATH": str(node),
-                        "VMLINUX_R19_PINNED_NPM_CLI_REALPATH": str(npm_cli),
+                        "VMLINUX_R20_PINNED_NODE_REALPATH": str(node),
+                        "VMLINUX_R20_PINNED_NPM_CLI_REALPATH": str(npm_cli),
                     },
                     # A small number of Python contract tests inspect the
                     # packaged Electron renderer with the pinned Node binary.
@@ -10511,7 +10511,7 @@ def _v5_api_sampling_capture(
         ("override", {"temperature": override_temperature}),
         ("after_override", {}),
     ):
-        proof_request_id = f"r19-sampling-{label}-{secrets.token_hex(12)}"
+        proof_request_id = f"r20-sampling-{label}-{secrets.token_hex(12)}"
         request_id = f"{proof_request_id}-request"
         message_id = f"{proof_request_id}-message"
         request = {
@@ -10519,7 +10519,7 @@ def _v5_api_sampling_capture(
             "messages": [
                 {
                     "role": "user",
-                    "content": f"Reply exactly R19-SAMPLING-{label.upper()}.",
+                    "content": f"Reply exactly R20-SAMPLING-{label.upper()}.",
                 }
             ],
             "stream": False,
@@ -10607,7 +10607,7 @@ def _v5_api_sampling_capture(
     if stable_defaults_after != stable_defaults_before:
         raise RuntimeError("per-request sampling override changed server defaults")
     return {
-        "schema": "vmlx-r19-owned-sampling-attestation-v1",
+        "schema": "vmlx-r20-owned-sampling-attestation-v1",
         "health_effective_defaults": effective_defaults,
         "health_effective_defaults_after": effective_defaults_after,
         "stable_sampling_defaults_before": stable_defaults_before,
@@ -10630,7 +10630,7 @@ def _v5_api_worker_capture(
     harness_path = ROOT / "tests/cross_matrix/run_agentic_protocol_matrix.py"
     harness, harness_pin = _v5_import_pinned_module(
         harness_path,
-        f"_vmlx_r19_api_worker_{args.v5_nonce}",
+        f"_vmlx_r20_api_worker_{args.v5_nonce}",
     )
     raw_root = (
         run_root
@@ -13917,22 +13917,22 @@ def _legacy_main_v4() -> int:
         "--attestation",
         type=Path,
         default=(
-            Path(os.environ["VMLX_R19_RELEASE_ATTESTATION"])
-            if os.environ.get("VMLX_R19_RELEASE_ATTESTATION")
+            Path(os.environ["VMLX_R20_RELEASE_ATTESTATION"])
+            if os.environ.get("VMLX_R20_RELEASE_ATTESTATION")
             else None
         ),
     )
     parser.add_argument(
         "--out",
         type=Path,
-        default=ROOT / "build/current-scoped-release-preflight-19.json",
+        default=ROOT / "build/current-scoped-release-preflight-20.json",
     )
     parser.add_argument(
         "--private-evidence-root",
         type=Path,
         default=(
-            Path(os.environ["VMLX_R19_PRIVATE_EVIDENCE_ROOT"])
-            if os.environ.get("VMLX_R19_PRIVATE_EVIDENCE_ROOT")
+            Path(os.environ["VMLX_R20_PRIVATE_EVIDENCE_ROOT"])
+            if os.environ.get("VMLX_R20_PRIVATE_EVIDENCE_ROOT")
             else None
         ),
     )
@@ -13951,7 +13951,7 @@ def _legacy_main_v4() -> int:
     args = parser.parse_args()
     failures: list[str] = []
     run_context = {
-        "run_id": args.run_id or f"r19-{uuid4()}",
+        "run_id": args.run_id or f"r20-{uuid4()}",
         "started_at": _iso_now(),
     }
     require(
@@ -13962,7 +13962,7 @@ def _legacy_main_v4() -> int:
     require(
         args.attestation is not None,
         failures,
-        "missing --attestation or VMLX_R19_RELEASE_ATTESTATION",
+        "missing --attestation or VMLX_R20_RELEASE_ATTESTATION",
     )
     versions = validate_versions(failures)
     git_state = validate_git_state(failures)
@@ -14114,7 +14114,7 @@ def _v5_run(
     failures: list[str] = []
     nonce = secrets.token_hex(16)
     run_context = {
-        "run_id": args.run_id or f"r19-{uuid4()}",
+        "run_id": args.run_id or f"r20-{uuid4()}",
         "nonce": nonce,
         "started_at": _iso_now(),
     }

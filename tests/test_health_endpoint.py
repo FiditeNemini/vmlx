@@ -384,6 +384,60 @@ class TestHealthEndpoint:
             for value in provenance.values()
         )
 
+    def test_health_reports_effective_active_parser_ids(self):
+        """Health exposes selected IDs, including IDs that share a parser class."""
+        from vmlx_engine import server
+
+        parser = object()
+        with (
+            patch.object(server, "_engine", None),
+            patch.object(server, "_model_name", None),
+            patch.object(server, "_model_path", None),
+            patch.object(server, "_model_load_error", None),
+            patch.object(server, "_mcp_manager", None),
+            patch.object(server, "_jang_metadata", None),
+            patch.object(server, "_last_request_time", 0.0),
+            patch.object(server, "_reasoning_parser", None),
+            patch.object(server, "_reasoning_parser_id", None),
+            patch.object(server, "_tool_call_parser", "dsml"),
+            patch.object(server, "_enable_auto_tool_choice", True),
+            patch.object(server, "_tool_call_parser_disabled_explicitly", False),
+        ):
+            server._set_active_reasoning_parser(parser, "poolside_v1")
+            result = _run(server.health())
+
+        assert result["active_parsers"] == {
+            "reasoning_parser": "poolside_v1",
+            "tool_call_parser": "dsml",
+            "auto_tool_choice": True,
+        }
+
+    def test_health_does_not_attest_stale_or_explicitly_disabled_parsers(self):
+        """Inactive instances and hard tool opt-outs must report null IDs."""
+        from vmlx_engine import server
+
+        with (
+            patch.object(server, "_engine", None),
+            patch.object(server, "_model_name", None),
+            patch.object(server, "_model_path", None),
+            patch.object(server, "_model_load_error", None),
+            patch.object(server, "_mcp_manager", None),
+            patch.object(server, "_jang_metadata", None),
+            patch.object(server, "_last_request_time", 0.0),
+            patch.object(server, "_reasoning_parser", None),
+            patch.object(server, "_reasoning_parser_id", "stale-parser-id"),
+            patch.object(server, "_tool_call_parser", "dsml"),
+            patch.object(server, "_enable_auto_tool_choice", True),
+            patch.object(server, "_tool_call_parser_disabled_explicitly", True),
+        ):
+            result = _run(server.health())
+
+        assert result["active_parsers"] == {
+            "reasoning_parser": None,
+            "tool_call_parser": None,
+            "auto_tool_choice": False,
+        }
+
     def test_health_publishes_storage_runtime_telemetry_outside_topology(self):
         """Volatile codec counters must not change the topology fingerprint."""
         from vmlx_engine import server

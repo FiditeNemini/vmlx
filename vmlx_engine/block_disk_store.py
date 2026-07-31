@@ -35,6 +35,8 @@ Supported cache_data tuple types (from prefix_cache.py):
 - ("deepseek_v4_pending", class_name, cache_meta) — non-terminal DSV4
   marker so paged/L2 chain hashes remain materialized without duplicating
   full CSA/HCA pool state in every block
+- ("deepseek_v4_delta_v1", record_tree, class_name, cache_meta) — immutable
+  DSV4 SWA/CSA/HCA native block delta plus optional exact anchor
 - ("zaya_cca", kv_entry, cca_state, cca_meta, cache_meta) — ZAYA CCA
   typed cache: standard KV pages plus terminal conv_state/prev_hs
 - ("minimax_m3", keys_slice, values_slice, idx_keys_slice) — MiniMax-M3 MSA
@@ -103,6 +105,14 @@ def _pack_tree(obj: Any, tensors: Dict[str, Any], prefix: str, counter: List[int
             "kind": "list",
             "items": [_pack_tree(x, tensors, prefix, counter) for x in obj],
         }
+    if isinstance(obj, dict):
+        return {
+            "kind": "dict",
+            "items": {
+                str(key): _pack_tree(value, tensors, prefix, counter)
+                for key, value in obj.items()
+            },
+        }
     return {"kind": "literal", "value": _json_safe(obj)}
 
 
@@ -130,6 +140,11 @@ def _unpack_tree(node: Any, data: Dict[str, Any]) -> Any:
         return tuple(_unpack_tree(x, data) for x in node.get("items", []))
     if kind == "list":
         return [_unpack_tree(x, data) for x in node.get("items", [])]
+    if kind == "dict":
+        return {
+            str(key): _unpack_tree(value, data)
+            for key, value in (node.get("items") or {}).items()
+        }
     return None
 
 
@@ -1469,6 +1484,109 @@ class BlockDiskStore:
                 return ready
             time.sleep(0.005)
 
+    def wait_for_write_fence_blocks(
+        self,
+        fence_id: str,
+        block_hashes: List[bytes],
+        timeout: float = 5.0,
+    ) -> set[bytes]:
+        """Return exact blocks retained after a request fence has settled.
+
+        ``wait_for_blocks`` intentionally answers the narrower question "is a
+        file/index row readable right now?"  A writer commits that row before
+        aggregate budget accounting and eviction, so it is not a sufficient
+        durability barrier for native path-dependent cache state.  This method
+        first waits for the request-correlated fence to finish its post-write
+        eviction phase, rejects every incomplete/error/retention-loss terminal
+        state, and only then verifies each requested hash while holding the
+        process-shared mutation guard.
+
+        Callers must seal ``fence_id`` before waiting.  An empty result is the
+        fail-closed outcome for timeout, writer death, fence failure, or an
+        exact hash that did not survive eviction.
+        """
+        normalized_fence_id = str(fence_id or "").strip()
+        targets = {bytes(block_hash) for block_hash in block_hashes if block_hash}
+        if not normalized_fence_id or not targets:
+            return set()
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        terminal: Dict[str, Any] | None = None
+        while True:
+            with self._stats_lock:
+                state = self._write_fences.get(normalized_fence_id)
+                if state is None:
+                    logger.warning(
+                        "BlockDiskStore durability wait lost fence %s",
+                        normalized_fence_id,
+                    )
+                    return set()
+                if state.get("post_eviction_complete"):
+                    terminal = dict(state)
+                    break
+                writer_alive = self._writer_thread.is_alive()
+
+            if not writer_alive:
+                logger.warning(
+                    "BlockDiskStore durability wait stopped because writer died "
+                    "before fence %s completed",
+                    normalized_fence_id,
+                )
+                return set()
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "BlockDiskStore durability wait timed out before fence %s "
+                    "completed",
+                    normalized_fence_id,
+                )
+                return set()
+            time.sleep(0.005)
+
+        expected = int(terminal.get("expected") or 0)
+        queued = int(terminal.get("queued") or 0)
+        completed = int(terminal.get("completed") or 0)
+        retained = int(terminal.get("retained") or 0)
+        failed = int(terminal.get("failed") or 0)
+        dropped = int(terminal.get("dropped") or 0)
+        terminal_error = terminal.get("post_eviction_error")
+        terminal_ok = (
+            terminal.get("sealed") is True
+            and terminal.get("seal_enqueued") is True
+            and terminal.get("seal_failed") is False
+            and terminal.get("producer_aborted") is False
+            and not terminal_error
+            and expected > 0
+            and queued == expected
+            and completed == expected
+            and retained == expected
+            and failed == 0
+            and dropped == 0
+        )
+        if not terminal_ok:
+            logger.warning(
+                "BlockDiskStore durability fence %s did not retain its complete "
+                "publication (expected=%d queued=%d completed=%d retained=%d "
+                "failed=%d dropped=%d error=%s)",
+                normalized_fence_id,
+                expected,
+                queued,
+                completed,
+                retained,
+                failed,
+                dropped,
+                terminal_error,
+            )
+            return set()
+
+        with self.global_budget.mutation_guard() as locked:
+            if not locked:
+                return set()
+            return {
+                block_hash
+                for block_hash in targets
+                if self._has_block_guarded(block_hash)
+            }
+
     def _background_writer(self) -> None:
         """Background thread: drain write queue and persist blocks.
 
@@ -2749,6 +2867,21 @@ def _serialize_block(
                 "state_tree": tree_meta,
             }
 
+        elif tag == "deepseek_v4_delta_v1":
+            _, record_tree, class_name, cache_meta = layer_data
+            counter = [0]
+            tree_meta = _pack_tree(
+                record_tree,
+                tensors,
+                f"layer_{i}_dsv4_delta",
+                counter,
+            )
+            meta[str(i)] = {
+                "class_name": class_name,
+                "cache_meta": _json_safe(cache_meta),
+                "record_tree": tree_meta,
+            }
+
         elif tag == "deepseek_v4_pending":
             _, class_name, cache_meta = layer_data
             tensors[f"layer_{i}_dsv4_pending"] = mx.array([1], dtype=mx.int32)
@@ -3122,6 +3255,21 @@ def _deserialize_block(
                 ))
             else:
                 cache_data.append(("skip",))
+        elif layer_type == "deepseek_v4_delta_v1":
+            layer_meta_dict = meta.get(str(i), {})
+            record = _unpack_tree(
+                layer_meta_dict.get("record_tree"),
+                data,
+            )
+            if isinstance(record, dict):
+                cache_data.append((
+                    "deepseek_v4_delta_v1",
+                    record,
+                    layer_meta_dict.get("class_name", "DeepseekV4Cache"),
+                    layer_meta_dict.get("cache_meta", {}),
+                ))
+            else:
+                cache_data.append(("skip",))
         elif layer_type == "deepseek_v4_pending":
             layer_meta_dict = meta.get(str(i), {})
             cache_data.append((
@@ -3142,6 +3290,7 @@ def _infer_layer_type(data: Dict[str, Any], layer_idx: int, fallback_dtype: str)
     has_tq = f"{prefix}tq_ck_indices_packed" in data
     has_cumulative = f"{prefix}cumulative_0" in data
     has_dsv4 = f"{prefix}dsv4_state_0" in data
+    has_dsv4_delta = f"{prefix}dsv4_delta_0" in data
     has_dsv4_pending = f"{prefix}dsv4_pending" in data
     has_max_size = f"{prefix}max_size" in data
     has_rotating_pending = f"{prefix}rotating_pending" in data
@@ -3158,6 +3307,8 @@ def _infer_layer_type(data: Dict[str, Any], layer_idx: int, fallback_dtype: str)
         return "cumulative"
     if has_dsv4:
         return "deepseek_v4"
+    if has_dsv4_delta:
+        return "deepseek_v4_delta_v1"
     if has_dsv4_pending:
         return "deepseek_v4_pending"
     if has_rotating_pending:

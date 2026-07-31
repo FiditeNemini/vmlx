@@ -43,6 +43,14 @@ describe('JANG quantization labels', () => {
     })).toBe('JANG_4M (4.45b)')
   })
 
+  it('labels affine JANG sidecars as JANG profiles rather than JANGTQ', () => {
+    expect(formatJangQuantizationLabel({
+      weight_format: 'affine',
+      profile: 'JANG_2L_GS64',
+      quantization: { target_bits: 2 },
+    })).toBe('JANG_2L_GS64 (2b)')
+  })
+
   it('does not mislabel mixed routed JANG profiles with their affine container bits', () => {
     expect(formatJangQuantizationLabel({
       format: 'jang',

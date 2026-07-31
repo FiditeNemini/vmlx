@@ -78,7 +78,7 @@ def test_reasoning_effort_none_disables_thinking_for_chat_and_responses():
     assert responses.reasoning_effort is None
 
 
-def test_dsv4_reasoning_effort_preserves_requested_rails(monkeypatch):
+def test_dsv4_reasoning_effort_preserves_bundle_native_rails(monkeypatch, tmp_path):
     """DSV4 should expose the real requested effort rail.
 
     Runtime should fix cache/attention/prompt bugs directly, not downgrade a
@@ -89,13 +89,34 @@ def test_dsv4_reasoning_effort_preserves_requested_rails(monkeypatch):
 
     monkeypatch.delenv("VMLX_DSV4_RAW_MAX", raising=False)
 
-    # Official DSV4 encoder accepts None/high/max; low/medium map to high
-    # for encoder compatibility, while max must not be silently downgraded.
-    assert server._normalize_dsv4_reasoning_effort("low") == "high"
-    assert server._normalize_dsv4_reasoning_effort("medium") == "high"
-    assert server._normalize_dsv4_reasoning_effort("high") == "high"
-    assert server._normalize_dsv4_reasoning_effort("max") == "max"
-    assert server._normalize_dsv4_reasoning_effort(None) is None
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps(
+            {
+                "chat": {
+                    "reasoning": {
+                        "default_effort": "low",
+                        "reasoning_effort_levels": ["low", "high", "max"],
+                    }
+                }
+            }
+        )
+    )
+
+    # The 0731 encoder owns distinct low/high/max rails. Explicit low must not
+    # be promoted, and unsupported medium must not be silently aliased.
+    assert server._normalize_dsv4_reasoning_effort("low", str(tmp_path)) == "low"
+    assert server._normalize_dsv4_reasoning_effort("high", str(tmp_path)) == "high"
+    assert server._normalize_dsv4_reasoning_effort("max", str(tmp_path)) == "max"
+    assert server._normalize_dsv4_reasoning_effort(None, str(tmp_path)) is None
+    with pytest.raises(Exception) as exc_info:
+        server._normalize_dsv4_reasoning_effort("medium", str(tmp_path))
+    assert getattr(exc_info.value, "status_code", None) == 400
+    assert "low, high, max" in str(getattr(exc_info.value, "detail", ""))
+
+    assert dsv4_chat_encoder._resolve_mode_and_effort(True, "low") == (
+        "thinking",
+        "low",
+    )
     assert dsv4_chat_encoder._resolve_mode_and_effort(True, "max") == (
         "thinking",
         "max",
@@ -104,6 +125,21 @@ def test_dsv4_reasoning_effort_preserves_requested_rails(monkeypatch):
         "thinking",
         "max",
     )
+    with pytest.raises(ValueError, match="supports: high, low, max"):
+        dsv4_chat_encoder._resolve_mode_and_effort(True, "medium")
+
+
+def test_dsv4_generic_reasoning_mode_uses_bundle_default_but_explicit_medium_does_not():
+    from vmlx_engine import server
+    from vmlx_engine.api.models import ChatCompletionRequest
+
+    base = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    generic = ChatCompletionRequest(**base, thinking_mode="reasoning")
+    assert generic.reasoning_effort == "medium"  # shared API representation
+    assert server._dsv4_requested_reasoning_effort(generic, {}) is None
+
+    explicit = ChatCompletionRequest(**base, reasoning_effort="medium")
+    assert server._dsv4_requested_reasoning_effort(explicit, {}) == "medium"
 
 
 def test_dsv4_thinking_disabled_uses_official_chat_closed_thinking_rail():

@@ -1309,13 +1309,13 @@ def _git(root: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _write_r19_runtime_fixture(
+def _write_r20_runtime_fixture(
     bundle_root: Path,
     *,
     flavor: str,
     source_commit: str,
 ) -> None:
-    contract = runner.R19_FLAVOR_RUNTIME_CONTRACTS[flavor]
+    contract = runner.R20_FLAVOR_RUNTIME_CONTRACTS[flavor]
     site_packages = bundle_root / "python/lib/python3.12/site-packages"
     tags = {
         "mlx": f"cp312-cp312-{contract['mlx_wheel_platform']}",
@@ -1335,7 +1335,7 @@ def _write_r19_runtime_fixture(
         )
         (dist_info / "WHEEL").write_text(
             "Wheel-Version: 1.0\n"
-            "Generator: vmlx-r19-fixture\n"
+            "Generator: vmlx-r20-fixture\n"
             "Root-Is-Purelib: false\n"
             f"Tag: {tags[distribution]}\n",
             encoding="utf-8",
@@ -1344,7 +1344,7 @@ def _write_r19_runtime_fixture(
         json.dumps(
             {
                 "schema_version": 1,
-                "vmlx": {"commit": source_commit, "version": "1.6.19"},
+                "vmlx": {"commit": source_commit, "version": "1.6.20"},
                 "jang": {"commit": "f" * 40, "version": "2.5.36"},
                 "mlx_wheel_platform": contract["mlx_wheel_platform"],
             },
@@ -1356,7 +1356,7 @@ def _write_r19_runtime_fixture(
     )
 
 
-def _r19_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
+def _r20_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
     root = tmp_path / "repo"
     root.mkdir(parents=True)
     _git(root, "init")
@@ -1369,9 +1369,9 @@ def _r19_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
     source_engine.mkdir()
     panel_out.mkdir(parents=True)
     (source_engine / "__init__.py").write_text('VERSION = "test"\n', encoding="utf-8")
-    (panel_out / "main.js").write_text("console.log('r19')\n", encoding="utf-8")
+    (panel_out / "main.js").write_text("console.log('r20')\n", encoding="utf-8")
     (root / "panel/package.json").write_text(
-        '{"name":"vmlx","version":"1.6.19","main":"out/main.js","type":"module"}\n',
+        '{"name":"vmlx","version":"1.6.20","main":"out/main.js","type":"module"}\n',
         encoding="utf-8",
     )
     _git(root, "add", ".gitignore", "source.txt", "vmlx_engine", "panel")
@@ -1383,8 +1383,8 @@ def _r19_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
     extracted_root = tmp_path / "extracted-asars"
     staged_outputs: dict[str, Path] = {}
     extracted_asars: dict[str, Path] = {}
-    for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS:
-        stem = f"vMLX-1.6.19-{flavor}-arm64.dmg"
+    for flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS:
+        stem = f"vMLX-1.6.20-{flavor}-arm64.dmg"
         (dist / stem).write_bytes(f"{flavor}-dmg-before-notary".encode())
         (dist / f"{stem}.blockmap").write_bytes(
             f"{flavor}-blockmap-before-notary".encode()
@@ -1403,14 +1403,14 @@ def _r19_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
         for packaged in (mirror / "__init__.py", bundled / "__init__.py"):
             packaged.write_text('VERSION = "test"\n', encoding="utf-8")
         (extracted / "out/main.js").write_text(
-            "console.log('r19')\n",
+            "console.log('r20')\n",
             encoding="utf-8",
         )
         (extracted / "package.json").write_text(
-            '{"name":"vmlx","version":"1.6.19","main":"out/main.js","type":"module"}\n',
+            '{"name":"vmlx","version":"1.6.20","main":"out/main.js","type":"module"}\n',
             encoding="utf-8",
         )
-        _write_r19_runtime_fixture(
+        _write_r20_runtime_fixture(
             resources / "bundled-python",
             flavor=flavor,
             source_commit=source_commit,
@@ -1440,9 +1440,9 @@ def _r19_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
             plistlib.dump(
                 {
                     "CFBundleIdentifier": "net.vmlx.app",
-                    "CFBundleShortVersionString": "1.6.19",
-                    "CFBundleVersion": "1.6.19",
-                    "LSMinimumSystemVersion": runner.R19_FLAVOR_RUNTIME_CONTRACTS[
+                    "CFBundleShortVersionString": "1.6.20",
+                    "CFBundleVersion": "1.6.20",
+                    "LSMinimumSystemVersion": runner.R20_FLAVOR_RUNTIME_CONTRACTS[
                         flavor
                     ]["minimum_system_version"],
                 },
@@ -1452,7 +1452,7 @@ def _r19_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
         extracted_asars[flavor] = extracted
     build = root / "build"
     build.mkdir()
-    preflight = build / "r19-preflight.json"
+    preflight = build / "r20-preflight.json"
     preflight.write_text('{"status":"pass"}\n', encoding="utf-8")
     return {
         "root": root,
@@ -1466,11 +1466,11 @@ def _r19_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
         "pre_manifest": tmp_path
         / "private-evidence"
         / "handoffs"
-        / "r19-release-artifact-chain-pre-notary.json",
+        / "r20-release-artifact-chain-pre-notary.json",
         "build_attestation": tmp_path
         / "private-evidence"
         / "handoffs"
-        / "r19-build-driver.json",
+        / "r20-build-driver.json",
         "staged_outputs": staged_outputs,
         "extracted_asars": extracted_asars,
         "hook_attestations": {
@@ -1478,21 +1478,21 @@ def _r19_artifact_chain_fixture(tmp_path: Path) -> dict[str, Path]:
             / "private-evidence"
             / "hook-completions"
             / f"{flavor}.completion.json"
-            for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS
+            for flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS
         },
         "bundle_attestations": {
             flavor: tmp_path
             / "private-evidence"
             / "hook-completions"
             / f"{flavor}.bundle-runtime.json"
-            for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS
+            for flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS
         },
         "dmg_parity_attestations": {
             flavor: tmp_path
             / "private-evidence"
             / "hook-completions"
             / f"{flavor}.dmg-parity.json"
-            for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS
+            for flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS
         },
     }
 
@@ -1510,7 +1510,7 @@ def _sealed_installed_manifest_fixture(
     *,
     flavor: str = "sequoia",
 ) -> tuple[dict[str, Path], Path, Path, dict[str, object]]:
-    paths = _r19_artifact_chain_fixture(tmp_path)
+    paths = _r20_artifact_chain_fixture(tmp_path)
     return _seal_installed_manifest_paths(paths, flavor=flavor)
 
 
@@ -1522,8 +1522,8 @@ def _seal_installed_manifest_paths(
     pre = _write_pre_manifest(paths)
     snapshots = _create_snapshots(paths, pre)
     submission_ids = _submission_ids()
-    for current_flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS:
-        stem = f"vMLX-1.6.19-{current_flavor}-arm64.dmg"
+    for current_flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS:
+        stem = f"vMLX-1.6.20-{current_flavor}-arm64.dmg"
         (paths["dist"] / stem).write_bytes(
             f"{current_flavor}-stapled-dmg".encode()
         )
@@ -1534,10 +1534,10 @@ def _seal_installed_manifest_paths(
     assert isinstance(snapshot_records, dict)
     snapshot_paths = {
         current_flavor: Path(str(snapshot_records[current_flavor]["dmg_path"]))
-        for current_flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS
+        for current_flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS
     }
     final_manifest = (
-        paths["private_root"] / "handoffs/r19-post-notary-manifest.json"
+        paths["private_root"] / "handoffs/r20-post-notary-manifest.json"
     )
     final = _write_final(
         paths,
@@ -1552,7 +1552,7 @@ def _seal_installed_manifest_paths(
         "root": paths["root"],
         "app": app,
         "dist_dir": paths["dist"],
-        "version": "1.6.19",
+        "version": "1.6.20",
         "flavor": flavor,
         "private_root": paths["private_root"],
         "final_manifest_path": final_manifest,
@@ -1604,8 +1604,8 @@ def _installed_manifest_cli_arguments(
     ]
 
 
-@pytest.mark.parametrize("flavor", runner.R19_ARTIFACT_CHAIN_FLAVORS)
-def test_r19_installed_manifest_producer_writes_exact_deterministic_private_schema(
+@pytest.mark.parametrize("flavor", runner.R20_ARTIFACT_CHAIN_FLAVORS)
+def test_r20_installed_manifest_producer_writes_exact_deterministic_private_schema(
     tmp_path,
     capsys,
     monkeypatch,
@@ -1653,7 +1653,7 @@ def test_r19_installed_manifest_producer_writes_exact_deterministic_private_sche
     assert first.stat().st_nlink == 1
 
 
-def test_r19_installed_manifest_producer_rejects_mismatched_app_identity(tmp_path):
+def test_r20_installed_manifest_producer_rejects_mismatched_app_identity(tmp_path):
     paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
     info_path = app / "Contents/Info.plist"
     with info_path.open("rb") as handle:
@@ -1672,7 +1672,7 @@ def test_r19_installed_manifest_producer_rejects_mismatched_app_identity(tmp_pat
         )
 
 
-def test_r19_installed_manifest_producer_rejects_mismatched_source_provenance(
+def test_r20_installed_manifest_producer_rejects_mismatched_source_provenance(
     tmp_path,
 ):
     paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
@@ -1700,7 +1700,7 @@ def test_r19_installed_manifest_producer_rejects_mismatched_source_provenance(
         )
 
 
-def test_r19_installed_manifest_producer_rejects_mismatched_bundled_python_source(
+def test_r20_installed_manifest_producer_rejects_mismatched_bundled_python_source(
     tmp_path,
 ):
     paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
@@ -1721,7 +1721,7 @@ def test_r19_installed_manifest_producer_rejects_mismatched_bundled_python_sourc
         )
 
 
-def test_r19_installed_manifest_producer_rejects_unbound_renderer_asar(tmp_path):
+def test_r20_installed_manifest_producer_rejects_unbound_renderer_asar(tmp_path):
     paths, app, _, producer_arguments = _sealed_installed_manifest_fixture(tmp_path)
     (app / "Contents/Resources/app.asar").write_bytes(b"stale renderer bytes\n")
 
@@ -1735,7 +1735,7 @@ def test_r19_installed_manifest_producer_rejects_unbound_renderer_asar(tmp_path)
         )
 
 
-def test_r19_installed_manifest_producer_cli_rejects_checkout_python(
+def test_r20_installed_manifest_producer_cli_rejects_checkout_python(
     tmp_path,
     capsys,
 ):
@@ -1753,7 +1753,7 @@ def test_r19_installed_manifest_producer_cli_rejects_checkout_python(
 
 
 @pytest.mark.parametrize("mutated_surface", ["app-payload", "extracted-asar"])
-def test_r19_installed_manifest_producer_rejects_payload_swaps(
+def test_r20_installed_manifest_producer_rejects_payload_swaps(
     tmp_path,
     mutated_surface,
 ):
@@ -1778,8 +1778,8 @@ def test_r19_installed_manifest_producer_rejects_payload_swaps(
         )
 
 
-def test_r19_installed_manifest_producer_rejects_versioned_python_mismatch(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_installed_manifest_producer_rejects_versioned_python_mismatch(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     app = _prepare_installed_manifest_fixture(paths)
     other_python = app / "Contents/Resources/bundled-python/python/bin/python3.11"
     other_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -1794,7 +1794,7 @@ def test_r19_installed_manifest_producer_rejects_versioned_python_mismatch(tmp_p
         )
 
 
-def test_r19_installed_manifest_producer_rechecks_provenance_before_write(
+def test_r20_installed_manifest_producer_rechecks_provenance_before_write(
     tmp_path,
     monkeypatch,
 ):
@@ -1805,8 +1805,8 @@ def test_r19_installed_manifest_producer_rechecks_provenance_before_write(
     )
     real_tree_payload_records = runner._tree_payload_records
 
-    def mutate_after_first_app_observation(path, *, label):
-        result = real_tree_payload_records(path, label=label)
+    def mutate_after_first_app_observation(path, *, label, **kwargs):
+        result = real_tree_payload_records(path, label=label, **kwargs)
         if label == "installed release-manifest application payload":
             provenance.write_bytes(provenance.read_bytes() + b" ")
         return result
@@ -1827,7 +1827,7 @@ def test_r19_installed_manifest_producer_rechecks_provenance_before_write(
 
 
 @pytest.mark.parametrize("late_surface", ["app-tree", "extracted-asar"])
-def test_r19_installed_manifest_producer_rejects_late_full_tree_mutation(
+def test_r20_installed_manifest_producer_rejects_late_full_tree_mutation(
     tmp_path,
     monkeypatch,
     late_surface,
@@ -1837,8 +1837,8 @@ def test_r19_installed_manifest_producer_rejects_late_full_tree_mutation(
     output = paths["private_root"] / "installed/manifest.json"
     real_tree_payload_records = runner._tree_payload_records
 
-    def mutate_after_penultimate_tree_observation(path, *, label):
-        result = real_tree_payload_records(path, label=label)
+    def mutate_after_penultimate_tree_observation(path, *, label, **kwargs):
+        result = real_tree_payload_records(path, label=label, **kwargs)
         if (
             late_surface == "app-tree"
             and label == "installed release-manifest application payload recheck"
@@ -1890,14 +1890,14 @@ def _write_hook_and_parity_attestations(
                     paths["hook_attestations"][flavor],
                     runner._sha256(paths["hook_attestations"][flavor]),
                 )
-                for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS
+                for flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS
             },
             {
                 flavor: (
                     paths["dmg_parity_attestations"][flavor],
                     runner._sha256(paths["dmg_parity_attestations"][flavor]),
                 )
-                for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS
+                for flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS
             },
         )
     hook_dir.mkdir(mode=0o700)
@@ -1939,19 +1939,19 @@ def _write_hook_and_parity_attestations(
         }
     hook_results: dict[str, tuple[Path, str]] = {}
     parity_results: dict[str, tuple[Path, str]] = {}
-    for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS:
+    for flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS:
         staged_output = paths["staged_outputs"][flavor]
         app = runner.find_exact_staged_app(staged_output)
         extracted = paths["extracted_asars"][flavor]
         bundle_attestation = runner.write_bundle_runtime_attestation(
             root=paths["root"],
             bundle_root=app / "Contents/Resources/bundled-python",
-            version="1.6.19",
+            version="1.6.20",
             private_root=private_root,
             flavor=flavor,
             output_path=paths["bundle_attestations"][flavor],
         )
-        stem = f"vMLX-1.6.19-{flavor}-arm64.dmg"
+        stem = f"vMLX-1.6.20-{flavor}-arm64.dmg"
         artifact_payload = {}
         for kind, artifact_path in {
             "dmg": paths["dist"] / stem,
@@ -1970,14 +1970,14 @@ def _write_hook_and_parity_attestations(
         hook_path = paths["hook_attestations"][flavor]
         hook_payload = {
             "schema_version": 1,
-            "scope": "r19_production",
+            "scope": "r20_production",
             "stage": "electron_builder_completion",
-            "version": "1.6.19",
+            "version": "1.6.20",
             "flavor": flavor,
             "source": {"commit": source["commit"], "tree": source["tree"]},
             "preflight_sha256": preflight_sha256,
             "plan": {
-                "path": str(paths["root"] / "build/r19-release-driver-plan.json"),
+                "path": str(paths["root"] / "build/r20-release-driver-plan.json"),
                 "sha256": ("b" if flavor == "sequoia" else "c") * 64,
                 "nonce": nonce,
                 "driver_pid": driver_pid,
@@ -1991,7 +1991,7 @@ def _write_hook_and_parity_attestations(
             "runtime_contract": runner._inspect_app_runtime_contract(
                 app=app,
                 flavor=flavor,
-                version="1.6.19",
+                version="1.6.20",
             ),
             "staged_app": {
                 "path": str(app),
@@ -2016,7 +2016,7 @@ def _write_hook_and_parity_attestations(
         parity = runner.write_dmg_payload_parity_attestation(
             root=paths["root"],
             dist_dir=paths["dist"],
-            version="1.6.19",
+            version="1.6.20",
             private_root=private_root,
             flavor=flavor,
             hook_attestation_path=hook_path,
@@ -2046,7 +2046,7 @@ def _write_build_attestation(paths: dict[str, Path]) -> dict[str, object]:
         "--dist",
         str(paths["dist"]),
         "--version",
-        "1.6.19",
+        "1.6.20",
         "--preflight",
         str(paths["preflight"]),
         "--private-root",
@@ -2058,7 +2058,7 @@ def _write_build_attestation(paths: dict[str, Path]) -> dict[str, object]:
         "--driver-pid",
         str(driver_pid),
     ]
-    for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS:
+    for flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS:
         hook_path, hook_sha256 = hooks[flavor]
         parity_path, parity_sha256 = parity[flavor]
         command.extend(
@@ -2106,7 +2106,7 @@ def _write_pre_manifest(paths: dict[str, Path]) -> dict[str, object]:
     return runner.write_pre_notary_artifact_manifest(
         root=paths["root"],
         dist_dir=paths["dist"],
-        version="1.6.19",
+        version="1.6.20",
         private_root=paths["private_root"],
         output_path=paths["pre_manifest"],
         build_attestation_path=paths["build_attestation"],
@@ -2138,7 +2138,7 @@ def _validate_pre(
     return runner.validate_pre_notary_artifact_manifest(
         root=paths["root"],
         dist_dir=paths["dist"],
-        version="1.6.19",
+        version="1.6.20",
         private_root=paths["private_root"],
         manifest_path=paths["pre_manifest"],
         **_pre_handoff(paths, pre),
@@ -2152,7 +2152,7 @@ def _create_snapshots(
     return runner.create_pre_notary_snapshots(
         root=paths["root"],
         dist_dir=paths["dist"],
-        version="1.6.19",
+        version="1.6.20",
         private_root=paths["private_root"],
         manifest_path=paths["pre_manifest"],
         snapshot_dir=paths["private_root"] / "snapshots",
@@ -2215,7 +2215,7 @@ def _submission_ids() -> dict[str, str]:
     }
 
 
-def test_r19_production_cli_has_no_direct_self_certifying_write_pre():
+def test_r20_production_cli_has_no_direct_self_certifying_write_pre():
     with pytest.raises(SystemExit):
         runner.artifact_chain_main(["write-pre"])
     assert (
@@ -2224,8 +2224,8 @@ def test_r19_production_cli_has_no_direct_self_certifying_write_pre():
     )
 
 
-def test_r19_fixture_uses_a_live_child_when_pytest_is_orphaned(tmp_path, monkeypatch):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_fixture_uses_a_live_child_when_pytest_is_orphaned(tmp_path, monkeypatch):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     monkeypatch.setattr(os, "getppid", lambda: 1)
 
     result = _write_pre_manifest(paths)
@@ -2233,7 +2233,7 @@ def test_r19_fixture_uses_a_live_child_when_pytest_is_orphaned(tmp_path, monkeyp
     assert result["payload"]["build_attestation"]["driver_pid"] == os.getpid()
 
 
-def test_r19_build_driver_accepts_live_non_direct_release_driver_ancestor():
+def test_r20_build_driver_accepts_live_non_direct_release_driver_ancestor():
     inner = (
         "import sys; "
         "from tests.cross_matrix.run_packaged_integrity_contract "
@@ -2256,8 +2256,8 @@ def test_r19_build_driver_accepts_live_non_direct_release_driver_ancestor():
     assert result.returncode == 0, result.stderr
 
 
-def test_r19_pre_notary_manifest_binds_source_preflight_and_exact_artifacts(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_pre_notary_manifest_binds_source_preflight_and_exact_artifacts(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     result = _write_pre_manifest(paths)
     manifest = paths["pre_manifest"]
 
@@ -2271,8 +2271,8 @@ def test_r19_pre_notary_manifest_binds_source_preflight_and_exact_artifacts(tmp_
     assert _validate_pre(paths, result)["sha256"] == result["sha256"]
 
 
-def test_r19_v4_rejects_same_version_mounted_dmg_payload_mismatch(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_v4_rejects_same_version_mounted_dmg_payload_mismatch(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     hooks, _ = _write_hook_and_parity_attestations(paths)
     flavor = "sequoia"
     staged_app = runner.find_exact_staged_app(paths["staged_outputs"][flavor])
@@ -2281,7 +2281,7 @@ def test_r19_v4_rejects_same_version_mounted_dmg_payload_mismatch(tmp_path):
     shutil.copytree(staged_app, mounted_app)
     shutil.copytree(paths["extracted_asars"][flavor], extracted_asar)
     with (mounted_app / "Contents/Info.plist").open("rb") as handle:
-        assert plistlib.load(handle)["CFBundleShortVersionString"] == "1.6.19"
+        assert plistlib.load(handle)["CFBundleShortVersionString"] == "1.6.20"
     (mounted_app / "Contents/Resources/payload-drift.bin").write_bytes(
         b"same-version altered payload"
     )
@@ -2294,7 +2294,7 @@ def test_r19_v4_rejects_same_version_mounted_dmg_payload_mismatch(tmp_path):
         runner.write_dmg_payload_parity_attestation(
             root=paths["root"],
             dist_dir=paths["dist"],
-            version="1.6.19",
+            version="1.6.20",
             private_root=paths["private_root"],
             flavor=flavor,
             hook_attestation_path=hook_path,
@@ -2308,30 +2308,30 @@ def test_r19_v4_rejects_same_version_mounted_dmg_payload_mismatch(tmp_path):
         )
 
 
-def test_r19_pre_notary_manifest_rejects_extra_or_symlinked_artifacts(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
-    extra = paths["dist"] / "vMLX-1.6.19-rogue-arm64.dmg"
+def test_r20_pre_notary_manifest_rejects_extra_or_symlinked_artifacts(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
+    extra = paths["dist"] / "vMLX-1.6.20-rogue-arm64.dmg"
     extra.write_bytes(b"rogue")
     with pytest.raises(runner.ArtifactChainError, match="exact Sequoia/Tahoe"):
         _write_pre_manifest(paths)
     extra.unlink()
 
-    blockmap = paths["dist"] / "vMLX-1.6.19-sequoia-arm64.dmg.blockmap"
+    blockmap = paths["dist"] / "vMLX-1.6.20-sequoia-arm64.dmg.blockmap"
     blockmap.unlink()
-    blockmap.symlink_to(paths["dist"] / "vMLX-1.6.19-tahoe-arm64.dmg.blockmap")
+    blockmap.symlink_to(paths["dist"] / "vMLX-1.6.20-tahoe-arm64.dmg.blockmap")
     with pytest.raises(runner.ArtifactChainError, match="symlinked path component"):
         _write_pre_manifest(paths)
 
 
-def test_r19_pre_notary_manifest_rejects_artifact_and_manifest_drift(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_pre_notary_manifest_rejects_artifact_and_manifest_drift(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     pre = _write_pre_manifest(paths)
-    dmg = paths["dist"] / "vMLX-1.6.19-sequoia-arm64.dmg"
+    dmg = paths["dist"] / "vMLX-1.6.20-sequoia-arm64.dmg"
     dmg.write_bytes(dmg.read_bytes() + b"-changed")
     with pytest.raises(runner.ArtifactChainError, match="changed after|artifacts changed"):
         _validate_pre(paths, pre)
 
-    paths = _r19_artifact_chain_fixture(tmp_path / "second")
+    paths = _r20_artifact_chain_fixture(tmp_path / "second")
     pre = _write_pre_manifest(paths)
     original_digest = str(pre["sha256"])
     paths["pre_manifest"].chmod(0o600)
@@ -2341,7 +2341,7 @@ def test_r19_pre_notary_manifest_rejects_artifact_and_manifest_drift(tmp_path):
         runner.validate_pre_notary_artifact_manifest(
             root=paths["root"],
             dist_dir=paths["dist"],
-            version="1.6.19",
+            version="1.6.20",
             private_root=paths["private_root"],
             manifest_path=paths["pre_manifest"],
             expected_manifest_sha256=original_digest,
@@ -2351,22 +2351,22 @@ def test_r19_pre_notary_manifest_rejects_artifact_and_manifest_drift(tmp_path):
         )
 
 
-def test_r19_pre_notary_manifest_rejects_source_and_preflight_drift(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_pre_notary_manifest_rejects_source_and_preflight_drift(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     pre = _write_pre_manifest(paths)
     (paths["root"] / "source.txt").write_text("dirty release source\n", encoding="utf-8")
     with pytest.raises(runner.ArtifactChainError, match="source is not clean"):
         _validate_pre(paths, pre)
 
-    paths = _r19_artifact_chain_fixture(tmp_path / "preflight")
+    paths = _r20_artifact_chain_fixture(tmp_path / "preflight")
     pre = _write_pre_manifest(paths)
     paths["preflight"].write_text('{"status":"changed"}\n', encoding="utf-8")
     with pytest.raises(runner.ArtifactChainError, match="digest mismatch|preflight changed"):
         _validate_pre(paths, pre)
 
 
-def test_r19_private_evidence_root_rejects_every_git_worktree(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_private_evidence_root_rejects_every_git_worktree(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     with pytest.raises(runner.ArtifactChainError, match="outside every Git worktree"):
         runner.ensure_private_evidence_root(paths["root"] / "build/private-release")
 
@@ -2376,12 +2376,12 @@ def test_r19_private_evidence_root_rejects_every_git_worktree(tmp_path):
 
 
 def _post_notary_fixture(tmp_path: Path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+    paths = _r20_artifact_chain_fixture(tmp_path)
     pre = _write_pre_manifest(paths)
     snapshots = _create_snapshots(paths, pre)
     submission_ids = _submission_ids()
-    for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS:
-        stem = f"vMLX-1.6.19-{flavor}-arm64.dmg"
+    for flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS:
+        stem = f"vMLX-1.6.20-{flavor}-arm64.dmg"
         (paths["dist"] / stem).write_bytes(f"{flavor}-stapled-dmg".encode())
         (paths["dist"] / f"{stem}.blockmap").write_bytes(
             f"{flavor}-post-staple-blockmap".encode()
@@ -2390,7 +2390,7 @@ def _post_notary_fixture(tmp_path: Path):
     assert isinstance(snapshot_records, dict)
     snapshot_paths = {
         flavor: Path(str(snapshot_records[flavor]["dmg_path"]))
-        for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS
+        for flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS
     }
     return paths, pre, snapshots, submission_ids, snapshot_paths
 
@@ -2400,7 +2400,7 @@ def _write_final(paths, pre, submission_ids, snapshot_paths, final_manifest):
     return runner.write_final_notary_artifact_manifest(
         root=paths["root"],
         dist_dir=paths["dist"],
-        version="1.6.19",
+        version="1.6.20",
         pre_notary_manifest_path=paths["pre_manifest"],
         expected_pre_manifest_sha256=handoff["expected_manifest_sha256"],
         expected_source_commit=handoff["expected_source_commit"],
@@ -2418,7 +2418,7 @@ def _validate_final(paths, pre, final, final_manifest):
     return runner.validate_final_notary_artifact_manifest(
         root=paths["root"],
         dist_dir=paths["dist"],
-        version="1.6.19",
+        version="1.6.20",
         private_root=paths["private_root"],
         manifest_path=final_manifest,
         expected_manifest_sha256=str(final["sha256"]),
@@ -2429,8 +2429,8 @@ def _validate_final(paths, pre, final, final_manifest):
     )
 
 
-def test_r19_production_cli_rejects_caller_authored_apple_json(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_production_cli_rejects_caller_authored_apple_json(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     pre = _write_pre_manifest(paths)
     snapshots = _create_snapshots(paths, pre)
     records = _write_accepted_notary_records(paths, snapshots)
@@ -2450,9 +2450,9 @@ def test_r19_production_cli_rejects_caller_authored_apple_json(tmp_path):
         )
 
 
-def test_r19_final_manifest_binds_post_notary_hashes_and_rejects_drift(tmp_path):
+def test_r20_final_manifest_binds_post_notary_hashes_and_rejects_drift(tmp_path):
     paths, pre, _, submission_ids, snapshot_paths = _post_notary_fixture(tmp_path)
-    final_manifest = paths["private_root"] / "r19-post-notary-manifest.json"
+    final_manifest = paths["private_root"] / "r20-post-notary-manifest.json"
     final = _write_final(paths, pre, submission_ids, snapshot_paths, final_manifest)
 
     assert final["payload"]["pre_notary_manifest"]["sha256"] == pre["sha256"]
@@ -2466,11 +2466,11 @@ def test_r19_final_manifest_binds_post_notary_hashes_and_rejects_drift(tmp_path)
         _validate_final(paths, pre, final, final_manifest)
 
 
-def test_r19_final_manifest_refuses_stale_output_and_duplicate_submission_id(tmp_path):
+def test_r20_final_manifest_refuses_stale_output_and_duplicate_submission_id(tmp_path):
     paths, pre, _, submission_ids, snapshot_paths = _post_notary_fixture(tmp_path)
     duplicate_id = "11111111-1111-4111-8111-111111111111"
     submission_ids["tahoe"] = duplicate_id
-    final_manifest = paths["private_root"] / "r19-post-notary-manifest.json"
+    final_manifest = paths["private_root"] / "r20-post-notary-manifest.json"
     with pytest.raises(runner.ArtifactChainError, match="distinct Apple submission IDs"):
         _write_final(paths, pre, submission_ids, snapshot_paths, final_manifest)
 
@@ -2480,14 +2480,14 @@ def test_r19_final_manifest_refuses_stale_output_and_duplicate_submission_id(tmp
         _write_final(paths, pre, submission_ids, snapshot_paths, final_manifest)
 
 
-def test_r19_artifact_chain_rejects_hardlinks_and_symlinked_ancestors(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
-    dmg = paths["dist"] / "vMLX-1.6.19-sequoia-arm64.dmg"
+def test_r20_artifact_chain_rejects_hardlinks_and_symlinked_ancestors(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
+    dmg = paths["dist"] / "vMLX-1.6.20-sequoia-arm64.dmg"
     os.link(dmg, paths["dist"] / "hardlink.keep")
     with pytest.raises(runner.ArtifactChainError, match="exactly one hard link"):
         _write_pre_manifest(paths)
 
-    paths = _r19_artifact_chain_fixture(tmp_path / "symlink")
+    paths = _r20_artifact_chain_fixture(tmp_path / "symlink")
     private_root = runner.ensure_private_evidence_root(paths["private_root"])
     real = private_root / "real"
     real.mkdir()
@@ -2498,16 +2498,16 @@ def test_r19_artifact_chain_rejects_hardlinks_and_symlinked_ancestors(tmp_path):
         _write_pre_manifest(paths)
 
 
-def test_r19_private_outputs_are_no_clobber_and_independent_digest_bound(
+def test_r20_private_outputs_are_no_clobber_and_independent_digest_bound(
     tmp_path,
     monkeypatch,
 ):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+    paths = _r20_artifact_chain_fixture(tmp_path)
     pre = _write_pre_manifest(paths)
     with pytest.raises(runner.ArtifactChainError, match="refusing to overwrite"):
         _write_pre_manifest(paths)
 
-    race_paths = _r19_artifact_chain_fixture(tmp_path / "race")
+    race_paths = _r20_artifact_chain_fixture(tmp_path / "race")
     original_link = runner.os.link
 
     def race_link(source, destination, **kwargs):
@@ -2535,20 +2535,20 @@ def test_r19_private_outputs_are_no_clobber_and_independent_digest_bound(
         runner.validate_pre_notary_artifact_manifest(
             root=paths["root"],
             dist_dir=paths["dist"],
-            version="1.6.19",
+            version="1.6.20",
             private_root=paths["private_root"],
             manifest_path=manifest,
             **_pre_handoff(paths, pre),
         )
 
 
-def test_r19_bound_tool_action_rechecks_document_and_complete_toolchain(tmp_path, monkeypatch):
+def test_r20_bound_tool_action_rechecks_document_and_complete_toolchain(tmp_path, monkeypatch):
     marker = tmp_path / "action-ran"
     umask_marker = tmp_path / "action-umask"
     monkeypatch.setenv("VMLX_TEST_ACTION_MARKER", str(marker))
     monkeypatch.setenv("VMLX_TEST_UMASK_MARKER", str(umask_marker))
     toolchain = {}
-    for name in runner.R19_PINNED_TOOL_NAMES:
+    for name in runner.R20_PINNED_TOOL_NAMES:
         tool = tmp_path / name
         tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         tool.chmod(0o700)
@@ -2604,7 +2604,7 @@ def test_r19_bound_tool_action_rechecks_document_and_complete_toolchain(tmp_path
 
     fixed_path = "/usr/bin:/bin"
     monkeypatch.setenv("PATH", fixed_path)
-    monkeypatch.setenv("VMLX_R19_FIXED_PATH", fixed_path)
+    monkeypatch.setenv("VMLX_R20_FIXED_PATH", fixed_path)
     plan = tmp_path / "tool-plan.json"
     _seal_json(
         plan,
@@ -2680,9 +2680,9 @@ def test_r19_bound_tool_action_rechecks_document_and_complete_toolchain(tmp_path
     assert marker.read_text(encoding="utf-8") == "ran\n"
 
 
-def test_r19_bound_tool_action_preserves_non_utf8_output_through_json(tmp_path):
+def test_r20_bound_tool_action_preserves_non_utf8_output_through_json(tmp_path):
     toolchain = {}
-    for name in runner.R19_PINNED_TOOL_NAMES:
+    for name in runner.R20_PINNED_TOOL_NAMES:
         tool = tmp_path / name
         output = (r"printf 'Mach-O \251 signed\n'" + "\n") if name == "file" else ""
         tool.write_text(f"#!/bin/sh\n{output}exit 0\n", encoding="utf-8")
@@ -2741,7 +2741,7 @@ def test_r19_bound_tool_action_preserves_non_utf8_output_through_json(tmp_path):
     assert restored.stdout.encode("utf-8", "surrogateescape") == expected
 
 
-def test_r19_git_status_excludes_only_its_verified_release_python_action(
+def test_r20_git_status_excludes_only_its_verified_release_python_action(
     tmp_path,
     monkeypatch,
 ):
@@ -2751,7 +2751,7 @@ def test_r19_git_status_excludes_only_its_verified_release_python_action(
     original = scripts / "run_packaged_integrity_contract.py"
     original.write_text("# verified runner\n", encoding="utf-8")
     action = scripts / (
-        ".run_packaged_integrity_contract.py.vmlx-r19-"
+        ".run_packaged_integrity_contract.py.vmlx-r20-"
         "0123456789abcdef0123456789abcdef"
     )
     os.link(original, action)
@@ -2773,7 +2773,7 @@ def test_r19_git_status_excludes_only_its_verified_release_python_action(
     assert filtered == dirty_row
 
 
-def test_r19_git_source_identity_excludes_only_its_verified_release_python_action(
+def test_r20_git_source_identity_excludes_only_its_verified_release_python_action(
     tmp_path,
     monkeypatch,
 ):
@@ -2789,7 +2789,7 @@ def test_r19_git_source_identity_excludes_only_its_verified_release_python_actio
     _git(repo, "commit", "-m", "fixture")
 
     action = scripts / (
-        ".run_packaged_integrity_contract.py.vmlx-r19-"
+        ".run_packaged_integrity_contract.py.vmlx-r20-"
         "0123456789abcdef0123456789abcdef"
     )
     os.link(original, action)
@@ -2804,7 +2804,7 @@ def test_r19_git_source_identity_excludes_only_its_verified_release_python_actio
         runner._git_source_identity(repo)
 
 
-def test_r19_git_status_refuses_to_hide_an_unverified_lookalike(
+def test_r20_git_status_refuses_to_hide_an_unverified_lookalike(
     tmp_path,
     monkeypatch,
 ):
@@ -2814,7 +2814,7 @@ def test_r19_git_status_refuses_to_hide_an_unverified_lookalike(
     original = scripts / "run_packaged_integrity_contract.py"
     original.write_text("# verified runner\n", encoding="utf-8")
     action = scripts / (
-        ".run_packaged_integrity_contract.py.vmlx-r19-"
+        ".run_packaged_integrity_contract.py.vmlx-r20-"
         "fedcba9876543210fedcba9876543210"
     )
     action.write_text("# lookalike, not a hardlink\n", encoding="utf-8")
@@ -2837,7 +2837,7 @@ def test_r19_git_status_refuses_to_hide_an_unverified_lookalike(
 
 
 @pytest.mark.parametrize("action", ("git", "shasum", "awk", "file", "find"))
-def test_r19_bound_tool_action_detects_each_residual_tool_swap(
+def test_r20_bound_tool_action_detects_each_residual_tool_swap(
     tmp_path,
     monkeypatch,
     action,
@@ -2846,9 +2846,9 @@ def test_r19_bound_tool_action_detects_each_residual_tool_swap(
     monkeypatch.setenv("VMLX_TEST_ACTION_MARKER", str(marker))
     fixed_path = "/usr/bin:/bin"
     monkeypatch.setenv("PATH", fixed_path)
-    monkeypatch.setenv("VMLX_R19_FIXED_PATH", fixed_path)
+    monkeypatch.setenv("VMLX_R20_FIXED_PATH", fixed_path)
     toolchain = {}
-    for name in runner.R19_PINNED_TOOL_NAMES:
+    for name in runner.R20_PINNED_TOOL_NAMES:
         tool = tmp_path / name
         if name == action:
             tool.write_text(
@@ -2891,13 +2891,13 @@ def test_r19_bound_tool_action_detects_each_residual_tool_swap(
     assert marker.read_text(encoding="utf-8") == "ran\n"
 
 
-def test_r19_private_directory_creation_rejects_symlink_without_chmod(tmp_path):
+def test_r20_private_directory_creation_rejects_symlink_without_chmod(tmp_path):
     private_root = runner.ensure_private_evidence_root(tmp_path / "private")
     parent = private_root / "notary-records"
     parent.mkdir(mode=0o700)
     victim = tmp_path / "victim"
     victim.mkdir(mode=0o755)
-    result_dir = parent / "vMLX-1.6.19-deadbeefcafe"
+    result_dir = parent / "vMLX-1.6.20-deadbeefcafe"
     result_dir.symlink_to(victim, target_is_directory=True)
 
     with pytest.raises(runner.ArtifactChainError, match="refusing to reuse"):
@@ -2924,7 +2924,7 @@ def test_r19_private_directory_creation_rejects_symlink_without_chmod(tmp_path):
         )
 
 
-def test_r19_private_root_alias_swap_never_chmods_victim(tmp_path, monkeypatch):
+def test_r20_private_root_alias_swap_never_chmods_victim(tmp_path, monkeypatch):
     private_root = tmp_path / "private"
     private_root.mkdir(mode=0o755)
     moved_root = tmp_path / "private-moved"
@@ -2953,7 +2953,7 @@ def test_r19_private_root_alias_swap_never_chmods_victim(tmp_path, monkeypatch):
     assert stat.S_IMODE(moved_root.stat().st_mode) == 0o700
 
 
-def test_r19_exclusive_sealed_write_rejects_parent_swap_without_victim_write(
+def test_r20_exclusive_sealed_write_rejects_parent_swap_without_victim_write(
     tmp_path,
     monkeypatch,
 ):
@@ -2986,7 +2986,7 @@ def test_r19_exclusive_sealed_write_rejects_parent_swap_without_victim_write(
     assert list(moved_dir.iterdir()) == []
 
 
-def test_r19_private_command_capture_is_fd_owned_and_immutable(tmp_path, capsys):
+def test_r20_private_command_capture_is_fd_owned_and_immutable(tmp_path, capsys):
     private_root = runner.ensure_private_evidence_root(tmp_path / "private")
     result_dir = runner.create_private_directory(
         private_root=private_root,
@@ -3027,7 +3027,7 @@ def test_r19_private_command_capture_is_fd_owned_and_immutable(tmp_path, capsys)
     assert stat.S_IMODE(stderr_output.stat().st_mode) == 0o400
 
 
-def test_r19_private_command_capture_rejects_result_dir_swap_without_victim_write(
+def test_r20_private_command_capture_rejects_result_dir_swap_without_victim_write(
     tmp_path,
 ):
     private_root = runner.ensure_private_evidence_root(tmp_path / "private")
@@ -3071,10 +3071,10 @@ def test_r19_private_command_capture_rejects_result_dir_swap_without_victim_writ
     assert list(moved_result_dir.iterdir()) == []
 
 
-def test_r19_snapshot_copy_and_operation_identity_detect_mutation(tmp_path, monkeypatch):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_snapshot_copy_and_operation_identity_detect_mutation(tmp_path, monkeypatch):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     pre = _write_pre_manifest(paths)
-    source = paths["dist"] / "vMLX-1.6.19-sequoia-arm64.dmg"
+    source = paths["dist"] / "vMLX-1.6.20-sequoia-arm64.dmg"
     destination = paths["private_root"] / "mutation-snapshot.dmg"
     original_read = runner.os.read
     mutated = False
@@ -3112,10 +3112,10 @@ def test_r19_snapshot_copy_and_operation_identity_detect_mutation(tmp_path, monk
         )
 
 
-def test_r19_staged_app_requires_exact_one_and_full_source_parity(tmp_path):
+def test_r20_staged_app_requires_exact_one_and_full_source_parity(tmp_path):
     import plistlib
 
-    paths = _r19_artifact_chain_fixture(tmp_path)
+    paths = _r20_artifact_chain_fixture(tmp_path)
     root = paths["root"]
 
     staged = tmp_path / "staged"
@@ -3129,11 +3129,11 @@ def test_r19_staged_app_requires_exact_one_and_full_source_parity(tmp_path):
     for packaged in (mirror / "__init__.py", bundled / "__init__.py"):
         packaged.write_text('VERSION = "test"\n', encoding="utf-8")
     (extracted / "out/main.js").write_text(
-        "console.log('r19')\n",
+        "console.log('r20')\n",
         encoding="utf-8",
     )
     (extracted / "package.json").write_text(
-        '{"name":"vmlx","version":"1.6.19","main":"out/main.js","type":"module"}\n',
+        '{"name":"vmlx","version":"1.6.20","main":"out/main.js","type":"module"}\n',
         encoding="utf-8",
     )
     info = app / "Contents/Info.plist"
@@ -3142,13 +3142,13 @@ def test_r19_staged_app_requires_exact_one_and_full_source_parity(tmp_path):
         plistlib.dump(
             {
                 "CFBundleIdentifier": "net.vmlx.app",
-                "CFBundleShortVersionString": "1.6.19",
-                "CFBundleVersion": "1.6.19",
+                "CFBundleShortVersionString": "1.6.20",
+                "CFBundleVersion": "1.6.20",
                 "LSMinimumSystemVersion": "14.5.0",
             },
             handle,
         )
-    _write_r19_runtime_fixture(
+    _write_r20_runtime_fixture(
         resources / "bundled-python",
         flavor="sequoia",
         source_commit=_git(root, "rev-parse", "HEAD"),
@@ -3164,7 +3164,7 @@ def test_r19_staged_app_requires_exact_one_and_full_source_parity(tmp_path):
         root=root,
         staged_output=staged,
         extracted_asar=extracted,
-        version="1.6.19",
+        version="1.6.20",
         flavor="sequoia",
     )["app"] == str(app)
 
@@ -3174,7 +3174,7 @@ def test_r19_staged_app_requires_exact_one_and_full_source_parity(tmp_path):
             root=root,
             staged_output=staged,
             extracted_asar=extracted,
-            version="1.6.19",
+            version="1.6.20",
             flavor="sequoia",
         )
     (bundled / "__init__.py").write_text('VERSION = "test"\n', encoding="utf-8")
@@ -3183,13 +3183,13 @@ def test_r19_staged_app_requires_exact_one_and_full_source_parity(tmp_path):
         runner.find_exact_staged_app(staged)
 
 
-def test_r19_runtime_contract_rejects_swapped_or_identical_wrong_platforms(
+def test_r20_runtime_contract_rejects_swapped_or_identical_wrong_platforms(
     tmp_path,
 ):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+    paths = _r20_artifact_chain_fixture(tmp_path)
     apps = {
         flavor: runner.find_exact_staged_app(paths["staged_outputs"][flavor])
-        for flavor in runner.R19_ARTIFACT_CHAIN_FLAVORS
+        for flavor in runner.R20_ARTIFACT_CHAIN_FLAVORS
     }
     bundles = {
         flavor: app / "Contents/Resources/bundled-python"
@@ -3204,7 +3204,7 @@ def test_r19_runtime_contract_rejects_swapped_or_identical_wrong_platforms(
             runner.inspect_bundle_runtime_contract(
                 bundle_root=bundles[actual],
                 flavor=asserted,
-                version="1.6.19",
+                version="1.6.20",
             )
 
     tahoe_bundle = bundles["tahoe"]
@@ -3221,7 +3221,7 @@ def test_r19_runtime_contract_rejects_swapped_or_identical_wrong_platforms(
         runner.inspect_bundle_runtime_contract(
             bundle_root=tahoe_bundle,
             flavor="tahoe",
-            version="1.6.19",
+            version="1.6.20",
         )
     metal_metadata.write_text(original_metal_metadata, encoding="utf-8")
 
@@ -3249,17 +3249,17 @@ def test_r19_runtime_contract_rejects_swapped_or_identical_wrong_platforms(
         runner.inspect_bundle_runtime_contract(
             bundle_root=tahoe_bundle,
             flavor="tahoe",
-            version="1.6.19",
+            version="1.6.20",
         )
 
 
-def test_r19_tahoe_minimum_os_is_an_attested_app_contract(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_tahoe_minimum_os_is_an_attested_app_contract(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     app = runner.find_exact_staged_app(paths["staged_outputs"]["tahoe"])
     assert runner._inspect_app_runtime_contract(
         app=app,
         flavor="tahoe",
-        version="1.6.19",
+        version="1.6.20",
     )["minimum_system_version"] == "26.0.0"
 
     info_path = app / "Contents/Info.plist"
@@ -3275,11 +3275,11 @@ def test_r19_tahoe_minimum_os_is_an_attested_app_contract(tmp_path):
         runner._inspect_app_runtime_contract(
             app=app,
             flavor="tahoe",
-            version="1.6.19",
+            version="1.6.20",
         )
 
 
-def test_r19_online_apple_query_pins_xcrun_and_sanitizes_path(
+def test_r20_online_apple_query_pins_xcrun_and_sanitizes_path(
     tmp_path,
     monkeypatch,
     capsys,
@@ -3300,7 +3300,7 @@ def test_r19_online_apple_query_pins_xcrun_and_sanitizes_path(
                 "jobId": submission_id,
                 "status": "Accepted",
                 "sha256": dmg_sha256,
-                "archiveFilename": "vMLX-1.6.19-sequoia-arm64.dmg",
+                "archiveFilename": "vMLX-1.6.20-sequoia-arm64.dmg",
                 "ticketContents": [{"path": "vMLX.app"}],
             }
         os.write(kwargs["stdout"], json.dumps(payload).encode())
@@ -3314,7 +3314,7 @@ def test_r19_online_apple_query_pins_xcrun_and_sanitizes_path(
         capture_dir=private_root / "fresh-query",
         submission_id=submission_id,
         expected_dmg_sha256=dmg_sha256,
-        expected_archive_name="vMLX-1.6.19-sequoia-arm64.dmg",
+        expected_archive_name="vMLX-1.6.20-sequoia-arm64.dmg",
         expected_team_id="55KGF2S5AY",
         keychain_profile="vmlx-notary",
         keychain=None,
@@ -3335,14 +3335,14 @@ def test_r19_online_apple_query_pins_xcrun_and_sanitizes_path(
     assert "PRIVATE_APPLE_STDERR_SENTINEL" not in capsys.readouterr().err
 
 
-def test_r19_caller_cannot_pair_substituted_attestation_with_own_digest(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_caller_cannot_pair_substituted_attestation_with_own_digest(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     attestation = _write_build_attestation(paths)
     with pytest.raises(runner.ArtifactChainError, match="digest mismatch"):
         runner.write_pre_notary_artifact_manifest(
             root=paths["root"],
             dist_dir=paths["dist"],
-            version="1.6.19",
+            version="1.6.20",
             private_root=paths["private_root"],
             output_path=paths["pre_manifest"],
             build_attestation_path=paths["build_attestation"],
@@ -3353,7 +3353,7 @@ def test_r19_caller_cannot_pair_substituted_attestation_with_own_digest(tmp_path
     assert attestation["sha256"] != "f" * 64
 
 
-def test_r19_fd_bound_read_is_not_substituted_by_swap_and_restore(
+def test_r20_fd_bound_read_is_not_substituted_by_swap_and_restore(
     tmp_path,
     monkeypatch,
 ):
@@ -3381,17 +3381,17 @@ def test_r19_fd_bound_read_is_not_substituted_by_swap_and_restore(
     assert target.read_bytes() == original
 
 
-def test_r19_wrong_named_extra_app_is_rejected(tmp_path):
-    paths = _r19_artifact_chain_fixture(tmp_path)
+def test_r20_wrong_named_extra_app_is_rejected(tmp_path):
+    paths = _r20_artifact_chain_fixture(tmp_path)
     staged = paths["staged_outputs"]["sequoia"]
     (staged / "mac-arm64/Other.app").mkdir()
     with pytest.raises(runner.ArtifactChainError, match="exactly one application"):
         runner.find_exact_staged_app(staged)
 
 
-def test_r19_mounted_parity_rejects_extra_asar_and_stale_output(tmp_path):
+def test_r20_mounted_parity_rejects_extra_asar_and_stale_output(tmp_path):
     paths, pre, _, submission_ids, snapshot_paths = _post_notary_fixture(tmp_path)
-    final_manifest = paths["private_root"] / "r19-post-notary-manifest.json"
+    final_manifest = paths["private_root"] / "r20-post-notary-manifest.json"
     final = _write_final(
         paths,
         pre,
@@ -3408,7 +3408,7 @@ def test_r19_mounted_parity_rejects_extra_asar_and_stale_output(tmp_path):
     arguments = {
         "root": paths["root"],
         "dist_dir": paths["dist"],
-        "version": "1.6.19",
+        "version": "1.6.20",
         "private_root": paths["private_root"],
         "final_manifest_path": final_manifest,
         "expected_final_manifest_sha256": str(final["sha256"]),
@@ -3435,7 +3435,7 @@ def test_r19_mounted_parity_rejects_extra_asar_and_stale_output(tmp_path):
         runner.validate_mounted_app_against_final_manifest(**arguments)
 
 
-def test_r19_unrelated_recomputed_blockmap_is_rejected(tmp_path):
+def test_r20_unrelated_recomputed_blockmap_is_rejected(tmp_path):
     expected = tmp_path / "release.dmg.blockmap"
     recomputed = tmp_path / "recomputed.dmg.blockmap"
     expected.write_bytes(b"blockmap-for-final-dmg")

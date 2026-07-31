@@ -646,13 +646,15 @@ def _argv_has_option(argv: list[str], option: str) -> bool:
 def _estimate_max_prompt_tokens() -> int:
     """Estimate max safe prompt length based on available GPU memory.
 
-    KV cache memory per token = n_layers * 2 * n_kv_heads * head_dim * 2 bytes.
-    We allow KV to use at most 60% of free memory (after model weights).
+    Standard caches use linear K+V geometry. Native DSV4 uses its bounded SWA
+    ring plus ratio-4 CSA/indexer and ratio-128 HCA pool geometry. We allow the
+    retained cache to use at most 60% of free memory (after model weights).
     Returns 0 if estimation fails (no limit enforced).
     """
     try:
         from vmlx_engine.utils.memory_limits import (
-            estimate_kv_bytes_per_token_from_config,
+            estimate_cache_token_capacity_from_config,
+            estimate_dsv4_cache_memory_from_config,
         )
 
         active, max_ws = _metal_projection_stats()
@@ -660,11 +662,27 @@ def _estimate_max_prompt_tokens() -> int:
         # Allow KV to use at most 60% of free memory
         kv_budget = int(free * 0.6)
         config = _loaded_model_config_for_memory_projection()
-        bytes_per_token = estimate_kv_bytes_per_token_from_config(config)
-        if config is not None and bytes_per_token > 0:
-            max_tokens = kv_budget // bytes_per_token
-            estimated = max(1024, max_tokens)  # preserve the existing 1K floor
+        declared_limit = 0
+        if config is not None:
             declared_limit = _declared_context_limit_from_config(config)
+            max_tokens = estimate_cache_token_capacity_from_config(
+                config,
+                kv_budget,
+                max_tokens=declared_limit,
+            )
+            if estimate_dsv4_cache_memory_from_config(config, 1) is not None:
+                try:
+                    dsv4_guard = int(
+                        os.environ.get("DSV4_MAX_PREFILL_TOKENS", "32768")
+                    )
+                except (TypeError, ValueError):
+                    dsv4_guard = 32768
+                if dsv4_guard > 0:
+                    max_tokens = min(max_tokens, dsv4_guard)
+        else:
+            max_tokens = 0
+        if max_tokens > 0:
+            estimated = max(1024, max_tokens)  # preserve the existing 1K floor
             if declared_limit > 0:
                 estimated = min(estimated, declared_limit)
             return max(1, estimated)
@@ -1805,6 +1823,80 @@ def _jang_chat_default_mode(bundle_path: str) -> str | None:
         return None
 
 
+def _dsv4_reasoning_contract(
+    bundle_path: str,
+) -> tuple[tuple[str, ...], str | None]:
+    """Return the selected DSV4 bundle's native effort levels and default.
+
+    The official Python encoder is bundle-versioned.  Reading its stamped chat
+    contract avoids applying an older DSV4 effort alias to a newer bundle.
+    """
+    if bundle_path:
+        try:
+            from .loaders.dsv4_chat_encoder import read_chat_config_from_bundle
+
+            chat = read_chat_config_from_bundle(bundle_path)
+            reasoning = chat.get("reasoning") if isinstance(chat, dict) else None
+            if isinstance(reasoning, dict):
+                raw_levels = reasoning.get("reasoning_effort_levels")
+                levels = tuple(
+                    dict.fromkeys(
+                        str(value).strip().lower()
+                        for value in (raw_levels or [])
+                        if isinstance(value, str) and value.strip()
+                    )
+                )
+                default = reasoning.get("default_effort")
+                default_effort = (
+                    str(default).strip().lower()
+                    if isinstance(default, str) and default.strip()
+                    else None
+                )
+                if levels:
+                    return levels, default_effort
+        except Exception:
+            pass
+    # Compatibility fallback for unstamped DSV4 bundles. The selected encoder
+    # performs a second, authoritative validation before rendering.
+    return ("low", "high", "max"), None
+
+
+def _dsv4_requested_reasoning_effort(
+    request: Any,
+    chat_template_kwargs: dict[str, Any],
+) -> str | None:
+    """Preserve explicit effort while keeping generic `thinking` bundle-native.
+
+    The shared API model represents `thinking_mode=reasoning` as an inferred
+    `reasoning_effort=medium`. DSV4-0731 has no medium tier, so that generic
+    toggle must select the bundle's native default rather than masquerade as an
+    explicit medium request. A caller that actually supplied medium remains
+    explicit and is rejected by `_normalize_dsv4_reasoning_effort`.
+    """
+    nested = chat_template_kwargs.get("reasoning_effort")
+    if nested is not None:
+        return str(nested).strip().lower()
+
+    effort = getattr(request, "reasoning_effort", None)
+    if effort is None:
+        return None
+    normalized = str(effort).strip().lower()
+    mode = str(getattr(request, "thinking_mode", "") or "").strip().lower()
+    generic_mode = mode.replace("-", "_").replace(" ", "_") in {
+        "reasoning",
+        "thinking",
+        "think",
+        "on",
+        "true",
+    }
+    # Pydantic marks fields assigned by its post-validator as set, so
+    # `model_fields_set` cannot distinguish this inferred medium from a raw
+    # caller field. The surviving generic mode is the authoritative signal.
+    if normalized == "medium" and generic_mode and getattr(request, "reasoning", None) is None:
+        return None
+    return normalized
+
+
 def _bundle_repetition_penalty_keys(
     bundle_path: str,
     *,
@@ -1855,9 +1947,8 @@ def _bundle_sampling_default(model_name: str, key: str) -> float | None:
 
     ``jang_config.chat.sampling_defaults`` is intentionally higher priority
     than ``generation_config.json`` because it is the JANG runtime stamp for
-    chat behavior. DSV4, for example, ships generation_config temperature/top_p
-    as 1.0/1.0 but declares the audited chat defaults as 0.6/0.95 in
-    jang_config.
+    chat behavior. Do not substitute remembered family defaults: DSV4 bundle
+    revisions, for example, carry different audited sampling contracts.
     """
     bundle_path = _model_path or model_name
     if not bundle_path:
@@ -2159,13 +2250,24 @@ def _resolve_dsv4_thinking_policy(
     )
 
 
-def _normalize_dsv4_reasoning_effort(effort: str | None) -> str | None:
-    """Map public effort names onto the actual DSV4 encoder vocabulary."""
-    if effort == "max":
-        return "max"
-    if effort in ("low", "medium", "high"):
-        return "high"
-    return None
+def _normalize_dsv4_reasoning_effort(
+    effort: str | None,
+    bundle_path: str = "",
+) -> str | None:
+    """Validate an explicit effort against the selected DSV4 bundle."""
+    if effort is None:
+        return None
+    normalized = str(effort).strip().lower()
+    levels, _ = _dsv4_reasoning_contract(bundle_path or _model_path or _model_name)
+    if normalized in levels:
+        return normalized
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Unsupported DSV4 reasoning_effort {normalized!r}; "
+            f"this bundle supports: {', '.join(levels)}"
+        ),
+    )
 
 
 def _is_loaded_dsv4_model(model: str = "") -> bool:
@@ -4042,6 +4144,40 @@ _PRIVATE_CACHE_ATTESTATION_MAX_PAIR_PREFIX_TOKENS = 262_144
 
 # Reasoning parser (for models like Qwen3, DeepSeek-R1)
 _reasoning_parser = None  # ReasoningParser instance when enabled
+_reasoning_parser_id: str | None = None
+
+
+def _set_active_reasoning_parser(parser, parser_id: str | None) -> None:
+    """Install a reasoning parser together with its canonical runtime ID.
+
+    Parser classes are not a truthful identifier because multiple registered
+    IDs may intentionally share one implementation (for example,
+    ``poolside_v1`` and ``deepseek_r1``).  Keep the selected registry/CLI ID
+    beside the instance so diagnostics can attest the effective parser without
+    guessing from its class name.
+    """
+    global _reasoning_parser, _reasoning_parser_id
+
+    _reasoning_parser = parser
+    _reasoning_parser_id = (
+        str(parser_id) if parser is not None and parser_id else None
+    )
+
+
+def _active_parser_health_status() -> dict[str, Any]:
+    """Return path-free IDs for parsers that are actually active."""
+    tool_call_enabled = bool(
+        _enable_auto_tool_choice
+        and not _tool_call_parser_disabled_explicitly
+        and _tool_call_parser
+    )
+    return {
+        "reasoning_parser": (
+            _reasoning_parser_id if _reasoning_parser is not None else None
+        ),
+        "tool_call_parser": _tool_call_parser if tool_call_enabled else None,
+        "auto_tool_choice": tool_call_enabled,
+    }
 
 # Cache: does a model's template inject <think> even when enable_thinking=False?
 # Some templates (e.g., MiniMax M2.5) unconditionally inject <think> regardless.
@@ -6215,12 +6351,21 @@ def _parse_tool_calls_with_parser(
     # risks interleaved state even with reset().
     try:
         parser_cls = ToolParserManager.get_tool_parser(active_parser)
+    except Exception as e:
+        logger.warning(f"Failed to resolve tool parser '{active_parser}': {e}")
+        return _generic_parse_filtered(output_text)
+
+    try:
         tokenizer = None
         if _engine is not None and hasattr(_engine, "_tokenizer"):
             tokenizer = _engine._tokenizer
         parser_instance = parser_cls(tokenizer)
     except Exception as e:
         logger.warning(f"Failed to initialize tool parser '{active_parser}': {e}")
+        if bool(getattr(parser_cls, "STRICT_NATIVE_TOOL_FORMAT", False)):
+            if bool(getattr(parser_cls, "SUPPRESS_INVALID_NATIVE_MARKUP", False)):
+                return _visible_prefix_before_unparsed_tool_markup(output_text), None
+            return output_text, None
         return _generic_parse_filtered(output_text)
 
     # Use the configured parser, fall back to generic if it finds nothing.
@@ -6228,6 +6373,9 @@ def _parse_tool_calls_with_parser(
     # generic repair pass can promote malformed native-control debris into a
     # wrong executable tool call.
     try:
+        strict_native_format = bool(
+            getattr(parser_cls, "STRICT_NATIVE_TOOL_FORMAT", False)
+        )
         # Convert request to dict format for parsers that need schema info (e.g., Step3p5 type coercion)
         parser_request = None
         effective_tools = _effective_tools_for_tool_parsing(request)
@@ -6238,9 +6386,21 @@ def _parse_tool_calls_with_parser(
                     _model_path or _model_name or getattr(request, "model", None)
                 ),
             }
-        strict_native_format = bool(
-            getattr(parser_cls, "STRICT_NATIVE_TOOL_FORMAT", False)
-        )
+        if strict_native_format and not effective_tools:
+            # A configured native parser is not authority to invent tools.  It
+            # may emit a structured call only when this request (including MCP
+            # contributions) exposes an effective tool set.  Preserve ordinary
+            # prose, but fail closed and hide any native control envelope.
+            safe_content = output_text
+            if bool(
+                getattr(parser_cls, "SUPPRESS_INVALID_NATIVE_MARKUP", False)
+            ):
+                safe_content_fn = getattr(
+                    parser_instance, "_safe_invalid_protocol_content", None
+                )
+                if callable(safe_content_fn):
+                    safe_content = safe_content_fn(output_text) or ""
+            return safe_content, None
         result = parser_instance.extract_tool_calls(output_text, request=parser_request)
         if result.tools_called:
             tool_calls = [
@@ -6261,6 +6421,10 @@ def _parse_tool_calls_with_parser(
             # so clients do not receive hallucinated function calls like
             # README.md()/src()/tests() when the request only exposed
             # list_directory().
+            if bool(
+                getattr(parser_cls, "SUPPRESS_INVALID_NATIVE_MARKUP", False)
+            ):
+                return result.content or "", None
             return output_text, None
         else:
             if strict_native_format:
@@ -6281,6 +6445,10 @@ def _parse_tool_calls_with_parser(
                         "a schema-valid function call; generic tool repair was "
                         "skipped for this strict native format."
                     )
+                if bool(
+                    getattr(parser_cls, "SUPPRESS_INVALID_NATIVE_MARKUP", False)
+                ):
+                    return result.content or "", None
                 return output_text, None
             # Specific parser found nothing — try generic parser as fallback
             # (handles Nemotron, Llama, raw JSON, etc.)
@@ -6296,6 +6464,17 @@ def _parse_tool_calls_with_parser(
                     f"The '{active_parser}' native tool parser failed; generic "
                     "tool repair was skipped for this strict native format."
                 )
+            if bool(
+                getattr(
+                    locals().get("parser_cls", None),
+                    "SUPPRESS_INVALID_NATIVE_MARKUP",
+                    False,
+                )
+            ) and locals().get("parser_instance") is not None:
+                safe_content = parser_instance._safe_invalid_protocol_content(
+                    output_text
+                )
+                return safe_content or "", None
             return output_text, None
         return _generic_parse_filtered(output_text)
 
@@ -9063,13 +9242,16 @@ def _native_cache_status(
     disk_cache = getattr(scheduler, "disk_cache", None)
 
     if getattr(scheduler, "_uses_dsv4_cache", False) or family_name == "deepseek_v4":
-        pool_quant_enabled = str(os.environ.get("DSV4_POOL_QUANT", "0")).lower() in (
+        pool_quant_requested = str(os.environ.get("DSV4_POOL_QUANT", "0")).lower() in (
             "1",
             "true",
             "yes",
             "on",
         )
         layout: dict[str, Any] = {}
+        pool_quant_observed: bool | None = None
+        cache_class_counts: dict[str, int] = {}
+        layout_error: str | None = None
         try:
             model = getattr(scheduler, "model", None)
             cache_layers = model.make_cache() if model is not None else None
@@ -9077,6 +9259,10 @@ def _native_cache_status(
                 ratios: list[int | None] = []
                 windows: list[int] = []
                 for layer_cache in cache_layers:
+                    cache_class = type(layer_cache).__name__
+                    cache_class_counts[cache_class] = (
+                        cache_class_counts.get(cache_class, 0) + 1
+                    )
                     ratio = getattr(layer_cache, "compress_ratio", None)
                     if (
                         ratio is None
@@ -9109,16 +9295,43 @@ def _native_cache_status(
                         "unknown" if ratio is None else ratio for ratio in ratios
                     ],
                     "compress_ratio_counts": ratio_counts,
+                    "cache_class_counts": cache_class_counts,
                 }
+                compressed_layers = [
+                    layer_cache
+                    for layer_cache, ratio in zip(cache_layers, ratios)
+                    if ratio not in (None, 0)
+                ]
+                if compressed_layers:
+                    pool_quant_flags = [
+                        type(layer_cache).__name__ == "PoolQuantizedV4Cache"
+                        for layer_cache in compressed_layers
+                    ]
+                    if all(pool_quant_flags):
+                        pool_quant_observed = True
+                    elif any(pool_quant_flags):
+                        pool_quant_observed = None
+                        mixed_error = (
+                            "mixed DSV4 compressed cache classes: "
+                            f"{cache_class_counts}"
+                        )
+                        layout_error = (
+                            f"{layout_error}; {mixed_error}"
+                            if layout_error
+                            else mixed_error
+                        )
+                    else:
+                        pool_quant_observed = False
                 if windows:
                     layout["sliding_window"] = windows[0]
                     if len(set(windows)) > 1:
                         layout["sliding_windows"] = windows
-        except Exception:
+        except Exception as exc:
+            layout_error = str(exc)
             layout = {}
         status = {
             "family": "deepseek_v4",
-            "schema": "deepseek_v4_v9",
+            "schema": "deepseek_v4_v10_delta",
             "cache_type": "native_composite",
             "components": [
                 "swa_local",
@@ -9128,8 +9341,15 @@ def _native_cache_status(
             ],
             "generic_turboquant_kv": {"enabled": False, "reason": "native_dsv4_composite"},
             "pool_quant": {
-                "enabled": pool_quant_enabled,
+                "requested": pool_quant_requested,
+                "enabled": pool_quant_observed is True,
+                "observed": pool_quant_observed,
+                "matches_request": (
+                    pool_quant_observed is not None
+                    and pool_quant_observed == pool_quant_requested
+                ),
                 "env": os.environ.get("DSV4_POOL_QUANT", "0"),
+                "error": layout_error,
             },
             "layer_cache_roles": {
                 "ratio_0": "swa_local_only",
@@ -9820,6 +10040,11 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
                 if getattr(block, "cache_data", None) is not None
                 and int(getattr(block, "resident_bytes", 0) or 0) > 0
             ]
+            transient_blocks = [
+                block
+                for block in resident_blocks
+                if bool(getattr(block, "cache_data_transient", False))
+            ]
             paged_cache = {
                 "backend_mode": (
                     "block_disk_only"
@@ -9842,6 +10067,20 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
                 ),
                 "resident_bytes": int(
                     getattr(paged_mgr, "resident_bytes", 0) or 0
+                ),
+                "transient_resident_tokens": sum(
+                    int(getattr(block, "token_count", 0) or 0)
+                    for block in transient_blocks
+                ),
+                "transient_resident_bytes": sum(
+                    int(getattr(block, "resident_bytes", 0) or 0)
+                    for block in transient_blocks
+                ),
+                "transient_disk_promotions": int(
+                    getattr(paged_mgr, "transient_disk_promotions", 0) or 0
+                ),
+                "transient_disk_peak_bytes": int(
+                    getattr(paged_mgr, "transient_disk_peak_bytes", 0) or 0
                 ),
                 "max_resident_bytes": int(
                     getattr(paged_mgr, "max_resident_bytes", 0) or 0
@@ -10170,6 +10409,7 @@ async def health():
         result["speculative_decoding"] = spec_info.get(
             "speculative_decoding", spec_info
         )
+    result["active_parsers"] = _active_parser_health_status()
     scheduler_stats: dict[str, Any] = {}
     if scheduler:
         try:
@@ -12606,10 +12846,15 @@ async def model_capabilities(model_id: str) -> dict:
     configured_reasoning_efforts = (
         getattr(cfg, "supported_reasoning_efforts", None) if cfg is not None else None
     )
+    bundle_path = _model_path or model_key
+    default_reasoning_effort = None
     if family == "deepseek_v4":
         supports_thinking = True
         supported_modes = ["instruct", "reasoning"]
-        reasoning_efforts = ["high", "max"]
+        dsv4_efforts, dsv4_default_effort = _dsv4_reasoning_contract(bundle_path)
+        reasoning_efforts = list(dsv4_efforts)
+        if dsv4_default_effort in dsv4_efforts:
+            default_reasoning_effort = dsv4_default_effort
     elif supports_thinking:
         supported_modes = (
             ["instruct", "reasoning"] if supports_instruct_mode else ["reasoning"]
@@ -12626,7 +12871,6 @@ async def model_capabilities(model_id: str) -> dict:
         supported_modes = ["instruct"]
         reasoning_efforts = []
 
-    bundle_path = _model_path or model_key
     generation_status = _model_effective_defaults_status(bundle_path)
 
     scheduler = _get_scheduler()
@@ -12694,6 +12938,7 @@ async def model_capabilities(model_id: str) -> dict:
         "supported_modes": supported_modes,
         "experimental_modes": [],
         "reasoning_efforts": reasoning_efforts,
+        "default_reasoning_effort": default_reasoning_effort,
         "modalities": modalities,
         "media": _loaded_media_capability_status(modalities),
         "cache": {
@@ -12979,11 +13224,10 @@ async def create_anthropic_message(
     except Exception:
         _is_dsv4 = False
     if _is_dsv4:
-        # See create_chat_completion `_is_dsv4` block for full rationale.
-        # The DSV4 Jinja template only branches on `reasoning_effort=='max'`.
-        _cur_effort = (
-            getattr(chat_req, "reasoning_effort", None)
-            or _ct_kwargs.get("reasoning_effort")
+        # Preserve the selected bundle encoder's native effort vocabulary.
+        _cur_effort = _dsv4_requested_reasoning_effort(
+            chat_req,
+            _ct_kwargs,
         )
         _ct_kwargs.pop("thinking_mode", None)
 
@@ -13014,7 +13258,10 @@ async def create_anthropic_message(
             enable_thinking=_msg_kwargs.get("enable_thinking"),
         )
         _stable_effort = (
-            _normalize_dsv4_reasoning_effort(_cur_effort)
+            _normalize_dsv4_reasoning_effort(
+                _cur_effort,
+                _model_path or _model_name or getattr(chat_req, "model", "") or "",
+            )
             if _dsv4_thinking.reasoning_effort_allowed
             else None
         )
@@ -13835,9 +14082,9 @@ async def ollama_chat(fastapi_request: Request):
         #   chat              → enable_thinking=False, no reasoning_effort
         #   thinking standard → enable_thinking=True,  no reasoning_effort
         #   thinking max      → enable_thinking=True,  reasoning_effort='max'
-        _cur_effort_o = (
-            getattr(chat_req, "reasoning_effort", None)
-            or _ollama_ct_kwargs.get("reasoning_effort")
+        _cur_effort_o = _dsv4_requested_reasoning_effort(
+            chat_req,
+            _ollama_ct_kwargs,
         )
         _ollama_ct_kwargs.pop("thinking_mode", None)
         _dsv4_thinking_o = _resolve_dsv4_thinking_policy(
@@ -13867,7 +14114,10 @@ async def ollama_chat(fastapi_request: Request):
             enable_thinking=chat_kwargs.get("enable_thinking"),
         )
         _stable_effort_o = (
-            _normalize_dsv4_reasoning_effort(_cur_effort_o)
+            _normalize_dsv4_reasoning_effort(
+                _cur_effort_o,
+                _model_path or _model_name or getattr(chat_req, "model", "") or "",
+            )
             if _dsv4_thinking_o.reasoning_effort_allowed
             else None
         )
@@ -15922,12 +16172,9 @@ async def create_chat_completion(
         enable_thinking=request.enable_thinking,
     )
 
-    # DeepSeek V4 three-mode encoder: thinking_mode=chat|thinking + optional
-    # reasoning_effort=high|max. Auto-map enable_thinking toggle to the right
-    # pair so the UI's simple on/off switch lands on the correct prompt
-    # suffix (</think> for chat mode, no suffix for thinking, extra system
-    # hint for max). See research/DSV4-RUNTIME-ARCHITECTURE.md §4 and
-    # vmlx_engine/loaders/dsv4_chat_encoder.py::_resolve_mode_and_effort.
+    # DeepSeek V4 bundle-owned encoder: thinking_mode=chat|thinking plus an
+    # optional effort accepted by that exact encoder revision. Auto-map only
+    # the public on/off toggle; never alias explicit effort tiers.
     try:
         from .model_config_registry import get_model_config_registry
         _model_family_key = _model_path or _model_name or getattr(request, "model", "") or ""
@@ -15936,27 +16183,12 @@ async def create_chat_completion(
     except Exception:
         _is_dsv4 = False
     if _is_dsv4:
-        # The DSV4 Jinja template (baked into tokenizer_config.json) accepts
-        # exactly two kwargs:
-        #     enable_thinking: bool
-        #     reasoning_effort: 'max' or None
-        # The template branches ONLY on `reasoning_effort == 'max'`. Any
-        # other string value (including 'high', 'medium', 'low') silently
-        # falls through to the default branch — i.e. behaves identical to
-        # `reasoning_effort=None`. So:
-        #
-        #   chat mode             → enable_thinking=False, reasoning_effort=None
-        #   thinking (standard)   → enable_thinking=True,  reasoning_effort=None
-        #   thinking (max)        → enable_thinking=True,  reasoning_effort='max'
-        #
-        # Setting `thinking_mode` here is a no-op for the template (it's only
-        # used by the legacy `dsv4_chat_encoder.py` Python adapter, not the
-        # Jinja template applied via tokenizer.apply_chat_template). We keep
-        # it off the kwargs to avoid Jinja "undefined kwarg" warnings on
-        # strict templates.
-        _cur_effort = (
-            request.reasoning_effort
-            or _ct_kwargs.get("reasoning_effort")
+        # DSV4 uses its versioned Python encoder rather than a Jinja template.
+        # Keep `thinking_mode` out of generic kwargs and pass only the resolved
+        # enable flag plus a bundle-validated explicit effort.
+        _cur_effort = _dsv4_requested_reasoning_effort(
+            request,
+            _ct_kwargs,
         )
         # Strip stale fields from any prior path so the final kwargs are clean.
         _ct_kwargs.pop("thinking_mode", None)
@@ -15988,7 +16220,10 @@ async def create_chat_completion(
             enable_thinking=chat_kwargs.get("enable_thinking"),
         )
         _stable_effort = (
-            _normalize_dsv4_reasoning_effort(_cur_effort)
+            _normalize_dsv4_reasoning_effort(
+                _cur_effort,
+                _model_path or _model_name or request.model or "",
+            )
             if _dsv4_thinking.reasoning_effort_allowed
             else None
         )
@@ -18979,19 +19214,19 @@ async def create_response(
             enable_thinking=chat_kwargs.get("enable_thinking"),
         )
 
-        # (b) reasoning_effort handling — DSV4 encoder only injects the
-        #     REASONING_EFFORT_MAX template at index 0 when effort=='max'.
-        #     'high' is currently a render no-op in the bundle encoder
-        #     but pass it through (forward-compat). 'low'/'medium' are
-        #     normalized to 'high' so a future encoder version that
-        #     handles non-max tiers picks them up.
-        _cur_resp_effort = (
-            getattr(request, "reasoning_effort", None)
-            or _ct_kwargs.get("reasoning_effort")
+        # (b) Preserve a supported explicit bundle effort. Generic
+        #     `thinking_mode=reasoning` selects the bundle-native default;
+        #     unsupported explicit tiers fail with a clear 400.
+        _cur_resp_effort = _dsv4_requested_reasoning_effort(
+            request,
+            _ct_kwargs,
         )
         _ct_kwargs.pop("thinking_mode", None)
         _stable_resp_effort = (
-            _normalize_dsv4_reasoning_effort(_cur_resp_effort)
+            _normalize_dsv4_reasoning_effort(
+                _cur_resp_effort,
+                _model_path or _model_name or request.model or "",
+            )
             if _dsv4_thinking_resp.reasoning_effort_allowed
             else None
         )
@@ -24719,7 +24954,7 @@ Examples:
     if parser_name:
         try:
             parser_cls = get_parser(parser_name)
-            _reasoning_parser = parser_cls()
+            _set_active_reasoning_parser(parser_cls(), parser_name)
             logger.info(f"Reasoning parser enabled: {parser_name}")
         except KeyError:
             logger.warning(

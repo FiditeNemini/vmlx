@@ -38,7 +38,6 @@ from .abstract_tool_parser import (
     generate_tool_id,
 )
 
-
 # Fullwidth vertical bar, DSV4's canonical DSML delimiter.
 DSML_CHAR = "｜"  # ｜
 DSML_PREFIX = f"{DSML_CHAR}DSML{DSML_CHAR}"
@@ -62,6 +61,13 @@ class DSMLToolParser(ToolParser):
 
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
+    # DSML is an executable native control protocol.  A malformed DSML-looking
+    # completion must never fall through to the generic tool repair parser or
+    # be returned verbatim as assistant content.  server.py consults these
+    # flags only for this parser family; plain prose remains visible.
+    STRICT_NATIVE_TOOL_FORMAT = True
+    SUPPRESS_INVALID_NATIVE_MARKUP = True
+
     # A canonical DSV4 tool turn is complete once its DSML wrapper (or a
     # schema-valid bare invoke used by older bundles) closes. Some low-bit DSV4
     # bundles keep generating after that boundary instead of emitting EOS. The
@@ -82,63 +88,10 @@ class DSMLToolParser(ToolParser):
         rf'<{re.escape(DSML_PREFIX)}invoke\s+name="([^"]+)"\s*>(.*?)</{re.escape(DSML_PREFIX)}invoke>',
         re.DOTALL,
     )
-    _PARTIAL_INVOKE_RE = re.compile(
-        rf'<{re.escape(DSML_PREFIX)}invoke\s+name="([^"]+)"\s*>(.*)',
-        re.DOTALL,
-    )
 
     # Param regex: <｜DSML｜parameter name="…" string="true|false">value</｜DSML｜parameter>
     _PARAM_RE = re.compile(
         rf'<{re.escape(DSML_PREFIX)}parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>(.*?)</{re.escape(DSML_PREFIX)}parameter>',
-        re.DOTALL,
-    )
-    _MALFORMED_PARAM_VALUE_RE = re.compile(
-        rf'<{re.escape(DSML_PREFIX)}parameter\s+name="([^"]+)"[^>]*?\bvalue\s*"?([^">\s]*)"?',
-        re.DOTALL,
-    )
-    _MALFORMED_NAME_RE = re.compile(
-        rf'<{re.escape(DSML_PREFIX)}(?:tool_call_type|tool_call|tool_calls)[^>]*?(?:type|name)="([^"]+)"',
-        re.DOTALL,
-    )
-    _ATTR_RE = re.compile(r'"attributes"\s*:\s*"([^"}\n]*)', re.DOTALL)
-    _HTMLISH_INVOKE_RE = re.compile(
-        r"<invoke_([A-Za-z_][A-Za-z0-9_]*)\b[^>]*>(.*)",
-        re.DOTALL,
-    )
-    _HTMLISH_PARAM_RE = re.compile(
-        r'<param\s+name=["\']?([A-Za-z_][A-Za-z0-9_]*)["\']?[^>]*>([^<]*)',
-        re.DOTALL,
-    )
-    _PLAIN_PARAM_RE = re.compile(
-        rf'<(?:{re.escape(DSML_PREFIX)})?(?:param|parameter)\s+name=["\']?'
-        rf'([A-Za-z_][A-Za-z0-9_]*)["\']?[^>]*>(.*?)'
-        rf'</(?:{re.escape(DSML_PREFIX)})?(?:param|parameter)>',
-        re.DOTALL,
-    )
-    _SHORT_DSML_PARAM_RE = re.compile(
-        rf'<{re.escape(DSML_PREFIX)}parameter\s+name="([^"]+)"[^>]*>(.*?)</{re.escape(DSML_PREFIX)}>',
-        re.DOTALL,
-    )
-    _SCHEMA_KEYED_DSML_PARAM_RE = re.compile(
-        rf'<{re.escape(DSML_PREFIX)}parameter\s+([A-Za-z_][A-Za-z0-9_]*)\b[^>]*>'
-        rf'(.*?)</{re.escape(DSML_PREFIX)}parameter>',
-        re.DOTALL,
-    )
-    _SELF_CLOSING_PARAM_RE = re.compile(
-        rf'<{re.escape(DSML_PREFIX)}parameter\s+name="([^"]+)"[^>]*\s+'
-        rf'(?:string|value)="([^"]*)"[^>]*/>',
-        re.DOTALL,
-    )
-    _DEGRADED_INVOKE_START_RE = re.compile(
-        rf'(?:<{re.escape(DSML_PREFIX)}inv(?:oke|use|ue)|<invoke)\s+name=["\']([^"\']+)["\']\s*>',
-        re.DOTALL,
-    )
-    _DEGRADED_NAMED_INV_RE = re.compile(
-        rf'<{re.escape(DSML_PREFIX)}inv>\s*<{re.escape(DSML_PREFIX)}name>([^<]+)</{re.escape(DSML_PREFIX)}>',
-        re.DOTALL,
-    )
-    _DEGRADED_INVOKE_CLOSE_RE = re.compile(
-        rf'</(?:{re.escape(DSML_PREFIX)})?inv(?:oke|ue)?>',
         re.DOTALL,
     )
     _WRAPPER_RESIDUE_RE = re.compile(
@@ -146,25 +99,220 @@ class DSMLToolParser(ToolParser):
         re.DOTALL,
     )
 
+    _NONCANONICAL_PROTOCOL_MARKERS = (
+        DSML_OPEN_PREFIX,
+        f"</{DSML_PREFIX}",
+        "<invoke_",
+        "<invoke ",
+    )
+    _PARTIAL_PROTOCOL_MARKERS = (
+        DSML_OPEN_PREFIX,
+        f"</{DSML_PREFIX}",
+    )
+    _MIN_PARTIAL_PROTOCOL_MARKER = 4
+
     def _has_dsml(self, text: str) -> bool:
         return self.DSML_OPEN_PREFIX in text
 
-    def _parse_params(self, body: str) -> dict[str, Any]:
-        out: dict[str, Any] = {}
-        for m in self._PARAM_RE.finditer(body):
-            name, is_string, raw = m.group(1), m.group(2), m.group(3)
+    def _native_protocol_start(self, text: str) -> int | None:
+        """Return the first full or terminally split native-protocol marker.
+
+        A generation can finish between tokenizer pieces of the fullwidth DSML
+        prefix (for example ``<｜DSML``).  That proper-prefix suffix is control
+        markup just like a complete marker and must not become assistant text.
+        Partial matching is deliberately limited to the DSML namespace markers
+        so ordinary prose ending in an HTML-ish ``<inv`` fragment is unaffected.
+        """
+        starts = [
+            position
+            for marker in self._NONCANONICAL_PROTOCOL_MARKERS
+            if (position := text.find(marker)) >= 0
+        ]
+        for marker in self._PARTIAL_PROTOCOL_MARKERS:
+            max_prefix = min(len(marker) - 1, len(text))
+            for length in range(
+                max_prefix,
+                self._MIN_PARTIAL_PROTOCOL_MARKER - 1,
+                -1,
+            ):
+                if text.endswith(marker[:length]):
+                    starts.append(len(text) - length)
+                    break
+        return min(starts) if starts else None
+
+    def _has_native_protocol_marker(self, text: str) -> bool:
+        return self._native_protocol_start(text) is not None
+
+    def _safe_invalid_protocol_content(self, text: str) -> str | None:
+        """Return only prose that safely precedes malformed native markup.
+
+        Once a native marker starts, everything after it is an untrusted
+        executable envelope.  Keeping a suffix after malformed markup risks
+        exposing arguments, DSML tokens, or model-generated fake tool results.
+        """
+        protocol_start = self._native_protocol_start(text)
+        if protocol_start is None:
+            return text or None
+        prefix = text[:protocol_start].strip()
+        return prefix or None
+
+    def _strict_parse_params(self, body: str) -> dict[str, Any] | None:
+        """Parse a complete canonical parameter body without repair.
+
+        Every non-whitespace byte in an invoke body must belong to a canonical
+        ``parameter name=... string=true|false`` element.  Duplicate names and
+        malformed JSON values are protocol errors, not strings to coerce.
+        """
+        args: dict[str, Any] = {}
+        cursor = 0
+        for match in self._PARAM_RE.finditer(body):
+            if body[cursor : match.start()].strip():
+                return None
+            name, is_string, raw = match.group(1), match.group(2), match.group(3)
+            if name in args:
+                return None
             if is_string == "true":
-                out[name] = raw
+                args[name] = raw
             else:
-                # DSV4 emits JSON-serialised values with `string="false"` —
-                # attempt json.loads; fall back to the raw string if it's
-                # malformed (preserves the original text rather than crashing
-                # the whole tool-call round).
                 try:
-                    out[name] = json.loads(raw)
-                except Exception:
-                    out[name] = raw
-        return out
+                    args[name] = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return None
+            cursor = match.end()
+        if body[cursor:].strip():
+            return None
+        return args
+
+    def _strict_canonical_regex_parse(
+        self,
+        model_output: str,
+        request: Any | None,
+    ) -> ExtractedToolCallInformation | None:
+        """Parse one fully closed canonical DSML turn.
+
+        This grammar check is shared by streaming and non-streaming paths.  It
+        deliberately accepts only canonical invoke/parameter elements, with an
+        optional canonical ``tool_calls`` wrapper.  Truncated, typoed,
+        HTML-ish, self-closing, or schema-incomplete variants return ``None``.
+        """
+        matches = list(self._INVOKE_RE.finditer(model_output))
+        if not matches:
+            return None
+
+        wrapper_open_count = model_output.count(self.TOOL_CALLS_OPEN)
+        wrapper_close_count = model_output.count(self.TOOL_CALLS_CLOSE)
+        has_wrapper = bool(wrapper_open_count or wrapper_close_count)
+        if has_wrapper:
+            if wrapper_open_count != 1 or wrapper_close_count != 1:
+                return None
+            wrapper_open = model_output.find(self.TOOL_CALLS_OPEN)
+            wrapper_close = model_output.find(self.TOOL_CALLS_CLOSE)
+            if not (
+                wrapper_open < matches[0].start()
+                and matches[-1].end() < wrapper_close
+            ):
+                return None
+            inner_start = wrapper_open + len(self.TOOL_CALLS_OPEN)
+            inner = model_output[inner_start:wrapper_close]
+            inner_residue = self._INVOKE_RE.sub("", inner)
+            if inner_residue.strip():
+                return None
+            outside = (
+                model_output[:wrapper_open]
+                + model_output[wrapper_close + len(self.TOOL_CALLS_CLOSE) :]
+            )
+            if self._INVOKE_RE.search(outside):
+                return None
+            visible_content = outside.strip() or None
+        else:
+            visible_content = self._INVOKE_RE.sub("", model_output).strip() or None
+
+        if visible_content and self._has_native_protocol_marker(visible_content):
+            return None
+
+        schemas = self._tool_schemas(request)
+        schema_gate_active = request is not None
+        tool_calls: list[dict[str, Any]] = []
+        for match in matches:
+            name, body = match.group(1), match.group(2)
+            schema = schemas.get(name) if schemas else None
+            if schema_gate_active and schema is None:
+                return None
+            args = self._strict_parse_params(body)
+            if args is None:
+                return None
+            if schema and not self._arguments_match_schema(args, schema):
+                return None
+            tool_calls.append(
+                self._make_tool_call(
+                    name=name,
+                    arguments=json.dumps(args, ensure_ascii=False),
+                    id_=generate_tool_id(),
+                )
+            )
+
+        if not tool_calls:
+            return None
+        return ExtractedToolCallInformation(
+            tools_called=True,
+            tool_calls=tool_calls,
+            content=visible_content,
+        )
+
+    def _parse_completed_canonical_calls(
+        self,
+        model_output: str,
+        request: Any | None,
+    ) -> ExtractedToolCallInformation | None:
+        """Single strict completed-call parser used by every DSML path.
+
+        The local grammar validates the bytes before the bundle encoder sees
+        them, preventing a permissive/older adapter from repairing malformed
+        output.  When the canonical bundle parser is available, both parsers
+        must agree on call names and decoded arguments.  The local parse remains
+        the returned representation so visible-content sanitization is owned by
+        one path.
+        """
+        strict = self._strict_canonical_regex_parse(model_output, request)
+        if strict is None:
+            return None
+        model_path = (
+            request.get("model_path")
+            if isinstance(request, dict)
+            else getattr(request, "model_path", None)
+        )
+        if not model_path:
+            return strict
+        canonical_available, canonical = self._encoding_dsv4_parse_status(
+            model_output,
+            request=request,
+        )
+        if not canonical_available:
+            # Compatibility for older DSV4 bundles that genuinely ship no
+            # canonical completion parser.  Once a selected bundle exposes the
+            # parser, its rejection is authoritative and must not be converted
+            # into a regex-only executable call.
+            return strict
+        if canonical is None:
+            return None
+
+        def signatures(result: ExtractedToolCallInformation) -> list[tuple[str, Any]]:
+            normalized: list[tuple[str, Any]] = []
+            for call in result.tool_calls:
+                name = call.get("name") if isinstance(call, dict) else None
+                arguments = call.get("arguments") if isinstance(call, dict) else None
+                if not isinstance(name, str) or not isinstance(arguments, str):
+                    return []
+                try:
+                    decoded = json.loads(arguments)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return []
+                normalized.append((name, decoded))
+            return normalized
+
+        if signatures(canonical) != signatures(strict):
+            return None
+        return strict
 
     def _schema_props_required(
         self, schema: dict[str, Any] | None
@@ -181,59 +329,6 @@ class DSMLToolParser(ToolParser):
             required if isinstance(required, list) else [],
         )
 
-    def _coerce_plain_param_value(
-        self, raw: str, prop_schema: dict[str, Any] | None
-    ) -> Any:
-        value = re.sub(r"<br\s*/?>", "", raw, flags=re.IGNORECASE).strip()
-        if not isinstance(prop_schema, dict):
-            return value
-        schema_type = prop_schema.get("type")
-        if isinstance(schema_type, list):
-            schema_type = next((t for t in schema_type if t != "null"), None)
-        if schema_type in {"integer", "number", "boolean", "array", "object"}:
-            try:
-                return json.loads(value)
-            except Exception:
-                return value
-        return value
-
-    def _parse_plain_params(
-        self, body: str, schema: dict[str, Any] | None
-    ) -> dict[str, Any]:
-        props, _ = self._schema_props_required(schema)
-        if not props:
-            return {}
-        args: dict[str, Any] = {}
-        for m in self._PLAIN_PARAM_RE.finditer(body):
-            name, raw = m.group(1), m.group(2)
-            if name not in props:
-                continue
-            value = self._coerce_plain_param_value(raw, props.get(name))
-            if value != "":
-                args[name] = value
-        for m in self._SHORT_DSML_PARAM_RE.finditer(body):
-            name, raw = m.group(1), m.group(2)
-            if name not in props or name in args:
-                continue
-            value = self._coerce_plain_param_value(raw, props.get(name))
-            if value != "":
-                args[name] = value
-        for m in self._SCHEMA_KEYED_DSML_PARAM_RE.finditer(body):
-            name, raw = m.group(1), m.group(2)
-            if name in {"name", "string", "value"} or name not in props or name in args:
-                continue
-            value = self._coerce_plain_param_value(raw, props.get(name))
-            if value != "":
-                args[name] = value
-        for m in self._SELF_CLOSING_PARAM_RE.finditer(body):
-            name, raw = m.group(1), m.group(2)
-            if name not in props or name in args or raw in {"true", "false"}:
-                continue
-            value = self._coerce_plain_param_value(raw, props.get(name))
-            if value != "":
-                args[name] = value
-        return args
-
     def _required_satisfied(
         self, args: dict[str, Any], schema: dict[str, Any] | None
     ) -> bool:
@@ -248,6 +343,40 @@ class DSMLToolParser(ToolParser):
             isinstance(value, str) and value.strip().rstrip("=") == "string"
             for value in args.values()
         )
+
+    def _arguments_match_schema(
+        self,
+        args: dict[str, Any],
+        schema: dict[str, Any],
+    ) -> bool:
+        """Validate decoded arguments against the request's function schema.
+
+        JSON Schema permits additional properties by default.  Native DSML is
+        stricter: once a function explicitly declares a ``properties`` map,
+        only those names may execute, including when the map is empty for a
+        zero-argument tool.  The shared structured-output validator then owns
+        nested types, enums, arrays, and all other JSON-Schema constraints.
+        """
+        params_schema = schema.get("parameters")
+        if params_schema is None:
+            return self._required_satisfied(args, schema)
+        if not isinstance(params_schema, dict):
+            return False
+
+        if "properties" in params_schema:
+            props = params_schema.get("properties")
+            if not isinstance(props, dict):
+                return False
+            if any(key not in props for key in args):
+                return False
+
+        try:
+            from vmlx_engine.api.tool_calling import validate_json_schema
+
+            valid, _error = validate_json_schema(args, params_schema)
+        except Exception:
+            return False
+        return bool(valid) and self._required_satisfied(args, schema)
 
     def _clean_residue(self, text: str | None) -> str | None:
         """Remove DSML wrapper/invoke residue from visible content."""
@@ -264,9 +393,8 @@ class DSMLToolParser(ToolParser):
     def _tool_schemas(self, request: Any | None) -> dict[str, dict[str, Any]]:
         """Return available tool schemas keyed by function name.
 
-        Parser repair must be schema-gated. DSV4 JANGTQ can emit malformed
-        DSML-ish text under tool pressure; we only turn that into a structured
-        call when the emitted name is one of the request's available tools.
+        Strict parsing is schema-gated: a canonical call is actionable only
+        when its name and required parameters match the request's tools.
         """
         tools = []
         if isinstance(request, dict):
@@ -283,254 +411,6 @@ class DSMLToolParser(ToolParser):
                 out[name] = fn
         return out
 
-    def _repair_malformed_dsml(
-        self, text: str, request: Any | None
-    ) -> list[dict[str, Any]]:
-        """Best-effort repair for old DSV4 JANGTQ malformed DSML.
-
-        Canonical DSML is still required for normal parsing. This fallback
-        handles the observed older-bundle shape:
-
-            <｜DSML｜tool_call_type type="list_directory"... "attributes":"." ...>
-
-        It is intentionally conservative: the function name must exist in the
-        request tool schema, and arguments are only inferred for declared
-        parameters. If there is one required parameter and the malformed block
-        exposes a single attributes value, that value is assigned to it.
-        """
-        if DSML_PREFIX not in text:
-            return []
-        schemas = self._tool_schemas(request)
-        if not schemas:
-            return []
-
-        calls: list[dict[str, Any]] = []
-        for m in self._MALFORMED_NAME_RE.finditer(text):
-            name = m.group(1)
-            schema = schemas.get(name)
-            if not schema:
-                continue
-            params_schema = schema.get("parameters") or {}
-            props = (
-                params_schema.get("properties") or {}
-                if isinstance(params_schema, dict)
-                else {}
-            )
-            required = (
-                params_schema.get("required") or []
-                if isinstance(params_schema, dict)
-                else []
-            )
-            args: dict[str, Any] = {}
-            for p_name in props:
-                # Common malformed forms: path=".", "path": ".", path:. 
-                pat = re.compile(
-                    rf'(?:{re.escape(p_name)}\s*=\s*"([^"]*)"|"{re.escape(p_name)}"\s*:\s*"([^"]*)")'
-                )
-                pm = pat.search(text)
-                if pm:
-                    args[p_name] = next(g for g in pm.groups() if g is not None)
-            attr = self._ATTR_RE.search(text)
-            if attr and len(required) == 1 and required[0] not in args:
-                args[required[0]] = attr.group(1)
-            if not args and len(props) == 1:
-                # Last-resort single-parameter inference from an explicit dot.
-                only = next(iter(props))
-                if '"."' in text or ">.<" in text or " . " in text:
-                    args[only] = "."
-            if args or not required:
-                calls.append(
-                    self._make_tool_call(
-                        name=name,
-                        arguments=json.dumps(args, ensure_ascii=False),
-                        id_=generate_tool_id(),
-                    )
-                )
-        return calls
-
-    def _repair_partial_invoke(
-        self, text: str, request: Any | None
-    ) -> list[dict[str, Any]]:
-        """Repair a canonical DSML invoke whose closing tag was truncated.
-
-        DSV4 JANGTQ2 sometimes emits a perfectly valid opening invoke and
-        complete parameter tags, then stops after the first characters of the
-        closing tag, e.g. ``</``. Treat that as a tool call only when:
-
-        - the tool name exists in the request schema; and
-        - at least all required parameters were parsed from complete parameter
-          tags.
-
-        This keeps the non-streaming parser from showing raw DSML text while
-        avoiding arbitrary conversion of incomplete markup into tool calls.
-        """
-        if DSML_PREFIX not in text or self.INVOKE_CLOSE in text:
-            return []
-        schemas = self._tool_schemas(request)
-        if not schemas:
-            return []
-        m = self._PARTIAL_INVOKE_RE.search(text)
-        if not m:
-            return []
-        name = m.group(1)
-        schema = schemas.get(name)
-        if not schema:
-            return []
-        params_schema = schema.get("parameters") or {}
-        required = (
-            params_schema.get("required") or []
-            if isinstance(params_schema, dict)
-            else []
-        )
-        args = self._parse_params(m.group(2))
-        if any(p not in args for p in required):
-            body = m.group(2)
-            for pm in self._MALFORMED_PARAM_VALUE_RE.finditer(body):
-                p_name, raw = pm.group(1), pm.group(2)
-                if p_name not in args and raw:
-                    args[p_name] = raw
-        if any(p not in args for p in required):
-            return []
-        return [
-            self._make_tool_call(
-                name=name,
-                arguments=json.dumps(args, ensure_ascii=False),
-                id_=generate_tool_id(),
-            )
-        ]
-
-    def _repair_htmlish_invoke(
-        self, text: str, request: Any | None
-    ) -> list[dict[str, Any]]:
-        """Repair DSV4's degraded ``<invoke_name><param ...>`` form.
-
-        Live DSV4 JANGTQ can degrade canonical DSML into HTML-ish tags after
-        the reasoning parser strips ``</think>``, for example::
-
-            <invoke_list_directory><br />
-            <param name="path".">.</br />
-            </inv
-
-        This is schema-gated for the same reason as the other repair paths: we
-        only emit a tool call when the function and parameters exist in the
-        request's tool schema.
-        """
-        schemas = self._tool_schemas(request)
-        if not schemas:
-            return []
-        m = self._HTMLISH_INVOKE_RE.search(text)
-        if not m:
-            return []
-        name, body = m.group(1), m.group(2)
-        schema = schemas.get(name)
-        if not schema:
-            return []
-        params_schema = schema.get("parameters") or {}
-        props = (
-            params_schema.get("properties") or {}
-            if isinstance(params_schema, dict)
-            else {}
-        )
-        required = (
-            params_schema.get("required") or []
-            if isinstance(params_schema, dict)
-            else []
-        )
-        args: dict[str, Any] = {}
-        for pm in self._HTMLISH_PARAM_RE.finditer(body):
-            p_name, raw = pm.group(1), pm.group(2)
-            if p_name in props:
-                value = re.sub(r"<br\s*/?>", "", raw, flags=re.IGNORECASE).strip()
-                if value:
-                    args[p_name] = value
-        if not args and len(props) == 1 and ">.<" in text:
-            args[next(iter(props))] = "."
-        if any(p not in args for p in required):
-            return []
-        return [
-            self._make_tool_call(
-                name=name,
-                arguments=json.dumps(args, ensure_ascii=False),
-                id_=generate_tool_id(),
-            )
-        ]
-
-    def _repair_degraded_dsml_invokes(
-        self, text: str, request: Any | None
-    ) -> list[dict[str, Any]]:
-        """Repair DSML wrapper/invoke blocks that degraded to plain params.
-
-        DSV4 JANGTQ2 can keep the DSML invoke marker but emit MiniMax-style
-        ``<param name="...">`` children and a shortened ``</inv>`` close. This
-        fallback is schema-gated and only reads parameters declared by the
-        request tool schema, so prose containing DSML-like text does not become
-        an arbitrary function call.
-        """
-        if DSML_PREFIX not in text:
-            return []
-        schemas = self._tool_schemas(request)
-        if not schemas:
-            return []
-        starts = list(self._DEGRADED_INVOKE_START_RE.finditer(text))
-        named_invokes = list(self._DEGRADED_NAMED_INV_RE.finditer(text))
-        if not starts and not named_invokes:
-            return []
-
-        calls: list[dict[str, Any]] = []
-        for index, match in enumerate(named_invokes):
-            name = match.group(1).strip()
-            schema = schemas.get(name)
-            if not schema:
-                continue
-            next_named = (
-                named_invokes[index + 1].start()
-                if index + 1 < len(named_invokes)
-                else len(text)
-            )
-            next_attr = next(
-                (start.start() for start in starts if start.start() > match.end()),
-                len(text),
-            )
-            close = self._DEGRADED_INVOKE_CLOSE_RE.search(text, match.end())
-            end = min(
-                next_named,
-                next_attr,
-                close.start() if close is not None else len(text),
-            )
-            body = text[match.end() : end]
-            args = self._parse_plain_params(body, schema)
-            if not self._required_satisfied(args, schema):
-                continue
-            calls.append(
-                self._make_tool_call(
-                    name=name,
-                    arguments=json.dumps(args, ensure_ascii=False),
-                    id_=generate_tool_id(),
-                )
-            )
-        for index, match in enumerate(starts):
-            name = match.group(1)
-            schema = schemas.get(name)
-            if not schema:
-                continue
-            next_start = (
-                starts[index + 1].start() if index + 1 < len(starts) else len(text)
-            )
-            close = self._DEGRADED_INVOKE_CLOSE_RE.search(text, match.end())
-            end = min(next_start, close.start() if close is not None else len(text))
-            body = text[match.end() : end]
-            args = self._parse_plain_params(body, schema)
-            if not self._required_satisfied(args, schema):
-                continue
-            calls.append(
-                self._make_tool_call(
-                    name=name,
-                    arguments=json.dumps(args, ensure_ascii=False),
-                    id_=generate_tool_id(),
-                )
-            )
-        return calls
-
     def _canonical_arguments_actionable(
         self,
         *,
@@ -540,11 +420,9 @@ class DSMLToolParser(ToolParser):
     ) -> bool:
         """Validate canonical DSV4 parser output before accepting it.
 
-        The bundled encoder is the preferred parser when it returns complete
-        arguments. Older DSV4/JANGTQ2 outputs can make it recover names while
-        dropping required parameters or leaking raw DSML/HTML-ish markup into
-        argument strings. In that case the regex repair paths below have more
-        information and should run.
+        Older encoders can recover names while dropping required parameters or
+        retaining raw native markup inside arguments. Such output is rejected;
+        no secondary repair path may promote it into an executable call.
         """
         raw_markers = (
             f"<{DSML_PREFIX}",
@@ -574,19 +452,27 @@ class DSMLToolParser(ToolParser):
             for value in decoded.values()
         ):
             return False
-        return self._required_satisfied(decoded, schema)
+        return self._arguments_match_schema(decoded, schema)
 
-    def _try_encoding_dsv4_parse(self, model_output: str, request: Any | None = None):
-        """Route DSML extraction through the canonical DSV4 chat-template
-        encoder when it's loaded. Returns ExtractedToolCallInformation on
-        success, None when encoding_dsv4 isn't available or the parse
-        produced nothing actionable (caller falls back to regex)."""
+    def _encoding_dsv4_parse_status(
+        self,
+        model_output: str,
+        request: Any | None = None,
+    ) -> tuple[bool, ExtractedToolCallInformation | None]:
+        """Return canonical-parser availability and its validated result.
+
+        ``(False, None)`` means no canonical completion parser is available and
+        permits the explicit older-bundle regex compatibility path.
+        ``(True, None)`` means the canonical parser was available but rejected
+        the bytes or produced a non-actionable call.  That rejection is final;
+        callers must not execute a regex-only interpretation.
+        """
         try:
             from vmlx_engine.loaders.dsv4_chat_encoder import (
                 _load_encoding_dsv4_module,
             )
         except Exception:
-            return None
+            return False, None
         try:
             if isinstance(request, dict):
                 model_path = request.get("model_path")
@@ -596,10 +482,10 @@ class DSMLToolParser(ToolParser):
                 model_path=Path(model_path) if model_path else None
             )
         except Exception:
-            return None
+            return False, None
         parse_fn = getattr(enc, "parse_message_from_completion_text", None)
         if parse_fn is None:
-            return None
+            return False, None
 
         # The production DSV4 encoder owns two contracts that differ from the
         # older one-argument test adapters:
@@ -653,12 +539,12 @@ class DSMLToolParser(ToolParser):
             # signature or hide a TypeError raised inside the bundle parser.
             raise
         except Exception:
-            return None
+            return True, None
         if not isinstance(parsed, dict):
-            return None
+            return True, None
         raw_calls = parsed.get("tool_calls") or []
         if not raw_calls:
-            return None
+            return True, None
         schemas = self._tool_schemas(request)
         tool_calls = []
         for tc in raw_calls:
@@ -680,99 +566,57 @@ class DSMLToolParser(ToolParser):
                 arguments=args_str,
                 schemas=schemas,
             ):
-                return None
+                return True, None
             tool_calls.append(
                 self._make_tool_call(
                     name=name, arguments=args_str, id_=generate_tool_id()
                 )
             )
         if not tool_calls:
-            return None
+            return True, None
         residue = parsed.get("content") or ""
         if isinstance(residue, list):
             residue = "".join(
                 p.get("text", "") if isinstance(p, dict) else str(p) for p in residue
             )
         residue = self._clean_residue(residue)
-        return ExtractedToolCallInformation(
-            tools_called=True,
-            tool_calls=tool_calls,
-            content=residue,
+        return (
+            True,
+            ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=tool_calls,
+                content=residue,
+            ),
         )
+
+    def _try_encoding_dsv4_parse(
+        self,
+        model_output: str,
+        request: Any | None = None,
+    ) -> ExtractedToolCallInformation | None:
+        """Compatibility wrapper for direct callers of the canonical parser."""
+        _available, result = self._encoding_dsv4_parse_status(
+            model_output,
+            request=request,
+        )
+        return result
 
     def extract_tool_calls(
         self, model_output: str, request: Any | None = None
     ) -> ExtractedToolCallInformation:
-        """Non-streaming path — parse entire completion and return tool calls + residue.
-
-        Routing precedence (added 2026-05-04):
-          1. Canonical ``encoding_dsv4.parse_message_from_completion_text``
-             when the DSV4 chat-template encoder is loaded — this matches the
-             round-trip semantics of the converter exactly and handles
-             nested / multi-line / parameter-string-coerced invokes that the
-             generic regex misses.
-          2. Fallback to the regex-based path below when encoding_dsv4 is
-             unavailable (e.g. non-DSV4 bundle still requesting `dsml` parser).
-        """
-        if DSML_PREFIX not in model_output and "<invoke_" not in model_output:
+        """Parse only complete canonical DSML; fail closed on native debris."""
+        if not self._has_native_protocol_marker(model_output):
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
 
-        canonical = self._try_encoding_dsv4_parse(model_output, request=request)
-        if canonical is not None:
-            return canonical
-
-        tool_calls = []
-        schemas = self._tool_schemas(request)
-        for m in self._INVOKE_RE.finditer(model_output):
-            name = m.group(1)
-            body = m.group(2)
-            args = self._parse_params(body)
-            schema = schemas.get(name)
-            if not args and schema:
-                plain_args = self._parse_plain_params(body, schema)
-                if plain_args and self._required_satisfied(plain_args, schema):
-                    args = plain_args
-            elif args and schema and not self._required_satisfied(args, schema):
-                plain_args = self._parse_plain_params(body, schema)
-                if plain_args and self._required_satisfied(plain_args, schema):
-                    args.update(plain_args)
-            if schema and not self._required_satisfied(args, schema):
-                continue
-            tool_calls.append(
-                self._make_tool_call(
-                    name=name,
-                    arguments=json.dumps(args, ensure_ascii=False),
-                    id_=generate_tool_id(),
-                )
-            )
-
-        if not tool_calls:
-            tool_calls = self._repair_partial_invoke(model_output, request)
-
-        if not tool_calls:
-            tool_calls = self._repair_malformed_dsml(model_output, request)
-
-        if not tool_calls:
-            tool_calls = self._repair_htmlish_invoke(model_output, request)
-
-        if not tool_calls:
-            tool_calls = self._repair_degraded_dsml_invokes(model_output, request)
-
-        # Residue content = everything OUTSIDE the invoke blocks. Strip the
-        # matched spans and collapse surrounding whitespace so the chat UI
-        # doesn't show a blank paragraph where the tool call used to be.
-        residue = self._clean_residue(model_output) or ""
-        if tool_calls and residue == model_output.strip():
-            # Repaired malformed DSML: hide the malformed raw marker from the
-            # client once we successfully emitted a structured tool call.
-            residue = ""
-
+        parsed = self._parse_completed_canonical_calls(model_output, request)
+        if parsed is not None:
+            return parsed
         return ExtractedToolCallInformation(
-            tools_called=len(tool_calls) > 0,
-            tool_calls=tool_calls,
-            content=residue if residue else None,
+            tools_called=False,
+            tool_calls=[],
+            content=self._safe_invalid_protocol_content(model_output),
         )
 
     def extract_tool_calls_streaming(
@@ -785,58 +629,30 @@ class DSMLToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: Any | None = None,
     ):
-        """Streaming path — buffer partial `<｜DSML｜invoke …>` blocks, emit on close.
-
-        Strategy: run the non-streaming regex on `current_text`. If we've seen
-        N complete invoke blocks previously and there are N+k now, flush those
-        k deltas. Content OUTSIDE invoke blocks streams normally via the
-        abstract parser's default path.
-        """
-        if not self._has_dsml(current_text):
-            # No DSML at all → pass through as plain content.
+        """Buffer native markup and emit only shared-parser canonical calls."""
+        if not self._has_native_protocol_marker(current_text):
             return self._default_content_delta(delta_text)
 
-        # Count complete blocks up to the previous cursor vs the current one.
-        prev_blocks = list(self._INVOKE_RE.finditer(previous_text))
-        curr_blocks = list(self._INVOKE_RE.finditer(current_text))
+        parsed = self._parse_completed_canonical_calls(current_text, request)
+        if parsed is None:
+            # Incomplete and malformed native protocol are both buffered and
+            # never surfaced as assistant content.
+            return None
 
-        if len(curr_blocks) == len(prev_blocks):
-            # We're mid-invoke (opening tag emitted but close not seen yet),
-            # inside a wrapper like <｜DSML｜tool_calls>, OR we're in plain
-            # content between invokes. Suppress the delta while inside DSML
-            # markup; otherwise pass through.
-            open_tail = current_text.rsplit(self.INVOKE_OPEN_PREFIX, 1)
-            if len(open_tail) == 2 and self.INVOKE_CLOSE not in open_tail[1]:
-                # We're inside an unclosed invoke — buffer silently.
-                return None
-            dsml_tail = current_text.rsplit(self.DSML_OPEN_PREFIX, 1)
-            if len(dsml_tail) == 2:
-                tail = dsml_tail[1]
-                if self.INVOKE_CLOSE not in tail:
-                    return None
-            return self._default_content_delta(delta_text)
-
-        # A new invoke block just closed. Emit tool calls for each block
-        # that's new since `prev_blocks`.
+        emitted = len(self.prev_tool_call_arr)
+        if emitted >= len(parsed.tool_calls):
+            return None
         new_calls = []
-        schemas = self._tool_schemas(request)
-        for m in curr_blocks[len(prev_blocks):]:
-            name = m.group(1)
-            body = m.group(2)
-            args = self._parse_params(body)
-            schema = schemas.get(name) if schemas else None
-            if schemas and schema is None:
-                return None
-            if schema and not self._required_satisfied(args, schema):
-                return None
+        for index, call in enumerate(parsed.tool_calls[emitted:], start=emitted):
             new_calls.append(
                 self._make_stream_tool_call_delta(
-                    index=len(prev_blocks) + len(new_calls),
-                    name=name,
-                    arguments=json.dumps(args, ensure_ascii=False),
-                    id_=generate_tool_id(),
+                    index=index,
+                    name=call["name"],
+                    arguments=call["arguments"],
+                    id_=call["id"],
                 )
             )
+        self.prev_tool_call_arr.extend(parsed.tool_calls[emitted:])
         return self._pack_stream_tool_calls(new_calls)
 
     @staticmethod
@@ -853,19 +669,6 @@ class DSMLToolParser(ToolParser):
             return None
 
         request = getattr(self, "_stream_stop_request", None)
-        schemas = self._tool_schemas(request)
-        for match in matches:
-            name, body = match.group(1), match.group(2)
-            schema = schemas.get(name) if schemas else None
-            if schemas and schema is None:
-                return None
-            args = self._parse_params(body)
-            if schema and not self._required_satisfied(args, schema):
-                plain_args = self._parse_plain_params(body, schema)
-                if plain_args:
-                    args.update(plain_args)
-            if schema and not self._required_satisfied(args, schema):
-                return None
 
         first_match = matches[0]
         last_match = matches[-1]
@@ -890,6 +693,10 @@ class DSMLToolParser(ToolParser):
             tail = buffered_text[wrapper_end:]
             if self._tail_starts_marker(tail, self.TOOL_CALLS_OPEN):
                 return None
+            if self._parse_completed_canonical_calls(
+                buffered_text[:wrapper_end], request
+            ) is None:
+                return None
             return wrapper_end
 
         # Older DSV4 encoders may emit a bare invoke without tool_calls wrapper.
@@ -899,6 +706,10 @@ class DSMLToolParser(ToolParser):
         bare_end = last_match.end()
         tail = buffered_text[bare_end:]
         if self._tail_starts_marker(tail, self.INVOKE_OPEN_PREFIX):
+            return None
+        if self._parse_completed_canonical_calls(
+            buffered_text[:bare_end], request
+        ) is None:
             return None
         return bare_end
 

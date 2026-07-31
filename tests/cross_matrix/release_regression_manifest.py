@@ -1758,8 +1758,8 @@ _ROWS: list[dict[str, Any]] = [
         "commands": [
             ".venv/bin/python tests/cross_matrix/run_release_surface_contract.py --out build/current-release-surface-contract-20260602-v154-live-public-after-site-fix.json",
             ".venv/bin/python tests/cross_matrix/run_release_surface_contract.py --out build/current-release-surface-contract-20260522-recheck-updater-i18n.json",
-            ".venv/bin/python tests/cross_matrix/run_release_surface_contract.py --live-public --public-manifest $VMLX_PUBLIC_RELEASE_MANIFEST --final-notary-manifest $VMLX_R19_FINAL_NOTARY_MANIFEST --final-notary-manifest-sha256 $VMLX_R19_FINAL_NOTARY_MANIFEST_SHA256 --out build/current-release-surface-contract-20260522-live-public-v1548.json",
-            ".venv/bin/python tests/cross_matrix/run_release_surface_contract.py --live-public --public-manifest $VMLX_PUBLIC_RELEASE_MANIFEST --final-notary-manifest $VMLX_R19_FINAL_NOTARY_MANIFEST --final-notary-manifest-sha256 $VMLX_R19_FINAL_NOTARY_MANIFEST_SHA256 --out build/current-release-surface-contract-20260524-live-source-tag-parity.json",
+            ".venv/bin/python tests/cross_matrix/run_release_surface_contract.py --live-public --public-manifest $VMLX_PUBLIC_RELEASE_MANIFEST --final-notary-manifest $VMLX_R20_FINAL_NOTARY_MANIFEST --final-notary-manifest-sha256 $VMLX_R20_FINAL_NOTARY_MANIFEST_SHA256 --out build/current-release-surface-contract-20260522-live-public-v1548.json",
+            ".venv/bin/python tests/cross_matrix/run_release_surface_contract.py --live-public --public-manifest $VMLX_PUBLIC_RELEASE_MANIFEST --final-notary-manifest $VMLX_R20_FINAL_NOTARY_MANIFEST --final-notary-manifest-sha256 $VMLX_R20_FINAL_NOTARY_MANIFEST_SHA256 --out build/current-release-surface-contract-20260524-live-source-tag-parity.json",
         ],
         "artifacts": [
             "build/current-release-surface-contract-20260602-v154-live-public-after-site-fix.json",

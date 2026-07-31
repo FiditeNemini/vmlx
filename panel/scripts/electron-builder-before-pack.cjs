@@ -982,7 +982,18 @@ function emitR19CompletionAttestation(panelDir, plan, planSha256) {
       payload,
     };
   } finally {
-    rmSync(extracted, { recursive: true, force: true });
+    // Large ASAR extractions contain thousands of files.  On macOS, a
+    // directory entry can transiently reappear while recursive removal walks
+    // that tree, causing fs.rmSync to surface ENOTEMPTY even though this hook
+    // is the sole owner.  Use Node's bounded recursive-removal retry support
+    // so completion attestation cleanup cannot fail after valid artifacts were
+    // already produced.
+    rmSync(extracted, {
+      recursive: true,
+      force: true,
+      maxRetries: 8,
+      retryDelay: 100,
+    });
   }
 }
 

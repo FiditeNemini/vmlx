@@ -1116,6 +1116,16 @@ def test_electron_builder_before_pack_hook_runs_verifier_in_direct_smoke(tmp_pat
     assert "skipped electron-vite build" in proc.stdout
 
 
+def test_completion_attestation_cleanup_retries_transient_directory_races():
+    hook_src = Path("panel/scripts/electron-builder-before-pack.cjs").read_text()
+
+    assert "rmSync(extracted, {" in hook_src
+    assert "recursive: true" in hook_src
+    assert "force: true" in hook_src
+    assert "maxRetries: 8" in hook_src
+    assert "retryDelay: 100" in hook_src
+
+
 def test_electron_builder_before_pack_hook_rejects_skip_vite_in_pack_context(tmp_path):
     scripts = tmp_path / "scripts"
     scripts.mkdir()

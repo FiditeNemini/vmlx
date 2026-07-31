@@ -38,7 +38,7 @@ ELECTRON_BUILDER_BIN="$PANEL_DIR/node_modules/electron-builder/cli.js"
 
 cd "$PANEL_DIR"
 
-remove_private_tree_with_retry() {
+remove_owned_release_tree_with_retry() {
   local target="$1"
   local attempt
 
@@ -48,12 +48,12 @@ remove_private_tree_with_retry() {
       return 0
     fi
     if [[ "$attempt" -lt 8 ]]; then
-      echo "WARNING: retrying transient private release cleanup ($attempt/8): $target" >&2
+      echo "WARNING: retrying transient owned release cleanup ($attempt/8): $target" >&2
       /bin/sleep 0.1
     fi
   done
 
-  echo "ERROR: private release cleanup did not converge after 8 attempts: $target" >&2
+  echo "ERROR: owned release cleanup did not converge after 8 attempts: $target" >&2
   return 1
 }
 
@@ -650,7 +650,7 @@ cleanup_r19_release_plans() {
   if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
     rm -f "$R19_TOOLCHAIN_PLAN_PATH" "$R19_BUILD_PLAN_PATH"
     if [[ -n "${R19_ATTESTATION_EXTRACT_ROOT:-}" ]]; then
-      rm -rf "$R19_ATTESTATION_EXTRACT_ROOT"
+      remove_owned_release_tree_with_retry "$R19_ATTESTATION_EXTRACT_ROOT"
     fi
   fi
 }
@@ -1471,7 +1471,7 @@ verify_staged_app_parity() {
     set -euo pipefail
     local extracted
     extracted="$(mktemp -d "$PRIVATE_EVIDENCE_ROOT/.staged-${flavor}-asar.XXXXXX")"
-    trap 'remove_private_tree_with_retry "$extracted"' EXIT
+    trap 'remove_owned_release_tree_with_retry "$extracted"' EXIT
     assert_asar_excludes_finder_metadata \
       "$app_path/Contents/Resources/app.asar"
     run_driver_plan_action asar extract \
@@ -1519,7 +1519,7 @@ write_mounted_dmg_payload_parity() (
         || "$APPLE_HDIUTIL" detach -force "$mount_dir" >/dev/null 2>&1 \
         || true
     fi
-    remove_private_tree_with_retry "$operation_root"
+    remove_owned_release_tree_with_retry "$operation_root"
   }
   trap cleanup_pre_notary_mount EXIT
 
@@ -1561,7 +1561,7 @@ write_mounted_dmg_payload_parity() (
   "$APPLE_HDIUTIL" detach "$mount_dir" >/dev/null
   attached=0
   trap - EXIT
-  remove_private_tree_with_retry "$operation_root"
+  remove_owned_release_tree_with_retry "$operation_root"
 )
 
 build_one() {
@@ -1597,7 +1597,7 @@ build_one() {
   seal_current_bundle_runtime \
     "$flavor" "$wheel_tag" "$minimum_system_version"
   assert_r19_release_output_safe
-  rm -rf "$staged_output"
+  remove_owned_release_tree_with_retry "$staged_output"
   # Let electron-builder perform its proven inside-out Developer-ID signing of
   # Electron and Squirrel framework leaves. Its mandatory beforePack hook owns
   # the single renderer build for this flavor, so the driver must not build the
@@ -1630,7 +1630,7 @@ build_one() {
 case "$REQUESTED_FLAVOR" in
   all)
     assert_r19_release_output_safe
-    rm -rf "$DIST_DIR"
+    remove_owned_release_tree_with_retry "$DIST_DIR"
     build_one "sequoia" "compat"
     build_one "tahoe" "native"
     ;;
@@ -1757,7 +1757,7 @@ NODE
     --expected-driver-pid "$$" \
     --out "$R19_PRE_NOTARY_MANIFEST_OUT"
   )"
-  remove_private_tree_with_retry "$R19_ATTESTATION_EXTRACT_ROOT"
+  remove_owned_release_tree_with_retry "$R19_ATTESTATION_EXTRACT_ROOT"
   R19_ATTESTATION_EXTRACT_ROOT=""
   assert_r19_source_identity "after pre-notary artifact manifest"
   pre_notary_sha256="$(artifact_json_field "$pre_notary_result" sha256)"

@@ -622,13 +622,17 @@ def test_bundle_python_retries_only_owned_tree_cleanup_and_still_fails_closed():
 def test_release_builder_retries_transient_private_asar_cleanup():
     builder = Path("panel/scripts/build-release-dmgs.sh").read_text()
 
-    assert "remove_private_tree_with_retry()" in builder
+    assert "remove_owned_release_tree_with_retry()" in builder
     assert "for attempt in 1 2 3 4 5 6 7 8" in builder
     assert '/bin/rm -rf -- "$target" || true' in builder
-    assert "retrying transient private release cleanup" in builder
-    assert "cleanup did not converge after 8 attempts" in builder
-    assert 'trap \'remove_private_tree_with_retry "$extracted"\' EXIT' in builder
+    assert "retrying transient owned release cleanup" in builder
+    assert "owned release cleanup did not converge after 8 attempts" in builder
+    assert 'trap \'remove_owned_release_tree_with_retry "$extracted"\' EXIT' in builder
+    assert 'remove_owned_release_tree_with_retry "$staged_output"' in builder
+    assert 'remove_owned_release_tree_with_retry "$DIST_DIR"' in builder
     assert 'rm -rf "$extracted"' not in builder
+    assert 'rm -rf "$staged_output"' not in builder
+    assert 'rm -rf "$DIST_DIR"' not in builder
 
 
 def test_electron_package_excludes_mutable_finder_metadata_from_asar():

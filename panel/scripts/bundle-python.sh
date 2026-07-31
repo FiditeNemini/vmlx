@@ -435,8 +435,13 @@ rm -rf "$BUNDLE_DIR/python/share" 2>/dev/null || true
 # Unused .so for removed stdlib (tkinter)
 rm -f "$BUNDLE_DIR/python/lib/python3.12/lib-dynload/_tkinter"*.so 2>/dev/null || true
 
-# Test suites in site-packages (~80+ MB of test data never used at runtime)
-find "$SITE" -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
+# Third-party test suites in site-packages (~80+ MB of data never used at
+# runtime).  Keep vmlx_engine/tests: those runtime diagnostics are explicit
+# package data and the staged-app parity gate binds the complete engine package
+# to the release source.
+find "$SITE" -type d -name "tests" \
+  ! -path "$SITE/vmlx_engine/tests" \
+  -exec rm -rf {} + 2>/dev/null || true
 find "$SITE" -type d -name "test" -exec rm -rf {} + 2>/dev/null || true
 
 # Third-party packages can ship agent/skill metadata that is not used at

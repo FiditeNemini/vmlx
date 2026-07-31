@@ -545,6 +545,14 @@ def test_bundle_python_preserves_release_gate_evidence_directory():
     assert "tracked release-gate evidence" in bundler
 
 
+def test_bundle_python_preserves_packaged_engine_runtime_diagnostics():
+    bundler = Path("panel/scripts/bundle-python.sh").read_text()
+
+    assert 'find "$SITE" -type d -name "tests"' in bundler
+    assert '! -path "$SITE/vmlx_engine/tests"' in bundler
+    assert "runtime diagnostics are explicit" in bundler
+
+
 def test_bundle_python_rejects_dirty_vmlx_package_source_by_default():
     bundler = Path("panel/scripts/bundle-python.sh").read_text()
 

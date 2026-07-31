@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,14 @@ def test_tree_parity_and_payload_records_accept_empty_regular_files(tmp_path):
     assert parity["file_count"] == 1
     assert payload["entries"]["__init__.py"]["size"] == 0
     assert payload["entries"]["__init__.py"]["sha256"] == hashlib.sha256(b"").hexdigest()
+
+
+def test_wheel_manifest_covers_runtime_diagnostics_and_native_mtp_docs():
+    pyproject = tomllib.loads((runner.REPO_ROOT / "pyproject.toml").read_text())
+    package_data = pyproject["tool"]["setuptools"]["package-data"]["vmlx_engine"]
+
+    assert "native_mtp_examples/*.md" in package_data
+    assert "tests/*.py" in package_data
 
 
 def _result(name: str, returncode: int, stdout_tail: list[str], passed: int | None = None):

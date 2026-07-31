@@ -1875,6 +1875,8 @@ class BlockAwarePrefixCache:
         self,
         tokens: List[int],
         cache_extra_keys: Optional[Any],
+        *,
+        stored_prompt_boundary: bool = False,
     ) -> Optional[Any]:
         """Bind native M3 blocks to the prefill matrix shape that produced them.
 
@@ -1888,9 +1890,14 @@ class BlockAwarePrefixCache:
         if not self._uses_minimax_m3_cache:
             return cache_extra_keys
 
+        # M3 stores the prompt-boundary cache under N-1 token IDs because the
+        # final prompt token is re-fed to obtain first-token logits. Lookup
+        # receives the corresponding full cache-key prompt. Normalize both
+        # sides to the matrix shape that originally produced the cache.
+        prefill_shape_tokens = len(tokens) + (1 if stored_prompt_boundary else 0)
         discriminator = {
             "schema": "minimax_m3_prefill_shape_v1",
-            "cache_key_tokens": len(tokens),
+            "cache_key_tokens": prefill_shape_tokens,
         }
         if cache_extra_keys is None:
             return {"__vmlx_native_cache_shape__": discriminator}
@@ -2496,6 +2503,7 @@ class BlockAwarePrefixCache:
         cache_extra_keys = self._shape_scoped_cache_extra_keys(
             tokens,
             cache_extra_keys,
+            stored_prompt_boundary=True,
         )
         write_fence: Dict[str, Any] = {}
         producer_aborted = False

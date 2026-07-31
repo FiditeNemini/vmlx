@@ -71,9 +71,15 @@ def test_m3_block_cache_keys_are_scoped_by_prefill_shape():
         list(reversed(range(15912))),
         None,
     )
+    stored_long_shape = cache._shape_scoped_cache_extra_keys(
+        list(range(15911)),
+        None,
+        stored_prompt_boundary=True,
+    )
 
     assert short_shape != long_shape
     assert long_shape == same_long_shape
+    assert long_shape == stored_long_shape
     assert compute_block_hash(
         None,
         shared_block_tokens,
@@ -103,8 +109,14 @@ def test_m3_prefill_shape_scope_preserves_request_discriminators():
         [1, 2, 3],
         request_extra,
     )
+    stored_scoped = cache._shape_scoped_cache_extra_keys(
+        [1, 2],
+        request_extra,
+        stored_prompt_boundary=True,
+    )
 
     assert scoped["__vmlx_request_extra_keys__"] is request_extra
+    assert stored_scoped == scoped
     assert scoped["__vmlx_native_cache_shape__"] == {
         "schema": "minimax_m3_prefill_shape_v1",
         "cache_key_tokens": 3,

@@ -631,6 +631,12 @@ def test_release_builder_retries_transient_private_asar_cleanup():
     assert 'rm -rf "$extracted"' not in builder
 
 
+def test_electron_package_excludes_mutable_finder_metadata_from_asar():
+    package = json.loads(Path("panel/package.json").read_text(encoding="utf-8"))
+
+    assert "!**/.DS_Store" in package["build"]["files"]
+
+
 def test_machine_specific_apple_notary_and_signing_helpers_are_ignored():
     private_helpers = (
         "panel/scripts/apple-notary-profile.sh",

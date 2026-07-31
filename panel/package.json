@@ -157,7 +157,8 @@
     "files": [
       "dist/**/*",
       "out/**/*",
-      "resources/**/*"
+      "resources/**/*",
+      "!**/.DS_Store"
     ],
     "directories": {
       "buildResources": "resources",

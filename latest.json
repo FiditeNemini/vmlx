@@ -1,19 +1,19 @@
 {
-  "version": "1.6.18",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.18/vMLX-1.6.18-sequoia-arm64.dmg",
-  "sha256": "beccd035bba416c064df5b46aa16062c180033824075dde6fc1565834e958ac1",
-  "sha512": "8JlNExstWfW86r0I+pT2qhQN+eJgQqMgeYHPB8RQwSf74Vz45gYFJ1SbVR3I7ak0cDKubj+qC39z7jJF072+pA==",
+  "version": "1.6.19",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.19/vMLX-1.6.19-sequoia-arm64.dmg",
+  "sha256": "a912bdbfb75d4bc7b103820f10f77c6929acf8c21b0c684ee3904092ac85da08",
+  "sha512": "HVra5FQXUFYLdhY38csGQO/cdpECIUWaXDm7Y+g+PCuVIG8WBRhL4FNhmH7Rb0dPRRfac4twEP8+ISM3v64Jxg==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.18/vMLX-1.6.18-sequoia-arm64.dmg",
-      "sha256": "beccd035bba416c064df5b46aa16062c180033824075dde6fc1565834e958ac1",
-      "sha512": "8JlNExstWfW86r0I+pT2qhQN+eJgQqMgeYHPB8RQwSf74Vz45gYFJ1SbVR3I7ak0cDKubj+qC39z7jJF072+pA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.19/vMLX-1.6.19-sequoia-arm64.dmg",
+      "sha256": "a912bdbfb75d4bc7b103820f10f77c6929acf8c21b0c684ee3904092ac85da08",
+      "sha512": "HVra5FQXUFYLdhY38csGQO/cdpECIUWaXDm7Y+g+PCuVIG8WBRhL4FNhmH7Rb0dPRRfac4twEP8+ISM3v64Jxg=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.18/vMLX-1.6.18-tahoe-arm64.dmg",
-      "sha256": "c445f1b1a5577741808f8f12c9a02b0dd427438b9c43a851375b3f0f9c347187",
-      "sha512": "/kg5b9hsQWeHw9kddupwVqvHZuMoupPFlFzpYDE9t5c8JJOeYcIWb7iqwIcjpp9jZXE4WtTGjcohzS2VP4fu+Q=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.19/vMLX-1.6.19-tahoe-arm64.dmg",
+      "sha256": "cc1b85242e1cd97c8920e60d3db200223e44192d17f95628cf4a1226259c5a12",
+      "sha512": "ER5sMT5s3YW4t0ZR9SbVht1ywArCTdL3FcP0BPPk3Niu+7AntBzSRd9+uDy+3EwCa9GJHZ0c+8ViUM8E8kL7FA=="
     }
   },
-  "notes": "## vMLX 1.6.18 for macOS\n\nThis checkpoint updates the Electron app and bundled Python engine from source commit `ded3f9f02e324f9aa5df4f3a331b7f7d4df40d64`.\n\n### What changed\n\n- Auto reasoning follows the selected model bundle's native policy, while reasoning markers remain separated from visible answers.\n- Tool availability and authorization stay bound to the correct chat turn, with improved multi-tool, cancellation, LFM, media, and tool-result continuations.\n- MiniMax request-schema XML tool arguments are parsed without leaking native tool markup into visible answers.\n- Fresh sessions inherit sampling, parser, output, template, and native MTP settings from the selected model bundle; explicit saved session overrides remain distinct.\n- Cache status now reports actual prefix reuse, RAM/SSD blocks, uncached suffixes, reconstruction, fallback prefill, and total SSD usage more clearly.\n- SSD cache storage gains a shared size budget, coordinated LRU eviction, and publication outside the request-completion path.\n- Paged-cache prefix reuse now rejects recycled block IDs unless the full ordered cache chain still matches and is pinned atomically.\n- Laguna receives safer mixed-SWA cache handling, preserved tool history, incomplete-terminal handling, and affine-JANG JIT policy updates.\n- Chat rendering better preserves KaTeX math, currency, Markdown, HTML, XML, code fences, and in-progress reasoning text.\n- Localized UI state is more stable, obsolete migration/update notices are removed, local attachment playback is allowed, and Ollama stream failures remain visible as failures.\n- The bundled runtime requires JANG 2.5.34.\n\nChoose the Sequoia or Tahoe arm64 DMG that matches your macOS release.\n\nThis is a public checkpoint rather than exhaustive closure of every model-family, modality, long-context, cache-eviction, gateway/LAN recovery, or JANG conversion scenario.\n\nThanks to GitHub `@Hornsan1` for reporting many of the issues addressed in this release."
+  "notes": "## vMLX 1.6.19 for macOS\n\nThis Electron/Python checkpoint is built from source commit `5772352cffadc0d5c423789aa4ffce7b829d4efc`.\n\n### Highlights\n\n- Model sampling defaults remain owned by request values and bundle metadata; new Electron sessions hydrate those defaults without stale zero-valued overrides.\n- SSD cache publication, eviction, partial-prefix reconstruction, and memory-pressure trimming are hardened.\n- DeepSeek-V4 Flash native composite-cache state, Qwen native MTP loading, MiniMax cache policy, hybrid TurboQuant state, prompt accounting, and Ollama top-k handling receive targeted correctness fixes.\n- Literal currency and single-dollar math render correctly in Electron.\n- The bundled runtime requires JANG 2.5.37.\n\nSeparate signed and Apple-notarized Apple-silicon downloads are available for macOS Tahoe and Sequoia-compatible systems. This is a checkpoint release; broader family, modality, maximum-context, cache-pressure, and performance certification continues afterward."
 }

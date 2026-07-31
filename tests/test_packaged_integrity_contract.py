@@ -2212,6 +2212,29 @@ def test_r19_fixture_uses_a_live_child_when_pytest_is_orphaned(tmp_path, monkeyp
     assert result["payload"]["build_attestation"]["driver_pid"] == os.getpid()
 
 
+def test_r19_build_driver_accepts_live_non_direct_release_driver_ancestor():
+    inner = (
+        "import sys; "
+        "from tests.cross_matrix.run_packaged_integrity_contract "
+        "import _require_live_driver_ancestor; "
+        "_require_live_driver_ancestor(int(sys.argv[1]))"
+    )
+    outer = (
+        "import subprocess,sys; "
+        "result=subprocess.run([sys.executable,'-c',sys.argv[1],sys.argv[2]]); "
+        "raise SystemExit(result.returncode)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", outer, inner, str(os.getpid())],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_r19_pre_notary_manifest_binds_source_preflight_and_exact_artifacts(tmp_path):
     paths = _r19_artifact_chain_fixture(tmp_path)
     result = _write_pre_manifest(paths)

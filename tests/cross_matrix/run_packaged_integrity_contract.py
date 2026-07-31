@@ -1012,6 +1012,50 @@ def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
     return value
 
 
+def _process_parent_pid(pid: int) -> int:
+    completed = subprocess.run(
+        ["/bin/ps", "-o", "ppid=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+    )
+    value = completed.stdout.strip()
+    if completed.returncode != 0 or re.fullmatch(r"[0-9]+", value) is None:
+        raise ArtifactChainError(
+            f"could not establish the live parent of release process {pid}"
+        )
+    return int(value)
+
+
+def _require_live_driver_ancestor(driver_pid: int) -> None:
+    if driver_pid <= 1:
+        raise ArtifactChainError("build-driver process identity is invalid")
+    current_pid = os.getpid()
+    seen = {current_pid}
+    for _ in range(16):
+        parent_pid = (
+            os.getppid()
+            if current_pid == os.getpid()
+            else _process_parent_pid(current_pid)
+        )
+        if parent_pid == driver_pid:
+            try:
+                os.kill(driver_pid, 0)
+            except OSError as exc:
+                raise ArtifactChainError(
+                    "build-driver attestation requires a live release-driver ancestor"
+                ) from exc
+            return
+        if parent_pid <= 1 or parent_pid in seen:
+            break
+        seen.add(parent_pid)
+        current_pid = parent_pid
+    raise ArtifactChainError(
+        "build-driver attestation must be written by its live release-driver ancestor"
+    )
+
+
 def write_build_driver_attestation(
     *,
     root: Path,
@@ -1033,8 +1077,7 @@ def write_build_driver_attestation(
         )
     if re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
         raise ArtifactChainError("build-driver nonce must be 256 unpredictable bits")
-    if driver_pid <= 1 or driver_pid != os.getppid():
-        raise ArtifactChainError("build-driver attestation must be written by its live parent")
+    _require_live_driver_ancestor(driver_pid)
     if any(
         set(value) != set(R19_ARTIFACT_CHAIN_FLAVORS)
         for value in (

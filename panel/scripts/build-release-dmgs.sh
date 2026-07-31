@@ -612,6 +612,32 @@ run_driver_plan_action() {
     "$@"
 }
 
+capture_driver_plan_action() {
+  local action="$1"
+  shift
+  capture_bound_release_action \
+    "$R19_BUILD_PLAN_PATH" \
+    "${VMLX_R19_RELEASE_PLAN_SHA256:?missing release-driver plan digest}" \
+    "$action" \
+    "$@"
+}
+
+assert_asar_excludes_finder_metadata() {
+  local archive="$1"
+  local entry
+  local listing
+
+  listing="$(capture_driver_plan_action asar list "$archive")"
+  while IFS= read -r entry; do
+    case "$entry" in
+      */.DS_Store|.DS_Store)
+        echo "ERROR: app.asar contains forbidden Finder metadata: $archive" >&2
+        return 1
+        ;;
+    esac
+  done <<<"$listing"
+}
+
 run_electron_builder_action() {
   if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
     run_driver_plan_action electron-builder "$@"
@@ -1446,6 +1472,8 @@ verify_staged_app_parity() {
     local extracted
     extracted="$(mktemp -d "$PRIVATE_EVIDENCE_ROOT/.staged-${flavor}-asar.XXXXXX")"
     trap 'remove_private_tree_with_retry "$extracted"' EXIT
+    assert_asar_excludes_finder_metadata \
+      "$app_path/Contents/Resources/app.asar"
     run_driver_plan_action asar extract \
       "$app_path/Contents/Resources/app.asar" \
       "$extracted"
@@ -1512,6 +1540,8 @@ write_mounted_dmg_payload_parity() (
     echo "ERROR: mounted ${flavor} DMG does not contain the exact vMLX.app" >&2
     exit 1
   fi
+  assert_asar_excludes_finder_metadata \
+    "$mount_dir/vMLX.app/Contents/Resources/app.asar"
   run_driver_plan_action asar extract \
     "$mount_dir/vMLX.app/Contents/Resources/app.asar" \
     "$extracted_asar"
@@ -1677,6 +1707,10 @@ NODE
   chmod 0700 "$R19_ATTESTATION_EXTRACT_ROOT"
   sequoia_app="$(find_staged_app "$DIST_DIR/sequoia-app")"
   tahoe_app="$(find_staged_app "$DIST_DIR/tahoe-app")"
+  assert_asar_excludes_finder_metadata \
+    "$sequoia_app/Contents/Resources/app.asar"
+  assert_asar_excludes_finder_metadata \
+    "$tahoe_app/Contents/Resources/app.asar"
   run_driver_plan_action asar extract \
     "$sequoia_app/Contents/Resources/app.asar" \
     "$R19_ATTESTATION_EXTRACT_ROOT/sequoia"

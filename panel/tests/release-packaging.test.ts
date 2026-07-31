@@ -1226,6 +1226,19 @@ describe("release packaging", () => {
         sourceTree,
         buildResultContext,
       );
+      writeFileSync(join(asarSource, ".DS_Store"), "forbidden metadata");
+      rmSync(appAsar, { force: true });
+      await asar.createPackage(asarSource, appAsar);
+      expect(() =>
+        beforePack.emitR19CompletionAttestation(
+          hookPanelDir,
+          verifiedPlan,
+          planHash,
+        ),
+      ).toThrow("app.asar contains forbidden Finder metadata");
+      rmSync(join(asarSource, ".DS_Store"));
+      rmSync(appAsar, { force: true });
+      await asar.createPackage(asarSource, appAsar);
       const result = beforePack.emitR19CompletionAttestation(
         hookPanelDir,
         verifiedPlan,
@@ -1270,6 +1283,31 @@ describe("release packaging", () => {
           process.env[name] = value;
         }
       }
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores only ambient Finder metadata in extracted ASAR payloads", () => {
+    const beforePack = requireCjs(
+      join(repo, "scripts/electron-builder-before-pack.cjs"),
+    );
+    const temp = mkdtempSync(join(tmpdir(), "vmlx-r19-asar-finder-"));
+    try {
+      mkdirSync(join(temp, "node_modules"), { recursive: true });
+      writeFileSync(join(temp, "node_modules", "module.js"), "module.exports=1\n");
+      writeFileSync(join(temp, "node_modules", ".DS_Store"), "ambient");
+      writeFileSync(join(temp, "node_modules", ".other-hidden"), "covered");
+
+      const strict = beforePack.treePayload(temp);
+      const filtered = beforePack.treePayload(temp, {
+        ignoreAmbientFinderMetadata: true,
+      });
+
+      expect(strict.entries["node_modules/.DS_Store"]).toBeDefined();
+      expect(filtered.entries["node_modules/.DS_Store"]).toBeUndefined();
+      expect(filtered.entries["node_modules/.other-hidden"]).toBeDefined();
+      expect(filtered.entries["node_modules/module.js"]).toBeDefined();
+    } finally {
       rmSync(temp, { recursive: true, force: true });
     }
   });

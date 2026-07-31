@@ -57,6 +57,27 @@ def test_tree_parity_and_payload_records_accept_empty_regular_files(tmp_path):
     assert payload["entries"]["__init__.py"]["sha256"] == hashlib.sha256(b"").hexdigest()
 
 
+def test_extracted_asar_payload_ignores_only_ambient_finder_metadata(tmp_path):
+    extracted = tmp_path / "extracted"
+    nested = extracted / "node_modules"
+    nested.mkdir(parents=True)
+    (nested / "module.js").write_text("export default 1;\n", encoding="utf-8")
+    (nested / ".DS_Store").write_bytes(b"ambient Finder metadata")
+    (nested / ".other-hidden").write_text("covered\n", encoding="utf-8")
+
+    strict = runner._tree_payload_records(extracted, label="strict ASAR")
+    filtered = runner._tree_payload_records(
+        extracted,
+        label="Finder-safe ASAR",
+        ignore_ambient_finder_metadata=True,
+    )
+
+    assert "node_modules/.DS_Store" in strict["entries"]
+    assert "node_modules/.DS_Store" not in filtered["entries"]
+    assert "node_modules/.other-hidden" in filtered["entries"]
+    assert "node_modules/module.js" in filtered["entries"]
+
+
 def test_wheel_manifest_covers_runtime_diagnostics_and_native_mtp_docs():
     pyproject = tomllib.loads((runner.REPO_ROOT / "pyproject.toml").read_text())
     package_data = pyproject["tool"]["setuptools"]["package-data"]["vmlx_engine"]

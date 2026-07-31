@@ -239,7 +239,10 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
-function treePayload(rootPath) {
+function treePayload(
+  rootPath,
+  { ignoreAmbientFinderMetadata = false } = {},
+) {
   const root = resolve(rootPath);
   const rootStat = lstatSync(root);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
@@ -250,6 +253,9 @@ function treePayload(rootPath) {
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort(
       (left, right) => left.name.localeCompare(right.name),
     )) {
+      if (ignoreAmbientFinderMetadata && entry.name === ".DS_Store") {
+        continue;
+      }
       const path = join(directory, entry.name);
       const name = relative(root, path).split("\\").join("/");
       const metadata = lstatSync(path);
@@ -281,6 +287,28 @@ function treePayload(rootPath) {
     tree_sha256: createHash("sha256").update(encoded).digest("hex"),
     entries,
   };
+}
+
+function assertAsarExcludesFinderMetadata(
+  panelDir,
+  planSha256,
+  archivePath,
+) {
+  const listing = runPlanToolAction(
+    panelDir,
+    planSha256,
+    "asar",
+    ["list", archivePath],
+    { cwd: panelDir, capture: true },
+  ).stdout;
+  const finderEntries = String(listing || "")
+    .split(/\r?\n/)
+    .filter((entry) => entry.split(/[\\/]/).at(-1) === ".DS_Store");
+  if (finderEntries.length !== 0) {
+    throw new Error(
+      `vMLX ${R19_VERSION} app.asar contains forbidden Finder metadata`,
+    );
+  }
 }
 
 function exactObjectKeys(value, expected) {
@@ -922,11 +950,13 @@ function emitR19CompletionAttestation(panelDir, plan, planSha256) {
     join(outputDirectory, `.${plan.current_flavor}.asar.`),
   );
   try {
+    const appAsar = join(app, "Contents", "Resources", "app.asar");
+    assertAsarExcludesFinderMetadata(panelDir, planSha256, appAsar);
     runPlanToolAction(
       panelDir,
       planSha256,
       "asar",
-      ["extract", join(app, "Contents", "Resources", "app.asar"), extracted],
+      ["extract", appAsar, extracted],
       { cwd: panelDir },
     );
     const bundleRuntime = validatePlanBundleRuntime(plan);
@@ -970,7 +1000,13 @@ function emitR19CompletionAttestation(panelDir, plan, planSha256) {
         payload: treePayload(app),
       },
       extracted_asar: {
-        payload: treePayload(extracted),
+        // Finder may add .DS_Store to a freshly extracted local tree after the
+        // archive has been proven not to contain it. Exclude only that ambient
+        // metadata from filesystem parity; every archive entry and every other
+        // post-extraction mutation remains covered.
+        payload: treePayload(extracted, {
+          ignoreAmbientFinderMetadata: true,
+        }),
       },
       artifacts: {
         dmg: fileIdentity(dmg),

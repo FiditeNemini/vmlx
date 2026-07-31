@@ -2717,6 +2717,7 @@ def write_installed_release_manifest(
     first_asar_payload = _tree_payload_records(
         extracted_asar,
         label="installed release-manifest extracted ASAR payload",
+        ignore_ambient_finder_metadata=True,
     )
     if (
         first_app_payload["tree_sha256"] != mounted["app_tree_sha256"]
@@ -2733,6 +2734,7 @@ def write_installed_release_manifest(
     second_asar_payload = _tree_payload_records(
         extracted_asar,
         label="installed release-manifest extracted ASAR payload recheck",
+        ignore_ambient_finder_metadata=True,
     )
     second = observe_bound_artifacts()
     if (
@@ -2756,6 +2758,7 @@ def write_installed_release_manifest(
     final_asar_payload = _tree_payload_records(
         extracted_asar,
         label="installed release-manifest final extracted ASAR payload",
+        ignore_ambient_finder_metadata=True,
     )
     if (
         final_app_payload != first_app_payload
@@ -2991,7 +2994,12 @@ def _require_tree_parity(
     return {"file_count": len(source_records), "tree_sha256": digest}
 
 
-def _tree_payload_records(root: Path, *, label: str) -> dict[str, Any]:
+def _tree_payload_records(
+    root: Path,
+    *,
+    label: str,
+    ignore_ambient_finder_metadata: bool = False,
+) -> dict[str, Any]:
     """Record a complete app/ASAR payload, including modes and symlink targets."""
     root = _absolute_path(root)
     _reject_symlinked_ancestors(root, label=label)
@@ -3000,6 +3008,8 @@ def _tree_payload_records(root: Path, *, label: str) -> dict[str, Any]:
     root_mode = stat.S_IMODE(root.stat().st_mode)
     entries: dict[str, dict[str, Any]] = {}
     for path in sorted(root.rglob("*")):
+        if ignore_ambient_finder_metadata and path.name == ".DS_Store":
+            continue
         relative = path.relative_to(root).as_posix()
         metadata = path.lstat()
         mode = stat.S_IMODE(metadata.st_mode)
@@ -3127,6 +3137,7 @@ def validate_staged_app_parity(
         "asar_payload": _tree_payload_records(
             _absolute_path(extracted_asar),
             label="staged extracted ASAR payload",
+            ignore_ambient_finder_metadata=True,
         ),
     }
 
@@ -3622,6 +3633,7 @@ def write_dmg_payload_parity_attestation(
     asar_payload = _tree_payload_records(
         extracted_asar,
         label=f"mounted pre-notary {flavor} ASAR",
+        ignore_ambient_finder_metadata=True,
     )
     if app_payload != hook["payload"]["staged_app"]["payload"]:
         raise ArtifactChainError(
@@ -4173,6 +4185,7 @@ def validate_mounted_app_against_final_manifest(
     asar_payload = _tree_payload_records(
         _absolute_path(extracted_asar),
         label="mounted extracted ASAR payload",
+        ignore_ambient_finder_metadata=True,
     )
     if app_payload != staged["app_payload"]:
         raise ArtifactChainError(

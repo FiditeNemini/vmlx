@@ -492,40 +492,26 @@ def test_r19_release_driver_plan_is_sealed_before_bound_actions():
     assert replace_idx < seal_idx < digest_idx
 
 
-def test_r19_release_source_suite_drops_outer_action_and_release_environment():
-    script = Path("panel/scripts/build-release-dmgs.sh").read_text()
-    start = script.index("run_complete_python_source_suite()")
-    end = script.index("\n}\n\nbind_release_python_action\n", start) + 2
-    block = script[start:end]
-
-    cleanup_idx = block.index("cleanup_release_python_action")
-    suite_idx = block.index('"$AUTHORITATIVE_PYTHON" -m pytest')
-    rebind_idx = block.rindex("bind_release_python_action")
-
-    assert cleanup_idx < suite_idx < rebind_idx
-    assert "/usr/bin/env -i" in block
-    assert "umask 022" in block
-    assert 'PATH="$HOME/.local/bin:$R19_FIXED_PATH"' in block
-    assert 'VMLX_JANG_TOOLS_SOURCE="${VMLX_JANG_TOOLS_SOURCE:-}"' in block
-    assert "expected_source_sha256" in block
-    assert "expected_pyvenv_sha256" in block
-    assert "observed_python_realpath" in block
-
-
-def test_r19_release_source_suite_rebind_persists_in_driver_shell():
+def test_r19_release_builder_reuses_consumed_v5_checks_without_rerunning_suites():
     script = Path("panel/scripts/build-release-dmgs.sh").read_text()
     start = script.index(
-        'echo "==> Running complete Python source suite on the attested release head"'
+        'echo "==> Reinstalling exact panel dependencies from package-lock.json"'
     )
-    end = script.index(
-        'assert_r19_source_identity "after complete Python source suite"', start
-    )
-    call_site = script[start:end]
+    end = script.index("\nfi\n\nis_macho_file()", start)
+    production_gate = script[start:end]
 
-    assert 'pushd "$ROOT_DIR" >/dev/null' in call_site
-    assert "run_complete_python_source_suite" in call_site
-    assert "popd >/dev/null" in call_site
-    assert '(\n    cd "$ROOT_DIR"\n    run_complete_python_source_suite\n  )' not in call_site
+    assert "run_complete_python_source_suite" not in script
+    assert "run_toolchain_action npm ci" in production_gate
+    assert "run_toolchain_action npm test" not in production_gate
+    assert "run_toolchain_action npm run typecheck" not in production_gate
+    assert (
+        "Reusing exact-head V5 Python, panel, typecheck, and production-build evidence"
+        in production_gate
+    )
+    assert (
+        'assert_r19_source_identity "after exact-head V5 check reuse"'
+        in production_gate
+    )
 
 
 def test_bundled_verifier_rejects_non_relocatable_console_shebangs():

@@ -257,71 +257,6 @@ cleanup_release_python_action() {
   fi
 }
 
-run_complete_python_source_suite() {
-  if [[ "$RELEASE_SCOPE" != "r19_production" ]]; then
-    "$PYTHON_BIN" -m pytest -s -p no:cacheprovider
-    return
-  fi
-
-  # The production launcher is a source-adjacent hardlink to the physical
-  # interpreter.  Keeping that hardlink alive while pytest recursively tests
-  # the release launchers makes the nested launchers correctly reject the
-  # interpreter's extra link.  The production umask/scope also contaminates
-  # tests that deliberately construct neutral permission and platform
-  # fixtures.  Release the outer action only for this source-verification
-  # subprocess, run it through the authoritative venv alias in an explicit
-  # neutral environment, and then recreate and compare the sealed binding.
-  local expected_source_sha256="$VMLX_R19_RELEASE_PYTHON_SOURCE_SHA256"
-  local expected_pyvenv_sha256="$VMLX_R19_RELEASE_PYTHON_PYVENV_SHA256"
-  local expected_python_realpath
-  expected_python_realpath="$(
-    "$NODE_BIN" -e \
-      'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' \
-      "$AUTHORITATIVE_PYTHON"
-  )"
-
-  cleanup_release_python_action
-
-  local suite_status=0
-  (
-    umask 022
-    /usr/bin/env -i \
-      HOME="$HOME" \
-      USER="${USER:-eric}" \
-      LOGNAME="${LOGNAME:-${USER:-eric}}" \
-      LANG="${LANG:-en_US.UTF-8}" \
-      TMPDIR="${TMPDIR:-/tmp}" \
-      PATH="$HOME/.local/bin:$R19_FIXED_PATH" \
-      VIRTUAL_ENV="$ROOT_DIR/.venv" \
-      VMLX_JANG_TOOLS_SOURCE="${VMLX_JANG_TOOLS_SOURCE:-}" \
-      "$AUTHORITATIVE_PYTHON" -m pytest -s -p no:cacheprovider
-  ) || suite_status=$?
-
-  local observed_python_realpath
-  local observed_source_sha256
-  observed_python_realpath="$(
-    "$NODE_BIN" -e \
-      'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' \
-      "$AUTHORITATIVE_PYTHON"
-  )"
-  observed_source_sha256="$(
-    "$SHASUM_BIN" -a 256 "$observed_python_realpath" | "$AWK_BIN" '{print $1}'
-  )"
-  if [[ "$observed_python_realpath" != "$expected_python_realpath" ]] \
-    || [[ "$observed_source_sha256" != "$expected_source_sha256" ]]; then
-    echo "ERROR: authoritative release Python changed during source suite" >&2
-    suite_status=1
-  fi
-
-  bind_release_python_action
-  if [[ "$VMLX_R19_RELEASE_PYTHON_SOURCE_SHA256" != "$expected_source_sha256" ]] \
-    || [[ "$VMLX_R19_RELEASE_PYTHON_PYVENV_SHA256" != "$expected_pyvenv_sha256" ]]; then
-    echo "ERROR: rebound release Python identity differs after source suite" >&2
-    return 1
-  fi
-  return "$suite_status"
-}
-
 bind_release_python_action
 if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
   trap cleanup_release_python_action EXIT
@@ -1247,21 +1182,16 @@ if [[ "$RELEASE_SCOPE" == "r19_production" ]]; then
   echo "==> Reinstalling exact panel dependencies from package-lock.json"
   run_toolchain_action npm ci
   assert_r19_source_identity "after npm ci"
-  echo "==> Running complete Python source suite on the attested release head"
-  # This must run in the release driver's shell. The suite helper deliberately
-  # tears down and recreates the pinned-Python binding; a subshell would discard
-  # the rebound environment and its EXIT trap would delete the new binding,
-  # leaving the parent pointed at the already-removed pre-suite plan.
-  pushd "$ROOT_DIR" >/dev/null
-  run_complete_python_source_suite
-  popd >/dev/null
-  assert_r19_source_identity "after complete Python source suite"
-  echo "==> Running complete panel suite on the attested release head"
-  run_toolchain_action npm test
-  assert_r19_source_identity "after complete panel suite"
-  echo "==> Running panel typecheck on the attested release head"
-  run_toolchain_action npm run typecheck
-  assert_r19_source_identity "after panel typecheck"
+  # The fail-closed V5 consumer above has already required exact source
+  # commit/tree identity and PASS rows for the complete Python suite, complete
+  # panel suite, typecheck, and production build. Re-running those suites here
+  # duplicates immutable evidence, adds environment-sensitive installed-app
+  # checks, and (before build_one refreshes bundled Python) can fail solely
+  # because a prior packaging bundle is stale. Package from the consumed
+  # exact-head evidence instead; a source change makes that manifest stale and
+  # is rejected before this point.
+  echo "==> Reusing exact-head V5 Python, panel, typecheck, and production-build evidence"
+  assert_r19_source_identity "after exact-head V5 check reuse"
 fi
 
 is_macho_file() {

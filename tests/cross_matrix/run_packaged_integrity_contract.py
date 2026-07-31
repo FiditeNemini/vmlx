@@ -3307,6 +3307,7 @@ def run_bound_tool_action(
 
     completed: subprocess.CompletedProcess[str] | None = None
     invocation_error: OSError | None = None
+    previous_umask = os.umask(0o077)
     try:
         try:
             completed = subprocess.run(
@@ -3320,6 +3321,7 @@ def run_bound_tool_action(
         except OSError as exc:
             invocation_error = exc
     finally:
+        os.umask(previous_umask)
         _, after = _bound_release_toolchain(
             document_path=document_path,
             expected_document_sha256=expected_document_sha256,

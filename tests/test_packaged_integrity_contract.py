@@ -2500,7 +2500,9 @@ def test_r19_private_outputs_are_no_clobber_and_independent_digest_bound(
 
 def test_r19_bound_tool_action_rechecks_document_and_complete_toolchain(tmp_path, monkeypatch):
     marker = tmp_path / "action-ran"
+    umask_marker = tmp_path / "action-umask"
     monkeypatch.setenv("VMLX_TEST_ACTION_MARKER", str(marker))
+    monkeypatch.setenv("VMLX_TEST_UMASK_MARKER", str(umask_marker))
     toolchain = {}
     for name in runner.R19_PINNED_TOOL_NAMES:
         tool = tmp_path / name
@@ -2521,6 +2523,7 @@ def test_r19_bound_tool_action_rechecks_document_and_complete_toolchain(tmp_path
     app_builder.write_text(
         "#!/bin/sh\n"
         'printf "ran\\n" >"$VMLX_TEST_ACTION_MARKER"\n'
+        'umask >"$VMLX_TEST_UMASK_MARKER"\n'
         "exit 0\n",
         encoding="utf-8",
     )
@@ -2538,16 +2541,22 @@ def test_r19_bound_tool_action_rechecks_document_and_complete_toolchain(tmp_path
         manifest,
         label="tool manifest",
     )
-    result = runner.run_bound_tool_action(
-        document_path=manifest,
-        expected_document_sha256=manifest_record["sha256"],
-        binding_kind="manifest",
-        action="app-builder",
-        arguments=["blockmap", "--input", "unused"],
-        cwd=tmp_path,
-    )
+    original_umask = os.umask(0o022)
+    try:
+        result = runner.run_bound_tool_action(
+            document_path=manifest,
+            expected_document_sha256=manifest_record["sha256"],
+            binding_kind="manifest",
+            action="app-builder",
+            arguments=["blockmap", "--input", "unused"],
+            cwd=tmp_path,
+        )
+    finally:
+        restored_umask = os.umask(original_umask)
     assert result["returncode"] == 0
     assert marker.read_text(encoding="utf-8") == "ran\n"
+    assert umask_marker.read_text(encoding="utf-8").strip() in {"0077", "077"}
+    assert restored_umask == 0o022
 
     fixed_path = "/usr/bin:/bin"
     monkeypatch.setenv("PATH", fixed_path)

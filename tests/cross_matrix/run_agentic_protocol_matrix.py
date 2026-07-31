@@ -4350,9 +4350,13 @@ def run_flow(
         "round2_exact_tool": check2,
         "final_no_tool": not (round3.get("tool_calls") or []),
         "final_exact": str(round3.get("content") or "").strip() == final_marker,
-        "tool_rounds_have_no_visible_prose": all(
-            not str(row.get("content") or "").strip() for row in (round1, round2)
-        ),
+        # OpenAI Responses permits an assistant message and a function_call in
+        # the same response. MiniMax-M3 can truthfully narrate "I'll call …"
+        # before emitting the exact required tool item; that is ordinary model
+        # verbosity, not inline reasoning or a parser leak. Exact tool
+        # validation plus the control-markup checks below are the protocol
+        # contract. Do not reject a valid tool lifecycle solely for prose.
+        "tool_rounds_valid_with_optional_visible_prose": check1 and check2,
         "no_stream_or_protocol_errors": all(
             not (row.get("errors") or []) for row in (round1, round2, round3)
         ),

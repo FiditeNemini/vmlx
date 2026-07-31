@@ -1833,13 +1833,34 @@ class BlockAwarePrefixCache:
         # Used by reconstruct_cache to hard-reject blocks whose layer count
         # diverges (canonical "wrong-model L2 entry" signal).
         self._expected_num_layers: Optional[int] = None
+        self._uses_minimax_m3_cache = False
         if model is not None and hasattr(model, "make_cache"):
             try:
                 _cache = model.make_cache() or []
                 if len(_cache) > 0:
                     self._expected_num_layers = len(_cache)
+                    self._uses_minimax_m3_cache = any(
+                        _is_minimax_m3_cache_class(type(layer).__name__)
+                        for layer in _cache
+                    )
             except Exception:
                 self._expected_num_layers = None
+        if not self._uses_minimax_m3_cache:
+            for _candidate in (
+                model,
+                getattr(model, "_model", None),
+                getattr(model, "model", None),
+                getattr(model, "language_model", None),
+            ):
+                if _candidate is None:
+                    continue
+                _identity = (
+                    f"{type(_candidate).__module__}."
+                    f"{type(_candidate).__name__}"
+                ).lower()
+                if "minimax_m3" in _identity or "minimaxm3" in _identity:
+                    self._uses_minimax_m3_cache = True
+                    break
         for _attr in ("args", "config"):
             if self._expected_num_layers is not None:
                 break
@@ -1849,6 +1870,34 @@ class BlockAwarePrefixCache:
                 if _ln:
                     self._expected_num_layers = int(_ln)
                     break
+
+    def _shape_scoped_cache_extra_keys(
+        self,
+        tokens: List[int],
+        cache_extra_keys: Optional[Any],
+    ) -> Optional[Any]:
+        """Bind native M3 blocks to the prefill matrix shape that produced them.
+
+        Identical token prefixes can produce slightly different K/V/index
+        tensors when MLX evaluates them inside different prompt-length matrix
+        shapes. Ordinary attention tolerates that numerical drift, but
+        MiniMax-M3's Lightning Indexer can select a different sparse block and
+        change greedy decoding. Exact requests and same-length partial-prefix
+        requests still share blocks; cross-length M3 aliases do not.
+        """
+        if not self._uses_minimax_m3_cache:
+            return cache_extra_keys
+
+        discriminator = {
+            "schema": "minimax_m3_prefill_shape_v1",
+            "cache_key_tokens": len(tokens),
+        }
+        if cache_extra_keys is None:
+            return {"__vmlx_native_cache_shape__": discriminator}
+        return {
+            "__vmlx_native_cache_shape__": discriminator,
+            "__vmlx_request_extra_keys__": cache_extra_keys,
+        }
 
     def _get_n_kv_heads(self) -> int:
         """Get expected KV head count from model config (cached).
@@ -2039,6 +2088,11 @@ class BlockAwarePrefixCache:
         """
         if not tokens:
             return None, tokens
+
+        cache_extra_keys = self._shape_scoped_cache_extra_keys(
+            tokens,
+            cache_extra_keys,
+        )
 
         # Primary path: chain-hash lookup. This includes the parent block hash
         # and therefore the full prefix context. Do not use the legacy
@@ -2439,6 +2493,10 @@ class BlockAwarePrefixCache:
         store_cumulative_state: bool = True,
     ) -> Optional[BlockTable]:
         """Store cache data and deterministically terminate any begun L2 fence."""
+        cache_extra_keys = self._shape_scoped_cache_extra_keys(
+            tokens,
+            cache_extra_keys,
+        )
         write_fence: Dict[str, Any] = {}
         producer_aborted = False
         try:

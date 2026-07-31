@@ -38,6 +38,79 @@ def _assert_m3_cache(c, seq: int) -> None:
     assert state[0].shape[2] == state[1].shape[2] == state[2].shape[2] == seq
 
 
+def test_m3_block_cache_keys_are_scoped_by_prefill_shape():
+    """Same tokens from different M3 prefill shapes must not alias one block.
+
+    MLX can produce slightly different projection values for a token prefix
+    when the enclosing prefill matrix has a different sequence length. M3's
+    Lightning Indexer amplifies that drift, so token-only block hashes are not
+    a sufficient native-state identity.
+    """
+    from vmlx_engine.paged_cache import PagedCacheManager, compute_block_hash
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+    from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
+
+    class _M3Model:
+        def make_cache(self):
+            return [MiniMaxM3SparseCache()]
+
+    cache = BlockAwarePrefixCache(
+        _M3Model(),
+        PagedCacheManager(block_size=64, max_blocks=8),
+    )
+    shared_block_tokens = list(range(64))
+    short_shape = cache._shape_scoped_cache_extra_keys(
+        list(range(487)),
+        None,
+    )
+    long_shape = cache._shape_scoped_cache_extra_keys(
+        list(range(15912)),
+        None,
+    )
+    same_long_shape = cache._shape_scoped_cache_extra_keys(
+        list(reversed(range(15912))),
+        None,
+    )
+
+    assert short_shape != long_shape
+    assert long_shape == same_long_shape
+    assert compute_block_hash(
+        None,
+        shared_block_tokens,
+        extra_keys=short_shape,
+    ) != compute_block_hash(
+        None,
+        shared_block_tokens,
+        extra_keys=long_shape,
+    )
+
+
+def test_m3_prefill_shape_scope_preserves_request_discriminators():
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+    from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
+
+    class _M3Model:
+        def make_cache(self):
+            return [MiniMaxM3SparseCache()]
+
+    cache = BlockAwarePrefixCache(
+        _M3Model(),
+        PagedCacheManager(block_size=64, max_blocks=8),
+    )
+    request_extra = {"generation_prompt": "assistant-suffix"}
+    scoped = cache._shape_scoped_cache_extra_keys(
+        [1, 2, 3],
+        request_extra,
+    )
+
+    assert scoped["__vmlx_request_extra_keys__"] is request_extra
+    assert scoped["__vmlx_native_cache_shape__"] == {
+        "schema": "minimax_m3_prefill_shape_v1",
+        "cache_key_tokens": 3,
+    }
+
+
 def test_paged_gen_prompt_strip_truncates_all_minimax_m3_cache_lanes():
     """The paged key and M3's K/V/index state must represent one token count."""
     from vmlx_engine.scheduler import _truncate_minimax_m3_state_dict

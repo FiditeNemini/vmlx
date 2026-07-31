@@ -619,6 +619,18 @@ def test_bundle_python_retries_only_owned_tree_cleanup_and_still_fails_closed():
     assert 'rm -rf "$PREVIOUS_BUNDLE_DIR"' not in bundler
 
 
+def test_release_builder_retries_transient_private_asar_cleanup():
+    builder = Path("panel/scripts/build-release-dmgs.sh").read_text()
+
+    assert "remove_private_tree_with_retry()" in builder
+    assert "for attempt in 1 2 3 4 5 6 7 8" in builder
+    assert '/bin/rm -rf -- "$target" || true' in builder
+    assert "retrying transient private release cleanup" in builder
+    assert "cleanup did not converge after 8 attempts" in builder
+    assert 'trap \'remove_private_tree_with_retry "$extracted"\' EXIT' in builder
+    assert 'rm -rf "$extracted"' not in builder
+
+
 def test_machine_specific_apple_notary_and_signing_helpers_are_ignored():
     private_helpers = (
         "panel/scripts/apple-notary-profile.sh",

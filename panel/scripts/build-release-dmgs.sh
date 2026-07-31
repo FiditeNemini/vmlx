@@ -38,6 +38,25 @@ ELECTRON_BUILDER_BIN="$PANEL_DIR/node_modules/electron-builder/cli.js"
 
 cd "$PANEL_DIR"
 
+remove_private_tree_with_retry() {
+  local target="$1"
+  local attempt
+
+  for attempt in 1 2 3 4 5 6 7 8; do
+    /bin/rm -rf -- "$target" || true
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+      return 0
+    fi
+    if [[ "$attempt" -lt 8 ]]; then
+      echo "WARNING: retrying transient private release cleanup ($attempt/8): $target" >&2
+      /bin/sleep 0.1
+    fi
+  done
+
+  echo "ERROR: private release cleanup did not converge after 8 attempts: $target" >&2
+  return 1
+}
+
 assert_exact_release_tool_path() {
   local name="$1"
   local expected="$2"
@@ -1426,7 +1445,7 @@ verify_staged_app_parity() {
     set -euo pipefail
     local extracted
     extracted="$(mktemp -d "$PRIVATE_EVIDENCE_ROOT/.staged-${flavor}-asar.XXXXXX")"
-    trap 'rm -rf "$extracted"' EXIT
+    trap 'remove_private_tree_with_retry "$extracted"' EXIT
     run_driver_plan_action asar extract \
       "$app_path/Contents/Resources/app.asar" \
       "$extracted"
@@ -1472,7 +1491,7 @@ write_mounted_dmg_payload_parity() (
         || "$APPLE_HDIUTIL" detach -force "$mount_dir" >/dev/null 2>&1 \
         || true
     fi
-    rm -rf "$operation_root"
+    remove_private_tree_with_retry "$operation_root"
   }
   trap cleanup_pre_notary_mount EXIT
 
@@ -1512,7 +1531,7 @@ write_mounted_dmg_payload_parity() (
   "$APPLE_HDIUTIL" detach "$mount_dir" >/dev/null
   attached=0
   trap - EXIT
-  rm -rf "$operation_root"
+  remove_private_tree_with_retry "$operation_root"
 )
 
 build_one() {
@@ -1704,7 +1723,7 @@ NODE
     --expected-driver-pid "$$" \
     --out "$R19_PRE_NOTARY_MANIFEST_OUT"
   )"
-  rm -rf "$R19_ATTESTATION_EXTRACT_ROOT"
+  remove_private_tree_with_retry "$R19_ATTESTATION_EXTRACT_ROOT"
   R19_ATTESTATION_EXTRACT_ROOT=""
   assert_r19_source_identity "after pre-notary artifact manifest"
   pre_notary_sha256="$(artifact_json_field "$pre_notary_result" sha256)"

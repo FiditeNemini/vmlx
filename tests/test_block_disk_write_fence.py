@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -514,6 +515,9 @@ def test_write_fence_waits_for_active_producer_before_finalizing(tmp_path):
         assert fence["post_eviction_complete"] is False
 
         store._write_fence_queue_result(fence_id, block_hash=b"r" * 32)
+        # The synthetic producer does not queue a real disk item, so mirror the
+        # writer's publication callback explicitly before waiting.
+        store._write_fence_completion(fence_id, failed=False)
         _stats, fence = _wait_for_fence(store, fence_id)
     finally:
         store.shutdown()
@@ -895,18 +899,19 @@ def test_unlimited_owner_clear_does_not_reenable_unhealthy_finite_root(
         finite_owner.close()
 
 
-def test_full_write_queue_terminalizes_unqueued_fence_sentinel(
+def test_stopped_writer_terminalizes_unqueued_fence_sentinel(
     tmp_path,
     monkeypatch,
 ):
     store = BlockDiskStore(str(tmp_path), max_size_gb=0)
 
-    def queue_is_full(_item):
-        raise queue.Full
-
     try:
         fence_id = store.begin_write_fence("resp-sentinel-full")
-        monkeypatch.setattr(store._write_queue, "put_nowait", queue_is_full)
+        monkeypatch.setattr(
+            store,
+            "_try_enqueue_write_item",
+            lambda *_args, **_kwargs: "writer_stopped",
+        )
         assert store.seal_write_fence(fence_id) is False
         fence = next(
             item
@@ -918,7 +923,7 @@ def test_full_write_queue_terminalizes_unqueued_fence_sentinel(
 
     assert fence["seal_failed"] is True
     assert fence["post_eviction_complete"] is True
-    assert "queue full" in fence["post_eviction_error"]
+    assert "writer quiescing" in fence["post_eviction_error"]
 
 
 def test_clear_terminalizes_unsettled_write_fences(tmp_path):
@@ -939,6 +944,175 @@ def test_clear_terminalizes_unsettled_write_fences(tmp_path):
     assert fence["sealed"] is True
     assert fence["post_eviction_complete"] is True
     assert "disk cache cleared" in fence["post_eviction_error"]
+
+
+def test_native_queue_backpressure_admits_4096_fake_blocks_without_loss():
+    """Exercise 4096-block pressure without allocating model/cache tensors."""
+
+    store = BlockDiskStore.__new__(BlockDiskStore)
+    store._write_lifecycle_lock = threading.Lock()
+    store._write_lifecycle = threading.Condition(store._write_lifecycle_lock)
+    store._accepting_writes = True
+    store._shutdown_started = False
+    store._pending_write_items = 0
+    store._write_queue = queue.Queue(maxsize=4)
+    store._writer_thread = SimpleNamespace(is_alive=lambda: True)
+    consumed = []
+
+    def consume():
+        for _ in range(4096):
+            consumed.append(store._write_queue.get(timeout=2.0))
+            store._complete_write_items(1)
+
+    consumer = threading.Thread(target=consume, daemon=True)
+    consumer.start()
+    for index in range(4096):
+        assert store._try_enqueue_write_item(
+            ("fake", index),
+            timeout=2.0,
+        ) == "queued"
+    consumer.join(timeout=5.0)
+
+    assert not consumer.is_alive()
+    assert len(consumed) == 4096
+    assert store._pending_write_items == 0
+    assert store._write_queue.empty()
+
+
+def test_native_pending_byte_backpressure_retries_after_release():
+    store = BlockDiskStore.__new__(BlockDiskStore)
+    store._stats_lock = threading.Lock()
+    store._pending_write_condition = threading.Condition(store._stats_lock)
+    store._max_pending_write_bytes = 16
+    store._pending_write_bytes = 16
+    store._pending_write_byte_drops = 0
+    result = []
+
+    waiter = threading.Thread(
+        target=lambda: result.append(
+            store._reserve_pending_write_bytes(16, timeout=1.0)
+        ),
+        daemon=True,
+    )
+    waiter.start()
+    time.sleep(0.02)
+    assert waiter.is_alive()
+    store._release_pending_write_bytes(16)
+    waiter.join(timeout=2.0)
+
+    assert result == [True]
+    assert store._pending_write_bytes == 16
+    assert store._pending_write_byte_drops == 0
+    store._release_pending_write_bytes(16)
+
+
+def test_native_chain_abort_accounts_all_4096_expected_blocks():
+    store = BlockDiskStore.__new__(BlockDiskStore)
+    store._stats_lock = threading.Lock()
+    fence_id = "block-write-4096-accounting"
+    store._write_fences = {
+        fence_id: {
+            "expected": 1,
+            "queued": 0,
+            "failed": 0,
+            "dropped": 1,
+            "sealed": False,
+            "seal_enqueued": False,
+            "seal_failed": False,
+            "post_eviction_complete": False,
+            "_active": 0,
+        }
+    }
+
+    store.record_write_fence_unadmitted(fence_id, 4095)
+
+    state = store._write_fences[fence_id]
+    assert state["expected"] == 4096
+    assert state["dropped"] == 4096
+
+
+def test_partial_terminal_fence_releases_survivors_only_when_requested():
+    retained_hash = b"r" * 32
+    evicted_hash = b"e" * 32
+    fence_id = "block-write-partial-cap"
+    store = BlockDiskStore.__new__(BlockDiskStore)
+    store._stats_lock = threading.Lock()
+    store._write_fences = {
+        fence_id: {
+            "sealed": True,
+            "seal_enqueued": True,
+            "seal_failed": False,
+            "producer_aborted": False,
+            "post_eviction_complete": True,
+            "expected": 2,
+            "queued": 2,
+            "completed": 2,
+            "retained": 1,
+            "failed": 0,
+            "dropped": 0,
+        }
+    }
+    store._writer_thread = SimpleNamespace(is_alive=lambda: True)
+    store.global_budget = SimpleNamespace(
+        mutation_guard=lambda: nullcontext(True)
+    )
+    store._has_block_guarded = lambda value: value == retained_hash
+
+    # Legacy callers remain all-or-nothing.
+    assert store.wait_for_write_fence_blocks(
+        fence_id,
+        [retained_hash, evicted_hash],
+        timeout=0.0,
+    ) == set()
+    # Native settlement releases only the exact hash that survived cap eviction.
+    assert store.wait_for_write_fence_blocks(
+        fence_id,
+        [retained_hash, evicted_hash],
+        timeout=0.0,
+        allow_partial=True,
+    ) == {retained_hash}
+
+
+def test_full_data_queue_defers_fence_control_until_payload_is_processed():
+    """A full data FIFO must not make an admitted native fence unsealable."""
+
+    fence_id = "block-write-deferred-control"
+    store = BlockDiskStore.__new__(BlockDiskStore)
+    store._stats_lock = threading.Lock()
+    store._write_lifecycle_lock = threading.Lock()
+    store._write_lifecycle = threading.Condition(store._write_lifecycle_lock)
+    store._accepting_writes = True
+    store._shutdown_started = False
+    store._pending_write_items = 1
+    store._writer_thread = SimpleNamespace(is_alive=lambda: True)
+    store._write_queue = queue.Queue(maxsize=1)
+    store._write_queue.put_nowait((b"p" * 32, "payload"))
+    store._write_fences = {
+        fence_id: {
+            "expected": 1,
+            "queued": 1,
+            "completed": 0,
+            "_processed": 0,
+            "failed": 0,
+            "dropped": 0,
+            "sealed": True,
+            "seal_enqueued": False,
+            "seal_failed": False,
+            "post_eviction_complete": False,
+            "_active": 0,
+            "_admission_timeout": 0.0,
+        }
+    }
+
+    assert store._enqueue_write_fence_sentinel(fence_id) is True
+    state = store._write_fences[fence_id]
+    assert state["seal_enqueued"] is True
+    assert state["seal_failed"] is False
+    assert state["_sentinel_deferred"] is True
+
+    store._write_queue.get_nowait()
+    store._write_fence_completion(fence_id, failed=False)
+    assert store._write_fence_publication_ready_locked(state) is True
 
 
 def test_clear_waits_for_cross_process_shared_cache_operation(tmp_path):

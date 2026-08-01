@@ -69,6 +69,31 @@ def test_release_resident_payload_clears_bytes_flags_and_data():
     assert mgr.resident_bytes == 0
 
 
+def test_durable_fallback_release_waits_for_active_request_ref():
+    """Late L2 completion must not clear an in-flight native fallback."""
+
+    mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=100_000)
+    block = mgr.allocate_block()
+    assert block is not None
+    _cache_a_block(mgr, block, b"d" * 32, 4000, ref_count=1)
+    payload = block.cache_data
+    table = BlockTable(
+        request_id="active-native-fallback",
+        block_ids=[block.block_id],
+        num_tokens=4,
+    )
+
+    assert mgr.release_resident_payload_when_unreferenced(block) is False
+    assert block.cache_data is payload
+    assert block.release_resident_when_unreferenced is True
+
+    assert mgr.release_request_refs(table) == 1
+    assert block.cache_data is None
+    assert block.release_resident_when_unreferenced is False
+    assert block.resident_bytes == 0
+    assert mgr.resident_bytes == 0
+
+
 def test_make_resident_payload_evictable_keeps_data_and_accounting():
     """A restored native payload becomes a normal RAM-tier LRU entry."""
     mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=100_000)

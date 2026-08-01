@@ -11,6 +11,7 @@ from vmlx_engine.utils.memory_limits import (
     _parse_float_env,
     _parse_working_set_bytes,
     estimate_cache_token_capacity_from_config,
+    estimate_dsv4_delta_transport_bytes_from_config,
     estimate_dsv4_cache_memory_from_config,
     estimate_kv_bytes_per_token_from_config,
     get_effective_metal_working_set_bytes,
@@ -40,6 +41,40 @@ def _dsv4_config():
         + [value for _ in range(20) for value in (4, 128)]
         + [4, 0],
     }
+
+
+def test_dsv4_delta_transport_estimate_counts_pool_anchors_and_records():
+    config = _dsv4_config()
+    one_anchor = estimate_dsv4_delta_transport_bytes_from_config(
+        config,
+        0,
+        2048,
+        pool_quant_enabled=True,
+    )
+    two_anchors = estimate_dsv4_delta_transport_bytes_from_config(
+        config,
+        0,
+        4096,
+        pool_quant_enabled=True,
+    )
+    tail_only = estimate_dsv4_delta_transport_bytes_from_config(
+        config,
+        2048,
+        2304,
+        pool_quant_enabled=True,
+    )
+
+    assert one_anchor is not None and one_anchor > 0
+    assert two_anchors is not None and two_anchors > one_anchor
+    assert tail_only is not None and 0 < tail_only < two_anchors
+    assert (
+        estimate_dsv4_delta_transport_bytes_from_config(
+            {"model_type": "llama"},
+            0,
+            4096,
+        )
+        is None
+    )
 
 
 def test_resolve_working_set_override_clamps_to_base():

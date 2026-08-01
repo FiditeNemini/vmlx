@@ -547,6 +547,110 @@ class DSV4BatchGenerator:
 
         return _walk(cache_list)
 
+    def _delta_capture_admitted(
+        self,
+        cache_list: List[Any],
+        token_count: int,
+    ) -> bool:
+        """Reject a finite-backend delta donation before records allocate."""
+
+        backend_limit = self.prompt_snapshot_max_bytes
+        cached_tokens = 0
+        for layer_cache in cache_list or ():
+            try:
+                cached_tokens = max(
+                    cached_tokens,
+                    int(getattr(layer_cache, "offset", 0) or 0),
+                )
+            except (TypeError, ValueError):
+                continue
+        final_tokens = cached_tokens + max(0, int(token_count or 0))
+        model = getattr(self.model, "_model", self.model)
+        config = (
+            getattr(model, "args", None)
+            or getattr(model, "config", None)
+            or getattr(self.model, "config", None)
+        )
+        pool_quant_enabled = any(
+            type(layer_cache).__name__ == "PoolQuantizedV4Cache"
+            for layer_cache in cache_list or ()
+        )
+        try:
+            from .memory_limits import (
+                estimate_dsv4_delta_transport_bytes_from_config,
+            )
+
+            estimated = estimate_dsv4_delta_transport_bytes_from_config(
+                config,
+                cached_tokens,
+                final_tokens,
+                pool_quant_enabled=pool_quant_enabled,
+                block_size=DSV4_NATIVE_BLOCK_SIZE,
+                anchor_interval_blocks=DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS,
+            )
+        except Exception as exc:
+            logger.warning(
+                "DSV4Gen: native delta pre-capture estimate failed: %s",
+                exc,
+            )
+            estimated = None
+        if estimated is None and backend_limit is None:
+            # An unlimited cache backend does not waive the Metal headroom
+            # guard.  Unknown model configs cannot predict future delta
+            # growth, but the already-retained native state still provides a
+            # truthful lower bound that must fit before capture starts.
+            estimated = self._estimate_dsv4_cache_nbytes(cache_list)
+        if estimated is not None:
+            self.prompt_snapshot_last_estimated_bytes = int(estimated)
+        if backend_limit is not None and (
+            estimated is None or int(estimated) > int(backend_limit)
+        ):
+            self.prompt_snapshot_oversize_skips += 1
+            logger.warning(
+                "DSV4Gen: skipping native delta capture before allocation: "
+                "estimated=%s backend_limit=%.1fMB start=%d end=%d",
+                "unknown"
+                if estimated is None
+                else f"{int(estimated) / (1024 * 1024):.1f}MB",
+                int(backend_limit) / (1024 * 1024),
+                cached_tokens,
+                final_tokens,
+            )
+            return False
+
+        try:
+            from .memory_limits import (
+                get_effective_metal_working_set_bytes,
+                get_metal_ws_guard_threshold,
+            )
+
+            active_bytes, max_ws_bytes = get_effective_metal_working_set_bytes(mx)
+            threshold = get_metal_ws_guard_threshold() / 100.0
+            headroom = max(0, int(max_ws_bytes * threshold) - int(active_bytes))
+        except Exception as exc:
+            logger.debug(
+                "DSV4 native delta pre-capture Metal headroom lookup failed: %s",
+                exc,
+            )
+            headroom = 0
+            max_ws_bytes = 0
+        self.prompt_snapshot_last_headroom_bytes = headroom
+        if (
+            estimated is not None
+            and max_ws_bytes > 0
+            and int(estimated) > headroom
+        ):
+            self.prompt_snapshot_oversize_skips += 1
+            self.prompt_snapshot_headroom_skips += 1
+            logger.warning(
+                "DSV4Gen: skipping native delta capture before allocation: "
+                "estimated %.1fMB exceeds safe Metal headroom (%.1fMB)",
+                int(estimated) / (1024 * 1024),
+                headroom / (1024 * 1024),
+            )
+            return False
+        return True
+
     @staticmethod
     def _copy_delta_tree(value: Any) -> Any:
         """Detach cache-record leaves from the live mutable DSV4 cache."""
@@ -1146,11 +1250,18 @@ class DSV4BatchGenerator:
                     # Phase 2: prefill the last token to advance the
                     #          live cache to N (used for first-token
                     #          decode logits).
-                    should_capture_snapshot = (
+                    snapshot_requested = (
                         self.capture_prompt_snapshot
                         and r.capture_prompt_snapshot
                         and len(r.prompt_tokens) >= 2
                         and len(r.prompt_tokens) - 1 >= self.prompt_snapshot_min_tokens
+                    )
+                    should_capture_snapshot = bool(
+                        snapshot_requested
+                        and self._delta_capture_admitted(
+                            r.cache,
+                            len(r.prompt_tokens) - 1,
+                        )
                     )
 
                     if should_capture_snapshot:
@@ -1207,6 +1318,7 @@ class DSV4BatchGenerator:
                             self.capture_prompt_snapshot
                             and r.capture_prompt_snapshot
                             and len(r.prompt_tokens) >= 2
+                            and not snapshot_requested
                         ):
                             _t_snapshot_skip = time.perf_counter()
                             self._trace_timing(
@@ -1288,16 +1400,26 @@ class DSV4BatchGenerator:
                     # for first-token logits.  This is correctness-safe for
                     # SWA + CSA/HCA and costs only the uncached tail; it never
                     # re-prefills the matched prefix.
-                    should_capture_extension_snapshot = (
+                    extension_snapshot_requested = (
                         self.capture_prompt_snapshot
                         and r.capture_prompt_snapshot
                         and len(r.context_tokens) >= 2
                         and len(r.context_tokens) - 1
                         >= self.prompt_snapshot_min_tokens
                     )
+                    tail_head = r.prompt_tokens[:-1]
+                    should_capture_extension_snapshot = bool(
+                        extension_snapshot_requested
+                        and (
+                            not tail_head
+                            or self._delta_capture_admitted(
+                                r.cache,
+                                len(tail_head),
+                            )
+                        )
+                    )
                     _t_prefill_tail = time.perf_counter()
                     if should_capture_extension_snapshot:
-                        tail_head = r.prompt_tokens[:-1]
                         final_prompt_token = r.prompt_tokens[-1:]
                         if tail_head:
                             _ = self._prefill_last_logits(

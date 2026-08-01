@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -628,8 +629,17 @@ class _FenceResultDisk:
         self.calls.append(("seal", fence_id, producer_aborted))
         return True
 
-    def wait_for_write_fence_blocks(self, fence_id, hashes, *, timeout):
-        self.calls.append(("wait", fence_id, set(hashes), timeout))
+    def wait_for_write_fence_blocks(
+        self,
+        fence_id,
+        hashes,
+        *,
+        timeout,
+        allow_partial=False,
+    ):
+        self.calls.append(
+            ("wait", fence_id, set(hashes), timeout, allow_partial)
+        )
         if self.wait_error is not None:
             raise self.wait_error
         return set(hashes) & self.ready
@@ -639,6 +649,8 @@ class _NativeHoldPaged:
     def __init__(self):
         self.noted = []
         self.evictable = []
+        self.released = []
+        self.enforced = 0
 
     @staticmethod
     def estimate_block_nbytes(_payload):
@@ -650,6 +662,15 @@ class _NativeHoldPaged:
     def make_resident_payload_evictable(self, block):
         block.keep_resident = False
         self.evictable.append(block)
+
+    def release_resident_payload(self, block):
+        block.cache_data = None
+        block.cache_data_from_disk = False
+        block.keep_resident = False
+        self.released.append(block)
+
+    def enforce_byte_budget(self):
+        self.enforced += 1
 
 
 def test_dsv4_disk_only_fallback_survives_fence_wait_error():
@@ -717,6 +738,68 @@ def test_dsv4_native_holds_release_only_for_post_eviction_exact_hashes():
     assert paged_block.keep_resident is False
     assert lost_block.keep_resident is True
     assert cache.paged_cache.evictable == [paged_block]
+
+
+def test_dsv4_disk_only_timeout_releases_fallback_after_eventual_fence_completion():
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    ready = threading.Event()
+    block_hash = b"t" * 32
+
+    class _EventuallyReadyDisk:
+        def __init__(self):
+            self.waits = 0
+
+        @staticmethod
+        def seal_write_fence(_fence_id, *, producer_aborted=False):
+            assert producer_aborted is False
+            return True
+
+        def wait_for_write_fence_blocks(
+            self,
+            _fence_id,
+            hashes,
+            *,
+            timeout,
+            allow_partial=False,
+        ):
+            assert allow_partial is True
+            self.waits += 1
+            if self.waits == 1:
+                return set()
+            assert timeout is None
+            assert ready.wait(timeout=2.0)
+            return set(hashes)
+
+    cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
+    cache.paged_cache = _NativeHoldPaged()
+    disk = _EventuallyReadyDisk()
+    payload = _topology_block(9, terminal=True)
+    block = SimpleNamespace(
+        block_hash=block_hash,
+        cache_data=None,
+        cache_data_from_disk=False,
+        keep_resident=False,
+    )
+    fence = {
+        "disk_store": disk,
+        "fence_id": "dsv4-fence-eventual",
+        "disk_only_fallbacks": {block_hash: (block, payload)},
+    }
+
+    cache._settle_native_write_fence("dsv4-fence-eventual", fence)
+    assert block.cache_data is payload
+    assert block.keep_resident is True
+
+    ready.set()
+    deadline = time.monotonic() + 2.0
+    while block.cache_data is not None and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    assert disk.waits == 2
+    assert block.cache_data is None
+    assert block.keep_resident is False
+    assert cache.paged_cache.released == [block]
 
 
 def _register_free_native_block(manager, block_id=1):

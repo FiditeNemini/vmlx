@@ -19,6 +19,7 @@ import hashlib
 import importlib.metadata
 import logging
 import os
+import threading
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
@@ -1931,6 +1932,18 @@ class BlockAwarePrefixCache:
             "VMLX_STRICT_BLOCK_DISK_WRITE_FENCE",
             "",
         ).strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            self._native_block_disk_admission_timeout = max(
+                0.0,
+                float(
+                    os.environ.get(
+                        "VMLX_NATIVE_BLOCK_DISK_ADMISSION_TIMEOUT_SECONDS",
+                        "30",
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            self._native_block_disk_admission_timeout = 30.0
 
         # Hash table for quick prefix lookup
         # Maps hash(tokens[:block_size*n]) -> (tokens, block_ids)
@@ -2848,6 +2861,152 @@ class BlockAwarePrefixCache:
             expected_layers=len(rotating_entries),
         )
 
+    @staticmethod
+    def _wait_native_write_fence_blocks(
+        disk_store: Any,
+        fence_id: str,
+        target_hashes: set[bytes],
+        *,
+        timeout: Optional[float],
+    ) -> set[bytes]:
+        wait_for_fence_blocks = getattr(
+            disk_store,
+            "wait_for_write_fence_blocks",
+            None,
+        )
+        if not callable(wait_for_fence_blocks) or not target_hashes:
+            return set()
+        try:
+            return set(
+                wait_for_fence_blocks(
+                    fence_id,
+                    list(target_hashes),
+                    timeout=timeout,
+                    allow_partial=True,
+                )
+            )
+        except TypeError:
+            # Compatibility for a non-BlockDiskStore test/third-party backend.
+            # It cannot expose partial terminal retention, but still preserves
+            # the former all-or-nothing safe fallback contract.
+            return set(
+                wait_for_fence_blocks(
+                    fence_id,
+                    list(target_hashes),
+                    timeout=5.0 if timeout is None else timeout,
+                )
+            )
+
+    def _release_durable_native_holds(
+        self,
+        durable_hashes: set[bytes],
+        disk_only_fallbacks: Dict[bytes, Tuple[Any, Any]],
+        native_paged_holds: Dict[bytes, Any],
+    ) -> None:
+        """Release only exact native hashes proven retained after eviction."""
+
+        released_paged = False
+        for block_hash in set(durable_hashes):
+            fallback = disk_only_fallbacks.pop(block_hash, None)
+            if fallback is not None:
+                block, fallback_payload = fallback
+                current_hash = getattr(block, "block_hash", block_hash)
+                if (
+                    current_hash == block_hash
+                    and getattr(block, "cache_data", None) is fallback_payload
+                ):
+                    release_when_unreferenced = getattr(
+                        self.paged_cache,
+                        "release_resident_payload_when_unreferenced",
+                        None,
+                    )
+                    if callable(release_when_unreferenced):
+                        release_when_unreferenced(block)
+                    else:
+                        # Compatibility backends without the ref-aware helper
+                        # may release only an unreferenced fallback. An active
+                        # payload remains safe in RAM and becomes normally
+                        # evictable after its reference lifecycle completes.
+                        if int(getattr(block, "ref_count", 0) or 0) <= 0:
+                            release_payload = getattr(
+                                self.paged_cache,
+                                "release_resident_payload",
+                                None,
+                            )
+                            if callable(release_payload):
+                                release_payload(block)
+                            else:
+                                block.cache_data = None
+                                block.cache_data_from_disk = False
+                                block.keep_resident = False
+                        else:
+                            make_evictable = getattr(
+                                self.paged_cache,
+                                "make_resident_payload_evictable",
+                                None,
+                            )
+                            if callable(make_evictable):
+                                make_evictable(block)
+
+            block = native_paged_holds.pop(block_hash, None)
+            if block is not None:
+                current_hash = getattr(block, "block_hash", block_hash)
+                if current_hash == block_hash:
+                    self.paged_cache.make_resident_payload_evictable(block)
+                    released_paged = True
+
+        if released_paged:
+            enforce_budget = getattr(self.paged_cache, "enforce_byte_budget", None)
+            if callable(enforce_budget):
+                enforce_budget()
+
+    def _schedule_eventual_native_fence_release(
+        self,
+        request_id: str,
+        disk_store: Any,
+        fence_id: str,
+        disk_only_fallbacks: Dict[bytes, Tuple[Any, Any]],
+        native_paged_holds: Dict[bytes, Any],
+    ) -> None:
+        """Release timeout-retained RAM only when the writer later settles."""
+
+        target_hashes = set(disk_only_fallbacks) | set(native_paged_holds)
+        if not target_hashes:
+            return
+
+        def _finish() -> None:
+            try:
+                durable_hashes = self._wait_native_write_fence_blocks(
+                    disk_store,
+                    fence_id,
+                    target_hashes,
+                    timeout=None,
+                )
+                self._release_durable_native_holds(
+                    durable_hashes,
+                    disk_only_fallbacks,
+                    native_paged_holds,
+                )
+                if durable_hashes:
+                    logger.info(
+                        "Native block-disk fence eventually released %d RAM "
+                        "hold(s) for %s",
+                        len(durable_hashes),
+                        request_id,
+                    )
+            except Exception as wait_error:
+                logger.warning(
+                    "Native block-disk eventual fence wait failed for %s: %s",
+                    request_id,
+                    wait_error,
+                )
+
+        threading.Thread(
+            target=_finish,
+            daemon=True,
+            name=f"native-cache-fence-{str(fence_id)[-8:]}",
+        ).start()
+
     def _settle_native_write_fence(
         self,
         request_id: str,
@@ -2872,7 +3031,8 @@ class BlockAwarePrefixCache:
             write_fence.get("native_paged_holds") or {}
         )
         target_hashes = set(disk_only_fallbacks) | set(native_paged_holds)
-        durable_hashes: set = set()
+        durable_hashes: set[bytes] = set()
+        eventual_wait_allowed = False
 
         sealed = False
         if disk_store is not None and fence_id is not None:
@@ -2894,35 +3054,35 @@ class BlockAwarePrefixCache:
                 )
 
         if sealed and target_hashes:
-            wait_for_fence_blocks = getattr(
-                disk_store,
-                "wait_for_write_fence_blocks",
-                None,
-            )
-            if callable(wait_for_fence_blocks):
+            if not callable(
+                getattr(disk_store, "wait_for_write_fence_blocks", None)
+            ):
+                logger.warning(
+                    "Native block-disk fence wait is unavailable for %s; "
+                    "retaining RAM fallbacks",
+                    request_id,
+                )
+            else:
                 try:
-                    durable_hashes = set(
-                        wait_for_fence_blocks(
-                            fence_id,
-                            list(target_hashes),
-                            timeout=5.0,
-                        )
+                    durable_hashes = self._wait_native_write_fence_blocks(
+                        disk_store,
+                        fence_id,
+                        target_hashes,
+                        timeout=5.0,
                     )
+                    eventual_wait_allowed = True
                 except Exception as wait_error:
                     logger.warning(
                         "Native block-disk fence wait failed for %s: %s",
                         request_id,
                         wait_error,
                     )
-            else:
-                logger.warning(
-                    "Native block-disk fence wait is unavailable for %s; "
-                    "retaining RAM fallbacks",
-                    request_id,
-                )
 
-        for ready_hash in durable_hashes:
-            disk_only_fallbacks.pop(ready_hash, None)
+        self._release_durable_native_holds(
+            durable_hashes,
+            disk_only_fallbacks,
+            native_paged_holds,
+        )
 
         if disk_only_fallbacks:
             for block, fallback_payload in disk_only_fallbacks.values():
@@ -2945,17 +3105,25 @@ class BlockAwarePrefixCache:
                 len(durable_hashes),
             )
 
-        for block_hash, block in native_paged_holds.items():
-            if block_hash in durable_hashes:
-                self.paged_cache.make_resident_payload_evictable(block)
-        pending_native = len(native_paged_holds) - len(
-            set(native_paged_holds) & durable_hashes
-        )
+        pending_native = len(native_paged_holds)
         if pending_native:
             logger.warning(
                 "Native paged cache retained %d post-eviction-pending RAM "
                 "block(s); those records are not eligible for eviction",
                 pending_native,
+            )
+
+        if (
+            sealed
+            and eventual_wait_allowed
+            and (disk_only_fallbacks or native_paged_holds)
+        ):
+            self._schedule_eventual_native_fence_release(
+                request_id,
+                disk_store,
+                fence_id,
+                disk_only_fallbacks,
+                native_paged_holds,
             )
 
     def store_cache(
@@ -3081,6 +3249,12 @@ class BlockAwarePrefixCache:
         has_minimax_m3_cache_data = (
             _cache_data_has_minimax_m3(cache_data) if is_tensor_data else False
         )
+        has_native_path_dependent_cache_data = bool(
+            has_dsv4_cache_data
+            or has_dsv4_delta_cache_data
+            or has_zaya_cca_cache_data
+            or has_rotating_kv_cache_data
+        )
         rotating_kv_layer_count = (
             _rotating_kv_layer_count(cache_data) if has_rotating_kv_cache_data else 0
         )
@@ -3193,12 +3367,31 @@ class BlockAwarePrefixCache:
             begin_write_fence = getattr(disk_store, "begin_write_fence", None)
             if callable(begin_write_fence):
                 try:
-                    disk_write_fence_id = str(
-                        begin_write_fence(
+                    begin_kwargs = {
+                        "strict_reconcile": self._strict_block_disk_write_fence,
+                        "admission_timeout": (
+                            self._native_block_disk_admission_timeout
+                            if has_native_path_dependent_cache_data
+                            else 0.0
+                        ),
+                    }
+                    try:
+                        begun_fence = begin_write_fence(
+                            request_id,
+                            **begin_kwargs,
+                        )
+                    except TypeError as fence_type_error:
+                        if "admission_timeout" not in str(fence_type_error):
+                            raise
+                        # Preserve the legacy backend contract. The in-tree
+                        # BlockDiskStore owns bounded native admission; a test
+                        # or third-party store without that extension remains
+                        # fail-closed through the RAM fallback.
+                        begun_fence = begin_write_fence(
                             request_id,
                             strict_reconcile=self._strict_block_disk_write_fence,
                         )
-                    )
+                    disk_write_fence_id = str(begun_fence)
                     _write_fence["disk_store"] = disk_store
                     _write_fence["fence_id"] = disk_write_fence_id
                 except Exception as fence_error:
@@ -3208,13 +3401,35 @@ class BlockAwarePrefixCache:
                         fence_error,
                     )
 
+        disk_write_chain_open = True
+
+        def _record_unadmitted_native_writes(count: int) -> None:
+            if (
+                not has_native_path_dependent_cache_data
+                or disk_store is None
+                or disk_write_fence_id is None
+                or int(count or 0) <= 0
+            ):
+                return
+            record_unadmitted = getattr(
+                disk_store,
+                "record_write_fence_unadmitted",
+                None,
+            )
+            if callable(record_unadmitted):
+                record_unadmitted(disk_write_fence_id, int(count))
+
         def _write_block_to_disk(
             block_hash: bytes,
             block_data: List[Tuple[Any, ...]],
             token_count: int,
             block_parent_hash: Optional[bytes],
         ) -> bool:
+            nonlocal disk_write_chain_open
             if disk_store is None:
+                return False
+            if has_native_path_dependent_cache_data and not disk_write_chain_open:
+                _record_unadmitted_native_writes(1)
                 return False
             fence_kwargs: Dict[str, Any] = {}
             if disk_write_fence_id is not None:
@@ -3222,7 +3437,7 @@ class BlockAwarePrefixCache:
                     "request_id": request_id,
                     "fence_id": disk_write_fence_id,
                 }
-            return bool(
+            admitted = bool(
                 disk_store.write_block_async(
                     block_hash,
                     block_data,
@@ -3231,6 +3446,9 @@ class BlockAwarePrefixCache:
                     **fence_kwargs,
                 )
             )
+            if has_native_path_dependent_cache_data and not admitted:
+                disk_write_chain_open = False
+            return admitted
 
         _disk_only = bool(getattr(self.paged_cache, "disk_only", False))
         # Paged RAM and block-disk L2 are separate cache tiers.  The manager
@@ -3770,23 +3988,31 @@ class BlockAwarePrefixCache:
             logger.debug(
                 f"Block disk: writing {len(pending_disk_writes)} blocks to SSD"
             )
-            for (
+            for write_index, (
                 block_hash,
                 block_data,
                 tok_count,
                 block_parent_hash,
-            ) in pending_disk_writes:
+            ) in enumerate(pending_disk_writes):
                 try:
-                    _write_block_to_disk(
+                    admitted = _write_block_to_disk(
                         block_hash,
                         block_data,
                         tok_count,
                         block_parent_hash,
                     )
+                    if has_native_path_dependent_cache_data and not admitted:
+                        remaining = len(pending_disk_writes) - write_index - 1
+                        _record_unadmitted_native_writes(remaining)
+                        break
                 except Exception as _wbe:
                     logger.warning(
                         f"Block disk: write_block_async failed: {_wbe}"
                     )
+                    if has_native_path_dependent_cache_data:
+                        remaining = len(pending_disk_writes) - write_index
+                        _record_unadmitted_native_writes(remaining)
+                        break
 
         # The lifecycle wrapper seals the request fence after every write has
         # been admitted, waits for post-eviction completion, and only then

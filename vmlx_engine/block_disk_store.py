@@ -285,6 +285,11 @@ class BlockDiskStore:
 
         # Stats (protected by _stats_lock for cross-thread accuracy)
         self._stats_lock = threading.Lock()
+        # Pending immutable payload bytes use the same lock as the public
+        # write-pipeline counters.  Native request fences may wait for this
+        # bounded budget instead of silently dropping a causal chain block;
+        # ordinary writes keep the historical non-blocking default.
+        self._pending_write_condition = threading.Condition(self._stats_lock)
         self.disk_hits = 0
         self.disk_misses = 0
         self.disk_writes = 0
@@ -764,25 +769,56 @@ class BlockDiskStore:
         """Queue a stale index entry cleanup for the background writer."""
         self._try_enqueue_write_item(("__cleanup__", hash_hex, 0))
 
-    def _try_enqueue_write_item(self, item: Tuple[Any, ...]) -> str:
+    def _try_enqueue_write_item(
+        self,
+        item: Tuple[Any, ...],
+        *,
+        timeout: float = 0.0,
+    ) -> str:
         """Atomically admit one queue item and track it through publication.
 
         Returns ``queued``, ``full``, ``quiescing``, or ``writer_stopped``.
         The lifecycle lock closes the check/enqueue race with clear/shutdown.
+        ``timeout`` is opt-in bounded backpressure for native request fences;
+        the default remains the legacy non-blocking admission policy.
         """
 
+        timeout_s = max(0.0, float(timeout or 0.0))
+        deadline = time.monotonic() + timeout_s
         with self._write_lifecycle:
-            if not self._accepting_writes:
-                return "quiescing"
-            if not self._writer_thread.is_alive():
-                return "writer_stopped"
-            try:
-                self._write_queue.put_nowait(item)
-            except queue.Full:
-                return "full"
-            self._pending_write_items += 1
-            self._write_lifecycle.notify_all()
-            return "queued"
+            while True:
+                if not self._accepting_writes:
+                    return "quiescing"
+                if not self._writer_thread.is_alive():
+                    return "writer_stopped"
+                try:
+                    self._write_queue.put_nowait(item)
+                except queue.Full:
+                    remaining = deadline - time.monotonic()
+                    if timeout_s <= 0.0 or remaining <= 0.0:
+                        return "full"
+                    self._write_lifecycle.wait(timeout=remaining)
+                    continue
+                self._pending_write_items += 1
+                self._write_lifecycle.notify_all()
+                return "queued"
+
+    def _wait_for_write_queue_capacity(self, timeout: float) -> str:
+        """Wait without serializing until a bounded writer slot is available."""
+
+        timeout_s = max(0.0, float(timeout or 0.0))
+        deadline = time.monotonic() + timeout_s
+        with self._write_lifecycle:
+            while self._write_queue.full():
+                if not self._accepting_writes:
+                    return "quiescing"
+                if not self._writer_thread.is_alive():
+                    return "writer_stopped"
+                remaining = deadline - time.monotonic()
+                if timeout_s <= 0.0 or remaining <= 0.0:
+                    return "full"
+                self._write_lifecycle.wait(timeout=remaining)
+            return "ready"
 
     def _complete_write_items(self, count: int) -> None:
         if count <= 0:
@@ -874,23 +910,32 @@ class BlockDiskStore:
         # rather than grows the reservation.
         return max(1, tensor_bytes + 65536 + tensor_count * 1024)
 
-    def _reserve_pending_write_bytes(self, requested: int) -> bool:
+    def _reserve_pending_write_bytes(
+        self,
+        requested: int,
+        *,
+        timeout: float = 0.0,
+    ) -> bool:
         amount = max(1, int(requested))
-        with self._stats_lock:
-            if (
-                amount > self._max_pending_write_bytes
-                or self._pending_write_bytes + amount
-                > self._max_pending_write_bytes
-            ):
+        timeout_s = max(0.0, float(timeout or 0.0))
+        deadline = time.monotonic() + timeout_s
+        with self._pending_write_condition:
+            if amount > self._max_pending_write_bytes:
                 self._pending_write_byte_drops += 1
                 return False
+            while self._pending_write_bytes + amount > self._max_pending_write_bytes:
+                remaining = deadline - time.monotonic()
+                if timeout_s <= 0.0 or remaining <= 0.0:
+                    self._pending_write_byte_drops += 1
+                    return False
+                self._pending_write_condition.wait(timeout=remaining)
             self._pending_write_bytes += amount
-        return True
+            return True
 
     def _resize_pending_write_reservation(self, previous: int, actual: int) -> bool:
         old_amount = max(0, int(previous))
         new_amount = max(1, int(actual))
-        with self._stats_lock:
+        with self._pending_write_condition:
             delta = new_amount - old_amount
             if (
                 new_amount > self._max_pending_write_bytes
@@ -905,14 +950,17 @@ class BlockDiskStore:
             self._pending_write_bytes = max(
                 0, self._pending_write_bytes + delta
             )
+            if delta < 0:
+                self._pending_write_condition.notify_all()
         return True
 
     def _release_pending_write_bytes(self, reserved: int) -> None:
-        with self._stats_lock:
+        with self._pending_write_condition:
             self._pending_write_bytes = max(
                 0,
                 self._pending_write_bytes - max(0, int(reserved)),
             )
+            self._pending_write_condition.notify_all()
 
     @staticmethod
     def _detach_safetensors_tensors(
@@ -998,6 +1046,7 @@ class BlockDiskStore:
         request_id: str,
         *,
         strict_reconcile: bool = False,
+        admission_timeout: float = 0.0,
     ) -> str:
         """Create an opaque, request-correlated asynchronous write fence."""
         normalized_request_id = str(request_id or "").strip()
@@ -1019,6 +1068,7 @@ class BlockDiskStore:
                 "expected": 0,
                 "queued": 0,
                 "completed": 0,
+                "_processed": 0,
                 "failed": 0,
                 "dropped": 0,
                 "retained": 0,
@@ -1029,6 +1079,10 @@ class BlockDiskStore:
                 "post_eviction_complete": False,
                 "completion_generation": None,
                 "_strict_reconcile": bool(strict_reconcile),
+                "_admission_timeout": max(
+                    0.0,
+                    float(admission_timeout or 0.0),
+                ),
                 "_queued_hashes": [],
                 "_active": 0,
             }
@@ -1096,6 +1150,18 @@ class BlockDiskStore:
             and accounted >= int(state.get("expected") or 0)
         )
 
+    def _write_fence_publication_ready_locked(
+        self,
+        state: Dict[str, Any],
+    ) -> bool:
+        """True only after every admitted payload reached the writer."""
+
+        return (
+            self._write_fence_ready_locked(state)
+            and int(state.get("_processed") or 0)
+            >= int(state.get("queued") or 0)
+        )
+
     def _write_fence_queue_result(
         self,
         fence_id: Optional[str],
@@ -1130,6 +1196,42 @@ class BlockDiskStore:
         if should_enqueue_fence:
             self._enqueue_write_fence_sentinel(str(fence_id))
 
+    def record_write_fence_unadmitted(
+        self,
+        fence_id: Optional[str],
+        count: int,
+    ) -> None:
+        """Account causal-chain writes skipped after the first rejection.
+
+        Native block chains stop enqueueing after one admission failure because
+        every later child depends on the missing parent.  Count those skipped
+        children as expected+dropped without pretending they reached the
+        writer.  This keeps request telemetry truthful while RAM remains the
+        authoritative fallback for the missing suffix.
+        """
+
+        skipped = max(0, int(count or 0))
+        if not fence_id or skipped <= 0:
+            return
+        should_enqueue_fence = False
+        with self._stats_lock:
+            state = self._write_fences.get(str(fence_id))
+            if (
+                state is None
+                or state.get("post_eviction_complete")
+                or state.get("seal_failed")
+            ):
+                return
+            state["expected"] += skipped
+            state["dropped"] += skipped
+            should_enqueue_fence = (
+                bool(state.get("sealed"))
+                and not state.get("seal_enqueued")
+                and self._write_fence_ready_locked(state)
+            )
+        if should_enqueue_fence:
+            self._enqueue_write_fence_sentinel(str(fence_id))
+
     def _write_fence_completion(
         self,
         fence_id: Optional[str],
@@ -1138,14 +1240,25 @@ class BlockDiskStore:
     ) -> None:
         if not fence_id:
             return
+        should_enqueue_fence = False
         with self._stats_lock:
             state = self._write_fences.get(fence_id)
             if state is None:
                 return
+            state["_processed"] = int(state.get("_processed") or 0) + 1
             if failed:
                 state["failed"] += 1
             else:
                 state["completed"] += 1
+            should_enqueue_fence = (
+                bool(state.get("sealed"))
+                and not state.get("seal_enqueued")
+                and not state.get("seal_failed")
+                and not state.get("post_eviction_complete")
+                and self._write_fence_publication_ready_locked(state)
+            )
+        if should_enqueue_fence:
+            self._enqueue_write_fence_sentinel(str(fence_id))
 
     def seal_write_fence(
         self,
@@ -1167,9 +1280,33 @@ class BlockDiskStore:
         return self._enqueue_write_fence_sentinel(fence_id)
 
     def _enqueue_write_fence_sentinel(self, fence_id: str) -> bool:
+        with self._stats_lock:
+            state = self._write_fences.get(fence_id)
+            admission_timeout = float(
+                (state or {}).get("_admission_timeout") or 0.0
+            )
         enqueue_result = self._try_enqueue_write_item(
-            ("__fence__", fence_id, 0)
+            ("__fence__", fence_id, 0),
+            timeout=admission_timeout,
         )
+        if enqueue_result == "full":
+            # Every data item for this fence was admitted before sealing. A
+            # full FIFO therefore already contains work that will wake the
+            # writer. Mark the control record as deferred; the writer scans
+            # publication-ready sealed fences after each batch and finalizes
+            # this one after all of its admitted payloads were processed.
+            with self._stats_lock:
+                state = self._write_fences.get(fence_id)
+                if state is None or state.get("post_eviction_complete"):
+                    return True
+                state["seal_enqueued"] = True
+                state["_sentinel_deferred"] = True
+            logger.info(
+                "BlockDiskStore deferred fence sentinel behind a full data "
+                "queue: %s",
+                fence_id,
+            )
+            return True
         if enqueue_result != "queued":
             with self._stats_lock:
                 state = self._write_fences.get(fence_id)
@@ -1269,12 +1406,18 @@ class BlockDiskStore:
                 fence_id,
             )
             return False
+        admission_timeout = 0.0
         if tracked:
             request_mismatch = False
             with self._stats_lock:
                 state = self._write_fences.get(str(fence_id))
                 if state is None or state.get("request_id") != str(request_id or ""):
                     request_mismatch = True
+                elif state is not None:
+                    admission_timeout = max(
+                        0.0,
+                        float(state.get("_admission_timeout") or 0.0),
+                    )
             if request_mismatch:
                 # Balance the expected/active producer registered above. A
                 # manual failed++ left _active stuck and a later seal could
@@ -1290,16 +1433,28 @@ class BlockDiskStore:
             self._write_fence_queue_result(fence_id, failed=True)
             return False
 
+        admission_deadline = time.monotonic() + admission_timeout
+
+        def _remaining_admission_time() -> float:
+            if admission_timeout <= 0.0:
+                return 0.0
+            return max(0.0, admission_deadline - time.monotonic())
+
         # Fail item admission before walking/serializing MLX state.  The item
         # queue bounds metadata commands; the byte reservation independently
         # bounds immutable payload RAM.
         if not self._write_admission_open():
             self._write_fence_queue_result(fence_id, dropped=True)
             return False
-        if self._write_queue.full():
+        queue_capacity = self._wait_for_write_queue_capacity(
+            _remaining_admission_time()
+        )
+        if queue_capacity != "ready":
             self._write_fence_queue_result(fence_id, dropped=True)
             logger.warning(
-                "BlockDiskStore write queue full (1000), skipping serialization"
+                "BlockDiskStore write queue admission failed (%s), skipping "
+                "serialization",
+                queue_capacity,
             )
             return False
 
@@ -1321,7 +1476,10 @@ class BlockDiskStore:
             self.has_block(block_hash)
 
         reserved_bytes = self._estimate_cache_payload_bytes(cache_data)
-        if not self._reserve_pending_write_bytes(reserved_bytes):
+        if not self._reserve_pending_write_bytes(
+            reserved_bytes,
+            timeout=_remaining_admission_time(),
+        ):
             self._write_fence_queue_result(fence_id, dropped=True)
             logger.warning(
                 "BlockDiskStore pending-write byte budget full "
@@ -1382,7 +1540,8 @@ class BlockDiskStore:
                 parent_hash,
                 fence_id,
                 reserved_bytes,
-            )
+            ),
+            timeout=_remaining_admission_time(),
         )
         if enqueue_result == "queued":
             self._write_fence_queue_result(fence_id, block_hash=block_hash)
@@ -1488,7 +1647,9 @@ class BlockDiskStore:
         self,
         fence_id: str,
         block_hashes: List[bytes],
-        timeout: float = 5.0,
+        timeout: Optional[float] = 5.0,
+        *,
+        allow_partial: bool = False,
     ) -> set[bytes]:
         """Return exact blocks retained after a request fence has settled.
 
@@ -1497,9 +1658,12 @@ class BlockDiskStore:
         aggregate budget accounting and eviction, so it is not a sufficient
         durability barrier for native path-dependent cache state.  This method
         first waits for the request-correlated fence to finish its post-write
-        eviction phase, rejects every incomplete/error/retention-loss terminal
-        state, and only then verifies each requested hash while holding the
-        process-shared mutation guard.
+        eviction phase, and only then verifies each requested hash while
+        holding the process-shared mutation guard.  The default rejects every
+        incomplete/error/retention-loss terminal state for legacy callers.
+        Native RAM-fallback settlement may set ``allow_partial=True`` to release
+        only exact hashes that survived a terminal partial publication while
+        retaining every missing causal block in RAM.
 
         Callers must seal ``fence_id`` before waiting.  An empty result is the
         fail-closed outcome for timeout, writer death, fence failure, or an
@@ -1510,7 +1674,11 @@ class BlockDiskStore:
         if not normalized_fence_id or not targets:
             return set()
 
-        deadline = time.monotonic() + max(0.0, float(timeout))
+        deadline = (
+            None
+            if timeout is None
+            else time.monotonic() + max(0.0, float(timeout))
+        )
         terminal: Dict[str, Any] | None = None
         while True:
             with self._stats_lock:
@@ -1533,7 +1701,7 @@ class BlockDiskStore:
                     normalized_fence_id,
                 )
                 return set()
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 logger.warning(
                     "BlockDiskStore durability wait timed out before fence %s "
                     "completed",
@@ -1576,7 +1744,8 @@ class BlockDiskStore:
                 dropped,
                 terminal_error,
             )
-            return set()
+            if not allow_partial:
+                return set()
 
         with self.global_budget.mutation_guard() as locked:
             if not locked:
@@ -1614,6 +1783,11 @@ class BlockDiskStore:
                         batch.append(self._write_queue.get_nowait())
                     except queue.Empty:
                         break
+                # Queue capacity is available as soon as items are dequeued;
+                # do not make bounded native producers wait for the entire
+                # serialization/publication batch to finish before retrying.
+                with self._write_lifecycle:
+                    self._write_lifecycle.notify_all()
 
                 try:
                     self._process_write_batch(write_conn, batch)
@@ -1715,12 +1889,26 @@ class BlockDiskStore:
                             else None
                         )
                         self._write_fence_completion(fence_id, failed=True)
+                    deferred_failures: set[str] = set()
                     for item in batch:
                         if item and item[0] == "__fence__":
-                            self._fail_write_fence(
-                                str(item[1]),
-                                "global block-cache publication lock unavailable",
+                            deferred_failures.add(str(item[1]))
+                    with self._stats_lock:
+                        deferred_failures.update(
+                            pending_fence_id
+                            for pending_fence_id, state in self._write_fences.items()
+                            if (
+                                bool(state.get("sealed"))
+                                and bool(state.get("seal_enqueued"))
+                                and not state.get("post_eviction_complete")
+                                and self._write_fence_publication_ready_locked(state)
                             )
+                        )
+                    for pending_fence_id in deferred_failures:
+                        self._fail_write_fence(
+                            pending_fence_id,
+                            "global block-cache publication lock unavailable",
+                        )
                     return
                 metadata_before = self._index_physical_bytes()
                 for item in batch:
@@ -1772,6 +1960,23 @@ class BlockDiskStore:
                             item[0].hex()[:12] if isinstance(item[0], bytes) else "?"
                         )
                         logger.warning(f"Background writer error ({h}): {e}")
+
+                # A fence control sentinel may be deferred when the bounded
+                # data FIFO is full. Finalize it from the writer only after
+                # every admitted payload for that fence has been processed;
+                # this preserves FIFO durability without making control-path
+                # completion droppable under data pressure.
+                with self._stats_lock:
+                    for pending_fence_id, state in self._write_fences.items():
+                        if (
+                            bool(state.get("sealed"))
+                            and bool(state.get("seal_enqueued"))
+                            and not state.get("seal_failed")
+                            and not state.get("post_eviction_complete")
+                            and self._write_fence_publication_ready_locked(state)
+                            and pending_fence_id not in fences_to_finalize
+                        ):
+                            fences_to_finalize.append(pending_fence_id)
                 metadata_delta = self._index_physical_bytes() - metadata_before
                 with self._stats_lock:
                     strict_reconcile = any(
@@ -1887,7 +2092,7 @@ class BlockDiskStore:
             state = self._write_fences.get(fence_id)
             if state is None:
                 return
-            if not self._write_fence_ready_locked(state):
+            if not self._write_fence_publication_ready_locked(state):
                 state["seal_enqueued"] = False
                 return
             queued_hashes = list(state.get("_queued_hashes") or ())

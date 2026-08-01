@@ -320,6 +320,77 @@ def estimate_cache_bytes_for_tokens_from_config(
     return max(0, int(token_count)) * estimate_kv_bytes_per_token_from_config(config)
 
 
+def estimate_dsv4_delta_transport_bytes_from_config(
+    config,
+    start_token: int,
+    end_token: int,
+    *,
+    pool_quant_enabled: Optional[bool] = None,
+    block_size: int = 256,
+    anchor_interval_blocks: int = 8,
+) -> Optional[int]:
+    """Conservatively size a native DSV4 block-delta donation before capture.
+
+    The cumulative compressor/indexer rows are emitted once across the delta
+    chain.  Exact local-SWA and incomplete-buffer state is duplicated at each
+    periodic/terminal anchor.  Include a deliberately conservative per-layer
+    record allowance for Python/safetensors metadata so a finite block-aware
+    RAM/L2 limit can reject the donation before block records allocate.
+    """
+
+    start = max(0, int(start_token or 0))
+    end = max(start, int(end_token or 0))
+    block = max(1, int(block_size or 1))
+    anchor_blocks = max(1, int(anchor_interval_blocks or 1))
+    if end <= start:
+        return 0
+
+    final = estimate_dsv4_cache_memory_from_config(
+        config,
+        end,
+        pool_quant_enabled=pool_quant_enabled,
+    )
+    initial = estimate_dsv4_cache_memory_from_config(
+        config,
+        start,
+        pool_quant_enabled=pool_quant_enabled,
+    )
+    if final is None or initial is None:
+        return None
+
+    final_pool = (
+        final.csa_pool_bytes
+        + final.csa_indexer_bytes
+        + final.hca_pool_bytes
+    )
+    initial_pool = (
+        initial.csa_pool_bytes
+        + initial.csa_indexer_bytes
+        + initial.hca_pool_bytes
+    )
+    pool_delta_bytes = max(0, final_pool - initial_pool)
+
+    anchor_interval = block * anchor_blocks
+    periodic_anchors = max(
+        0,
+        end // anchor_interval - start // anchor_interval,
+    )
+    terminal_anchor = 0 if end % anchor_interval == 0 else 1
+    anchor_count = max(1, periodic_anchors + terminal_anchor)
+    anchor_bytes = anchor_count * (
+        final.local_swa_bytes + final.tail_bytes
+    )
+
+    block_count = (end - start + block - 1) // block
+    layer_count = (
+        final.ratio_zero_layers
+        + final.ratio_four_layers
+        + final.ratio_high_layers
+    )
+    metadata_bytes = block_count * max(1, layer_count) * 4096
+    return int(pool_delta_bytes + anchor_bytes + metadata_bytes)
+
+
 def estimate_cache_token_capacity_from_config(
     config,
     budget_bytes: int,

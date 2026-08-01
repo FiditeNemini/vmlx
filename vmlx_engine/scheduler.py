@@ -96,6 +96,63 @@ def _block_cache_detail(paged_cache_manager: Any, *, disk_hit: bool) -> str:
     return "paged+disk" if disk_hit else "paged"
 
 
+def _prompt_snapshot_backend_limit_bytes(
+    *,
+    memory_aware_cache: Any = None,
+    disk_cache: Any = None,
+    block_aware_cache: Any = None,
+) -> Optional[int]:
+    """Return the largest enabled single-entry RAM/L2 snapshot budget.
+
+    DSV4 prompt snapshots are donated to the block-aware paged/L2 hierarchy,
+    not only the legacy memory/disk caches.  A zero block-RAM ceiling means
+    unbounded resident storage when paged RAM is enabled; a zero disk ceiling
+    means an explicitly unbounded L2.  Either unbounded destination removes
+    the finite admission cap.  Legacy backend semantics remain unchanged.
+    """
+
+    limits: list[int] = []
+    unbounded = False
+
+    if memory_aware_cache is not None:
+        memory_max = int(
+            memory_aware_cache.get_stats().get("max_bytes", 0) or 0
+        )
+        if memory_max > 0:
+            limits.append(int(memory_max * 0.95))
+
+    if disk_cache is not None:
+        disk_max = int(getattr(disk_cache, "max_size_bytes", 0) or 0)
+        if disk_max <= 0:
+            unbounded = True
+        else:
+            limits.append(disk_max)
+
+    paged = getattr(block_aware_cache, "paged_cache", None)
+    if paged is not None:
+        if not bool(getattr(paged, "disk_only", False)):
+            resident_max = int(
+                getattr(paged, "max_resident_bytes", 0) or 0
+            )
+            if resident_max <= 0:
+                unbounded = True
+            else:
+                limits.append(int(resident_max * 0.95))
+        block_disk = getattr(paged, "_disk_store", None)
+        if block_disk is not None:
+            block_disk_max = int(
+                getattr(block_disk, "max_size_bytes", 0) or 0
+            )
+            if block_disk_max <= 0:
+                unbounded = True
+            else:
+                limits.append(block_disk_max)
+
+    if unbounded:
+        return None
+    return max(limits) if limits else None
+
+
 def _m3_vl_cached_prefix_covers_media_tokens(model: Any, request: Any) -> bool:
     """Return True only when restored M3 state contains every media splice.
 
@@ -3004,26 +3061,11 @@ class Scheduler:
         # generator (including the early-return DSV4 path below) the largest
         # single-entry limit of the enabled RAM/disk backends so it can reject
         # an oversize boundary before paying for that copy.
-        _snapshot_limits: list[int] = []
-        if self.memory_aware_cache is not None:
-            _memory_max = int(
-                self.memory_aware_cache.get_stats().get("max_bytes", 0) or 0
-            )
-            if _memory_max > 0:
-                _snapshot_limits.append(int(_memory_max * 0.95))
-        if self.disk_cache is not None:
-            _disk_max = int(getattr(self.disk_cache, "max_size_bytes", 0) or 0)
-            if _disk_max <= 0:
-                # Zero means an explicitly unbounded disk cache.
-                _snapshot_limits = []
-                _prompt_snapshot_max_bytes = None
-            else:
-                _snapshot_limits.append(_disk_max)
-                _prompt_snapshot_max_bytes = max(_snapshot_limits)
-        else:
-            _prompt_snapshot_max_bytes = (
-                max(_snapshot_limits) if _snapshot_limits else None
-            )
+        _prompt_snapshot_max_bytes = _prompt_snapshot_backend_limit_bytes(
+            memory_aware_cache=self.memory_aware_cache,
+            disk_cache=self.disk_cache,
+            block_aware_cache=self.block_aware_cache,
+        )
 
         # DSV4-Flash family bypass. mlx_lm.BatchGenerator's prefill /
         # decode loop calls mx.eval / mx.async_eval / inputs.tolist() on

@@ -198,6 +198,10 @@ class CacheBlock:
     # serializing the same payload or discarding its only restorable copy.
     durability_write_pending: bool = False
     durability_retry_after: float = 0.0
+    # A native disk-only fallback became durable while this block still had
+    # request references. The final ref release performs the deferred RAM drop
+    # under the manager lock instead of racing an active reconstruction.
+    release_resident_when_unreferenced: bool = False
 
     # Metadata
     token_count: int = 0
@@ -226,6 +230,7 @@ class CacheBlock:
         self.keep_resident = False
         self.durability_write_pending = False
         self.durability_retry_after = 0.0
+        self.release_resident_when_unreferenced = False
 
     def touch(self) -> None:
         """Update last access time."""
@@ -987,13 +992,42 @@ class PagedCacheManager:
         expires once the corresponding disk payload is readable and removed.
         """
         with self._lock:
-            block.cache_data = None
+            self._release_resident_payload_locked(block)
+
+    def _release_resident_payload_locked(self, block: CacheBlock) -> None:
+        """Drop one RAM mirror while ``self._lock`` is already held."""
+
+        block.cache_data = None
+        block.cache_data_from_disk = False
+        block.cache_data_transient = False
+        block.keep_resident = False
+        block.durability_write_pending = False
+        block.durability_retry_after = 0.0
+        block.release_resident_when_unreferenced = False
+        self._release_resident(block)
+
+    def release_resident_payload_when_unreferenced(
+        self,
+        block: CacheBlock,
+    ) -> bool:
+        """Drop a durable disk-only fallback without racing active readers.
+
+        Returns ``True`` when the payload was released immediately. An active
+        block is merely marked; whichever request releases the final reference
+        performs the drop under the same paged-cache lock.
+        """
+
+        with self._lock:
             block.cache_data_from_disk = False
             block.cache_data_transient = False
             block.keep_resident = False
             block.durability_write_pending = False
             block.durability_retry_after = 0.0
-            self._release_resident(block)
+            if block.ref_count > 0:
+                block.release_resident_when_unreferenced = True
+                return False
+            self._release_resident_payload_locked(block)
+            return True
 
     def make_resident_payload_evictable(self, block: CacheBlock) -> None:
         """Retain a restored L1 payload but return it to normal LRU policy.
@@ -1115,6 +1149,8 @@ class PagedCacheManager:
             block.ref_count -= 1
 
             if block.ref_count <= 0:
+                if block.release_resident_when_unreferenced:
+                    self._release_resident_payload_locked(block)
                 # Remove from allocated
                 del self.allocated_blocks[block_id]
 
@@ -1152,6 +1188,8 @@ class PagedCacheManager:
                 block.ref_count -= 1
 
                 if block.ref_count <= 0:
+                    if block.release_resident_when_unreferenced:
+                        self._release_resident_payload_locked(block)
                     self.allocated_blocks.pop(block.block_id, None)
                     to_free.append(block)
                     self.stats.allocated_blocks -= 1
@@ -1707,6 +1745,8 @@ class PagedCacheManager:
                 # Keep cache mapping (block_hash/hash_value) so prefix hits can
                 # revive this block, but make it reclaimable via free LRU queue.
                 if block.ref_count == 0:
+                    if block.release_resident_when_unreferenced:
+                        self._release_resident_payload_locked(block)
                     if block.prev_free_block is None and block.next_free_block is None:
                         self.free_block_queue.append(block)
                         self.stats.allocated_blocks = max(0, self.stats.allocated_blocks - 1)

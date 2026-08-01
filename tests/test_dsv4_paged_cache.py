@@ -2591,7 +2591,7 @@ def test_dsv4_generator_captures_prompt_snapshot_when_cache_store_enabled(monkey
 
 
 def test_dsv4_generator_rejects_oversize_nested_snapshot_before_copy(monkeypatch):
-    """Nested composite state must be counted before the destructive copy."""
+    """Finite block budgets reject delta capture before record allocation."""
     import mlx.core as mx
 
     from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
@@ -2606,6 +2606,18 @@ def test_dsv4_generator_rejects_oversize_nested_snapshot_before_copy(monkeypatch
         )
 
     class _Model:
+        args = {
+            "model_type": "deepseek_v4",
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
+            "head_dim": 32,
+            "sliding_window": 128,
+            "index_head_dim": 32,
+            "torch_dtype": "bfloat16",
+            "compress_ratios": [0, 4],
+        }
+
         def make_cache(self):
             return [_CompositeCache()]
 
@@ -2623,6 +2635,15 @@ def test_dsv4_generator_rejects_oversize_nested_snapshot_before_copy(monkeypatch
         "_snapshot_dsv4_cache",
         staticmethod(_snapshot),
     )
+    monkeypatch.setattr(
+        DSV4BatchGenerator,
+        "_reset_dsv4_block_records",
+        classmethod(
+            lambda cls, cache, start: (_ for _ in ()).throw(
+                AssertionError("oversize capture must be rejected before records")
+            )
+        ),
+    )
     gen = DSV4BatchGenerator(
         _Model(),
         capture_prompt_snapshot=True,
@@ -2635,7 +2656,7 @@ def test_dsv4_generator_rejects_oversize_nested_snapshot_before_copy(monkeypatch
 
     assert calls == []
     assert prompt_responses[0].prompt_cache_snapshot is None
-    assert gen.prompt_snapshot_last_estimated_bytes == (8 + 16 + 32) * 4
+    assert gen.prompt_snapshot_last_estimated_bytes > 1
     assert gen.prompt_snapshot_oversize_skips == 1
 
 
@@ -2717,6 +2738,42 @@ def test_scheduler_passes_snapshot_budget_to_dsv4_and_surfaces_telemetry():
         assert '"DSV4BatchGenerator"' in source
         assert '"prompt_snapshot_last_estimated_bytes"' in source
         assert '"prompt_snapshot_headroom_skips"' in source
+
+
+def test_scheduler_snapshot_budget_includes_block_aware_ram_and_l2():
+    from vmlx_engine.scheduler import _prompt_snapshot_backend_limit_bytes
+
+    legacy_memory = SimpleNamespace(
+        get_stats=lambda: {"max_bytes": 1000}
+    )
+    legacy_disk = SimpleNamespace(max_size_bytes=2000)
+    paged = SimpleNamespace(
+        disk_only=False,
+        max_resident_bytes=3000,
+        _disk_store=SimpleNamespace(max_size_bytes=4000),
+    )
+    block_cache = SimpleNamespace(paged_cache=paged)
+
+    assert _prompt_snapshot_backend_limit_bytes(
+        memory_aware_cache=legacy_memory,
+        disk_cache=legacy_disk,
+        block_aware_cache=block_cache,
+    ) == 4000
+    assert _prompt_snapshot_backend_limit_bytes(
+        block_aware_cache=SimpleNamespace(
+            paged_cache=SimpleNamespace(
+                disk_only=True,
+                max_resident_bytes=0,
+                _disk_store=SimpleNamespace(max_size_bytes=5000),
+            )
+        )
+    ) == 5000
+
+    # Preserve the legacy meaning: an explicitly unbounded disk backend wins.
+    assert _prompt_snapshot_backend_limit_bytes(
+        memory_aware_cache=legacy_memory,
+        disk_cache=SimpleNamespace(max_size_bytes=0),
+    ) is None
 
 
 def test_dsv4_cache_hit_extends_clean_snapshot_from_uncached_tail(monkeypatch):

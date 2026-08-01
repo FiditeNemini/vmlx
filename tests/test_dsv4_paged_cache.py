@@ -519,8 +519,8 @@ def test_panel_names_dsv4_cache_as_native_composite_not_generic_paged_kv():
     assert "DSV4 Native Cache" not in form
     assert "const pagedCacheToggleLabel = dsv4Active" not in form
     assert "DSV4 Native Composite Prefix Cache" not in form
-    assert "DSV4 generic paged-KV controls are hidden" in form
-    assert "restored SWA+CSA/HCA state has not proven output-equivalent" in form
+    assert "there is no separate hidden DSV4 cache toggle" in form
+    assert "restored SWA+CSA/HCA state has not proven output-equivalent" not in form
 
 
 def test_panel_suppresses_dsv4_batch_sizes_but_passes_real_prefill_step():
@@ -550,8 +550,8 @@ def test_panel_suppresses_dsv4_batch_sizes_but_passes_real_prefill_step():
     assert "if (!dsv4Active && completionBatchSize != null)" in settings
 
 
-def test_dsv4_ui_defaults_composite_cache_off_and_exposes_no_false_reuse_toggle():
-    """DSV4 product settings truthfully expose full-prefill-only serving."""
+def test_dsv4_ui_exposes_native_composite_reuse_without_a_second_toggle():
+    """DSV4 uses the shared tier controls without inventing a second cache."""
     from pathlib import Path
 
     form = Path("panel/src/renderer/src/components/sessions/SessionConfigForm.tsx").read_text()
@@ -568,8 +568,9 @@ def test_dsv4_ui_defaults_composite_cache_off_and_exposes_no_false_reuse_toggle(
     assert "applyDsv4CompositeCacheToggle" not in form
     assert "cacheControlUpdatesForDsv4PoolQuantToggle" not in form
     assert "applyDsv4PoolQuantToggle" not in form
-    assert "const genericPagedCacheToggleDisabled = !dsv4Active && (cachePolicy.pagedCacheDisabled || openPanguExactTypedCache)" in form
-    assert "restored SWA+CSA/HCA state has not proven output-equivalent" in form
+    assert "const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache" in form
+    assert "there is no separate hidden DSV4 cache toggle" in form
+    assert "restored SWA+CSA/HCA state has not proven output-equivalent" not in form
     assert "checked={config.dsv4PrefixCache !== false}" not in form
     assert "DSV4 Composite Prefix Cache" not in form
     assert "DSV4 Native Cache" not in form
@@ -622,8 +623,8 @@ def test_dsv4_launch_filters_stale_saved_and_additional_args():
     assert "--dsv4-enable-prefix-cache" in sessions
 
 
-def test_dsv4_cache_ui_exposes_no_unusable_cache_owner_or_stale_duplicate_labels():
-    """The DSV4 product surface must not advertise nonfunctional reuse."""
+def test_dsv4_cache_ui_uses_shared_cache_owner_without_duplicate_labels():
+    """The DSV4 product surface uses shared controls for its typed cache."""
     from pathlib import Path
 
     form = Path("panel/src/renderer/src/components/sessions/SessionConfigForm.tsx").read_text()
@@ -633,10 +634,11 @@ def test_dsv4_cache_ui_exposes_no_unusable_cache_owner_or_stale_duplicate_labels
     assert 'label="Block Disk Cache (SSD / L2)"' in form
     assert "DSV4 Block Disk Cache (SSD / L2)" not in form
 
-    # Generic prefix/paged/stored-KV controls must be hidden or disabled for
-    # DSV4. The internal paged path is only the block index/L2 transport for
-    # DeepseekV4Cache state; it is not a second DSV4 prefix toggle.
-    assert '!dsv4Active && (\n          <CheckField label="Enable Prefix Cache"' in form
+    # DSV4 uses the standard prefix/RAM/L2 controls; only the incompatible
+    # generic stored-KV codec selector stays disabled. There is no second
+    # DSV4-specific prefix toggle.
+    assert '<CheckField label="Enable Prefix Cache"' in form
+    assert '!dsv4Active && (\n          <CheckField label="Enable Prefix Cache"' not in form
     assert '<CheckField label="In-Memory Paged Cache (RAM)"' in form
     assert 'disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}' in form
     assert "const effectiveStoredCacheQuantization = openPanguExactTypedCache" in form
@@ -651,8 +653,8 @@ def test_dsv4_cache_ui_exposes_no_unusable_cache_owner_or_stale_duplicate_labels
         assert stale_label not in form
 
 
-def test_dsv4_product_ui_has_no_cache_opt_in_but_cli_env_remains_explicit():
-    """Product sessions fail closed while direct CLI diagnostics stay explicit."""
+def test_dsv4_product_ui_uses_shared_cache_defaults_and_cli_env_stays_explicit():
+    """Product sessions default shared tiers while pool codec remains explicit."""
     from pathlib import Path
 
     policy = Path("panel/src/shared/cacheControlPolicy.ts").read_text()
@@ -672,9 +674,13 @@ def test_dsv4_product_ui_has_no_cache_opt_in_but_cli_env_remains_explicit():
 
     assert "const dsv4PrefixOptIn = false" not in sessions
     assert "config.dsv4PoolQuant = false" not in sessions
-    assert "config.enablePrefixCache = false" in sessions
+    assert "config.enablePrefixCache = false" not in sessions
+    assert "if (config.enablePrefixCache === undefined)" in sessions
+    assert "config.enablePrefixCache = true" in sessions
+    assert "if (config.usePagedCache === undefined)" in sessions
     assert "config.usePagedCache = false" in sessions
-    assert "config.enableBlockDiskCache = false" in sessions
+    assert "if (config.enableBlockDiskCache === undefined)" in sessions
+    assert "config.enableBlockDiskCache = true" in sessions
     assert "config.dsv4PoolQuant = detected.dsv4PoolQuantDefault" in sessions
     assert "delete config.dsv4PoolQuant" in sessions
     assert "dsv4PoolQuantDefault: freshDetectedConfig?.dsv4PoolQuantDefault" in sessions

@@ -577,6 +577,7 @@ def _fixture_ui_capture(
     source_records = []
     source_reasoning = []
     source_ui_turns = []
+    source_user_messages = []
     resolved_sampling_records = []
     request_correlation_turns = []
     cache_rows = []
@@ -588,6 +589,62 @@ def _fixture_ui_capture(
             if turn < 3
             else r"UI-V5-3 $43 \(47 \times 19\)"
         )
+        if phase_index == 0 and turn == 1:
+            request_content = (
+                "Keep literal $43 and render "
+                r"$47 \times 19 = 893 < 920 = 46 \times 20$."
+            )
+            math_source = r"47 \times 19 = 893 < 920 = 46 \times 20"
+            math_source_codepoints = "-".join(
+                f"{ord(char):x}" for char in math_source
+            )
+            user_html = (
+                '<p>Keep literal $43 and render '
+                '<span class="math-inline" '
+                f'data-vmlx-math-source-codepoints="{math_source_codepoints}" '
+                'data-vmlx-math-delimiter="single-dollar" '
+                'data-vmlx-math-display-mode="inline">'
+                '<span class="katex">47 × 19 = 893 &lt; 920 = 46 × 20</span>'
+                '</span>.</p>'
+            )
+            source_user_messages.append(
+                {
+                    "messageId": f"u{turn}",
+                    "role": "user",
+                    "visible": True,
+                    "text": (
+                        "Keep literal $43 and render "
+                        "47 × 19 = 893 < 920 = 46 × 20."
+                    ),
+                    "html": user_html,
+                    "katexCount": 1,
+                    "katexErrorCount": 0,
+                    "currencyOccurrences": [
+                        {"text": "$43", "insideKatex": False}
+                    ],
+                }
+            )
+        else:
+            request_content = (
+                f"Reply exactly {content}"
+                if turn < 3
+                else (
+                    "Include UI-V5-3, literal $43, and "
+                    r"inline \(47 \times 19\)."
+                )
+            )
+            source_user_messages.append(
+                {
+                    "messageId": f"u{turn}",
+                    "role": "user",
+                    "visible": True,
+                    "text": request_content,
+                    "html": f"<p>{request_content}</p>",
+                    "katexCount": 0,
+                    "katexErrorCount": 0,
+                    "currencyOccurrences": [],
+                }
+            )
         events = [
             {"seq": 0, "type": "reasoning_delta", "text": reasoning},
         ]
@@ -643,14 +700,7 @@ def _fixture_ui_capture(
                         "messages": [
                             {
                                 "role": "user",
-                                "content": (
-                                    f"Reply exactly {content}"
-                                    if turn < 3
-                                    else (
-                                        "Include UI-V5-3, literal $43, and "
-                                        r"inline \(47 \times 19\)."
-                                    )
-                                ),
+                                "content": request_content,
                             }
                         ],
                         "message_id": f"m{turn}",
@@ -685,6 +735,7 @@ def _fixture_ui_capture(
         source_ui_turns.append(
             {
                 "turn": turn,
+                "prompt": request_content,
                 "proofRequestId": f"u{turn}",
                 "terminalProofRequestId": f"u{turn}",
                 "requestIds": [f"wire-{phase_index}-{turn}"],
@@ -819,6 +870,9 @@ def _fixture_ui_capture(
                         "chat:complete.responseId == health.scheduler."
                         "last_cache_execution.request_id"
                     ),
+                },
+                "renderedDom": {
+                    "userMessages": source_user_messages,
                 },
             }
         ),
@@ -5588,6 +5642,44 @@ def test_r20_v5_ui_facts_do_not_invent_unobserved_settings_or_layout(
         "preview_argv_health_parity",
     }.isdisjoint(facts)
     assert hashes
+
+    broken_rendering = deepcopy(captures)
+    phase_zero_capture = broken_rendering[0][0]
+    phase_zero_source = json.loads(
+        base64.b64decode(
+            phase_zero_capture["source_proof_b64"],
+            validate=True,
+        )
+    )
+    phase_zero_user = phase_zero_source["renderedDom"]["userMessages"][0]
+    phase_zero_user["katexCount"] = 0
+    phase_zero_user["html"] = "<p>Keep literal $43 and render raw TeX.</p>"
+    phase_zero_capture["source_proof_b64"] = _fixture_json_b64(
+        phase_zero_source
+    )
+    broken_rendering[0] = (
+        phase_zero_capture,
+        json.dumps(
+            phase_zero_capture,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+    )
+    broken_facts, _ = module._v5_ui_facts(
+        broken_rendering,
+        {
+            "dom": dom,
+            "dom_bytes_sha256": hashlib.sha256(dom_bytes).hexdigest(),
+            "phase_observations": phase_observations,
+        },
+        bundle,
+    )
+    assert {
+        "rendering",
+        "katex_rendered",
+        "currency_preserved",
+        "markdown_rendered",
+    }.isdisjoint(broken_facts)
 
     overwritten = deepcopy(captures)
     phase_five_capture = overwritten[5][0]

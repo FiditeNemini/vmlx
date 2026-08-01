@@ -5604,6 +5604,89 @@ def _v5_has_bad_repetition(text: str) -> bool:
     return False
 
 
+V5_RENDERING_TEX_SOURCE = (
+    r"47 \times 19 = 893 < 920 = 46 \times 20"
+)
+
+
+def _v5_primary_user_rendering_facts(
+    source_proof: dict[str, Any],
+) -> set[str]:
+    """Attest the deterministic, visible phase-0 Markdown/KaTeX receipt.
+
+    A model may truthfully replace TeX with Unicode or omit a requested closing
+    delimiter.  That is not evidence that the renderer failed.  The real Chat
+    UI always renders the phase-0 user prompt through the same literal Markdown
+    and KaTeX pipeline, so bind the completed DOM node to that exact prompt and
+    message ID instead of requiring a stochastic model to echo syntax bytes.
+    """
+
+    ui_turns = source_proof.get("uiTurnEvidence")
+    rendered_dom = source_proof.get("renderedDom")
+    user_messages = (
+        rendered_dom.get("userMessages")
+        if isinstance(rendered_dom, dict)
+        else None
+    )
+    if not isinstance(ui_turns, list) or not isinstance(user_messages, list):
+        return set()
+
+    exact_span = f"${V5_RENDERING_TEX_SOURCE}$"
+    rendering_turns = [
+        row
+        for row in ui_turns
+        if isinstance(row, dict)
+        and "$43" in str(row.get("prompt") or "")
+        and exact_span in str(row.get("prompt") or "")
+    ]
+    if len(rendering_turns) != 1:
+        return set()
+    user_message_id = str(rendering_turns[0].get("userMessageId") or "")
+    rendered_rows = [
+        row
+        for row in user_messages
+        if isinstance(row, dict)
+        and str(row.get("messageId") or "") == user_message_id
+    ]
+    if not user_message_id or len(rendered_rows) != 1:
+        return set()
+
+    rendered = rendered_rows[0]
+    html = str(rendered.get("html") or "")
+    text = str(rendered.get("text") or "")
+    compact_text = re.sub(r"\s+", "", text)
+    source_codepoints = "-".join(
+        f"{ord(char):x}" for char in V5_RENDERING_TEX_SOURCE
+    )
+    currency = rendered.get("currencyOccurrences")
+    if (
+        rendered.get("role") != "user"
+        or rendered.get("visible") is not True
+        or rendered.get("katexCount") != 1
+        or rendered.get("katexErrorCount") != 0
+        or currency != [{"text": "$43", "insideKatex": False}]
+        or "$43" not in text
+        or "47×19=893<920=46×20" not in compact_text
+        or r"\times" in text
+        or 'class="katex"' not in html
+        or 'class="katex-error"' in html
+        or "<p>" not in html
+        or (
+            f'data-vmlx-math-source-codepoints="{source_codepoints}"'
+            not in html
+        )
+        or 'data-vmlx-math-delimiter="single-dollar"' not in html
+        or 'data-vmlx-math-display-mode="inline"' not in html
+    ):
+        return set()
+    return {
+        "rendering",
+        "katex_rendered",
+        "currency_preserved",
+        "markdown_rendered",
+    }
+
+
 def _v5_ui_facts(
     captures: list[tuple[dict[str, Any], bytes]],
     runtime: dict[str, Any],
@@ -5793,7 +5876,10 @@ def _v5_ui_facts(
         hashlib.sha256(source_proof_bytes).hexdigest(),
         selected_runtime["dom_bytes_sha256"],
     ]
-    facts: set[str] = {"real_start_button"}
+    facts: set[str] = {
+        "real_start_button",
+        *_v5_primary_user_rendering_facts(source_proofs_by_phase[0]),
+    }
     reasoning_values: list[str] = []
     content_values: list[str] = []
     assistant_records = source_proof.get("assistantRecords")
@@ -5811,8 +5897,6 @@ def _v5_ui_facts(
     saw_tool_call = False
     saw_tool_result = False
     timings_match = True
-    rendering_requested = False
-    rendering_match = True
     for index, turn in enumerate(turns):
         if not isinstance(turn, dict):
             return set(), []
@@ -5918,15 +6002,6 @@ def _v5_ui_facts(
             )
             for key in event_timing
         )
-        html = str(message.get("html") or "")
-        request_text = json.dumps(request, sort_keys=True)
-        if "$43" in request_text or "\\\\(" in request_text:
-            rendering_requested = True
-            rendering_match = rendering_match and (
-                "$43" in html
-                and 'class="katex"' in html
-                and "\\times" not in html
-            )
         saw_tool_call = saw_tool_call or any(
             row.get("type") == "tool_call"
             and row.get("name") in {"file_info", "run_command"}
@@ -5964,15 +6039,6 @@ def _v5_ui_facts(
             facts.add("reasoning_tool_reasoning_tool_answer")
     if timings_match:
         facts.add("cache_ttft_tps")
-    if rendering_requested and rendering_match:
-        facts.update(
-            {
-                "rendering",
-                "katex_rendered",
-                "currency_preserved",
-                "markdown_rendered",
-            }
-        )
     if len(set(content_values)) == len(content_values):
         facts.update(
             {

@@ -4380,6 +4380,15 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "real_ui_tool_probe_2.txt" in source
     assert "REAL_UI_LIVE_TOOL_ONE" in source
     assert "REAL_UI_LIVE_TOOL_TWO" in source
+    assert (
+        "printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt && "
+        "cat real_ui_tool_probe_1.txt"
+    ) in source
+    assert (
+        'test "$(cat real_ui_tool_probe_1.txt)" = REAL_UI_LIVE_TOOL_ONE && '
+        "printf %s REAL_UI_LIVE_TOOL_TWO > real_ui_tool_probe_2.txt && "
+        "cat real_ui_tool_probe_2.txt"
+    ) in source
     assert "VMLINUX_REAL_UI_PROMPT_3" in source
     assert "Third UI turn" in source
     assert "Currency: $43" in source

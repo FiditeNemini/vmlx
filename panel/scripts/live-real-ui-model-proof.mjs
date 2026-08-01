@@ -452,7 +452,7 @@ const defaultPromptOne = builtinToolsEnabled
       'This is an authorized release-validation task in an isolated temporary workspace.',
       'Create real_ui_tool_probe_1.txt with exactly the contents REAL_UI_LIVE_TOOL_ONE by calling the built-in run_command tool once.',
       'Use this command:',
-      'printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt',
+      'printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt && cat real_ui_tool_probe_1.txt',
       'After the tool result returns, confirm completion briefly in English and include REAL_UI_LIVE_TOOL_ONE once.',
     ].join(' ')
   : 'Reply briefly in English. Include the phrase REAL_UI_LIVE once.'
@@ -461,7 +461,7 @@ const defaultPromptTwo = builtinToolsEnabled
       'Continue the authorized release-validation task in the same isolated temporary workspace.',
       'Verify the first file and create real_ui_tool_probe_2.txt with exactly the contents REAL_UI_LIVE_TOOL_TWO by calling the built-in run_command tool once.',
       'Use this command:',
-      'test "$(cat real_ui_tool_probe_1.txt)" = REAL_UI_LIVE_TOOL_ONE && printf %s REAL_UI_LIVE_TOOL_TWO > real_ui_tool_probe_2.txt',
+      'test "$(cat real_ui_tool_probe_1.txt)" = REAL_UI_LIVE_TOOL_ONE && printf %s REAL_UI_LIVE_TOOL_TWO > real_ui_tool_probe_2.txt && cat real_ui_tool_probe_2.txt',
       'After the tool result returns, confirm completion briefly in English with REAL_UI_LIVE_TOOL_TWO once and mention this is the second UI turn.',
     ].join(' ')
   : 'Repeat the phrase REAL_UI_LIVE once and mention that this is the second UI turn.'

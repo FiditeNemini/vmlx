@@ -4379,6 +4379,32 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         }
     })
 
+    it('shows a DSV4 Top P 0.95 advisory without mutating server or API sampling', () => {
+        const form = readFileSync(
+            'src/renderer/src/components/sessions/SessionConfigForm.tsx',
+            'utf8',
+        )
+        const chat = readFileSync(
+            'src/renderer/src/components/chat/ChatSettings.tsx',
+            'utf8',
+        )
+
+        expect(form).toContain('dsv4Active && (')
+        expect(form).toContain("t('common.dsv4TopPAdvisory')")
+        expect(form).not.toContain("onChange('defaultTopP', 95)")
+        expect(chat).toContain("hydrationCurrent && detectedFamily === 'deepseek-v4'")
+        expect(chat).toContain('data-vmlx-warning="dsv4-top-p-advisory"')
+        expect(chat).toContain("t('common.dsv4TopPAdvisory')")
+        expect(chat).not.toContain("update('topP', 0.95)")
+
+        for (const locale of ['en', 'es', 'ja', 'ko', 'zh']) {
+            const messages = JSON.parse(
+                readFileSync(`src/renderer/src/i18n/locales/${locale}.json`, 'utf8'),
+            )
+            expect(messages.common.dsv4TopPAdvisory).toMatch(/0[.,]95/)
+        }
+    })
+
     it('video sampling controls are gated to runtime video-capable families', () => {
         const source = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
         const allowlistStart = source.indexOf('const detectedRuntimeVideoCapable = [')

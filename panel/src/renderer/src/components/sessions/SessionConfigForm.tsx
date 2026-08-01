@@ -646,6 +646,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
   return (
     <div className="space-y-0">
+      {dsv4Active && (
+        <IncompatWarning text={t('common.dsv4TopPAdvisory')} />
+      )}
       {lagunaXsTopKMetadataWarning && (
         <IncompatWarning text={t('sessions.config.lagunaXsTopKWarning')} />
       )}

@@ -130,6 +130,16 @@ describe('chat settings cross-family compatibility warnings', () => {
     expect(source).not.toContain("sessionConfig?.dsv4RawMax === true")
   })
 
+  it('shows the DSV4 Top P advisory after model hydration without changing the effective value', () => {
+    const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
+
+    expect(source).toContain("hydrationCurrent && detectedFamily === 'deepseek-v4'")
+    expect(source).toContain('data-vmlx-warning="dsv4-top-p-advisory"')
+    expect(source).toContain("t('common.dsv4TopPAdvisory')")
+    expect(source).not.toContain("update('topP', 0.95)")
+    expect(source).not.toContain("setOverrides({ topP: 0.95 })")
+  })
+
   it('distinguishes model-default effort from the separate Auto thinking mode', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 

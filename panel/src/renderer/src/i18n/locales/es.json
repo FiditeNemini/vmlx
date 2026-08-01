@@ -34,6 +34,7 @@
     "dismiss": "Descartar",
     "language": "Idioma",
     "or": "o",
+    "dsv4TopPAdvisory": "DeepSeek V4 Flash: use Top P 0,95. Otros valores pueden aumentar el riesgo de bucles. vMLX solo muestra esta advertencia y no cambia esta configuración automáticamente.",
     "theme": {
       "dark": "Tema oscuro",
       "light": "Tema claro",

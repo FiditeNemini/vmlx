@@ -456,6 +456,17 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
 
         <div className="border-t border-border" />
 
+        {!isImageModel && hydrationCurrent && detectedFamily === 'deepseek-v4' && (
+          <div
+            data-vmlx-warning="dsv4-top-p-advisory"
+            role="alert"
+            className="flex items-start gap-2 rounded border border-warning/30 bg-warning/10 p-3 text-xs text-warning"
+          >
+            <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+            <p className="leading-snug">{t('common.dsv4TopPAdvisory')}</p>
+          </div>
+        )}
+
         {!isImageModel && inferenceReady && compatibilityWarnings.length > 0 && (
           <div className="rounded border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
             <div className="flex items-start gap-2">

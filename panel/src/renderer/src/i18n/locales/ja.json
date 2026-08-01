@@ -34,6 +34,7 @@
     "dismiss": "閉じる",
     "language": "言語",
     "or": "または",
+    "dsv4TopPAdvisory": "DeepSeek V4 Flash では Top P 0.95 を使用してください。他の値ではループのリスクが高まる可能性があります。vMLX は警告のみを表示し、この設定を自動的に変更しません。",
     "theme": {
       "dark": "ダークテーマ",
       "light": "ライトテーマ",

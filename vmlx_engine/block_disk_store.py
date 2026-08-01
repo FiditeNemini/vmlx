@@ -477,6 +477,19 @@ class BlockDiskStore:
                 "CREATE INDEX IF NOT EXISTS idx_blocks_parent "
                 "ON blocks(parent_hash)"
             )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS block_write_pins (
+                    block_hash    TEXT NOT NULL,
+                    owner_lease_id TEXT NOT NULL,
+                    fence_id      TEXT NOT NULL,
+                    created_at    REAL NOT NULL,
+                    PRIMARY KEY (block_hash, owner_lease_id, fence_id)
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_block_write_pins_owner "
+                "ON block_write_pins(owner_lease_id, fence_id)"
+            )
             conn.commit()
         finally:
             conn.close()
@@ -1087,6 +1100,92 @@ class BlockDiskStore:
                 "_active": 0,
             }
         return fence_id
+
+    def _pin_write_fence_block_locked(
+        self,
+        conn: sqlite3.Connection,
+        fence_id: Optional[str],
+        block_hash: bytes,
+    ) -> None:
+        """Protect an unfinished fence block from root-global eviction."""
+
+        if not fence_id:
+            return
+        with self._stats_lock:
+            state = self._write_fences.get(str(fence_id))
+            if state is None or state.get("post_eviction_complete"):
+                return
+        conn.execute(
+            "INSERT OR IGNORE INTO block_write_pins "
+            "(block_hash, owner_lease_id, fence_id, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                bytes(block_hash).hex(),
+                self.global_budget.lease_id,
+                str(fence_id),
+                time.time(),
+            ),
+        )
+        conn.commit()
+
+    def _release_write_fence_pins_locked(
+        self,
+        conn: sqlite3.Connection,
+        fence_ids: set[str] | None = None,
+    ) -> set[str]:
+        """Release this process's persistent pins while the root lock is held."""
+
+        owner = self.global_budget.lease_id
+        if fence_ids is None:
+            rows = conn.execute(
+                "SELECT DISTINCT fence_id FROM block_write_pins "
+                "WHERE owner_lease_id = ?",
+                (owner,),
+            ).fetchall()
+            released = {str(row[0]) for row in rows}
+            conn.execute(
+                "DELETE FROM block_write_pins WHERE owner_lease_id = ?",
+                (owner,),
+            )
+        else:
+            released = {str(fence_id) for fence_id in fence_ids if fence_id}
+            if not released:
+                return set()
+            ordered = sorted(released)
+            for start in range(0, len(ordered), 500):
+                chunk = ordered[start : start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                conn.execute(
+                    "DELETE FROM block_write_pins "
+                    "WHERE owner_lease_id = ? "
+                    f"AND fence_id IN ({placeholders})",
+                    (owner, *chunk),
+                )
+        conn.commit()
+        return released
+
+    def _release_write_fence_pins(self, fence_id: str) -> None:
+        """Best-effort terminal cleanup for a fence failed off the writer path."""
+
+        try:
+            with self.global_budget.exclusive_mutation_guard() as locked:
+                if not locked:
+                    return
+                conn = sqlite3.connect(str(self._db_path), timeout=5.0)
+                try:
+                    self._release_write_fence_pins_locked(
+                        conn,
+                        {str(fence_id)},
+                    )
+                    self.global_budget._enforce_locked()
+                finally:
+                    conn.close()
+        except Exception as exc:
+            logger.warning(
+                "Could not release block-disk fence pins (%s): %s",
+                fence_id,
+                exc,
+            )
 
     def _prune_write_fences_locked(
         self,
@@ -1872,6 +1971,11 @@ class BlockDiskStore:
             if item
             and not isinstance(item[0], str)
         ]
+        batch_fence_ids = {
+            str(item[6])
+            for item in block_items
+            if len(item) > 6 and item[6] is not None
+        }
         fences_to_finalize: List[str] = []
         net_payload_bytes = 0
         new_block_hashes: list[bytes] = []
@@ -1911,6 +2015,16 @@ class BlockDiskStore:
                         )
                     return
                 metadata_before = self._index_physical_bytes()
+                with self._stats_lock:
+                    terminal_fences = {
+                        pending_fence_id
+                        for pending_fence_id, state in self._write_fences.items()
+                        if state.get("post_eviction_complete")
+                    }
+                self._release_write_fence_pins_locked(
+                    write_conn,
+                    terminal_fences,
+                )
                 for item in batch:
                     fence_id: Optional[str] = None
                     try:
@@ -1949,6 +2063,11 @@ class BlockDiskStore:
                                 token_count,
                                 parent_hash,
                             )
+                            self._pin_write_fence_block_locked(
+                                write_conn,
+                                fence_id,
+                                block_hash,
+                            )
                             net_payload_bytes += written_bytes
                             if written_bytes > 0:
                                 new_block_hashes.append(bytes(block_hash))
@@ -1977,7 +2096,6 @@ class BlockDiskStore:
                             and pending_fence_id not in fences_to_finalize
                         ):
                             fences_to_finalize.append(pending_fence_id)
-                metadata_delta = self._index_physical_bytes() - metadata_before
                 with self._stats_lock:
                     strict_reconcile = any(
                         bool(
@@ -1987,11 +2105,32 @@ class BlockDiskStore:
                         )
                         for pending_fence_id in fences_to_finalize
                     )
+                    protected_blocks = {
+                        (self._db_path.resolve(), block_hash.hex())
+                        for pending_fence_id in fences_to_finalize
+                        for block_hash in (
+                            self._write_fences.get(
+                                pending_fence_id,
+                                {},
+                            ).get("_queued_hashes")
+                            or ()
+                        )
+                    }
+                # Persistent pins bridge separate writer batches.  The final
+                # batch converts them to an in-lock protected set so the same
+                # reconciliation can trim unrelated LRU entries and certify
+                # this exact chain without leaving pins after completion.
+                self._release_write_fence_pins_locked(
+                    write_conn,
+                    set(fences_to_finalize),
+                )
+                metadata_delta = self._index_physical_bytes() - metadata_before
                 try:
                     global_result = (
                         self.global_budget.account_finalized_write_locked(
                             net_payload_bytes + metadata_delta,
                             require_reconciled=strict_reconcile,
+                            protected_blocks=protected_blocks,
                         )
                     )
                     if not global_result.accounted or not global_result.compliant:
@@ -2003,16 +2142,32 @@ class BlockDiskStore:
                                 f"{global_result.max_size_bytes})"
                             )
                         )
-                        for written_hash in new_block_hashes:
-                            self._cleanup_entry(
-                                write_conn,
-                                written_hash.hex(),
+                        released_fences = self._release_write_fence_pins_locked(
+                            write_conn,
+                        )
+                        failed_fences = (
+                            released_fences
+                            | batch_fence_ids
+                            | set(fences_to_finalize)
+                        )
+                        for failed_fence_id in failed_fences:
+                            self._mark_write_fence_failed(
+                                failed_fence_id,
+                                budget_failure_reason,
                             )
-                        self._disable_global_budget_writes()
-                        # Rebuild physical truth after rollback; this is still
-                        # inside the same root-exclusive transaction.
+                        # The protected chain cannot fit.  Keep RAM
+                        # authoritative, remove all of this owner's pins, and
+                        # restore the physical ceiling without protection.
                         global_result = self.global_budget._enforce_locked()
+                        if not (
+                            global_result.accounted
+                            and global_result.compliant
+                        ):
+                            self._disable_global_budget_writes()
                 except Exception as exc:
+                    released_fences = self._release_write_fence_pins_locked(
+                        write_conn,
+                    )
                     for written_hash in new_block_hashes:
                         try:
                             self._cleanup_entry(
@@ -2021,14 +2176,22 @@ class BlockDiskStore:
                             )
                         except Exception:
                             pass
+                    failed_fences = (
+                        released_fences
+                        | batch_fence_ids
+                        | set(fences_to_finalize)
+                    )
+                    for failed_fence_id in failed_fences:
+                        self._mark_write_fence_failed(
+                            failed_fence_id,
+                            str(exc),
+                        )
                     try:
                         self.global_budget._enforce_locked()
                     except Exception:
                         pass
                     self._disable_global_budget_writes()
                     logger.warning("Background writer accounting error: %s", exc)
-                    for pending_fence_id in fences_to_finalize:
-                        self._fail_write_fence(pending_fence_id, str(exc))
                     return
 
             try:
@@ -2125,8 +2288,9 @@ class BlockDiskStore:
             state["global_max_size_bytes"] = global_result.max_size_bytes
             self._prune_write_fences_locked()
 
-    def _fail_write_fence(self, fence_id: str, reason: str) -> None:
-        """Make a fence terminal when the writer cannot certify retention."""
+    def _mark_write_fence_failed(self, fence_id: str, reason: str) -> None:
+        """Make a fence terminal; caller owns persistent-pin settlement."""
+
         with self._stats_lock:
             state = self._write_fences.get(fence_id)
             if state is None or state.get("post_eviction_complete"):
@@ -2136,6 +2300,12 @@ class BlockDiskStore:
             state["post_eviction_complete"] = True
             state["completion_generation"] = self._write_completion_generation
             self._prune_write_fences_locked()
+
+    def _fail_write_fence(self, fence_id: str, reason: str) -> None:
+        """Make a fence terminal and release any cross-process disk pins."""
+
+        self._mark_write_fence_failed(fence_id, reason)
+        self._release_write_fence_pins(fence_id)
 
     def _update_access(self, conn: sqlite3.Connection, hash_hex: str, ts: float) -> None:
         """Update last_accessed time in the index (background thread only)."""
@@ -2213,6 +2383,11 @@ class BlockDiskStore:
             for start in range(0, len(target_list), 500):
                 chunk = target_list[start : start + 500]
                 placeholders = ",".join("?" for _ in chunk)
+                conn.execute(
+                    f"DELETE FROM block_write_pins "
+                    f"WHERE block_hash IN ({placeholders})",
+                    chunk,
+                )
                 conn.execute(
                     f"DELETE FROM blocks WHERE block_hash IN ({placeholders})",
                     chunk,
@@ -2689,6 +2864,7 @@ class BlockDiskStore:
                     self.blocks_dir.mkdir(parents=True)
                 conn = sqlite3.connect(str(self._db_path), timeout=5.0)
                 try:
+                    conn.execute("DELETE FROM block_write_pins")
                     conn.execute("DELETE FROM blocks")
                     conn.commit()
                 finally:
@@ -2760,6 +2936,26 @@ class BlockDiskStore:
                 )
                 # Any unfinalized temp remains owner-tagged and is protected
                 # until this lease closes, then becomes normal orphan cleanup.
+            try:
+                with self.global_budget.exclusive_mutation_guard() as locked:
+                    if locked:
+                        pin_conn = sqlite3.connect(
+                            str(self._db_path),
+                            timeout=5.0,
+                        )
+                        try:
+                            released = self._release_write_fence_pins_locked(
+                                pin_conn,
+                            )
+                            if released:
+                                self.global_budget._enforce_locked()
+                        finally:
+                            pin_conn.close()
+            except Exception as exc:
+                logger.warning(
+                    "BlockDiskStore shutdown pin cleanup failed: %s",
+                    exc,
+                )
             self._close_current_read_connection()
             if self.global_budget.close():
                 self._shutdown_finalized = True

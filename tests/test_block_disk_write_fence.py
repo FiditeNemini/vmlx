@@ -278,6 +278,274 @@ def test_write_fence_settles_after_full_capacity_replacement(tmp_path):
     assert second_stats["blocks_on_disk"] == first_stats["blocks_on_disk"] == 1
 
 
+def test_open_fence_pins_reused_parent_across_split_writer_batches(tmp_path):
+    root = tmp_path / "root"
+    store = BlockDiskStore(
+        str(root / "aaaaaaaaaaaa"),
+        max_size_gb=0,
+        global_cache_root=str(root),
+    )
+    parent_hash = b"p" * 32
+    unrelated_hash = b"u" * 32
+    trim_budget = None
+    try:
+        _write_request(
+            store,
+            request_id="seed-parent",
+            block_hash=parent_hash,
+            value=1,
+            cache_data=_large_cache_data(1),
+        )
+        _write_request(
+            store,
+            request_id="seed-unrelated",
+            block_hash=unrelated_hash,
+            value=2,
+            cache_data=_large_cache_data(2),
+        )
+
+        with sqlite3.connect(str(store._db_path)) as connection:
+            rows = connection.execute(
+                "SELECT block_hash, file_name FROM blocks"
+            ).fetchall()
+            paths = {
+                str(block_hash): store.cache_dir / str(file_name)
+                for block_hash, file_name in rows
+            }
+            old = time.time() - 600
+            connection.execute(
+                "UPDATE blocks SET last_accessed = ? WHERE block_hash = ?",
+                (old, parent_hash.hex()),
+            )
+            connection.execute(
+                "UPDATE blocks SET last_accessed = ? WHERE block_hash = ?",
+                (old + 300, unrelated_hash.hex()),
+            )
+            connection.commit()
+        os.utime(paths[parent_hash.hex()], (old, old))
+        os.utime(paths[unrelated_hash.hex()], (old + 300, old + 300))
+
+        fence_id = store.begin_write_fence("split-reused-parent")
+        assert store.write_block_async(
+            parent_hash,
+            _large_cache_data(1),
+            8,
+            request_id="split-reused-parent",
+            fence_id=fence_id,
+        )
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            pipeline = store.get_stats()["write_pipeline"]
+            with sqlite3.connect(str(store._db_path)) as connection:
+                pin_count = connection.execute(
+                    "SELECT COUNT(*) FROM block_write_pins "
+                    "WHERE owner_lease_id = ? AND fence_id = ?",
+                    (store.global_budget.lease_id, fence_id),
+                ).fetchone()[0]
+            if (
+                pin_count == 1
+                and pipeline["queue_depth"] == 0
+                and pipeline["inflight"] == 0
+            ):
+                break
+            time.sleep(0.01)
+        assert pin_count == 1
+
+        total = store.global_budget.enforce(force=True).bytes_after
+        unrelated_size = paths[unrelated_hash.hex()].stat().st_size
+        after_one = total - unrelated_size
+        cap = ((after_one * 10 + 8) // 9) + 1024
+        assert after_one < cap < total
+        trim_budget = GlobalDiskCacheBudget(root, cap, orphan_grace_seconds=0)
+        result = trim_budget.enforce(force=True)
+
+        assert result.compliant is True
+        assert store.has_block(parent_hash) is True
+        assert store.has_block(unrelated_hash) is False
+
+        trim_budget.close()
+        trim_budget = None
+        child_hash = b"c" * 32
+        assert store.write_block_async(
+            child_hash,
+            _large_cache_data(3),
+            8,
+            parent_hash=parent_hash,
+            request_id="split-reused-parent",
+            fence_id=fence_id,
+        )
+        assert store.seal_write_fence(fence_id)
+        _stats, fence = _wait_for_fence(store, fence_id)
+        with sqlite3.connect(str(store._db_path)) as connection:
+            pin_count = connection.execute(
+                "SELECT COUNT(*) FROM block_write_pins WHERE fence_id = ?",
+                (fence_id,),
+            ).fetchone()[0]
+
+        assert fence["expected"] == 2
+        assert fence["completed"] == 2
+        assert fence["failed"] == 0
+        assert fence["retained"] == 2
+        assert store.has_block(parent_hash) is True
+        assert store.has_block(child_hash) is True
+        assert pin_count == 0
+    finally:
+        if trim_budget is not None:
+            trim_budget.close()
+        store.shutdown()
+
+
+def test_cross_process_global_trim_honors_live_fence_pin(tmp_path):
+    root = tmp_path / "root"
+    store = BlockDiskStore(
+        str(root / "aaaaaaaaaaaa"),
+        max_size_gb=0,
+        global_cache_root=str(root),
+    )
+    parent_hash = b"x" * 32
+    unrelated_hash = b"y" * 32
+    fence_id = ""
+    try:
+        _write_request(
+            store,
+            request_id="cross-process-parent",
+            block_hash=parent_hash,
+            value=4,
+            cache_data=_large_cache_data(4),
+        )
+        _write_request(
+            store,
+            request_id="cross-process-unrelated",
+            block_hash=unrelated_hash,
+            value=5,
+            cache_data=_large_cache_data(5),
+        )
+        with sqlite3.connect(str(store._db_path)) as connection:
+            rows = connection.execute(
+                "SELECT block_hash, file_name FROM blocks"
+            ).fetchall()
+            paths = {
+                str(block_hash): store.cache_dir / str(file_name)
+                for block_hash, file_name in rows
+            }
+            old = time.time() - 600
+            connection.execute(
+                "UPDATE blocks SET last_accessed = ? WHERE block_hash = ?",
+                (old, parent_hash.hex()),
+            )
+            connection.execute(
+                "UPDATE blocks SET last_accessed = ? WHERE block_hash = ?",
+                (old + 300, unrelated_hash.hex()),
+            )
+            connection.commit()
+        os.utime(paths[parent_hash.hex()], (old, old))
+        os.utime(paths[unrelated_hash.hex()], (old + 300, old + 300))
+
+        fence_id = store.begin_write_fence("cross-process-pin")
+        assert store.write_block_async(
+            parent_hash,
+            _large_cache_data(4),
+            8,
+            request_id="cross-process-pin",
+            fence_id=fence_id,
+        )
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with sqlite3.connect(str(store._db_path)) as connection:
+                pin_count = connection.execute(
+                    "SELECT COUNT(*) FROM block_write_pins WHERE fence_id = ?",
+                    (fence_id,),
+                ).fetchone()[0]
+            if pin_count == 1:
+                break
+            time.sleep(0.01)
+        assert pin_count == 1
+
+        total = store.global_budget.enforce(force=True).bytes_after
+        after_one = total - paths[unrelated_hash.hex()].stat().st_size
+        cap = ((after_one * 10 + 8) // 9) + 1024
+        child_code = "\n".join(
+            (
+                "import json, sys",
+                "from vmlx_engine.global_disk_cache_budget import GlobalDiskCacheBudget",
+                "budget = GlobalDiskCacheBudget(sys.argv[1], int(sys.argv[2]), orphan_grace_seconds=0)",
+                "result = budget.enforce(force=True)",
+                "print(json.dumps({'compliant': result.compliant, 'after': result.bytes_after}), flush=True)",
+                "budget.close()",
+            )
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", child_code, str(root), str(cap)],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        observed = json.loads(completed.stdout.strip())
+
+        assert observed["compliant"] is True
+        assert store.has_block(parent_hash) is True
+        assert store.has_block(unrelated_hash) is False
+    finally:
+        if fence_id:
+            store._fail_write_fence(fence_id, "test cleanup")
+        store.shutdown()
+
+
+def test_global_trim_reaps_stale_owner_pin_before_eviction(tmp_path):
+    root = tmp_path / "root"
+    store = BlockDiskStore(
+        str(root / "aaaaaaaaaaaa"),
+        max_size_gb=0,
+        global_cache_root=str(root),
+    )
+    block_hash = b"s" * 32
+    trim_budget = None
+    try:
+        _write_request(
+            store,
+            request_id="stale-pin-seed",
+            block_hash=block_hash,
+            value=6,
+            cache_data=_large_cache_data(6),
+        )
+        with sqlite3.connect(str(store._db_path)) as connection:
+            row = connection.execute(
+                "SELECT file_name FROM blocks WHERE block_hash = ?",
+                (block_hash.hex(),),
+            ).fetchone()
+            assert row is not None
+            payload = store.cache_dir / str(row[0])
+            connection.execute(
+                "INSERT INTO block_write_pins "
+                "(block_hash, owner_lease_id, fence_id, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (block_hash.hex(), "999999-dead", "stale-fence", time.time()),
+            )
+            connection.commit()
+
+        total = store.global_budget.enforce(force=True).bytes_after
+        after_block = total - payload.stat().st_size
+        # Allow one SQLite WAL page for stale-pin deletion while still forcing
+        # the much larger payload block through the global trim.
+        cap = ((after_block * 10 + 8) // 9) + 16 * 1024
+        assert after_block < cap < total
+        trim_budget = GlobalDiskCacheBudget(root, cap, orphan_grace_seconds=0)
+        result = trim_budget.enforce(force=True)
+
+        assert result.compliant is True
+        assert store.has_block(block_hash) is False
+        with sqlite3.connect(str(store._db_path)) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM block_write_pins"
+            ).fetchone()[0] == 0
+    finally:
+        if trim_budget is not None:
+            trim_budget.close()
+        store.shutdown()
+
+
 def test_store_cache_exception_terminates_begun_write_fence(
     tmp_path,
     monkeypatch,
@@ -622,13 +890,19 @@ def test_fence_block_wait_rejects_commit_visible_before_budget_eviction(
     allow_account = threading.Event()
     original_account = store.global_budget.account_finalized_write_locked
 
-    def delayed_account(net_bytes_delta, *, require_reconciled=False):
+    def delayed_account(
+        net_bytes_delta,
+        *,
+        require_reconciled=False,
+        protected_blocks=None,
+    ):
         account_entered.set()
         if not allow_account.wait(timeout=5.0):
             raise RuntimeError("timed out waiting to exercise budget eviction")
         return original_account(
             net_bytes_delta,
             require_reconciled=require_reconciled,
+            protected_blocks=protected_blocks,
         )
 
     monkeypatch.setattr(
@@ -688,6 +962,11 @@ def test_fence_block_wait_rejects_commit_visible_before_budget_eviction(
     assert result["hashes"] == set()
     assert fence["post_eviction_complete"] is True
     assert fence.get("post_eviction_error") or fence["retained"] == 0
+    with sqlite3.connect(str(store._db_path)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM block_write_pins WHERE fence_id = ?",
+            (fence_id,),
+        ).fetchone()[0] == 0
 
 
 def test_fence_block_wait_returns_exact_hash_after_terminal_retention(tmp_path):

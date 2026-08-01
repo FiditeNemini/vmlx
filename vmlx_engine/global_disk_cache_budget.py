@@ -197,6 +197,7 @@ class _BudgetCandidate:
     indexed_file_name: str | None = None
     parent_hash: str | None = None
     ancestry_known: bool = False
+    publication_pinned: bool = False
 
 
 @dataclass(frozen=True)
@@ -680,6 +681,7 @@ class GlobalDiskCacheBudget:
         net_bytes_delta: int,
         *,
         require_reconciled: bool = False,
+        protected_blocks: set[tuple[Path, str]] | None = None,
     ) -> GlobalBudgetResult:
         """Account a mutation while ``exclusive_mutation_guard`` is held.
 
@@ -690,7 +692,7 @@ class GlobalDiskCacheBudget:
 
         delta = int(net_bytes_delta)
         if delta < 0:
-            return self._enforce_locked()
+            return self._enforce_locked(protected_blocks=protected_blocks)
         maximum = self._effective_max_size_bytes_locked()
         state = self._read_or_reset_accounting_locked()
         force_reconcile = bool(require_reconciled or state is None)
@@ -721,7 +723,7 @@ class GlobalDiskCacheBudget:
             or (maximum > 0 and estimate > maximum)
         )
         if force_reconcile:
-            return self._enforce_locked()
+            return self._enforce_locked(protected_blocks=protected_blocks)
         result = GlobalBudgetResult(
             max_size_bytes=maximum,
             bytes_before=estimate,
@@ -977,6 +979,19 @@ class GlobalDiskCacheBudget:
                             "FROM blocks"
                         ).fetchall()
                     ]
+
+                pin_table_exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'block_write_pins'"
+                ).fetchone() is not None
+                pin_rows = (
+                    conn.execute(
+                        "SELECT block_hash, owner_lease_id "
+                        "FROM block_write_pins"
+                    ).fetchall()
+                    if pin_table_exists
+                    else []
+                )
             except sqlite3.Error as exc:
                 raise OSError(f"cannot inspect block index {database}: {exc}") from exc
             finally:
@@ -1017,6 +1032,37 @@ class GlobalDiskCacheBudget:
                     str(parent_hash) if parent_hash is not None else None,
                     bool(ancestry_known),
                 )
+
+            # Pins are useful only while both their process lease and their
+            # readable finalized row remain live.  Clean dead owners and
+            # partial/crashed publications under the same root-exclusive scan.
+            active_pinned_hashes = {
+                str(block_hash)
+                for block_hash, owner_lease_id in pin_rows
+                if (
+                    str(owner_lease_id) in active_lease_ids
+                    and str(block_hash) in indexed_rows
+                )
+            }
+            stale_pins = [
+                (str(block_hash), str(owner_lease_id))
+                for block_hash, owner_lease_id in pin_rows
+                if (
+                    str(owner_lease_id) not in active_lease_ids
+                    or str(block_hash) not in indexed_rows
+                )
+            ]
+            if stale_pins:
+                cleanup_conn = sqlite3.connect(str(database), timeout=1.0)
+                try:
+                    cleanup_conn.executemany(
+                        "DELETE FROM block_write_pins "
+                        "WHERE block_hash = ? AND owner_lease_id = ?",
+                        stale_pins,
+                    )
+                    cleanup_conn.commit()
+                finally:
+                    cleanup_conn.close()
 
             # Validate that every "known" row reaches an explicit known root in
             # this same namespace. Missing parents and cycles are fail-closed
@@ -1080,6 +1126,9 @@ class GlobalDiskCacheBudget:
                         indexed_file_name=str(relative),
                         parent_hash=parent_hash,
                         ancestry_known=valid_ancestry,
+                        publication_pinned=(
+                            str(block_hash) in active_pinned_hashes
+                        ),
                     )
                 )
 
@@ -1211,6 +1260,15 @@ class GlobalDiskCacheBudget:
             if row is None:
                 conn.rollback()
                 return 0
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'block_write_pins'"
+            ).fetchone() is not None and conn.execute(
+                "SELECT 1 FROM block_write_pins WHERE block_hash = ? LIMIT 1",
+                (candidate.block_hash,),
+            ).fetchone() is not None:
+                conn.rollback()
+                return 0
             file_name, last_accessed, parent_hash, ancestry_known = row
             current_access_ns = max(
                 0,
@@ -1246,6 +1304,14 @@ class GlobalDiskCacheBudget:
                 conn.rollback()
                 return 0
             path = candidate.paths[0]
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'block_write_pins'"
+            ).fetchone() is not None:
+                conn.execute(
+                    "DELETE FROM block_write_pins WHERE block_hash = ?",
+                    (candidate.block_hash,),
+                )
             conn.execute(
                 "DELETE FROM blocks WHERE block_hash = ?",
                 (candidate.block_hash,),
@@ -1328,6 +1394,15 @@ class GlobalDiskCacheBudget:
             for start in range(0, len(hashes), 500):
                 chunk = hashes[start : start + 500]
                 placeholders = ",".join("?" for _ in chunk)
+                if conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'block_write_pins'"
+                ).fetchone() is not None:
+                    conn.execute(
+                        f"DELETE FROM block_write_pins "
+                        f"WHERE block_hash IN ({placeholders})",
+                        chunk,
+                    )
                 conn.execute(
                     f"DELETE FROM blocks WHERE block_hash IN ({placeholders})",
                     chunk,
@@ -1515,8 +1590,17 @@ class GlobalDiskCacheBudget:
             )
             return result
 
-    def _enforce_locked(self) -> GlobalBudgetResult:
+    def _enforce_locked(
+        self,
+        *,
+        protected_blocks: set[tuple[Path, str]] | None = None,
+    ) -> GlobalBudgetResult:
         """Reconcile and trim while the root-exclusive lock is held."""
+
+        protected_keys = {
+            (Path(database).resolve(), str(block_hash))
+            for database, block_hash in (protected_blocks or set())
+        }
 
         max_size_bytes = self._effective_max_size_bytes_locked()
         stored_accounting = self._read_or_reset_accounting_locked()
@@ -1588,6 +1672,19 @@ class GlobalDiskCacheBudget:
 
             def _push(candidate: _BudgetCandidate) -> None:
                 nonlocal sequence
+                if candidate.publication_pinned:
+                    return
+                if (
+                    candidate.kind == "block"
+                    and candidate.database is not None
+                    and candidate.block_hash is not None
+                    and (
+                        candidate.database.resolve(),
+                        candidate.block_hash,
+                    )
+                    in protected_keys
+                ):
+                    return
                 heapq.heappush(
                     eligible,
                     (
@@ -1614,6 +1711,20 @@ class GlobalDiskCacheBudget:
                 _push(candidate)
             invalid_hashes: dict[Path, set[str]] = {}
             for database, invalid_candidates in invalid_by_database.items():
+                if any(
+                    candidate.publication_pinned
+                    or (
+                        candidate.database is not None
+                        and candidate.block_hash is not None
+                        and (
+                            candidate.database.resolve(),
+                            candidate.block_hash,
+                        )
+                        in protected_keys
+                    )
+                    for candidate in invalid_candidates
+                ):
+                    continue
                 hashes = {
                     str(candidate.block_hash)
                     for candidate in invalid_candidates

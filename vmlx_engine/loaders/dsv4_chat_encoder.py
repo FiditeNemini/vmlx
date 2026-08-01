@@ -77,6 +77,38 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def request_explicitly_requests_tool(request_text: str, tool_name: str) -> bool:
+    """Return whether the current user positively directs use of ``tool_name``.
+
+    A bare or negated mention is not authorization.  This distinction matters
+    for DSV4 because a positive match scopes the native schema catalog and can
+    add a request-bound canonical DSML example.
+    """
+    normalized = tool_name.strip()
+    if not request_text or not normalized:
+        return False
+
+    name_pattern = re.compile(
+        rf"(?<![A-Za-z0-9_]){re.escape(normalized)}(?![A-Za-z0-9_])",
+        flags=re.IGNORECASE,
+    )
+    for match in name_pattern.finditer(request_text):
+        prefix = request_text[max(0, match.start() - 128) : match.start()]
+        if re.search(
+            r"\b(?:do\s+not|don['’]t|never|without)\b[^.!?;\n]{0,96}$",
+            prefix,
+            flags=re.IGNORECASE,
+        ):
+            continue
+        if re.search(
+            r"\b(?:call|use|invoke|run|execute)\b[^.!?;\n]{0,80}$",
+            prefix,
+            flags=re.IGNORECASE,
+        ):
+            return True
+    return False
+
+
 def select_tools_for_explicit_request(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]],
@@ -118,10 +150,7 @@ def select_tools_for_explicit_request(
         name = func.get("name") if isinstance(func, dict) else None
         if not isinstance(name, str) or not name:
             continue
-        if re.search(
-            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])",
-            request_text,
-        ):
+        if request_explicitly_requests_tool(request_text, name):
             selected.append(tool)
     if selected:
         return selected

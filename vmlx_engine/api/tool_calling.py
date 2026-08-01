@@ -264,19 +264,27 @@ def check_and_inject_fallback_tools(
         # encoder already rendered the correct DSML example.  Live Responses
         # multi-turn testing showed that duplicate fallback can drive DSV4
         # into an unbounded literal `response` loop.
-        from ..loaders.dsv4_chat_encoder import select_tools_for_explicit_request
+        from ..loaders.dsv4_chat_encoder import (
+            request_explicitly_requests_tool,
+            select_tools_for_explicit_request,
+        )
 
         scoped_tools = select_tools_for_explicit_request(messages, template_tools)
         if scoped_tools:
             template_tools = scoped_tools
             tool_names = [_tool_func(t).get("name", "") for t in template_tools]
             tool_names = [name for name in tool_names if name]
-            explicit_tool_requested = any(
-                _request_mentions_tool_name(name) for name in tool_names
-            )
             explicitly_requested_tool_names = {
-                name for name in tool_names if _request_mentions_tool_name(name)
+                name
+                for name in tool_names
+                if request_explicitly_requests_tool(request_text, name)
             }
+            # A specific endpoint-native tool choice is also an explicit
+            # execution contract even when the natural-language prompt does
+            # not repeat the function name.
+            if tool_choice_required and len(tool_names) == 1:
+                explicitly_requested_tool_names.add(tool_names[0])
+            explicit_tool_requested = bool(explicitly_requested_tool_names)
     is_qwen_native_tool_prompt = (
         parser_id not in {"xml_function", "mimo_xml_function"}
         and "<|im_start|>" in prompt
@@ -329,12 +337,8 @@ def check_and_inject_fallback_tools(
     # If ALL tool names made it into a prompt and the prompt also contains a
     # concrete parser-native exemplar for those names, the template handled
     # tools correctly. Otherwise inject a concrete native exemplar.
-    _dsv4_has_concrete_dsml_examples = (
+    _dsv4_has_scoped_history_examples = (
         is_dsv4_prompt
-        # A named current-turn request still needs the request-bound fallback
-        # below.  The canonical encoder's native example proves the parser
-        # shape, but it may contain an empty/generic argument rather than the
-        # concrete path or command from the user.
         and not explicit_tool_requested
         and all(
             f'<｜DSML｜invoke name="{name}"' in instruction_prompt
@@ -414,6 +418,84 @@ def check_and_inject_fallback_tools(
         normalized.pop("type", None)
         return normalized
 
+    def _dsv4_has_exact_native_tool_contract() -> bool:
+        """Accept only the source-owned encoder grammar and exact schemas."""
+        if not is_dsv4_prompt or not getattr(
+            tokenizer, "_vmlx_dsv4_chat_template_shim", False
+        ):
+            return False
+
+        grammar_fragments = (
+            "## Tools",
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="$TOOL_NAME">\n'
+            '<｜DSML｜parameter name="$PARAMETER_NAME" '
+            'string="true|false">$PARAMETER_VALUE'
+            "</｜DSML｜parameter>\n"
+            "...\n"
+            "</｜DSML｜invoke>\n"
+            '<｜DSML｜invoke name="$TOOL_NAME2">\n'
+            "...\n"
+            "</｜DSML｜invoke>\n"
+            "</｜DSML｜tool_calls>",
+            'String parameters should be specified as is and set `string="true"`.',
+            "For all other types (numbers, booleans, arrays, objects), pass the "
+            'value in JSON format and set `string="false"`.',
+            "If thinking_mode is enabled",
+            "BEFORE any tool calls or final response.",
+            "### Available Tool Schemas",
+            "You MUST strictly follow the above defined tool name and parameter "
+            "schemas to invoke tool calls.",
+        )
+        if any(fragment not in instruction_prompt for fragment in grammar_fragments):
+            return False
+
+        expected_by_name: dict[str, dict] = {}
+        for tool in template_tools:
+            normalized = _normalized_function_schema(tool)
+            if normalized is None or normalized["name"] in expected_by_name:
+                return False
+            expected_by_name[normalized["name"]] = normalized
+
+        schema_marker = "### Available Tool Schemas"
+        closing = (
+            "You MUST strictly follow the above defined tool name and parameter "
+            "schemas to invoke tool calls."
+        )
+        schema_start = instruction_prompt.find(schema_marker)
+        schema_end = instruction_prompt.find(closing, schema_start + len(schema_marker))
+        if schema_start < 0 or schema_end < 0:
+            return False
+        schema_text = instruction_prompt[
+            schema_start + len(schema_marker) : schema_end
+        ].strip()
+        rendered_by_name: dict[str, dict] = {}
+        for line in schema_text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                rendered = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                return False
+            if (
+                isinstance(rendered, dict)
+                and isinstance(rendered.get("name"), str)
+                and rendered.get("name")
+                and isinstance(rendered.get("parameters"), dict)
+            ):
+                # DSV4's vendor encoder renders the inner function schema
+                # directly, without an OpenAI ``type/function`` wrapper.
+                normalized = dict(rendered)
+                normalized.pop("type", None)
+            else:
+                normalized = _normalized_function_schema(rendered)
+            if normalized is None or normalized["name"] in rendered_by_name:
+                return False
+            rendered_by_name[normalized["name"]] = normalized
+        return bool(expected_by_name) and rendered_by_name == expected_by_name
+
+    _dsv4_has_native_tool_contract = _dsv4_has_exact_native_tool_contract()
+
     def _lfm2_has_exact_native_tool_schema() -> bool:
         """Validate Liquid's bounded native JSON catalog against this request."""
         if not is_lfm2_native_tool_prompt:
@@ -492,7 +574,11 @@ def check_and_inject_fallback_tools(
         and all(name in instruction_prompt for name in tool_names)
     )
     if all(name in prompt for name in tool_names) and (
-        (not is_dsv4_prompt or _dsv4_has_concrete_dsml_examples)
+        (
+            not is_dsv4_prompt
+            or _dsv4_has_native_tool_contract
+            or _dsv4_has_scoped_history_examples
+        )
         and (
             not is_qwen_native_tool_prompt
             or _qwen_has_concrete_tool_examples
@@ -569,7 +655,14 @@ def check_and_inject_fallback_tools(
             normalized = name.strip()
             if not normalized:
                 continue
-            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(normalized)}(?![A-Za-z0-9_])", request_text):
+            if (
+                normalized in explicitly_requested_tool_names
+                if is_dsv4_prompt
+                else re.search(
+                    rf"(?<![A-Za-z0-9_]){re.escape(normalized)}(?![A-Za-z0-9_])",
+                    request_text,
+                )
+            ):
                 requested.append(tool)
         return requested or tools
 
@@ -795,8 +888,22 @@ def check_and_inject_fallback_tools(
         """
         normalized_tool = tool_name.strip().lower()
         normalized_param = param.strip().lower()
+        is_path_param = (
+            normalized_param in {"path", "file", "filename", "dir", "directory"}
+            or normalized_param.endswith("_path")
+        )
+
+        def _safe_path_value(value: str) -> str:
+            # This value is interpolated inside a canonical DSML parameter in
+            # a system message. Never allow user text to terminate that node
+            # or open another native control envelope. Ordinary shell command
+            # redirection remains unaffected because this guard is path-only.
+            if any(marker in value for marker in ("<", ">", "｜", "\r", "\n")):
+                return ""
+            return value
+
         binding_text = request_text
-        if not _request_mentions_tool_name(tool_name):
+        if tool_name not in explicitly_requested_tool_names:
             binding_text = (
                 _historical_explicit_tool_request_text(tool_name)
                 or request_text
@@ -841,17 +948,27 @@ def check_and_inject_fallback_tools(
                 continue
             value = obj.get(param) if isinstance(obj, dict) else None
             if isinstance(value, str) and 0 < len(value) <= 240:
-                return value
+                return _safe_path_value(value) if is_path_param else value
 
         name = re.escape(param)
-        if (
-            normalized_param in {"path", "file", "filename", "dir", "directory"}
-            or normalized_param.endswith("_path")
-        ):
+        if is_path_param:
             # File paths routinely contain `/`, `~`, and percent/URL-safe
             # characters.  The generic scalar patterns below intentionally
             # use a narrower alphabet and truncated `panel/package.json` to
             # `panel` in the live DSV4 DSML example.
+            #
+            # Preserve quoted paths before applying the unquoted fallback.
+            # In particular, `path '.'` is the canonical current-directory
+            # request.  The fallback below historically captured `.` and then
+            # stripped it as sentence punctuation, leaving an empty invoke and
+            # depriving DSV4 of the concrete parser-canonical example.
+            quoted_path = re.search(
+                rf"\b{name}\s*(?:(?:=|:|to|is)\s*)?([`'\"])([^`'\"\n]{{1,240}})\1",
+                binding_text,
+                flags=re.IGNORECASE,
+            )
+            if quoted_path:
+                return _safe_path_value(quoted_path.group(2))
             path_patterns = (
                 rf"\bwith\s+{name}\s+[`'\"]?([A-Za-z0-9_~@%+=:,./-]{{1,240}})",
                 rf"\b{name}\s*(?:=|:|to|is)\s*[`'\"]?([A-Za-z0-9_~@%+=:,./-]{{1,240}})",
@@ -861,6 +978,28 @@ def check_and_inject_fallback_tools(
                 match = re.search(pattern, binding_text, flags=re.IGNORECASE)
                 if match:
                     return match.group(1).rstrip(".,;:!?`'\"")
+
+            # Electron's bounded tool turns commonly put the concrete file
+            # after a file-oriented verb instead of repeating the schema
+            # field name, for example: ``file_info ... to inspect
+            # generation_config.json``.  The DSV4 fallback must bind that
+            # request value into its canonical DSML example; otherwise it
+            # emits an empty invoke while instructing the model to copy a
+            # concrete parameter that is not present.  Keep this limited to
+            # an explicitly named tool and an actually path-like value so
+            # unrelated prose cannot become a tool argument.
+            if tool_name in explicitly_requested_tool_names:
+                natural_path = re.search(
+                    r"\b(?:inspect|examine|stat|read|check)\s+"
+                    r"(?:the\s+)?(?:file\s+)?(?:at\s+)?"
+                    r"[`\"']?([A-Za-z0-9_~@%+=:,./-]{1,240})",
+                    binding_text,
+                    flags=re.IGNORECASE,
+                )
+                if natural_path:
+                    candidate = natural_path.group(1).strip().rstrip(".,;`\"'")
+                    if candidate.startswith("~") or "/" in candidate or "." in candidate:
+                        return candidate
         patterns = (
             rf"\b{name}\s+argument\s+must\s+be\s+(?:the\s+)?literal\s+string\s+[`'\"]?([A-Za-z0-9][A-Za-z0-9_.:-]{{0,119}})",
             rf"\b{name}\s*(?:=|:|to|is)\s*[`'\"]?([A-Za-z0-9][A-Za-z0-9_.:-]{{0,119}})",
@@ -872,7 +1011,7 @@ def check_and_inject_fallback_tools(
                 return match.group(1).rstrip(".,;:!?`'\"")
         historical = recent_tool_call_arguments.get(tool_name, {}).get(param)
         if isinstance(historical, str):
-            return historical
+            return _safe_path_value(historical) if is_path_param else historical
         if historical is not None:
             return json.dumps(historical, ensure_ascii=False)
         return ""

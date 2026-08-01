@@ -846,6 +846,9 @@ def _health_identity(health: dict[str, Any]) -> tuple[dict[str, Any], list[str]]
     model_name = str(health.get("model_name") or "")
     if not model_name:
         failures.append("/health model_name is empty")
+    loaded_model_name = str(health.get("loaded_model_name") or "")
+    if not loaded_model_name:
+        failures.append("/health loaded_model_name is empty")
 
     bundle_files = bundle.get("files")
     if bundle.get("schema") != "vmlx-bundle-config-v1":
@@ -888,6 +891,7 @@ def _health_identity(health: dict[str, Any]) -> tuple[dict[str, Any], list[str]]
             "python_source_read_error_count"
         ),
         "model_name": model_name,
+        "loaded_model_name": loaded_model_name,
         "model_bundle_fingerprint_sha256": bundle_fingerprint,
         "model_bundle_files": bundle_files,
         "cache_topology_fingerprint_sha256": topology_fingerprint,
@@ -936,11 +940,11 @@ def _validate_health_source_binding(
         )
     if identity.get("model_name") != requested_model:
         failures.append(
-            "requested --model does not match the loaded /health model_name"
+            "requested --model does not match the served /health model_name"
         )
-    if identity.get("model_name") != bundle.get("model_name"):
+    if identity.get("loaded_model_name") != bundle.get("model_name"):
         failures.append(
-            "loaded /health model_name does not match the independently observed bundle"
+            "/health loaded_model_name does not match the independently observed bundle"
         )
     if identity.get("model_bundle_fingerprint_sha256") != bundle.get(
         "fingerprint_sha256"

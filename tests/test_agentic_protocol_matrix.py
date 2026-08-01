@@ -218,6 +218,7 @@ def _identity_health(
     *,
     pid: int = 1234,
     model_name: str = "served-org/served-model",
+    loaded_model_name: str | None = None,
     bundle: dict | None = None,
     cache_fingerprint: str = "b" * 64,
 ) -> dict:
@@ -243,6 +244,8 @@ def _identity_health(
             "aggregate_sha256": bundle_fingerprint,
             "fingerprint_sha256": bundle_fingerprint,
         }
+    if loaded_model_name is None:
+        loaded_model_name = str(bundle.get("model_name") or model_name)
     cache_configuration = {
         "schema": "test-cache-topology-v1",
         "nonce": cache_fingerprint,
@@ -263,6 +266,7 @@ def _identity_health(
         "status": "healthy",
         "model_loaded": True,
         "model_name": model_name,
+        "loaded_model_name": loaded_model_name,
         "runtime_provenance": {
             "pid": pid,
             "server_module_sha256": source["server_module_sha256"],
@@ -534,6 +538,61 @@ def test_backend_identity_accepts_equivalent_checkout_python_alias(tmp_path: Pat
         bundle,
         bundle["model_name"],
     ) == []
+
+
+def test_backend_identity_accepts_served_alias_separate_from_loaded_bundle(
+    tmp_path: Path,
+):
+    _, source = _identity_repo(tmp_path)
+    _, bundle = _identity_bundle(tmp_path)
+    served_alias = "DeepSeek-V4-Flash-0731-JANG"
+    health = _identity_health(
+        source,
+        model_name=served_alias,
+        loaded_model_name=bundle["model_name"],
+        bundle=bundle,
+    )
+
+    identity, failures = matrix._health_identity(health)
+
+    assert failures == []
+    assert identity["model_name"] == served_alias
+    assert identity["loaded_model_name"] == bundle["model_name"]
+    assert (
+        matrix._validate_health_source_binding(
+            identity,
+            source,
+            _identity_runner(),
+            bundle,
+            served_alias,
+        )
+        == []
+    )
+
+
+def test_backend_identity_rejects_served_alias_substituted_for_loaded_bundle(
+    tmp_path: Path,
+):
+    _, source = _identity_repo(tmp_path)
+    _, bundle = _identity_bundle(tmp_path)
+    served_alias = "DeepSeek-V4-Flash-0731-JANG"
+    health = _identity_health(
+        source,
+        model_name=served_alias,
+        loaded_model_name=served_alias,
+        bundle=bundle,
+    )
+
+    identity, failures = matrix._health_identity(health)
+
+    assert failures == []
+    assert matrix._validate_health_source_binding(
+        identity,
+        source,
+        _identity_runner(),
+        bundle,
+        served_alias,
+    ) == ["/health loaded_model_name does not match the independently observed bundle"]
 
 
 def test_backend_identity_fingerprint_retains_bundle_file_attestation(

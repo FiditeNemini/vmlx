@@ -603,7 +603,7 @@ describe("generated CDP expression syntax", () => {
       "utf8",
     );
     const preflightSource = readFileSync(
-      path.resolve("scripts/scoped-release-preflight-19.py"),
+      path.resolve("scripts/scoped-release-preflight-20.py"),
       "utf8",
     );
 
@@ -1048,7 +1048,7 @@ function ownedRunIntent(
     ui: "panel/scripts/live-real-ui-model-proof.mjs",
     api: "tests/cross_matrix/run_agentic_protocol_matrix.py",
     cache: "tests/cross_matrix/run_cache_hierarchy_live_gate.py",
-    semantic: "panel/scripts/scoped-release-preflight-19.py",
+    semantic: "panel/scripts/scoped-release-preflight-20.py",
   };
   const harnesses = Object.fromEntries(
     Object.entries(harnessPaths).map(([name, relativePath]) => {
@@ -1164,7 +1164,7 @@ function ownedRunIntent(
     bundle_fingerprint_sha256: "2".repeat(64),
   });
   const intent: Record<string, unknown> = {
-    schema: "vmlx-r19-owned-run-intent-v5",
+    schema: "vmlx-r20-owned-run-intent-v5",
     run_id: "run",
     nonce: "nonce",
     source_commit: "3".repeat(40),
@@ -5401,6 +5401,20 @@ describe("real UI model proof harness", () => {
         activeModelBundlePath: nativeBundle,
         expectedDirectBaseUrl: "http://127.0.0.1:8002",
       })).toEqual([]);
+
+      const staleReleaseSchema = structuredClone(value);
+      staleReleaseSchema.schema = "vmlx-r19-owned-run-intent-v5";
+      staleReleaseSchema.canonical_sha256 = canonicalHash(
+        Object.fromEntries(
+          Object.entries(staleReleaseSchema).filter(
+            ([key]) => key !== "canonical_sha256",
+          ),
+        ),
+      );
+      expect(validateOwnedRunIntent(
+        { ...opened, value: staleReleaseSchema },
+        options,
+      ).join("\n")).toMatch(/schema\/run\/nonce does not match/);
 
       const reordered = structuredClone(value);
       [

@@ -29,6 +29,7 @@ import vm from 'node:vm'
 const panelDir = path.resolve(new URL('..', import.meta.url).pathname)
 const repoDir = path.resolve(panelDir, '..')
 const proofFormat = 'vmlx-electron-ui-proof-v2'
+const ownedRunIntentSchema = 'vmlx-r20-owned-run-intent-v5'
 const executableIdentityMaxBytes = 512 * 1024 * 1024
 const installedReleaseManifestSchema = 'vmlx-installed-release-manifest-v1'
 const installedReleaseManifestFields = [
@@ -1356,7 +1357,7 @@ export function validateOwnedRunIntent(
     return failures
   }
   if (
-    value.schema !== 'vmlx-r19-owned-run-intent-v5'
+    value.schema !== ownedRunIntentSchema
     || value.run_id !== expectedRunId
     || value.nonce !== nonce
   ) {

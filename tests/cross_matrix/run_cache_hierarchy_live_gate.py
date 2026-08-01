@@ -4850,11 +4850,27 @@ def _run_store_evict_refault_scenario(
     configured_l2_max_bytes = _integer(
         (recent_before.get("l2") or {}).get("store_max_size_bytes")
     )
-    l1_l2_capacity_margin_ok = (
-        l1_max_resident_bytes > 0
-        and configured_l2_max_bytes > 0
-        and l1_max_resident_bytes * 2 < configured_l2_max_bytes
+    recent_before_l1 = recent_before.get("l1") or {}
+    disk_only_l1 = (
+        recent_before_l1.get("backend_mode") == "block_disk_only"
+        and recent_before_l1.get("disk_only") is True
+        and recent_before_l1.get("paged_ram_enabled") is False
     )
+    if disk_only_l1:
+        l1_l2_capacity_margin_ok = (
+            configured_l2_max_bytes > 0
+            and _integer(
+                recent_before_l1.get("resident_payload_blocks_present")
+            )
+            == 0
+            and _integer(recent_before_l1.get("resident_payload_bytes")) == 0
+        )
+    else:
+        l1_l2_capacity_margin_ok = (
+            l1_max_resident_bytes > 0
+            and configured_l2_max_bytes > 0
+            and l1_max_resident_bytes * 2 < configured_l2_max_bytes
+        )
     peak_bytes = max(
         _integer(
             (old_after_store.get("l2") or {}).get("store_total_size_bytes")

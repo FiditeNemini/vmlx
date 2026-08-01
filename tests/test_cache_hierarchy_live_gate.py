@@ -1271,7 +1271,14 @@ def test_l2_eviction_scenario_refaults_after_recent_store_evicts_old(
         return {
             "block_chain_fingerprint_sha256": fingerprint,
             "expected_blocks": 2,
-            "l1": {"terminal_resident_payload_present": resident},
+            "l1": {
+                "terminal_resident_payload_present": resident,
+                "backend_mode": "block_disk_only",
+                "disk_only": True,
+                "paged_ram_enabled": False,
+                "resident_payload_blocks_present": 0,
+                "resident_payload_bytes": 0,
+            },
             "l2": {
                 "expected_blocks": 2,
                 "indexed_blocks": blocks,
@@ -1287,8 +1294,8 @@ def test_l2_eviction_scenario_refaults_after_recent_store_evicts_old(
             },
         }
 
-    old_stored = binding("2" * 64, resident=True, readable=True)
-    old_evicted = binding("2" * 64, resident=True, readable=False)
+    old_stored = binding("2" * 64, resident=False, readable=True)
+    old_evicted = binding("2" * 64, resident=False, readable=False)
     recent_ssd = binding("5" * 64, resident=False, readable=True)
     contracts = iter(
         (
@@ -1302,7 +1309,7 @@ def test_l2_eviction_scenario_refaults_after_recent_store_evicts_old(
         calls.append(tag)
         return (
             {"tag": tag, "response_id": f"resp-{tag}"},
-            {"cache": {"totals": {"l1_max_resident_bytes": 400}}},
+            {"cache": {"totals": {"l1_max_resident_bytes": 10_000}}},
         )
 
     def fake_durability_proof(row, _durability):
@@ -1321,7 +1328,7 @@ def test_l2_eviction_scenario_refaults_after_recent_store_evicts_old(
         "_scenario_request_durability",
         lambda **_kwargs: (
             {"ok": True},
-            {"cache": {"totals": {"l1_max_resident_bytes": 400}}},
+            {"cache": {"totals": {"l1_max_resident_bytes": 10_000}}},
         ),
     )
     monkeypatch.setattr(gate, "_path_free_durability_proof", fake_durability_proof)

@@ -834,6 +834,20 @@ export function captureBundleGenerationContract(bundlePath) {
     || (includeStub && templateText.trim())
     || templateText.trim()
   )
+  const modelType = files['config.json']?.value?.model_type
+  const chatContract = files['jang_config.json']?.value?.chat
+  const nativeEncoder = {
+    encoder: chatContract?.encoder,
+    encoder_fn: chatContract?.encoder_fn,
+    source: chatContract?.chat_template_source,
+  }
+  const usableNativeEncoder = Boolean(
+    modelType === 'deepseek_v4'
+    && nativeEncoder.encoder === 'encoding_dsv4'
+    && nativeEncoder.encoder_fn === 'encode_messages'
+    && nativeEncoder.source === 'official_python_encoder'
+  )
+  const usablePromptRenderer = Boolean(usableTemplate || usableNativeEncoder)
   const attestedFiles = {}
   for (const name of [
     'config.json',
@@ -887,10 +901,16 @@ export function captureBundleGenerationContract(bundlePath) {
       tokenizer_chat_template_include_stub: includeStub,
       sidecar_present: Boolean(templateText.trim()),
       sidecar_sha256: templateText ? sha256Text(templateText) : null,
-      usable: Boolean(usableTemplate),
-      warning: usableTemplate
+      mode: usableTemplate
+        ? 'jinja'
+        : usableNativeEncoder
+          ? 'native_encoder'
+          : null,
+      native_encoder: nativeEncoder,
+      usable: usablePromptRenderer,
+      warning: usablePromptRenderer
         ? null
-        : 'Bundle exposes no usable chat template in tokenizer_config.json or chat_template.jinja',
+        : 'Bundle exposes neither a usable chat template nor a recognized native encoder contract',
     },
     health_attestation: {
       ...healthObserved,

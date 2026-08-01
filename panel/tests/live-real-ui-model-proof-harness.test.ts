@@ -3141,7 +3141,7 @@ describe("real UI model proof harness", () => {
     }
   });
 
-  it("retains bundle config hashes and reports a generic missing-template warning", () => {
+  it("retains bundle config hashes and accepts only a recognized native encoder without a template", () => {
     const bundle = mkdtempSync(path.join(tmpdir(), "vmlx-ui-proof-bundle-"));
     try {
       writeFileSync(
@@ -3160,13 +3160,38 @@ describe("real UI model proof harness", () => {
       );
       const missing = captureBundleGenerationContract(bundle);
       expect(missing.template.usable).toBe(false);
-      expect(missing.template.warning).toMatch(/no usable chat template/i);
+      expect(missing.template.warning).toMatch(/neither a usable chat template nor a recognized native encoder/i);
       expect(missing.files["config.json"].sha256).toMatch(/^[0-9a-f]{64}$/);
       expect(missing.health_attestation.schema).toBe("vmlx-bundle-config-v1");
+
+      writeFileSync(
+        path.join(bundle, "config.json"),
+        JSON.stringify({ model_type: "deepseek_v4" }),
+      );
+      writeFileSync(
+        path.join(bundle, "jang_config.json"),
+        JSON.stringify({
+          chat: {
+            encoder: "encoding_dsv4",
+            encoder_fn: "encode_messages",
+            chat_template_source: "official_python_encoder",
+          },
+        }),
+      );
+      const native = captureBundleGenerationContract(bundle);
+      expect(native.template.usable).toBe(true);
+      expect(native.template.mode).toBe("native_encoder");
+      expect(native.template.native_encoder).toEqual({
+        encoder: "encoding_dsv4",
+        encoder_fn: "encode_messages",
+        source: "official_python_encoder",
+      });
+      expect(native.template.warning).toBeNull();
 
       writeFileSync(path.join(bundle, "chat_template.jinja"), "{{ messages }}");
       const usable = captureBundleGenerationContract(bundle);
       expect(usable.template.usable).toBe(true);
+      expect(usable.template.mode).toBe("jinja");
       expect(usable.template.warning).toBeNull();
     } finally {
       rmSync(bundle, { recursive: true, force: true });

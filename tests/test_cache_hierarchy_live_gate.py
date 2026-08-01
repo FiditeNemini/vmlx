@@ -900,6 +900,46 @@ def test_prefix_bounds_accepts_smaller_architecture_safe_hybrid_checkpoint():
     assert failures == []
 
 
+def test_prefix_bounds_accepts_dsv4_checkpoint_plus_replayed_tail():
+    execution = _path_free_execution()
+    execution["cached_tokens"] = 96
+    execution["native_cache"] = _dsv4_native_cache()
+    execution["last_cache_execution"].update(
+        {
+            "prompt_tokens": 129,
+            "attempted_cached_tokens": 96,
+            "cached_tokens": 96,
+            "checkpoint_tokens": 96,
+            "matched_tokens": 112,
+            "replayed_tokens": 16,
+            "uncached_prompt_tokens": 33,
+            "prefill_tokens": 33,
+        }
+    )
+    binding = {
+        "block_size": 16,
+        "reusable_prefix_tokens": 112,
+        "longest_common_prefix_tokens": 127,
+    }
+
+    assert gate._validate_execution_prefix_bounds(
+        execution,
+        binding,
+        label="L2 DSV4 replay",
+    ) == []
+
+    execution["last_cache_execution"]["matched_tokens"] = 111
+    failures = gate._validate_execution_prefix_bounds(
+        execution,
+        binding,
+        label="L2 DSV4 replay",
+    )
+    assert any(
+        "does not equal checkpoint_tokens+replayed_tokens=112" in failure
+        for failure in failures
+    )
+
+
 @pytest.mark.parametrize(
     ("mutate", "expected_failure"),
     (
@@ -938,7 +978,7 @@ def test_prefix_bounds_accepts_smaller_architecture_safe_hybrid_checkpoint():
             "required 2x margin below L2",
         ),
         (
-            lambda row: row.update({"evicting_filler_stage": "pre-refault"}),
+            lambda row: row.update({"evicting_filler_stage": "between-stages"}),
             "evicting stage is invalid",
         ),
     ),
@@ -1022,6 +1062,26 @@ def test_l2_recent_store_eviction_geometry_fails_closed(
     )
 
     assert any(expected_failure in failure for failure in failures)
+
+
+def test_l2_pre_refault_filler_geometry_is_valid():
+    observation = _l2_eviction_observation()
+    observation.update(
+        {
+            "post_refault_filler_request_count": 0,
+            "evicting_filler_stage": "pre-refault",
+        }
+    )
+
+    failures = gate.validate_l2_size_eviction_observation(
+        observation,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+        max_filler_requests=64,
+    )
+
+    assert failures == []
 
 
 @pytest.mark.parametrize(

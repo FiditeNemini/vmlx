@@ -3227,9 +3227,35 @@ def _validate_execution_prefix_bounds(
     reusable_floor = _integer(binding.get("reusable_prefix_tokens"))
     lcp_ceiling = _integer(binding.get("longest_common_prefix_tokens"))
     block_size = _integer(binding.get("block_size"))
-    if not reusable_floor <= attempted_tokens <= lcp_ceiling:
+    native_cache = execution.get("native_cache")
+    if not isinstance(native_cache, dict):
+        native_cache = {}
+    dsv4_delta = (
+        native_cache.get("family") == "deepseek_v4"
+        and native_cache.get("schema") == "deepseek_v4_v10_delta"
+    )
+    bound_tokens = attempted_tokens
+    bound_field = "attempted_cached_tokens"
+    if dsv4_delta:
+        checkpoint_tokens = _integer(last.get("checkpoint_tokens"))
+        matched_tokens = _integer(last.get("matched_tokens"))
+        replayed_tokens = _integer(last.get("replayed_tokens"))
+        if checkpoint_tokens != attempted_tokens:
+            failures.append(
+                f"{label}: checkpoint_tokens={checkpoint_tokens} does not equal "
+                f"attempted_cached_tokens={attempted_tokens}"
+            )
+        if matched_tokens != checkpoint_tokens + replayed_tokens:
+            failures.append(
+                f"{label}: matched_tokens={matched_tokens} does not equal "
+                f"checkpoint_tokens+replayed_tokens="
+                f"{checkpoint_tokens + replayed_tokens}"
+            )
+        bound_tokens = matched_tokens
+        bound_field = "matched_tokens"
+    if not reusable_floor <= bound_tokens <= lcp_ceiling:
         failures.append(
-            f"{label}: attempted_cached_tokens={attempted_tokens} is outside the exact "
+            f"{label}: {bound_field}={bound_tokens} is outside the exact "
             f"block-aligned prefix range [{reusable_floor}, {lcp_ceiling}]"
         )
     if block_size <= 0:
@@ -3560,12 +3586,16 @@ def validate_l2_size_eviction_observation(
         failures.append("L2 size eviction: peak bytes exceed configured bound")
     if not 0 <= final <= peak:
         failures.append("L2 size eviction: final bytes are invalid")
-    if eviction_stage == "post-refault":
+    if eviction_stage in {"pre-refault", "post-refault"}:
         if not 1 <= fillers <= min(256, max_filler_requests):
             failures.append("L2 size eviction: filler request count is unbounded")
-        if post_refault_fillers <= 0:
+        if eviction_stage == "post-refault" and post_refault_fillers <= 0:
             failures.append(
                 "L2 size eviction: post-refault geometry has no eviction filler"
+            )
+        if eviction_stage == "pre-refault" and post_refault_fillers != 0:
+            failures.append(
+                "L2 size eviction: pre-refault geometry used a post-refault filler"
             )
     elif eviction_stage == "recent-store":
         if fillers != 0 or post_refault_fillers != 0:
@@ -3651,9 +3681,12 @@ def validate_l2_size_eviction_observation(
             failures.append(
                 "L2 size eviction: evicting write is not the exact recent-store fence"
             )
-        if eviction_stage == "post-refault" and not tag.startswith("l2_filler_"):
+        if (
+            eviction_stage in {"pre-refault", "post-refault"}
+            and not tag.startswith("l2_filler_")
+        ):
             failures.append(
-                "L2 size eviction: post-refault geometry is not bound to a filler"
+                f"L2 size eviction: {eviction_stage} geometry is not bound to a filler"
             )
     write_fences = observation.get("write_fences")
     if not isinstance(write_fences, list) or not write_fences:
@@ -3719,11 +3752,11 @@ def validate_l2_size_eviction_observation(
                 label="L2 size eviction recent after its durable store",
             )
         )
-        if eviction_stage == "post-refault":
+        if eviction_stage in {"pre-refault", "post-refault"}:
             failures.extend(
                 _validate_complete_l2_binding(
                     old_before,
-                    label="L2 size eviction old before post-refault filler",
+                    label=f"L2 size eviction old before {eviction_stage} filler",
                 )
             )
         elif (old_before.get("l2") or {}).get("terminal_readable") is not False:
@@ -3768,7 +3801,7 @@ def validate_l2_size_eviction_observation(
                         f"L2 size eviction: {label} does not truthfully "
                         "represent SSD-only state"
                     )
-        elif eviction_stage == "post-refault" and (
+        elif eviction_stage in {"pre-refault", "post-refault"} and (
             recent_before_l1.get("terminal_resident_payload_present")
             is not True
         ):
@@ -4494,6 +4527,9 @@ def _path_free_execution(row: dict[str, Any]) -> dict[str, Any]:
                 "prompt_tokens",
                 "attempted_cached_tokens",
                 "cached_tokens",
+                "checkpoint_tokens",
+                "matched_tokens",
+                "replayed_tokens",
                 "uncached_prompt_tokens",
                 "prefill_tokens",
                 "generation_prompt_suffix_tokens",
@@ -4979,6 +5015,10 @@ def _run_store_evict_refault_scenario(
             pre_refault_contract,
             "recent",
         )
+        old_after_candidate = _prefix_binding(
+            pre_refault_contract,
+            "old",
+        )
         peak_bytes = max(
             peak_bytes,
             _integer(
@@ -4987,6 +5027,24 @@ def _run_store_evict_refault_scenario(
                 )
             ),
         )
+        if (
+            not attestation_failures
+            and durability_proof.get("ok") is True
+            and durability_proof.get("post_eviction_complete") is True
+            and _integer(durability_proof.get("disk_evictions_delta")) > 0
+            and (old_after_candidate.get("l2") or {}).get(
+                "terminal_readable"
+            ) is False
+            and (recent_pre_refault.get("l1") or {}).get(
+                "terminal_resident_payload_present"
+            ) is False
+            and _l2_binding_is_complete(recent_pre_refault)
+        ):
+            evicting_filler_fence = durability_proof
+            evicting_filler_stage = "pre-refault"
+            old_after_durable_filler = old_after_candidate
+            recent_after_durable_filler = recent_pre_refault
+            break
         if attestation_failures:
             break
 
@@ -5015,7 +5073,20 @@ def _run_store_evict_refault_scenario(
         and _l2_binding_is_complete(old_after_store)
         and recent_store_eviction_ready
     )
-    pre_refault_ready = standard_pre_refault_ready or recent_store_pre_refault_ready
+    filler_pre_refault_ready = bool(
+        evicting_filler_stage == "pre-refault"
+        and isinstance(recent_l1, dict)
+        and recent_l1.get("terminal_resident_payload_present") is False
+        and _l2_binding_is_complete(recent_pre_refault)
+        and isinstance(old_pre_refault_l2, dict)
+        and old_pre_refault_l2.get("terminal_readable") is False
+        and evicting_filler_fence
+    )
+    pre_refault_ready = (
+        standard_pre_refault_ready
+        or recent_store_pre_refault_ready
+        or filler_pre_refault_ready
+    )
     if not pre_refault_ready:
         if not any(
             failure.startswith("store-evict-refault:") for failure in failures
@@ -5071,7 +5142,7 @@ def _run_store_evict_refault_scenario(
     old_final = _prefix_binding(final_contract, "old")
     recent_final = _prefix_binding(final_contract, "recent")
     while (
-        evicting_filler_stage != "recent-store"
+        evicting_filler_stage not in {"pre-refault", "recent-store"}
         and filler_count < max_filler_requests
     ):
         old_l2 = old_final.get("l2")
@@ -5182,6 +5253,7 @@ def _run_store_evict_refault_scenario(
         recent_l2 = {}
     saved_max = _integer(recent_l2.get("store_max_size_bytes"))
     final_bytes = _integer(recent_l2.get("store_total_size_bytes"))
+    peak_bytes = max(peak_bytes, final_bytes)
     observation = {
         "schema": L2_SIZE_EVICTION_SCHEMA,
         "scenario": "store-evict-refault",

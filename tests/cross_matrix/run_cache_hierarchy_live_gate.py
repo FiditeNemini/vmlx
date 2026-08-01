@@ -2170,6 +2170,7 @@ def _validate_hit_row(
     maximum_cached_tokens: int,
     expected_prompt_tokens: int,
     allow_direct_reuse: bool,
+    allow_native_matched_tail_replay: bool = False,
 ) -> list[str]:
     """Validate that a nominal hit actually reused a continuous prompt prefix."""
     tag = str(row.get("tag") or "<missing-tag>")
@@ -2203,17 +2204,57 @@ def _validate_hit_row(
         else 0
     )
     prefill_tokens = _integer(execution.get("prefill_tokens"))
+    reusable_prefix_tokens = cached_tokens
+    replayed_tokens = _integer(execution.get("replayed_tokens"))
+    matched_tokens = _integer(execution.get("matched_tokens"))
+    checkpoint_tokens = _integer(execution.get("checkpoint_tokens"))
+    if replayed_tokens > 0 or matched_tokens > cached_tokens:
+        native_cache = row.get("native_cache")
+        native_replay_contract = bool(
+            allow_native_matched_tail_replay
+            and isinstance(native_cache, dict)
+            and native_cache.get("family") == "deepseek_v4"
+            and native_cache.get("cache_type") == "native_composite"
+            and native_cache.get("schema") == "deepseek_v4_v10_delta"
+            and (native_cache.get("generic_turboquant_kv") or {}).get("enabled")
+            is False
+        )
+        if not native_replay_contract:
+            failures.append(
+                f"{tag}: matched-tail replay is not authorized by the native "
+                "DSV4 delta-cache contract"
+            )
+        elif checkpoint_tokens != cached_tokens:
+            failures.append(
+                f"{tag}: checkpoint_tokens={checkpoint_tokens} does not equal "
+                f"cached_tokens={cached_tokens}"
+            )
+        elif matched_tokens != checkpoint_tokens + replayed_tokens:
+            failures.append(
+                f"{tag}: matched_tokens={matched_tokens} does not equal "
+                f"checkpoint_tokens+replayed_tokens="
+                f"{checkpoint_tokens + replayed_tokens}"
+            )
+        elif matched_tokens > prompt_tokens:
+            failures.append(
+                f"{tag}: matched_tokens={matched_tokens} exceeds "
+                f"prompt_tokens={prompt_tokens}"
+            )
+        else:
+            reusable_prefix_tokens = matched_tokens
 
     if cached_tokens <= 0:
         failures.append(f"{tag}: cached_tokens must be positive")
-    if cached_tokens < minimum_cached_tokens:
+    if reusable_prefix_tokens < minimum_cached_tokens:
         failures.append(
-            f"{tag}: cached_tokens={cached_tokens} is below expected shared-prefix "
+            f"{tag}: reusable prefix tokens={reusable_prefix_tokens} "
+            "is below expected shared-prefix "
             f"floor {minimum_cached_tokens}"
         )
-    if maximum_cached_tokens > 0 and cached_tokens > maximum_cached_tokens:
+    if maximum_cached_tokens > 0 and reusable_prefix_tokens > maximum_cached_tokens:
         failures.append(
-            f"{tag}: cached_tokens={cached_tokens} exceeds independent tokenizer "
+            f"{tag}: reusable prefix tokens={reusable_prefix_tokens} "
+            "exceeds independent tokenizer "
             f"LCP {maximum_cached_tokens}"
         )
     if "attempted_cached_tokens" not in execution:
@@ -2687,6 +2728,17 @@ def _cache_contract_profile_from_health(health: dict[str, Any]) -> str:
     )
     if (
         isinstance(native, dict)
+        and native.get("family") == "deepseek_v4"
+        and native.get("cache_type") == "native_composite"
+        and native.get("schema") == "deepseek_v4_v10_delta"
+        and isinstance(generic_tq, dict)
+        and generic_tq.get("enabled") is False
+        and (topology.get("turboquant_kv_cache") or {}).get("enabled") is False
+        and (topology.get("kv_cache_quantization") or {}).get("enabled") is False
+    ):
+        return "deepseek_v4_native_delta"
+    if (
+        isinstance(native, dict)
         and native.get("family") == "qwen3_5"
         and native.get("schema") == "hybrid_ssm_v1"
     ):
@@ -2730,11 +2782,13 @@ def validate_cache_rows(
     }
     if contract_profile not in {
         "generic",
+        "deepseek_v4_native_delta",
         "minimax_m3_sparse_block",
         "qwen_hybrid_ssm_tq4",
     }:
         return [f"unsupported cache contract profile: {contract_profile}"]
     native_sparse = contract_profile == "minimax_m3_sparse_block"
+    dsv4_native_delta = contract_profile == "deepseek_v4_native_delta"
     hybrid_ssm_tq4 = contract_profile == "qwen_hybrid_ssm_tq4"
     requirements = (
         {
@@ -2922,6 +2976,7 @@ def validate_cache_rows(
                 # Standard scheduler/TQ hits may be direct memory/prefix reuse.
                 # Only restart-C must prove worker reconstruction from disk.
                 allow_direct_reuse=requirement != "disk_partial",
+                allow_native_matched_tail_replay=dsv4_native_delta,
             )
             if hybrid_ssm_tq4 and requirement in {"partial", "disk_partial"}:
                 row_failures.extend(

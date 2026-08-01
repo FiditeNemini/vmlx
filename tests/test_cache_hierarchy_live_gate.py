@@ -2205,6 +2205,122 @@ def test_cache_contract_profile_selects_hybrid_schema_before_field_validation():
     assert gate._cache_contract_profile_from_health(other_schema) == "generic"
 
 
+def _dsv4_native_cache() -> dict:
+    return {
+        "family": "deepseek_v4",
+        "cache_type": "native_composite",
+        "schema": "deepseek_v4_v10_delta",
+        "generic_turboquant_kv": {
+            "enabled": False,
+            "reason": "native_dsv4_composite",
+        },
+    }
+
+
+def test_cache_contract_profile_requires_exact_dsv4_delta_topology():
+    health = _health()
+    topology = health["cache_topology_provenance"]["configuration"] = {
+        "native_cache": _dsv4_native_cache(),
+        "turboquant_kv_cache": {"enabled": False},
+        "kv_cache_quantization": {"enabled": False},
+    }
+    assert (
+        gate._cache_contract_profile_from_health(health)
+        == "deepseek_v4_native_delta"
+    )
+
+    for field, value in (
+        ("family", "deepseek_v3"),
+        ("cache_type", "generic_kv"),
+        ("schema", "deepseek_v4_v9"),
+    ):
+        changed = deepcopy(health)
+        changed["cache_topology_provenance"]["configuration"]["native_cache"][
+            field
+        ] = value
+        assert gate._cache_contract_profile_from_health(changed) == "generic"
+
+    topology["turboquant_kv_cache"]["enabled"] = True
+    assert gate._cache_contract_profile_from_health(health) == "generic"
+
+
+def _dsv4_replayed_store_rows() -> list[dict]:
+    rows = _valid_store_rows()
+    rows[1]["native_cache"] = _dsv4_native_cache()
+    row = rows[2]
+    row["cached_tokens"] = 96
+    row["native_cache"] = _dsv4_native_cache()
+    execution = row["last_cache_execution"]
+    execution.update(
+        {
+            "attempted_cached_tokens": 96,
+            "cached_tokens": 96,
+            "checkpoint_tokens": 96,
+            "matched_tokens": 112,
+            "replayed_tokens": 16,
+            "uncached_prompt_tokens": 32,
+            "prefill_tokens": 32,
+        }
+    )
+    return rows
+
+
+def test_dsv4_delta_replay_satisfies_floor_without_overstating_cached_tokens():
+    rows = _dsv4_replayed_store_rows()
+
+    assert _validate_rows(
+        "store",
+        rows,
+        contract_profile="deepseek_v4_native_delta",
+    ) == []
+    generic_failures = _validate_rows("store", deepcopy(rows))
+    assert any("replay is not authorized" in item for item in generic_failures)
+    assert any("below expected shared-prefix floor 112" in item for item in generic_failures)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("checkpoint_tokens", 95, "does not equal cached_tokens=96"),
+        (
+            "matched_tokens",
+            111,
+            "does not equal checkpoint_tokens+replayed_tokens=112",
+        ),
+    ],
+)
+def test_dsv4_delta_replay_rejects_malformed_or_overclaimed_receipts(
+    field,
+    value,
+    message,
+):
+    rows = _dsv4_replayed_store_rows()
+    rows[2]["last_cache_execution"][field] = value
+
+    failures = _validate_rows(
+        "store",
+        rows,
+        contract_profile="deepseek_v4_native_delta",
+    )
+
+    assert any(message in item for item in failures)
+
+
+def test_dsv4_delta_replay_rejects_internally_consistent_prompt_overclaim():
+    rows = _dsv4_replayed_store_rows()
+    execution = rows[2]["last_cache_execution"]
+    execution["matched_tokens"] = 129
+    execution["replayed_tokens"] = 33
+
+    failures = _validate_rows(
+        "store",
+        rows,
+        contract_profile="deepseek_v4_native_delta",
+    )
+
+    assert any("matched_tokens=129 exceeds prompt_tokens=128" in item for item in failures)
+
+
 def test_standard_scheduler_prefill_does_not_require_generation_suffix_field():
     rows = _valid_store_rows()
 

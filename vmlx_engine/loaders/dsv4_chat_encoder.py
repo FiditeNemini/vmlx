@@ -442,17 +442,32 @@ def parse_completion(
     in the raw text.
     """
     thinking_mode = "thinking" if enable_thinking else "chat"
-    try:
-        enc = _get_encoding(model_path=Path(model_path) if model_path else None)
-        return enc.parse_message_from_completion_text(raw_text, thinking_mode=thinking_mode)
-    except Exception as e:  # pragma: no cover - defensive fallback
-        logger.warning("DSV4 parse_completion failed (%s); returning raw text.", e)
-        return {
-            "role": "assistant",
-            "reasoning_content": "",
-            "content": raw_text,
-            "tool_calls": [],
-        }
+    enc = _get_encoding(model_path=Path(model_path) if model_path else None)
+
+    # The generation loop consumes the stop token instead of returning it in
+    # decoded completion text.  The official DSV4 parser owns the opposite
+    # contract: an ordinary visible completion must terminate with the
+    # encoder's EOS token.  Tool-call-only turns happened to parse without EOS
+    # because their canonical DSML close is itself terminal, which hid this
+    # mismatch until a tool-result continuation produced reasoning + a visible
+    # final answer.  Restore only the consumed canonical stop token before
+    # invoking the bundle parser, exactly as the production DSML parser does.
+    parser_text = raw_text
+    eos_token = getattr(enc, "eos_token", None)
+    if (
+        isinstance(eos_token, str)
+        and eos_token
+        and not parser_text.endswith(eos_token)
+    ):
+        parser_text += eos_token
+
+    # Do not turn a rejected official DSV4 grammar into an apparently valid
+    # visible answer.  Callers need the parser failure so API/batch harnesses
+    # can fail closed instead of leaking reasoning or malformed DSML.
+    return enc.parse_message_from_completion_text(
+        parser_text,
+        thinking_mode=thinking_mode,
+    )
 
 
 def read_chat_config_from_bundle(bundle_path: str) -> Dict[str, Any]:

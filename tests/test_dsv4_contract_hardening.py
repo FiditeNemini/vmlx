@@ -212,6 +212,114 @@ def test_dsv4_native_cache_status_reports_ratio_and_window_contract():
     }
 
 
+def test_dsv4_batch_parser_restores_consumed_eos_for_reasoning_final(
+    monkeypatch,
+):
+    """Stop-stripped reasoning/final output must satisfy the official parser.
+
+    DSV4 tool-call-only output can terminate at the canonical DSML close, but
+    an ordinary final answer requires the bundle EOS token.  The engine consumes
+    that stop token, so the adapter must restore it before parsing.
+    """
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    calls = []
+
+    class OfficialShapeEncoder:
+        eos_token = "<DSV4_EOS>"
+
+        @staticmethod
+        def parse_message_from_completion_text(text, thinking_mode):
+            calls.append((text, thinking_mode))
+            assert text.endswith(OfficialShapeEncoder.eos_token)
+            body = text[: -len(OfficialShapeEncoder.eos_token)]
+            reasoning, close, content = body.partition("</think>")
+            assert close == "</think>"
+            return {
+                "role": "assistant",
+                "reasoning_content": reasoning,
+                "content": content,
+                "tool_calls": [],
+            }
+
+    monkeypatch.setattr(
+        dsv4_chat_encoder,
+        "_get_encoding",
+        lambda model_path=None: OfficialShapeEncoder,
+    )
+    raw = (
+        "The tool result was 1083. Now produce the final answer."
+        "</think>R20-DSV4-QAT-B-DONE"
+    )
+
+    parsed = dsv4_chat_encoder.parse_completion(
+        raw,
+        enable_thinking=True,
+        model_path="/models/dsv4",
+    )
+
+    assert parsed["reasoning_content"] == (
+        "The tool result was 1083. Now produce the final answer."
+    )
+    assert parsed["content"] == "R20-DSV4-QAT-B-DONE"
+    assert calls == [(raw + "<DSV4_EOS>", "thinking")]
+
+
+def test_dsv4_batch_parser_does_not_duplicate_existing_eos(monkeypatch):
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    calls = []
+
+    class OfficialShapeEncoder:
+        eos_token = "<DSV4_EOS>"
+
+        @staticmethod
+        def parse_message_from_completion_text(text, thinking_mode):
+            calls.append((text, thinking_mode))
+            return {
+                "role": "assistant",
+                "reasoning_content": "",
+                "content": "done",
+                "tool_calls": [],
+            }
+
+    monkeypatch.setattr(
+        dsv4_chat_encoder,
+        "_get_encoding",
+        lambda model_path=None: OfficialShapeEncoder,
+    )
+
+    dsv4_chat_encoder.parse_completion(
+        "done<DSV4_EOS>",
+        enable_thinking=False,
+    )
+
+    assert calls == [("done<DSV4_EOS>", "chat")]
+
+
+def test_dsv4_batch_parser_fails_closed_on_official_grammar_error(monkeypatch):
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    class RejectingEncoder:
+        eos_token = "<DSV4_EOS>"
+
+        @staticmethod
+        def parse_message_from_completion_text(text, thinking_mode):
+            raise ValueError("malformed canonical DSML")
+
+    monkeypatch.setattr(
+        dsv4_chat_encoder,
+        "_get_encoding",
+        lambda model_path=None: RejectingEncoder,
+    )
+
+    with pytest.raises(ValueError, match="malformed canonical DSML"):
+        dsv4_chat_encoder.parse_completion(
+            "<malformed>",
+            enable_thinking=True,
+        )
+
+
 def test_dsv4_capability_runner_check_accepts_current_contract_only():
     """Mirror of the runner shape check; guards against the stale shape passing.
 

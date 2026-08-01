@@ -10384,7 +10384,9 @@ async def health():
         result = {
             "status": status,
             "model_loaded": _image_gen is not None and _image_gen.is_loaded,
-            "model_name": _model_name,
+            "model_name": _resolve_model_name(),
+            "loaded_model_name": _model_name,
+            "served_model_name": _served_model_name,
             "model_type": "image",
             "engine_type": "mflux",
             "last_request_time": _last_request_time if _last_request_time > 0 else None,
@@ -10393,7 +10395,9 @@ async def health():
         result = {
             "status": status,
             "model_loaded": _engine is not None,
-            "model_name": _model_name,
+            "model_name": _resolve_model_name(),
+            "loaded_model_name": _model_name,
+            "served_model_name": _served_model_name,
             "model_type": "mllm" if (_engine and _engine.is_mllm) else "llm",
             "engine_type": engine_stats.get("engine_type", "unknown"),
             "last_request_time": _last_request_time if _last_request_time > 0 else None,

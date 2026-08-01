@@ -1463,7 +1463,32 @@ class TestHealthEndpoint:
         assert result["status"] == "healthy"
         assert result["model_loaded"] is True
         assert result["model_name"] == "test-model"
+        assert result["loaded_model_name"] == "test-model"
+        assert result["served_model_name"] is None
         assert result["engine_type"] == "simple"
+
+    def test_health_uses_public_served_name_and_keeps_loaded_identity(self):
+        """Health identity matches the public API alias without losing the artifact name."""
+        from vmlx_engine import server
+
+        mock_engine = MagicMock()
+        mock_engine.get_stats.return_value = {"engine_type": "simple"}
+        mock_engine.is_mllm = False
+
+        with (
+            patch.object(server, "_engine", mock_engine),
+            patch.object(server, "_model_name", "models/DeepSeek-V4-Flash-0731-JANG"),
+            patch.object(server, "_served_model_name", "DeepSeek-V4-Flash-0731-JANG"),
+            patch.object(server, "_model_load_error", None),
+            patch.object(server, "_mcp_manager", None),
+            patch.object(server, "_jang_metadata", None),
+            patch.object(server, "_last_request_time", 0.0),
+        ):
+            result = _run(server.health())
+
+        assert result["model_name"] == "DeepSeek-V4-Flash-0731-JANG"
+        assert result["served_model_name"] == "DeepSeek-V4-Flash-0731-JANG"
+        assert result["loaded_model_name"] == "models/DeepSeek-V4-Flash-0731-JANG"
 
     def test_health_error_sanitizes_paths(self):
         """Path strings in _model_load_error are replaced with <path>."""

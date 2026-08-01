@@ -2711,7 +2711,7 @@ describe('Default IP and New Settings', () => {
     it('session manager migrates the exact stale continuous-cache default tuple', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         expect(source).toContain('function applyCacheStackStartupDefaultMigration')
-        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 12')
+        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 13')
         expect(source).toContain('function markCacheStackStartupDefaultsCurrent')
         expect(source).toContain('config.cacheStackStartupDefaultsVersion = CACHE_STACK_STARTUP_DEFAULTS_VERSION')
         expect(source).toContain('config.continuousBatching === true')
@@ -2745,14 +2745,14 @@ describe('Default IP and New Settings', () => {
         const serverSource = readFileSync('src/main/server.ts', 'utf8')
         expect(serverSource).toContain('cacheStackStartupDefaultsVersion?: number')
         expect(source).toContain('function applyMissingCacheStackStartupDefaults')
-        expect(source).toContain('Number(config.cacheStackStartupDefaultsVersion || 0) >= CACHE_STACK_STARTUP_DEFAULTS_VERSION')
+        expect(source).toContain('cacheDefaultsVersion >= CACHE_STACK_STARTUP_DEFAULTS_VERSION')
         expect(source).toContain('const cacheDefaultsFilled = applyMissingCacheStackStartupDefaults(config, config.modelPath)')
-        expect(source).toContain('const markedCurrent = markCacheStackStartupDefaultsCurrent(config)')
+        expect(source).toContain('const markedCurrent = markCacheStackStartupDefaultsCurrent(config, config.modelPath)')
         expect(source).toContain('const familyDefaultsChanged = applyFamilyStartupDefaults(config, config.modelPath)')
         expect(source).toContain(
             'if (bundleDefaultsChanged || cacheDefaultsFilled || migrated || familyDefaultsChanged || normalized || markedCurrent)'
         )
-        expect(source).toContain('markCacheStackStartupDefaultsCurrent(merged as Partial<ServerConfig>)')
+        expect(source).toContain('markCacheStackStartupDefaultsCurrent(merged as Partial<ServerConfig>, session.modelPath)')
         expect(source).toContain('cacheStackStartupDefaultsVersion: CACHE_STACK_STARTUP_DEFAULTS_VERSION')
     })
 
@@ -2845,15 +2845,15 @@ describe('Default IP and New Settings', () => {
         const existingBlock = source.slice(existing, source.indexOf('const id = uuidv4()', existing))
 
         expect(beforeExisting).toContain('applyMissingCacheStackStartupDefaults(config, modelPath)')
-        expect(beforeExisting).toContain('markCacheStackStartupDefaultsCurrent(config)')
+        expect(beforeExisting).toContain('markCacheStackStartupDefaultsCurrent(config, modelPath)')
         expect(beforeExisting.indexOf('applyMissingCacheStackStartupDefaults(config, modelPath)')).toBeLessThan(
-            beforeExisting.indexOf('markCacheStackStartupDefaultsCurrent(config)'),
+            beforeExisting.indexOf('markCacheStackStartupDefaultsCurrent(config, modelPath)'),
         )
         expect(beforeExisting).not.toContain('applyCacheStackStartupDefaultMigration(config')
         expect(existingBlock).toContain('applyCacheStackStartupDefaultMigration(existingConfig, modelPath)')
         expect(existingBlock).toContain('const merged = { ...existingConfig, ...config, modelPath, host, port }')
         expect(existingBlock).toContain('applyMissingCacheStackStartupDefaults(merged, modelPath)')
-        expect(existingBlock).toContain('markCacheStackStartupDefaultsCurrent(merged)')
+        expect(existingBlock).toContain('markCacheStackStartupDefaultsCurrent(merged, modelPath)')
     })
 
     it('create-session UI persists the same paged plus block-L2 tuple that it displays', () => {
@@ -2865,7 +2865,7 @@ describe('Default IP and New Settings', () => {
         const launchEnd = source.indexOf('const handleLaunchRemote', launchStart)
         const launchBlock = source.slice(launchStart, launchEnd)
 
-        expect(detectBlock).toContain("usePagedCache: detected?.family === 'deepseek-v4' ? false : detected?.usePagedCache")
+        expect(detectBlock).toContain("usePagedCache: detected?.family === 'deepseek-v4' ? true : detected?.usePagedCache")
         expect(detectBlock).toContain("enableDiskCache: detected?.family === 'openpangu_v2'")
         expect(detectBlock).toContain("enableBlockDiskCache: detected?.family !== 'openpangu_v2'")
         expect(launchBlock).toContain('const normalizedCacheConfig = config')
@@ -2886,9 +2886,9 @@ describe('Default IP and New Settings', () => {
         expect(helper).toContain("setConfigValue(mutable, 'kvCacheQuantization', openPanguExactTypedCache ? 'none' : 'auto')")
         // v8 paged-default-ON (2026-07-12): fresh sessions inherit the detected
         // per-family paged capability — paged ON for autodetected TEXT families,
-        // OFF for VL/MLLM (#98) and arch-incompatible families. DSV4 defaults
-        // its RAM tier Off while SSD block-disk L2 remains independent.
-        expect(helper).toContain('const defaultUsePagedCache = dsv4Active ? false : (detectedUsePaged ?? false)')
+        // OFF for VL/MLLM (#98) and arch-incompatible families. DSV4 uses its
+        // typed RAM tier backed by SSD block-disk L2.
+        expect(helper).toContain('const defaultUsePagedCache = dsv4Active ? true : (detectedUsePaged ?? false)')
         expect(helper).toContain('const defaultEnableDiskCache = openPanguExactTypedCache')
         expect(helper).toContain('const defaultEnableBlockDiskCache = !openPanguExactTypedCache')
     })
@@ -2899,7 +2899,7 @@ describe('Default IP and New Settings', () => {
         const end = source.indexOf('// v8 (2026-07-12)', start)
         const block = source.slice(start, end)
 
-        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 12')
+        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 13')
         expect(block).toContain('Number(config.cacheStackStartupDefaultsVersion || 0) < 9')
         expect(block).toContain('migrationDetectedUsePaged === true')
         expect(block).toContain('config.usePagedCache === true')
@@ -2916,7 +2916,7 @@ describe('Default IP and New Settings', () => {
         const end = source.indexOf('// v8 (2026-07-12)', start)
         const block = source.slice(start, end)
 
-        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 12')
+        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 13')
         expect(block).toContain("migrationDetectedFamily === 'minimax_m3'")
         expect(block).toContain('Number(config.cacheStackStartupDefaultsVersion || 0) === 9')
         expect(block).toContain('config.usePagedCache === false')
@@ -2937,7 +2937,7 @@ describe('Default IP and New Settings', () => {
         expect(block).toContain('applyMissingCacheStackStartupDefaults(config, session.modelPath)')
         expect(block).toContain('applyCacheStackStartupDefaultMigration(config, session.modelPath)')
         expect(block).toContain('normalizeCacheStackMutualExclusion(config)')
-        expect(block).toContain('markCacheStackStartupDefaultsCurrent(config)')
+        expect(block).toContain('markCacheStackStartupDefaultsCurrent(config, session.modelPath)')
         expect(block).toContain("db.updateSession(session.id, { config: JSON.stringify(config) })")
     })
 
@@ -3796,6 +3796,7 @@ describe('JIT Toggle', () => {
         expect(form).toContain('{!dsv4Active && config.enableDiskCache &&')
         expect(form).toContain('{!dsv4Active && !batchingOff && prefixOff &&')
         expect(form).not.toContain('Persist DeepSeek-V4 native SWA+CSA/HCA composite cache records to SSD')
+        expect(form).toContain('The bounded RAM tier defaults On for hot reuse')
         expect(form).toContain("cachePolicy.legacyDiskCacheUnavailableReason === 'paged-cache-active'")
         expect(form).toContain("cachePolicy.legacyDiskCacheUnavailableReason === 'architecture-requires-paged-cache'")
         expect(form).toContain('DSV4 uses Block Disk Cache (SSD / L2) above for persistent native composite blocks')

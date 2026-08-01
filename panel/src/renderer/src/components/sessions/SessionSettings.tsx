@@ -19,7 +19,10 @@ import { buildMcpPolicyArgs } from '../../../../shared/mcpPolicy'
 import { resolveEffectiveReasoningParser } from '../../../../shared/reasoningParserAliases'
 import { resolveEffectiveToolParser } from '../../../../shared/toolParserAliases'
 import { buildToolLaunchArgs } from '../../../../shared/toolLaunchArgs'
-import { applyBundleGenerationDefaultsToSessionConfig } from '../../../../shared/sessionGenerationDefaults'
+import {
+  applyBundleDsv4PoolQuantToSessionConfig,
+  applyBundleGenerationDefaultsToSessionConfig,
+} from '../../../../shared/sessionGenerationDefaults'
 
 interface Session {
   id: string
@@ -740,7 +743,10 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
         // Load auto-detected config for preview resolution
         try {
           const det = await window.api.models.detectConfig(s.modelPath)
-          if (active) setDetectedConfig(det && det.family !== 'unknown' ? det : null)
+          if (active) {
+            setConfig(current => applyBundleDsv4PoolQuantToSessionConfig(current, det))
+            setDetectedConfig(det && det.family !== 'unknown' ? det : null)
+          }
         } catch (_) {
           if (active) setDetectedConfig(null)
         }
@@ -878,7 +884,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
               ? detected.dsv4PoolQuantDefault
               : undefined
             base.enablePrefixCache = true
-            base.usePagedCache = false
+            base.usePagedCache = true
             base.enableDiskCache = false
             base.enableBlockDiskCache = true
             base.kvCacheQuantization = 'auto'

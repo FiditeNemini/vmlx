@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
+  applyBundleDsv4PoolQuantToSessionConfig,
   applyBundleGenerationDefaultsToSessionConfig,
   resolveBundleGenerationDefaults,
 } from '../src/shared/sessionGenerationDefaults'
@@ -133,6 +134,48 @@ describe('session generation-default hydration', () => {
     })
   })
 
+  it('replaces stale saved DSV4 pool quant with the current bundle value only', () => {
+    const saved = {
+      dsv4PoolQuant: true,
+      enablePrefixCache: false,
+      maxCacheBlocks: 2048,
+      additionalArgs: '--user-owned value',
+    }
+
+    const hydrated = applyBundleDsv4PoolQuantToSessionConfig(saved, {
+      family: 'deepseek-v4',
+      dsv4PoolQuantDefault: false,
+    })
+
+    expect(hydrated).toEqual({
+      ...saved,
+      dsv4PoolQuant: false,
+    })
+    expect(saved.dsv4PoolQuant).toBe(true)
+  })
+
+  it('clears a stale DSV4-only value for a known non-DSV4 bundle', () => {
+    const hydrated = applyBundleDsv4PoolQuantToSessionConfig({
+      dsv4PoolQuant: true,
+      enablePrefixCache: false,
+      maxCacheBlocks: 2048,
+    }, {
+      family: 'qwen3.5',
+      dsv4PoolQuantDefault: false,
+    })
+
+    expect(hydrated).toEqual({
+      enablePrefixCache: false,
+      maxCacheBlocks: 2048,
+    })
+  })
+
+  it('keeps saved state intact when current bundle detection is unavailable', () => {
+    const saved = { dsv4PoolQuant: true, maxCacheBlocks: 2048 }
+    expect(applyBundleDsv4PoolQuantToSessionConfig(saved, null)).toBe(saved)
+    expect(applyBundleDsv4PoolQuantToSessionConfig(saved, { family: 'unknown' })).toBe(saved)
+  })
+
   it('wires both settings surfaces on initial load and Reset', () => {
     for (const sourcePath of [
       'src/renderer/src/components/sessions/SessionSettings.tsx',
@@ -156,5 +199,19 @@ describe('session generation-default hydration', () => {
     expect(source).not.toContain('function applyGenerationDefaultsToConfig')
     expect(source).not.toContain('function applyGenerationDefaultsToStoredConfig')
     expect(source).toContain('Promise.all([')
+  })
+
+  it('reconciles current DSV4 bundle state in every existing-session settings surface', () => {
+    for (const sourcePath of [
+      'src/renderer/src/components/sessions/SessionSettings.tsx',
+      'src/renderer/src/components/sessions/ServerSettingsDrawer.tsx',
+      'src/renderer/src/components/sessions/CreateSession.tsx',
+    ]) {
+      const source = readFileSync(sourcePath, 'utf8')
+      expect(source).toContain('applyBundleDsv4PoolQuantToSessionConfig')
+      expect(source).toContain(
+        'setConfig(current => applyBundleDsv4PoolQuantToSessionConfig(current, det))',
+      )
+    }
   })
 })

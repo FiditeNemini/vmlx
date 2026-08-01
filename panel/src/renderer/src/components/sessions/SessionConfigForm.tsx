@@ -1025,7 +1025,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       {/* In-memory paged cache (RAM) */}
       <Section title={pagedCacheSectionTitle} expanded={expandedSections.pagedCache} onToggle={() => toggleSection('pagedCache')} hidden={isImage}>
         {!effectivelyNoBatching && <PerformanceHint text="Keeps reusable prefix blocks in Apple unified memory as small pages instead of one large allocation. This is the fast RAM tier; Block Disk Cache (SSD / L2) below is the persistent tier." />}
-        {dsv4Active && <InfoNote text="DSV4 uses 256-token typed composite blocks. The RAM tier is optional and defaults Off; Block Disk Cache can remain On as the persistent SSD-only tier." />}
+        {dsv4Active && <InfoNote text="DSV4 uses 256-token typed composite blocks. The bounded RAM tier defaults On for hot reuse, with Block Disk Cache as the persistent warm/cold tier. You can turn RAM Off and keep SSD-only reuse." />}
         {batchingOff && <IncompatWarning text="In-Memory Paged Cache (RAM) requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above to enable the RAM cache tier." />}
         {!dsv4Active && config.enableDiskCache && <IncompatWarning text="In-Memory Paged Cache (RAM) and legacy Disk Cache cannot run simultaneously. Enabling the RAM tier will auto-disable legacy Disk Cache. For persistent SSD caching, use 'Block Disk Cache (SSD / L2)' below instead." />}
         {!dsv4Active && !batchingOff && prefixOff && !cachePolicy.architectureRequiresPagedCache && <InfoNote text="In-Memory Paged Cache (RAM) is a prefix-cache backend. Turning it on will enable Prefix Cache." />}

@@ -11,7 +11,10 @@ import {
 } from './SessionConfigForm'
 import { useInferenceMode } from '../layout/InferenceMode'
 import { useTranslation } from '../../i18n'
-import { applyBundleGenerationDefaultsToSessionConfig } from '../../../../shared/sessionGenerationDefaults'
+import {
+  applyBundleDsv4PoolQuantToSessionConfig,
+  applyBundleGenerationDefaultsToSessionConfig,
+} from '../../../../shared/sessionGenerationDefaults'
 
 interface Session {
   id: string
@@ -107,6 +110,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
       try {
         const det: any = await window.api.models.detectConfig(session.modelPath)
         if (!active) return
+        setConfig(current => applyBundleDsv4PoolQuantToSessionConfig(current, det))
         if (det?.cacheType) setDetectedCacheType(det.cacheType)
         setDetectedUsePagedCache(det?.usePagedCache)
         setDetectedCacheSubtype(det?.cacheSubtype)
@@ -262,7 +266,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
               ? detected.dsv4PoolQuantDefault
               : undefined
             base.enablePrefixCache = true
-            base.usePagedCache = false
+            base.usePagedCache = true
             base.enableDiskCache = false
             base.enableBlockDiskCache = true
             base.kvCacheQuantization = 'auto'

@@ -171,6 +171,7 @@ registerFamily('mistral', { cacheType: 'kv', toolParser: 'mistral', enableAutoTo
 // DeepSeek
 registerFamily('deepseek-v4', {
   cacheType: 'kv',
+  usePagedCache: true,
   toolParser: 'dsml',
   reasoningParser: 'deepseek_r1',
   supportsThinking: true,

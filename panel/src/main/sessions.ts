@@ -262,7 +262,7 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         changed = true
       }
       if (config.usePagedCache === undefined) {
-        config.usePagedCache = false
+        config.usePagedCache = true
         changed = true
       }
       if (config.enableBlockDiskCache === undefined) {
@@ -717,10 +717,29 @@ function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   return changed
 }
 
-const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 12
+const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 13
 
-function markCacheStackStartupDefaultsCurrent(config: Partial<ServerConfig>): boolean {
+function markCacheStackStartupDefaultsCurrent(
+  config: Partial<ServerConfig>,
+  modelPath?: string,
+): boolean {
   if (config.cacheStackStartupDefaultsVersion === CACHE_STACK_STARTUP_DEFAULTS_VERSION) return false
+  // v13 is a DSV4-only default change. If a v12 session's bundle is currently
+  // unavailable, do not consume the migration version: retry after the model
+  // path is mounted again so an untouched DSV4 default cannot be stranded in
+  // SSD-only mode. Unknown detection is equally non-authoritative.
+  if (Number(config.cacheStackStartupDefaultsVersion || 0) === 12) {
+    const targetPath = modelPath || config.modelPath
+    if (!targetPath) return false
+    try {
+      const detectedFamily = normalizeDetectedFamilyName(
+        detectModelConfigFromDir(targetPath).family,
+      )
+      if (!detectedFamily || detectedFamily === 'unknown') return false
+    } catch {
+      return false
+    }
+  }
   config.cacheStackStartupDefaultsVersion = CACHE_STACK_STARTUP_DEFAULTS_VERSION
   return true
 }
@@ -755,10 +774,11 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
 
   const dsv4Active = detectedFamily === 'deepseek-v4'
   const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
-  // Fresh DSV4 sessions use native composite prefix reuse with the RAM paged
-  // tier Off. Other families inherit their detected per-family paged default.
-  // Block-disk L2 remains independent of paged RAM in both cases.
-  const defaultUsePagedCache = dsv4Active ? false : (detectedUsePaged ?? false)
+  // DSV4 and every family with a safe generic or typed block serializer use
+  // the normal hot/warm/cold stack by default: bounded paged RAM backed by
+  // block-disk L2. Users may still explicitly disable the RAM tier and retain
+  // SSD-only longest-prefix reuse.
+  const defaultUsePagedCache = dsv4Active ? true : (detectedUsePaged ?? false)
   // Every supported prefix-cache lane gets block SSD L2 by default, even when
   // paged RAM is explicitly Off. openPangu is the path-dependent exact-snapshot
   // exception and continues to use prompt-level typed L2.
@@ -828,7 +848,8 @@ function isZayaCacheStackMigrationTarget(modelPath?: string): boolean {
 }
 
 function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, modelPath?: string): boolean {
-  if (Number(config.cacheStackStartupDefaultsVersion || 0) >= CACHE_STACK_STARTUP_DEFAULTS_VERSION) {
+  const cacheDefaultsVersion = Number(config.cacheStackStartupDefaultsVersion || 0)
+  if (cacheDefaultsVersion >= CACHE_STACK_STARTUP_DEFAULTS_VERSION) {
     return false
   }
 
@@ -847,30 +868,80 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     /* detection best-effort; leave undefined -> paged-off in the generic branch */
   }
   // v12: DSV4 native composite block records became a product cache lane.
-  // Migrate only the exact v11 fail-closed tuple. Any other combination is an
-  // explicit user choice and must survive the version bump unchanged.
+  // v13 restores the standard hot/warm/cold default now that typed RAM blocks,
+  // bounded block-disk L2, and SSD refault share one native block index. Only
+  // exact prior default tuples migrate; near-misses remain user-owned.
   const staleV11Dsv4FailClosed =
     migrationDetectedFamily === 'deepseek-v4' &&
-    Number(config.cacheStackStartupDefaultsVersion || 0) === 11 &&
+    cacheDefaultsVersion === 11 &&
+    config.continuousBatching === true &&
+    Number(config.maxNumSeqs) === 1 &&
+    Number(config.prefillBatchSize) === 512 &&
+    Number(config.prefillStepSize) === 2048 &&
+    Number(config.completionBatchSize) === 512 &&
     config.dsv4PrefixCache === false &&
     config.enablePrefixCache === false &&
+    Number(config.prefixCacheSize) === 100 &&
+    Number(config.prefixCacheMaxBytes) === 0 &&
+    Number(config.cacheMemoryMb) === 0 &&
+    Number(config.cacheMemoryPercent) === 15 &&
+    Number(config.cacheTtlMinutes) === 0 &&
+    config.noMemoryAwareCache === false &&
     config.usePagedCache === false &&
+    config.enableDiskCache === false &&
+    Number(config.diskCacheMaxGb) === 10 &&
+    String(config.diskCacheDir || '') === '' &&
     config.enableBlockDiskCache === false &&
+    Number(config.blockDiskCacheMaxGb) === 10 &&
+    String(config.blockDiskCacheDir || '') === '' &&
     Number(config.maxCacheBlocks) === 1000 &&
-    (config.pagedCacheBlockSize === undefined || Number(config.pagedCacheBlockSize) === DSV4_PAGED_CACHE_BLOCK_SIZE)
+    Number(config.pagedCacheBlockSize) === DSV4_PAGED_CACHE_BLOCK_SIZE &&
+    config.kvCacheQuantization === 'auto' &&
+    Number(config.kvCacheGroupSize) === 64
+  const staleV12Dsv4SsdOnlyDefault =
+    migrationDetectedFamily === 'deepseek-v4' &&
+    cacheDefaultsVersion === 12 &&
+    config.continuousBatching === true &&
+    Number(config.maxNumSeqs) === 1 &&
+    Number(config.prefillBatchSize) === 512 &&
+    Number(config.prefillStepSize) === 2048 &&
+    Number(config.completionBatchSize) === 512 &&
+    config.dsv4PrefixCache === true &&
+    config.enablePrefixCache === true &&
+    Number(config.prefixCacheSize) === 100 &&
+    Number(config.prefixCacheMaxBytes) === 0 &&
+    Number(config.cacheMemoryMb) === 0 &&
+    Number(config.cacheMemoryPercent) === 15 &&
+    Number(config.cacheTtlMinutes) === 0 &&
+    config.noMemoryAwareCache === false &&
+    config.usePagedCache === false &&
+    config.enableDiskCache === false &&
+    Number(config.diskCacheMaxGb) === 10 &&
+    String(config.diskCacheDir || '') === '' &&
+    config.enableBlockDiskCache === true &&
+    Number(config.blockDiskCacheMaxGb) === 10 &&
+    String(config.blockDiskCacheDir || '') === '' &&
+    Number(config.pagedCacheBlockSize) === DSV4_PAGED_CACHE_BLOCK_SIZE &&
+    Number(config.maxCacheBlocks) === DSV4_MAX_CACHE_BLOCKS &&
+    config.kvCacheQuantization === 'auto' &&
+    Number(config.kvCacheGroupSize) === 64
   if (migrationDetectedFamily === 'deepseek-v4') {
-    if (!staleV11Dsv4FailClosed) return false
+    if (!staleV11Dsv4FailClosed && !staleV12Dsv4SsdOnlyDefault) return false
     config.enablePrefixCache = true
     config.dsv4PrefixCache = true
-    config.usePagedCache = false
+    config.usePagedCache = true
     config.enableDiskCache = false
     config.enableBlockDiskCache = true
     config.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
     config.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
     config.kvCacheQuantization = 'auto'
-    markCacheStackStartupDefaultsCurrent(config)
+    markCacheStackStartupDefaultsCurrent(config, modelPath || config.modelPath)
     return true
   }
+  // v13 changes only the DSV4 paged-RAM default. A v12 non-DSV4 session has
+  // no migration work to do, and must not fall back through older generic
+  // predicates merely because the global defaults version advanced.
+  if (cacheDefaultsVersion >= 12) return false
   const staleContinuousDefaults =
     config.continuousBatching === true &&
     config.enablePrefixCache === true &&
@@ -1084,7 +1155,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     config.enableBlockDiskCache = true
     config.blockDiskCacheMaxGb = config.blockDiskCacheMaxGb ?? 10
   }
-  markCacheStackStartupDefaultsCurrent(config)
+  markCacheStackStartupDefaultsCurrent(config, modelPath || config.modelPath)
   return true
 }
 
@@ -1206,7 +1277,7 @@ export class SessionManager extends EventEmitter {
       const cacheDefaultsFilled = applyMissingCacheStackStartupDefaults(config, session.modelPath)
       const migrated = applyCacheStackStartupDefaultMigration(config, session.modelPath)
       const normalized = normalizeCacheStackMutualExclusion(config)
-      const markedCurrent = markCacheStackStartupDefaultsCurrent(config)
+      const markedCurrent = markCacheStackStartupDefaultsCurrent(config, session.modelPath)
       if (cacheDefaultsFilled || migrated || normalized || markedCurrent) {
         db.updateSession(session.id, { config: JSON.stringify(config) })
         console.log(`[SESSION] Persisted startup cache defaults for session ${session.id}`)
@@ -1566,7 +1637,7 @@ export class SessionManager extends EventEmitter {
     applyMissingCacheStackStartupDefaults(config, modelPath)
     applyFamilyStartupDefaults(config, modelPath)
     normalizeCacheStackMutualExclusion(config)
-    markCacheStackStartupDefaultsCurrent(config)
+    markCacheStackStartupDefaultsCurrent(config, modelPath)
 
     // Check if session already exists for this model path. Raw-path lookup
     // first; fall back to model IDENTITY so path-prefix twins (~/models
@@ -1591,7 +1662,7 @@ export class SessionManager extends EventEmitter {
       applyMissingCacheStackStartupDefaults(merged, modelPath)
       applyFamilyStartupDefaults(merged, modelPath)
       normalizeCacheStackMutualExclusion(merged)
-      markCacheStackStartupDefaultsCurrent(merged)
+      markCacheStackStartupDefaultsCurrent(merged, modelPath)
       db.updateSession(existing.id, {
         config: JSON.stringify(merged),
         host,
@@ -1983,7 +2054,7 @@ export class SessionManager extends EventEmitter {
     const migrated = applyCacheStackStartupDefaultMigration(config, config.modelPath)
     const familyDefaultsChanged = applyFamilyStartupDefaults(config, config.modelPath)
     const normalized = normalizeCacheStackMutualExclusion(config)
-    const markedCurrent = markCacheStackStartupDefaultsCurrent(config)
+    const markedCurrent = markCacheStackStartupDefaultsCurrent(config, config.modelPath)
     if (bundleDefaultsChanged || cacheDefaultsFilled || migrated || familyDefaultsChanged || normalized || markedCurrent) {
       // Persist the migrated config so the settings UI reflects the corrected
       // values on next render and the same migration doesn't have to re-fire
@@ -2069,7 +2140,7 @@ export class SessionManager extends EventEmitter {
               config.isMultimodal !== false
             config.continuousBatching = true
             if (config.enablePrefixCache === undefined) config.enablePrefixCache = true
-            if (config.usePagedCache === undefined) config.usePagedCache = false
+            if (config.usePagedCache === undefined) config.usePagedCache = true
             if (config.enableBlockDiskCache === undefined) config.enableBlockDiskCache = true
             if (config.maxCacheBlocks === undefined) config.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
             config.dsv4PrefixCache = config.enablePrefixCache !== false
@@ -2841,11 +2912,11 @@ export class SessionManager extends EventEmitter {
     // current, because the baseline is migrated here before the merge.
     const migratedBaseline: Record<string, unknown> = { ...currentConfig }
     applyCacheStackStartupDefaultMigration(migratedBaseline as Partial<ServerConfig>, (migratedBaseline.modelPath as string) || undefined)
-    markCacheStackStartupDefaultsCurrent(migratedBaseline as Partial<ServerConfig>)
+    markCacheStackStartupDefaultsCurrent(migratedBaseline as Partial<ServerConfig>, session.modelPath)
     for (const key of explicitlyClearedKeys) delete migratedBaseline[key]
     const merged = { ...migratedBaseline, ...cleanConfig }
     normalizeCacheStackMutualExclusion(merged as Partial<ServerConfig>)
-    markCacheStackStartupDefaultsCurrent(merged as Partial<ServerConfig>)
+    markCacheStackStartupDefaultsCurrent(merged as Partial<ServerConfig>, session.modelPath)
 
     // Log sleep config changes
     if ('idleTimeoutSoftMin' in cleanConfig || 'idleTimeoutHardMin' in cleanConfig || 'autoSleepEnabled' in cleanConfig) {
@@ -3021,7 +3092,7 @@ export class SessionManager extends EventEmitter {
           // disk-only block-aware prefix backend; typed/path-dependent families
           // still force their detected paged contract. openPangu is the exact
           // typed exception and stays on prompt-level disk L2.
-          usePagedCache: detectedFamily === 'deepseek-v4' ? false : (detected.usePagedCache ?? false),
+          usePagedCache: detectedFamily === 'deepseek-v4' ? true : (detected.usePagedCache ?? false),
           enableDiskCache: detectedFamily === 'openpangu_v2',
           pagedCacheBlockSize: detectedFamily === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64,
           maxCacheBlocks: detectedFamily === 'deepseek-v4' ? DSV4_MAX_CACHE_BLOCKS : 1000,

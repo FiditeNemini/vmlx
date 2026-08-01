@@ -20,6 +20,11 @@ export interface SessionGenerationDefaultFields {
   defaultSamplingDefaultsDeclared: boolean
 }
 
+export interface DetectedDsv4PoolQuantDefault {
+  family?: string
+  dsv4PoolQuantDefault?: boolean
+}
+
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
@@ -141,4 +146,30 @@ export function applyBundleGenerationDefaultsToSessionConfig<T extends object>(
     defaultDoSample: typeof defaults?.doSample === 'boolean' ? defaults.doSample : undefined,
     defaultSamplingDefaultsDeclared: hasDeclaredBundleSamplingDefaults(defaults),
   }
+}
+
+/**
+ * Reconcile the one DSV4 session field whose value is owned by the current
+ * model bundle rather than by a previously saved session. Unknown detection
+ * leaves the saved value alone; a known non-DSV4 family clears the stale,
+ * family-specific field without touching any unrelated user settings.
+ */
+export function applyBundleDsv4PoolQuantToSessionConfig<
+  T extends { dsv4PoolQuant?: boolean },
+>(
+  config: T,
+  detected: DetectedDsv4PoolQuantDefault | null | undefined,
+): T {
+  if (!detected?.family || detected.family === 'unknown') return config
+
+  const next = { ...config } as T
+  if (
+    detected.family === 'deepseek-v4'
+    && typeof detected.dsv4PoolQuantDefault === 'boolean'
+  ) {
+    next.dsv4PoolQuant = detected.dsv4PoolQuantDefault
+  } else {
+    delete next.dsv4PoolQuant
+  }
+  return next
 }

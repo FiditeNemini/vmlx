@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -89,6 +89,47 @@ function detected(modelPath: string, port = 8123, pid = 4242): any {
   }
 }
 
+function untouchedV12Dsv4CacheConfig(): Record<string, unknown> {
+  return {
+    cacheStackStartupDefaultsVersion: 12,
+    continuousBatching: true,
+    maxNumSeqs: 1,
+    prefillBatchSize: 512,
+    prefillStepSize: 2048,
+    completionBatchSize: 512,
+    dsv4PrefixCache: true,
+    enablePrefixCache: true,
+    prefixCacheSize: 100,
+    prefixCacheMaxBytes: 0,
+    cacheMemoryMb: 0,
+    cacheMemoryPercent: 15,
+    cacheTtlMinutes: 0,
+    noMemoryAwareCache: false,
+    usePagedCache: false,
+    enableDiskCache: false,
+    diskCacheMaxGb: 10,
+    diskCacheDir: '',
+    enableBlockDiskCache: true,
+    blockDiskCacheMaxGb: 10,
+    blockDiskCacheDir: '',
+    pagedCacheBlockSize: 256,
+    maxCacheBlocks: 4097,
+    kvCacheQuantization: 'auto',
+    kvCacheGroupSize: 64,
+  }
+}
+
+function untouchedV11Dsv4CacheConfig(): Record<string, unknown> {
+  return {
+    ...untouchedV12Dsv4CacheConfig(),
+    cacheStackStartupDefaultsVersion: 11,
+    dsv4PrefixCache: false,
+    enablePrefixCache: false,
+    enableBlockDiskCache: false,
+    maxCacheBlocks: 1000,
+  }
+}
+
 describe('DSV4 existing-engine adoption policy', () => {
   beforeEach(() => {
     state.sessions = []
@@ -102,25 +143,17 @@ describe('DSV4 existing-engine adoption policy', () => {
     }
   })
 
-  it('migrates only the exact v11 DSV4 fail-closed cache tuple to native SSD-only defaults', () => {
+  it('migrates only the exact v11 DSV4 fail-closed cache tuple to native hot/warm/cold defaults', () => {
     const modelPath = modelBundle('deepseek_v4')
-    state.sessions = [localSession('dsv4-v11', modelPath, {
-      cacheStackStartupDefaultsVersion: 11,
-      dsv4PrefixCache: false,
-      enablePrefixCache: false,
-      usePagedCache: false,
-      enableBlockDiskCache: false,
-      pagedCacheBlockSize: 256,
-      maxCacheBlocks: 1000,
-    })]
+    state.sessions = [localSession('dsv4-v11', modelPath, untouchedV11Dsv4CacheConfig())]
 
     new SessionManager()
 
     const migrated = JSON.parse(state.sessions[0].config)
-    expect(migrated.cacheStackStartupDefaultsVersion).toBe(12)
+    expect(migrated.cacheStackStartupDefaultsVersion).toBe(13)
     expect(migrated.dsv4PrefixCache).toBe(true)
     expect(migrated.enablePrefixCache).toBe(true)
-    expect(migrated.usePagedCache).toBe(false)
+    expect(migrated.usePagedCache).toBe(true)
     expect(migrated.enableDiskCache).toBe(false)
     expect(migrated.enableBlockDiskCache).toBe(true)
     expect(migrated.pagedCacheBlockSize).toBe(256)
@@ -133,17 +166,14 @@ describe('DSV4 existing-engine adoption policy', () => {
     { label: 'paged RAM explicitly enabled', patch: { usePagedCache: true } },
     { label: 'SSD block cache already enabled', patch: { enableBlockDiskCache: true } },
     { label: 'cache block capacity customized', patch: { maxCacheBlocks: 2048 } },
-    { label: 'already current', patch: { cacheStackStartupDefaultsVersion: 12 } },
+    { label: 'RAM percentage customized', patch: { cacheMemoryPercent: 37 } },
+    { label: 'block-L2 directory customized', patch: { blockDiskCacheDir: '/tmp/custom-block-cache' } },
+    { label: 'prefill batch customized', patch: { prefillBatchSize: 256 } },
+    { label: 'already current', patch: { cacheStackStartupDefaultsVersion: 13 } },
   ])('preserves a near-miss DSV4 v11 cache tuple: $label', ({ patch }) => {
     const modelPath = modelBundle('deepseek_v4')
     const original = {
-      cacheStackStartupDefaultsVersion: 11,
-      dsv4PrefixCache: false,
-      enablePrefixCache: false,
-      usePagedCache: false,
-      enableBlockDiskCache: false,
-      pagedCacheBlockSize: 256,
-      maxCacheBlocks: 1000,
+      ...untouchedV11Dsv4CacheConfig(),
       ...patch,
     }
     state.sessions = [localSession('dsv4-near-miss', modelPath, original)]
@@ -155,7 +185,106 @@ describe('DSV4 existing-engine adoption policy', () => {
     expect(preserved.usePagedCache).toBe(original.usePagedCache)
     expect(preserved.enableBlockDiskCache).toBe(original.enableBlockDiskCache)
     expect(preserved.maxCacheBlocks).toBe(original.maxCacheBlocks)
-    expect(preserved.cacheStackStartupDefaultsVersion).toBe(12)
+    expect(preserved.cacheStackStartupDefaultsVersion).toBe(13)
+  })
+
+  it('migrates the exact v12 DSV4 SSD-only default to paged RAM backed by block L2', () => {
+    const modelPath = modelBundle('deepseek_v4')
+    state.sessions = [localSession('dsv4-v12', modelPath, untouchedV12Dsv4CacheConfig())]
+
+    new SessionManager()
+
+    const migrated = JSON.parse(state.sessions[0].config)
+    expect(migrated.cacheStackStartupDefaultsVersion).toBe(13)
+    expect(migrated.dsv4PrefixCache).toBe(true)
+    expect(migrated.enablePrefixCache).toBe(true)
+    expect(migrated.usePagedCache).toBe(true)
+    expect(migrated.enableDiskCache).toBe(false)
+    expect(migrated.enableBlockDiskCache).toBe(true)
+    expect(migrated.pagedCacheBlockSize).toBe(256)
+    expect(migrated.maxCacheBlocks).toBe(4097)
+    expect(migrated.kvCacheQuantization).toBe('auto')
+  })
+
+  it.each([
+    ['RAM percentage', { cacheMemoryPercent: 37 }],
+    ['RAM MiB ceiling', { cacheMemoryMb: 4096 }],
+    ['RAM TTL', { cacheTtlMinutes: 30 }],
+    ['memory-awareness override', { noMemoryAwareCache: true }],
+    ['prefix entry capacity', { prefixCacheSize: 250 }],
+    ['prefix byte capacity', { prefixCacheMaxBytes: 8 * 1024 ** 3 }],
+    ['disk cache capacity', { diskCacheMaxGb: 25 }],
+    ['legacy disk directory', { diskCacheDir: '/tmp/custom-prompt-cache' }],
+    ['block-L2 capacity', { blockDiskCacheMaxGb: 25 }],
+    ['block-L2 directory', { blockDiskCacheDir: '/tmp/custom-block-cache' }],
+    ['cache block capacity', { maxCacheBlocks: 2048 }],
+    ['cache codec group size', { kvCacheGroupSize: 128 }],
+    ['prefill batch size', { prefillBatchSize: 256 }],
+  ])('preserves a customized v12 DSV4 SSD-only session: %s', (_label, patch) => {
+    const modelPath = modelBundle('deepseek_v4')
+    state.sessions = [localSession('dsv4-v12-custom', modelPath, {
+      ...untouchedV12Dsv4CacheConfig(),
+      ...patch,
+    })]
+
+    new SessionManager()
+
+    const preserved = JSON.parse(state.sessions[0].config)
+    expect(preserved.cacheStackStartupDefaultsVersion).toBe(13)
+    expect(preserved.usePagedCache).toBe(false)
+    for (const [key, value] of Object.entries(patch)) {
+      expect(preserved[key]).toBe(value)
+    }
+  })
+
+  it('does not reopen legacy generic migrations when stamping a v12 session to v13', () => {
+    const modelPath = modelBundle('qwen3')
+    state.sessions = [localSession('generic-v12-custom', modelPath, {
+      cacheStackStartupDefaultsVersion: 12,
+      continuousBatching: true,
+      enablePrefixCache: true,
+      maxNumSeqs: 1,
+      prefillBatchSize: 512,
+      prefillStepSize: 2048,
+      completionBatchSize: 512,
+      usePagedCache: true,
+      enableDiskCache: false,
+      enableBlockDiskCache: true,
+      kvCacheQuantization: 'auto',
+      cacheMemoryPercent: 37,
+    })]
+
+    new SessionManager()
+
+    const preserved = JSON.parse(state.sessions[0].config)
+    expect(preserved.cacheStackStartupDefaultsVersion).toBe(13)
+    expect(preserved.cacheMemoryPercent).toBe(37)
+    expect(preserved.usePagedCache).toBe(true)
+    expect(preserved.enableBlockDiskCache).toBe(true)
+  })
+
+  it('retries the v12 DSV4 migration after an unavailable bundle returns', () => {
+    const modelPath = modelBundle('deepseek_v4')
+    rmSync(modelPath, { recursive: true, force: true })
+    state.sessions = [localSession(
+      'dsv4-v12-unmounted',
+      modelPath,
+      untouchedV12Dsv4CacheConfig(),
+    )]
+
+    new SessionManager()
+
+    const unavailable = JSON.parse(state.sessions[0].config)
+    expect(unavailable.cacheStackStartupDefaultsVersion).toBe(12)
+    expect(unavailable.usePagedCache).toBe(false)
+
+    mkdirSync(modelPath, { recursive: true })
+    writeFileSync(join(modelPath, 'config.json'), JSON.stringify({ model_type: 'deepseek_v4' }))
+    new SessionManager()
+
+    const retried = JSON.parse(state.sessions[0].config)
+    expect(retried.cacheStackStartupDefaultsVersion).toBe(13)
+    expect(retried.usePagedCache).toBe(true)
   })
 
   it.each([

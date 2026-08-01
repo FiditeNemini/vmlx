@@ -10,7 +10,10 @@ import {
 import { DownloadTab } from './DownloadTab'
 import { DirectoryManager } from './DirectoryManager'
 import { useTranslation } from '../../i18n'
-import { applyBundleGenerationDefaultsToSessionConfig } from '../../../../shared/sessionGenerationDefaults'
+import {
+  applyBundleDsv4PoolQuantToSessionConfig,
+  applyBundleGenerationDefaultsToSessionConfig,
+} from '../../../../shared/sessionGenerationDefaults'
 
 interface ModelInfo {
   path: string
@@ -93,7 +96,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
               : undefined)
           : prev.dsv4PoolQuant,
         enablePrefixCache: detected?.family === 'openpangu_v2' || detected?.family === 'deepseek-v4' ? true : prev.enablePrefixCache,
-        usePagedCache: detected?.family === 'deepseek-v4' ? false : detected?.usePagedCache,
+        usePagedCache: detected?.family === 'deepseek-v4' ? true : detected?.usePagedCache,
         enableDiskCache: detected?.family === 'openpangu_v2',
         enableBlockDiskCache: detected?.family !== 'openpangu_v2',
         kvCacheQuantization: detected?.family === 'openpangu_v2' ? 'none' : detected?.family === 'deepseek-v4' ? 'auto' : prev.kvCacheQuantization,
@@ -217,7 +220,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
               ? detected.dsv4PoolQuantDefault
               : undefined
             base.enablePrefixCache = true
-            base.usePagedCache = false
+            base.usePagedCache = true
             base.enableDiskCache = false
             base.enableBlockDiskCache = true
             base.kvCacheQuantization = 'auto'
@@ -651,6 +654,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                               try {
                                 const det = await window.api.models.detectConfig(model.path) as any
                                 if (!selectionStillCurrent()) return
+                                setConfig(current => applyBundleDsv4PoolQuantToSessionConfig(current, det))
                                 if (det?.cacheType) setDetectedCacheType(det.cacheType)
                                 setDetectedUsePagedCache(det?.usePagedCache)
                                 setDetectedCacheSubtype(det?.cacheSubtype)

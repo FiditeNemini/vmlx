@@ -30,6 +30,8 @@ const panelDir = path.resolve(new URL('..', import.meta.url).pathname)
 const repoDir = path.resolve(panelDir, '..')
 const proofFormat = 'vmlx-electron-ui-proof-v2'
 const ownedRunIntentSchema = 'vmlx-r20-owned-run-intent-v5'
+const ownedUiReleaseSchema = 'vmlx-r20-owned-ui-release-v5'
+const ownedUiSessionAttestationSchema = 'vmlx-r20-owned-ui-session-attestation-v5'
 const executableIdentityMaxBytes = 512 * 1024 * 1024
 const installedReleaseManifestSchema = 'vmlx-installed-release-manifest-v1'
 const installedReleaseManifestFields = [
@@ -1627,7 +1629,7 @@ export function validateOwnedUiReleaseSentinel(
   if (
     !exactObjectFields(value, expectedFields)
     ||
-    value.schema !== 'vmlx-r19-owned-ui-release-v5'
+    value.schema !== ownedUiReleaseSchema
     || value.run_id !== expectedRunId
     || value.nonce !== nonce
     || String(value.session_id || '') !== String(sessionId || '')
@@ -1727,7 +1729,7 @@ export function validateOwnedReuseSessionAttestation(
   if (
     !activePhase
     || ![1, 2, 3, 4].includes(activePhase.phase_index)
-    || value.schema !== 'vmlx-r19-owned-ui-session-attestation-v5'
+    || value.schema !== ownedUiSessionAttestationSchema
     || value.run_id !== expectedRunId
     || value.nonce !== nonce
     || value.run_intent_sha256 !== runIntentSha256
@@ -10614,7 +10616,7 @@ async function main() {
         throw new Error('Owned UI session attestation has incomplete PID/session binding')
       }
       const attestationValue = {
-        schema: 'vmlx-r19-owned-ui-session-attestation-v5',
+        schema: ownedUiSessionAttestationSchema,
         run_id: runId,
         nonce: releaseSentinelNonce,
         run_intent_sha256: releaseRunIntentSha256,

@@ -5517,7 +5517,7 @@ describe("real UI model proof harness", () => {
         nlink: 1,
         mode: 0o600,
         value: {
-          schema: "vmlx-r19-owned-ui-session-attestation-v5",
+          schema: "vmlx-r20-owned-ui-session-attestation-v5",
           run_id: options.runId,
           nonce: options.nonce,
           run_intent_sha256: options.runIntentSha256,
@@ -5539,6 +5539,12 @@ describe("real UI model proof harness", () => {
         },
       };
       expect(validateOwnedReuseSessionAttestation(opened, options)).toEqual([]);
+
+      const staleSchema = structuredClone(opened);
+      staleSchema.value.schema = "vmlx-r19-owned-ui-session-attestation-v5";
+      expect(
+        validateOwnedReuseSessionAttestation(staleSchema, options).join("\n"),
+      ).toMatch(/stale, wrong-phase, wrong-model|not owned/);
 
       for (const [field, value] of [
         ["phase_index", 0],
@@ -5579,7 +5585,7 @@ describe("real UI model proof harness", () => {
       nlink: 1,
       mode: 0o600,
       value: {
-        schema: "vmlx-r19-owned-ui-release-v5",
+        schema: "vmlx-r20-owned-ui-release-v5",
         run_id: "run",
         nonce: "nonce",
         session_id: "session",
@@ -5601,6 +5607,19 @@ describe("real UI model proof harness", () => {
       activePhase,
       notBeforeMs: now,
     })).toEqual([]);
+
+    const staleSchema = structuredClone(validOpened);
+    staleSchema.value.schema = "vmlx-r19-owned-ui-release-v5";
+    expect(validateOwnedUiReleaseSentinel(staleSchema, {
+      runId: "run",
+      nonce: "nonce",
+      sessionId: "session",
+      orchestrated: true,
+      runIntentSha256: runIntentSha,
+      uiSessionAttestationSha256: sessionAttestationSha,
+      activePhase,
+      notBeforeMs: now,
+    }).join("\n")).toMatch(/fields\/run\/nonce\/session do not match/);
 
     const mismatched = structuredClone(validOpened);
     mismatched.value.nonce = "wrong";

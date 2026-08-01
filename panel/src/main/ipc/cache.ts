@@ -6,7 +6,16 @@ import { resolveBaseUrl, getAuthHeaders } from './utils'
  * Proxies to the vmlx-engine server's /v1/cache/* endpoints.
  */
 
-function isExpectedCacheEndpointDisconnectError(err: unknown): boolean {
+const expectedUndiciTransportCodes = new Set([
+  'UND_ERR_SOCKET',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_DESTROYED',
+  'UND_ERR_ABORTED',
+])
+
+export function isExpectedCacheEndpointDisconnectError(err: unknown): boolean {
   const anyErr = err as any
   const code = anyErr?.code
   const message = String(anyErr?.message || anyErr || "").toLowerCase()
@@ -24,9 +33,14 @@ function isExpectedCacheEndpointDisconnectError(err: unknown): boolean {
   return (
     code === "EPIPE" ||
     code === "ECONNRESET" ||
+    code === "ECONNREFUSED" ||
+    code === "ETIMEDOUT" ||
+    code === "EHOSTUNREACH" ||
+    code === "ENETUNREACH" ||
     code === "ERR_STREAM_DESTROYED" ||
     code === "ERR_STREAM_WRITE_AFTER_END" ||
-    /EPIPE|write EPIPE|broken pipe|socket hang up|connection reset|premature close|stream.*destroyed|write after end/i.test(message) ||
+    expectedUndiciTransportCodes.has(code) ||
+    /EPIPE|write EPIPE|broken pipe|socket hang up|connection reset|connection refused|connect timeout|other side closed|socket closed|premature close|stream.*destroyed|write after end/i.test(message) ||
     wrappedDisconnects.some((nested) => isExpectedCacheEndpointDisconnectError(nested)) ||
     nestedErrors.some((nested) => isExpectedCacheEndpointDisconnectError(nested))
   )

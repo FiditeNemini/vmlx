@@ -1,4 +1,79 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+
+export interface CachePanelRequestToken {
+  identityGeneration: number
+  requestGeneration: number
+}
+
+/**
+ * Keeps cache-panel async work scoped to the current session lifecycle and
+ * makes cache-stat refreshes last-request-wins.
+ */
+export class CachePanelRequestGuard {
+  private identityGeneration = 0
+  private requestGeneration = 0
+  private activeActionRequestGeneration: number | null = null
+
+  captureIdentity(): number {
+    return this.identityGeneration
+  }
+
+  resetIdentity(): void {
+    this.identityGeneration += 1
+    this.requestGeneration += 1
+    this.activeActionRequestGeneration = null
+  }
+
+  isIdentityCurrent(identityGeneration: number): boolean {
+    return identityGeneration === this.identityGeneration
+  }
+
+  beginLatest(identityGeneration = this.identityGeneration): CachePanelRequestToken | null {
+    if (
+      !this.isIdentityCurrent(identityGeneration)
+      || this.activeActionRequestGeneration !== null
+    ) return null
+    this.requestGeneration += 1
+    return {
+      identityGeneration,
+      requestGeneration: this.requestGeneration,
+    }
+  }
+
+  beginAction(identityGeneration = this.identityGeneration): CachePanelRequestToken | null {
+    if (
+      !this.isIdentityCurrent(identityGeneration)
+      || this.activeActionRequestGeneration !== null
+    ) return null
+    this.requestGeneration += 1
+    this.activeActionRequestGeneration = this.requestGeneration
+    return {
+      identityGeneration,
+      requestGeneration: this.requestGeneration,
+    }
+  }
+
+  finishAction(token: CachePanelRequestToken): void {
+    if (
+      this.isCurrent(token)
+      && this.activeActionRequestGeneration === token.requestGeneration
+    ) {
+      this.activeActionRequestGeneration = null
+    }
+  }
+
+  invalidateRequests(): void {
+    this.requestGeneration += 1
+    this.activeActionRequestGeneration = null
+  }
+
+  isCurrent(token: CachePanelRequestToken): boolean {
+    return (
+      token.identityGeneration === this.identityGeneration
+      && token.requestGeneration === this.requestGeneration
+    )
+  }
+}
 
 interface CachePanelProps {
   endpoint: { host: string; port: number }
@@ -16,40 +91,90 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
   const [clearing, setClearing] = useState(false)
   const [warmInput, setWarmInput] = useState('')
   const [showWarmInput, setShowWarmInput] = useState(false)
-  const intervalRef = useRef<NodeJS.Timeout | null>(null)
+  const requestGuardRef = useRef<CachePanelRequestGuard | null>(null)
+  const warmInputGenerationRef = useRef(0)
+  if (!requestGuardRef.current) {
+    requestGuardRef.current = new CachePanelRequestGuard()
+  }
+  const requestGuard = requestGuardRef.current
+  const identityKey = `${endpoint.host}:${endpoint.port}:${sessionId ?? ''}:${sessionStatus}`
+  const identityKeyRef = useRef(identityKey)
+  // Invalidate old async work during render, before passive effects run. This
+  // closes the commit-to-effect window where a completion from the previous
+  // session could otherwise update the newly-rendered panel.
+  if (identityKeyRef.current !== identityKey) {
+    requestGuard.resetIdentity()
+    identityKeyRef.current = identityKey
+  }
 
-  const fetchStats = async () => {
+  const fetchStatsForToken = useCallback(async (requestToken: CachePanelRequestToken) => {
     if (sessionStatus !== 'running' && sessionStatus !== 'standby') return
     try {
       const s = await window.api.cache.stats(endpoint, sessionId)
+      if (!requestGuard.isCurrent(requestToken)) return
       setStats(s)
       setError(null)
     } catch (err: any) {
+      if (!requestGuard.isCurrent(requestToken)) return
       setError(err.message || 'Failed to fetch cache stats')
     }
-  }
+  }, [endpoint.host, endpoint.port, requestGuard, sessionId, sessionStatus])
+
+  const fetchStats = useCallback(async (
+    expectedIdentity = requestGuard.captureIdentity(),
+  ) => {
+    const requestToken = requestGuard.beginLatest(expectedIdentity)
+    if (!requestToken) return
+    await fetchStatsForToken(requestToken)
+  }, [fetchStatsForToken, requestGuard])
+
+  // A reused SessionView keeps this component instance alive when its session
+  // changes. Reset all panel state and invalidate every old async completion.
+  useEffect(() => {
+    setStats(null)
+    setEntries(null)
+    setLoading(false)
+    setError(null)
+    setShowEntries(false)
+    setWarming(false)
+    setClearing(false)
+    setWarmInput('')
+    setShowWarmInput(false)
+
+    return () => {
+      requestGuard.resetIdentity()
+    }
+  }, [endpoint.host, endpoint.port, requestGuard, sessionId, sessionStatus])
 
   // Poll stats every 5 seconds
   useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | null = null
     if (sessionStatus === 'running') {
       fetchStats()
-      intervalRef.current = setInterval(fetchStats, 5000)
+      interval = setInterval(fetchStats, 5000)
     }
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
+      if (interval) clearInterval(interval)
+      requestGuard.invalidateRequests()
     }
-  }, [endpoint.host, endpoint.port, sessionStatus, sessionId])
+  }, [fetchStats, requestGuard, sessionStatus])
 
   const handleFetchEntries = async () => {
+    const identity = requestGuard.captureIdentity()
+    const actionToken = requestGuard.beginAction(identity)
+    if (!actionToken) return
     setLoading(true)
     try {
       const e = await window.api.cache.entries(endpoint, sessionId)
+      if (!requestGuard.isCurrent(actionToken)) return
       setEntries(e)
       setShowEntries(true)
     } catch (err: any) {
+      if (!requestGuard.isCurrent(actionToken)) return
       setError(err.message)
     } finally {
-      setLoading(false)
+      if (requestGuard.isCurrent(actionToken)) setLoading(false)
+      requestGuard.finishAction(actionToken)
     }
   }
 
@@ -58,29 +183,47 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       setShowWarmInput(true)
       return
     }
+    const identity = requestGuard.captureIdentity()
+    const actionToken = requestGuard.beginAction(identity)
+    if (!actionToken) return
+    const submittedInput = warmInput.trim()
+    const submittedInputGeneration = warmInputGenerationRef.current
     setWarming(true)
     try {
-      await window.api.cache.warm([warmInput.trim()], endpoint, sessionId)
-      await fetchStats()
-      setWarmInput('')
-      setShowWarmInput(false)
+      await window.api.cache.warm([submittedInput], endpoint, sessionId)
+      if (!requestGuard.isCurrent(actionToken)) return
+      await fetchStatsForToken(actionToken)
+      if (!requestGuard.isCurrent(actionToken)) return
+      if (warmInputGenerationRef.current === submittedInputGeneration) {
+        setWarmInput('')
+        setShowWarmInput(false)
+      }
     } catch (err: any) {
+      if (!requestGuard.isCurrent(actionToken)) return
       setError(err.message)
     } finally {
-      setWarming(false)
+      if (requestGuard.isCurrent(actionToken)) setWarming(false)
+      requestGuard.finishAction(actionToken)
     }
   }
 
   const handleClear = async (type: string) => {
+    const identity = requestGuard.captureIdentity()
+    const actionToken = requestGuard.beginAction(identity)
+    if (!actionToken) return
     setClearing(true)
     try {
       await window.api.cache.clear(type, endpoint, sessionId)
-      await fetchStats()
+      if (!requestGuard.isCurrent(actionToken)) return
+      await fetchStatsForToken(actionToken)
+      if (!requestGuard.isCurrent(actionToken)) return
       setEntries(null)
     } catch (err: any) {
+      if (!requestGuard.isCurrent(actionToken)) return
       setError(err.message)
     } finally {
-      setClearing(false)
+      if (requestGuard.isCurrent(actionToken)) setClearing(false)
+      requestGuard.finishAction(actionToken)
     }
   }
 
@@ -104,6 +247,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
   const cacheTotals = stats?.cache_totals
   const blockDiskCache = stats?.block_disk_cache
   const globalBlockDiskBudget = blockDiskCache?.global_budget
+  const actionBusy = loading || warming || clearing
   const attentionKvStorage =
     nativeCache?.attention_kv_storage_quantization ??
     nativeCache?.storage_quantization
@@ -656,14 +800,23 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           <input
             type="text"
             value={warmInput}
-            onChange={e => setWarmInput(e.target.value)}
+            onChange={e => {
+              warmInputGenerationRef.current += 1
+              setWarmInput(e.target.value)
+            }}
             onKeyDown={e => { if (e.key === 'Enter' && warmInput.trim()) handleWarm() }}
+            disabled={actionBusy}
             placeholder="Enter system prompt to warm cache with..."
             autoFocus
             className="flex-1 px-2 py-1.5 text-xs bg-background border border-input rounded focus:outline-none focus:ring-1 focus:ring-ring"
           />
           <button
-            onClick={() => { setShowWarmInput(false); setWarmInput('') }}
+            onClick={() => {
+              warmInputGenerationRef.current += 1
+              setShowWarmInput(false)
+              setWarmInput('')
+            }}
+            disabled={actionBusy}
             className="px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground"
           >
             Cancel
@@ -675,21 +828,21 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       <div className="flex gap-2 flex-wrap">
         <button
           onClick={handleFetchEntries}
-          disabled={loading}
+          disabled={actionBusy}
           className="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent disabled:opacity-50"
         >
           {loading ? 'Loading...' : showEntries ? 'Refresh Entries' : 'Show Entries'}
         </button>
         <button
           onClick={handleWarm}
-          disabled={warming}
+          disabled={actionBusy}
           className="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent disabled:opacity-50"
         >
           {warming ? 'Warming...' : 'Warm Cache'}
         </button>
         <button
           onClick={() => handleClear('ram')}
-          disabled={clearing}
+          disabled={actionBusy}
           title="Clear resident/indexed cache state while preserving disk-backed L2"
           className="px-3 py-1.5 text-xs border border-destructive/50 text-destructive rounded hover:bg-destructive/10 disabled:opacity-50"
         >
@@ -697,7 +850,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
         </button>
         <button
           onClick={() => handleClear('prefix')}
-          disabled={clearing}
+          disabled={actionBusy}
           title="Clear prefix cache from RAM and disk-backed L2"
           className="px-3 py-1.5 text-xs border border-destructive/50 text-destructive rounded hover:bg-destructive/10 disabled:opacity-50"
         >
@@ -705,7 +858,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
         </button>
         <button
           onClick={() => handleClear('all')}
-          disabled={clearing}
+          disabled={actionBusy}
           className="px-3 py-1.5 text-xs border border-destructive/50 text-destructive rounded hover:bg-destructive/10 disabled:opacity-50"
         >
           Clear All

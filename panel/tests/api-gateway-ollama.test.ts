@@ -400,6 +400,8 @@ describe("Ollama gateway parity contracts", () => {
     expect(cacheSource).toContain("const nestedErrors = Array.isArray((err as any)?.errors)");
     expect(cacheSource).toContain("nestedErrors.some((nested) => isExpectedCacheEndpointDisconnectError(nested))");
     expect(cacheSource).toContain("async function fetchCacheJson");
+    expect(cacheSource).toContain('code === "ECONNREFUSED"');
+    expect(cacheSource).toContain("expectedUndiciTransportCodes.has(code)");
     const rawFetches = cacheSource.match(/await fetch\(/g) || [];
     expect(rawFetches.length).toBe(1);
     const guardedFetches = cacheSource.match(/await fetchCacheJson\(/g) || [];

@@ -7,6 +7,21 @@ const source = readFileSync(
 )
 
 describe('CachePanel last-request truthfulness', () => {
+  it('invalidates stale refreshes and clears state when session identity changes', () => {
+    expect(source).toContain('requestGuard.beginLatest(expectedIdentity)')
+    expect(source).toContain('requestGuard.isCurrent(requestToken)')
+    expect(source).toContain('requestGuard.invalidateRequests()')
+    expect(source).toContain('requestGuard.resetIdentity()')
+    expect(source).toContain('requestGuard.beginAction(identity)')
+    expect(source).toContain('requestGuard.finishAction(actionToken)')
+    expect(source).toContain('identityKeyRef.current !== identityKey')
+    expect(source).toContain('warmInputGenerationRef.current === submittedInputGeneration')
+    expect(source).toContain('disabled={actionBusy}')
+    expect(source).toContain('setStats(null)')
+    expect(source).toContain('setEntries(null)')
+    expect(source).toContain('setError(null)')
+  })
+
   it('reads cache execution telemetry from scheduler and batch-generator shapes', () => {
     expect(source).toContain('schedulerStats?.last_cache_execution')
     expect(source).toContain('schedulerStats?.batch_generator?.last_cache_execution')

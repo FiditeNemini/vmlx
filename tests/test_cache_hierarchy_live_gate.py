@@ -277,6 +277,8 @@ def _path_free_execution() -> dict:
             "request_id": "resp-l2",
             "cache_reuse_applied": True,
             "cache_outcome": "hit",
+            "reconstructed": True,
+            "reconstruction_ok": True,
             "cache_detail": "block-disk",
             "prompt_tokens": 35,
             "attempted_cached_tokens": 32,
@@ -285,6 +287,35 @@ def _path_free_execution() -> dict:
             "prefill_tokens": 3,
             "disk_blocks": 2,
         },
+    }
+
+
+def _write_fence(
+    tag: str,
+    response_id: str,
+    *,
+    completion_generation: int,
+    disk_evictions: int,
+    attestation: str,
+) -> dict:
+    return {
+        "tag": tag,
+        "response_id": response_id,
+        "request_id": response_id,
+        "request_correlated": True,
+        "ok": True,
+        "post_eviction_complete": True,
+        "fence_sealed": True,
+        "fence_completion_generation": completion_generation,
+        "strict_physical_reconcile": True,
+        "baseline_reconciliation_generation": completion_generation - 1,
+        "global_reconciliation_generation": completion_generation,
+        "global_accounting_generation": completion_generation,
+        "global_bytes_after": 800,
+        "global_max_size_bytes": 1000,
+        "disk_writes_delta": 2,
+        "disk_evictions_delta": disk_evictions,
+        "attestation_sha256": attestation,
     }
 
 
@@ -358,6 +389,27 @@ def _l2_eviction_observation(*, disk_only: bool = False) -> dict:
     )[1]
     old_final = gate._prefix_binding(old_final_contract, "target")
     recent_final = recent_post
+    old_store_fence = _write_fence(
+        "l2_old_store",
+        "resp-old-store",
+        completion_generation=1,
+        disk_evictions=0,
+        attestation="8" * 64,
+    )
+    recent_store_fence = _write_fence(
+        "l2_recent_store",
+        "resp-recent-store",
+        completion_generation=2,
+        disk_evictions=0,
+        attestation="9" * 64,
+    )
+    evicting_filler_fence = _write_fence(
+        "l2_filler_001",
+        "resp-filler",
+        completion_generation=3,
+        disk_evictions=1,
+        attestation="a" * 64,
+    )
     return {
         "schema": gate.L2_SIZE_EVICTION_SCHEMA,
         "scenario": "store-evict-refault",
@@ -378,48 +430,50 @@ def _l2_eviction_observation(*, disk_only: bool = False) -> dict:
         "old_prefix_evicted": True,
         "recent_prefix_present": True,
         "recent_prefix_last_access_after_old": True,
+        "old_after_store": old_before,
         "old_before": old_before,
         "recent_before": recent_before,
         "recent_pre_refault": recent_pre,
         "recent_post_refault": recent_post,
-        "evicting_filler_fence": {
-            "tag": "l2_filler_001",
-            "response_id": "resp-filler",
-            "request_id": "resp-filler",
-            "request_correlated": True,
-            "ok": True,
-            "post_eviction_complete": True,
-            "fence_sealed": True,
-            "fence_completion_generation": 2,
-            "strict_physical_reconcile": True,
-            "baseline_reconciliation_generation": 0,
-            "global_reconciliation_generation": 1,
-            "global_accounting_generation": 1,
-            "global_bytes_after": 800,
-            "global_max_size_bytes": 1000,
-            "disk_writes_delta": 2,
-            "disk_evictions_delta": 1,
-            "attestation_sha256": "8" * 64,
-        },
+        "evicting_filler_fence": evicting_filler_fence,
+        "old_store_fence": old_store_fence,
+        "recent_store_fence": recent_store_fence,
         "old_after_durable_filler": old_final,
         "recent_after_durable_filler": recent_final,
         "old_final": old_final,
         "recent_final": recent_final,
         "recent_refault_execution": _path_free_execution(),
         "write_fences": [
-            {
-                "tag": "filler",
-                "ok": True,
-                "strict_physical_reconcile": True,
-                "baseline_reconciliation_generation": 0,
-                "global_reconciliation_generation": 1,
-                "global_accounting_generation": 1,
-                "global_bytes_after": 800,
-                "global_max_size_bytes": 1000,
-                "attestation_sha256": "8" * 64,
-            }
+            old_store_fence,
+            recent_store_fence,
+            evicting_filler_fence,
         ],
     }
+
+
+def _l2_recent_store_eviction_observation() -> dict:
+    observation = _l2_eviction_observation()
+    old_evicted = deepcopy(observation["old_final"])
+    recent_ssd_only = deepcopy(observation["recent_pre_refault"])
+    recent_store_fence = deepcopy(observation["recent_store_fence"])
+    recent_store_fence["disk_evictions_delta"] = 1
+    observation.update(
+        {
+            "bounded_filler_request_count": 0,
+            "post_refault_filler_request_count": 0,
+            "evicting_filler_stage": "recent-store",
+            "old_before": old_evicted,
+            "recent_before": recent_ssd_only,
+            "recent_pre_refault": recent_ssd_only,
+            "evicting_filler_fence": recent_store_fence,
+            "recent_store_fence": recent_store_fence,
+            "old_after_durable_filler": old_evicted,
+            "recent_after_durable_filler": recent_ssd_only,
+            "old_final": old_evicted,
+        }
+    )
+    observation["write_fences"][1] = recent_store_fence
+    return observation
 
 
 def _l2_restart_observation(store: dict) -> dict:
@@ -613,11 +667,14 @@ def test_l2_eviction_observation_requires_exact_identity_not_generic_counters():
         for key, value in observation.items()
         if key
         not in {
+            "old_after_store",
             "old_before",
             "recent_before",
             "recent_pre_refault",
             "recent_post_refault",
             "evicting_filler_fence",
+            "old_store_fence",
+            "recent_store_fence",
             "old_after_durable_filler",
             "recent_after_durable_filler",
             "old_final",
@@ -635,6 +692,25 @@ def test_l2_eviction_observation_requires_exact_identity_not_generic_counters():
     )
     assert any("source prefix binding is missing" in failure for failure in failures)
     assert any("exact request execution is missing" in failure for failure in failures)
+
+
+def test_l2_eviction_observation_accepts_recent_store_eviction_geometry():
+    observation = _l2_recent_store_eviction_observation()
+
+    failures = gate.validate_l2_size_eviction_observation(
+        observation,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+        max_filler_requests=64,
+    )
+
+    assert failures == []
+    assert observation["bounded_filler_request_count"] == 0
+    assert observation["evicting_filler_stage"] == "recent-store"
+    assert observation["evicting_filler_fence"] == observation[
+        "recent_store_fence"
+    ]
 
 
 def test_l2_eviction_observation_accepts_truthful_ssd_only_state():
@@ -863,7 +939,7 @@ def test_prefix_bounds_accepts_smaller_architecture_safe_hybrid_checkpoint():
         ),
         (
             lambda row: row.update({"evicting_filler_stage": "pre-refault"}),
-            "post-refault request-correlated filler",
+            "evicting stage is invalid",
         ),
     ),
 )
@@ -886,13 +962,76 @@ def test_l2_eviction_observation_fails_closed_without_exact_filler_proof(
 
 
 @pytest.mark.parametrize(
+    ("mutate", "expected_failure"),
+    (
+        (
+            lambda row: row["old_after_store"]["l2"].update(
+                {"terminal_readable": False}
+            ),
+            "old after its durable store: exact complete readable L2 chain",
+        ),
+        (
+            lambda row: row["recent_before"]["l2"].update(
+                {
+                    "indexed_blocks": 1,
+                    "readable_blocks": 1,
+                    "contiguous_indexed_blocks": 1,
+                    "contiguous_readable_blocks": 1,
+                }
+            ),
+            "recent after its durable store: exact complete readable L2 chain",
+        ),
+        (
+            lambda row: row["recent_store_fence"].update(
+                {"disk_evictions_delta": 0}
+            ),
+            "recent store: disk_evictions delta must be positive",
+        ),
+        (
+            lambda row: row.update(
+                {
+                    "evicting_filler_fence": {
+                        **row["evicting_filler_fence"],
+                        "attestation_sha256": "f" * 64,
+                    }
+                }
+            ),
+            "evicting write is not the exact recent-store fence",
+        ),
+        (
+            lambda row: row["recent_refault_execution"][
+                "last_cache_execution"
+            ].update({"cache_outcome": "miss", "reconstructed": False}),
+            "cold fallback is possible",
+        ),
+    ),
+)
+def test_l2_recent_store_eviction_geometry_fails_closed(
+    mutate,
+    expected_failure,
+):
+    observation = _l2_recent_store_eviction_observation()
+    mutate(observation)
+
+    failures = gate.validate_l2_size_eviction_observation(
+        observation,
+        expected_source_head=SOURCE,
+        expected_source_tree=_observed_source(SOURCE)["tree"],
+        health_attestation=_prefix_health_attestation(),
+        max_filler_requests=64,
+    )
+
+    assert any(expected_failure in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
     ("old_readable", "recent_resident", "recent_readable", "failure_text"),
     (
         (
             True,
             True,
             False,
-            "recent prefix left L2 before",
+            "recent prefix was not completely readable",
         ),
         (
             False,
@@ -920,10 +1059,18 @@ def test_l2_eviction_scenario_stops_before_invalid_refault_boundary(
     ) -> dict:
         return {
             "block_chain_fingerprint_sha256": fingerprint,
+            "expected_blocks": 2,
             "l1": {
                 "terminal_resident_payload_present": resident,
             },
             "l2": {
+                "expected_blocks": 2,
+                "indexed_blocks": 2 if readable else 1,
+                "readable_blocks": 2 if readable else 1,
+                "contiguous_indexed_blocks": 2 if readable else 1,
+                "contiguous_readable_blocks": 2 if readable else 1,
+                "stale_index_blocks": 0,
+                "terminal_indexed": readable,
                 "terminal_readable": readable,
                 "store_total_size_bytes": 600,
                 "store_max_size_bytes": 1000,
@@ -946,7 +1093,7 @@ def test_l2_eviction_scenario_stops_before_invalid_refault_boundary(
             readable=recent_readable,
         ),
     }
-    contracts = iter(((before, []), (lost, [])))
+    contracts = iter((({"old": before["old"]}, []), (before, []), (lost, [])))
 
     def fake_response_observation(**kwargs):
         tag = kwargs["tag"]
@@ -1051,6 +1198,131 @@ def test_l2_eviction_scenario_stops_before_invalid_refault_boundary(
     assert observation["pre_refault_ready"] is False
     assert observation["bounded_filler_request_count"] == 1
     assert any(failure_text in failure for failure in failures)
+
+
+def test_l2_eviction_scenario_refaults_after_recent_store_evicts_old(
+    monkeypatch,
+    tmp_path,
+):
+    calls: list[str] = []
+
+    def binding(fingerprint: str, *, resident: bool, readable: bool) -> dict:
+        blocks = 2 if readable else 1
+        return {
+            "block_chain_fingerprint_sha256": fingerprint,
+            "expected_blocks": 2,
+            "l1": {"terminal_resident_payload_present": resident},
+            "l2": {
+                "expected_blocks": 2,
+                "indexed_blocks": blocks,
+                "readable_blocks": blocks,
+                "contiguous_indexed_blocks": blocks,
+                "contiguous_readable_blocks": blocks,
+                "stale_index_blocks": 0,
+                "terminal_indexed": readable,
+                "terminal_readable": readable,
+                "terminal_last_accessed_ns": 100 if readable else 0,
+                "store_total_size_bytes": 800,
+                "store_max_size_bytes": 1000,
+            },
+        }
+
+    old_stored = binding("2" * 64, resident=True, readable=True)
+    old_evicted = binding("2" * 64, resident=True, readable=False)
+    recent_ssd = binding("5" * 64, resident=False, readable=True)
+    contracts = iter(
+        (
+            ({"old": old_stored}, []),
+            ({"old": old_evicted, "recent": recent_ssd}, []),
+        )
+    )
+
+    def fake_response_observation(**kwargs):
+        tag = kwargs["tag"]
+        calls.append(tag)
+        return (
+            {"tag": tag, "response_id": f"resp-{tag}"},
+            {"cache": {"totals": {"l1_max_resident_bytes": 400}}},
+        )
+
+    def fake_durability_proof(row, _durability):
+        tag = row["tag"]
+        return _write_fence(
+            tag,
+            f"resp-{tag}",
+            completion_generation=1 if tag == "l2_old_store" else 2,
+            disk_evictions=0 if tag == "l2_old_store" else 1,
+            attestation=("8" if tag == "l2_old_store" else "9") * 64,
+        )
+
+    monkeypatch.setattr(gate, "_run_response_observation", fake_response_observation)
+    monkeypatch.setattr(
+        gate,
+        "_scenario_request_durability",
+        lambda **_kwargs: (
+            {"ok": True},
+            {"cache": {"totals": {"l1_max_resident_bytes": 400}}},
+        ),
+    )
+    monkeypatch.setattr(gate, "_path_free_durability_proof", fake_durability_proof)
+    monkeypatch.setattr(
+        gate,
+        "_fetch_prefix_attestation",
+        lambda **_kwargs: next(contracts),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_prefix_binding",
+        lambda contract, pair_name: contract[pair_name],
+    )
+    monkeypatch.setattr(
+        gate,
+        "_write_path_free_attestation",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_prefix_access_touch",
+        lambda **_kwargs: ({"old": old_evicted, "recent": recent_ssd}, []),
+    )
+    monkeypatch.setattr(
+        gate,
+        "validate_l2_size_eviction_observation",
+        lambda *_args, **_kwargs: [],
+    )
+
+    observation, _rows, failures, _health = (
+        gate._run_store_evict_refault_scenario(
+            base_url="http://127.0.0.1:8000",
+            model=MODEL,
+            nonce=NONCE,
+            records=4,
+            artifact_dir=tmp_path,
+            timeout=5,
+            durability_timeout=5,
+            durability_poll_interval=0.1,
+            max_filler_requests=64,
+            health_attestation={
+                "model_bundle_provenance": {"fingerprint_sha256": CONFIG},
+                "cache_topology_provenance": {
+                    "fingerprint_sha256": CACHE_TOPOLOGY,
+                },
+            },
+            observed_source={
+                "head": SOURCE,
+                "tree": _observed_source(SOURCE)["tree"],
+            },
+        )
+    )
+
+    assert failures == []
+    assert calls == ["l2_old_store", "l2_recent_store", "l2_recent_refault"]
+    assert observation["bounded_filler_request_count"] == 0
+    assert observation["evicting_filler_stage"] == "recent-store"
+    assert observation["old_after_store"] == old_stored
+    assert observation["evicting_filler_fence"] == observation[
+        "recent_store_fence"
+    ]
 
 
 def test_l2_eviction_observation_rejects_swapped_stale_and_wrong_source():

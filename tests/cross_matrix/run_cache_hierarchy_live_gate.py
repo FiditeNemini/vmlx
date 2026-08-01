@@ -3114,6 +3114,32 @@ def _validate_prefix_binding(
     return failures
 
 
+def _l2_binding_is_complete(binding: Any) -> bool:
+    """Return whether one exact prefix chain is wholly readable from L2."""
+    if not isinstance(binding, dict):
+        return False
+    expected_blocks = _integer(binding.get("expected_blocks"))
+    l2 = binding.get("l2")
+    if expected_blocks <= 0 or not isinstance(l2, dict):
+        return False
+    return bool(
+        _integer(l2.get("expected_blocks")) == expected_blocks
+        and _integer(l2.get("indexed_blocks")) == expected_blocks
+        and _integer(l2.get("readable_blocks")) == expected_blocks
+        and _integer(l2.get("contiguous_indexed_blocks")) == expected_blocks
+        and _integer(l2.get("contiguous_readable_blocks")) == expected_blocks
+        and _integer(l2.get("stale_index_blocks")) == 0
+        and l2.get("terminal_indexed") is True
+        and l2.get("terminal_readable") is True
+    )
+
+
+def _validate_complete_l2_binding(binding: Any, *, label: str) -> list[str]:
+    if _l2_binding_is_complete(binding):
+        return []
+    return [f"{label}: exact complete readable L2 chain is not proven"]
+
+
 def _validate_disk_refault_execution(
     execution: Any,
     *,
@@ -3141,6 +3167,12 @@ def _validate_disk_refault_execution(
         failures.append(f"{label}: no cached tokens were reported")
     if last.get("cache_reuse_applied") is not True:
         failures.append(f"{label}: cache reuse was not applied")
+    if last.get("cache_outcome") != "hit":
+        failures.append(f"{label}: cache outcome is not a hit; cold fallback is possible")
+    if last.get("reconstructed") is not True:
+        failures.append(f"{label}: block-disk reconstruction was not applied")
+    if last.get("reconstruction_ok") is not True:
+        failures.append(f"{label}: block-disk reconstruction did not succeed")
     if _integer(last.get("disk_blocks")) <= 0:
         failures.append(f"{label}: no block-disk blocks were loaded")
     if _integer(last.get("cached_tokens")) <= 0:
@@ -3414,6 +3446,43 @@ def _validate_strict_write_fence_proof(
     return failures
 
 
+def _validate_request_correlated_write_fence(
+    proof: Any,
+    *,
+    label: str,
+    require_disk_eviction: bool,
+) -> list[str]:
+    """Require one exact Responses request to own a settled durable write."""
+    if not isinstance(proof, dict):
+        return [f"{label}: request-correlated write-fence proof is missing"]
+    failures: list[str] = []
+    response_id = str(proof.get("response_id") or "")
+    request_id = str(proof.get("request_id") or "")
+    if (
+        not response_id
+        or request_id != response_id
+        or proof.get("request_correlated") is not True
+    ):
+        failures.append(
+            f"{label}: write fence is not bound to its Responses request_id"
+        )
+    if (
+        proof.get("ok") is not True
+        or proof.get("post_eviction_complete") is not True
+        or proof.get("fence_sealed") is not True
+        or _integer(proof.get("fence_completion_generation")) <= 0
+    ):
+        failures.append(f"{label}: write fence was not durably settled")
+    if _integer(proof.get("disk_writes_delta")) <= 0:
+        failures.append(f"{label}: write fence committed no block writes")
+    if require_disk_eviction and _integer(
+        proof.get("disk_evictions_delta")
+    ) <= 0:
+        failures.append(f"{label}: disk_evictions delta must be positive")
+    failures.extend(_validate_strict_write_fence_proof(proof, label=label))
+    return failures
+
+
 def validate_l2_size_eviction_observation(
     observation: Any,
     *,
@@ -3469,6 +3538,10 @@ def validate_l2_size_eviction_observation(
     peak = _integer(observation.get("peak_observed_bytes"))
     final = _integer(observation.get("final_observed_bytes"))
     fillers = _integer(observation.get("bounded_filler_request_count"))
+    post_refault_fillers = _integer(
+        observation.get("post_refault_filler_request_count")
+    )
+    eviction_stage = str(observation.get("evicting_filler_stage") or "")
     if saved_max <= 0:
         failures.append("L2 size eviction: configured disk bound is not positive")
     if l1_max <= 0:
@@ -3487,24 +3560,28 @@ def validate_l2_size_eviction_observation(
         failures.append("L2 size eviction: peak bytes exceed configured bound")
     if not 0 <= final <= peak:
         failures.append("L2 size eviction: final bytes are invalid")
-    if not 1 <= fillers <= min(256, max_filler_requests):
-        failures.append("L2 size eviction: filler request count is unbounded")
+    if eviction_stage == "post-refault":
+        if not 1 <= fillers <= min(256, max_filler_requests):
+            failures.append("L2 size eviction: filler request count is unbounded")
+        if post_refault_fillers <= 0:
+            failures.append(
+                "L2 size eviction: post-refault geometry has no eviction filler"
+            )
+    elif eviction_stage == "recent-store":
+        if fillers != 0 or post_refault_fillers != 0:
+            failures.append(
+                "L2 size eviction: recent-store geometry unexpectedly used fillers"
+            )
+    else:
+        failures.append("L2 size eviction: evicting stage is invalid")
     if observation.get("old_prefix_evicted") is not True:
         failures.append("L2 size eviction: old prefix was not evicted")
     if observation.get("recent_prefix_present") is not True:
         failures.append("L2 size eviction: recent prefix did not survive")
     if observation.get("recent_prefix_last_access_after_old") is not True:
         failures.append("L2 size eviction: recent LRU touch was not proven")
-    if (
-        observation.get("evicting_filler_stage") != "post-refault"
-        or _integer(observation.get("post_refault_filler_request_count")) <= 0
-    ):
-        failures.append(
-            "L2 size eviction: eviction was not caused by a post-refault "
-            "request-correlated filler"
-        )
-
     binding_specs = (
+        ("old_after_store", old_fingerprint),
         ("old_before", old_fingerprint),
         ("recent_before", recent_fingerprint),
         ("recent_pre_refault", recent_fingerprint),
@@ -3525,6 +3602,7 @@ def validate_l2_size_eviction_observation(
             )
         )
 
+    old_after_store = observation.get("old_after_store")
     old_before = observation.get("old_before")
     recent_before = observation.get("recent_before")
     recent_pre = observation.get("recent_pre_refault")
@@ -3533,54 +3611,59 @@ def validate_l2_size_eviction_observation(
     recent_after_filler = observation.get("recent_after_durable_filler")
     old_final = observation.get("old_final")
     recent_final = observation.get("recent_final")
+    old_store_fence = observation.get("old_store_fence")
+    recent_store_fence = observation.get("recent_store_fence")
     evicting_filler = observation.get("evicting_filler_fence")
-    if not isinstance(evicting_filler, dict):
-        failures.append(
-            "L2 size eviction: request-correlated evicting filler fence is missing"
+    failures.extend(
+        _validate_request_correlated_write_fence(
+            old_store_fence,
+            label="L2 size eviction old store",
+            require_disk_eviction=False,
         )
-    else:
-        response_id = str(evicting_filler.get("response_id") or "")
-        request_id = str(evicting_filler.get("request_id") or "")
+    )
+    failures.extend(
+        _validate_request_correlated_write_fence(
+            recent_store_fence,
+            label="L2 size eviction recent store",
+            require_disk_eviction=eviction_stage == "recent-store",
+        )
+    )
+    failures.extend(
+        _validate_request_correlated_write_fence(
+            evicting_filler,
+            label="L2 size eviction evicting write",
+            require_disk_eviction=True,
+        )
+    )
+    if isinstance(evicting_filler, dict):
+        tag = str(evicting_filler.get("tag") or "")
+        if eviction_stage == "recent-store" and tag != "l2_recent_store":
+            failures.append(
+                "L2 size eviction: recent-store geometry is not bound to the "
+                "recent-store fence"
+            )
         if (
-            not response_id
-            or request_id != response_id
-            or evicting_filler.get("request_correlated") is not True
+            eviction_stage == "recent-store"
+            and isinstance(recent_store_fence, dict)
+            and evicting_filler.get("attestation_sha256")
+            != recent_store_fence.get("attestation_sha256")
         ):
             failures.append(
-                "L2 size eviction: evicting filler fence is not bound to its "
-                "Responses request_id"
+                "L2 size eviction: evicting write is not the exact recent-store fence"
             )
-        if (
-            evicting_filler.get("ok") is not True
-            or evicting_filler.get("post_eviction_complete") is not True
-            or evicting_filler.get("fence_sealed") is not True
-            or _integer(
-                evicting_filler.get("fence_completion_generation")
-            )
-            <= 0
-        ):
+        if eviction_stage == "post-refault" and not tag.startswith("l2_filler_"):
             failures.append(
-                "L2 size eviction: evicting filler fence was not durably settled"
+                "L2 size eviction: post-refault geometry is not bound to a filler"
             )
-        if _integer(evicting_filler.get("disk_evictions_delta")) <= 0:
-            failures.append(
-                "L2 size eviction: request-correlated disk_evictions delta "
-                "must be positive"
-            )
-        if _integer(evicting_filler.get("disk_writes_delta")) <= 0:
-            failures.append(
-                "L2 size eviction: evicting filler committed no block writes"
-            )
-        failures.extend(
-            _validate_strict_write_fence_proof(
-                evicting_filler,
-                label="L2 size eviction evicting filler",
-            )
-        )
     write_fences = observation.get("write_fences")
     if not isinstance(write_fences, list) or not write_fences:
         failures.append("L2 size eviction: strict write-fence rows are missing")
     else:
+        fence_attestations = {
+            str(write_fence.get("attestation_sha256") or "")
+            for write_fence in write_fences
+            if isinstance(write_fence, dict)
+        }
         for index, write_fence in enumerate(write_fences):
             failures.extend(
                 _validate_strict_write_fence_proof(
@@ -3588,10 +3671,33 @@ def validate_l2_size_eviction_observation(
                     label=f"L2 size eviction write fence {index}",
                 )
             )
+        for label, proof in (
+            ("old store", old_store_fence),
+            ("recent store", recent_store_fence),
+            ("evicting write", evicting_filler),
+        ):
+            attestation = (
+                str(proof.get("attestation_sha256") or "")
+                if isinstance(proof, dict)
+                else ""
+            )
+            if not _valid_sha256(attestation) or attestation not in fence_attestations:
+                failures.append(
+                    f"L2 size eviction: {label} fence is not in the attested "
+                    "write-fence sequence"
+                )
+            if (
+                isinstance(proof, dict)
+                and _integer(proof.get("global_max_size_bytes")) != saved_max
+            ):
+                failures.append(
+                    f"L2 size eviction: {label} fence has the wrong byte limit"
+                )
     if all(
         isinstance(item, dict)
         for item in (
             old_before,
+            old_after_store,
             recent_before,
             recent_pre,
             recent_post,
@@ -3601,12 +3707,32 @@ def validate_l2_size_eviction_observation(
             recent_final,
         )
     ):
-        if (old_before.get("l2") or {}).get("terminal_readable") is not True:
-            failures.append("L2 size eviction: old prefix was never stored")
-        if (recent_before.get("l2") or {}).get("terminal_readable") is not True:
-            failures.append("L2 size eviction: recent prefix was never stored")
+        failures.extend(
+            _validate_complete_l2_binding(
+                old_after_store,
+                label="L2 size eviction old after its durable store",
+            )
+        )
+        failures.extend(
+            _validate_complete_l2_binding(
+                recent_before,
+                label="L2 size eviction recent after its durable store",
+            )
+        )
+        if eviction_stage == "post-refault":
+            failures.extend(
+                _validate_complete_l2_binding(
+                    old_before,
+                    label="L2 size eviction old before post-refault filler",
+                )
+            )
+        elif (old_before.get("l2") or {}).get("terminal_readable") is not False:
+            failures.append(
+                "L2 size eviction: recent-store geometry did not evict the old "
+                "terminal"
+            )
         old_access_time = _integer(
-            (old_before.get("l2") or {}).get("terminal_last_accessed_ns")
+            (old_after_store.get("l2") or {}).get("terminal_last_accessed_ns")
         )
         recent_access_time = _integer(
             (recent_before.get("l2") or {}).get("terminal_last_accessed_ns")
@@ -3642,12 +3768,19 @@ def validate_l2_size_eviction_observation(
                         f"L2 size eviction: {label} does not truthfully "
                         "represent SSD-only state"
                     )
-        elif (
+        elif eviction_stage == "post-refault" and (
             recent_before_l1.get("terminal_resident_payload_present")
             is not True
         ):
             failures.append(
                 "L2 size eviction: recent prefix was never resident in paged RAM"
+            )
+        elif eviction_stage == "recent-store" and (
+            recent_before_l1.get("terminal_resident_payload_present")
+            is not False
+        ):
+            failures.append(
+                "L2 size eviction: recent-store geometry did not reach SSD-only state"
             )
         if (
             (recent_pre.get("l1") or {}).get(
@@ -3661,6 +3794,18 @@ def validate_l2_size_eviction_observation(
         if (recent_pre.get("l2") or {}).get("terminal_readable") is not True:
             failures.append(
                 "L2 size eviction: recent prefix was absent from L2 before refault"
+            )
+        for label, binding in (
+            ("recent_pre_refault", recent_pre),
+            ("recent_post_refault", recent_post),
+            ("recent_after_durable_filler", recent_after_filler),
+            ("recent_final", recent_final),
+        ):
+            failures.extend(
+                _validate_complete_l2_binding(
+                    binding,
+                    label=f"L2 size eviction {label}",
+                )
             )
         pre_access = _integer(
             (recent_pre.get("l2") or {}).get("terminal_access_count")
@@ -4578,6 +4723,9 @@ def _run_store_evict_refault_scenario(
     }
     request_controls = _l2_scenario_request_controls()
     health_after: dict[str, Any] = {}
+    old_after_store: dict[str, Any] = {}
+    old_store_fence: dict[str, Any] = {}
+    recent_store_fence: dict[str, Any] = {}
 
     for identity in ("old", "recent"):
         marker = (
@@ -4601,13 +4749,35 @@ def _run_store_evict_refault_scenario(
             durability_timeout=durability_timeout,
             durability_poll_interval=durability_poll_interval,
         )
-        durability_rows.append(_path_free_durability_proof(row, durability))
+        durability_proof = _path_free_durability_proof(row, durability)
+        durability_rows.append(durability_proof)
+        if identity == "old":
+            old_store_fence = durability_proof
+        else:
+            recent_store_fence = durability_proof
         if durable_health:
             health_after = durable_health
         if durability.get("ok") is not True:
             failures.append(
                 f"{row['tag']}: exact write fence did not become durable"
             )
+        if identity == "old":
+            old_contract, old_attestation_failures = _fetch_prefix_attestation(
+                base_url=base_url,
+                model=model,
+                prompts=prompts,
+                pairs={"old": pairs["old"]},
+                timeout=timeout,
+                health_attestation=health_attestation,
+                request_controls=request_controls,
+            )
+            failures.extend(old_attestation_failures)
+            _write_path_free_attestation(
+                artifact_dir,
+                "l2_old_after_store",
+                old_contract,
+            )
+            old_after_store = _prefix_binding(old_contract, "old")
 
     before_contract, before_failures = _fetch_prefix_attestation(
         base_url=base_url,
@@ -4627,7 +4797,7 @@ def _run_store_evict_refault_scenario(
     old_before = _prefix_binding(before_contract, "old")
     recent_before = _prefix_binding(before_contract, "recent")
     old_fingerprint = str(
-        old_before.get("block_chain_fingerprint_sha256") or ""
+        old_after_store.get("block_chain_fingerprint_sha256") or ""
     )
     recent_fingerprint = str(
         recent_before.get("block_chain_fingerprint_sha256") or ""
@@ -4650,6 +4820,9 @@ def _run_store_evict_refault_scenario(
         and l1_max_resident_bytes * 2 < configured_l2_max_bytes
     )
     peak_bytes = max(
+        _integer(
+            (old_after_store.get("l2") or {}).get("store_total_size_bytes")
+        ),
         _integer((old_before.get("l2") or {}).get("store_total_size_bytes")),
         _integer(
             (recent_before.get("l2") or {}).get("store_total_size_bytes")
@@ -4659,6 +4832,7 @@ def _run_store_evict_refault_scenario(
     pre_refault_contract = before_contract
     recent_pre_refault = recent_before
     evicting_filler_fence: dict[str, Any] = {}
+    evicting_filler_stage: str | None = None
     old_after_durable_filler: dict[str, Any] = {}
     recent_after_durable_filler: dict[str, Any] = {}
 
@@ -4685,10 +4859,15 @@ def _run_store_evict_refault_scenario(
             "bounded_filler_request_count": filler_count,
             "old_prefix_fingerprint_sha256": old_fingerprint,
             "recent_prefix_fingerprint_sha256": recent_fingerprint,
+            "old_after_store": old_after_store,
             "old_before": old_before,
             "recent_before": recent_before,
             "recent_pre_refault": recent_pre_refault,
             "write_fences": durability_rows,
+            "old_store_fence": old_store_fence,
+            "recent_store_fence": recent_store_fence,
+            "evicting_filler_stage": evicting_filler_stage,
+            "evicting_filler_fence": evicting_filler_fence,
             "pre_refault_ready": False,
         }
 
@@ -4704,33 +4883,52 @@ def _run_store_evict_refault_scenario(
             health_after,
         )
 
+    recent_store_eviction_ready = not _validate_request_correlated_write_fence(
+        recent_store_fence,
+        label="store-evict-refault recent store",
+        require_disk_eviction=True,
+    )
     while filler_count < max_filler_requests:
         old_pre_refault = _prefix_binding(pre_refault_contract, "old")
         old_pre_refault_l2 = old_pre_refault.get("l2")
         recent_l1 = recent_pre_refault.get("l1")
-        recent_l2 = recent_pre_refault.get("l2")
         if not isinstance(old_pre_refault_l2, dict):
             old_pre_refault_l2 = {}
         if not isinstance(recent_l1, dict):
             recent_l1 = {}
-        if not isinstance(recent_l2, dict):
-            recent_l2 = {}
+        recent_at_refault_boundary = bool(
+            recent_l1.get("terminal_resident_payload_present") is False
+            and _l2_binding_is_complete(recent_pre_refault)
+        )
+        if not _l2_binding_is_complete(recent_pre_refault):
+            failures.append(
+                "store-evict-refault: recent prefix was not completely readable "
+                "from L2 before refault"
+            )
+            break
+        if recent_at_refault_boundary:
+            if old_pre_refault_l2.get("terminal_readable") is True:
+                break
+            if (
+                old_pre_refault_l2.get("terminal_readable") is False
+                and _l2_binding_is_complete(old_after_store)
+                and recent_store_eviction_ready
+            ):
+                evicting_filler_fence = recent_store_fence
+                evicting_filler_stage = "recent-store"
+                old_after_durable_filler = old_pre_refault
+                recent_after_durable_filler = recent_pre_refault
+                break
+            failures.append(
+                "store-evict-refault: older prefix left L2 without an exact "
+                "durable recent-store eviction proof"
+            )
+            break
         if old_pre_refault_l2.get("terminal_readable") is False:
             failures.append(
                 "store-evict-refault: older prefix left L2 before the recent "
                 "prefix reached the refault boundary"
             )
-            break
-        if recent_l2.get("terminal_readable") is False:
-            failures.append(
-                "store-evict-refault: recent prefix left L2 before it could "
-                "be evicted from L1 and refaulted"
-            )
-            break
-        if (
-            recent_l1.get("terminal_resident_payload_present") is False
-            and recent_l2.get("terminal_readable") is True
-        ):
             break
         filler_prompt, marker = _l2_filler_prompt(
             nonce,
@@ -4798,30 +4996,29 @@ def _run_store_evict_refault_scenario(
         pre_refault_contract,
     )
     recent_l1 = recent_pre_refault.get("l1")
-    recent_l2 = recent_pre_refault.get("l2")
     old_pre_refault = _prefix_binding(pre_refault_contract, "old")
     old_pre_refault_l2 = old_pre_refault.get("l2")
-    pre_refault_ready = (
+    standard_pre_refault_ready = (
         isinstance(recent_l1, dict)
         and recent_l1.get("terminal_resident_payload_present") is False
-        and isinstance(recent_l2, dict)
-        and recent_l2.get("terminal_readable") is True
+        and _l2_binding_is_complete(recent_pre_refault)
         and isinstance(old_pre_refault_l2, dict)
         and old_pre_refault_l2.get("terminal_readable") is True
     )
+    recent_store_pre_refault_ready = bool(
+        evicting_filler_stage == "recent-store"
+        and isinstance(recent_l1, dict)
+        and recent_l1.get("terminal_resident_payload_present") is False
+        and _l2_binding_is_complete(recent_pre_refault)
+        and isinstance(old_pre_refault_l2, dict)
+        and old_pre_refault_l2.get("terminal_readable") is False
+        and _l2_binding_is_complete(old_after_store)
+        and recent_store_eviction_ready
+    )
+    pre_refault_ready = standard_pre_refault_ready or recent_store_pre_refault_ready
     if not pre_refault_ready:
-        if (
-            isinstance(recent_l2, dict)
-            and recent_l2.get("terminal_readable") is True
-            and isinstance(old_pre_refault_l2, dict)
-            and old_pre_refault_l2.get("terminal_readable") is False
-        ):
-            failures.append(
-                "store-evict-refault: older prefix left L2 before the recent "
-                "prefix reached the refault boundary"
-            )
-        elif not any(
-            "recent prefix left L2 before" in failure for failure in failures
+        if not any(
+            failure.startswith("store-evict-refault:") for failure in failures
         ):
             failures.append(
                 "store-evict-refault: bounded fillers did not evict the recent "
@@ -4873,7 +5070,10 @@ def _run_store_evict_refault_scenario(
     final_contract = post_refault_contract
     old_final = _prefix_binding(final_contract, "old")
     recent_final = _prefix_binding(final_contract, "recent")
-    while filler_count < max_filler_requests:
+    while (
+        evicting_filler_stage != "recent-store"
+        and filler_count < max_filler_requests
+    ):
         old_l2 = old_final.get("l2")
         recent_l2 = recent_final.get("l2")
         if not isinstance(old_l2, dict):
@@ -4955,6 +5155,7 @@ def _run_store_evict_refault_scenario(
             and not evicting_filler_fence
         ):
             evicting_filler_fence = durability_proof
+            evicting_filler_stage = "post-refault"
             old_after_durable_filler = old_final
             recent_after_durable_filler = recent_final
         peak_bytes = max(
@@ -4981,12 +5182,6 @@ def _run_store_evict_refault_scenario(
         recent_l2 = {}
     saved_max = _integer(recent_l2.get("store_max_size_bytes"))
     final_bytes = _integer(recent_l2.get("store_total_size_bytes"))
-    recent_post_l2 = recent_post_refault.get("l2")
-    if not isinstance(recent_post_l2, dict):
-        recent_post_l2 = {}
-    old_before_l2 = old_before.get("l2")
-    if not isinstance(old_before_l2, dict):
-        old_before_l2 = {}
     observation = {
         "schema": L2_SIZE_EVICTION_SCHEMA,
         "scenario": "store-evict-refault",
@@ -5009,24 +5204,29 @@ def _run_store_evict_refault_scenario(
         "final_observed_bytes": final_bytes,
         "bounded_filler_request_count": filler_count,
         "post_refault_filler_request_count": post_refault_filler_count,
-        "evicting_filler_stage": (
-            "post-refault" if evicting_filler_fence else None
-        ),
+        "evicting_filler_stage": evicting_filler_stage,
         "old_prefix_fingerprint_sha256": old_fingerprint,
         "recent_prefix_fingerprint_sha256": recent_fingerprint,
         "old_prefix_evicted": old_l2.get("terminal_readable") is False,
         "recent_prefix_present": recent_l2.get("terminal_readable") is True,
         "recent_prefix_last_access_after_old": (
-            _integer((recent_before.get("l2") or {}).get(
+            _integer((recent_post_refault.get("l2") or {}).get(
                 "terminal_last_accessed_ns"
             ))
-            > _integer(old_before_l2.get("terminal_last_accessed_ns"))
+            > _integer(
+                (old_after_store.get("l2") or {}).get(
+                    "terminal_last_accessed_ns"
+                )
+            )
         ),
+        "old_after_store": old_after_store,
         "old_before": old_before,
         "recent_before": recent_before,
         "recent_pre_refault": recent_pre_refault,
         "recent_post_refault": recent_post_refault,
         "evicting_filler_fence": evicting_filler_fence,
+        "old_store_fence": old_store_fence,
+        "recent_store_fence": recent_store_fence,
         "old_after_durable_filler": old_after_durable_filler,
         "recent_after_durable_filler": recent_after_durable_filler,
         "old_final": old_final,

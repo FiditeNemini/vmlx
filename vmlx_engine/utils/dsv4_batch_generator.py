@@ -47,6 +47,27 @@ DSV4_NATIVE_BLOCK_SIZE = 256
 DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS = 8
 
 
+def dsv4_max_prefill_tokens() -> int:
+    """Return an explicit operator prefill guard, or zero when unset.
+
+    Native DSV4 admission is already bounded by the architecture-aware cache
+    estimator and the bundle's declared context limit.  This environment
+    variable is therefore an opt-in operational ceiling, not a second implicit
+    32K model limit.
+    """
+    raw = os.environ.get("DSV4_MAX_PREFILL_TOKENS")
+    if raw is None:
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid DSV4_MAX_PREFILL_TOKENS=%r; ignoring explicit prefill guard",
+            raw,
+        )
+        return 0
+
+
 def dsv4_prefill_step_policy(default_step: int) -> tuple[int, bool]:
     """Resolve the configured DSV4 prefill ceiling and diagnostic override."""
     try:

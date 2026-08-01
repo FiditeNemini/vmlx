@@ -334,12 +334,12 @@ class TestHelperFunctions:
         monkeypatch.setenv("DSV4_POOL_QUANT", "1")
         monkeypatch.delenv("DSV4_MAX_PREFILL_TOKENS", raising=False)
 
-        # Architecture-aware admission can fit the declared context, but the
-        # independent production long-prefill guard remains authoritative.
-        assert server._estimate_max_prompt_tokens() == 32_768
-
-        monkeypatch.setenv("DSV4_MAX_PREFILL_TOKENS", "0")
+        # An absent operator guard must not override architecture-aware
+        # admission when the declared context fits the machine.
         assert server._estimate_max_prompt_tokens() == 1_048_576
+
+        monkeypatch.setenv("DSV4_MAX_PREFILL_TOKENS", "32768")
+        assert server._estimate_max_prompt_tokens() == 32_768
 
     def test_declared_context_limit_prefers_smaller_nested_text_ceiling(self):
         from types import SimpleNamespace

@@ -2929,6 +2929,21 @@ def test_dsv4_long_prefill_guard_describes_bounded_chunk_default():
 
     assert "defaults to bounded" in guard_src
     assert "DSV4_PREFILL_STEP_SIZE=0" in guard_src
+    assert "dsv4_max_prefill_tokens()" in guard_src
+    assert 'DSV4_MAX_PREFILL_TOKENS", "32768"' not in guard_src
+
+
+def test_dsv4_long_prefill_ceiling_is_explicit_opt_in(monkeypatch):
+    from vmlx_engine.utils.dsv4_batch_generator import dsv4_max_prefill_tokens
+
+    monkeypatch.delenv("DSV4_MAX_PREFILL_TOKENS", raising=False)
+    assert dsv4_max_prefill_tokens() == 0
+
+    monkeypatch.setenv("DSV4_MAX_PREFILL_TOKENS", "32768")
+    assert dsv4_max_prefill_tokens() == 32_768
+
+    monkeypatch.setenv("DSV4_MAX_PREFILL_TOKENS", "invalid")
+    assert dsv4_max_prefill_tokens() == 0
 
 
 def test_dsv4_batch_generator_prefill_step_default_and_legacy_override(monkeypatch):

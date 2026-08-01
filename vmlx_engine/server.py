@@ -671,12 +671,11 @@ def _estimate_max_prompt_tokens() -> int:
                 max_tokens=declared_limit,
             )
             if estimate_dsv4_cache_memory_from_config(config, 1) is not None:
-                try:
-                    dsv4_guard = int(
-                        os.environ.get("DSV4_MAX_PREFILL_TOKENS", "32768")
-                    )
-                except (TypeError, ValueError):
-                    dsv4_guard = 32768
+                from vmlx_engine.utils.dsv4_batch_generator import (
+                    dsv4_max_prefill_tokens,
+                )
+
+                dsv4_guard = dsv4_max_prefill_tokens()
                 if dsv4_guard > 0:
                     max_tokens = min(max_tokens, dsv4_guard)
         else:
@@ -1442,6 +1441,11 @@ def _select_responses_visible_text(
     if cleaned_text:
         return clean_output_text(cleaned_text)
     if suppress_tools or tool_calls:
+        return ""
+    if raw_text and _has_tool_marker_or_partial_suffix(raw_text):
+        # A parser-sanitized empty string means native control markup was
+        # rejected.  Never revive those rejected bytes as visible Responses
+        # output; valid calls arrive through ``tool_calls`` above.
         return ""
     return clean_output_text(raw_text) if raw_text else ""
 

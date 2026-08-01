@@ -5235,10 +5235,11 @@ class Scheduler:
             )
 
         if self._uses_dsv4_cache:
-            try:
-                _dsv4_max_prefill = int(os.environ.get("DSV4_MAX_PREFILL_TOKENS", "32768"))
-            except (TypeError, ValueError):
-                _dsv4_max_prefill = 32768
+            from vmlx_engine.utils.dsv4_batch_generator import (
+                dsv4_max_prefill_tokens,
+            )
+
+            _dsv4_max_prefill = dsv4_max_prefill_tokens()
             if _dsv4_max_prefill > 0 and len(request.prompt_token_ids) > _dsv4_max_prefill:
                 raise ValueError(
                     "DeepSeek V4 Flash JANGTQ long-prefill guard: prompt has "
@@ -5248,8 +5249,8 @@ class Scheduler:
                     "cache-hit validation; legacy single-shot remains available with "
                     "DSV4_PREFILL_STEP_SIZE=0 for diagnostics. Very large prompts still scale with "
                     "accumulated compressor/indexer pool work. "
-                    "Set DSV4_MAX_PREFILL_TOKENS=0 to disable this production "
-                    "guard after validating the workload on this machine."
+                    "Unset DSV4_MAX_PREFILL_TOKENS (or set it to 0) to rely on "
+                    "the architecture-aware admission limit for this machine."
                 )
 
         # Per-request cache bypass (from cache_salt / skip_prefix_cache on the

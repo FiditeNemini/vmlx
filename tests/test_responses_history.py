@@ -317,6 +317,18 @@ def test_responses_nonstream_suppression_never_revives_raw_tool_markup():
         tool_calls=None,
         suppress_tools=False,
     ) == "ordinary answer"
+    assert _select_responses_visible_text(
+        cleaned_text="",
+        raw_text=(
+            '<｜DSML｜tool_calls>\n'
+            '<｜DSML｜invoke name="list_directory">\n'
+            '<｜DSML｜parameter name="path">.</｜DSML｜parameter>\n'
+            '</｜DSML｜invoke>\n'
+            '</｜DSML｜tool_calls>'
+        ),
+        tool_calls=None,
+        suppress_tools=False,
+    ) == ""
 
 
 def test_responses_previous_history_keeps_instructions_as_leading_system():

@@ -51,6 +51,13 @@ _STATE_VERSION = 1
 _DEFAULT_ORPHAN_GRACE_SECONDS = 5 * 60
 _DEFAULT_RECONCILE_INTERVAL_SECONDS = 30.0
 _DEFAULT_BIRTH_VALIDATION_INTERVAL_SECONDS = 30.0
+_SQLITE_TRANSIENT_SIDECAR_NAMES = frozenset(
+    {
+        "block_index.db-wal",
+        "block_index.db-shm",
+        "block_index.db-journal",
+    }
+)
 
 _ROOT_THREAD_LOCKS_GUARD = threading.Lock()
 _ROOT_THREAD_LOCKS: dict[Path, threading.RLock] = {}
@@ -59,6 +66,18 @@ _ROOT_THREAD_LOCKS: dict[Path, threading.RLock] = {}
 def _root_thread_lock(root: Path) -> threading.RLock:
     with _ROOT_THREAD_LOCKS_GUARD:
         return _ROOT_THREAD_LOCKS.setdefault(root, threading.RLock())
+
+
+def _is_sqlite_transient_sidecar(path: Path, namespace: Path) -> bool:
+    """Return whether this is a real namespace-root SQLite index sidecar."""
+
+    database = namespace / "block_index.db"
+    return bool(
+        path.parent == namespace
+        and path.name in _SQLITE_TRANSIENT_SIDECAR_NAMES
+        and not database.is_symlink()
+        and database.is_file()
+    )
 
 
 def _process_birth_identity(pid: int) -> str | None:
@@ -120,8 +139,15 @@ def ensure_managed_block_cache_namespace(
         if expected_type == "directory" and not entry.is_dir():
             raise OSError(f"expected block-cache directory: {entry}")
         if expected_type == "file" and not entry.is_file():
+            if _is_sqlite_transient_sidecar(entry, path) and not entry.exists():
+                continue
             raise OSError(f"expected block-cache file: {entry}")
-        resolved_entry = entry.resolve(strict=True)
+        try:
+            resolved_entry = entry.resolve(strict=True)
+        except FileNotFoundError:
+            if _is_sqlite_transient_sidecar(entry, path):
+                continue
+            raise
         if not resolved_entry.is_relative_to(resolved_namespace):
             raise OSError(f"block-cache path escaped its namespace: {entry}")
 
@@ -832,6 +858,7 @@ class GlobalDiskCacheBudget:
         active_lease_ids = self._active_lease_ids_locked()
 
         all_files: set[Path] = set()
+        sqlite_transient_sidecars: set[Path] = set()
         for namespace in self._managed_namespace_dirs_locked():
             legacy_direct = bool(
                 namespace == self.root
@@ -853,7 +880,10 @@ class GlobalDiskCacheBudget:
                 for suffix in ("", "-wal", "-shm", "-journal"):
                     path = Path(f"{self.root / 'block_index.db'}{suffix}")
                     if path.is_file() and not path.is_symlink():
-                        all_files.add(path.resolve())
+                        resolved = path.resolve()
+                        all_files.add(resolved)
+                        if _is_sqlite_transient_sidecar(path, self.root):
+                            sqlite_transient_sidecars.add(resolved)
             for walk_root in walk_roots:
                 for current, directories, files in os.walk(
                     walk_root,
@@ -887,18 +917,39 @@ class GlobalDiskCacheBudget:
                             raise OSError(f"refusing symlinked cache file: {path}")
                         try:
                             resolved = path.resolve(strict=True)
+                        except FileNotFoundError as exc:
+                            if _is_sqlite_transient_sidecar(path, namespace):
+                                continue
+                            raise OSError(
+                                f"cannot inspect cache file {path}: {exc}"
+                            ) from exc
                         except OSError as exc:
                             raise OSError(
                                 f"cannot inspect cache file {path}: {exc}"
                             ) from exc
-                        if (
-                            not resolved.is_relative_to(namespace)
-                            or not resolved.is_file()
-                        ):
+                        if not resolved.is_relative_to(namespace):
+                            raise OSError(
+                                f"cache file escaped managed namespace: {path}"
+                            )
+                        try:
+                            resolved_stat = resolved.stat()
+                        except FileNotFoundError as exc:
+                            if _is_sqlite_transient_sidecar(path, namespace):
+                                continue
+                            raise OSError(
+                                f"cannot inspect cache file {path}: {exc}"
+                            ) from exc
+                        except OSError as exc:
+                            raise OSError(
+                                f"cannot inspect cache file {path}: {exc}"
+                            ) from exc
+                        if not stat.S_ISREG(resolved_stat.st_mode):
                             raise OSError(
                                 f"cache file escaped managed namespace: {path}"
                             )
                         all_files.add(resolved)
+                        if _is_sqlite_transient_sidecar(path, namespace):
+                            sqlite_transient_sidecars.add(resolved)
 
         for database in self._database_paths_locked():
             namespace = database.parent.resolve()
@@ -1098,6 +1149,14 @@ class GlobalDiskCacheBudget:
         for path in all_files - referenced:
             try:
                 file_stat = path.stat()
+            except FileNotFoundError as exc:
+                # Opening and closing the last SQLite connection above can
+                # checkpoint and remove an already-enumerated WAL/SHM/journal.
+                # Its absence is the final physical truth, not an ambiguous
+                # cache mutation. Every other vanished path remains fail-closed.
+                if path in sqlite_transient_sidecars:
+                    continue
+                raise OSError(f"cannot stat cache metadata {path}: {exc}") from exc
             except OSError as exc:
                 raise OSError(f"cannot stat cache metadata {path}: {exc}") from exc
             is_temp = self._is_temp_path(path)

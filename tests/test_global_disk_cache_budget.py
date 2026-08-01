@@ -50,12 +50,203 @@ def _indexed_block(
     return payload
 
 
+def _leave_crash_stale_wal_index(namespace: Path, payload: Path) -> tuple[Path, Path]:
+    """Publish one valid row, then exit without SQLite's last-close cleanup."""
+
+    child = r"""
+import os
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+namespace = Path(sys.argv[1])
+payload = Path(sys.argv[2])
+connection = sqlite3.connect(namespace / "block_index.db")
+connection.execute("PRAGMA journal_mode=WAL")
+connection.execute("PRAGMA wal_autocheckpoint=0")
+connection.execute(
+    "CREATE TABLE blocks ("
+    "block_hash TEXT PRIMARY KEY, parent_hash TEXT, "
+    "ancestry_known INTEGER NOT NULL DEFAULT 1, "
+    "file_name TEXT NOT NULL, num_tokens INTEGER NOT NULL, "
+    "num_layers INTEGER NOT NULL, dtype TEXT NOT NULL, "
+    "file_size INTEGER NOT NULL, created_at REAL NOT NULL, "
+    "last_accessed REAL NOT NULL, access_count INTEGER DEFAULT 0)"
+)
+now = time.time() - 1000
+connection.execute(
+    "INSERT INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    (
+        "crash-root",
+        None,
+        1,
+        str(payload.relative_to(namespace)),
+        64,
+        1,
+        "float16",
+        payload.stat().st_size,
+        now,
+        now,
+        0,
+    ),
+)
+connection.commit()
+os._exit(0)
+"""
+    subprocess.run(
+        [sys.executable, "-c", child, str(namespace), str(payload)],
+        check=True,
+    )
+    wal_path = namespace / "block_index.db-wal"
+    shm_path = namespace / "block_index.db-shm"
+    assert wal_path.is_file() and wal_path.stat().st_size > 0
+    assert shm_path.is_file() and shm_path.stat().st_size > 0
+    return wal_path, shm_path
+
+
 def _physical_total(root: Path) -> int:
     budget = GlobalDiskCacheBudget(root, 1024**3, orphan_grace_seconds=0)
     try:
         return budget.enforce(force=True).bytes_after
     finally:
         budget._remove_lease()
+
+
+def test_crash_stale_sqlite_sidecars_do_not_skip_block_store_startup_trim(
+    tmp_path: Path,
+) -> None:
+    from vmlx_engine.block_disk_store import BlockDiskStore
+
+    root = tmp_path / "root"
+    old_namespace = ensure_managed_block_cache_namespace(root / "aaaaaaaaaaaa")
+    payload = old_namespace / "blocks" / "cr" / "crash-root.safetensors"
+    payload.parent.mkdir(parents=True)
+    payload.write_bytes(b"x" * 1_000_000)
+    wal_path, shm_path = _leave_crash_stale_wal_index(old_namespace, payload)
+
+    cap_bytes = 256 * 1024
+    store = BlockDiskStore(
+        str(root / "bbbbbbbbbbbb"),
+        max_size_gb=cap_bytes / 1024**3,
+        global_cache_root=str(root),
+    )
+    try:
+        result = store.global_budget.last_result
+        assert result is not None
+        assert result.accounted is True
+        assert result.compliant is True
+        assert result.error is None
+        assert store._global_budget_write_enabled is True
+        assert not payload.exists()
+        assert not wal_path.exists()
+        assert not shm_path.exists()
+    finally:
+        store.shutdown()
+
+
+def test_live_sqlite_sidecars_remain_counted_in_physical_budget(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    namespace = ensure_managed_block_cache_namespace(root / "aaaaaaaaaaaa")
+    database = namespace / "block_index.db"
+    connection = sqlite3.connect(database)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA wal_autocheckpoint=0")
+    connection.execute(
+        "CREATE TABLE blocks ("
+        "block_hash TEXT PRIMARY KEY, file_name TEXT NOT NULL, "
+        "last_accessed REAL NOT NULL)"
+    )
+    connection.commit()
+    wal_path = namespace / "block_index.db-wal"
+    shm_path = namespace / "block_index.db-shm"
+    assert wal_path.is_file() and wal_path.stat().st_size > 0
+    assert shm_path.is_file() and shm_path.stat().st_size > 0
+    physical_metadata_bytes = sum(
+        path.stat().st_size for path in (database, wal_path, shm_path)
+    )
+
+    budget = GlobalDiskCacheBudget(root, 10_000_000)
+    try:
+        result = budget.enforce(force=True)
+        assert result.accounted is True
+        assert result.compliant is True
+        assert result.error is None
+        assert result.bytes_after >= physical_metadata_bytes
+        assert wal_path.is_file()
+        assert shm_path.is_file()
+    finally:
+        budget.close()
+        connection.close()
+
+
+def test_sqlite_sidecar_disappearing_during_discovery_is_ignored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "root"
+    namespace = ensure_managed_block_cache_namespace(root / "aaaaaaaaaaaa")
+    with sqlite3.connect(namespace / "block_index.db") as connection:
+        connection.execute(
+            "CREATE TABLE blocks ("
+            "block_hash TEXT PRIMARY KEY, file_name TEXT NOT NULL, "
+            "last_accessed REAL NOT NULL)"
+        )
+    sidecar = namespace / "block_index.db-shm"
+    sidecar.write_bytes(b"transient")
+    budget = GlobalDiskCacheBudget(root, 10_000_000)
+    original_resolve = Path.resolve
+
+    def resolve_after_sidecar_cleanup(path: Path, *args, **kwargs) -> Path:
+        if path == sidecar:
+            sidecar.unlink(missing_ok=True)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_after_sidecar_cleanup)
+    try:
+        result = budget.enforce(force=True)
+        assert result.accounted is True
+        assert result.compliant is True
+        assert result.error is None
+        assert not sidecar.exists()
+    finally:
+        budget.close()
+
+
+def test_same_named_nested_file_disappearance_remains_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "root"
+    namespace = ensure_managed_block_cache_namespace(root / "aaaaaaaaaaaa")
+    with sqlite3.connect(namespace / "block_index.db") as connection:
+        connection.execute(
+            "CREATE TABLE blocks ("
+            "block_hash TEXT PRIMARY KEY, file_name TEXT NOT NULL, "
+            "last_accessed REAL NOT NULL)"
+        )
+    nested = namespace / "blocks" / "block_index.db-shm"
+    nested.parent.mkdir()
+    nested.write_bytes(b"unknown")
+    budget = GlobalDiskCacheBudget(root, 10_000_000)
+    original_resolve = Path.resolve
+
+    def resolve_after_nested_cleanup(path: Path, *args, **kwargs) -> Path:
+        if path == nested:
+            nested.unlink(missing_ok=True)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_after_nested_cleanup)
+    try:
+        result = budget.enforce(force=True)
+        assert result.accounted is False
+        assert result.compliant is False
+        assert result.error is not None
+        assert str(nested) in result.error
+    finally:
+        budget.close()
 
 
 def test_global_lru_crosses_model_namespaces(tmp_path: Path) -> None:

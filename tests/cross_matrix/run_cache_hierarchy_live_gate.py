@@ -3568,20 +3568,40 @@ def validate_l2_size_eviction_observation(
         observation.get("post_refault_filler_request_count")
     )
     eviction_stage = str(observation.get("evicting_filler_stage") or "")
+    recent_before_l1 = (
+        (observation.get("recent_before") or {}).get("l1") or {}
+    )
+    disk_only_l1 = (
+        recent_before_l1.get("backend_mode") == "block_disk_only"
+        and recent_before_l1.get("disk_only") is True
+        and recent_before_l1.get("paged_ram_enabled") is False
+    )
     if saved_max <= 0:
         failures.append("L2 size eviction: configured disk bound is not positive")
-    if l1_max <= 0:
-        failures.append("L2 size eviction: configured L1 byte bound is not positive")
-    if (
-        observation.get("l1_l2_capacity_margin_ok") is not True
-        or l1_max <= 0
-        or saved_max <= 0
-        or l1_max * 2 >= saved_max
-    ):
-        failures.append(
-            "L2 size eviction: live L1 byte bound does not leave the required "
-            "2x margin below L2"
-        )
+    if disk_only_l1:
+        if l1_max != 0:
+            failures.append(
+                "L2 size eviction: SSD-only effective L1 byte bound is not zero"
+            )
+        if observation.get("l1_l2_capacity_margin_ok") is not True:
+            failures.append(
+                "L2 size eviction: SSD-only topology has resident L1 payload"
+            )
+    else:
+        if l1_max <= 0:
+            failures.append(
+                "L2 size eviction: configured L1 byte bound is not positive"
+            )
+        if (
+            observation.get("l1_l2_capacity_margin_ok") is not True
+            or l1_max <= 0
+            or saved_max <= 0
+            or l1_max * 2 >= saved_max
+        ):
+            failures.append(
+                "L2 size eviction: live L1 byte bound does not leave the required "
+                "2x margin below L2"
+            )
     if not 0 <= peak <= saved_max:
         failures.append("L2 size eviction: peak bytes exceed configured bound")
     if not 0 <= final <= peak:

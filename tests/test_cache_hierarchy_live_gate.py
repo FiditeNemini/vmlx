@@ -418,7 +418,7 @@ def _l2_eviction_observation(*, disk_only: bool = False) -> dict:
         "model_bundle_fingerprint_sha256": CONFIG,
         "cache_topology_fingerprint_sha256": CACHE_TOPOLOGY,
         "saved_max_bytes": 1000,
-        "l1_max_resident_bytes": 400,
+        "l1_max_resident_bytes": 0 if disk_only else 400,
         "l1_l2_capacity_margin_ok": True,
         "peak_observed_bytes": 900,
         "final_observed_bytes": 800,
@@ -725,6 +725,7 @@ def test_l2_eviction_observation_accepts_truthful_ssd_only_state():
     )
 
     assert failures == []
+    assert observation["l1_max_resident_bytes"] == 0
     for label in (
         "recent_before",
         "recent_pre_refault",

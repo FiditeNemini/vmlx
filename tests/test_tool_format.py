@@ -236,19 +236,25 @@ class TestToolChoiceSuppression:
         )
         assert target_name == "search"
 
-    def test_tool_choice_dict_no_match_fallback(self):
-        """When tool_choice names a non-existent tool, all tools should be sent."""
+    def test_tool_choice_dict_no_match_fails_closed(self):
+        """A missing specific tool must never authorize the remaining catalog."""
+        from fastapi import HTTPException
+
         from vmlx_engine.api.models import ToolDefinition
+        from vmlx_engine.server import _suppress_tool_parsing_when_no_tools
 
         target_name = "nonexistent"
         tools = [
             ToolDefinition(function={"name": "search", "description": "Search"}),
         ]
         filtered = [t for t in tools if t.function.get("name") == target_name]
-        # When no match, fallback to all tools
-        result = filtered if filtered else tools
-        assert len(result) == 1
-        assert result[0].function["name"] == "search"
+        assert filtered == []
+        with pytest.raises(HTTPException, match="tool_choice requires"):
+            _suppress_tool_parsing_when_no_tools(
+                filtered,
+                {"type": "function", "function": {"name": target_name}},
+                "Chat Completions",
+            )
 
     def test_specific_tool_choice_dict_counts_as_required_for_enforcement(self):
         from vmlx_engine.server import _is_required_tool_choice

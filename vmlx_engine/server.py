@@ -16335,7 +16335,12 @@ async def create_chat_completion(
                         for t in request.tools
                         if t.function.get("name") == target_name
                     ]
-                    all_tools.extend(filtered if filtered else request.tools)
+                    # A specific choice is an authorization boundary. Falling
+                    # back to every request tool when the name is unavailable
+                    # lets the model call a function the client did not choose
+                    # and diverges from the Responses path. Leave the set empty;
+                    # the shared no-tools guard below returns an explicit 400.
+                    all_tools.extend(filtered)
                 else:
                     all_tools.extend(request.tools)
             else:

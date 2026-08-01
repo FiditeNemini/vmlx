@@ -8,7 +8,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db, Chat, Message, Folder } from "../database";
 import { sessionManager, resolveUrl, connectHost } from "../sessions";
-import { readGenerationDefaults } from "./models";
+import {
+  readDetectedModelConfig,
+  readGenerationDefaults,
+} from "./models";
+import type { RemoteDetectedConfig } from "../../shared/remoteModelCapabilities";
 import {
   BUILTIN_TOOLS,
   isBuiltinTool,
@@ -35,6 +39,7 @@ import {
   requiredToolChoiceNamesForCurrentTurn,
   requestedExactFinalToolNames,
   requestedOnceToolNames,
+  requestedScopedToolNames,
   requestsBoundedFinalAnswerAfterToolResult,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
@@ -117,6 +122,7 @@ function shouldSuppressGenericAgenticPromptForNativeTools(
 ): boolean {
   const modelName = String(modelNameOrPath || "").toLowerCase();
   return (
+    detectedFamily === "deepseek-v4" ||
     detectedFamily === "lfm2" ||
     detectedFamily === "zaya" ||
     detectedFamily === "zaya1-vl" ||
@@ -353,6 +359,12 @@ function summarizeRequestForLog(bodyJson: string, useResponsesApi: boolean): Rec
       thinking_budget: body.chat_template_kwargs?.thinking_budget,
       previous_response_id: body.previous_response_id ? "<present>" : undefined,
       has_tools: Array.isArray(body.tools) && body.tools.length > 0,
+      tool_choice: body.tool_choice,
+      tool_names: Array.isArray(body.tools)
+        ? body.tools
+            .map((tool: any) => tool?.function?.name ?? tool?.name)
+            .filter((name: unknown): name is string => typeof name === "string")
+        : [],
       messages: Array.isArray(items)
         ? items.slice(-8).map((m: any) => ({
             role: m.role || m.type || "item",
@@ -1121,7 +1133,12 @@ export function registerChatHandlers(
               timeoutSeconds = sessionConfig.timeout;
             }
             // Check if model has a reasoning parser (for enable_thinking default)
-            const detected = detectModelConfigFromDir(chat.modelPath);
+            // Remote sessions have no readable local bundle directory. Hydrate
+            // the exact live family/parser/cache contract from the model's
+            // capability endpoint instead of guessing from its display alias.
+            const detected =
+              (await readDetectedModelConfig(chat.modelPath)) ??
+              ({} as RemoteDetectedConfig);
             try {
               const generationDefaults = await readGenerationDefaults(chat.modelPath);
               thinkingBudgetSupported = generationDefaults?.thinkingBudgetSupported;
@@ -1523,7 +1540,7 @@ export function registerChatHandlers(
         overrides?.builtinToolsEnabled === true &&
         shouldSuppressGenericAgenticPromptForNativeTools(
           chatDetectedFamily,
-          chat.modelPath || chat.modelId,
+          chat.modelPath || resolvedSession?.remoteModel || chat.modelId,
         );
       const directMediaAttachmentRule =
         hasMediaAttachments && attachBuiltinToolsForCurrentTurn
@@ -1551,12 +1568,27 @@ export function registerChatHandlers(
           : [];
       const exactFinalBuiltinToolNames =
         exactFinalToolNames.filter((name) => isBuiltinTool(name));
+      const scopedCurrentTurnToolNames =
+        overrides?.builtinToolsEnabled === true
+          ? requestedScopedToolNames(
+              latestUserText,
+              toolCapabilityNames(unscopedCurrentTurnToolDefinitions),
+            )
+          : [];
+      const scopedCurrentTurnBuiltinToolNames =
+        scopedCurrentTurnToolNames.filter((name) => isBuiltinTool(name));
+      const restrictedToolNamesForCurrentTurn =
+        exactFinalBuiltinToolNames.length > 0
+          ? exactFinalBuiltinToolNames
+          : scopedCurrentTurnBuiltinToolNames;
       const directAnswerAfterSingleTool =
         exactFinalBuiltinToolNames.length === 1;
       const currentTurnToolDefinitions = attachBuiltinToolsForCurrentTurn
         ? scopeToolDefinitionsByName(
             unscopedCurrentTurnToolDefinitions,
-            exactFinalToolNames,
+            exactFinalBuiltinToolNames.length > 0
+              ? exactFinalBuiltinToolNames
+              : scopedCurrentTurnBuiltinToolNames,
           )
         : [];
       const currentToolCapabilityFingerprint = toolCapabilityFingerprint(
@@ -1641,9 +1673,10 @@ export function registerChatHandlers(
       // the engine filters its MCP catalog to that same name. Open-ended turns
       // intentionally leave tool_choice omitted so legitimate MCP use remains
       // available. Remote providers only see the already-scoped request.tools
-      // catalog and do not participate in the local MCP merge.
+      // catalog and do not participate in the local MCP merge. They still need
+      // a specific tool_choice for an explicit singular contract; one schema
+      // by itself is only auto choice and can terminate without calling it.
       const currentTurnToolChoice = () => {
-        if (isRemote) return undefined;
         const remainingExactBuiltinTools = exactFinalBuiltinToolNames.filter(
           (name) => !completedExactFinalTools.has(name),
         );
@@ -1654,12 +1687,12 @@ export function registerChatHandlers(
         const requiredToolNames = requiredToolChoiceNamesForCurrentTurn(
           remainingExactBuiltinTools,
           remainingExactlyOnceBuiltinTools,
-          boundedFinalAfterExactlyOnceTools,
         );
         return toolChoiceForCurrentTurn(
           currentPromptAlreadyForbidsTools,
           requiredToolNames,
           useResponsesApi ? "responses" : "chat",
+          isRemote,
         );
       };
 
@@ -3593,7 +3626,7 @@ export function registerChatHandlers(
                 // here would reject that tool's first real execution.
                 currentToolNames,
                 currentPromptAlreadyForbidsTools,
-                exactFinalBuiltinToolNames,
+                restrictedToolNamesForCurrentTurn,
               );
               if (toolAuthorized) {
                 if (isExactlyOnceTool) {

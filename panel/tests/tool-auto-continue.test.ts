@@ -6,6 +6,7 @@ import {
   requiredToolChoiceNamesForCurrentTurn,
   requestedExactFinalToolNames,
   requestedOnceToolNames,
+  requestedScopedToolNames,
   requestsBoundedFinalAnswerAfterToolResult,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
@@ -69,6 +70,20 @@ describe('tool auto-continue policy', () => {
         'Call file_info exactly once. After the tool result, reply exactly DONE and nothing else.',
       ),
     ).toEqual(['file_info'])
+    expect(
+      requestedOnceToolNames(
+        'Use exactly one file_info tool call to inspect generation_config.json.',
+      ),
+    ).toEqual(['file_info'])
+    expect(
+      requestedOnceToolNames('Do not use file_info exactly once. Answer directly.'),
+    ).toEqual([])
+    expect(
+      requestsBoundedFinalAnswerAfterToolResult(
+        'Use exactly one file_info tool call. After the tool result, answer briefly.',
+        ['file_info'],
+      ),
+    ).toBe(true)
     expect(
       requestedExactFinalToolNames(
         'Continue this same chat. Call the built-in file_info tool exactly once with path pyproject.toml. After the real tool result, reply exactly B1-NONE-MT2-DONE and nothing else.',
@@ -234,7 +249,6 @@ describe('tool auto-continue policy', () => {
           requestedOnceToolNames(
             'Use the run_command tool exactly once with command pwd. After the tool result, reply briefly.',
           ),
-          true,
         ),
         'chat',
       ),
@@ -250,18 +264,65 @@ describe('tool auto-continue policy', () => {
           requestedOnceToolNames(
             'Use run_command exactly once and use more tools if needed.',
           ),
-          false,
         ),
         'chat',
       ),
-    ).toBeUndefined()
+    ).toEqual({
+      type: 'function',
+      function: { name: 'run_command' },
+    })
     expect(
       requiredToolChoiceNamesForCurrentTurn(
         ['file_info'],
         ['run_command'],
-        false,
       ),
     ).toEqual(['file_info'])
+    expect(
+      requestedScopedToolNames(
+        'Use exactly one file_info tool call to inspect generation_config.json. Do not guess. After the real tool result, reason briefly, then answer exactly DONE.',
+        ['file_info', 'run_command'],
+      ),
+    ).toEqual(['file_info'])
+    expect(
+      requestedScopedToolNames(
+        'Use run_command exactly once and use more tools if needed.',
+        ['file_info', 'run_command'],
+      ),
+    ).toEqual([])
+    expect(
+      requestedScopedToolNames(
+        'Use file_info exactly once. Do not use additional tools.',
+        ['file_info', 'run_command'],
+      ),
+    ).toEqual(['file_info'])
+    expect(
+      requestedScopedToolNames(
+        'Use file_info exactly once. Do not use run_command.',
+        ['file_info', 'run_command'],
+      ),
+    ).toEqual(['file_info'])
+    expect(
+      requestedScopedToolNames(
+        'Use filesystem__read_file exactly once.',
+        ['file_info', 'run_command'],
+      ),
+    ).toEqual(['filesystem__read_file'])
+  })
+
+  it('keeps remote no-tool compatibility but enforces singular remote tool contracts', () => {
+    expect(toolChoiceForCurrentTurn(true, [], 'chat', true)).toBeUndefined()
+    expect(toolChoiceForCurrentTurn(true, [], 'responses', true)).toBeUndefined()
+    expect(toolChoiceForCurrentTurn(false, [], 'chat', true)).toBeUndefined()
+    expect(toolChoiceForCurrentTurn(false, ['file_info'], 'chat', true)).toEqual({
+      type: 'function',
+      function: { name: 'file_info' },
+    })
+    expect(
+      toolChoiceForCurrentTurn(false, ['file_info'], 'responses', true),
+    ).toEqual({
+      type: 'function',
+      name: 'file_info',
+    })
   })
 
   it('authorizes no MCP execution on forbidden or exact built-in turns', () => {
@@ -292,6 +353,14 @@ describe('tool auto-continue policy', () => {
         [],
       ),
     ).toBe(true)
+    expect(
+      isToolAuthorizedForCurrentTurn(
+        'filesystem__read_file',
+        ['file_info'],
+        false,
+        ['file_info'],
+      ),
+    ).toBe(false)
   })
 
   it('maps an explicit current-turn no-tool directive to the API contract', () => {
@@ -413,7 +482,7 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('const requestToolChoice = currentTurnToolChoice()')
     expect(source).toContain('const remainingExactlyOnceBuiltinTools =')
     expect(source).toContain('requiredToolChoiceNamesForCurrentTurn(')
-    expect(source).toContain('boundedFinalAfterExactlyOnceTools')
+    expect(source).toContain('requestedScopedToolNames(')
     expect(source).toContain('exactlyOnceToolsComplete')
     expect(source).toContain('obj.tool_choice = requestToolChoice')
     expect(source).toContain('obj.tool_choice = "none"')
@@ -627,7 +696,7 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('!isRemote || isLoopbackUrl(url)')
   })
 
-  it('suppresses generic agentic instructions for native ZAYA and LFM2 prompts', () => {
+  it('suppresses generic agentic instructions for native DSV4, ZAYA, and LFM2 prompts', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
 
     expect(source).toContain('function shouldSuppressGenericAgenticPromptForNativeTools')
@@ -635,19 +704,32 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('detectedFamily === "zaya1-vl"')
     expect(source).toContain('detectedFamily === "zaya1_vl"')
     expect(source).toContain('detectedFamily === "lfm2"')
+    expect(source).toContain('detectedFamily === "deepseek-v4"')
     expect(source).toContain('modelNameOrPath')
     expect(source).toContain('modelName.includes("zaya")')
     expect(source).toContain('modelName.includes("lfm2")')
+    expect(source).not.toContain('modelName.includes("deepseek-v4")')
+    expect(source).not.toContain('modelName.includes("dsv4")')
+    expect(source).toContain('await readDetectedModelConfig(chat.modelPath)')
     expect(source).toContain('const suppressGenericAgenticToolPromptForNativeTools =')
+    expect(source).toContain(
+      'chat.modelPath || resolvedSession?.remoteModel || chat.modelId',
+    )
 
     const promptBranch = source.slice(
       source.indexOf('const suppressGenericAgenticToolPromptForNativeTools ='),
       source.indexOf('// No default system prompt injected'),
     )
     expect(promptBranch).toContain('!suppressGenericAgenticToolPromptForNativeTools')
-    expect(promptBranch).toContain('chat.modelPath || chat.modelId')
+    expect(promptBranch).toContain(
+      'chat.modelPath || resolvedSession?.remoteModel || chat.modelId',
+    )
     expect(promptBranch).toContain('AGENTIC_SYSTEM_PROMPT + directMediaAttachmentRule')
     expect(promptBranch).toContain('directMediaAttachmentRule.trim()')
+    expect(source).toContain('const scopedCurrentTurnBuiltinToolNames =')
+    expect(source).toContain(
+      'scopedCurrentTurnToolNames.filter((name) => isBuiltinTool(name))',
+    )
   })
 
   it('panel max tool iterations caps tool loops', () => {

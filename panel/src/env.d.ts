@@ -22,7 +22,7 @@ declare global {
         ) => Promise<{ success: boolean }>;
         browseDirectory: () => Promise<{ canceled: boolean; path?: string }>;
         detectConfig: (modelPath: string) => Promise<{
-          family: string;
+          family?: string;
           toolParser?: string;
           reasoningParser?: string;
           supportsThinking?: boolean;
@@ -32,27 +32,27 @@ declare global {
           supportsThinkingBudget?: boolean;
           thinkInTemplate?: boolean;
           dsv4PoolQuantDefault?: boolean;
-          cacheType: string;
+          cacheType?: string;
           cacheSubtype?: string;
           architectureHints?: Record<string, string | number | boolean>;
-          usePagedCache: boolean;
-          enableAutoToolChoice: boolean;
-          isMultimodal: boolean;
+          usePagedCache?: boolean;
+          enableAutoToolChoice?: boolean;
+          isMultimodal?: boolean;
           forceTextOnly?: boolean;
           isTurboQuant?: boolean;
           quantizationLabel?: string;
           nativeMtp?: {
-            supported: boolean;
-            depth: number;
+            supported?: boolean;
+            depth?: number;
             depthSource?: string;
-            runtimeScope: 'text' | 'text+vl';
-            nativeCacheType: string;
-            requiresDeterministicSampling: boolean;
+            runtimeScope?: 'text' | 'text+vl';
+            nativeCacheType?: string;
+            requiresDeterministicSampling?: boolean;
             blockedReason?: string;
           };
-          description: string;
+          description?: string;
           maxContextLength?: number;
-        }>;
+        } | null>;
         detectTypes: (
           modelPaths: string[],
         ) => Promise<Record<string, "text" | "image" | "unknown">>;

@@ -20,18 +20,26 @@ export type CurrentTurnToolChoice =
 export function requiredToolChoiceNamesForCurrentTurn(
   exactFinalToolNames: string[],
   exactlyOnceToolNames: string[],
-  boundedFinalAfterExactlyOnceTools: boolean,
 ): string[] {
   if (exactFinalToolNames.length > 0) return exactFinalToolNames
-  return boundedFinalAfterExactlyOnceTools ? exactlyOnceToolNames : []
+  // "Call X exactly once" is itself a current-turn execution contract. It
+  // must not silently degrade to auto choice merely because the requested
+  // post-tool answer is phrased differently (or is open ended).
+  return exactlyOnceToolNames
 }
 
 export function toolChoiceForCurrentTurn(
   suppressAllTools: boolean,
   exactFinalToolNames: string[],
   wireApi: 'responses' | 'chat',
+  isRemote = false,
 ): CurrentTurnToolChoice {
-  if (suppressAllTools) return 'none'
+  // Remote providers already receive no schemas for an explicit no-tool turn;
+  // keep omitting `tool_choice="none"` for strict third-party compatibility.
+  // A singular explicit tool contract is different: the scoped schema alone
+  // still means auto choice, so forward the standard endpoint-native specific
+  // choice instead of silently weakening the user's instruction.
+  if (suppressAllTools) return isRemote ? undefined : 'none'
   if (exactFinalToolNames.length === 0) return undefined
 
   // Specific tool_choice is singular in both wire APIs. For an exact ordered
@@ -64,10 +72,10 @@ export function isToolAuthorizedForCurrentTurn(
   toolName: string,
   providedNames: string[],
   suppressAllTools: boolean,
-  exactBuiltinToolNames: string[],
+  restrictedToolNames: string[],
 ): boolean {
   const restrictToProvidedNames =
-    suppressAllTools || exactBuiltinToolNames.length > 0
+    suppressAllTools || restrictedToolNames.length > 0
   return (
     !restrictToProvidedNames ||
     isToolNameProvidedForCurrentTurn(toolName, providedNames)
@@ -100,18 +108,33 @@ export function requestedOnceToolNames(text: string): string[] {
   // independent of how the user phrases the final-answer request. Retire each
   // named tool after its first call while leaving other tools available for
   // genuinely agentic multi-tool work.
-  const names = Array.from(
-    text.matchAll(
+  const matches = [
+    ...text.matchAll(
       /\b(?:call|use|invoke|run|execute)\s+(?:the\s+)?(?:built[- ]in\s+)?`?([a-z][\w-]*)`?(?:\s+(?:tool|function))?\s+exactly\s+once\b/gi,
     ),
-    match => match[1].toLowerCase(),
-  )
+    ...text.matchAll(
+      /\b(?:call|use|invoke|run|execute)\s+exactly\s+(?:one|1)\s+(?:the\s+)?(?:built[- ]in\s+)?`?([a-z][\w-]*)`?(?:\s+(?:tool|function))?(?:\s+call)?\b/gi,
+    ),
+  ].sort((a, b) => (a.index || 0) - (b.index || 0))
+  const names = matches
+    .filter(match => !isNegatedDirectiveAt(text, match.index || 0))
+    .map(match => match[1].toLowerCase())
   if (names.length === 0 || new Set(names).size !== names.length) return []
   return names
 }
 
 function escapedToolName(name: string): string {
   return name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function isNegatedDirectiveAt(text: string, directiveIndex: number): boolean {
+  const prefix = text.slice(Math.max(0, directiveIndex - 96), directiveIndex)
+  // Only inspect the current clause. A prior "Do not guess." must not negate
+  // a later positive "Use file_info" directive, while "do not use ..." and
+  // "never call ..." must not be reinterpreted as authorization.
+  return /\b(?:do\s+not|don['’]t|never|without)\b[^.!?;\n]{0,80}$/i.test(
+    prefix,
+  )
 }
 
 function explicitlyRequestedCatalogToolNames(
@@ -131,7 +154,7 @@ function explicitlyRequestedCatalogToolNames(
       'i',
     )
     const match = requestPattern.exec(text)
-    if (!match) continue
+    if (!match || isNegatedDirectiveAt(text, match.index)) continue
     seen.add(name)
     matches.push({ name, index: match.index })
   }
@@ -140,9 +163,28 @@ function explicitlyRequestedCatalogToolNames(
 }
 
 function permitsAdditionalToolUse(text: string): boolean {
-  return /\buse\s+tools?\s+as\s+needed\b|\b(?:use|call|invoke|run|execute)\s+(?:any\s+)?(?:other|additional|more|further)\s+tools?\b/i.test(
-    text,
+  const pattern = /\buse\s+tools?\s+as\s+needed\b|\b(?:use|call|invoke|run|execute)\s+(?:any\s+)?(?:other|additional|more|further)\s+tools?\b/gi
+  return [...text.matchAll(pattern)].some(
+    match => !isNegatedDirectiveAt(text, match.index || 0),
   )
+}
+
+export function requestedScopedToolNames(
+  text: string,
+  catalogToolNames: string[] = [],
+): string[] {
+  const exactlyOnceNames = requestedOnceToolNames(text)
+  if (exactlyOnceNames.length === 0 || permitsAdditionalToolUse(text)) return []
+
+  const explicitlyRequestedNames = explicitlyRequestedCatalogToolNames(
+    text,
+    catalogToolNames,
+  )
+  if (explicitlyRequestedNames.length === 0) return exactlyOnceNames
+
+  const requested = new Set(explicitlyRequestedNames)
+  for (const name of exactlyOnceNames) requested.add(name)
+  return [...requested]
 }
 
 export function requestedExactFinalToolNames(

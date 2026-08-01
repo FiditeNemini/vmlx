@@ -31,6 +31,11 @@ import {
   normalizeHfTokenSetting,
 } from "../../shared/hfSettings";
 import { resolveBundleGenerationDefaults } from "../../shared/sessionGenerationDefaults";
+import {
+  detectedConfigFromRemoteCapabilities,
+  fetchRemoteModelCapabilities,
+  generationDefaultsFromRemoteCapabilities,
+} from "../../shared/remoteModelCapabilities";
 
 /**
  * ms#75: resolve the HuggingFace-compatible base URL for API calls
@@ -183,6 +188,42 @@ export interface GenerationDefaults {
   source?: "jang_config" | "generation_config";
 }
 
+const REMOTE_CAPABILITIES_CACHE_MS = 2_500;
+const remoteCapabilitiesCache = new Map<
+  string,
+  { expiresAt: number; pending: Promise<Record<string, unknown> | null> }
+>();
+
+export async function readRemoteCapabilities(
+  modelPath: string,
+): Promise<Record<string, unknown> | null> {
+  if (!modelPath.startsWith("remote://")) return null;
+  const session = db.getSessionByModelPath(modelPath);
+  if (!session || session.type !== "remote" || !session.remoteUrl) return null;
+  const cacheKey = `${session.id}:${session.updatedAt}:${session.remoteModel ?? ""}`;
+  const now = Date.now();
+  const cached = remoteCapabilitiesCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.pending;
+  const pending = fetchRemoteModelCapabilities(session);
+  remoteCapabilitiesCache.clear();
+  remoteCapabilitiesCache.set(cacheKey, {
+    expiresAt: now + REMOTE_CAPABILITIES_CACHE_MS,
+    pending,
+  });
+  return pending;
+}
+
+export async function readDetectedModelConfig(
+  modelPath: string,
+): Promise<ReturnType<typeof detectedConfigFromRemoteCapabilities>> {
+  if (modelPath.startsWith("remote://")) {
+    return detectedConfigFromRemoteCapabilities(
+      await readRemoteCapabilities(modelPath),
+    );
+  }
+  return detectModelConfigFromDir(modelPath);
+}
+
 const THINKING_TEMPLATE_MARKERS = [
   "enable_thinking",
   "<think>",
@@ -268,6 +309,11 @@ async function readThinkingBudgetSupport(modelPath: string): Promise<boolean | u
 export async function readGenerationDefaults(
   modelPath: string,
 ): Promise<GenerationDefaults | null> {
+  if (modelPath.startsWith("remote://")) {
+    return generationDefaultsFromRemoteCapabilities(
+      await readRemoteCapabilities(modelPath),
+    );
+  }
   try {
     const defaults: GenerationDefaults = {};
     const thinkingBudgetSupported = await readThinkingBudgetSupport(modelPath);
@@ -1128,7 +1174,7 @@ export function registerModelHandlers(): void {
 
   // Detect model config (tool/reasoning parser, cache type) from model directory
   ipcMain.handle("models:detect-config", async (_, modelPath: string) => {
-    return detectModelConfigFromDir(modelPath);
+    return readDetectedModelConfig(modelPath);
   });
 
   // Detect model types (image vs text) by checking file structure, not names

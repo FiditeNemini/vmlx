@@ -107,11 +107,22 @@ def _jang_quant_block_size(jang_cfg: dict, default: int = 64) -> int:
 
     Newer MXFP/JANG sidecars use MLX's canonical ``group_size`` key, while
     older JANG configs used ``block_size``. Preserve ``block_size`` precedence
-    for legacy bundles that carry both, but do not silently fall back to 64
-    when a modern bundle only has ``group_size``.
+    for legacy bundles that carry both. Current mixed-affine bundles keep the
+    actual construction default in ``top_level_default`` (and repeat it under
+    ``routed_experts``), so resolve those model-owned declarations before the
+    historical 64 fallback. Packed affine shapes alone cannot distinguish
+    layouts such as q4/group32 from q2/group64.
     """
     quant = jang_cfg.get("quantization") or {}
-    return int(quant.get("block_size") or quant.get("group_size") or default)
+    top_default = quant.get("top_level_default") if isinstance(quant, dict) else {}
+    routed = quant.get("routed_experts") if isinstance(quant, dict) else {}
+    return int(
+        quant.get("block_size")
+        or quant.get("group_size")
+        or (top_default.get("group_size") if isinstance(top_default, dict) else None)
+        or (routed.get("group_size") if isinstance(routed, dict) else None)
+        or default
+    )
 
 
 def _jang_routed_expert_group_size(jang_cfg: dict, default: int = 64) -> int:
@@ -131,6 +142,12 @@ def _jang_default_bits(jang_cfg: dict, fallback: list[int] | None = None) -> int
     quant = jang_cfg.get("quantization") or {}
     if quant.get("bits") is not None:
         return int(quant["bits"])
+    top_default = quant.get("top_level_default")
+    if isinstance(top_default, dict) and top_default.get("bits") is not None:
+        return int(top_default["bits"])
+    routed = quant.get("routed_experts")
+    if isinstance(routed, dict) and routed.get("bits") is not None:
+        return int(routed["bits"])
     bit_widths = quant.get("bit_widths_used", fallback or [4])
     return int(min(bit_widths))
 

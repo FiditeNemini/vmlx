@@ -335,7 +335,53 @@ def test_jang_loader_quant_block_size_falls_back_to_group_size():
         )
         == 64
     )
-    assert _jang_quant_block_size({"quantization": {}}) == 64
+
+    direct_metadata = {
+        "quantization": {
+            "group_size": 64,
+            "bits": 8,
+            "top_level_default": {"bits": 4, "group_size": 32},
+            "routed_experts": {"bits": 2, "group_size": 128},
+            "bit_widths_used": [2, 4, 8],
+        }
+    }
+    assert _jang_quant_block_size(direct_metadata) == 64
+    assert _jang_default_bits(direct_metadata) == 8
+
+    top_default_metadata = {
+        "quantization": {
+            "top_level_default": {"bits": 4, "group_size": 32},
+            "routed_experts": {"bits": 2, "group_size": 128},
+            "bit_widths_used": [2, 8],
+        }
+    }
+    assert _jang_quant_block_size(top_default_metadata) == 32
+    assert _jang_default_bits(top_default_metadata) == 4
+
+    routed_only_metadata = {
+        "quantization": {
+            "routed_experts": {"bits": 2, "group_size": 128},
+            "bit_widths_used": [4, 8],
+        }
+    }
+    assert _jang_quant_block_size(routed_only_metadata) == 128
+    assert _jang_default_bits(routed_only_metadata) == 2
+
+    assert _jang_quant_block_size({"quantization": {}}, default=128) == 128
+    assert _jang_default_bits({"quantization": {}}, fallback=[8, 6]) == 6
+
+    assert (
+        _jang_quant_block_size(
+            {
+                "quantization": {
+                    "top_level_default": {"bits": 4, "group_size": 32},
+                    "routed_experts": {"bits": 4, "group_size": 32},
+                    "non_routed": {"bits": 8, "group_size": 64},
+                }
+            }
+        )
+        == 32
+    )
     assert _jang_default_bits({"quantization": {"bits": 4, "bit_widths_used": [2]}}) == 4
     assert _jang_default_bits({"quantization": {"bit_widths_used": [2, 4]}}) == 2
 

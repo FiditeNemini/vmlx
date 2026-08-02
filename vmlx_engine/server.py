@@ -24064,16 +24064,26 @@ async def stream_responses_api(
             request,
         )
 
+    # Tool markup that lands on the reasoning rail must be *extracted*, not
+    # discarded. This used to require ``suppress_reasoning``, so it never ran on
+    # the Responses API, where reasoning is streamed as a summary rather than
+    # suppressed. A DSV4 turn that emitted its DSML block inside the reasoning
+    # rail therefore fell through to the buffered-markup path, which threw the
+    # markup away as an unsafe control suffix and finalized the response as
+    # ``response.incomplete`` with no function call at all — even though the
+    # DSML parser accepts that exact block and returns a valid `file_info` call.
+    # The markup is already withheld from the visible reasoning summary, so
+    # extracting it adds no leak: it only turns a dropped call into a real one.
     if (
         not tool_calls
-        and suppress_reasoning
         and accumulated_reasoning
         and not _suppress_tools
         and _private_reasoning_has_tool_syntax(accumulated_reasoning)
     ):
         logger.info(
-            f"Request {response_id}: tool markers in suppressed reasoning — "
-            "extracting before Responses API finalization"
+            f"Request {response_id}: tool markers in reasoning rail "
+            f"(suppressed={suppress_reasoning}) — extracting before Responses "
+            "API finalization"
         )
         _tc_calls = _parse_private_reasoning_tool_calls(
             accumulated_reasoning, request

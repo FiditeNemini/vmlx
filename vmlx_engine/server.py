@@ -1278,8 +1278,27 @@ def _parse_private_reasoning_tool_calls(
     """Extract structured private-rail tool calls without exposing private prose."""
     if not _private_reasoning_has_tool_syntax(reasoning_text):
         return None
-    _cleaned, calls = _parse_tool_calls_with_parser(str(reasoning_text).strip(), request)
-    return calls or None
+    text = str(reasoning_text).strip()
+    _cleaned, calls = _parse_tool_calls_with_parser(text, request)
+    if calls:
+        return calls
+
+    # Strict native parsers (DSML) validate the *whole* blob against the
+    # bundle's canonical completion grammar and require both parsers to agree.
+    # Reasoning-rail text is private prose plus leaked markup, which is never a
+    # canonical completion, so the bundle rejects it and a perfectly valid call
+    # is dropped: measured, `prose + DSML` yields tools_called=False while the
+    # identical DSML block alone yields the correct `file_info` call. Retry with
+    # just the markup span so the canonical agreement gate keeps its meaning
+    # instead of being weakened.
+    markup_start = _visible_prefix_before_unparsed_tool_markup(text)
+    if markup_start and len(markup_start) < len(text):
+        remainder = text[len(markup_start):].strip()
+        if remainder:
+            _cleaned_tail, tail_calls = _parse_tool_calls_with_parser(remainder, request)
+            if tail_calls:
+                return tail_calls
+    return None
 
 
 def _dsv4_split_reasoning_from_token_ids(

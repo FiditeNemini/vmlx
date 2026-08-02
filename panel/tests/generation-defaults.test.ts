@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
@@ -40,6 +40,29 @@ afterEach(() => {
 })
 
 describe('hasUsableChatTemplate', () => {
+  it('accepts the canonical DeepSeek-V4 native Python encoder without Jinja', async () => {
+    const dir = makeModelDir({
+      'config.json': { model_type: 'deepseek_v4' },
+      'tokenizer_config.json': {},
+    }, 'vmlx-chat-template-dsv4-native-')
+    mkdirSync(join(dir, 'encoding'))
+    writeFileSync(
+      join(dir, 'encoding', 'encoding_dsv4.py'),
+      'def encode_messages(messages):\n    return ""\n\ndef parse_message_from_completion_text(text, thinking_mode):\n    return {}\n',
+    )
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(true)
+  })
+
+  it('rejects DeepSeek-V4 when its native encoder contract is absent', async () => {
+    const dir = makeModelDir({
+      'config.json': { model_type: 'deepseek_v4' },
+      'tokenizer_config.json': {},
+    }, 'vmlx-chat-template-dsv4-missing-native-')
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(false)
+  })
+
   it('accepts a current embedded tokenizer chat template', async () => {
     const dir = makeModelDir({
       'tokenizer_config.json': {

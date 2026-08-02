@@ -459,6 +459,24 @@ async function chatTemplateValueHasContent(
  * can ship either a standalone template or tokenizer_config chat_template.
  */
 export async function hasUsableChatTemplate(modelPath: string): Promise<boolean> {
+  // DeepSeek-V4 does not use Jinja. Its bundle-owned, versioned Python
+  // encoder is the chat contract consumed by dsv4_chat_encoder. Treating this
+  // family as Jinja-only produces a false missing-template warning even when
+  // the canonical native encoder is present. Require the two entry points the
+  // runtime actually owns so a truncated/placeholder Python file still fails
+  // closed.
+  const detected = detectModelConfigFromDir(modelPath);
+  if (detected.family === "deepseek-v4") {
+    const nativeEncoder = await readBundleLocalText(
+      modelPath,
+      join("encoding", "encoding_dsv4.py"),
+    );
+    return (
+      nativeEncoder.includes("def encode_messages") &&
+      nativeEncoder.includes("def parse_message_from_completion_text")
+    );
+  }
+
   for (const name of ["chat_template.jinja", "chat_template.txt"]) {
     if ((await readBundleLocalText(modelPath, name)).trim()) return true;
   }

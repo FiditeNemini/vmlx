@@ -256,22 +256,21 @@ def check_and_inject_fallback_tools(
     # model's own tool/result transcript framing and thinking contract.
     is_dsv4_prompt = "<｜User｜>" in prompt or "<｜Assistant｜>" in prompt
     if is_dsv4_prompt:
-        # The canonical DSV4 encoder scopes a broad API tool catalog to the
-        # explicitly requested or most-recently called tools.  Judge its
-        # rendered prompt against that same scoped set.  Comparing the prompt
-        # to every API-authorized tool falsely reports that schemas were
-        # dropped, then prepends a second synthetic fallback even though the
-        # encoder already rendered the correct DSML example.  Live Responses
-        # multi-turn testing showed that duplicate fallback can drive DSV4
-        # into an unbounded literal `response` loop.
+        # Judge the rendered prompt against exactly the catalog the canonical
+        # DSV4 encoder renders — the full authorized set, deduplicated by name.
+        # Comparing the prompt to a different set falsely reports that schemas
+        # were dropped, then prepends a second synthetic fallback even though
+        # the encoder already rendered the correct DSML example.  Live
+        # Responses multi-turn testing showed that duplicate fallback can drive
+        # DSV4 into an unbounded literal `response` loop.
         from ..loaders.dsv4_chat_encoder import (
+            prompt_tool_catalog,
             request_explicitly_requests_tool,
-            select_tools_for_explicit_request,
         )
 
-        scoped_tools = select_tools_for_explicit_request(messages, template_tools)
-        if scoped_tools:
-            template_tools = scoped_tools
+        catalog_tools = prompt_tool_catalog(template_tools)
+        if catalog_tools:
+            template_tools = catalog_tools
             tool_names = [_tool_func(t).get("name", "") for t in template_tools]
             tool_names = [name for name in tool_names if name]
             explicitly_requested_tool_names = {

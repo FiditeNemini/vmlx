@@ -44,6 +44,20 @@ layer on top as JANG-stamp capabilities.
 Tool calls are DSML format (``vmlx_engine/tool_parsers/dsml_tool_parser.py``
 — parser key "dsml"). ``jang_config.chat.tool_calling.parser`` = "dsml".
 
+Prefix-cache invariants (see docs/DSV4-ENCODER-CONTRACT.md):
+
+  * The tool catalog renders into the *system* message, at the front of the
+    sequence. It must never depend on the current turn — see
+    ``prompt_tool_catalog``. A turn-dependent catalog pins prefix reuse to the
+    pre-catalog boundary for the rest of the conversation.
+  * ``drop_thinking`` is force-disabled by the bundle encoder whenever any
+    message carries ``tools``. Enabling or disabling tools mid-conversation
+    therefore re-renders all prior assistant turns and is an inherent full
+    invalidation, not a bug.
+  * ``latest_reminder`` is a caller-supplied role. This adapter never invents
+    one; injecting per-request volatile content (dates, clocks) mid-history
+    would invalidate every token after it.
+
 Long-context mode (``DSV4_LONG_CTX``):
 
   * ``1`` is the supported runtime mode. ``Model.make_cache()`` returns
@@ -109,40 +123,41 @@ def request_explicitly_requests_tool(request_text: str, tool_name: str) -> bool:
     return False
 
 
-def select_tools_for_explicit_request(
-    messages: List[Dict[str, Any]],
+def prompt_tool_catalog(
     tools: Optional[List[Dict[str, Any]]],
 ) -> Optional[List[Dict[str, Any]]]:
-    """Keep DSV4's prompt focused when the latest user names a tool.
+    """Return the DSV4 prompt tool catalog — the full authorized set, stable.
 
-    The request may still authorize the full tool array for output parsing and
-    execution.  This helper only limits what the canonical DSV4 encoder places
-    in the prompt.  Without it, one explicit ``run_command`` request expands to
-    several thousand tokens of unrelated schemas/examples and live DSV4 copies
-    those schemas or emits an empty/no-op argument instead of the requested
-    value.
+    DSV4 renders ``## Tools`` and every schema into the *system* message, which
+    is the very front of the token sequence.  Any turn-dependent change to this
+    list therefore invalidates the prefix cache from the first schema byte
+    onward, and every later agent iteration cold-prefills the whole transcript.
+
+    An earlier revision narrowed this catalog to the tool named by the latest
+    user turn (falling back to the most recently called tool).  That produced
+    two defects:
+
+    1. Prefix-cache collapse.  In an agent loop the narrowed set changes each
+       time the agent switches tools, so reuse pins to the pre-catalog boundary
+       and never advances.
+    2. Mid-loop capability loss.  After the agent called ``write_file`` the
+       prompt catalog contained *only* ``write_file``, so the model could no
+       longer see ``read_file``/``run_command`` and could not continue the task
+       with the tools the caller had authorized.
+
+    The catalog is therefore never turn-dependent.  Order follows the caller so
+    tool priority is preserved, and duplicate names are dropped because a
+    repeated schema both wastes prompt budget and lets caller-side ordering
+    jitter move later bytes.
+
+    ``request_explicitly_requests_tool`` remains available for *intent*
+    detection (which does not touch the prompt prefix).
     """
     if not tools:
         return tools
 
-    request_text = ""
-    for message in reversed(messages or []):
-        if not isinstance(message, dict) or message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            request_text = content
-        elif isinstance(content, list):
-            request_text = "\n".join(
-                str(part.get("text") or part.get("content") or "")
-                for part in content
-                if isinstance(part, dict)
-            )
-        break
-    if not request_text:
-        return tools
-
-    selected: List[Dict[str, Any]] = []
+    catalog: List[Dict[str, Any]] = []
+    seen: set[str] = set()
     for tool in tools:
         if not isinstance(tool, dict):
             continue
@@ -150,41 +165,11 @@ def select_tools_for_explicit_request(
         name = func.get("name") if isinstance(func, dict) else None
         if not isinstance(name, str) or not name:
             continue
-        if request_explicitly_requests_tool(request_text, name):
-            selected.append(tool)
-    if selected:
-        return selected
-
-    # A later user turn normally stops naming the tool even though Responses
-    # history still carries the assistant function_call and its output. Keep
-    # the same schema set in that continuation prompt; expanding back to every
-    # enabled coding tool changes the DSV4 prefix and makes the terminal native
-    # composite disk block impossible to match after a restart.
-    recent_call_names: set[str] = set()
-    for message in reversed(messages or []):
-        if not isinstance(message, dict) or message.get("role") != "assistant":
+        if name in seen:
             continue
-        for tool_call in message.get("tool_calls") or []:
-            if not isinstance(tool_call, dict):
-                continue
-            func = tool_call.get("function")
-            name = func.get("name") if isinstance(func, dict) else None
-            if isinstance(name, str) and name:
-                recent_call_names.add(name)
-        if recent_call_names:
-            break
-    if recent_call_names:
-        historical = []
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            func = tool.get("function") if isinstance(tool.get("function"), dict) else tool
-            name = func.get("name") if isinstance(func, dict) else None
-            if name in recent_call_names:
-                historical.append(tool)
-        if historical:
-            return historical
-    return tools
+        seen.add(name)
+        catalog.append(tool)
+    return catalog or tools
 
 
 def _default_encoding_dirs() -> List[Path]:
@@ -407,12 +392,11 @@ def apply_chat_template(
         supported_efforts=supported_efforts,
     )
     messages = copy.deepcopy(messages)
-    prompt_tools = select_tools_for_explicit_request(messages, tools)
+    prompt_tools = prompt_tool_catalog(tools)
     if prompt_tools and tools and len(prompt_tools) < len(tools):
-        logger.info(
-            "DSV4 explicit-tool prompt narrowed from %d schemas to %d",
-            len(tools),
-            len(prompt_tools),
+        logger.debug(
+            "DSV4 prompt catalog dropped %d duplicate tool schema(s)",
+            len(tools) - len(prompt_tools),
         )
 
     # DSV4's bundled encoder predates the strict-template normalization used

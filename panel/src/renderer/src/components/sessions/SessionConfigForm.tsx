@@ -869,7 +869,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           disabled={dsv4Active}
         />
         {!dsv4Active && <PerformanceHint text="Keep ON for best overall behavior: it enables prefix reuse, the in-memory RAM tier, persistent SSD L2, and architecture-specific cache restore while the default max sequence count stays at one for local chat." />}
-        {dsv4Active && <InfoNote text="DSV4 Flash stays on its native DSV4BatchGenerator path. Prefix reuse defaults On, In-Memory Paged Cache (RAM) defaults Off, Block Disk Cache (SSD / L2) defaults On, and the CSA/HCA pool codec remains bundle-derived." />}
+        {dsv4Active && <InfoNote text="DSV4 Flash stays on its native DSV4BatchGenerator path. Prefix reuse, bounded In-Memory Paged Cache (RAM), and Block Disk Cache (SSD / L2) default On as one hot/warm/cold stack; the CSA/HCA pool codec remains bundle-derived." />}
         {!effectiveContinuousBatching && effectivePrefixCacheEnabled && (
           <InfoNote text="Cache flags will be omitted at launch while continuous batching is off. Turn it back on to use Prefix Cache, In-Memory Paged Cache (RAM), Block Disk Cache (SSD / L2), and stored-cache codecs." />
         )}

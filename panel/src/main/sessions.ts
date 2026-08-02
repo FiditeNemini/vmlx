@@ -4275,9 +4275,9 @@ export class SessionManager extends EventEmitter {
       if (blockDiskCacheMaxGb != null) {
         args.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
       }
-    } else if (cacheLaunchPolicy.effectiveUsePagedCache) {
-      // Paged cache defaults its SSD L2 on in the engine. Preserve an explicit
-      // UI opt-out instead of silently falling back to the engine default.
+    } else if (!prefixCacheOff) {
+      // Prefix cache defaults its SSD L2 on in the engine. Preserve an explicit
+      // UI opt-out even when the paged RAM tier is also off.
       args.push('--disable-block-disk-cache')
     }
 

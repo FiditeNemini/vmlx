@@ -34,6 +34,7 @@ from .mlx_memory import clear_mlx_memory_cache
 from .paged_cache import PagedCacheManager
 from .prefix_cache import (
     BlockAwarePrefixCache,
+    DSV4_APPEND_SAFE_CHECKPOINT_POLICY,
     PAGED_CACHE_SCHEMA_VERSION,
     PrefixCacheManager,
     compute_model_cache_key,
@@ -1124,6 +1125,8 @@ class Scheduler:
                                 f":dsv4_unsafe_trim={_unsafe_trim}"
                                 f":dsv4_paged_block_size={self.config.paged_cache_block_size}"
                                 ":dsv4_cache_schema=deepseek_v4_v10_delta"
+                                ":dsv4_append_safe_checkpoint="
+                                f"{DSV4_APPEND_SAFE_CHECKPOINT_POLICY}"
                             )
                         elif self._uses_zaya_cache:
                             zaya_scope = ":zaya_cache_schema=zaya_cca_v1"

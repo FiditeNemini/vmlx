@@ -333,9 +333,11 @@ def estimate_dsv4_delta_transport_bytes_from_config(
 
     The cumulative compressor/indexer rows are emitted once across the delta
     chain.  Exact local-SWA and incomplete-buffer state is duplicated at each
-    periodic/terminal anchor.  Include a deliberately conservative per-layer
-    record allowance for Python/safetensors metadata so a finite block-aware
-    RAM/L2 limit can reject the donation before block records allocate.
+    periodic/terminal anchor. A partial request boundary also retains the
+    preceding complete block as an append-safe checkpoint when that block is
+    part of this donation. Include a deliberately conservative per-layer record
+    allowance for Python/safetensors metadata so a finite block-aware RAM/L2
+    limit can reject the donation before block records allocate.
     """
 
     start = max(0, int(start_token or 0))
@@ -376,7 +378,16 @@ def estimate_dsv4_delta_transport_bytes_from_config(
         end // anchor_interval - start // anchor_interval,
     )
     terminal_anchor = 0 if end % anchor_interval == 0 else 1
-    anchor_count = max(1, periodic_anchors + terminal_anchor)
+    aligned_predecessor = (end // block) * block
+    append_safe_predecessor = int(
+        end % block != 0
+        and aligned_predecessor > start
+        and aligned_predecessor % anchor_interval != 0
+    )
+    anchor_count = max(
+        1,
+        periodic_anchors + terminal_anchor + append_safe_predecessor,
+    )
     anchor_bytes = anchor_count * (
         final.local_swa_bytes + final.tail_bytes
     )

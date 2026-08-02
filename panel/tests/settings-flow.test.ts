@@ -506,7 +506,7 @@ function buildCommandPreview(
         if (config.blockDiskCacheDir) parts.push('--block-disk-cache-dir', config.blockDiskCacheDir)
         const blockDiskCacheMaxGb = finiteNonNegativeNumber(config.blockDiskCacheMaxGb)
         if (blockDiskCacheMaxGb != null) parts.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
-    } else if (cacheLaunchPolicy.effectiveUsePagedCache) {
+    } else if (!prefixCacheOff) {
         parts.push('--disable-block-disk-cache')
     }
 
@@ -1209,6 +1209,13 @@ describe('Block Disk Cache', () => {
 
     it('emits an explicit opt-out when paged cache is active and block L2 is off', () => {
         const out = preview({ enablePrefixCache: true, usePagedCache: true, enableBlockDiskCache: false })
+        expect(hasFlag(out, '--enable-block-disk-cache')).toBe(false)
+        expect(hasFlag(out, '--disable-block-disk-cache')).toBe(true)
+    })
+
+    it('emits an explicit block L2 opt-out when paged cache is also off', () => {
+        const out = preview({ enablePrefixCache: true, usePagedCache: false, enableBlockDiskCache: false })
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(false)
         expect(hasFlag(out, '--disable-block-disk-cache')).toBe(true)
     })

@@ -69,6 +69,7 @@ def _delta_record(
     *,
     periodic=False,
     terminal=False,
+    append_safe=False,
     pool_quant=False,
 ):
     anchor = None
@@ -79,6 +80,7 @@ def _delta_record(
             "tokens": end,
             "periodic": bool(periodic),
             "terminal": bool(terminal),
+            "append_safe": bool(append_safe),
             "local_state": (local, local + 1000),
             "meta_state": ("0", "128", str(end), str(local_rows)),
             "compressor_buffer_kv": None,
@@ -116,9 +118,16 @@ def _delta_record(
     }
 
 
-def _topology_block(block_index: int, *, terminal=False, pool_quant=False):
-    start = block_index * 256
-    end = start + 256
+def _topology_interval(
+    start: int,
+    end: int,
+    *,
+    terminal=False,
+    append_safe=False,
+    pool_quant=False,
+):
+    if end <= start or end - start > 256:
+        raise ValueError(f"invalid DSV4 topology interval [{start}, {end})")
     periodic = end % 2048 == 0
     entries = []
     for layer_index in range(43):
@@ -142,6 +151,7 @@ def _topology_block(block_index: int, *, terminal=False, pool_quant=False):
                     ratio,
                     periodic=periodic,
                     terminal=terminal,
+                    append_safe=append_safe,
                     pool_quant=pool_quant,
                 ),
                 "PoolQuantizedV4Cache" if pool_quant else "DeepseekV4Cache",
@@ -154,6 +164,23 @@ def _topology_block(block_index: int, *, terminal=False, pool_quant=False):
             )
         )
     return entries
+
+
+def _topology_block(
+    block_index: int,
+    *,
+    terminal=False,
+    append_safe=False,
+    pool_quant=False,
+):
+    start = block_index * 256
+    return _topology_interval(
+        start,
+        start + 256,
+        terminal=terminal,
+        append_safe=append_safe,
+        pool_quant=pool_quant,
+    )
 
 
 def _write_native_block(store, *, request_id: str, block_hash: bytes, block_index: int):
@@ -209,6 +236,99 @@ def test_dsv4_delta_serializer_roundtrip_preserves_43_layer_native_topology():
     )
     assert valid, reason
     assert measured_bytes > 0
+
+
+def test_dsv4_terminal_capture_retains_preceding_aligned_checkpoint():
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    class DeepseekV4Cache:
+        """Minimal native exporter shaped like the installed JANG cache."""
+
+        def export_block_delta(
+            self,
+            start,
+            end,
+            *,
+            block_size,
+            anchor_interval_blocks,
+            force_anchor=False,
+        ):
+            anchor_interval = block_size * anchor_interval_blocks
+            anchored = bool(force_anchor or end % anchor_interval == 0)
+            return {
+                "start_token": start,
+                "end_token": end,
+                "anchor": (
+                    {
+                        "tokens": end,
+                        "periodic": end % anchor_interval == 0,
+                        "terminal": bool(force_anchor),
+                    }
+                    if anchored
+                    else None
+                ),
+            }
+
+    cache = DeepseekV4Cache()
+    DSV4BatchGenerator._reset_dsv4_block_records([cache], 0)
+    DSV4BatchGenerator._capture_dsv4_completed_blocks([cache], 256)
+    DSV4BatchGenerator._capture_dsv4_append_safe_checkpoint([cache], 256)
+    DSV4BatchGenerator._capture_dsv4_terminal_anchor([cache], 331)
+
+    records = cache._vmlx_dsv4_block_records
+    assert [(record["start_token"], record["end_token"]) for record in records] == [
+        (0, 256),
+        (256, 331),
+    ]
+    assert records[0]["anchor"]["append_safe"] is True
+    assert records[0]["anchor"]["terminal"] is True
+    assert records[1]["anchor"]["terminal"] is True
+    assert records[1]["anchor"].get("append_safe") is not True
+
+
+def test_dsv4_append_safe_marker_roundtrips_through_block_disk_transport():
+    from vmlx_engine.block_disk_store import _deserialize_block, _serialize_block
+    from vmlx_engine.cache_record_validator import validate_cache_record
+
+    payload = _topology_block(0, terminal=True, append_safe=True)
+    tensors, dtype, _ = _serialize_block(payload)
+    restored = _deserialize_block(tensors, dtype)
+
+    delta_anchors = [
+        entry[1]["anchor"]
+        for entry in restored
+        if entry[0] == "deepseek_v4_delta_v1"
+    ]
+    assert len(delta_anchors) == 41
+    assert all(anchor["append_safe"] is True for anchor in delta_anchors)
+    valid, reason, _ = validate_cache_record(
+        restored,
+        expected_num_layers=43,
+        source="test-dsv4-append-safe-roundtrip",
+    )
+    assert valid, reason
+
+
+def test_dsv4_append_safe_policy_versions_the_cache_namespace(monkeypatch):
+    import vmlx_engine.prefix_cache as prefix_cache
+
+    model = SimpleNamespace(
+        args=SimpleNamespace(
+            model_type="deepseek_v4",
+            num_hidden_layers=43,
+            num_attention_heads=64,
+            num_key_value_heads=1,
+            hidden_size=4096,
+        )
+    )
+    current = prefix_cache.compute_model_cache_key(model)
+    monkeypatch.setattr(
+        prefix_cache,
+        "DSV4_APPEND_SAFE_CHECKPOINT_POLICY",
+        "full_block_test_next",
+    )
+
+    assert prefix_cache.compute_model_cache_key(model) != current
 
 
 def test_dsv4_native_delta_disk_store_roundtrip_is_readable_and_bounded(tmp_path):
@@ -466,6 +586,140 @@ def test_dsv4_longest_match_uses_periodic_anchor_and_replays_matched_tail():
     assert len(kept) == 8
     assert checkpoint == 2048
     assert replayed == 256
+
+
+@pytest.mark.parametrize("disk_backed", [False, True])
+def test_dsv4_short_changed_suffix_uses_preceding_aligned_checkpoint(disk_backed):
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
+    cache._expected_num_layers = 43
+    payloads = [
+        _topology_block(0, terminal=True, append_safe=True),
+        _topology_interval(256, 331, terminal=True),
+    ]
+    hashes = [b"a" * 32, b"b" * 32]
+    blocks = [
+        SimpleNamespace(
+            token_count=token_count,
+            block_hash=block_hash,
+            cache_data=None if disk_backed else payload,
+        )
+        for token_count, block_hash, payload in zip(
+            (256, 75), hashes, payloads
+        )
+    ]
+    disk_store = (
+        SimpleNamespace(
+            read_block=lambda block_hash: payloads[hashes.index(block_hash)]
+        )
+        if disk_backed
+        else None
+    )
+    request_tokens = list(range(331)) + list(range(80_000, 80_086))
+
+    kept, checkpoint, replayed = cache._normalize_dsv4_delta_candidate(
+        request_id=f"dsv4-short-aligned-{'disk' if disk_backed else 'ram'}",
+        blocks=blocks,
+        matched_tokens=331,
+        request_tokens=request_tokens,
+        disk_store=disk_store,
+    )
+
+    assert kept == blocks[:1]
+    assert checkpoint == 256
+    assert replayed == 75
+    assert request_tokens[checkpoint:] == list(range(256, 331)) + list(
+        range(80_000, 80_086)
+    )
+
+
+def test_dsv4_short_exact_n_minus_one_still_prefers_terminal_checkpoint():
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
+    cache._expected_num_layers = 43
+    blocks = [
+        SimpleNamespace(
+            token_count=256,
+            cache_data=_topology_block(0, terminal=True, append_safe=True),
+        ),
+        SimpleNamespace(
+            token_count=75,
+            cache_data=_topology_interval(256, 331, terminal=True),
+        ),
+    ]
+
+    kept, checkpoint, replayed = cache._normalize_dsv4_delta_candidate(
+        request_id="dsv4-short-exact-terminal",
+        blocks=blocks,
+        matched_tokens=331,
+        request_tokens=list(range(331)) + [90_004],
+        disk_store=None,
+    )
+
+    assert kept == blocks
+    assert checkpoint == 331
+    assert replayed == 0
+
+
+def test_dsv4_unstamped_terminal_is_not_a_changed_suffix_checkpoint():
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
+    cache._expected_num_layers = 43
+    blocks = [
+        SimpleNamespace(
+            token_count=256,
+            cache_data=_topology_block(0, terminal=True),
+        ),
+        SimpleNamespace(
+            token_count=75,
+            cache_data=_topology_interval(256, 331, terminal=True),
+        ),
+    ]
+
+    kept, checkpoint, replayed = cache._normalize_dsv4_delta_candidate(
+        request_id="dsv4-short-terminal-no-false-hit",
+        blocks=blocks,
+        matched_tokens=331,
+        request_tokens=list(range(331)) + list(range(91_000, 91_086)),
+        disk_store=None,
+    )
+
+    assert kept == []
+    assert checkpoint == 0
+    assert replayed == 331
+
+
+def test_dsv4_append_safe_checkpoint_rejects_stale_rotating_state():
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
+    cache._expected_num_layers = 43
+    aligned = _topology_block(0, terminal=True, append_safe=True)
+    for index in range(2):
+        entry = aligned[index]
+        aligned[index] = (*entry[:5], 255, entry[6])
+    blocks = [
+        SimpleNamespace(token_count=256, cache_data=aligned),
+        SimpleNamespace(
+            token_count=75,
+            cache_data=_topology_interval(256, 331, terminal=True),
+        ),
+    ]
+
+    kept, checkpoint, replayed = cache._normalize_dsv4_delta_candidate(
+        request_id="dsv4-short-stale-rotating-no-false-hit",
+        blocks=blocks,
+        matched_tokens=331,
+        request_tokens=list(range(331)) + list(range(92_000, 92_086)),
+        disk_store=None,
+    )
+
+    assert kept == []
+    assert checkpoint == 0
+    assert replayed == 331
 
 
 def _dsv4_pending_tail_fetch_fixture(*, register_chain_hashes: bool):
@@ -928,6 +1182,24 @@ def test_dsv4_validator_rejects_rotating_anchor_dimension_mismatch():
 
     assert ok is False
     assert "local K/V geometry" in reason
+
+
+def test_dsv4_validator_rejects_append_safe_marker_on_partial_terminal():
+    from vmlx_engine.cache_record_validator import validate_cache_record
+
+    malformed = _topology_interval(256, 331, terminal=True)
+    for entry in malformed:
+        if entry[0] == "deepseek_v4_delta_v1":
+            entry[1]["anchor"]["append_safe"] = True
+
+    ok, reason, _ = validate_cache_record(
+        malformed,
+        expected_num_layers=43,
+        source="dsv4-partial-append-safe-mutation",
+    )
+
+    assert ok is False
+    assert "append-safe anchor is misaligned" in reason
 
 
 def test_dsv4_reconstruct_rejects_chain_metadata_change():

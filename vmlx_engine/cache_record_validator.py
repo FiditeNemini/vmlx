@@ -797,6 +797,19 @@ def validate_cache_record(
                     return False, f"layer {i} DSV4 anchor has no valid kind", total_bytes
                 if periodic and end % (block_size * anchor_blocks):
                     return False, f"layer {i} DSV4 periodic anchor is misaligned", total_bytes
+                append_safe = anchor.get("append_safe", False)
+                if not isinstance(append_safe, bool):
+                    return False, (
+                        f"layer {i} DSV4 append-safe marker is invalid"
+                    ), total_bytes
+                if append_safe and (
+                    end - start != block_size
+                    or start % block_size
+                    or end % block_size
+                ):
+                    return False, (
+                        f"layer {i} DSV4 append-safe anchor is misaligned"
+                    ), total_bytes
                 local_state = anchor.get("local_state")
                 if (
                     not isinstance(local_state, (tuple, list))

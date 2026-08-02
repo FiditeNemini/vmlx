@@ -77,6 +77,46 @@ def test_dsv4_delta_transport_estimate_counts_pool_anchors_and_records():
     )
 
 
+def test_dsv4_delta_transport_estimate_counts_partial_terminal_and_aligned_predecessor():
+    config = _dsv4_config()
+    estimated = estimate_dsv4_delta_transport_bytes_from_config(
+        config,
+        0,
+        331,
+        pool_quant_enabled=True,
+    )
+    initial = estimate_dsv4_cache_memory_from_config(
+        config,
+        0,
+        pool_quant_enabled=True,
+    )
+    final = estimate_dsv4_cache_memory_from_config(
+        config,
+        331,
+        pool_quant_enabled=True,
+    )
+    assert estimated is not None and initial is not None and final is not None
+    pool_delta = (
+        final.csa_pool_bytes
+        + final.csa_indexer_bytes
+        + final.hca_pool_bytes
+        - initial.csa_pool_bytes
+        - initial.csa_indexer_bytes
+        - initial.hca_pool_bytes
+    )
+    layer_count = (
+        final.ratio_zero_layers
+        + final.ratio_four_layers
+        + final.ratio_high_layers
+    )
+    expected = (
+        pool_delta
+        + 2 * (final.local_swa_bytes + final.tail_bytes)
+        + 2 * layer_count * 4096
+    )
+    assert estimated == expected
+
+
 def test_resolve_working_set_override_clamps_to_base():
     base = 64 * (1024**3)
     with patch.dict(

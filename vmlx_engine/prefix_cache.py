@@ -86,6 +86,13 @@ PAGED_CACHE_SCHEMA_VERSION = (
     "paged_n1_keys_v11_qwen_tool_continuation_rotating_terminal_window"
 )
 
+# DSV4 v10 delta records remain wire-compatible, but the engine now donates an
+# explicitly stamped full-block checkpoint immediately before a partial request
+# terminal. Scope RAM/L2 namespaces so older pending-only 256-token blocks cannot
+# deduplicate over the upgraded payload and silently preserve the short-prefix
+# miss that this policy fixes.
+DSV4_APPEND_SAFE_CHECKPOINT_POLICY = "full_block_v1"
+
 _LOOPED_CACHE_LAYOUT = "looped_kv_v1"
 
 
@@ -350,6 +357,10 @@ def compute_model_cache_key(
         # intentionally invalidates older v2 disk blocks that were keyed by
         # the full prompt despite holding truncated cache state.
         parts.append("dsv4_cache_schema=deepseek_v4_v10_delta")
+        parts.append(
+            "dsv4_append_safe_checkpoint="
+            f"{DSV4_APPEND_SAFE_CHECKPOINT_POLICY}"
+        )
 
     if not parts:
         # Defensive: fall back to identity
@@ -1055,6 +1066,37 @@ def _dsv4_delta_anchor_kind(entry) -> Optional[Tuple[bool, bool]]:
     return bool(anchor.get("periodic")), bool(anchor.get("terminal"))
 
 
+def _dsv4_delta_anchor_is_append_safe(entry) -> bool:
+    """Return True only for an explicitly stamped full-block DSV4 anchor."""
+    if (
+        not isinstance(entry, (tuple, list))
+        or len(entry) < 2
+        or entry[0] != "deepseek_v4_delta_v1"
+        or not isinstance(entry[1], dict)
+    ):
+        return False
+    record = entry[1]
+    anchor = record.get("anchor")
+    if not isinstance(anchor, dict) or anchor.get("append_safe") is not True:
+        return False
+    try:
+        start = int(record.get("start_token", -1))
+        end = int(record.get("end_token", -1))
+        block_size = int(record.get("block_size", 0))
+        anchor_tokens = int(anchor.get("tokens", -1))
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        block_size > 0
+        and start >= 0
+        and end - start == block_size
+        and start % block_size == 0
+        and end % block_size == 0
+        and anchor_tokens == end
+        and _dsv4_delta_anchor_kind(entry) is not None
+    )
+
+
 def _block_has_complete_dsv4_delta_anchor(
     cache_data, *, expected_layers: Optional[int] = None, periodic_only: bool = False
 ) -> bool:
@@ -1077,6 +1119,60 @@ def _block_has_complete_dsv4_delta_anchor(
             # window record. Periodicity is established by the composite
             # layer records at the same token boundary.
             if len(entry) < 7:
+                return False
+        else:
+            return False
+    return saw_delta
+
+
+def _block_has_complete_dsv4_append_safe_anchor(
+    cache_data,
+    *,
+    target_tokens: int,
+    expected_layers: Optional[int] = None,
+) -> bool:
+    """Validate an all-layer aligned checkpoint donated for suffix growth."""
+    entries = list(cache_data or ())
+    if expected_layers is not None and len(entries) != int(expected_layers):
+        return False
+    saw_delta = False
+    for entry in entries:
+        if not isinstance(entry, (tuple, list)) or not entry:
+            return False
+        tag = entry[0]
+        if tag == "deepseek_v4_delta_v1":
+            saw_delta = True
+            if not _dsv4_delta_anchor_is_append_safe(entry):
+                return False
+        elif tag == "rotating_kv":
+            if len(entry) < 7:
+                return False
+            try:
+                expected = int(target_tokens)
+                max_size = int(entry[3])
+                offset = int(entry[5])
+                idx = int(entry[6])
+                key_shape = tuple(getattr(entry[1], "shape", ()))
+                value_shape = tuple(getattr(entry[2], "shape", ()))
+                seq_axis = (
+                    2
+                    if len(key_shape) == 4
+                    else 1
+                    if len(key_shape) == 3
+                    else -1
+                )
+                expected_rows = min(expected, max_size)
+            except (TypeError, ValueError, IndexError):
+                return False
+            if (
+                expected <= 0
+                or max_size <= 0
+                or seq_axis < 0
+                or key_shape != value_shape
+                or int(key_shape[seq_axis]) != expected_rows
+                or offset != expected
+                or idx != expected_rows
+            ):
                 return False
         else:
             return False
@@ -2663,11 +2759,12 @@ class BlockAwarePrefixCache:
 
         A request that needs at most the conventional final N-1 kickoff token
         may restore an exact terminal anchor. Any materially changed suffix
-        must restore the latest 2K-periodic anchor and replay the already-
-        matched tail, because a prior request terminal is not an append-safe
-        block boundary.
+        must restore either the latest 2K-periodic anchor or an explicitly
+        stamped full 256-token checkpoint and replay the already-matched tail.
+        A prior request terminal remains ineligible unless its full-block state
+        independently carries that append-safe stamp.
         """
-        boundaries: List[Tuple[int, int, bool, bool]] = []
+        boundaries: List[Tuple[int, int, bool, bool, bool]] = []
         cumulative = 0
         saw_delta = False
         expected_layers = getattr(self, "_expected_num_layers", None)
@@ -2714,19 +2811,26 @@ class BlockAwarePrefixCache:
                 (_dsv4_delta_anchor_kind(entry) or (False, False))[1]
                 for entry in delta_entries
             )
-            boundaries.append((index + 1, cumulative, periodic, terminal))
+            append_safe = complete and _block_has_complete_dsv4_append_safe_anchor(
+                entries,
+                target_tokens=cumulative,
+                expected_layers=expected_layers,
+            )
+            boundaries.append(
+                (index + 1, cumulative, periodic, terminal, append_safe)
+            )
 
         if not saw_delta:
             return None
 
         matched = max(0, min(int(matched_tokens), len(request_tokens)))
         allow_terminal = len(request_tokens) - matched <= 1
-        selected: Optional[Tuple[int, int, bool, bool]] = None
+        selected: Optional[Tuple[int, int, bool, bool, bool]] = None
         for boundary in boundaries:
-            _, boundary_tokens, periodic, terminal = boundary
+            _, boundary_tokens, periodic, terminal, append_safe = boundary
             if boundary_tokens > matched:
                 break
-            if periodic or (allow_terminal and terminal):
+            if periodic or append_safe or (allow_terminal and terminal):
                 selected = boundary
         if selected is None:
             logger.info(
@@ -2734,12 +2838,23 @@ class BlockAwarePrefixCache:
                 "safe %s anchor; prefilling cleanly",
                 request_id,
                 matched,
-                "terminal/periodic" if allow_terminal else "periodic",
+                (
+                    "terminal/periodic/aligned"
+                    if allow_terminal
+                    else "periodic/aligned"
+                ),
             )
             return ([], 0, matched)
 
-        keep_count, checkpoint, _, _ = selected
+        keep_count, checkpoint, periodic, terminal, append_safe = selected
         replayed = max(0, matched - checkpoint)
+        anchor_kind = (
+            "periodic"
+            if periodic
+            else "aligned"
+            if append_safe
+            else "terminal"
+        )
         logger.info(
             "DSV4 native delta match for %s: matched_tokens=%d "
             "checkpoint_tokens=%d replayed_tokens=%d anchor=%s",
@@ -2747,7 +2862,7 @@ class BlockAwarePrefixCache:
             matched,
             checkpoint,
             replayed,
-            "terminal" if allow_terminal and checkpoint == matched else "periodic",
+            anchor_kind,
         )
         return (list(blocks[:keep_count]), checkpoint, replayed)
 

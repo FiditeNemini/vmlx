@@ -758,10 +758,21 @@ class DSV4BatchGenerator:
         end_token: int,
         *,
         force_anchor: bool = False,
+        append_safe: bool = False,
         replace_last: bool = False,
     ) -> None:
         start = int(start_token)
         end = int(end_token)
+        if append_safe and (
+            not force_anchor
+            or end - start != DSV4_NATIVE_BLOCK_SIZE
+            or start % DSV4_NATIVE_BLOCK_SIZE
+            or end % DSV4_NATIVE_BLOCK_SIZE
+        ):
+            raise ValueError(
+                "DSV4 append-safe anchors must be forced at one aligned "
+                f"256-token block; got [{start}, {end})"
+            )
         for cache in cache_list:
             records = getattr(cache, "_vmlx_dsv4_block_records", None)
             if not isinstance(records, list):
@@ -786,6 +797,30 @@ class DSV4BatchGenerator:
                     end,
                     force_anchor=force_anchor,
                 )
+            if append_safe:
+                if isinstance(record, dict):
+                    anchor = record.get("anchor")
+                    if (
+                        not isinstance(anchor, dict)
+                        or int(anchor.get("tokens", -1)) != end
+                    ):
+                        raise ValueError(
+                            "DSV4 composite append-safe record has no exact anchor"
+                        )
+                    # JANG's current delta schema recognizes forced checkpoints
+                    # as terminal anchors.  Keep that underlying restore contract
+                    # intact while adding an engine-owned, stricter capability:
+                    # only a complete 256-token boundary explicitly stamped here
+                    # may seed a later changed-suffix capture.
+                    anchor["append_safe"] = True
+                elif (
+                    not isinstance(record, (tuple, list))
+                    or not record
+                    or record[0] != "rotating_kv"
+                ):
+                    raise ValueError(
+                        "DSV4 rotating append-safe record has no exact checkpoint"
+                    )
             if replace_last:
                 if not records:
                     raise ValueError("cannot replace an absent DSV4 block record")
@@ -811,6 +846,35 @@ class DSV4BatchGenerator:
                 next_token + DSV4_NATIVE_BLOCK_SIZE,
             )
             next_token += DSV4_NATIVE_BLOCK_SIZE
+
+    @classmethod
+    def _capture_dsv4_append_safe_checkpoint(
+        cls, cache_list: List[Any], target_token: int
+    ) -> None:
+        """Promote the just-completed full block while live state is aligned."""
+        if not cache_list:
+            return
+        target = int(target_token)
+        next_token = int(
+            getattr(cache_list[0], "_vmlx_dsv4_delta_next_token", 0) or 0
+        )
+        if (
+            target <= 0
+            or target % DSV4_NATIVE_BLOCK_SIZE
+            or next_token != target
+        ):
+            raise ValueError(
+                "DSV4 append-safe checkpoint must match the completed block "
+                f"boundary; target={target} captured={next_token}"
+            )
+        cls._capture_dsv4_block_record(
+            cache_list,
+            target - DSV4_NATIVE_BLOCK_SIZE,
+            target,
+            force_anchor=True,
+            append_safe=True,
+            replace_last=True,
+        )
 
     @classmethod
     def _capture_dsv4_terminal_anchor(
@@ -839,14 +903,7 @@ class DSV4BatchGenerator:
             records = getattr(cache, "_vmlx_dsv4_block_records", None)
             if not records:
                 raise ValueError("DSV4 terminal anchor has no block record")
-        start = target - DSV4_NATIVE_BLOCK_SIZE
-        cls._capture_dsv4_block_record(
-            cache_list,
-            start,
-            target,
-            force_anchor=True,
-            replace_last=True,
-        )
+        cls._capture_dsv4_append_safe_checkpoint(cache_list, target)
 
     @classmethod
     def _dsv4_delta_transport(cls, cache_list: List[Any]) -> Optional[List[Any]]:
@@ -1069,6 +1126,22 @@ class DSV4BatchGenerator:
             )
         if capture_block_deltas:
             self._reset_dsv4_block_records(cache, cached_tokens)
+        append_safe_boundary = 0
+        if capture_block_deltas and force_terminal_anchor:
+            final_boundary = cached_tokens + total
+            preceding_full = (
+                final_boundary // DSV4_NATIVE_BLOCK_SIZE
+            ) * DSV4_NATIVE_BLOCK_SIZE
+            if (
+                preceding_full > cached_tokens
+                and preceding_full < final_boundary
+                and preceding_full
+                % (
+                    DSV4_NATIVE_BLOCK_SIZE
+                    * DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS
+                )
+            ):
+                append_safe_boundary = preceding_full
         off = 0
         while off < total:
             end_off = min(off + step, total)
@@ -1081,6 +1154,11 @@ class DSV4BatchGenerator:
                     (absolute_start // anchor_interval) + 1
                 ) * anchor_interval
                 end_off = min(end_off, next_anchor - cached_tokens)
+                if absolute_start < append_safe_boundary:
+                    end_off = min(
+                        end_off,
+                        append_safe_boundary - cached_tokens,
+                    )
             chunk = all_ids[:, off:end_off]
             logits = self.model(chunk, cache=cache)
             last_logits = logits[:, -1, :]
@@ -1098,6 +1176,14 @@ class DSV4BatchGenerator:
             off = end_off
             if capture_block_deltas:
                 self._capture_dsv4_completed_blocks(cache, cached_tokens + off)
+                if cached_tokens + off == append_safe_boundary:
+                    # Capture while every native layer is exactly at this block
+                    # boundary. Re-exporting it after the partial tail would ask
+                    # JANG to canonicalize offset 331 as offset 256 and fail.
+                    self._capture_dsv4_append_safe_checkpoint(
+                        cache,
+                        append_safe_boundary,
+                    )
         if capture_block_deltas and force_terminal_anchor:
             self._capture_dsv4_terminal_anchor(cache, cached_tokens + total)
         return last_logits

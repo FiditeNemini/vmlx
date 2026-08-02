@@ -7137,24 +7137,40 @@ class TestV5DisplayTextInit:
 class TestResponsesSuppressedReasoningToolCalls:
     """Suppressed reasoning can still contain a real tool call."""
 
-    def test_responses_extracts_suppressed_reasoning_tool_calls_before_finalize(self):
-        """Tool calls found only in suppressed reasoning must enter the Responses tool branch."""
+    def test_responses_extracts_reasoning_rail_tool_calls_before_finalize(self):
+        """Tool calls found only on the reasoning rail must enter the tool branch.
+
+        This extraction used to be gated on ``suppress_reasoning``, so it never
+        ran on the Responses API, where reasoning is streamed as a summary
+        rather than suppressed. A DSV4 turn whose DSML landed in the reasoning
+        rail was finalized as ``response.incomplete`` with the markup discarded
+        and no function call at all. The gate must stay off.
+        """
         import inspect
         from vmlx_engine.server import stream_responses_api
 
         source = inspect.getsource(stream_responses_api)
-        extract_idx = source.find("tool markers in suppressed reasoning")
+        extract_idx = source.find("tool markers in reasoning rail")
         branch_idx = source.find("if tool_calls:")
 
         assert extract_idx != -1, (
-            "Responses API must extract tool calls from suppressed reasoning before finalization"
+            "Responses API must extract tool calls from the reasoning rail before finalization"
         )
         assert branch_idx != -1, "Responses API tool_calls branch missing"
         assert extract_idx < branch_idx, (
-            "Suppressed-reasoning tool extraction must run before the final tool_calls branch"
+            "Reasoning-rail tool extraction must run before the final tool_calls branch"
         )
         assert "TODO: emit tool calls via Responses API format" not in source, (
-            "Responses API must not leave parsed suppressed-reasoning tool calls un-emitted"
+            "Responses API must not leave parsed reasoning-rail tool calls un-emitted"
+        )
+
+        # The extraction condition must not require suppressed reasoning again.
+        condition_start = source.rfind("if (", 0, extract_idx)
+        assert condition_start != -1
+        condition = source[condition_start:extract_idx]
+        assert "suppress_reasoning" not in condition, (
+            "Reasoning-rail tool extraction must not be re-gated on suppress_reasoning; "
+            "that gate made the Responses API discard valid DSV4 tool calls"
         )
 
     def test_responses_nonstreaming_extracts_reasoning_tool_calls_before_finalize(self):

@@ -1,19 +1,19 @@
 {
-  "version": "1.6.20",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.20/vMLX-1.6.20-tahoe-arm64.dmg",
-  "sha256": "13e92059f7e5b7e69a214c12edc5e694c481444dec02f413037bdcd74b876095",
-  "sha512": "YK2NgFu2ze7s7B/ofeiXvWCKughYT8Kda14doujDzM4dyrTGMSUa3E8I3OVKylIYSSHbIgSciXfKKncZvz4V4g==",
+  "version": "1.6.21",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.21/vMLX-1.6.21-tahoe-arm64.dmg",
+  "sha256": "d9c418c4995b35ec2b96d13c96d0b65abd0f78de48033e10852c804a1c7dc19d",
+  "sha512": "+Z2BPC2qx55wDg++ivFvSA3nQ5SocBItMbzw954tV3XvJ7XAN/7GG2Zepy/WiGRosG5XmgNE/dVN3LjmpQyF/A==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.20/vMLX-1.6.20-sequoia-arm64.dmg",
-      "sha256": "4c30688306aab4bfb42c93a7c706322b93f9632160d1e71e298970d934438264",
-      "sha512": "UUsmUHkJcKYE7E3zyM/R/ZMl99Kvxv102+tD7Tj5Xc1L8L5ZtnliP/RPPD9aE699dzusDV4w52jKLfyPDwFwgQ=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.21/vMLX-1.6.21-sequoia-arm64.dmg",
+      "sha256": "cc88356e88143eb8d44f7c7c13e34777b0ccdd9be8f5476e1ab03fee7152d4ac",
+      "sha512": "W/LkXCjrdzg0gCNLtRnWOXy3/ZyHIey073T2woniQzqpimyRk32Rhh68f+N7UzHOOUAEWWz5xWs7wc/mCFcMKg=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.20/vMLX-1.6.20-tahoe-arm64.dmg",
-      "sha256": "13e92059f7e5b7e69a214c12edc5e694c481444dec02f413037bdcd74b876095",
-      "sha512": "YK2NgFu2ze7s7B/ofeiXvWCKughYT8Kda14doujDzM4dyrTGMSUa3E8I3OVKylIYSSHbIgSciXfKKncZvz4V4g=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.21/vMLX-1.6.21-tahoe-arm64.dmg",
+      "sha256": "d9c418c4995b35ec2b96d13c96d0b65abd0f78de48033e10852c804a1c7dc19d",
+      "sha512": "+Z2BPC2qx55wDg++ivFvSA3nQ5SocBItMbzw954tV3XvJ7XAN/7GG2Zepy/WiGRosG5XmgNE/dVN3LjmpQyF/A=="
     }
   },
-  "notes": "## vMLX 1.6.20 for macOS\n\nThis Electron/Python checkpoint is built from source commit `7022a7d845ff2b1ee458d45a8ebd98f6fc501d9e`.\n\n### Highlights\n\n- DeepSeek V4 Flash reasoning, DSML tools, sampling guidance, cache pooling, context admission, and stop handling are hardened.\n- Cache reporting now separates live-process activity from persistent storage and improves partial-tail, SSD-only, RAM eviction, and disk-refault behavior.\n- Electron settings expose effective DSV4 runtime state and warn when top-p differs from bundle guidance.\n- The bundled runtime uses JANG 2.5.39.\n\nSeparate signed and Apple-notarized Apple-silicon downloads are available for macOS Tahoe and Sequoia-compatible systems. Tahoe is the default download. This focused checkpoint does not imply exhaustive certification of every model family or maximum-context configuration."
+  "notes": "## vMLX 1.6.21 for macOS\n\nThis Electron/Python checkpoint is built from source commit `498b357bf`.\n\n### Highlights\n\n- Streams that stop at `max_tokens` report their token usage again. Previously a reasoning turn cut short by the token cap emitted no terminal usage chunk, so OpenAI-compatible clients requesting `stream_options.include_usage` received nothing and the Anthropic route reported zero tokens with no cache-read accounting on an almost fully cached prompt.\n- DeepSeek V4 Flash delta-cache restore reads its block size and anchor interval from the cache records instead of assuming fixed values.\n- Built-in tools name an unusable working directory and the setting that fixes it rather than surfacing a raw filesystem error per call.\n- Reasoning-rail DSML tool calls are recovered from their markup span, and prompt tool catalogs stay turn-independent so agentic loops keep reusing their cached prefix.\n- The bundled runtime uses JANG 2.5.39.\n\nSeparate signed and Apple-notarized Apple-silicon downloads are available for macOS Tahoe and Sequoia-compatible systems. Tahoe is the default download. This focused checkpoint does not imply exhaustive certification of every model family or maximum-context configuration."
 }

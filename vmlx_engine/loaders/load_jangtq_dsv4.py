@@ -1488,9 +1488,11 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
                 _drop_thinking = kwargs.pop("drop_earlier_reasoning", True)
                 # Some callers pass `tokenize=True` and want token IDs back.
                 _tokenize = kwargs.pop("tokenize", False)
-                # Other Jinja-template kwargs (add_generation_prompt, etc.)
-                # are inherent to encode_messages — ignore silently.
-                kwargs.pop("add_generation_prompt", None)
+                # Prefix-cache identity deliberately renders once without the
+                # terminal assistant rail. The canonical encoder has no native
+                # kwarg for this, so the adapter removes only its exact owned
+                # suffix after rendering.
+                _add_generation_prompt = kwargs.pop("add_generation_prompt", True)
                 kwargs.pop("chat_template", None)
                 # Unrecognized kwargs forwarded back to original Jinja path
                 # would only be Jinja-interpreted variables; canonical
@@ -1516,6 +1518,7 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
                     reasoning_effort=_reasoning_effort,
                     tools=_tools,
                     add_default_bos_token=_add_default_bos,
+                    add_generation_prompt=_add_generation_prompt,
                     drop_earlier_reasoning=_drop_thinking,
                     model_path=model_path,
                 )

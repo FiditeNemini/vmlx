@@ -313,6 +313,97 @@ def test_dsv4_official_encoder_adapter_preserves_message_order(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(
+    ("enable_thinking", "rail"),
+    ((True, "<Assistant><think>"), (False, "<Assistant></think>")),
+)
+def test_dsv4_adapter_can_strip_only_the_terminal_generation_rail(
+    monkeypatch,
+    enable_thinking,
+    rail,
+):
+    """Cache rendering excludes the owned rail without touching history."""
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    class OfficialShapeEncoder:
+        REASONING_EFFORT_PROMPTS = {"low": ""}
+        ASSISTANT_SP_TOKEN = "<Assistant>"
+        thinking_start_token = "<think>"
+        thinking_end_token = "</think>"
+        DS_TASK_SP_TOKENS = {"action": "<action>"}
+
+        @staticmethod
+        def merge_tool_messages(messages):
+            return messages
+
+        @staticmethod
+        def encode_messages(messages, *, thinking_mode, **kwargs):
+            del kwargs
+            current_rail = (
+                "<Assistant><think>"
+                if thinking_mode == "thinking"
+                else "<Assistant></think>"
+            )
+            return "history:<Assistant><think>old</think>:user" + current_rail
+
+    monkeypatch.setattr(
+        dsv4_chat_encoder,
+        "_get_encoding",
+        lambda model_path=None: OfficialShapeEncoder,
+    )
+    messages = [{"role": "user", "content": "next"}]
+
+    with_generation = dsv4_chat_encoder.apply_chat_template(
+        messages,
+        enable_thinking=enable_thinking,
+        reasoning_effort="low" if enable_thinking else None,
+    )
+    without_generation = dsv4_chat_encoder.apply_chat_template(
+        messages,
+        enable_thinking=enable_thinking,
+        reasoning_effort="low" if enable_thinking else None,
+        add_generation_prompt=False,
+    )
+
+    assert with_generation.endswith(rail)
+    assert without_generation == "history:<Assistant><think>old</think>:user"
+
+
+def test_dsv4_adapter_strips_action_task_generation_rail(monkeypatch):
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    class OfficialShapeEncoder:
+        REASONING_EFFORT_PROMPTS = {"low": ""}
+        ASSISTANT_SP_TOKEN = "<Assistant>"
+        thinking_start_token = "<think>"
+        thinking_end_token = "</think>"
+        DS_TASK_SP_TOKENS = {"action": "<action>"}
+
+        @staticmethod
+        def merge_tool_messages(messages):
+            return messages
+
+        @staticmethod
+        def encode_messages(messages, **kwargs):
+            del messages, kwargs
+            return "task-body<Assistant><think><action>"
+
+    monkeypatch.setattr(
+        dsv4_chat_encoder,
+        "_get_encoding",
+        lambda model_path=None: OfficialShapeEncoder,
+    )
+
+    rendered = dsv4_chat_encoder.apply_chat_template(
+        [{"role": "user", "content": "run", "task": "action"}],
+        enable_thinking=True,
+        reasoning_effort="low",
+        add_generation_prompt=False,
+    )
+
+    assert rendered == "task-body"
+
+
 def test_dsv4_batch_parser_does_not_duplicate_existing_eos(monkeypatch):
     from vmlx_engine.loaders import dsv4_chat_encoder
 

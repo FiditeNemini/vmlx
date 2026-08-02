@@ -13,6 +13,9 @@ All notable changes to vMLX Engine will be documented in this file.
   cache state from unsupported generic TurboQuant or whole-model cache modes.
 - Cache activity separates current-process reads, writes, misses, and evictions
   from persistent namespace and managed-root occupancy.
+- A guarded opt-in affine MoE decode path is available for DSV4 JANG bundles;
+  native MLX remains the production default because the current M5 A/B did not
+  improve throughput. Credit: Andrew Hornsby (@hornsan1) for PR #248.
 
 ### Fixed
 

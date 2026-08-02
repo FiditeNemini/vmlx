@@ -359,6 +359,7 @@ def apply_chat_template(
     drop_earlier_reasoning: bool = True,
     tools: Optional[List[Dict[str, Any]]] = None,
     add_default_bos_token: bool = True,
+    add_generation_prompt: bool = True,
     context: Optional[List[Dict[str, Any]]] = None,
     model_path: Optional[str] = None,
 ) -> str:
@@ -381,6 +382,11 @@ def apply_chat_template(
         add_default_bos_token: Whether to prepend ``<｜begin▁of▁sentence｜>``.
             DSV4 prompts need this; turn off only when the caller already
             prepended their own BOS.
+        add_generation_prompt: Whether to retain the canonical terminal
+            assistant/thinking/task rail. Prefix-cache identity renders with
+            this disabled so the rail can be represented by its separate
+            generation-prompt discriminator instead of becoming part of the
+            reusable message prefix.
         context: Optional cross-turn context injection (DSV4 encoder kwarg;
             pass through unchanged for advanced users).
 
@@ -447,7 +453,7 @@ def apply_chat_template(
                 msgs_out.extend(messages)
             messages = msgs_out
 
-    return enc.encode_messages(
+    prompt = enc.encode_messages(
         messages,
         thinking_mode=thinking_mode,
         context=context,
@@ -455,6 +461,62 @@ def apply_chat_template(
         add_default_bos_token=add_default_bos_token,
         reasoning_effort=effort,
     )
+    if add_generation_prompt:
+        return prompt
+
+    # The official 0731 encoder has no ``add_generation_prompt`` argument.
+    # Its ``render_message`` appends one exact terminal rail after the final
+    # user/developer message (or after a typed task). Remove only that owned
+    # suffix; never search/replace an earlier assistant rail in history.
+    effective_messages = copy.deepcopy(messages)
+    merge_tools = getattr(enc, "merge_tool_messages", None)
+    if callable(merge_tools):
+        effective_messages = merge_tools(effective_messages)
+    full_messages = [*(copy.deepcopy(context) if context else []), *effective_messages]
+    if not full_messages:
+        return prompt
+    last = full_messages[-1]
+    suffix = ""
+    task = last.get("task") if isinstance(last, dict) else None
+    if task is not None:
+        task_tokens = getattr(enc, "DS_TASK_SP_TOKENS", {})
+        task_token = task_tokens.get(task) if isinstance(task_tokens, dict) else None
+        if not isinstance(task_token, str) or not task_token:
+            raise RuntimeError(
+                f"DSV4 canonical encoder did not expose a suffix for task {task!r}"
+            )
+        if task == "action":
+            suffix = (
+                str(enc.ASSISTANT_SP_TOKEN)
+                + str(
+                    getattr(
+                        enc,
+                        "thinking_start_token"
+                        if thinking_mode == "thinking"
+                        else "thinking_end_token",
+                    )
+                )
+                + task_token
+            )
+        else:
+            suffix = task_token
+    elif isinstance(last, dict) and last.get("role") in {"user", "developer"}:
+        suffix = str(enc.ASSISTANT_SP_TOKEN) + str(
+            getattr(
+                enc,
+                "thinking_start_token"
+                if thinking_mode == "thinking"
+                else "thinking_end_token",
+            )
+        )
+
+    if not suffix:
+        return prompt
+    if not prompt.endswith(suffix):
+        raise RuntimeError(
+            "DSV4 canonical encoder generation suffix did not match its declared rail"
+        )
+    return prompt[: -len(suffix)]
 
 
 def parse_completion(

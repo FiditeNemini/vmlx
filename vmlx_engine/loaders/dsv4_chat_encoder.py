@@ -464,6 +464,12 @@ def apply_chat_template(
     if add_generation_prompt:
         return prompt
 
+    # ``context`` is already-encoded prefix state. The official encoder renders
+    # zero context messages when there is no new message, so there is no
+    # generation rail owned by this call to remove.
+    if not messages:
+        return prompt
+
     # The official 0731 encoder has no ``add_generation_prompt`` argument.
     # Its ``render_message`` appends one exact terminal rail after the final
     # user/developer message (or after a typed task). Remove only that owned
@@ -510,6 +516,10 @@ def apply_chat_template(
             )
         )
 
+    # ``latest_reminder`` is rendered *after* the preceding user's assistant
+    # rail. That rail is therefore non-terminal and cannot be represented by
+    # the cache layer's final-N-token stripping contract. Keep the full prompt
+    # as its safe cache identity instead of stripping reminder tokens.
     if not suffix:
         return prompt
     if not prompt.endswith(suffix):

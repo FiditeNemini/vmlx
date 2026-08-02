@@ -404,6 +404,78 @@ def test_dsv4_adapter_strips_action_task_generation_rail(monkeypatch):
     assert rendered == "task-body"
 
 
+def test_dsv4_adapter_keeps_nonterminal_rail_before_latest_reminder(monkeypatch):
+    """Final-N cache stripping must never remove reminder tokens instead."""
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    class OfficialShapeEncoder:
+        REASONING_EFFORT_PROMPTS = {"low": ""}
+        ASSISTANT_SP_TOKEN = "<Assistant>"
+        thinking_start_token = "<think>"
+        thinking_end_token = "</think>"
+        DS_TASK_SP_TOKENS = {"action": "<action>"}
+
+        @staticmethod
+        def merge_tool_messages(messages):
+            return messages
+
+        @staticmethod
+        def encode_messages(messages, **kwargs):
+            del messages, kwargs
+            return "user<Assistant><think><latest-reminder>"
+
+    monkeypatch.setattr(
+        dsv4_chat_encoder,
+        "_get_encoding",
+        lambda model_path=None: OfficialShapeEncoder,
+    )
+    messages = [
+        {"role": "user", "content": "work"},
+        {"role": "latest_reminder", "content": "finish"},
+    ]
+
+    rendered = dsv4_chat_encoder.apply_chat_template(
+        messages,
+        enable_thinking=True,
+        reasoning_effort="low",
+        add_generation_prompt=False,
+    )
+
+    assert rendered == "user<Assistant><think><latest-reminder>"
+
+
+def test_dsv4_adapter_context_only_render_has_no_owned_generation_rail(monkeypatch):
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    class OfficialShapeEncoder:
+        REASONING_EFFORT_PROMPTS = {"low": ""}
+        ASSISTANT_SP_TOKEN = "<Assistant>"
+        thinking_start_token = "<think>"
+        thinking_end_token = "</think>"
+        DS_TASK_SP_TOKENS = {"action": "<action>"}
+
+        @staticmethod
+        def encode_messages(messages, **kwargs):
+            del messages, kwargs
+            return "context-only"
+
+    monkeypatch.setattr(
+        dsv4_chat_encoder,
+        "_get_encoding",
+        lambda model_path=None: OfficialShapeEncoder,
+    )
+
+    rendered = dsv4_chat_encoder.apply_chat_template(
+        [],
+        enable_thinking=True,
+        reasoning_effort="low",
+        add_generation_prompt=False,
+        context=[{"role": "user", "content": "already encoded"}],
+    )
+
+    assert rendered == "context-only"
+
+
 def test_dsv4_batch_parser_does_not_duplicate_existing_eos(monkeypatch):
     from vmlx_engine.loaders import dsv4_chat_encoder
 

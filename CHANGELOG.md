@@ -2,6 +2,31 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.21] - 2026-08-02
+
+### Fixed
+
+- Streams that stop at `max_tokens` report their token usage again. A
+  reasoning-only turn cut short by the token cap returned without emitting the
+  terminal usage chunk or `[DONE]`, so OpenAI-compatible clients requesting
+  `stream_options.include_usage` received no usage at all, and the Anthropic
+  `/v1/messages` route — which rebuilds usage from that stream — reported zero
+  input and output tokens with no `cache_read_input_tokens` even when the
+  prompt was served almost entirely from cache.
+- DeepSeek V4 Flash delta-cache restore reads its block size and anchor
+  interval from the cache records themselves instead of assuming fixed values,
+  so the two stay consistent with whatever geometry wrote them.
+
+### Changed
+
+- Built-in tools name an unusable working directory and the setting that fixes
+  it, instead of surfacing a raw filesystem error per tool call.
+- Reasoning-rail DSML tool calls are recovered from their markup span rather
+  than discarded, and prompt tool catalogs stay turn-independent so an agentic
+  loop keeps reusing its cached prefix.
+- Cache reporting exposes live block occupancy alongside allocator pin state,
+  and the Anthropic surface reports prefix-cache reads.
+
 ## [1.6.20] - 2026-08-01
 
 ### Changed

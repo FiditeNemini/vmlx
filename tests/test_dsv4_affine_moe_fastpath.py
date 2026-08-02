@@ -88,6 +88,29 @@ class _FakeModel:
         return [("layers.0.ffn.switch_mlp", self.switch)]
 
 
+class _FakeWeightedMoE:
+    def __init__(self, switch):
+        self.switch_mlp = switch
+
+    def _weighted_routed_experts(self, x, indices, scores):
+        return ("stock-weighted", x, indices, scores)
+
+
+_FAKE_STOCK_WEIGHTED_CALL = _FakeWeightedMoE._weighted_routed_experts
+
+
+class _FakeWeightedModel(_FakeModel):
+    def __init__(self, switch):
+        super().__init__(switch)
+        self.moe = _FakeWeightedMoE(switch)
+
+    def named_modules(self):
+        return [
+            ("layers.0.ffn", self.moe),
+            ("layers.0.ffn.switch_mlp", self.switch),
+        ]
+
+
 @pytest.fixture
 def fake_runtime(monkeypatch):
     import mlx_lm.models.switch_layers as switch_layers
@@ -99,6 +122,9 @@ def fake_runtime(monkeypatch):
     monkeypatch.setattr(fastpath, "_PATCHED_CLASS", None)
     monkeypatch.setattr(fastpath, "_ORIGINAL_CALL", None)
     monkeypatch.setattr(fastpath, "_WRAPPER", None)
+    monkeypatch.setattr(fastpath, "_PATCHED_WEIGHTED_CLASS", None)
+    monkeypatch.setattr(fastpath, "_ORIGINAL_WEIGHTED_CALL", None)
+    monkeypatch.setattr(fastpath, "_WEIGHTED_WRAPPER", None)
     monkeypatch.setattr(fastpath, "_FIRST_FAST_CALL_LOGGED", False)
     monkeypatch.setattr(fastpath, "_FIRST_REGISTERED_FALLBACK_LOGGED", False)
     monkeypatch.setattr(switch_layers, "SwitchGLU", _FakeSwitchGLU)
@@ -108,8 +134,10 @@ def fake_runtime(monkeypatch):
         _FakeQuantizedSwitchLinear,
     )
     _FakeSwitchGLU.__call__ = _FAKE_STOCK_CALL
+    _FakeWeightedMoE._weighted_routed_experts = _FAKE_STOCK_WEIGHTED_CALL
     yield fastpath
     _FakeSwitchGLU.__call__ = _FAKE_STOCK_CALL
+    _FakeWeightedMoE._weighted_routed_experts = _FAKE_STOCK_WEIGHTED_CALL
 
 
 def test_dsv4_affine_installer_is_weak_scoped_and_idempotent(fake_runtime):
@@ -218,6 +246,75 @@ def test_dsv4_affine_training_uses_stock_without_disabling_decode(fake_runtime, 
 
     assert switch(x, indices) == ("stock", x, indices)
     assert fake_runtime._CONFIGS[switch].disabled_reason is None
+
+
+def test_dsv4_affine_current_dsv4_weighted_route_owns_decode(
+    fake_runtime,
+    monkeypatch,
+):
+    switch = _FakeSwitchGLU()
+    model = _FakeWeightedModel(switch)
+    expected = object()
+    calls = []
+
+    def _fake_weighted_decode(owner, config, x, indices, scores):
+        calls.append((owner, config, x, indices, scores))
+        return expected
+
+    monkeypatch.setattr(fake_runtime, "_weighted_decode", _fake_weighted_decode)
+    assert fake_runtime.install_dsv4_affine_moe_fastpath(model) == 1
+    assert _FakeSwitchGLU.__call__ is _FAKE_STOCK_CALL
+    x = _FakeArray((1, 1, 128), "float16")
+    indices = _FakeArray((1, 1, 2), "uint32")
+    scores = _FakeArray((1, 1, 2), "float32")
+
+    assert model.moe._weighted_routed_experts(x, indices, scores) is expected
+    assert calls and calls[0][0] is switch
+
+
+def test_dsv4_affine_current_dsv4_weighted_route_preserves_prefill(
+    fake_runtime,
+    monkeypatch,
+):
+    switch = _FakeSwitchGLU()
+    model = _FakeWeightedModel(switch)
+
+    def _unexpected_weighted_decode(*_args, **_kwargs):
+        raise AssertionError("decode kernel must not own weighted prefill")
+
+    monkeypatch.setattr(
+        fake_runtime,
+        "_weighted_decode",
+        _unexpected_weighted_decode,
+    )
+    assert fake_runtime.install_dsv4_affine_moe_fastpath(model) == 1
+    x = _FakeArray((1, 2, 128), "float16")
+    indices = _FakeArray((1, 2, 2), "uint32")
+    scores = _FakeArray((1, 2, 2), "float32")
+
+    result = model.moe._weighted_routed_experts(x, indices, scores)
+    assert result == ("stock-weighted", x, indices, scores)
+
+
+def test_dsv4_affine_rejects_partial_weighted_owner_topology(fake_runtime):
+    first = _FakeSwitchGLU()
+    second = _FakeSwitchGLU()
+    owner = _FakeWeightedMoE(first)
+
+    class _PartialOwnerModel:
+        config = {"model_type": "deepseek_v4"}
+
+        def named_modules(self):
+            return [
+                ("layers.0.ffn", owner),
+                ("layers.0.ffn.switch_mlp", first),
+                ("layers.1.ffn.switch_mlp", second),
+            ]
+
+    assert fake_runtime.install_dsv4_affine_moe_fastpath(_PartialOwnerModel()) == 0
+    assert first not in fake_runtime._CONFIGS
+    assert second not in fake_runtime._CONFIGS
+    assert _FakeWeightedMoE._weighted_routed_experts is _FAKE_STOCK_WEIGHTED_CALL
 
 
 @pytest.mark.parametrize(
@@ -340,3 +437,97 @@ def test_dsv4_affine_populated_packed_weights_match_stock_and_preserve_rank():
                     delattr(SwitchGLU, name)
             else:
                 setattr(SwitchGLU, name, value)
+
+
+def test_dsv4_affine_weighted_owner_matches_current_dsv4_stock_order():
+    """Metal numeric gate for score-before-down current DSV4 packages."""
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx_lm.models.switch_layers import SwitchGLU, SwitchLinear
+
+    import vmlx_engine.metal.affine_moe_decode as fastpath
+
+    try:
+        if mx.default_device() != mx.gpu or not mx.metal.is_available():
+            pytest.skip("requires MLX Metal")
+    except Exception:
+        pytest.skip("requires MLX Metal")
+
+    class _Activation(nn.Module):
+        swiglu_limit = 10.0
+
+        def __call__(self, x_up, x_gate):
+            gate = mx.clip(x_gate.astype(mx.float32), a_min=None, a_max=10.0)
+            up = mx.clip(x_up.astype(mx.float32), a_min=-10.0, a_max=10.0)
+            return (mx.sigmoid(gate) * gate * up).astype(x_gate.dtype)
+
+    class _CurrentWeightedOwner:
+        def __init__(self, switch):
+            self.switch_mlp = switch
+
+        def _weighted_routed_experts(self, x, inds, scores):
+            switch = self.switch_mlp
+            dtype = x.dtype
+            expanded = mx.expand_dims(x, (-2, -3))
+            x_up = switch.up_proj(expanded, inds, sorted_indices=False)
+            x_gate = switch.gate_proj(expanded, inds, sorted_indices=False)
+            gate = mx.clip(x_gate.astype(mx.float32), a_min=None, a_max=10.0)
+            up = mx.clip(x_up.astype(mx.float32), a_min=-10.0, a_max=10.0)
+            activated = mx.sigmoid(gate) * gate * up
+            activated = (activated * scores[..., None, None]).astype(dtype)
+            return switch.down_proj(
+                activated,
+                inds,
+                sorted_indices=False,
+            ).squeeze(-2)
+
+    mx.random.seed(249)
+    switch = SwitchGLU(128, 64, 8, activation=_Activation(), bias=False)
+    switch.gate_proj = SwitchLinear(128, 64, 8, bias=False).to_quantized(64, 3)
+    switch.up_proj = SwitchLinear(128, 64, 8, bias=False).to_quantized(64, 2)
+    switch.down_proj = SwitchLinear(64, 128, 8, bias=False).to_quantized(32, 2)
+    for projection in (switch.gate_proj, switch.up_proj, switch.down_proj):
+        projection.scales = projection.scales.astype(mx.float16)
+        projection.biases = projection.biases.astype(mx.float16)
+    owner = _CurrentWeightedOwner(switch)
+
+    class _CurrentWeightedModel:
+        config = {"model_type": "deepseek_v4"}
+
+        def named_modules(self):
+            return [("layers.0.ffn", owner), ("layers.0.ffn.switch_mlp", switch)]
+
+    x = mx.random.normal((1, 1, 128)).astype(mx.float16)
+    indices = mx.array([[[1, 3, 0, 2, 4, 7]]], dtype=mx.uint32)
+    scores = mx.array([[[0.31, 0.24, 0.18, 0.12, 0.09, 0.06]]], dtype=mx.float32)
+    original = _CurrentWeightedOwner._weighted_routed_experts
+    expected = original(owner, x, indices, scores)
+    mx.eval(expected)
+
+    saved_weighted_class = fastpath._PATCHED_WEIGHTED_CLASS
+    saved_original = fastpath._ORIGINAL_WEIGHTED_CALL
+    saved_wrapper = fastpath._WEIGHTED_WRAPPER
+    saved_configs = fastpath._CONFIGS
+    try:
+        fastpath._PATCHED_WEIGHTED_CLASS = None
+        fastpath._ORIGINAL_WEIGHTED_CALL = None
+        fastpath._WEIGHTED_WRAPPER = None
+        fastpath._CONFIGS = fastpath._WeakIdentityMap()
+        assert fastpath.install_dsv4_affine_moe_fastpath(_CurrentWeightedModel()) == 1
+        actual = owner._weighted_routed_experts(x, indices, scores)
+        mx.eval(actual)
+
+        assert actual.shape == expected.shape == (1, 1, 6, 128)
+        delta = actual.astype(mx.float32) - expected.astype(mx.float32)
+        rel_rms = mx.sqrt(mx.mean(mx.square(delta))) / mx.maximum(
+            mx.sqrt(mx.mean(mx.square(expected.astype(mx.float32)))),
+            mx.array(1e-8),
+        )
+        assert float(rel_rms.item()) < 0.02
+        assert float(mx.max(mx.abs(delta)).item()) < 0.25
+    finally:
+        _CurrentWeightedOwner._weighted_routed_experts = original
+        fastpath._PATCHED_WEIGHTED_CLASS = saved_weighted_class
+        fastpath._ORIGINAL_WEIGHTED_CALL = saved_original
+        fastpath._WEIGHTED_WRAPPER = saved_wrapper
+        fastpath._CONFIGS = saved_configs

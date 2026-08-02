@@ -269,6 +269,9 @@ _CONFIGS = _WeakIdentityMap()
 _PATCHED_CLASS: type | None = None
 _ORIGINAL_CALL: Any = None
 _WRAPPER: Any = None
+_PATCHED_WEIGHTED_CLASS: type | None = None
+_ORIGINAL_WEIGHTED_CALL: Any = None
+_WEIGHTED_WRAPPER: Any = None
 _FIRST_FAST_CALL_LOGGED = False
 _FIRST_REGISTERED_FALLBACK_LOGGED = False
 
@@ -440,6 +443,132 @@ def _install_class_wrapper(switch_class: type) -> None:
     _WRAPPER = _guarded_call
 
 
+def _weighted_decode(
+    switch: Any,
+    config: _SwitchConfig,
+    x: mx.array,
+    indices: mx.array,
+    scores: mx.array,
+) -> mx.array:
+    """Run the official DSV4 score-before-down decode order.
+
+    Current DSV4 packages can own this boundary instead of calling
+    ``SwitchGLU.__call__``. They project the selected gate/up rows, apply
+    limited SwiGLU in FP32, multiply the FP32 route score, cast once to the
+    hidden dtype, and only then run down_proj. Keep that ordering while
+    replacing only the three affine matvecs.
+    """
+
+    leading = tuple(x.shape[:-1])
+    k = int(indices.shape[-1])
+    ids = indices.reshape(-1).astype(mx.uint16)
+    token = x.reshape(-1)
+    gate = _MANAGER.run_projection(token, config.gate, ids, k)
+    up = _MANAGER.run_projection(token, config.up, ids, k)
+
+    gate_fp32 = gate.astype(mx.float32)
+    up_fp32 = up.astype(mx.float32)
+    swiglu_limit = float(switch.activation.swiglu_limit)
+    if swiglu_limit > 0:
+        up_fp32 = mx.clip(up_fp32, a_min=-swiglu_limit, a_max=swiglu_limit)
+        gate_fp32 = mx.clip(gate_fp32, a_min=None, a_max=swiglu_limit)
+    activated = mx.sigmoid(gate_fp32) * gate_fp32 * up_fp32
+    activated = (
+        activated * scores.reshape(-1).astype(mx.float32)[..., None]
+    ).astype(x.dtype)
+    down = _MANAGER.run_projection(activated, config.down, ids, k)
+    return down.reshape(leading + (k, config.down.output_dims))
+
+
+def _install_weighted_moe_wrapper(moe_class: type) -> None:
+    """Patch the DSV4-owned weighted route boundary when it is present."""
+
+    global _PATCHED_WEIGHTED_CLASS, _ORIGINAL_WEIGHTED_CALL, _WEIGHTED_WRAPPER
+    if (
+        _PATCHED_WEIGHTED_CLASS is moe_class
+        and moe_class._weighted_routed_experts is _WEIGHTED_WRAPPER
+    ):
+        return
+    if _PATCHED_WEIGHTED_CLASS is not None:
+        raise RuntimeError(
+            "DSV4 affine fast path was already installed on a different MoE class"
+        )
+    original_call = moe_class._weighted_routed_experts
+
+    def _guarded_weighted_call(
+        self: Any,
+        x: mx.array,
+        indices: mx.array,
+        scores: mx.array,
+    ) -> mx.array:
+        global _FIRST_FAST_CALL_LOGGED, _FIRST_REGISTERED_FALLBACK_LOGGED
+        switch = getattr(self, "switch_mlp", None)
+        config = _CONFIGS.get(switch)
+        if (
+            config is None
+            or config.disabled_reason is not None
+            or bool(getattr(switch, "training", False))
+        ):
+            return original_call(self, x, indices, scores)
+
+        leading = tuple(x.shape[:-1])
+        fallback_reason = None
+        if x.dtype != mx.float16:
+            fallback_reason = f"activation_dtype={x.dtype}"
+        elif x.ndim not in (2, 3):
+            fallback_reason = f"activation_rank={x.ndim}"
+        elif int(x.size) != int(x.shape[-1]):
+            fallback_reason = f"multi_token_shape={tuple(x.shape)}"
+        elif indices.ndim != x.ndim or tuple(indices.shape[:-1]) != leading:
+            fallback_reason = (
+                f"route_shape={tuple(indices.shape)} activation_shape={tuple(x.shape)}"
+            )
+        elif tuple(scores.shape) != tuple(indices.shape):
+            fallback_reason = (
+                f"score_shape={tuple(scores.shape)} route_shape={tuple(indices.shape)}"
+            )
+        elif int(indices.shape[-1]) <= 0 or int(indices.shape[-1]) >= 64:
+            fallback_reason = f"route_top_k={int(indices.shape[-1])}"
+        if fallback_reason is not None:
+            if not _FIRST_REGISTERED_FALLBACK_LOGGED:
+                logger.info(
+                    "DSV4 affine MoE registered module used stock weighted route: %s",
+                    fallback_reason,
+                )
+                _FIRST_REGISTERED_FALLBACK_LOGGED = True
+            return original_call(self, x, indices, scores)
+
+        try:
+            result = _weighted_decode(switch, config, x, indices, scores)
+            if not config.first_call_evaluated:
+                mx.eval(result)
+                config.first_call_evaluated = True
+            if not _FIRST_FAST_CALL_LOGGED:
+                logger.info(
+                    "DSV4 affine MoE Metal weighted decode path active: "
+                    "activation_dtype=%s route_top_k=%d hidden=%d",
+                    x.dtype,
+                    int(indices.shape[-1]),
+                    config.gate.input_dims,
+                )
+                _FIRST_FAST_CALL_LOGGED = True
+            return result
+        except Exception as exc:
+            config.disabled_reason = f"{type(exc).__name__}: {exc}"
+            logger.exception(
+                "DSV4 affine MoE weighted fast path failed; disabling it for "
+                "this SwitchGLU and falling back"
+            )
+            return original_call(self, x, indices, scores)
+
+    moe_class._vmlx_dsv4_affine_original_weighted_call = original_call
+    moe_class._vmlx_dsv4_affine_weighted_decode_fastpath = True
+    moe_class._weighted_routed_experts = _guarded_weighted_call
+    _PATCHED_WEIGHTED_CLASS = moe_class
+    _ORIGINAL_WEIGHTED_CALL = original_call
+    _WEIGHTED_WRAPPER = _guarded_weighted_call
+
+
 def install_dsv4_affine_moe_fastpath(model: Any, *, model_type: str | None = None) -> int:
     """Enable the fused path only for validated DSV4 affine SwitchGLU modules.
 
@@ -468,7 +597,8 @@ def install_dsv4_affine_moe_fastpath(model: Any, *, model_type: str | None = Non
     if not callable(named_modules):
         logger.warning("DSV4 affine MoE fast path skipped: model has no named_modules()")
         return 0
-    for name, module in named_modules():
+    modules = list(named_modules())
+    for name, module in modules:
         if not isinstance(module, SwitchGLU):
             continue
         switch_modules.append(module)
@@ -493,15 +623,70 @@ def install_dsv4_affine_moe_fastpath(model: Any, *, model_type: str | None = Non
             f" ({'; '.join(rejected[:3])})" if rejected else "",
         )
         return 0
-    _install_class_wrapper(SwitchGLU)
+    accepted_ids = {id(module) for module, _config in accepted}
+    weighted_owners = [
+        module
+        for _name, module in modules
+        if id(getattr(module, "switch_mlp", None)) in accepted_ids
+        and callable(getattr(module, "_weighted_routed_experts", None))
+    ]
+    weighted_classes = {type(module) for module in weighted_owners}
+    weighted_switch_ids = [
+        id(getattr(module, "switch_mlp", None)) for module in weighted_owners
+    ]
+    if weighted_owners and (
+        len(weighted_classes) != 1
+        or len(weighted_switch_ids) != len(accepted_ids)
+        or len(set(weighted_switch_ids)) != len(weighted_switch_ids)
+        or set(weighted_switch_ids) != accepted_ids
+    ):
+        for module in switch_modules:
+            _CONFIGS.discard(module)
+        logger.warning(
+            "DSV4 affine MoE fast path rejected mixed owner topology: "
+            "accepted_switches=%d weighted_owners=%d owner_classes=%d",
+            len(accepted_ids),
+            len(weighted_owners),
+            len(weighted_classes),
+        )
+        return 0
+    # Install the class boundary only after every module and owner relationship
+    # has passed. This keeps registration atomic if wrapper topology collides.
+    if weighted_classes:
+        try:
+            _install_weighted_moe_wrapper(next(iter(weighted_classes)))
+        except RuntimeError as exc:
+            for module in switch_modules:
+                _CONFIGS.discard(module)
+            logger.warning(
+                "DSV4 affine MoE weighted owner install rejected: %s",
+                exc,
+            )
+            return 0
+    else:
+        # Older DSV4 packages delegate directly to SwitchGLU and apply route
+        # scores after it returns. Current packages own score-before-down in
+        # ``_weighted_routed_experts`` and must never enter this generic hook.
+        try:
+            _install_class_wrapper(SwitchGLU)
+        except RuntimeError as exc:
+            for module in switch_modules:
+                _CONFIGS.discard(module)
+            logger.warning(
+                "DSV4 affine MoE SwitchGLU install rejected: %s",
+                exc,
+            )
+            return 0
     for module, config in accepted:
         # Hydration/reload can replace projection tensors while retaining the
         # enclosing SwitchGLU object. Always refresh the validated tensor refs.
         _CONFIGS[module] = config
     logger.info(
-        "DSV4 affine MoE fast path enabled for %d exact modules; rejected=%d",
+        "DSV4 affine MoE fast path enabled for %d exact modules; rejected=%d; "
+        "weighted_owner=%s",
         len(accepted),
         len(rejected),
+        bool(weighted_classes),
     )
     return len(accepted)
 

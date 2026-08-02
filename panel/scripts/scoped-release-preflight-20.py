@@ -1534,6 +1534,10 @@ def _read_bundle_directory_snapshot(bundle_path_value: Any) -> dict[str, Any] | 
                     "sha256": digest,
                 }
                 raw_files[name] = raw
+            except FileNotFoundError:
+                if name != "chat_template.jinja":
+                    return None
+                files[name] = {"state": "missing"}
             except OSError:
                 return None
             finally:
@@ -1563,6 +1567,8 @@ def _read_bundle_directory_snapshot(bundle_path_value: Any) -> dict[str, Any] | 
 
         parsed: dict[str, Any] = {}
         for name in BUNDLE_CONFIG_FILES:
+            if files[name].get("state") != "present":
+                continue
             if name.endswith(".json"):
                 try:
                     value = json.loads(raw_files[name].decode("utf-8"))
@@ -1576,6 +1582,111 @@ def _read_bundle_directory_snapshot(bundle_path_value: Any) -> dict[str, Any] | 
                     parsed[name] = raw_files[name].decode("utf-8")
                 except UnicodeDecodeError:
                     return None
+        tokenizer_template = parsed.get("tokenizer_config.json", {}).get(
+            "chat_template"
+        )
+        include_stub = bool(
+            isinstance(tokenizer_template, str)
+            and re.search(
+                r"{%\s*include\s+['\"][^'\"]+['\"]\s*%}",
+                tokenizer_template,
+            )
+        )
+        sidecar_template = parsed.get("chat_template.jinja")
+        usable_jinja = bool(
+            (
+                isinstance(tokenizer_template, str)
+                and tokenizer_template.strip()
+                and not include_stub
+            )
+            or (
+                isinstance(sidecar_template, str)
+                and sidecar_template.strip()
+            )
+        )
+        config = parsed.get("config.json", {})
+        chat = parsed.get("jang_config.json", {}).get("chat")
+        native_dsv4 = bool(
+            config.get("model_type") == "deepseek_v4"
+            and isinstance(chat, dict)
+            and chat.get("encoder") == "encoding_dsv4"
+            and chat.get("encoder_fn") == "encode_messages"
+            and chat.get("chat_template_source") == "official_python_encoder"
+        )
+        prompt_renderer: dict[str, Any]
+        if usable_jinja:
+            prompt_renderer = {"mode": "jinja"}
+        elif native_dsv4:
+            encoder_dir_fd: int | None = None
+            encoder_fd: int | None = None
+            try:
+                encoder_dir_fd = os.open(
+                    "encoding", directory_flags, dir_fd=bundle_fd
+                )
+                encoder_dir_before = os.fstat(encoder_dir_fd)
+                encoder_fd = os.open(
+                    "encoding_dsv4.py", file_flags, dir_fd=encoder_dir_fd
+                )
+                encoder_before = os.fstat(encoder_fd)
+                if (
+                    not stat.S_ISREG(encoder_before.st_mode)
+                    or encoder_before.st_nlink != 1
+                ):
+                    return None
+                encoder_raw = _read_fd_bytes(encoder_fd)
+                encoder_after = os.fstat(encoder_fd)
+                encoder_entry = os.stat(
+                    "encoding_dsv4.py",
+                    dir_fd=encoder_dir_fd,
+                    follow_symlinks=False,
+                )
+                encoder_dir_after = os.fstat(encoder_dir_fd)
+                encoder_dir_entry = os.stat(
+                    "encoding", dir_fd=bundle_fd, follow_symlinks=False
+                )
+                if (
+                    not stat.S_ISDIR(encoder_dir_before.st_mode)
+                    or _stable_file_identity(encoder_before)
+                    != _stable_file_identity(encoder_after)
+                    or _stable_file_identity(encoder_after)
+                    != _stable_file_identity(encoder_entry)
+                    or len(encoder_raw) != encoder_after.st_size
+                    or _stable_file_identity(encoder_dir_before)
+                    != _stable_file_identity(encoder_dir_after)
+                    or _stable_file_identity(encoder_dir_after)
+                    != _stable_file_identity(encoder_dir_entry)
+                ):
+                    return None
+                prompt_renderer = {
+                    "mode": "native_encoder",
+                    "encoder": "encoding_dsv4",
+                    "encoder_fn": "encode_messages",
+                    "size_bytes": len(encoder_raw),
+                    "sha256": hashlib.sha256(encoder_raw).hexdigest(),
+                }
+            except OSError:
+                return None
+            finally:
+                if encoder_fd is not None:
+                    os.close(encoder_fd)
+                if encoder_dir_fd is not None:
+                    os.close(encoder_dir_fd)
+        else:
+            return None
+
+        directory_after = os.fstat(bundle_fd)
+        directory_entry = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        if directory_identity != (
+            directory_after.st_dev,
+            directory_after.st_ino,
+            directory_after.st_mode,
+            directory_after.st_mtime_ns,
+            directory_after.st_ctime_ns,
+        ) or (directory_after.st_dev, directory_after.st_ino) != (
+            directory_entry.st_dev,
+            directory_entry.st_ino,
+        ):
+            return None
         observed = {
             "schema": "vmlx-bundle-config-v2",
             "model_bundle_path": str(Path(os.path.abspath(bundle_path))),
@@ -1584,6 +1695,7 @@ def _read_bundle_directory_snapshot(bundle_path_value: Any) -> dict[str, Any] | 
                 "inode": directory_after.st_ino,
             },
             "files": files,
+            "prompt_renderer": prompt_renderer,
         }
         # The directory fingerprint is intentionally stronger than the
         # path-free content attestation exposed by /health.  Keep both: the
@@ -1885,6 +1997,7 @@ def _validated_bundle_attestation(
     return {
         name: str(snapshot["files"][name]["sha256"])
         for name in BUNDLE_CONFIG_FILES
+        if snapshot["files"][name].get("state") == "present"
     }
 
 

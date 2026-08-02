@@ -2117,6 +2117,37 @@ def native_bundle_attestation(module, root: Path) -> tuple[dict, dict[str, str]]
     return observed, hashes
 
 
+def dsv4_native_bundle_attestation(module, root: Path) -> dict:
+    root.mkdir(parents=True, exist_ok=True)
+    contents = {
+        "config.json": (
+            '{"model_type":"deepseek_v4",'
+            '"architectures":["DeepseekV4ForCausalLM"]}\n'
+        ),
+        "generation_config.json": (
+            '{"temperature":1.0,"top_p":0.95,"top_k":0}\n'
+        ),
+        "jang_config.json": (
+            '{"profile":"JANG","quantization":"affine","chat":{'
+            '"encoder":"encoding_dsv4",'
+            '"encoder_fn":"encode_messages",'
+            '"chat_template_source":"official_python_encoder"}}\n'
+        ),
+        "tokenizer_config.json": '{}\n',
+    }
+    for name, content in contents.items():
+        (root / name).write_text(content, encoding="utf-8")
+    encoder = root / "encoding" / "encoding_dsv4.py"
+    encoder.parent.mkdir()
+    encoder.write_text(
+        "def encode_messages(messages, **kwargs):\n    return str(messages)\n",
+        encoding="utf-8",
+    )
+    snapshot = module._read_bundle_directory_snapshot(root.resolve())
+    assert snapshot is not None
+    return snapshot
+
+
 def runtime_binding(module, bundle_fingerprint: str) -> dict:
     release = module.release_runtime_source_attestation()
     return {
@@ -3238,6 +3269,53 @@ def test_r20_bundle_attestation_accepts_production_path_free_health_shape(
         str(root.resolve()),
         legacy_v2,
     ) is None
+
+
+def test_r20_bundle_snapshot_accepts_dsv4_native_encoder_without_jinja(
+    tmp_path: Path,
+):
+    module = load_module()
+    root = tmp_path / "dsv4"
+    snapshot = dsv4_native_bundle_attestation(module, root)
+    assert snapshot["files"]["chat_template.jinja"] == {"state": "missing"}
+    assert snapshot["prompt_renderer"]["mode"] == "native_encoder"
+    assert snapshot["prompt_renderer"]["encoder"] == "encoding_dsv4"
+    assert snapshot["prompt_renderer"]["encoder_fn"] == "encode_messages"
+    assert len(snapshot["prompt_renderer"]["sha256"]) == 64
+    hashes = module._validated_bundle_attestation(
+        str(root.resolve()),
+        snapshot["health_attestation"],
+    )
+    assert hashes is not None
+    assert "chat_template.jinja" not in hashes
+
+
+def test_r20_bundle_snapshot_rejects_dsv4_native_metadata_without_encoder(
+    tmp_path: Path,
+):
+    module = load_module()
+    root = tmp_path / "dsv4"
+    dsv4_native_bundle_attestation(module, root)
+    (root / "encoding" / "encoding_dsv4.py").unlink()
+    assert module._read_bundle_directory_snapshot(root.resolve()) is None
+
+
+def test_r20_bundle_snapshot_rejects_unresolved_template_include_stub(
+    tmp_path: Path,
+):
+    module = load_module()
+    root = tmp_path / "stub"
+    root.mkdir()
+    (root / "config.json").write_text(
+        '{"model_type":"generic"}\n', encoding="utf-8"
+    )
+    (root / "generation_config.json").write_text('{}\n', encoding="utf-8")
+    (root / "jang_config.json").write_text('{}\n', encoding="utf-8")
+    (root / "tokenizer_config.json").write_text(
+        '{"chat_template":"{% include \\\"chat_template.jinja\\\" %}"}\n',
+        encoding="utf-8",
+    )
+    assert module._read_bundle_directory_snapshot(root.resolve()) is None
 
 
 def test_r20_v5_runtime_bundle_attestation_requires_production_nested_shape(

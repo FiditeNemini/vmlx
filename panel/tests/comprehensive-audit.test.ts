@@ -3847,7 +3847,15 @@ describe("Phase 6: Cache API Data Flow", () => {
       const effect = source.match(
         /useEffect\(\(\) => \{[\s\S]*?setInterval\(fetchStats, 5000\)[\s\S]*?\}, \[([^\]]+)\]\)/,
       );
-      expect(effect?.[1]).toContain("sessionId");
+      // The session key reaches this effect through its memo chain rather than a
+      // literal dep: fetchStats -> fetchStatsForToken, and that callback is the
+      // one keyed on sessionId. Pin the chain, not the identifier.
+      expect(effect?.[1]).toContain("fetchStats");
+
+      const fetchStatsForToken = source.match(
+        /const fetchStatsForToken = useCallback\([\s\S]*?\}, \[([^\]]+)\]\)/,
+      );
+      expect(fetchStatsForToken?.[1]).toContain("sessionId");
     });
 
     it("CachePanel does not render disabled KV quantization as 0-bit active quant", () => {

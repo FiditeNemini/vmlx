@@ -5728,6 +5728,14 @@ class BlockAwarePrefixCache:
                             original_idx_int,
                         )
                         return None
+                    # A reconstructed cache is owned by the live request and
+                    # RotatingKVCache writes its next decode token in place.
+                    # Never install the resident block payload directly: a
+                    # disk-promoted hit would otherwise corrupt its new L1
+                    # copy, so the next exact paged hit would observe different
+                    # logits than the clean L2 restore that populated it.
+                    terminal_keys = _copy_mlx_tree(terminal_keys)
+                    terminal_values = _copy_mlx_tree(terminal_values)
                     mx.eval(terminal_keys, terminal_values)
                     if has_rotating:
                         cache = RotatingKVCache(max_size=max_size_int, keep=keep_int)
@@ -5845,7 +5853,10 @@ class BlockAwarePrefixCache:
                                 f"unsupported DSV4 delta cache class {class_name!r}"
                             )
                         restored = cache_cls.restore_anchor_from_deltas(
-                            [entry[1] for entry in dsv4_delta_entries],
+                            [
+                                _copy_mlx_tree(entry[1])
+                                for entry in dsv4_delta_entries
+                            ],
                             target_tokens=int(block_table.num_tokens),
                             block_size=256,
                             anchor_interval_blocks=8,
@@ -5896,6 +5907,12 @@ class BlockAwarePrefixCache:
 
                             cache_cls = PoolQuantizedV4Cache
 
+                        # Both DeepseekV4Cache.state and
+                        # PoolQuantizedV4Cache.storage_state retain the arrays
+                        # they are given. The live one-token kickoff mutates the
+                        # local rotating window, so detach the whole composite
+                        # tree from its reusable resident block first.
+                        state = _copy_mlx_tree(state)
                         cache = cache_cls(
                             sliding_window=sliding_window,
                             compress_ratio=compress_ratio,

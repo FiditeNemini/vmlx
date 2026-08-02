@@ -454,6 +454,43 @@ def test_dsv4_delta_reconstructs_full_43_layer_periodic_anchor():
     assert all(layer.offset == 2048 for layer in rebuilt)
 
 
+def test_dsv4_reconstructed_live_cache_does_not_mutate_resident_block_payload():
+    """The request-owned kickoff cache must not alias reusable L1 blocks."""
+    from vmlx_engine.paged_cache import BlockTable, PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    paged = PagedCacheManager(block_size=256, max_blocks=16)
+    cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+    table = BlockTable(request_id="dsv4-copy-on-reconstruct")
+    for block_index in range(8):
+        block = paged.allocate_block()
+        assert block is not None
+        block.token_count = 256
+        block.cache_data = _topology_block(block_index)
+        table.block_ids.append(block.block_id)
+        table.num_tokens += 256
+
+    terminal = paged.allocated_blocks[table.block_ids[-1]].cache_data
+    rotating_source = terminal[0][1]
+    composite_source = terminal[2][1]["anchor"]["local_state"][0]
+    rotating_before = rotating_source * 1
+    composite_before = composite_source * 1
+    mx.eval(rotating_before, composite_before)
+
+    rebuilt = cache.reconstruct_cache(table)
+    assert rebuilt is not None
+    one_key = mx.full((1, 1, 1, 1), -17, dtype=mx.float32)
+    one_value = mx.full((1, 1, 1, 1), -29, dtype=mx.float32)
+    rebuilt[0].update_and_fetch(one_key, one_value)
+    rebuilt[2].update_and_fetch(one_key, one_value)
+    mx.eval(rebuilt[0].keys, rebuilt[2].keys)
+
+    assert bool(mx.array_equal(rotating_source, rotating_before).item())
+    assert bool(mx.array_equal(composite_source, composite_before).item())
+    assert float(rebuilt[0].keys[0, 0, 0, 0].item()) == -17
+    assert float(rebuilt[2].keys[0, 0, 0, 0].item()) == -17
+
+
 def test_dsv4_q8_pool_deltas_roundtrip_disk_and_reconstruct_without_codec_loss(
     tmp_path,
 ):

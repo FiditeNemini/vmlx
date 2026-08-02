@@ -369,6 +369,17 @@ describe('tool auto-continue policy', () => {
         '[FOLLOW] Do not call any tool. Use only the previous result.',
       ),
     ).toBe(true)
+    expect(
+      requestsNoToolCalls(
+        '[FOLLOW] Do not call a tool. Use only the previous result.',
+      ),
+    ).toBe(true)
+    expect(requestsNoToolCalls('Please do not use the tool again.')).toBe(true)
+    expect(
+      requestsExactTextOnlyWithoutToolUse(
+        'Do not call a tool. Reply exactly NO-TOOL-ARTICLE-OK.',
+      ),
+    ).toBe(true)
     expect(requestsNoToolCalls('Please never use tools. Answer directly.')).toBe(true)
     expect(
       requestsNoToolCalls(

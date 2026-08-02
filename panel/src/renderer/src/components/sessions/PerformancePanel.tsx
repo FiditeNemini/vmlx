@@ -1,4 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
+import {
+  describeDsv4ActivationQat,
+  type Dsv4ActivationQatStatus,
+} from './dsv4QatStatus'
 
 interface PerformancePanelProps {
   endpoint: { host: string; port: number }
@@ -189,6 +193,7 @@ interface HealthData {
       env?: string
       error?: string | null
     }
+    activation_qat?: Dsv4ActivationQatStatus
     attention_kv_storage_quantization?: NativeStorageQuantization
     storage_quantization?: NativeStorageQuantization
   }
@@ -282,6 +287,10 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
   const attentionKvStorage =
     health?.native_cache?.attention_kv_storage_quantization ??
     health?.native_cache?.storage_quantization
+  const dsv4ActivationQat = health?.native_cache?.activation_qat
+  const dsv4ActivationQatDisplay = dsv4ActivationQat
+    ? describeDsv4ActivationQat(dsv4ActivationQat)
+    : null
   const tqKeyBits = health?.turboquant_kv_cache?.key_bits_values?.length
     ? health.turboquant_kv_cache.key_bits_values.map(bits => `q${bits}`).join('/')
     : `q${health?.turboquant_kv_cache?.storage_key_bits ?? '?'}`
@@ -529,6 +538,14 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
                       : health.native_cache.pool_quant.enabled ? 'enabled' : 'disabled'
                 }
               />
+            )}
+            {dsv4ActivationQatDisplay && (
+              <>
+                <InfoCard label="DSV4 QAT Requested" value={dsv4ActivationQatDisplay.requestedEffective} />
+                <InfoCard label="DSV4 QAT Observed" value={dsv4ActivationQatDisplay.observedAttestation} />
+                <InfoCard label="DSV4 QAT Paths" value={dsv4ActivationQatDisplay.paths} />
+                <InfoCard label="DSV4 QAT Kernels" value={dsv4ActivationQatDisplay.fusedKernels} />
+              </>
             )}
             {attentionKvStorage && (
               <InfoCard

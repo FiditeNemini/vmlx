@@ -262,6 +262,11 @@ export function requestsBoundedFinalAnswerAfterToolResult(
 }
 
 function containsExplicitToolRequest(text: string): boolean {
+  // Resolve an explicit prohibition before looking for positive tool verbs.
+  // Otherwise phrases such as "do not call a tool" are misread as a request
+  // for a tool literally named "a" by the broad explicit-tool grammar below.
+  if (requestsNoToolCalls(text)) return false
+
   const explicitToolRequest =
     /\b(?:call|use|invoke|run|execute)\s+(?:the\s+)?(?:built[- ]in\s+)?`?[a-z][\w-]*`?(?:\s+(?:tool|function))?\b/i
   const toolResultContract =
@@ -313,7 +318,7 @@ export function requestsNoToolCalls(text: string): boolean {
   // this returns true; that is the stable no-tool request contract for both
   // Responses and Chat Completions.
   const explicitProhibition =
-    /(?:^|[.!?\]\n])\s*(?:please\s+)?(?:do not|don['’]?t|dont|never)\s+(?:call|use)\s+(?:(?:any|another|additional|more)\s+)?tools?\b(?!\s+unless)/i
+    /(?:^|[.!?\]\n])\s*(?:please\s+)?(?:do not|don['’]?t|dont|never)\s+(?:call|use)\s+(?:(?:a|the|any|another|additional|more)\s+)?tools?\b(?!\s+unless)/i
   const explicitWithoutTools =
     /(?:^|[.!?\]\n])\s*(?:please\s+)?without\s+(?:(?:using|calling)\s+)?(?:any\s+)?tools?\b/i
   return explicitProhibition.test(text) || explicitWithoutTools.test(text)

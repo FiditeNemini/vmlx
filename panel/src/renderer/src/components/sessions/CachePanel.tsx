@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { describeDsv4ActivationQat } from './dsv4QatStatus'
 
 export interface CachePanelRequestToken {
   identityGeneration: number
@@ -243,6 +244,9 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
   const diskCache = stats?.disk_cache
   const kvQuant = stats?.kv_cache_quantization
   const nativeCache = stats?.native_cache
+  const dsv4ActivationQatDisplay = nativeCache?.activation_qat
+    ? describeDsv4ActivationQat(nativeCache.activation_qat)
+    : null
   const turboQuantKv = stats?.turboquant_kv_cache
   const cacheTotals = stats?.cache_totals
   const blockDiskCache = stats?.block_disk_cache
@@ -666,6 +670,14 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                     : `off (${nativeCache.generic_turboquant_kv.reason || 'native'})`
                 }
               />
+            )}
+            {dsv4ActivationQatDisplay && (
+              <>
+                <StatCard label="DSV4 QAT Requested" value={dsv4ActivationQatDisplay.requestedEffective} />
+                <StatCard label="DSV4 QAT Observed" value={dsv4ActivationQatDisplay.observedAttestation} />
+                <StatCard label="DSV4 QAT Paths" value={dsv4ActivationQatDisplay.paths} />
+                <StatCard label="DSV4 QAT Kernels" value={dsv4ActivationQatDisplay.fusedKernels} />
+              </>
             )}
             {attentionKvStorage && (
               <StatCard

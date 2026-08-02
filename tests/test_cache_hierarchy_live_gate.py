@@ -2618,6 +2618,65 @@ def test_dsv4_delta_replay_satisfies_floor_without_overstating_cached_tokens():
     assert any("below expected shared-prefix floor 112" in item for item in generic_failures)
 
 
+def test_generic_memory_fit_partial_proves_maximum_safe_prefix():
+    rows = _valid_store_rows()
+    row = rows[2]
+    row["cached_tokens"] = 96
+    execution = row["last_cache_execution"]
+    execution.update(
+        {
+            "attempted_cached_tokens": 112,
+            "cached_tokens": 96,
+            "checkpoint_tokens": 112,
+            "matched_tokens": 112,
+            "replayed_tokens": 0,
+            "uncached_prompt_tokens": 32,
+            "prefill_tokens": 32,
+        }
+    )
+    row["last_cache_reuse_partial"] = {
+        "request_id": row["response_id"],
+        "reason": "insufficient_memory_for_full_cache_merge",
+        "cache_contract": "turboquant_kv",
+        "available_bytes": 4000,
+        "cache_bytes": 1120,
+        "budget_bytes": 2000.0,
+        "original_needed_bytes": 2240.0,
+        "used_cache_bytes": 960.0,
+        "used_needed_bytes": 1920.0,
+        "multiplier": 2.0,
+        "budget_fraction": 0.5,
+        "original_cached_tokens": 112,
+        "used_cached_tokens": 96,
+        "dropped_cached_tokens": 16,
+        "tail_tokens": 32,
+        "prompt_tokens": 128,
+    }
+
+    assert _validate_rows("store", rows) == []
+
+
+def test_generic_memory_fit_partial_rejects_missing_request_receipt():
+    rows = _valid_store_rows()
+    row = rows[2]
+    row["cached_tokens"] = 96
+    row["last_cache_execution"].update(
+        {
+            "attempted_cached_tokens": 112,
+            "cached_tokens": 96,
+            "checkpoint_tokens": 112,
+            "matched_tokens": 112,
+            "replayed_tokens": 0,
+            "uncached_prompt_tokens": 32,
+            "prefill_tokens": 32,
+        }
+    )
+
+    failures = _validate_rows("store", rows)
+
+    assert any("replay is not authorized" in item for item in failures)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

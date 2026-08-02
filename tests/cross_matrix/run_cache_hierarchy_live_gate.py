@@ -2208,7 +2208,32 @@ def _validate_hit_row(
     replayed_tokens = _integer(execution.get("replayed_tokens"))
     matched_tokens = _integer(execution.get("matched_tokens"))
     checkpoint_tokens = _integer(execution.get("checkpoint_tokens"))
-    if replayed_tokens > 0 or matched_tokens > cached_tokens:
+    memory_fit_partial = (
+        replayed_tokens == 0
+        and attempted_cached_tokens > cached_tokens > 0
+        and matched_tokens == attempted_cached_tokens
+        and isinstance(row.get("last_cache_reuse_partial"), dict)
+    )
+    if memory_fit_partial:
+        reusable_prefix_tokens = attempted_cached_tokens
+        scheduler_cache = row.get("scheduler_cache")
+        block_size = (
+            _integer(scheduler_cache.get("block_size"))
+            if isinstance(scheduler_cache, dict)
+            else 0
+        )
+        failures.extend(
+            _validate_execution_prefix_bounds(
+                row,
+                {
+                    "block_size": block_size,
+                    "reusable_prefix_tokens": minimum_cached_tokens,
+                    "longest_common_prefix_tokens": maximum_cached_tokens,
+                },
+                label=tag,
+            )
+        )
+    elif replayed_tokens > 0 or matched_tokens > cached_tokens:
         native_cache = row.get("native_cache")
         native_replay_contract = bool(
             allow_native_matched_tail_replay
@@ -5759,6 +5784,9 @@ def main() -> int:
                 "health_counter_deltas": health_counter_deltas,
                 "last_cache_execution": (health.get("scheduler") or {}).get(
                     "last_cache_execution"
+                ),
+                "last_cache_reuse_partial": (health.get("scheduler") or {}).get(
+                    "last_cache_reuse_partial"
                 ),
                 "scheduler_cache": (
                     (health.get("cache") or {}).get("scheduler_cache") or {}

@@ -514,11 +514,37 @@ def to_anthropic_response(
         "model": model,
         "stop_reason": stop_reason,
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0),
-        },
+        "usage": _anthropic_usage(usage),
     }
+
+
+def _cached_prompt_tokens(usage: dict) -> int:
+    """Return prefix-cache hits from a Chat Completions usage block."""
+    details = usage.get("prompt_tokens_details")
+    if not isinstance(details, dict):
+        return 0
+    cached = details.get("cached_tokens")
+    return cached if isinstance(cached, int) and cached > 0 else 0
+
+
+def _anthropic_usage(usage: dict) -> dict:
+    """Map Chat Completions usage onto Anthropic's usage shape.
+
+    Anthropic clients read ``cache_read_input_tokens`` to show how much of the
+    prompt was served from cache. Without it a fully reused prefix looks like a
+    cold request, so the surface under-reports its own cache. vMLX has no
+    separate cache-creation billing step, so ``cache_creation_input_tokens`` is
+    reported as 0 whenever any cache read occurred.
+    """
+    out = {
+        "input_tokens": usage.get("prompt_tokens", 0),
+        "output_tokens": usage.get("completion_tokens", 0),
+    }
+    cached = _cached_prompt_tokens(usage)
+    if cached:
+        out["cache_read_input_tokens"] = cached
+        out["cache_creation_input_tokens"] = 0
+    return out
 
 
 # ─── Streaming Adapter ─────────────────────────────────────────────────
@@ -552,6 +578,7 @@ class AnthropicStreamAdapter:
         self._active_tool_index: int | None = None
         self._input_tokens = 0
         self._output_tokens = 0
+        self._cached_tokens = 0
         self._finish_reason: str | None = None
         self._errored = False
         self._finalized = False
@@ -725,6 +752,9 @@ class AnthropicStreamAdapter:
             if usage:
                 self._input_tokens = usage.get("prompt_tokens", self._input_tokens)
                 self._output_tokens = usage.get("completion_tokens", self._output_tokens)
+                self._cached_tokens = (
+                    _cached_prompt_tokens(usage) or self._cached_tokens
+                )
             return events
 
         delta = choices[0].get("delta", {})
@@ -739,6 +769,7 @@ class AnthropicStreamAdapter:
         if usage:
             self._input_tokens = usage.get("prompt_tokens", self._input_tokens)
             self._output_tokens = usage.get("completion_tokens", self._output_tokens)
+            self._cached_tokens = _cached_prompt_tokens(usage) or self._cached_tokens
 
         # Handle reasoning/thinking content
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
@@ -888,6 +919,11 @@ class AnthropicStreamAdapter:
         usage = {"output_tokens": self._output_tokens}
         if self._input_tokens > 0:
             usage["input_tokens"] = self._input_tokens
+        if self._cached_tokens > 0:
+            # Anthropic clients read this to show how much of the prompt was
+            # served from cache; omitting it makes a reused prefix look cold.
+            usage["cache_read_input_tokens"] = self._cached_tokens
+            usage["cache_creation_input_tokens"] = 0
         events.append(self._sse("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},

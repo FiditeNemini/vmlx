@@ -1119,3 +1119,59 @@ class TestStreamingStateMachine:
         # Only one content_block_start for thinking (block opened once, not reopened)
         block_starts = [e for e in events if "content_block_start" in e and "thinking" in e]
         assert len(block_starts) == 1, "Thinking block should be opened exactly once"
+
+
+def test_anthropic_usage_reports_prefix_cache_reads():
+    """A reused prefix must not look like a cold request on this surface.
+
+    Anthropic clients read ``cache_read_input_tokens`` to show how much of the
+    prompt was served from cache. vMLX reuses DSV4 prefixes across every
+    gateway surface, so omitting the field under-reports the engine's own
+    cache.
+    """
+    from vmlx_engine.api.anthropic_adapter import to_anthropic_response
+
+    response = to_anthropic_response(
+        {
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": 507,
+                "completion_tokens": 12,
+                "prompt_tokens_details": {"cached_tokens": 256},
+            },
+        },
+        model="dsv4",
+    )
+
+    usage = response["usage"]
+    assert usage["input_tokens"] == 507
+    assert usage["output_tokens"] == 12
+    assert usage["cache_read_input_tokens"] == 256
+    assert usage["cache_creation_input_tokens"] == 0
+
+
+def test_anthropic_usage_omits_cache_fields_when_nothing_was_reused():
+    """A genuinely cold request must not advertise phantom cache reads."""
+    from vmlx_engine.api.anthropic_adapter import to_anthropic_response
+
+    response = to_anthropic_response(
+        {
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": 400,
+                "completion_tokens": 9,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            },
+        },
+        model="dsv4",
+    )
+
+    usage = response["usage"]
+    assert "cache_read_input_tokens" not in usage
+    assert "cache_creation_input_tokens" not in usage

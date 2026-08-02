@@ -11890,7 +11890,10 @@ def _cache_contract_render_and_tokenize(
         dry_request.instructions,
         preserve_multimodal=False,
     )
-    messages = _normalize_leading_system_messages(messages)
+    messages = _normalize_leading_system_messages(
+        messages,
+        preserve_native_order=_is_loaded_dsv4_model(model),
+    )
     ct_kwargs = _merge_ct_kwargs(dry_request.chat_template_kwargs)
     resolved_thinking = _resolve_enable_thinking(
         request_value=dry_request.enable_thinking,
@@ -16520,7 +16523,10 @@ async def create_chat_completion(
             messages = _inject_json_instruction(messages, json_instruction)
     if engine.is_mllm and _should_coerce_zaya_vl_tool_history(request.model):
         messages = _coerce_zaya_vl_tool_history_for_template(messages)
-    messages = _normalize_leading_system_messages(messages)
+    messages = _normalize_leading_system_messages(
+        messages,
+        preserve_native_order=_is_loaded_dsv4_model(request.model),
+    )
 
     # When thinking is explicitly disabled, strip <think> blocks from prior assistant
     # messages in the conversation history. Without this, the model sees prior thinking
@@ -18200,7 +18206,11 @@ def _extract_text_from_content(content) -> str:
     return str(content) if content else ""
 
 
-def _normalize_leading_system_messages(messages: list[dict]) -> list[dict]:
+def _normalize_leading_system_messages(
+    messages: list[dict],
+    *,
+    preserve_native_order: bool = False,
+) -> list[dict]:
     """Merge all system/developer messages into one leading system message.
 
     Some tokenizer templates, including Qwen-family templates, reject a system
@@ -18208,9 +18218,18 @@ def _normalize_leading_system_messages(messages: list[dict]) -> list[dict]:
     follow-ups can create that shape when previous_response_id history is
     prepended before a new request with instructions. Treat system/developer
     content as global instructions and keep non-system turns in order.
+
+    DeepSeek V4 is the explicit exception: its official Python encoder owns
+    message order and has a distinct ``latest_reminder`` role for tail
+    reminders.  Hoisting a later system message changes the beginning of the
+    token sequence and destroys an otherwise reusable prompt prefix.  Callers
+    must opt into native ordering only after resolving the loaded family; this
+    helper never rewrites ``system`` into ``latest_reminder``.
     """
     if not messages:
         return messages
+    if preserve_native_order:
+        return list(messages)
 
     system_template: dict | None = None
     system_parts: list[str] = []
@@ -19534,10 +19553,16 @@ async def create_response(
         json_instruction = build_json_system_prompt(text_dict)
         if json_instruction:
             messages = _inject_json_instruction(messages, json_instruction)
-    messages = _normalize_leading_system_messages(messages)
+    messages = _normalize_leading_system_messages(
+        messages,
+        preserve_native_order=_is_dsv4_resp_msgs,
+    )
     # Persist only explicit input system/developer messages. Template-only
     # coercions and request-scoped instructions remain generation-local.
-    history_messages = _normalize_leading_system_messages(history_messages)
+    history_messages = _normalize_leading_system_messages(
+        history_messages,
+        preserve_native_order=_is_dsv4_resp_msgs,
+    )
     _responses_max_prompt_tokens = _effective_max_prompt_tokens(request)
 
     # Strip <think> blocks from history when thinking is OFF (same as Chat Completions path)

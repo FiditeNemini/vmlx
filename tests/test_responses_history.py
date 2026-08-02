@@ -412,6 +412,49 @@ def test_normalize_leading_system_messages_moves_mid_conversation_system():
     ]
 
 
+def test_dsv4_preserves_native_system_and_latest_reminder_order():
+    from vmlx_engine.server import _normalize_leading_system_messages
+
+    messages = [
+        {"role": "system", "content": "base policy"},
+        {"role": "user", "content": "first turn"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "system", "content": "tail system"},
+        {"role": "latest_reminder", "content": "2026-08-02,US,App,en"},
+        {"role": "user", "content": "second turn"},
+    ]
+
+    normalized = _normalize_leading_system_messages(
+        messages,
+        preserve_native_order=True,
+    )
+
+    assert normalized == messages
+    assert normalized is not messages
+    assert normalized[3]["role"] == "system"
+    assert normalized[4]["role"] == "latest_reminder"
+
+
+def test_qwen_generic_path_still_hoists_mid_conversation_system():
+    from vmlx_engine.server import _normalize_leading_system_messages
+
+    normalized = _normalize_leading_system_messages(
+        [
+            {"role": "system", "content": "base policy"},
+            {"role": "user", "content": "first turn"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "system", "content": "tail system"},
+        ],
+        preserve_native_order=False,
+    )
+
+    assert normalized == [
+        {"role": "system", "content": "base policy\n\ntail system"},
+        {"role": "user", "content": "first turn"},
+        {"role": "assistant", "content": "first answer"},
+    ]
+
+
 def test_responses_history_json_instruction_stays_in_leading_system():
     from vmlx_engine.server import (
         _inject_json_instruction,
@@ -452,14 +495,20 @@ def test_responses_and_chat_call_sites_normalize_before_template_rendering():
 
     responses_src = inspect.getsource(server.create_response)
     chat_src = inspect.getsource(server.create_chat_completion)
+    cache_contract_src = inspect.getsource(server._cache_contract_render_and_tokenize)
 
-    assert "messages = _normalize_leading_system_messages(messages)" in responses_src
-    assert "messages = _normalize_leading_system_messages(messages)" in chat_src
+    assert "messages = _normalize_leading_system_messages(" in responses_src
+    assert "preserve_native_order=_is_dsv4_resp_msgs" in responses_src
+    assert "messages = _normalize_leading_system_messages(" in chat_src
+    assert (
+        "preserve_native_order=_is_loaded_dsv4_model(request.model)" in chat_src
+    )
+    assert "preserve_native_order=_is_loaded_dsv4_model(model)" in cache_contract_src
     assert responses_src.index(
-        "messages = _normalize_leading_system_messages(messages)"
+        "messages = _normalize_leading_system_messages("
     ) > responses_src.index("_inject_json_instruction(messages, json_instruction)")
     assert chat_src.index(
-        "messages = _normalize_leading_system_messages(messages)"
+        "messages = _normalize_leading_system_messages("
     ) > chat_src.index("_inject_json_instruction(messages, json_instruction)")
 
 

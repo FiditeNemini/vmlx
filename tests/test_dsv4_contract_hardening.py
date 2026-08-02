@@ -265,6 +265,54 @@ def test_dsv4_batch_parser_restores_consumed_eos_for_reasoning_final(
     assert calls == [(raw + "<DSV4_EOS>", "thinking")]
 
 
+def test_dsv4_official_encoder_adapter_preserves_message_order(monkeypatch):
+    """The adapter must not hoist systems or invent latest_reminder roles."""
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    captured = {}
+
+    class OfficialShapeEncoder:
+        REASONING_EFFORT_PROMPTS = {"low": ""}
+
+        @staticmethod
+        def encode_messages(messages, **kwargs):
+            captured["messages"] = messages
+            captured["kwargs"] = kwargs
+            return "official-prompt"
+
+    monkeypatch.setattr(
+        dsv4_chat_encoder,
+        "_get_encoding",
+        lambda model_path=None: OfficialShapeEncoder,
+    )
+    messages = [
+        {"role": "system", "content": "base policy"},
+        {"role": "user", "content": "first turn"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "system", "content": "tail system"},
+        {"role": "latest_reminder", "content": "2026-08-02,US,App,en"},
+        {"role": "user", "content": "second turn"},
+    ]
+
+    prompt = dsv4_chat_encoder.apply_chat_template(
+        messages,
+        enable_thinking=True,
+        reasoning_effort="low",
+    )
+
+    assert prompt == "official-prompt"
+    assert captured["messages"] == messages
+    assert captured["messages"] is not messages
+    assert [message["role"] for message in captured["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "system",
+        "latest_reminder",
+        "user",
+    ]
+
+
 def test_dsv4_batch_parser_does_not_duplicate_existing_eos(monkeypatch):
     from vmlx_engine.loaders import dsv4_chat_encoder
 

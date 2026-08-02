@@ -152,6 +152,46 @@ def test_parity_system_plus_user():
     assert ollama == expected, "ollama → openai"
 
 
+def test_dsv4_native_system_and_latest_reminder_order_matches_all_surfaces():
+    """DSV4 owns message order in its official Python encoder.
+
+    Every adapter must hand the same ordered list to the DSV4-only normalization
+    exception.  Ollama's ``stream`` flag is included because its streaming and
+    non-streaming handlers take different server paths after conversion.
+    """
+    from vmlx_engine.server import _normalize_leading_system_messages
+
+    expected = [
+        {"role": "system", "content": "base policy"},
+        {"role": "user", "content": "first turn"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "system", "content": "tail system"},
+        {"role": "latest_reminder", "content": "2026-08-02,US,App,en"},
+        {"role": "user", "content": "second turn"},
+    ]
+
+    responses = _via_responses(expected)
+    anthropic = _via_anthropic(system="base policy", messages=expected[1:])
+    ollama_stream = _via_ollama_chat(
+        {"model": "deepseek-v4", "messages": expected, "stream": True}
+    )
+    ollama_nonstream = _via_ollama_chat(
+        {"model": "deepseek-v4", "messages": expected, "stream": False}
+    )
+
+    for converted in (
+        _via_openai_chat(expected),
+        responses,
+        anthropic,
+        ollama_stream,
+        ollama_nonstream,
+    ):
+        assert _normalize_leading_system_messages(
+            converted,
+            preserve_native_order=True,
+        ) == expected
+
+
 def test_parity_multi_turn():
     """Multi-turn assistant continuation must round-trip on all surfaces."""
     expected = [

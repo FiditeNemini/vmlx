@@ -196,10 +196,13 @@ def test_ui_defaults_prefix_on_paged_off_and_hy3_mtp_native_type_visible():
     # comes from the detection layer (see registry assertion below).
     assert "usePagedCache: false" in form
     # The launch default honors the detected per-family policy (text ON / MLLM
-    # OFF) while DSV4 fails closed until composite-cache output equivalence is
-    # independently proven.
+    # OFF). DSV4 no longer fails closed: composite-cache reuse has since been
+    # proven live -- an agentic turn served 12288/17558 prompt tokens from cache
+    # with coherent output, and a cold-L1 restart refaulted the prefix from SSD
+    # (cache_detail "paged+dsv4+disk") -- so DSV4 defaults paged ON, which the
+    # running engine's argv confirms via --use-paged-cache.
     assert (
-        "const defaultUsePagedCache = !dsv4Active && (detectedUsePaged ?? false)"
+        "const defaultUsePagedCache = dsv4Active ? true : (detectedUsePaged ?? false)"
         in sessions
     )
     assert "dsv4PrefixOptIn" not in sessions

@@ -503,7 +503,13 @@ def test_panel_suppresses_generic_kv_quantization_controls_for_dsv4():
     assert ": nativeTypedCacheOwnsStoredCodec ? 'auto' : config.kvCacheQuantization" in form
     assert "disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}" in form
     assert "!dsv4Active && !m3Active && !openPanguExactTypedCache && config.kvCacheQuantization" in settings
-    assert "detectedFamily !== 'deepseek-v4' && detectedFamily !== 'minimax_m3' && detectedFamily !== 'openpangu_v2' && config.kvCacheQuantization" in sessions
+    # The launch-arg guard moved from detectedFamily to effectiveFamily, which
+    # is strictly stronger: an explicit family override now suppresses generic
+    # KV quantization too, not just autodetection. Confirmed live on DSV4 --
+    # the running engine's argv carries no --kv-cache-quantization at all and
+    # the engine logs "DSV4-Flash native SWA+CSA/HCA cache owns cache
+    # compression; forcing generic --kv-cache-quantization...".
+    assert "effectiveFamily !== 'deepseek-v4' && effectiveFamily !== 'minimax_m3' && effectiveFamily !== 'openpangu_v2' && config.kvCacheQuantization" in sessions
     assert "if (family === 'deepseek_v4') return 'deepseek-v4'" in form
     assert "if (family === 'deepseek_v4') return 'deepseek-v4'" in settings
     assert "if (family === 'deepseek_v4') return 'deepseek-v4'" in sessions

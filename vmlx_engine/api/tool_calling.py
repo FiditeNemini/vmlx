@@ -336,10 +336,17 @@ def check_and_inject_fallback_tools(
     # If ALL tool names made it into a prompt and the prompt also contains a
     # concrete parser-native exemplar for those names, the template handled
     # tools correctly. Otherwise inject a concrete native exemplar.
+    # Secondary path for a DSV4-shaped prompt that carries concrete DSML
+    # history but not the canonical ``## Tools`` block. One real exemplar is
+    # enough to demonstrate the grammar, and the outer gate has already
+    # required every authorized tool name to appear in the prompt. Demanding an
+    # exemplar per authorized tool only held while the catalog was narrowed to
+    # the recently called tool; with a stable broad catalog it can never hold,
+    # which would duplicate the contract on every agentic turn.
     _dsv4_has_scoped_history_examples = (
         is_dsv4_prompt
         and not explicit_tool_requested
-        and all(
+        and any(
             f'<｜DSML｜invoke name="{name}"' in instruction_prompt
             for name in tool_names
         )

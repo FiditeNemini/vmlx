@@ -1357,8 +1357,13 @@ def test_dsv4_fallback_preserves_recent_tool_schema_on_later_user_turn():
     assert '<｜DSML｜invoke name="read_file">' not in injected
 
 
-def test_dsv4_broad_catalog_does_not_duplicate_scoped_native_history_prompt():
-    """Fallback validation must use the same tool scope as the DSV4 encoder."""
+def test_dsv4_broad_catalog_does_not_duplicate_native_history_prompt():
+    """A concrete DSML exemplar in history suppresses the duplicate fallback.
+
+    The catalog is broad and stable, so history can only ever exemplify the
+    tools that actually ran. One real exemplar demonstrates the grammar; the
+    outer gate has already required every authorized name to be present.
+    """
     tools = [
         {
             "type": "function",

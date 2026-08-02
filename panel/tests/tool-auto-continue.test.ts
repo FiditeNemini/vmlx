@@ -70,6 +70,12 @@ describe('tool auto-continue policy', () => {
         'Call file_info exactly once. After the tool result, reply exactly DONE and nothing else.',
       ),
     ).toEqual(['file_info'])
+
+    expect(
+      requestedExactFinalToolNames(
+        'Use the built-in file_info tool exactly once on panel/package.json. Think briefly, then your visible answer must be exactly two lines: DONE and RESULT.',
+      ),
+    ).toEqual(['file_info'])
     expect(
       requestedOnceToolNames(
         'Use exactly one file_info tool call to inspect generation_config.json.',

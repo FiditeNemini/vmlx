@@ -217,7 +217,10 @@ export function requestedExactFinalToolNames(
   // whole built-in catalog; an LFM2 turn then called write_file even though
   // the current request named only file_info. This changes the schemas sent to
   // the model rather than hiding an emitted call.
-  const exactFinalThen = /\bthen\s*,?\s*reply exactly\b/i.test(text)
+  const exactFinalThen =
+    /\bthen\s*,?\s*(?:reply\s+exactly\b|(?:(?:your|the)\s+)?(?:only\s+)?visible\s+answer\s+(?:must\s+be\s+|is\s+|exactly\s+))/i.test(
+      text,
+    )
   if (!(exactFinalAfterResults || exactFinalThen)) return []
 
   // "Exactly once" may constrain only one step in a bounded multi-tool

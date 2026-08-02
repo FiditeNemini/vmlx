@@ -1008,6 +1008,57 @@ def test_dsv4_disk_only_pending_chain_without_terminal_is_a_miss():
     assert remaining == tokens + [15]
 
 
+def test_dsv4_metadata_only_validation_reads_l2_payload_once_before_reconstruct():
+    from vmlx_engine.paged_cache import PagedCacheManager, compute_block_hash
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    terminal_payload = [(
+        "deepseek_v4",
+        ("local", "compressor", "indexer"),
+        ("0", "128", "4", "4"),
+        "DeepseekV4Cache",
+        {"compress_ratio": 4, "sliding_window": 128},
+    )]
+
+    tokens = [11, 12, 13, 14]
+    block_hash = compute_block_hash(None, tokens)
+
+    class _CountingDisk:
+        def __init__(self):
+            self.reads = {}
+
+        def read_block(self, requested_hash):
+            self.reads[requested_hash] = self.reads.get(requested_hash, 0) + 1
+            return terminal_payload if requested_hash == block_hash else None
+
+    disk = _CountingDisk()
+    paged = PagedCacheManager(
+        block_size=4,
+        max_blocks=8,
+        disk_store=disk,
+    )
+    cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+    block = paged.allocate_block()
+    block.token_count = len(tokens)
+    block.cache_data = None
+    block.cache_data_from_disk = False
+    block.block_hash = block_hash
+    paged.cached_block_hash_to_block.insert(block_hash, block)
+
+    table, remaining = cache.fetch_cache(
+        "dsv4-metadata-only-validation",
+        tokens + [15],
+    )
+
+    assert table is not None
+    assert table.num_tokens == len(tokens)
+    assert remaining == [15]
+    assert disk.reads[block_hash] == 1
+    # Validation must not turn an immutable inspection payload into resident
+    # live state. The worker still performs the authoritative reconstruction.
+    assert block.cache_data is None
+
+
 def test_dsv4_disk_backed_terminal_chain_with_composite_state_is_a_hit():
     from vmlx_engine.paged_cache import PagedCacheManager, compute_block_hash
     from vmlx_engine.prefix_cache import BlockAwarePrefixCache

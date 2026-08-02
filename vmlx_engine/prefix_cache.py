@@ -2449,12 +2449,18 @@ class BlockAwarePrefixCache:
                 best_match = None
         if cached_blocks:
             _disk_store = getattr(self.paged_cache, "_disk_store", None)
+            # Metadata-only/frugal blocks keep their immutable payload solely
+            # in L2. Share one request-local read-through cache across DSV4
+            # candidate validators without attaching payloads to the blocks;
+            # worker reconstruction remains the sole owner of live hydration.
+            _validation_payload_cache: Dict[int, Any] = {}
             dsv4_delta_match = self._normalize_dsv4_delta_candidate(
                 request_id=request_id,
                 blocks=cached_blocks,
                 matched_tokens=num_cached,
                 request_tokens=tokens,
                 disk_store=_disk_store,
+                validation_payload_cache=_validation_payload_cache,
             )
             dsv4_matched_tokens: Optional[int] = None
             dsv4_replayed_tokens = 0
@@ -2500,6 +2506,7 @@ class BlockAwarePrefixCache:
                 cached_blocks,
                 target_tokens=num_cached,
                 disk_store=_disk_store,
+                validation_payload_cache=_validation_payload_cache,
             ):
                 _reject_table = BlockTable(
                     request_id=request_id,
@@ -2520,7 +2527,11 @@ class BlockAwarePrefixCache:
                 self._misses += 1
                 return None, tokens
 
-            if self._dsv4_l2_chain_missing_terminal_state(cached_blocks, _disk_store):
+            if self._dsv4_l2_chain_missing_terminal_state(
+                cached_blocks,
+                _disk_store,
+                validation_payload_cache=_validation_payload_cache,
+            ):
                 _reject_table = BlockTable(
                     request_id=request_id,
                     block_ids=[cb.block_id for cb in cached_blocks],
@@ -2539,7 +2550,11 @@ class BlockAwarePrefixCache:
                 self._misses += 1
                 return None, tokens
 
-            if self._zaya_l2_chain_missing_terminal_state(cached_blocks, _disk_store):
+            if self._zaya_l2_chain_missing_terminal_state(
+                cached_blocks,
+                _disk_store,
+                validation_payload_cache=_validation_payload_cache,
+            ):
                 _reject_table = BlockTable(
                     request_id=request_id,
                     block_ids=[cb.block_id for cb in cached_blocks],
@@ -2616,12 +2631,14 @@ class BlockAwarePrefixCache:
                 ),
             )
             _disk_store = getattr(self.paged_cache, "_disk_store", None)
+            _validation_payload_cache: Dict[int, Any] = {}
             dsv4_delta_match = self._normalize_dsv4_delta_candidate(
                 request_id=request_id,
                 blocks=matched_blocks,
                 matched_tokens=len(matched_tokens),
                 request_tokens=tokens,
                 disk_store=_disk_store,
+                validation_payload_cache=_validation_payload_cache,
             )
             dsv4_matched_tokens: Optional[int] = None
             dsv4_replayed_tokens = 0
@@ -2657,6 +2674,7 @@ class BlockAwarePrefixCache:
                 matched_blocks,
                 target_tokens=pinned_table.num_tokens,
                 disk_store=_disk_store,
+                validation_payload_cache=_validation_payload_cache,
             ):
                 self.paged_cache.release_request_refs(pinned_table)
                 logger.info(
@@ -2668,7 +2686,11 @@ class BlockAwarePrefixCache:
                 )
                 self._misses += 1
                 return None, tokens
-            if self._dsv4_l2_chain_missing_terminal_state(matched_blocks, _disk_store):
+            if self._dsv4_l2_chain_missing_terminal_state(
+                matched_blocks,
+                _disk_store,
+                validation_payload_cache=_validation_payload_cache,
+            ):
                 self.paged_cache.release_request_refs(pinned_table)
                 logger.warning(
                     "Ignoring DSV4 prefix-index hit for %s: matched blocks "
@@ -2678,7 +2700,11 @@ class BlockAwarePrefixCache:
                 )
                 self._misses += 1
                 return None, tokens
-            if self._zaya_l2_chain_missing_terminal_state(matched_blocks, _disk_store):
+            if self._zaya_l2_chain_missing_terminal_state(
+                matched_blocks,
+                _disk_store,
+                validation_payload_cache=_validation_payload_cache,
+            ):
                 self.paged_cache.release_request_refs(pinned_table)
                 logger.warning(
                     "Ignoring ZAYA prefix-index hit for %s: matched blocks "
@@ -2749,6 +2775,7 @@ class BlockAwarePrefixCache:
         matched_tokens: int,
         request_tokens: List[int],
         disk_store: Optional[Any],
+        validation_payload_cache: Optional[Dict[int, Any]] = None,
     ) -> Optional[Tuple[List[Any], int, int]]:
         """Map a longest DSV4 token match to its latest safe checkpoint.
 
@@ -2773,7 +2800,13 @@ class BlockAwarePrefixCache:
             if token_count <= 0:
                 return ([], 0, max(0, int(matched_tokens)))
             cumulative += token_count
-            entries = list(self._iter_terminal_check_entries(block, disk_store))
+            entries = list(
+                self._iter_terminal_check_entries(
+                    block,
+                    disk_store,
+                    validation_payload_cache=validation_payload_cache,
+                )
+            )
             delta_entries = [
                 entry
                 for entry in entries
@@ -2867,15 +2900,29 @@ class BlockAwarePrefixCache:
         return (list(blocks[:keep_count]), checkpoint, replayed)
 
     @staticmethod
-    def _iter_terminal_check_entries(block: Any, disk_store: Optional[Any] = None):
-        cache_data = getattr(block, "cache_data", None)
-        if cache_data is None and disk_store is not None:
-            block_hash = getattr(block, "block_hash", None)
-            if block_hash is not None:
-                try:
-                    cache_data = disk_store.read_block(block_hash)
-                except Exception:
-                    cache_data = None
+    def _iter_terminal_check_entries(
+        block: Any,
+        disk_store: Optional[Any] = None,
+        *,
+        validation_payload_cache: Optional[Dict[int, Any]] = None,
+    ):
+        cache_key = id(block)
+        if (
+            validation_payload_cache is not None
+            and cache_key in validation_payload_cache
+        ):
+            cache_data = validation_payload_cache[cache_key]
+        else:
+            cache_data = getattr(block, "cache_data", None)
+            if cache_data is None and disk_store is not None:
+                block_hash = getattr(block, "block_hash", None)
+                if block_hash is not None:
+                    try:
+                        cache_data = disk_store.read_block(block_hash)
+                    except Exception:
+                        cache_data = None
+            if validation_payload_cache is not None:
+                validation_payload_cache[cache_key] = cache_data
         for entry in cache_data or []:
             yield entry
 
@@ -2883,6 +2930,8 @@ class BlockAwarePrefixCache:
     def _dsv4_l2_chain_missing_terminal_state(
         cached_blocks: List[Any],
         disk_store: Optional[Any] = None,
+        *,
+        validation_payload_cache: Optional[Dict[int, Any]] = None,
     ) -> bool:
         """True when an L2 hit restored only non-terminal DSV4 blocks.
 
@@ -2900,6 +2949,7 @@ class BlockAwarePrefixCache:
             for entry in BlockAwarePrefixCache._iter_terminal_check_entries(
                 block,
                 disk_store,
+                validation_payload_cache=validation_payload_cache,
             ):
                 if not isinstance(entry, (tuple, list)) or not entry:
                     continue
@@ -2914,6 +2964,8 @@ class BlockAwarePrefixCache:
     def _zaya_l2_chain_missing_terminal_state(
         cached_blocks: List[Any],
         disk_store: Optional[Any] = None,
+        *,
+        validation_payload_cache: Optional[Dict[int, Any]] = None,
     ) -> bool:
         """True when a ZAYA hit has KV pages but lacks terminal CCA state."""
         saw_zaya = False
@@ -2922,6 +2974,7 @@ class BlockAwarePrefixCache:
             for entry in BlockAwarePrefixCache._iter_terminal_check_entries(
                 block,
                 disk_store,
+                validation_payload_cache=validation_payload_cache,
             ):
                 if not isinstance(entry, (tuple, list)) or not entry:
                     continue
@@ -2938,6 +2991,7 @@ class BlockAwarePrefixCache:
         *,
         target_tokens: int,
         disk_store: Optional[Any] = None,
+        validation_payload_cache: Optional[Dict[int, Any]] = None,
     ) -> bool:
         """True when a matched mixed-SWA boundary cannot be reconstructed.
 
@@ -2958,6 +3012,7 @@ class BlockAwarePrefixCache:
             BlockAwarePrefixCache._iter_terminal_check_entries(
                 cached_blocks[-1],
                 disk_store,
+                validation_payload_cache=validation_payload_cache,
             )
         )
         rotating_entries = [

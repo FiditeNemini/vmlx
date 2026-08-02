@@ -1406,8 +1406,11 @@ def test_dsv4_broad_catalog_does_not_duplicate_native_history_prompt():
         {"role": "assistant", "content": "5.2 KB"},
         {"role": "user", "content": "Repeat the size without calling a tool."},
     ]
+    # The catalog is broad and stable, so both authorized names are present,
+    # but only the tool that actually ran can appear as a DSML exemplar.
     native_prompt = """
 <｜begin▁of▁sentence｜>system
+Available tools: file_info, read_file
 <｜DSML｜tool_calls>
 <｜DSML｜invoke name="file_info">
 <｜DSML｜parameter name="path" string="true">panel/package.json</｜DSML｜parameter>

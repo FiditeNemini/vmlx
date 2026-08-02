@@ -28,6 +28,14 @@ export function requiredToolChoiceNamesForCurrentTurn(
   return exactlyOnceToolNames
 }
 
+export function unavailableRequestedToolNames(
+  requestedNames: string[],
+  availableNames: string[],
+): string[] {
+  const available = new Set(availableNames.map(name => name.toLowerCase()))
+  return requestedNames.filter(name => !available.has(name.toLowerCase()))
+}
+
 export function toolChoiceForCurrentTurn(
   suppressAllTools: boolean,
   exactFinalToolNames: string[],

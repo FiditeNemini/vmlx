@@ -48,6 +48,7 @@ import {
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
   toolChoiceForCurrentTurn,
+  unavailableRequestedToolNames,
 } from "../../shared/toolAutoContinue";
 import { buildToolMediaFollowupContent } from "../../shared/toolMediaFollowup";
 import { dsv4OutputBudget } from "../../shared/dsv4RequestBudget";
@@ -1529,10 +1530,11 @@ export function registerChatHandlers(
         !userForbidsToolCalls &&
         !exactTextOnlyNoToolTurn &&
         !privateReasoningNoToolTurn;
-      const exactlyOnceToolNames =
-        overrides?.builtinToolsEnabled === true
-          ? requestedOnceToolNames(latestUserText)
-          : [];
+      // Parse explicit built-in contracts even when the catalog or one of its
+      // categories is disabled. Otherwise the request can silently ignore the
+      // user's tool requirement, or (with a category disabled) send a required
+      // tool_choice without the matching schema.
+      const exactlyOnceToolNames = requestedOnceToolNames(latestUserText);
       const exactlyOnceBuiltinToolNames =
         exactlyOnceToolNames.filter((name) => isBuiltinTool(name));
       const completedExactFinalTools = new Set<string>();
@@ -1599,6 +1601,11 @@ export function registerChatHandlers(
         .filter((message) => message.role === "assistant")
         .map((message) => message.toolCapabilityFingerprint);
       const currentToolNames = toolCapabilityNames(currentTurnToolDefinitions);
+      const unavailableExactlyOnceBuiltinToolNames =
+        unavailableRequestedToolNames(
+          exactlyOnceBuiltinToolNames,
+          currentToolNames,
+        );
       const historicallyUnavailableTools = historicalUnavailableToolNames(
         messages,
         currentToolCapabilityFingerprint,
@@ -1989,6 +1996,18 @@ export function registerChatHandlers(
       };
 
       try {
+        if (unavailableExactlyOnceBuiltinToolNames.length > 0) {
+          const quotedNames = unavailableExactlyOnceBuiltinToolNames
+            .map((name) => `"${name}"`)
+            .join(", ");
+          const subject =
+            unavailableExactlyOnceBuiltinToolNames.length === 1
+              ? `tool ${quotedNames} is`
+              : `tools ${quotedNames} are`;
+          throw new Error(
+            `Requested built-in ${subject} disabled or unavailable for this turn. Enable the relevant Chat Settings category and retry.`,
+          );
+        }
         // Call API (local vMLX Engine or remote OpenAI-compatible endpoint)
         const apiUrl = useResponsesApi
           ? `${baseUrl}/v1/responses`

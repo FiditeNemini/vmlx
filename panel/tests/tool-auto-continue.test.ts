@@ -15,6 +15,7 @@ import {
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
   toolChoiceForCurrentTurn,
+  unavailableRequestedToolNames,
 } from '../src/shared/toolAutoContinue'
 
 describe('tool auto-continue policy', () => {
@@ -315,6 +316,18 @@ describe('tool auto-continue policy', () => {
     ).toEqual(['filesystem__read_file'])
   })
 
+  it('rejects explicit required tools that are absent from the filtered catalog', () => {
+    expect(
+      unavailableRequestedToolNames(
+        ['file_info', 'READ_FILE'],
+        ['read_file', 'run_command'],
+      ),
+    ).toEqual(['file_info'])
+    expect(
+      unavailableRequestedToolNames(['FILE_INFO'], ['file_info']),
+    ).toEqual([])
+  })
+
   it('keeps remote no-tool compatibility but enforces singular remote tool contracts', () => {
     expect(toolChoiceForCurrentTurn(true, [], 'chat', true)).toBeUndefined()
     expect(toolChoiceForCurrentTurn(true, [], 'responses', true)).toBeUndefined()
@@ -499,6 +512,8 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('const requestToolChoice = currentTurnToolChoice()')
     expect(source).toContain('const remainingExactlyOnceBuiltinTools =')
     expect(source).toContain('requiredToolChoiceNamesForCurrentTurn(')
+    expect(source).toContain('unavailableRequestedToolNames(')
+    expect(source).toContain('disabled or unavailable for this turn')
     expect(source).toContain('requestedScopedToolNames(')
     expect(source).toContain('exactlyOnceToolsComplete')
     expect(source).toContain('obj.tool_choice = requestToolChoice')

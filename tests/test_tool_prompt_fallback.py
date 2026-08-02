@@ -13,8 +13,8 @@ import pytest
 
 from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
 from vmlx_engine.loaders.dsv4_chat_encoder import (
+    prompt_tool_catalog,
     request_explicitly_requests_tool,
-    select_tools_for_explicit_request,
 )
 
 
@@ -445,50 +445,78 @@ def test_qwen_new_user_after_visible_assistant_answer_does_not_reuse_tool_state(
     assert "Completed tool(s): read_file" not in injected
 
 
-def test_dsv4_encoder_prompt_tools_narrow_to_explicit_latest_user_tool():
-    tools = [
-        {"type": "function", "function": {"name": "read_file"}},
-        {"type": "function", "function": {"name": "run_command"}},
-    ]
-    messages = [
-        {"role": "user", "content": "Use the run_command tool exactly once."},
-        {"role": "assistant", "content": "", "tool_calls": []},
-        {"role": "tool", "content": "prior result"},
-    ]
+def test_dsv4_prompt_catalog_keeps_full_set_when_latest_user_names_one_tool():
+    """An explicit tool request must not shrink the rendered catalog.
 
-    selected = select_tools_for_explicit_request(messages, tools)
-
-    assert selected == [tools[1]]
-
-
-def test_dsv4_encoder_prompt_tools_keep_all_when_no_registered_name_is_mentioned():
+    DSV4 renders the catalog into the system message. Dropping ``read_file``
+    here would both move every later byte (killing prefix reuse) and hide an
+    authorized tool from the model for the rest of the conversation.
+    """
     tools = [
         {"type": "function", "function": {"name": "read_file"}},
         {"type": "function", "function": {"name": "run_command"}},
     ]
 
-    selected = select_tools_for_explicit_request(
-        [{"role": "user", "content": "Use the built-in shell tool."}],
-        tools,
-    )
-
-    assert selected == tools
+    assert prompt_tool_catalog(tools) == tools
 
 
-def test_dsv4_encoder_tool_scope_ignores_negated_or_discussed_names():
+def test_dsv4_prompt_catalog_is_identical_across_an_agentic_transcript():
+    """The catalog is turn-independent — the prefix-cache invariant."""
     tools = [
-        {"type": "function", "function": {"name": "file_info"}},
+        {"type": "function", "function": {"name": "read_file"}},
         {"type": "function", "function": {"name": "run_command"}},
+        {"type": "function", "function": {"name": "write_file"}},
+    ]
+    transcripts = [
+        [{"role": "user", "content": "Use run_command to list files."}],
+        [
+            {"role": "user", "content": "Use run_command to list files."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "run_command", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "content": "app.py"},
+        ],
+        [
+            {"role": "user", "content": "Use run_command to list files."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "write_file", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "content": "wrote 7168 bytes"},
+            {"role": "user", "content": "Add one to the previous number."},
+        ],
     ]
 
+    catalogs = [prompt_tool_catalog(tools) for _ in transcripts]
+
+    assert all(catalog == tools for catalog in catalogs)
+
+
+def test_dsv4_prompt_catalog_drops_duplicate_tool_names():
+    """Duplicates waste prompt budget and let caller jitter move later bytes."""
+    read_file = {"type": "function", "function": {"name": "read_file"}}
+    run_command = {"type": "function", "function": {"name": "run_command"}}
+
+    assert prompt_tool_catalog([read_file, run_command, dict(read_file)]) == [
+        read_file,
+        run_command,
+    ]
+
+
+def test_dsv4_explicit_tool_intent_ignores_negated_or_discussed_names():
+    """Intent detection stays strict — it drives execution, not the prefix."""
     for request_text in (
         "Do not use file_info; explain how to inspect generation_config.json.",
         "Explain what FILE_INFO does without calling it.",
     ):
         assert not request_explicitly_requests_tool(request_text, "file_info")
-        assert select_tools_for_explicit_request(
-            [{"role": "user", "content": request_text}], tools
-        ) == tools
 
     assert request_explicitly_requests_tool(
         "Use exactly one FILE_INFO tool call to inspect generation_config.json.",
@@ -700,34 +728,19 @@ def test_dsv4_native_post_tool_prompt_remains_vendor_owned():
     assert "Native DSV4 tool-result continuation" not in rendered
 
 
-def test_dsv4_encoder_prompt_tools_preserve_recent_tool_schema_on_continuation():
+def test_dsv4_prompt_catalog_survives_a_tool_result_continuation():
+    """A continuation whose user turn stops naming the tool keeps every schema.
+
+    Narrowing to the most recently called tool used to make this continuation
+    render a different catalog than the turn before it, which pinned prefix
+    reuse at the first schema byte for the rest of the conversation.
+    """
     tools = [
         {"type": "function", "function": {"name": "read_file"}},
         {"type": "function", "function": {"name": "run_command"}},
     ]
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                "Use the run_command tool exactly once to create a file named "
-                "z.txt. Write the text Z7 into that file."
-            ),
-        },
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"function": {"name": "run_command", "arguments": {"command": "printf OK42"}}}
-            ],
-        },
-        {"role": "tool", "content": "$ printf OK42\n\nOK42"},
-        {"role": "assistant", "content": "OK42"},
-        {"role": "user", "content": "Add one to the previous number."},
-    ]
 
-    selected = select_tools_for_explicit_request(messages, tools)
-
-    assert selected == [tools[1]]
+    assert prompt_tool_catalog(tools) == tools
 
 
 def test_dsv4_fallback_does_not_invent_arg1_for_zero_arg_tool():

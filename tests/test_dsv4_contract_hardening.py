@@ -870,3 +870,87 @@ def test_dsv4_safe_auto_tokenizer_falls_back_to_tokenizer_json(tmp_path, monkeyp
             raise AssertionError("non-target tokenizer path should not be hidden")
 
     assert transformers.AutoTokenizer.from_pretrained is failing_from_pretrained
+
+
+def test_dsv4_adapter_renders_a_turn_independent_tool_catalog(monkeypatch):
+    """The system-message tool catalog must not vary across an agent loop.
+
+    DSV4 renders ``## Tools`` and every schema into the system message, at the
+    front of the token sequence. A turn-dependent catalog moves the first
+    schema byte, so prefix reuse pins there and every later agent iteration
+    cold-prefills the whole transcript. It also hides authorized tools from the
+    model mid-loop.
+    """
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    captured: list[list[dict]] = []
+
+    class OfficialShapeEncoder:
+        REASONING_EFFORT_PROMPTS = {"low": ""}
+
+        @staticmethod
+        def encode_messages(messages, **_kwargs):
+            for message in messages:
+                if message.get("tools"):
+                    captured.append(message["tools"])
+                    break
+            else:
+                captured.append([])
+            return "official-prompt"
+
+    monkeypatch.setattr(
+        dsv4_chat_encoder,
+        "_get_encoding",
+        lambda model_path=None: OfficialShapeEncoder,
+    )
+
+    tools = [
+        {"type": "function", "function": {"name": "run_command"}},
+        {"type": "function", "function": {"name": "write_file"}},
+        {"type": "function", "function": {"name": "read_file"}},
+    ]
+    system = {"role": "system", "content": "coding agent"}
+    call = lambda name: {  # noqa: E731
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"function": {"name": name, "arguments": "{}"}}],
+    }
+    transcripts = [
+        [system, {"role": "user", "content": "Use run_command to list files."}],
+        [
+            system,
+            {"role": "user", "content": "Use run_command to list files."},
+            call("run_command"),
+            {"role": "tool", "content": "app.py"},
+        ],
+        [
+            system,
+            {"role": "user", "content": "Use run_command to list files."},
+            call("run_command"),
+            {"role": "tool", "content": "app.py"},
+            {"role": "assistant", "content": "Found app.py."},
+            {"role": "user", "content": "Now build minesweeper.html."},
+            call("write_file"),
+            {"role": "tool", "content": "wrote 7168 bytes"},
+        ],
+    ]
+
+    for messages in transcripts:
+        dsv4_chat_encoder.apply_chat_template(
+            messages,
+            enable_thinking=True,
+            reasoning_effort="low",
+            tools=tools,
+        )
+
+    assert len(captured) == len(transcripts)
+    names = [[_tool_name(t) for t in rendered] for rendered in captured]
+    assert names == [["run_command", "write_file", "read_file"]] * len(transcripts), (
+        "DSV4 prompt tool catalog must be identical on every turn; "
+        f"got {names}"
+    )
+
+
+def _tool_name(tool: dict) -> str:
+    func = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+    return func.get("name", "")

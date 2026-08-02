@@ -15,6 +15,10 @@
  *     is independent of reusable prefix/paged/L2 state. Electron emits it only
  *     when the live bundle detector found an explicit boolean cache stamp;
  *     otherwise the engine loader derives the value from `jang_config.json`.
+ *   - `DSV4_ACTIVATION_QAT` is a user-owned, restart-required fidelity knob.
+ *     It defaults Off. On enables the source-native E4M3 attention-KV/pool
+ *     round-trips and Hadamard+FP4 indexer round-trips in the JANG graph. It
+ *     does not control the separate FP32 compressor staging contract.
  *   - `--dsv4-enable-prefix-cache` is a deprecated compatibility alias. Product
  *     sessions intentionally use only the normal prefix/paged/block-disk flags.
  *
@@ -27,11 +31,29 @@ export interface Dsv4EnvConfig {
   dsv4RawMax?: boolean
   dsv4FinalizerTokens?: number
   dsv4ForceDirect?: boolean
+  dsv4ActivationQat?: boolean
 }
 
 export interface Dsv4EnvOptions {
   dsv4Active?: boolean
   dsv4PoolQuantDefault?: boolean
+}
+
+/**
+ * Resolve the family the engine will actually use for this session.
+ *
+ * `--model-family` bypasses engine autodetection, so every family-gated panel
+ * behavior must give a saved, non-Auto override the same precedence. Empty and
+ * Auto values retain the detected family.
+ */
+export function resolveEffectiveModelFamily(
+  modelFamilyOverride: string | null | undefined,
+  detectedFamily: string | null | undefined,
+): string | undefined {
+  const override = String(modelFamilyOverride || '').trim()
+  if (override && override !== 'auto') return override
+  const detected = String(detectedFamily || '').trim()
+  return detected || undefined
 }
 
 export function dsv4EnvFromConfig(
@@ -43,6 +65,7 @@ export function dsv4EnvFromConfig(
 
   if (options.dsv4Active === true) {
     env.DSV4_LONG_CTX = '1'
+    env.DSV4_ACTIVATION_QAT = config.dsv4ActivationQat === true ? '1' : '0'
     if (typeof options.dsv4PoolQuantDefault === 'boolean') {
       env.DSV4_POOL_QUANT = options.dsv4PoolQuantDefault ? '1' : '0'
     }

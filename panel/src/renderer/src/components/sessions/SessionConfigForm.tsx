@@ -19,6 +19,7 @@ import { isLagunaMixedSwaTurboQuantEffective } from '../../../../shared/lagunaCa
 import { normalizeMcpPolicyList } from '../../../../shared/mcpPolicy'
 import { canonicalizeToolParserId } from '../../../../shared/toolParserAliases'
 import { shouldWarnDsv4TopP } from '../../../../shared/samplingParameterDomain'
+import { resolveEffectiveModelFamily } from '../../../../shared/dsv4Env'
 export interface SessionConfig {
   host: string
   port: number
@@ -90,6 +91,7 @@ export interface SessionConfig {
   defaultEnableThinking?: boolean
   dsv4PrefixCache?: boolean
   dsv4PoolQuant?: boolean
+  dsv4ActivationQat?: boolean
   embeddingModel: string
   additionalArgs: string
   enableJit: boolean
@@ -182,6 +184,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
   defaultEnableThinking: undefined,
   dsv4PrefixCache: false,
   dsv4PoolQuant: undefined,
+  dsv4ActivationQat: false,
   embeddingModel: '',
   additionalArgs: '',
   enableJit: true,
@@ -344,7 +347,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const [mcpImportLoading, setMcpImportLoading] = useState(false)
 
   const normalizedDetectedFamily = normalizeDetectedFamilyName(detectedFamily)
-  const dsv4Active = normalizedDetectedFamily === 'deepseek-v4'
+  const normalizedEffectiveFamily = normalizeDetectedFamilyName(
+    resolveEffectiveModelFamily(config.modelFamily, normalizedDetectedFamily),
+  )
+  const dsv4Active = normalizedEffectiveFamily === 'deepseek-v4'
   const m3Active = normalizedDetectedFamily === 'minimax_m3'
   const hy3Active = normalizedDetectedFamily === 'hy_v3' || normalizedDetectedFamily === 'hy3'
   const openPanguExactTypedCache = normalizedDetectedFamily === 'openpangu_v2'
@@ -874,7 +880,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           disabled={dsv4Active}
         />
         {!dsv4Active && <PerformanceHint text="Keep ON for best overall behavior: it enables prefix reuse, the in-memory RAM tier, persistent SSD L2, and architecture-specific cache restore while the default max sequence count stays at one for local chat." />}
-        {dsv4Active && <InfoNote text="DSV4 Flash stays on its native DSV4BatchGenerator path. Prefix reuse, bounded In-Memory Paged Cache (RAM), and Block Disk Cache (SSD / L2) default On as one hot/warm/cold stack; the CSA/HCA pool codec remains bundle-derived." />}
+        {dsv4Active && <InfoNote text="DSV4 Flash stays on its native DSV4BatchGenerator path. Prefix reuse defaults On and Block Disk Cache (SSD / L2) defaults On as the warm/cold stack. In-Memory Paged Cache (RAM) remains optional and bounded when enabled; the CSA/HCA pool codec remains bundle-derived." />}
         {!effectiveContinuousBatching && effectivePrefixCacheEnabled && (
           <InfoNote text="Cache flags will be omitted at launch while continuous batching is off. Turn it back on to use Prefix Cache, In-Memory Paged Cache (RAM), Block Disk Cache (SSD / L2), and stored-cache codecs." />
         )}
@@ -1155,22 +1161,31 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           </div>
         </div>
         {dsv4Active && (
-          <div className="block">
-            <span className="text-xs font-medium text-muted-foreground">
-              Native CSA/HCA Pool Codec
-              <Tooltip text="This is DSV4's architecture-native compressed-pool codec, not generic TurboQuant KV. The value is detected from the loaded bundle and is not user-overridable from this generic cache panel." />
-            </span>
-            <div className="cfg-input flex items-center justify-between" style={{ background: 'var(--card)', cursor: 'default' }}>
-              <span>DSV4 pool quantization</span>
-              <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'var(--success-bg, rgba(34,197,94,0.15))', color: 'var(--success-fg, rgb(34,197,94))' }}>
-                {config.dsv4PoolQuant === true
-                  ? 'ON (BUNDLE)'
-                  : config.dsv4PoolQuant === false
-                    ? 'OFF (BUNDLE)'
-                    : 'ENGINE / BUNDLE DEFAULT'}
+          <>
+            <div className="block">
+              <span className="text-xs font-medium text-muted-foreground">
+                Native CSA/HCA Pool Codec
+                <Tooltip text="This is DSV4's architecture-native compressed-pool codec, not generic TurboQuant KV. The value is detected from the loaded bundle and is not user-overridable from this generic cache panel." />
               </span>
+              <div className="cfg-input flex items-center justify-between" style={{ background: 'var(--card)', cursor: 'default' }}>
+                <span>DSV4 pool quantization</span>
+                <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'var(--success-bg, rgba(34,197,94,0.15))', color: 'var(--success-fg, rgb(34,197,94))' }}>
+                  {config.dsv4PoolQuant === true
+                    ? 'ON (BUNDLE)'
+                    : config.dsv4PoolQuant === false
+                      ? 'OFF (BUNDLE)'
+                      : 'ENGINE / BUNDLE DEFAULT'}
+                </span>
+              </div>
             </div>
-          </div>
+            <CheckField
+              label="DSV4 Activation QAT"
+              tooltip="Restart required. On enables source-native E4M3 round-trips for attention KV and compressed pools plus Hadamard-128 + FP4 E2M1 indexer round-trips. Off skips only those activation-QAT transforms to avoid their runtime overhead; FP32 compressor staging remains enabled and is not controlled here."
+              checked={config.dsv4ActivationQat === true}
+              onChange={v => onChange('dsv4ActivationQat', v)}
+            />
+            <InfoNote text="Default Off. Enable only when you want the source-native DSV4 activation-QAT graph and accept its extra runtime work. This switch does not change weights, sampling, cache pool quantization, or FP32 compressor staging." />
+          </>
         )}
 
         {/* Stored prefix-cache compression — orthogonal to TurboQuant. */}

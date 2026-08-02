@@ -289,6 +289,7 @@ _NATIVE_CACHE_ATTESTATION_FIELDS = (
     "components",
     "generic_turboquant_kv",
     "pool_quant",
+    "activation_qat_configuration",
     "layer_cache_roles",
     "cache_store_policy",
     "decode_activation_order",
@@ -9211,6 +9212,429 @@ def _current_model_config():
         return None
 
 
+def _dsv4_model_candidates(model: Any) -> list[Any]:
+    """Return the small set of wrappers that may own JANG runtime attestations."""
+
+    candidates: list[Any] = []
+    seen: set[int] = set()
+    pending = [model]
+    while pending and len(candidates) < 4:
+        candidate = pending.pop(0)
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        candidates.append(candidate)
+        for name in ("model", "language_model"):
+            nested = getattr(candidate, name, None)
+            if nested is not None:
+                pending.append(nested)
+    return candidates
+
+
+def _optional_runtime_bool(value: Any) -> bool | None:
+    """Accept only explicit runtime booleans; never turn missing truth into False."""
+
+    return value if isinstance(value, bool) else None
+
+
+def _dsv4_activation_qat_status(model: Any) -> dict[str, Any]:
+    """Report requested/configured/observed activation-QAT without inference.
+
+    The environment is only the request. The JANG graph owns effective and
+    observed truth through a non-executing model attestation; an older runtime
+    that lacks that contract reports ``None`` instead of echoing the request as
+    success. FP32 compressor staging is deliberately separate from this toggle.
+    """
+
+    raw_env = os.environ.get("DSV4_ACTIVATION_QAT", "0")
+    requested = str(raw_env).strip().lower() in {"1", "true", "yes", "on"}
+    effective: bool | None = None
+    observed: bool | None = None
+    supported: bool | None = None
+    runtime_requested: bool | None = None
+    attested: bool | None = None
+    paths: dict[str, bool | None] | None = None
+    transform_families: list[Any] | None = None
+    attestation_scope: str | None = None
+    fused_e4m3_available: bool | None = None
+    fused_indexer_available: bool | None = None
+    source: str | None = None
+    fp32_staging_observed: bool | None = None
+
+    for candidate in _dsv4_model_candidates(model):
+        raw_status = getattr(candidate, "_vmlx_dsv4_activation_qat_status", None)
+        if isinstance(raw_status, dict):
+            runtime_requested = _optional_runtime_bool(raw_status.get("requested"))
+            effective = _optional_runtime_bool(raw_status.get("effective"))
+            observed = _optional_runtime_bool(raw_status.get("observed"))
+            attested = _optional_runtime_bool(raw_status.get("attested"))
+            supported = _optional_runtime_bool(
+                raw_status.get(
+                    "implementation_available",
+                    raw_status.get("supported"),
+                )
+            )
+            paths = {
+                "attention_kv_and_pool_e4m3": _optional_runtime_bool(
+                    raw_status.get("e4m3_kv_pool_observed")
+                ),
+                "indexer_hadamard128_fp4_e2m1": _optional_runtime_bool(
+                    raw_status.get("hadamard_fp4_indexer_observed")
+                ),
+            }
+            raw_transform_families = raw_status.get("transform_families")
+            if isinstance(raw_transform_families, (list, tuple)):
+                transform_families = list(raw_transform_families)
+            raw_attestation_scope = raw_status.get("attestation_scope")
+            if isinstance(raw_attestation_scope, str):
+                attestation_scope = raw_attestation_scope
+            fused_e4m3_available = _optional_runtime_bool(
+                raw_status.get("fused_e4m3_available")
+            )
+            fused_indexer_available = _optional_runtime_bool(
+                raw_status.get("fused_indexer_available")
+            )
+            fp32_staging_observed = _optional_runtime_bool(
+                raw_status.get(
+                    "fp32_compressor_staging_unconditional",
+                    raw_status.get("fp32_compressor_staging_observed"),
+                )
+            )
+            source = type(candidate).__name__ + "._vmlx_dsv4_activation_qat_status"
+            break
+
+        candidate_effective = _optional_runtime_bool(
+            getattr(candidate, "_vmlx_dsv4_activation_qat_effective", None)
+        )
+        candidate_observed = _optional_runtime_bool(
+            getattr(candidate, "_vmlx_dsv4_activation_qat_observed", None)
+        )
+        if candidate_effective is not None or candidate_observed is not None:
+            effective = candidate_effective
+            observed = candidate_observed
+            attested = observed is not None
+            supported = _optional_runtime_bool(
+                getattr(candidate, "_vmlx_dsv4_activation_qat_supported", None)
+            )
+            fp32_staging_observed = _optional_runtime_bool(
+                getattr(
+                    candidate,
+                    "_vmlx_dsv4_fp32_compressor_staging_observed",
+                    None,
+                )
+            )
+            source = type(candidate).__name__ + ".vmlx_activation_qat_attributes"
+            break
+
+    paths_match_request = bool(paths) and all(
+        value is requested for value in paths.values()
+    )
+
+    return {
+        "requested": requested,
+        "runtime_requested": runtime_requested,
+        "effective": effective,
+        "observed": observed,
+        "attested": attested,
+        "supported": supported,
+        "matches_request": (
+            effective is not None
+            and observed is not None
+            and attested is True
+            and supported is True
+            and (runtime_requested is None or runtime_requested == requested)
+            and effective == requested
+            and observed == requested
+            and paths_match_request
+        ),
+        "env": str(raw_env),
+        "attestation_source": source,
+        "paths": paths,
+        "attestation_scope": attestation_scope,
+        "transform_families": transform_families,
+        "fused_kernels": {
+            "e4m3_available": fused_e4m3_available,
+            "indexer_available": fused_indexer_available,
+        },
+        "controls": [
+            "attention_kv_e4m3_roundtrip",
+            "compressed_pool_e4m3_roundtrip",
+            "indexer_hadamard128_fp4_e2m1_roundtrip",
+        ],
+        "fp32_compressor_staging": {
+            "controlled_by_toggle": False,
+            "observed": fp32_staging_observed,
+            "reason": "separate_precision_contract",
+        },
+    }
+
+
+def _dsv4_model_config(model: Any) -> Any | None:
+    """Return the actual DSV4 config, never an unrelated outer wrapper config."""
+
+    def config_value(config: Any, name: str) -> Any:
+        return (
+            config.get(name)
+            if isinstance(config, dict)
+            else getattr(config, name, None)
+        )
+
+    def is_dsv4_config(config: Any) -> bool:
+        model_type = str(config_value(config, "model_type") or "").lower()
+        family_name = str(config_value(config, "family_name") or "").lower()
+        architectures = config_value(config, "architectures") or []
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        architecture_names = {str(name).lower() for name in architectures}
+        return (
+            model_type == "deepseek_v4"
+            or family_name == "deepseek_v4"
+            or any(
+                "deepseekv4" in name or "deepseek_v4" in name
+                for name in architecture_names
+            )
+        )
+
+    matching_configs: list[Any] = []
+    for candidate in _dsv4_model_candidates(model):
+        outer_config = getattr(candidate, "config", None) or getattr(
+            candidate, "args", None
+        )
+        if outer_config is None:
+            continue
+        configs = [outer_config]
+        text_config = config_value(outer_config, "text_config")
+        if text_config is not None:
+            configs.append(text_config)
+        for config in configs:
+            if is_dsv4_config(config):
+                matching_configs.append(config)
+
+    def has_estimator_dimensions(config: Any) -> bool:
+        layers = (
+            config_value(config, "num_hidden_layers")
+            or config_value(config, "n_layers")
+            or config_value(config, "num_layers")
+        )
+        kv_heads = (
+            config_value(config, "num_key_value_heads")
+            or config_value(config, "n_kv_heads")
+            or config_value(config, "num_kv_heads")
+            or config_value(config, "num_attention_heads")
+            or config_value(config, "n_heads")
+        )
+        head_dim = config_value(config, "head_dim")
+        hidden_size = config_value(config, "hidden_size") or config_value(
+            config, "d_model"
+        )
+        attention_heads = (
+            config_value(config, "num_attention_heads")
+            or config_value(config, "n_heads")
+            or config_value(config, "attention_heads")
+        )
+        try:
+            has_layers = int(layers or 0) > 0
+            has_kv_heads = int(kv_heads or 0) > 0
+            has_head_width = int(head_dim or 0) > 0 or (
+                int(hidden_size or 0) > 0 and int(attention_heads or 0) > 0
+            )
+        except (TypeError, ValueError):
+            return False
+        return has_layers and has_kv_heads and has_head_width
+
+    for config in matching_configs:
+        if has_estimator_dimensions(config):
+            return config
+    return matching_configs[0] if matching_configs else None
+
+
+def _dsv4_memory_estimate_payload(estimate: Any) -> dict[str, Any]:
+    component_bytes = {
+        "swa_local": int(estimate.local_swa_bytes),
+        "csa_compressed_pool": int(estimate.csa_pool_bytes),
+        "csa_indexer_pool": int(estimate.csa_indexer_bytes),
+        "hca_compressed_pool": int(estimate.hca_pool_bytes),
+        "incomplete_tail_state": int(estimate.tail_bytes),
+    }
+    total_bytes = int(estimate.total_bytes)
+    return {
+        "tokens": int(estimate.token_count),
+        "total_bytes": total_bytes,
+        "total_gib": round(total_bytes / (1024**3), 6),
+        "component_bytes": component_bytes,
+        "component_gib": {
+            key: round(value / (1024**3), 6)
+            for key, value in component_bytes.items()
+        },
+        "pool_quant_enabled": bool(estimate.pool_quant_enabled),
+        "layer_counts": {
+            "ratio_0_swa": int(estimate.ratio_zero_layers),
+            "ratio_4_csa": int(estimate.ratio_four_layers),
+            "ratio_high_hca": int(estimate.ratio_high_layers),
+        },
+    }
+
+
+def _dsv4_native_state_memory_status(
+    scheduler: Any,
+    model: Any,
+    *,
+    pool_quant_observed: bool | None,
+) -> dict[str, Any]:
+    """Estimate only DSV4's architecture-native live state, never generic KV.
+
+    This is distinct from the retained prefix-cache L1 counters reported by
+    ``_cache_telemetry_snapshot``. It describes one live DSV4 sequence's
+    bounded SWA ring plus cumulative CSA/indexer/HCA pools at the current/last
+    prompt and at the model's declared maximum context.
+    """
+
+    config = _dsv4_model_config(model)
+    result: dict[str, Any] = {
+        "basis": "architecture_estimate_not_allocator_measurement",
+        "includes": [
+            "swa_local",
+            "csa_compressed_pool",
+            "csa_indexer_pool",
+            "hca_compressed_pool",
+            "incomplete_tail_state",
+        ],
+        "excludes": ["model_weights", "prefix_cache_l1", "block_disk_l2"],
+        "retained_l1_reported_separately": True,
+        "pool_quant_observed": pool_quant_observed,
+    }
+    if config is None:
+        result.update({"available": False, "reason": "loaded_model_config_unavailable"})
+        return result
+    if pool_quant_observed is None:
+        result.update({"available": False, "reason": "pool_quant_runtime_unattested"})
+        return result
+
+    try:
+        from vmlx_engine.utils.memory_limits import (
+            estimate_dsv4_cache_memory_from_config,
+        )
+
+        running = getattr(scheduler, "running", None)
+        if isinstance(running, dict):
+            running_requests = list(running.values())
+        elif isinstance(running, (list, tuple)):
+            running_requests = list(running)
+        else:
+            running_requests = []
+        def request_token_counts(request: Any) -> tuple[int, int]:
+            prompt_tokens = int(
+                getattr(request, "num_prompt_tokens", 0)
+                or len(getattr(request, "prompt_token_ids", None) or [])
+            )
+            output_tokens = int(getattr(request, "num_output_tokens", 0) or 0)
+            raw_total = getattr(request, "num_tokens", 0)
+            total_tokens = int(raw_total or (prompt_tokens + output_tokens))
+            return prompt_tokens, max(total_tokens, prompt_tokens + output_tokens)
+
+        running_counts = [request_token_counts(request) for request in running_requests]
+        current_prompt_tokens = max((count[0] for count in running_counts), default=0)
+        current_sequence_tokens = max((count[1] for count in running_counts), default=0)
+        batch_generator = getattr(scheduler, "batch_generator", None)
+        generator_requests = getattr(batch_generator, "_requests", None)
+        if current_sequence_tokens <= 0 and isinstance(generator_requests, list):
+            current_sequence_tokens = max(
+                (
+                    len(getattr(request, "context_tokens", None) or [])
+                    for request in generator_requests
+                ),
+                default=0,
+            )
+        last_execution = getattr(scheduler, "_last_cache_execution", None)
+        last_prompt_tokens = (
+            int(last_execution.get("prompt_tokens", 0) or 0)
+            if isinstance(last_execution, dict)
+            else 0
+        )
+        declared_context_tokens = _declared_context_limit_from_config(config)
+
+        def estimate_for_tokens(token_count: int) -> dict[str, Any] | None:
+            if token_count <= 0:
+                return None
+            estimate = estimate_dsv4_cache_memory_from_config(
+                config,
+                token_count,
+                pool_quant_enabled=pool_quant_observed,
+            )
+            return (
+                _dsv4_memory_estimate_payload(estimate)
+                if estimate is not None
+                else None
+            )
+
+        snapshot_bytes = int(
+            getattr(batch_generator, "prompt_snapshot_last_estimated_bytes", 0)
+            or 0
+        )
+
+        estimates = {
+            "current_prompt": estimate_for_tokens(current_prompt_tokens),
+            "current_sequence": estimate_for_tokens(current_sequence_tokens),
+            "last_prompt": estimate_for_tokens(last_prompt_tokens),
+            "max_context": estimate_for_tokens(declared_context_tokens),
+        }
+        requested_estimates = {
+            "current_prompt": current_prompt_tokens,
+            "current_sequence": current_sequence_tokens,
+            "last_prompt": last_prompt_tokens,
+            "max_context": declared_context_tokens,
+        }
+        unavailable_estimates = [
+            name
+            for name, token_count in requested_estimates.items()
+            if token_count > 0 and estimates[name] is None
+        ]
+        if unavailable_estimates:
+            result.update(
+                {
+                    "available": False,
+                    "reason": "native_estimator_unavailable",
+                    "unavailable_estimates": unavailable_estimates,
+                    "declared_context_tokens": declared_context_tokens or None,
+                }
+            )
+            return result
+
+        result.update(
+            {
+                "available": True,
+                "current_prompt": estimates["current_prompt"],
+                "current_sequence": estimates["current_sequence"],
+                "current_sequence_basis": "prompt_plus_generated_tokens",
+                "last_prompt": estimates["last_prompt"],
+                "max_context": estimates["max_context"],
+                "declared_context_tokens": declared_context_tokens or None,
+                "last_prompt_snapshot": (
+                    {
+                        "estimated_bytes": snapshot_bytes,
+                        "estimated_gib": round(snapshot_bytes / (1024**3), 6),
+                        "source": (
+                            "DSV4BatchGenerator."
+                            "prompt_snapshot_last_estimated_bytes"
+                        ),
+                    }
+                    if snapshot_bytes > 0
+                    else None
+                ),
+            }
+        )
+        return result
+    except Exception as exc:
+        result.update(
+            {
+                "available": False,
+                "reason": "architecture_estimate_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        return result
+
+
 def _native_cache_status(
     scheduler=None,
     *,
@@ -9252,12 +9676,13 @@ def _native_cache_status(
             "yes",
             "on",
         )
+        model = getattr(scheduler, "model", None)
+        activation_qat = _dsv4_activation_qat_status(model)
         layout: dict[str, Any] = {}
         pool_quant_observed: bool | None = None
         cache_class_counts: dict[str, int] = {}
         layout_error: str | None = None
         try:
-            model = getattr(scheduler, "model", None)
             cache_layers = model.make_cache() if model is not None else None
             if cache_layers:
                 ratios: list[int | None] = []
@@ -9343,7 +9768,10 @@ def _native_cache_status(
                 "hca_compressed_pool",
                 "incomplete_tail_state",
             ],
-            "generic_turboquant_kv": {"enabled": False, "reason": "native_dsv4_composite"},
+            "generic_turboquant_kv": {
+                "enabled": False,
+                "reason": "native_dsv4_composite",
+            },
             "pool_quant": {
                 "requested": pool_quant_requested,
                 "enabled": pool_quant_observed is True,
@@ -9354,6 +9782,18 @@ def _native_cache_status(
                 ),
                 "env": os.environ.get("DSV4_POOL_QUANT", "0"),
                 "error": layout_error,
+            },
+            # Full runtime observation is intentionally outside the stable
+            # cache-topology attestation because per-path observations become
+            # populated only after the first forward pass.
+            "activation_qat": activation_qat,
+            "activation_qat_configuration": {
+                "requested": activation_qat["requested"],
+                "runtime_requested": activation_qat["runtime_requested"],
+                "effective": activation_qat["effective"],
+                "supported": activation_qat["supported"],
+                "controls": activation_qat["controls"],
+                "fp32_compressor_staging_controlled": False,
             },
             "layer_cache_roles": {
                 "ratio_0": "swa_local_only",
@@ -9377,6 +9817,13 @@ def _native_cache_status(
             "block_disk_only": block_disk_only,
             "block_disk_l2": bool(block_disk_store is not None),
         }
+        native_state_memory = _dsv4_native_state_memory_status(
+            scheduler,
+            getattr(scheduler, "model", None),
+            pool_quant_observed=pool_quant_observed,
+        )
+        if native_state_memory:
+            status["native_state_memory"] = native_state_memory
         status.update(layout)
         return status
 

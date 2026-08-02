@@ -1518,6 +1518,312 @@ def test_dsv4_health_reports_rotating_swa_layers_as_ratio_zero(monkeypatch):
     assert status["layer_cache_roles"]["ratio_0"] == "swa_local_only"
 
 
+def test_dsv4_activation_qat_partitions_prefix_and_l2_model_identity(monkeypatch):
+    """QAT-on cache tensors must never refault into a QAT-off graph."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.prefix_cache import compute_model_cache_key
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            model_type="deepseek_v4",
+            num_hidden_layers=43,
+            num_attention_heads=64,
+            num_key_value_heads=1,
+            hidden_size=4096,
+        )
+    )
+    monkeypatch.setenv("DSV4_ACTIVATION_QAT", "0")
+    qat_off_key = compute_model_cache_key(model)
+    monkeypatch.setenv("DSV4_ACTIVATION_QAT", "1")
+    qat_on_key = compute_model_cache_key(model)
+
+    assert qat_off_key != qat_on_key
+    monkeypatch.setenv("DSV4_ACTIVATION_QAT", "false")
+    assert compute_model_cache_key(model) == qat_off_key
+
+
+def test_dsv4_health_reports_qat_truth_and_native_memory_separately(monkeypatch):
+    """Health distinguishes JANG QAT attestation, native state, and retained L1."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.server import _native_cache_status
+
+    class RotatingKVCache:
+        pass
+
+    class PoolQuantizedV4Cache:
+        def __init__(self, ratio):
+            self.compress_ratio = ratio
+            self.local = SimpleNamespace(max_size=128)
+
+    config = SimpleNamespace(
+        model_type="deepseek_v4",
+        num_hidden_layers=3,
+        num_attention_heads=64,
+        num_key_value_heads=1,
+        head_dim=512,
+        hidden_size=4096,
+        sliding_window=128,
+        index_head_dim=128,
+        torch_dtype="bfloat16",
+        max_position_embeddings=1_048_576,
+        compress_ratios=[0, 4, 128],
+    )
+    model = SimpleNamespace(
+        # The engine may wrap the language model in an unrelated outer config;
+        # telemetry must select the recognized DSV4 config, not the wrapper.
+        config=SimpleNamespace(model_type="wrapper"),
+        language_model=SimpleNamespace(config=config),
+        make_cache=lambda: [
+            RotatingKVCache(),
+            PoolQuantizedV4Cache(4),
+            PoolQuantizedV4Cache(128),
+        ],
+        _vmlx_dsv4_activation_qat_status={
+            "requested": True,
+            "effective": True,
+            "observed": True,
+            "attested": True,
+            "e4m3_kv_pool_observed": True,
+            "hadamard_fp4_indexer_observed": True,
+            "implementation_available": True,
+            "fused_e4m3_available": True,
+            "fused_indexer_available": True,
+            "fp32_compressor_staging_unconditional": True,
+            "attestation_scope": "transform_family_dispatch_not_every_call_site",
+            "transform_families": ["e4m3", "hadamard_fp4"],
+        },
+    )
+    batch_generator = SimpleNamespace(
+        _requests=[],
+        prompt_snapshot_last_estimated_bytes=123_456,
+    )
+    scheduler = SimpleNamespace(
+        _uses_dsv4_cache=True,
+        _model_type_for_runtime="deepseek_v4",
+        model=model,
+        block_aware_cache=None,
+        paged_cache_manager=None,
+        disk_cache=None,
+        running={
+            "request": SimpleNamespace(
+                num_prompt_tokens=4096,
+                num_output_tokens=64,
+                num_tokens=4160,
+                prompt_token_ids=[],
+            )
+        },
+        _last_cache_execution={"prompt_tokens": 2048},
+        batch_generator=batch_generator,
+    )
+    monkeypatch.setenv("DSV4_POOL_QUANT", "1")
+    monkeypatch.setenv("DSV4_ACTIVATION_QAT", "1")
+
+    status = _native_cache_status(scheduler)
+
+    assert status["activation_qat"]["requested"] is True
+    assert status["activation_qat"]["effective"] is True
+    assert status["activation_qat"]["observed"] is True
+    assert status["activation_qat"]["attested"] is True
+    assert status["activation_qat"]["matches_request"] is True
+    assert status["activation_qat"]["fp32_compressor_staging"] == {
+        "controlled_by_toggle": False,
+        "observed": True,
+        "reason": "separate_precision_contract",
+    }
+    memory = status["native_state_memory"]
+    assert memory["basis"] == "architecture_estimate_not_allocator_measurement"
+    assert memory["retained_l1_reported_separately"] is True
+    assert memory["pool_quant_observed"] is True
+    assert memory["current_prompt"]["tokens"] == 4096
+    assert memory["current_sequence"]["tokens"] == 4160
+    assert memory["current_sequence_basis"] == "prompt_plus_generated_tokens"
+    assert memory["last_prompt"]["tokens"] == 2048
+    assert memory["max_context"]["tokens"] == 1_048_576
+    assert memory["max_context"]["total_bytes"] < 15 * 1024**3
+    assert memory["last_prompt_snapshot"]["estimated_bytes"] == 123_456
+    assert "prefix_cache_l1" in memory["excludes"]
+
+
+def test_dsv4_health_does_not_echo_qat_request_as_runtime_observation(monkeypatch):
+    """An old JANG runtime without attestation remains explicitly unknown."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.server import _native_cache_status
+
+    model = SimpleNamespace(make_cache=lambda: [])
+    scheduler = SimpleNamespace(
+        _uses_dsv4_cache=True,
+        _model_type_for_runtime="deepseek_v4",
+        model=model,
+        block_aware_cache=None,
+        paged_cache_manager=None,
+        disk_cache=None,
+        running={},
+        batch_generator=None,
+    )
+    monkeypatch.setenv("DSV4_ACTIVATION_QAT", "1")
+
+    qat = _native_cache_status(scheduler)["activation_qat"]
+
+    assert qat["requested"] is True
+    assert qat["effective"] is None
+    assert qat["observed"] is None
+    assert qat["attested"] is None
+    assert qat["matches_request"] is False
+
+
+def test_dsv4_health_accepts_attested_identity_bypass_as_qat_off(monkeypatch):
+    """Observed False is the correct enabled state when both paths bypass QAT."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.server import _dsv4_activation_qat_status
+
+    model = SimpleNamespace(
+        _vmlx_dsv4_activation_qat_status={
+            "requested": False,
+            "effective": False,
+            "observed": False,
+            "attested": True,
+            "e4m3_kv_pool_observed": False,
+            "hadamard_fp4_indexer_observed": False,
+            "implementation_available": True,
+            "fused_e4m3_available": True,
+            "fused_indexer_available": True,
+            "fp32_compressor_staging_unconditional": True,
+            "attestation_scope": "transform_family_dispatch_not_every_call_site",
+            "transform_families": ["e4m3", "hadamard_fp4"],
+        }
+    )
+    monkeypatch.setenv("DSV4_ACTIVATION_QAT", "0")
+
+    status = _dsv4_activation_qat_status(model)
+
+    assert status["requested"] is False
+    assert status["runtime_requested"] is False
+    assert status["effective"] is False
+    assert status["observed"] is False
+    assert status["attested"] is True
+    assert status["matches_request"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("implementation_available", False),
+        ("attested", False),
+        ("e4m3_kv_pool_observed", False),
+        ("hadamard_fp4_indexer_observed", None),
+    ],
+)
+def test_dsv4_health_rejects_contradictory_qat_attestation(
+    monkeypatch, field, value
+):
+    """A request match requires every transform-family attestation to agree."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.server import _dsv4_activation_qat_status
+
+    runtime_status = {
+        "requested": True,
+        "effective": True,
+        "observed": True,
+        "attested": True,
+        "e4m3_kv_pool_observed": True,
+        "hadamard_fp4_indexer_observed": True,
+        "implementation_available": True,
+    }
+    runtime_status[field] = value
+    monkeypatch.setenv("DSV4_ACTIVATION_QAT", "1")
+
+    status = _dsv4_activation_qat_status(
+        SimpleNamespace(_vmlx_dsv4_activation_qat_status=runtime_status)
+    )
+
+    assert status["matches_request"] is False
+
+
+def test_dsv4_native_memory_prefers_dimensional_inner_config(monkeypatch):
+    """A DSV4-labelled wrapper must not hide its estimator-ready text config."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.server import _dsv4_native_state_memory_status
+
+    inner = SimpleNamespace(
+        model_type="deepseek_v4",
+        num_hidden_layers=3,
+        num_attention_heads=64,
+        num_key_value_heads=1,
+        head_dim=512,
+        hidden_size=4096,
+        max_position_embeddings=4096,
+        compress_ratios=[0, 4, 128],
+    )
+    model = SimpleNamespace(
+        config=SimpleNamespace(model_type="deepseek_v4", text_config=inner),
+        make_cache=lambda: [],
+    )
+    scheduler = SimpleNamespace(
+        _uses_dsv4_cache=True,
+        _model_type_for_runtime="deepseek_v4",
+        model=model,
+        block_aware_cache=None,
+        paged_cache_manager=None,
+        disk_cache=None,
+        running={
+            "request": SimpleNamespace(
+                num_prompt_tokens=1024,
+                num_output_tokens=0,
+                num_tokens=1024,
+                prompt_token_ids=[],
+            )
+        },
+        batch_generator=SimpleNamespace(
+            _requests=[], prompt_snapshot_last_estimated_bytes=0
+        ),
+        _last_cache_execution=None,
+    )
+    memory = _dsv4_native_state_memory_status(
+        scheduler, model, pool_quant_observed=True
+    )
+
+    assert memory["available"] is True
+    assert memory["current_prompt"]["tokens"] == 1024
+
+
+def test_dsv4_native_memory_fails_closed_when_estimator_cannot_size(monkeypatch):
+    """Positive token counts cannot report available with null estimates."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.server import _dsv4_native_state_memory_status
+
+    model = SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v4"))
+    scheduler = SimpleNamespace(
+        model=model,
+        running={
+            "request": SimpleNamespace(
+                num_prompt_tokens=1024,
+                num_output_tokens=0,
+                num_tokens=1024,
+                prompt_token_ids=[],
+            )
+        },
+        batch_generator=SimpleNamespace(
+            _requests=[], prompt_snapshot_last_estimated_bytes=0
+        ),
+        _last_cache_execution=None,
+    )
+
+    memory = _dsv4_native_state_memory_status(
+        scheduler, model, pool_quant_observed=True
+    )
+
+    assert memory["available"] is False
+    assert memory["reason"] == "native_estimator_unavailable"
+    assert "current_prompt" in memory["unavailable_estimates"]
+
+
 def test_dsv4_cached_prefix_kickoff_avoids_cross_thread_mx_eval():
     """DSV4 cache-hit kickoff must not use mx.eval on worker-thread tensors."""
     import inspect

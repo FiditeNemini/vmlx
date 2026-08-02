@@ -9,7 +9,7 @@ import { join, basename, dirname } from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import { db, Session } from './database'
 import { resolveImageModelFromDirectoryName } from '../shared/imageModels'
-import { dsv4EnvFromConfig } from '../shared/dsv4Env'
+import { dsv4EnvFromConfig, resolveEffectiveModelFamily } from '../shared/dsv4Env'
 import { resolveCacheLaunchPolicy } from '../shared/cacheControlPolicy'
 import {
   applyLagunaJitDefaultEnvironment,
@@ -241,19 +241,22 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   try {
     const detected = detectModelConfigFromDir(modelPath)
     const detectedFamily = normalizeDetectedFamilyName(detected.family)
+    const effectiveFamily = normalizeDetectedFamilyName(
+      resolveEffectiveModelFamily(config.modelFamily, detectedFamily),
+    )
     let changed = migrateModelParserDefaults(
       config as Record<string, any>,
       detectedFamily,
       detected.reasoningParser,
     )
     if (
-      detectedFamily === 'deepseek-v4' &&
+      effectiveFamily === 'deepseek-v4' &&
       (config.timeout == null || config.timeout === GENERIC_DEFAULT_TIMEOUT_SECONDS)
     ) {
       config.timeout = DSV4_DEFAULT_TIMEOUT_SECONDS
       changed = true
     }
-    if (detectedFamily === 'deepseek-v4') {
+    if (effectiveFamily === 'deepseek-v4') {
       // DSV4 uses the normal product cache controls with a typed
       // SWA+CSA/HCA block record. Fill only missing user toggles here: explicit
       // post-migration Prefix/Paged/Block-Disk choices must survive restart.
@@ -302,6 +305,12 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         // No bundle stamp: omit the product override so the engine loader
         // derives the internal pool codec from jang_config.json.
         delete config.dsv4PoolQuant
+        changed = true
+      }
+      if (config.dsv4ActivationQat === undefined) {
+        // Activation QAT is a user-owned fidelity/overhead choice, not a
+        // bundle-derived cache default. Existing sessions migrate to Off.
+        config.dsv4ActivationQat = false
         changed = true
       }
     } else if (detectedFamily === 'minimax_m3') {
@@ -735,7 +744,10 @@ function markCacheStackStartupDefaultsCurrent(
       const detectedFamily = normalizeDetectedFamilyName(
         detectModelConfigFromDir(targetPath).family,
       )
-      if (!detectedFamily || detectedFamily === 'unknown') return false
+      const effectiveFamily = normalizeDetectedFamilyName(
+        resolveEffectiveModelFamily(config.modelFamily, detectedFamily),
+      )
+      if (!effectiveFamily || effectiveFamily === 'unknown') return false
     } catch {
       return false
     }
@@ -772,7 +784,10 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
     }
   }
 
-  const dsv4Active = detectedFamily === 'deepseek-v4'
+  const effectiveFamily = normalizeDetectedFamilyName(
+    resolveEffectiveModelFamily(config.modelFamily, detectedFamily),
+  )
+  const dsv4Active = effectiveFamily === 'deepseek-v4'
   const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
   // DSV4 and every family with a safe generic or typed block serializer use
   // the normal hot/warm/cold stack by default: bounded paged RAM backed by
@@ -867,12 +882,16 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
   } catch {
     /* detection best-effort; leave undefined -> paged-off in the generic branch */
   }
+  const migrationEffectiveFamily = normalizeDetectedFamilyName(
+    resolveEffectiveModelFamily(config.modelFamily, migrationDetectedFamily),
+  )
+  const migrationDsv4Active = migrationEffectiveFamily === 'deepseek-v4'
   // v12: DSV4 native composite block records became a product cache lane.
   // v13 restores the standard hot/warm/cold default now that typed RAM blocks,
   // bounded block-disk L2, and SSD refault share one native block index. Only
   // exact prior default tuples migrate; near-misses remain user-owned.
   const staleV11Dsv4FailClosed =
-    migrationDetectedFamily === 'deepseek-v4' &&
+    migrationDsv4Active &&
     cacheDefaultsVersion === 11 &&
     config.continuousBatching === true &&
     Number(config.maxNumSeqs) === 1 &&
@@ -899,7 +918,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     config.kvCacheQuantization === 'auto' &&
     Number(config.kvCacheGroupSize) === 64
   const staleV12Dsv4SsdOnlyDefault =
-    migrationDetectedFamily === 'deepseek-v4' &&
+    migrationDsv4Active &&
     cacheDefaultsVersion === 12 &&
     config.continuousBatching === true &&
     Number(config.maxNumSeqs) === 1 &&
@@ -925,7 +944,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     Number(config.maxCacheBlocks) === DSV4_MAX_CACHE_BLOCKS &&
     config.kvCacheQuantization === 'auto' &&
     Number(config.kvCacheGroupSize) === 64
-  if (migrationDetectedFamily === 'deepseek-v4') {
+  if (migrationDsv4Active) {
     if (!staleV11Dsv4FailClosed && !staleV12Dsv4SsdOnlyDefault) return false
     config.enablePrefixCache = true
     config.dsv4PrefixCache = true
@@ -1018,7 +1037,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
   // opt-out (paged ON + both disk caches OFF) remains untouched.
   const stalePreV9PagedLegacyDiskWithoutBlockL2 =
     Number(config.cacheStackStartupDefaultsVersion || 0) < 9 &&
-    migrationDetectedFamily !== 'deepseek-v4' &&
+    !migrationDsv4Active &&
     migrationDetectedUsePaged === true &&
     config.continuousBatching === true &&
     config.enablePrefixCache === true &&
@@ -1060,7 +1079,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
   const staleV10NonPagedPromptL2 =
     Number(config.cacheStackStartupDefaultsVersion || 0) === 10 &&
     migrationDetectedFamily !== 'openpangu_v2' &&
-    migrationDetectedFamily !== 'deepseek-v4' &&
+    !migrationDsv4Active &&
     migrationDetectedUsePaged !== true &&
     config.continuousBatching === true &&
     config.enablePrefixCache === true &&
@@ -2082,14 +2101,20 @@ export class SessionManager extends EventEmitter {
     // replaced with a different model (same folder name, different model_type).
     // User-set overrides (port, host, apiKey, etc.) are preserved.
     let freshDetectedFamily: string | undefined
+    let freshDsv4Active = normalizeDetectedFamilyName(
+      resolveEffectiveModelFamily(config.modelFamily, freshDetectedFamily),
+    ) === 'deepseek-v4'
     let freshDetectedConfig: ReturnType<typeof detectModelConfigFromDir> | undefined
     if (!isImageSession) {
       try {
         const freshConfig = detectModelConfigFromDir(config.modelPath)
         if (freshConfig) {
           freshDetectedConfig = freshConfig
-          const freshFamily = normalizeDetectedFamilyName(freshConfig.family)
-          freshDetectedFamily = freshFamily
+          freshDetectedFamily = normalizeDetectedFamilyName(freshConfig.family)
+          const freshFamily = freshDetectedFamily
+          freshDsv4Active = normalizeDetectedFamilyName(
+            resolveEffectiveModelFamily(config.modelFamily, freshDetectedFamily),
+          ) === 'deepseek-v4'
           const oldFamily = config.toolCallParser
           const oldReasoningParser = config.reasoningParser
           // Update auto-detected fields only if user hasn't explicitly overridden them
@@ -2116,7 +2141,7 @@ export class SessionManager extends EventEmitter {
           if (freshFamily === 'minimax' && config.reasoningParser !== '') {
             config.reasoningParser = freshConfig.reasoningParser || 'auto'
           }
-          if (freshFamily === 'deepseek-v4') {
+          if (freshDsv4Active) {
             const dsv4PoolQuantDefault = freshConfig.dsv4PoolQuantDefault
             const dsv4PrefixEnabled = config.enablePrefixCache !== false
             const dsv4Changed =
@@ -2129,6 +2154,7 @@ export class SessionManager extends EventEmitter {
               (typeof dsv4PoolQuantDefault === 'boolean'
                 ? config.dsv4PoolQuant !== dsv4PoolQuantDefault
                 : config.dsv4PoolQuant !== undefined) ||
+              config.dsv4ActivationQat === undefined ||
               config.pagedCacheBlockSize !== DSV4_PAGED_CACHE_BLOCK_SIZE ||
               config.maxNumSeqs !== 1 ||
               config.kvCacheQuantization !== 'auto' ||
@@ -2149,6 +2175,9 @@ export class SessionManager extends EventEmitter {
             } else {
               delete config.dsv4PoolQuant
             }
+            if (config.dsv4ActivationQat === undefined) {
+              config.dsv4ActivationQat = false
+            }
             config.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
             config.maxNumSeqs = 1
             config.prefillBatchSize = 1
@@ -2165,7 +2194,7 @@ export class SessionManager extends EventEmitter {
             if (dsv4Changed) {
               this.pushLog(
                 sessionId,
-                `[INFO] DSV4-Flash native cache policy: prefix=${config.enablePrefixCache !== false ? 'on' : 'off'}, paged_ram=${config.usePagedCache === true ? 'on' : 'off'}, block_disk_l2=${config.enableBlockDiskCache === true ? 'on' : 'off'}, block_size=${DSV4_PAGED_CACHE_BLOCK_SIZE}, generic_turboquant=off, pool_codec=bundle-derived`,
+                `[INFO] DSV4-Flash native cache policy: prefix=${config.enablePrefixCache !== false ? 'on' : 'off'}, paged_ram=${config.usePagedCache === true ? 'on' : 'off'}, block_disk_l2=${config.enableBlockDiskCache === true ? 'on' : 'off'}, block_size=${DSV4_PAGED_CACHE_BLOCK_SIZE}, generic_turboquant=off, pool_codec=bundle-derived, activation_qat=${config.dsv4ActivationQat === true ? 'on' : 'off'}`,
               )
             }
           } else if (freshFamily === 'minimax_m3') {
@@ -2428,6 +2457,7 @@ export class SessionManager extends EventEmitter {
     delete spawnEnv.JANGTQ_DISABLE_DSV4_FAST_LOAD
     delete spawnEnv.DSV4_LONG_CTX
     delete spawnEnv.DSV4_POOL_QUANT
+    delete spawnEnv.DSV4_ACTIVATION_QAT
     delete spawnEnv.VMLX_DENSE_STRICT_LANE
     delete spawnEnv.VMLX_DSV4_FAST_LOAD_DISABLE
     delete spawnEnv.VMLX_DSV4_ENABLE_PREFIX_CACHE
@@ -2443,7 +2473,7 @@ export class SessionManager extends EventEmitter {
     // DSV4 Flash runtime knobs. Helper validates inputs and emits only the
     // env vars the engine reads.
     const dsv4Env = dsv4EnvFromConfig(config as any, {
-      dsv4Active: freshDetectedFamily === 'deepseek-v4',
+      dsv4Active: freshDsv4Active,
       dsv4PoolQuantDefault: freshDetectedConfig?.dsv4PoolQuantDefault,
     })
     for (const [key, value] of Object.entries(dsv4Env)) {
@@ -2459,6 +2489,7 @@ export class SessionManager extends EventEmitter {
       'JANGTQ_DISABLE_DSV4_FAST_LOAD',
       'DSV4_LONG_CTX',
       'DSV4_POOL_QUANT',
+      'DSV4_ACTIVATION_QAT',
       'VMLX_DENSE_STRICT_LANE',
       'VMLX_DSV4_FAST_LOAD_DISABLE',
       'VMLX_DSV4_ENABLE_PREFIX_CACHE',
@@ -2821,7 +2852,7 @@ export class SessionManager extends EventEmitter {
     'enableBlockDiskCache', 'blockDiskCacheMaxGb', 'blockDiskCacheDir',
     'prefixCacheSize', 'prefixCacheMaxBytes', 'cacheTtlMinutes', 'isMultimodal',
     'toolCallParser', 'reasoningParser',
-    'dsv4PrefixCache', 'dsv4PoolQuant',
+    'dsv4PrefixCache', 'dsv4PoolQuant', 'dsv4ActivationQat',
     'maxNumSeqs', 'prefillBatchSize', 'prefillStepSize', 'completionBatchSize',
     'streamInterval', 'apiKey', 'rateLimit', 'timeout',
     // Timeout is both a per-request client/proxy deadline and a server launch
@@ -3110,6 +3141,7 @@ export class SessionManager extends EventEmitter {
           dsv4PoolQuant: detectedFamily === 'deepseek-v4'
             ? detected.dsv4PoolQuantDefault
             : undefined,
+          dsv4ActivationQat: false,
           defaultEnableThinking: undefined,
           nativeMtpMode: proc.nativeMtpSamplingPolicy === 'deterministic-defaults'
             ? 'deterministic'
@@ -3902,11 +3934,15 @@ export class SessionManager extends EventEmitter {
     const args = ['serve', config.modelPath]
     const isImage = config.modelType === 'image'
     const detected = detectModelConfigFromDir(config.modelPath)
+    const detectedFamily = normalizeDetectedFamilyName(detected.family)
+    const effectiveFamily = normalizeDetectedFamilyName(
+      resolveEffectiveModelFamily(config.modelFamily, detectedFamily),
+    )
 
     // Server settings — always pass explicitly (both text and image)
     args.push('--host', config.host)
     args.push('--port', config.port.toString())
-    args.push('--timeout', effectiveSessionTimeoutSeconds(config, detected.family).toString())
+    args.push('--timeout', effectiveSessionTimeoutSeconds(config, effectiveFamily).toString())
 
     const rateLimit = finitePositiveInteger(config.rateLimit)
     if (rateLimit != null) args.push('--rate-limit', rateLimit.toString())
@@ -3955,9 +3991,8 @@ export class SessionManager extends EventEmitter {
     // Auto-detect tool/reasoning/cache behavior from config.json. This must
     // happen before concurrency flags because DSV4's custom generator is
     // single-batch even though the generic session profile defaults higher.
-    const detectedFamily = normalizeDetectedFamilyName(detected.family)
-    const dsv4Active = detectedFamily === 'deepseek-v4'
-    const m3Active = detectedFamily === 'minimax_m3'
+    const dsv4Active = effectiveFamily === 'deepseek-v4'
+    const m3Active = effectiveFamily === 'minimax_m3'
 
     // Concurrent processing
     // When value is 0 ("No limit" in UI), omit the flag so backend uses its default.
@@ -4176,10 +4211,10 @@ export class SessionManager extends EventEmitter {
       args.push('--no-paged-cache')
     }
     if (!prefixCacheOff && (usePagedCache || cacheLaunchPolicy.enableBlockDiskCache)) {
-      const effectivePagedCacheBlockSize = detectedFamily === 'deepseek-v4'
+      const effectivePagedCacheBlockSize = dsv4Active
         ? DSV4_PAGED_CACHE_BLOCK_SIZE
         : config.pagedCacheBlockSize
-      if (detectedFamily === 'deepseek-v4' && config.pagedCacheBlockSize !== DSV4_PAGED_CACHE_BLOCK_SIZE) {
+      if (dsv4Active && config.pagedCacheBlockSize !== DSV4_PAGED_CACHE_BLOCK_SIZE) {
         console.log(`[SESSION] DSV4-Flash detected: overriding pagedCacheBlockSize ${config.pagedCacheBlockSize} -> ${DSV4_PAGED_CACHE_BLOCK_SIZE} (native SWA+CSA/HCA composite cache)`)
       }
       const pagedCacheBlockSize = finitePositiveInteger(effectivePagedCacheBlockSize)
@@ -4196,16 +4231,16 @@ export class SessionManager extends EventEmitter {
     // Compatible plain-KV families may use TurboQuant for live generation;
     // typed/path-dependent families own their complete cache state instead.
     // q8/q4 here is additional compression only where the generic codec is valid.
-    if (!prefixCacheOff && detectedFamily === 'deepseek-v4' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
+    if (!prefixCacheOff && dsv4Active && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
       console.log(`[SESSION] DSV4-Flash detected: ignoring generic kvCacheQuantization=${config.kvCacheQuantization}; native SWA+CSA/HCA cache policy owns compression`)
     }
-    if (!prefixCacheOff && detectedFamily === 'minimax_m3' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
+    if (!prefixCacheOff && effectiveFamily === 'minimax_m3' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
       console.log(`[SESSION] MiniMax-M3 detected: ignoring generic kvCacheQuantization=${config.kvCacheQuantization}; native MSA cache stores keys/values/idx_keys without generic KV codecs`)
     }
-    if (!prefixCacheOff && detectedFamily === 'openpangu_v2' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
+    if (!prefixCacheOff && effectiveFamily === 'openpangu_v2' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
       console.log(`[SESSION] openPangu detected: ignoring generic kvCacheQuantization=${config.kvCacheQuantization}; exact typed cache owns MLA KV, DSA indexer, SWA metadata, and causal-conv state`)
     }
-    if (!prefixCacheOff && detectedFamily !== 'deepseek-v4' && detectedFamily !== 'minimax_m3' && detectedFamily !== 'openpangu_v2' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
+    if (!prefixCacheOff && effectiveFamily !== 'deepseek-v4' && effectiveFamily !== 'minimax_m3' && effectiveFamily !== 'openpangu_v2' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
       args.push('--kv-cache-quantization', config.kvCacheQuantization)
       const kvCacheGroupSize = finitePositiveInteger(config.kvCacheGroupSize)
       if (config.kvCacheQuantization !== 'none' && kvCacheGroupSize != null && kvCacheGroupSize !== 64) {

@@ -92,6 +92,7 @@ export interface ServerConfig {
   // DSV4 Flash runtime env controls
   dsv4PrefixCache?: boolean
   dsv4PoolQuant?: boolean
+  dsv4ActivationQat?: boolean
 
   // Custom API model name (--served-model-name)
   servedModelName?: string

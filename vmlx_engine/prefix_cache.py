@@ -333,6 +333,13 @@ def compute_model_cache_key(
     if any(p == "model_type=deepseek_v4" for p in parts):
         parts.append(f"dsv4_long_ctx={os.environ.get('DSV4_LONG_CTX', '0')}")
         parts.append(f"dsv4_pool_quant={os.environ.get('DSV4_POOL_QUANT', '')}")
+        activation_qat = str(
+            os.environ.get("DSV4_ACTIVATION_QAT", "0")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        # Activation-QAT changes the values written into attention KV and
+        # compressor/indexer pools. Never restore an L1/L2 state produced by
+        # the opposite graph even when model weights and prompt tokens match.
+        parts.append(f"dsv4_activation_qat={1 if activation_qat else 0}")
         # v5: DSV4 runtime uses PR #1195 flat-pool CSA/HCA masks plus
         # chunked prefill. Bump the schema so old blocks captured by the
         # pre-v5 L*topk expansion path can never replay into the fixed

@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { dsv4EnvFromConfig } from '../src/shared/dsv4Env'
+import { dsv4EnvFromConfig, resolveEffectiveModelFamily } from '../src/shared/dsv4Env'
+
+describe('resolveEffectiveModelFamily', () => {
+  it('gives an explicit non-Auto family precedence over autodetection', () => {
+    expect(resolveEffectiveModelFamily('deepseek_v4', 'qwen3_5')).toBe('deepseek_v4')
+    expect(resolveEffectiveModelFamily('qwen3_5', 'deepseek-v4')).toBe('qwen3_5')
+  })
+
+  it('retains autodetection for Auto, empty, and missing overrides', () => {
+    expect(resolveEffectiveModelFamily('auto', 'deepseek-v4')).toBe('deepseek-v4')
+    expect(resolveEffectiveModelFamily('', 'deepseek-v4')).toBe('deepseek-v4')
+    expect(resolveEffectiveModelFamily(undefined, 'deepseek-v4')).toBe('deepseek-v4')
+  })
+})
 
 describe('dsv4EnvFromConfig', () => {
   it('returns empty object for null/undefined config', () => {
@@ -15,12 +28,23 @@ describe('dsv4EnvFromConfig', () => {
   it('keeps product cache policy out of the DSV4 env helper', () => {
     expect(dsv4EnvFromConfig({}, { dsv4Active: true })).toEqual({
       DSV4_LONG_CTX: '1',
+      DSV4_ACTIVATION_QAT: '0',
     })
   })
 
   it('leaves standard cache controls CLI-owned and an unstamped pool codec model-owned', () => {
     expect(dsv4EnvFromConfig({ dsv4PrefixCache: true, dsv4PoolQuant: true } as any, { dsv4Active: true })).toEqual({
       DSV4_LONG_CTX: '1',
+      DSV4_ACTIVATION_QAT: '0',
+    })
+  })
+
+  it('emits activation QAT off by default and on only for an explicit DSV4 setting', () => {
+    expect(dsv4EnvFromConfig({}, { dsv4Active: true })).toMatchObject({
+      DSV4_ACTIVATION_QAT: '0',
+    })
+    expect(dsv4EnvFromConfig({ dsv4ActivationQat: true }, { dsv4Active: true })).toMatchObject({
+      DSV4_ACTIVATION_QAT: '1',
     })
   })
 
@@ -30,6 +54,7 @@ describe('dsv4EnvFromConfig', () => {
       dsv4PoolQuantDefault: true,
     })).toEqual({
       DSV4_LONG_CTX: '1',
+      DSV4_ACTIVATION_QAT: '0',
       DSV4_POOL_QUANT: '1',
     })
   })
@@ -40,12 +65,13 @@ describe('dsv4EnvFromConfig', () => {
       dsv4PoolQuantDefault: false,
     })).toEqual({
       DSV4_LONG_CTX: '1',
+      DSV4_ACTIVATION_QAT: '0',
       DSV4_POOL_QUANT: '0',
     })
   })
 
   it('does not leak stale DSV4 cache fields into non-DSV4 launches', () => {
-    expect(dsv4EnvFromConfig({ dsv4PrefixCache: true, dsv4PoolQuant: true } as any, { dsv4Active: false })).toEqual({})
+    expect(dsv4EnvFromConfig({ dsv4PrefixCache: true, dsv4PoolQuant: true, dsv4ActivationQat: true } as any, { dsv4Active: false })).toEqual({})
   })
 
   it('does not gate raw max through an env opt-in anymore', () => {
@@ -99,6 +125,7 @@ describe('dsv4EnvFromConfig', () => {
     }, { dsv4Active: true })
     expect(env).toEqual({
       DSV4_LONG_CTX: '1',
+      DSV4_ACTIVATION_QAT: '0',
     })
   })
 
@@ -121,15 +148,41 @@ describe('dsv4EnvFromConfig wired into sessions.ts spawnEnv', () => {
     const source = fs.readFileSync(sessionsPath, 'utf8')
 
     // Import statement present
-    expect(source).toContain("import { dsv4EnvFromConfig } from '../shared/dsv4Env'")
+    expect(source).toContain("import { dsv4EnvFromConfig, resolveEffectiveModelFamily } from '../shared/dsv4Env'")
 
     // Called and merged into spawnEnv (each emitted env var assigned)
     expect(source).toContain('const dsv4Env = dsv4EnvFromConfig(config as any, {')
-    expect(source).toContain("dsv4Active: freshDetectedFamily === 'deepseek-v4'")
+    expect(source).toContain('resolveEffectiveModelFamily(config.modelFamily, freshDetectedFamily)')
+    expect(source).toContain('dsv4Active: freshDsv4Active')
     expect(source).toContain('dsv4PoolQuantDefault: freshDetectedConfig?.dsv4PoolQuantDefault')
     expect(source).toContain('delete spawnEnv.DSV4_LONG_CTX')
     expect(source).toContain('delete spawnEnv.DSV4_POOL_QUANT')
+    expect(source).toContain('delete spawnEnv.DSV4_ACTIVATION_QAT')
     expect(source).toContain('spawnEnv[key] = value')
+  })
+
+  it('uses the effective family for DSV4 defaults and launch gating', () => {
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const sessionsPath = path.resolve(__dirname, '../src/main/sessions.ts')
+    const source = fs.readFileSync(sessionsPath, 'utf8')
+
+    const familyDefaultsStart = source.indexOf('function applyFamilyStartupDefaults')
+    const familyDefaultsEnd = source.indexOf('const ADDITIONAL_ARG_VALUE_FLAGS', familyDefaultsStart)
+    const familyDefaultsBlock = source.slice(familyDefaultsStart, familyDefaultsEnd)
+    expect(familyDefaultsBlock).toContain('resolveEffectiveModelFamily(config.modelFamily, detectedFamily)')
+    expect(familyDefaultsBlock).toContain("effectiveFamily === 'deepseek-v4'")
+
+    const cacheDefaultsStart = source.indexOf('function applyMissingCacheStackStartupDefaults')
+    const cacheDefaultsEnd = source.indexOf('function isZayaCacheStackMigrationTarget', cacheDefaultsStart)
+    const cacheDefaultsBlock = source.slice(cacheDefaultsStart, cacheDefaultsEnd)
+    expect(cacheDefaultsBlock).toContain('resolveEffectiveModelFamily(config.modelFamily, detectedFamily)')
+    expect(cacheDefaultsBlock).toContain("const dsv4Active = effectiveFamily === 'deepseek-v4'")
+
+    const buildArgsStart = source.indexOf('buildArgs(config: ServerConfig)')
+    const buildArgsBlock = source.slice(buildArgsStart)
+    expect(buildArgsBlock).toContain('resolveEffectiveModelFamily(config.modelFamily, detectedFamily)')
+    expect(buildArgsBlock).toContain("const dsv4Active = effectiveFamily === 'deepseek-v4'")
   })
 
   it('marks DSV4 cache controls as restart-required session config', () => {
@@ -140,6 +193,7 @@ describe('dsv4EnvFromConfig wired into sessions.ts spawnEnv', () => {
 
     expect(source).toContain("'dsv4PrefixCache'")
     expect(source).toContain("'dsv4PoolQuant'")
+    expect(source).toContain("'dsv4ActivationQat'")
     expect(source).not.toContain("'dsv4RawMax'")
     expect(source).not.toContain("'dsv4ForceDirect'")
   })
@@ -155,6 +209,7 @@ describe('dsv4EnvFromConfig wired into sessions.ts spawnEnv', () => {
 
     expect(probeBlock).toContain("'DSV4_LONG_CTX'")
     expect(probeBlock).toContain("'DSV4_POOL_QUANT'")
+    expect(probeBlock).toContain("'DSV4_ACTIVATION_QAT'")
     expect(probeBlock).toContain("'VMLX_DSV4_ENABLE_PREFIX_CACHE'")
     expect((probeBlock.match(/DSV4_POOL_QUANT/g) ?? [])).toHaveLength(1)
   })
@@ -186,9 +241,29 @@ describe('DSV4 runtime controls in SessionConfigForm', () => {
 
     expect(source).toContain('dsv4PoolQuant?: boolean')
     expect(source).toContain('dsv4PrefixCache?: boolean')
+    expect(source).toContain('dsv4ActivationQat?: boolean')
+    expect(source).toContain('dsv4ActivationQat: false')
     expect(source).not.toContain('dsv4PoolQuant: false')
     expect(source).toContain('dsv4PrefixCache: false')
     expect(source).not.toContain('dsv4FinalizerTokens')
+  })
+
+  it('shows a DSV4-only restart-required activation-QAT toggle with honest scope', () => {
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const formPath = path.resolve(__dirname, '../src/renderer/src/components/sessions/SessionConfigForm.tsx')
+    const source = fs.readFileSync(formPath, 'utf8')
+
+    expect(source).toContain('resolveEffectiveModelFamily(config.modelFamily, normalizedDetectedFamily)')
+    expect(source).toContain("const dsv4Active = normalizedEffectiveFamily === 'deepseek-v4'")
+    expect(source).toContain('{dsv4Active && (')
+    expect(source).toContain('label="DSV4 Activation QAT"')
+    expect(source).toContain("checked={config.dsv4ActivationQat === true}")
+    expect(source).toContain("onChange={v => onChange('dsv4ActivationQat', v)}")
+    expect(source).toContain('E4M3 round-trips for attention KV and compressed pools')
+    expect(source).toContain('Hadamard-128 + FP4 E2M1 indexer round-trips')
+    expect(source).toContain('FP32 compressor staging remains enabled')
+    expect(source).toContain('Default Off')
   })
 
   it('renders standard DSV4 cache controls without legacy behavior toggles', () => {

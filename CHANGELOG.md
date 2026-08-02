@@ -2,6 +2,46 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.20] - 2026-08-01
+
+### Changed
+
+- DeepSeek V4 Flash 0731 sessions derive native Low reasoning, DSML tooling,
+  top-p guidance, q8 native pool quantization, activation-QAT availability,
+  and cache-tier capabilities from the loaded bundle and effective runtime.
+- Server and Chat settings distinguish DSV4 native compiled decode and pooled
+  cache state from unsupported generic TurboQuant or whole-model cache modes.
+- Cache activity separates current-process reads, writes, misses, and evictions
+  from persistent namespace and managed-root occupancy.
+
+### Fixed
+
+- Native DSV4 context admission, stop-token handling, tool-prompt ownership,
+  DSML failure behavior, and tool-result continuation remain consistent across
+  Electron and OpenAI-compatible API paths.
+- DSV4 native cache snapshots preserve short append checkpoints, lossless L2
+  writes, valid eviction ancestry, partial-tail replay, SSD-only operation, and
+  RAM-to-SSD refault without repeated validation reads.
+- The Electron renderer warns when DSV4 top-p differs from bundle guidance,
+  keeps cache status requests session-scoped, prevents loaded-session header
+  overlap, and renders math without treating currency as a delimiter.
+- Explicit one-tool prompts whose final contract says the visible answer must
+  be exact now enter the no-more-tools continuation pass instead of leaving the
+  model in an open-ended tool-capable continuation.
+
+### Distribution hardening
+
+- Production packaging attests the native Python DSV4 encoder and the exact
+  clean JANG runtime source, including nested affine defaults and mixed module
+  quantization metadata.
+- Sequoia and Tahoe remain separately signed and notarized artifacts from one
+  exact source revision.
+
+### Checkpoint boundary
+
+- Broader multi-family, modality, and maximum-context coverage remains tracked
+  for the next checkpoint and is not implied by this DSV4-focused release.
+
 ## [1.6.19] - 2026-07-28
 
 ### Changed

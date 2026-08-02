@@ -578,7 +578,11 @@ def install_dsv4_affine_moe_fastpath(model: Any, *, model_type: str | None = Non
     if mx is None:
         logger.info("DSV4 affine MoE fast path skipped: MLX is unavailable")
         return 0
-    enabled = os.environ.get("VMLX_DSV4_AFFINE_MOE_FASTPATH", "1").strip().lower()
+    # PR #248 measured a large win over an older M4 stock runtime. Current MLX
+    # on M5 Max is already faster on native gather_qmm (18.7 vs 17.1 tok/s in
+    # the exact 400-token keeper A/B), so this remains an explicit hardware
+    # evaluation opt-in instead of regressing the production default.
+    enabled = os.environ.get("VMLX_DSV4_AFFINE_MOE_FASTPATH", "0").strip().lower()
     if enabled in {"0", "false", "no", "off"}:
         logger.info(
             "DSV4 affine MoE fast path disabled by VMLX_DSV4_AFFINE_MOE_FASTPATH=%s",

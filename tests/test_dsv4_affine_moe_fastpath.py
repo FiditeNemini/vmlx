@@ -133,6 +133,7 @@ def fake_runtime(monkeypatch):
         "QuantizedSwitchLinear",
         _FakeQuantizedSwitchLinear,
     )
+    monkeypatch.setenv("VMLX_DSV4_AFFINE_MOE_FASTPATH", "1")
     _FakeSwitchGLU.__call__ = _FAKE_STOCK_CALL
     _FakeWeightedMoE._weighted_routed_experts = _FAKE_STOCK_WEIGHTED_CALL
     yield fastpath
@@ -168,6 +169,14 @@ def test_dsv4_affine_weak_identity_map_accepts_unhashable_modules(fake_runtime):
 
 def test_dsv4_affine_opt_out_precedes_install(fake_runtime, monkeypatch):
     monkeypatch.setenv("VMLX_DSV4_AFFINE_MOE_FASTPATH", "0")
+    switch = _FakeSwitchGLU()
+
+    assert fake_runtime.install_dsv4_affine_moe_fastpath(_FakeModel(switch)) == 0
+    assert switch not in fake_runtime._CONFIGS
+
+
+def test_dsv4_affine_default_is_native_stock(fake_runtime, monkeypatch):
+    monkeypatch.delenv("VMLX_DSV4_AFFINE_MOE_FASTPATH")
     switch = _FakeSwitchGLU()
 
     assert fake_runtime.install_dsv4_affine_moe_fastpath(_FakeModel(switch)) == 0
@@ -345,13 +354,15 @@ def test_dsv4_affine_multitoken_prefill_stays_on_stock_switchglu(
     assert result == ("stock", x, indices)
 
 
-def test_dsv4_affine_populated_packed_weights_match_stock_and_preserve_rank():
+def test_dsv4_affine_populated_packed_weights_match_stock_and_preserve_rank(monkeypatch):
     """Metal numeric gate; run on the designated DSV4 compute Mac."""
     import mlx.core as mx
     import mlx.nn as nn
     from mlx_lm.models.switch_layers import SwitchGLU, SwitchLinear
 
     import vmlx_engine.metal.affine_moe_decode as fastpath
+
+    monkeypatch.setenv("VMLX_DSV4_AFFINE_MOE_FASTPATH", "1")
 
     try:
         if mx.default_device() != mx.gpu or not mx.metal.is_available():
@@ -439,13 +450,15 @@ def test_dsv4_affine_populated_packed_weights_match_stock_and_preserve_rank():
                 setattr(SwitchGLU, name, value)
 
 
-def test_dsv4_affine_weighted_owner_matches_current_dsv4_stock_order():
+def test_dsv4_affine_weighted_owner_matches_current_dsv4_stock_order(monkeypatch):
     """Metal numeric gate for score-before-down current DSV4 packages."""
     import mlx.core as mx
     import mlx.nn as nn
     from mlx_lm.models.switch_layers import SwitchGLU, SwitchLinear
 
     import vmlx_engine.metal.affine_moe_decode as fastpath
+
+    monkeypatch.setenv("VMLX_DSV4_AFFINE_MOE_FASTPATH", "1")
 
     try:
         if mx.default_device() != mx.gpu or not mx.metal.is_available():

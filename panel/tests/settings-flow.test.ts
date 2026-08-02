@@ -4391,10 +4391,14 @@ describe('Settings → CLI Round-Trip Completeness', () => {
             'utf8',
         )
 
-        expect(form).toContain('dsv4Active && (')
+        expect(form).toContain('const dsv4TopPMismatch = shouldWarnDsv4TopP(')
+        expect(form).toContain('Number(config.defaultTopP) / 100')
+        expect(form).toContain('dsv4TopPMismatch && (')
         expect(form).toContain("t('common.dsv4TopPAdvisory')")
         expect(form).not.toContain("onChange('defaultTopP', 95)")
-        expect(chat).toContain("hydrationCurrent && detectedFamily === 'deepseek-v4'")
+        expect(chat).toContain('const dsv4TopPMismatch =')
+        expect(chat).toContain('hydrationCurrent && shouldWarnDsv4TopP(')
+        expect(chat).toContain('dsv4TopPMismatch && (')
         expect(chat).toContain('data-vmlx-warning="dsv4-top-p-advisory"')
         expect(chat).toContain("t('common.dsv4TopPAdvisory')")
         expect(chat).not.toContain("update('topP', 0.95)")

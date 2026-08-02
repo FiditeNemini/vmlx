@@ -4,6 +4,7 @@ import {
   buildChatSettingsCompatibilityWarnings,
   type ChatSettingsCompatibilityInput,
 } from '../src/renderer/src/components/chat/chatSettingsCompatibility'
+import { shouldWarnDsv4TopP } from '../src/shared/samplingParameterDomain'
 
 function warnings(input: Partial<ChatSettingsCompatibilityInput>): string[] {
   return buildChatSettingsCompatibilityWarnings({
@@ -15,6 +16,14 @@ function warnings(input: Partial<ChatSettingsCompatibilityInput>): string[] {
 }
 
 describe('chat settings cross-family compatibility warnings', () => {
+  it('warns only when a known DSV4 Top P differs from 0.95', () => {
+    expect(shouldWarnDsv4TopP('deepseek-v4', 0.95)).toBe(false)
+    expect(shouldWarnDsv4TopP('deepseek-v4', 0.9500005)).toBe(false)
+    expect(shouldWarnDsv4TopP('deepseek-v4', 1)).toBe(true)
+    expect(shouldWarnDsv4TopP('qwen3', 1)).toBe(false)
+    expect(shouldWarnDsv4TopP('deepseek-v4', undefined)).toBe(false)
+  })
+
   it('does not warn for empty chats', () => {
     expect(warnings({
       messageCount: 0,
@@ -133,7 +142,11 @@ describe('chat settings cross-family compatibility warnings', () => {
   it('shows the DSV4 Top P advisory after model hydration without changing the effective value', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 
-    expect(source).toContain("hydrationCurrent && detectedFamily === 'deepseek-v4'")
+    expect(source).toContain('const dsv4TopPMismatch =')
+    expect(source).toContain('hydrationCurrent && shouldWarnDsv4TopP(')
+    expect(source).toContain('detectedFamily,')
+    expect(source).toContain('displayedTopP,')
+    expect(source).toContain('dsv4TopPMismatch && (')
     expect(source).toContain('data-vmlx-warning="dsv4-top-p-advisory"')
     expect(source).toContain("t('common.dsv4TopPAdvisory')")
     expect(source).not.toContain("update('topP', 0.95)")

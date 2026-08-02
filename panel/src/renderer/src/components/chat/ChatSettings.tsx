@@ -23,6 +23,7 @@ import {
   sanitizeTemperatureOverride,
   sanitizeTopKOverride,
   sanitizeTopPOverride,
+  shouldWarnDsv4TopP,
 } from '../../../../shared/samplingParameterDomain'
 
 interface ChatProfile {
@@ -153,6 +154,10 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
     : Math.max(0, Math.round(displayedTopKValue))
   const displayedMinP = displayedOverrides.minP ?? displayedModelDefaults.minP
   const displayedRepeatPenalty = displayedOverrides.repeatPenalty ?? displayedModelDefaults.repeatPenalty
+  const dsv4TopPMismatch = hydrationCurrent && shouldWarnDsv4TopP(
+    detectedFamily,
+    displayedTopP,
+  )
   const topKSliderMax = Math.min(
     TOP_K_MAX,
     Math.max(CHAT_TOP_K_SLIDER_DEFAULT_MAX, displayedTopK ?? 0),
@@ -456,7 +461,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
 
         <div className="border-t border-border" />
 
-        {!isImageModel && hydrationCurrent && detectedFamily === 'deepseek-v4' && (
+        {dsv4TopPMismatch && (
           <div
             data-vmlx-warning="dsv4-top-p-advisory"
             role="alert"

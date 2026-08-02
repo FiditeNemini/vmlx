@@ -9,6 +9,7 @@ export const TOP_K_MAX = Number.MAX_SAFE_INTEGER
 export const MIN_P_MIN = 0
 export const MIN_P_MAX = 1
 export const REPETITION_PENALTY_LOWER_EXCLUSIVE = 0
+export const DSV4_RECOMMENDED_TOP_P = 0.95
 
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
@@ -49,4 +50,11 @@ export function sanitizeRepetitionPenaltyOverride(value: unknown): number | unde
   return number != null && number > REPETITION_PENALTY_LOWER_EXCLUSIVE
     ? number
     : undefined
+}
+
+export function shouldWarnDsv4TopP(family: unknown, topP: unknown): boolean {
+  const number = finiteNumber(topP)
+  return family === 'deepseek-v4' &&
+    number != null &&
+    Math.abs(number - DSV4_RECOMMENDED_TOP_P) > 0.000001
 }

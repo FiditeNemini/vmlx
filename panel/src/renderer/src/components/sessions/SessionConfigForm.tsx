@@ -18,6 +18,7 @@ import { metalWiredLimitHelpText } from '../../../../shared/metalWiredLimit'
 import { isLagunaMixedSwaTurboQuantEffective } from '../../../../shared/lagunaCachePolicy'
 import { normalizeMcpPolicyList } from '../../../../shared/mcpPolicy'
 import { canonicalizeToolParserId } from '../../../../shared/toolParserAliases'
+import { shouldWarnDsv4TopP } from '../../../../shared/samplingParameterDomain'
 export interface SessionConfig {
   host: string
   port: number
@@ -524,6 +525,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     normalizedDetectedFamily === 'laguna' &&
     detectedArchitectureHints?.lagunaVariant === 'xs-2.1' &&
     Number(config.defaultTopK ?? 0) !== 20
+  const dsv4TopPMismatch = shouldWarnDsv4TopP(
+    normalizedDetectedFamily,
+    Number(config.defaultTopP) / 100,
+  )
 
   const toggleSection = (section: keyof typeof expandedSections) => {
     setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }))
@@ -646,7 +651,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
   return (
     <div className="space-y-0">
-      {dsv4Active && (
+      {dsv4TopPMismatch && (
         <IncompatWarning text={t('common.dsv4TopPAdvisory')} />
       )}
       {lagunaXsTopKMetadataWarning && (

@@ -11,6 +11,7 @@ import {
     applyReasoningRequestFields,
     type ReasoningEffort,
 } from '../src/shared/reasoningEffortPolicy'
+import { splitResponsesSystemMessages } from '../src/shared/responsesSystemMessages'
 
 // ─── buildRequestBody logic (extracted from chat.ts) ─────────────────────────
 
@@ -83,12 +84,14 @@ function buildRequestBody(
     }
 
     if (wireApi === 'responses') {
-        const systemMessages = requestMessages.filter(m => m.role === 'system')
+        const { systemMessages, inputMessages } = splitResponsesSystemMessages(
+            requestMessages,
+            detectedFamily === 'deepseek-v4',
+        )
         const instructions =
             overrides?.builtinToolsEnabled && systemMessages.length > 0
                 ? systemMessages.map(m => m.content).join('\n')
                 : overrides?.systemPrompt || (systemMessages.length > 0 ? systemMessages.map(m => m.content).join('\n') : undefined)
-        const inputMessages = requestMessages.filter(m => m.role !== 'system')
         const obj: Record<string, any> = {
             model: modelName,
             input: inputMessages,
@@ -866,6 +869,81 @@ describe('DSV4-0731 bundle reasoning payload', () => {
             expect(body.thinking_mode).toBeUndefined()
         }
     })
+
+    it('Responses moves only the contiguous leading system run into instructions', () => {
+        const ordered = [
+            { role: 'system', content: 'base policy' },
+            { role: 'system', content: 'leading tool policy' },
+            { role: 'latest_reminder', content: '2026-08-02,US,App,en' },
+            { role: 'user', content: 'first turn' },
+            { role: 'assistant', content: 'first answer' },
+            { role: 'system', content: 'tail system' },
+            { role: 'user', content: 'second turn' },
+        ]
+
+        const body = build('responses', {}, ordered)
+
+        expect(body.instructions).toBe('base policy\nleading tool policy')
+        expect(body.input).toEqual(ordered.slice(2))
+        expect(body.input[3]).toEqual({ role: 'system', content: 'tail system' })
+    })
+
+    it('Responses preserves every row when the DSV4 conversation has no leading system run', () => {
+        const ordered = [
+            { role: 'latest_reminder', content: '2026-08-02,US,App,en' },
+            { role: 'user', content: 'first turn' },
+            { role: 'system', content: 'tail system' },
+        ]
+
+        const body = build('responses', {}, ordered)
+
+        expect(body.instructions).toBeUndefined()
+        expect(body.input).toEqual(ordered)
+    })
+
+    it('Chat wire keeps the same DSV4 message order unchanged', () => {
+        const ordered = [
+            { role: 'system', content: 'base policy' },
+            { role: 'user', content: 'first turn' },
+            { role: 'system', content: 'tail system' },
+            { role: 'latest_reminder', content: '2026-08-02,US,App,en' },
+            { role: 'user', content: 'second turn' },
+        ]
+
+        const body = build('completions', {}, ordered)
+
+        expect(body.messages).toEqual(ordered)
+    })
+})
+
+describe('Responses system-message ordering policy', () => {
+    it('keeps generic-family behavior unchanged by hoisting every system row', () => {
+        const messages = [
+            { role: 'system', content: 'base policy' },
+            { role: 'user', content: 'first turn' },
+            { role: 'assistant', content: 'first answer' },
+            { role: 'system', content: 'tail system' },
+            { role: 'user', content: 'second turn' },
+        ]
+
+        const body = buildRequestBody(
+            'responses',
+            'generic-model',
+            messages,
+            undefined,
+            false,
+            false,
+            undefined,
+            'qwen3',
+        )
+
+        expect(body.instructions).toBe('base policy\ntail system')
+        expect(body.input).toEqual([
+            { role: 'user', content: 'first turn' },
+            { role: 'assistant', content: 'first answer' },
+            { role: 'user', content: 'second turn' },
+        ])
+    })
 })
 
 describe('buildRequestBody source parity', () => {
@@ -883,6 +961,8 @@ describe('buildRequestBody source parity', () => {
         expect(responsesBranch).toContain('applyLocalThinkingBudget(obj);')
         expect(responsesBranch.match(/applyReasoningRequestFields\(obj, \{/g)?.length).toBe(1)
         expect(responsesBranch.match(/applyLocalThinkingBudget\(obj\);/g)?.length).toBe(1)
+        expect(responsesBranch).toContain('splitResponsesSystemMessages(')
+        expect(responsesBranch).toContain('chatDetectedFamily === "deepseek-v4"')
     })
 
     it('serializes both the initial request and built-in-tool continuation through the same builder', () => {

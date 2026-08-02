@@ -68,6 +68,7 @@ import {
 import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
 import { replayPersistedAssistantHistory } from "../../shared/toolHistoryReplay";
 import { orderComposerContentParts } from "../../shared/composerContentOrder";
+import { splitResponsesSystemMessages } from "../../shared/responsesSystemMessages";
 import {
   ChatStreamServerEventError,
   chatStreamServerEventErrorDetail,
@@ -2106,9 +2107,11 @@ export function registerChatHandlers(
             delete obj.max_thinking_tokens;
           };
           if (useResponsesApi) {
-            const systemMessages = requestMessages.filter(
-              (m: any) => m.role === "system",
-            );
+            const { systemMessages, inputMessages } =
+              splitResponsesSystemMessages(
+                requestMessages,
+                chatDetectedFamily === "deepseek-v4",
+              );
             const instructions =
               overrides?.builtinToolsEnabled && systemMessages.length > 0
                 ? systemMessages.map((m: any) => m.content).join("\n")
@@ -2116,9 +2119,6 @@ export function registerChatHandlers(
               (systemMessages.length > 0
                 ? systemMessages.map((m: any) => m.content).join("\n")
                 : undefined);
-            const inputMessages = requestMessages.filter(
-              (m: any) => m.role !== "system",
-            );
             const obj: Record<string, any> = {
               model: modelName,
               input: inputMessages,

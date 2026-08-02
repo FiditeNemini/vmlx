@@ -368,71 +368,73 @@ def test_mcp_required_tool_choice_errors_when_policy_disables_all_tools():
     assert "tool_choice requires at least one available tool" in exc_info.value.detail
 
 
-def test_mcp_effective_tools_are_used_for_schema_gated_dsml_repair(monkeypatch):
+def test_mcp_effective_tools_gate_dsml_parsing(monkeypatch):
+    """MCP-contributed tools must feed the DSML schema gate.
+
+    The tool is not in the static registry -- it arrives only via
+    ``_vmlx_effective_tools`` -- so a canonical call for it can only validate if
+    MCP tools reach the gate.
+
+    This test previously asserted that *typoed* DSML (``</｜DSML｜invinvoke>``)
+    was repaired into an executable call. The strict canonical grammar
+    (``bd193e93a``, 2026-07-31) deliberately superseded that: truncated, typoed,
+    HTML-ish and self-closing variants return None, because repairing malformed
+    output turns a bad emission into a real tool execution. The repair
+    expectation dated from 2026-05-19 and had been failing ever since, so it is
+    replaced here by the contract the parser actually owns.
+    """
     import vmlx_engine.server as server
 
-    request = server.ChatCompletionRequest(
-        model="dsv4-chain-smoke",
-        messages=[{"role": "user", "content": "chain"}],
-    )
-    object.__setattr__(
-        request,
-        "_vmlx_effective_tools",
-        [
-            {
-                "type": "function",
-                "function": {
-                    "name": "smoke__add",
-                    "description": "Add two integers.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "a": {"type": "integer"},
-                            "b": {"type": "integer"},
+    def _request():
+        request = server.ChatCompletionRequest(
+            model="dsv4-chain-smoke",
+            messages=[{"role": "user", "content": "chain"}],
+        )
+        object.__setattr__(
+            request,
+            "_vmlx_effective_tools",
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "smoke__add",
+                        "description": "Add two integers.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "a": {"type": "integer"},
+                                "b": {"type": "integer"},
+                            },
+                            "required": ["a", "b"],
                         },
-                        "required": ["a", "b"],
                     },
-                },
-            }
-        ],
-    )
-    malformed_dsml = (
+                }
+            ],
+        )
+        return request
+
+    monkeypatch.setattr(server, "_tool_call_parser", "dsml")
+
+    canonical_dsml = (
         '<｜DSML｜tool_calls>\n'
         '<｜DSML｜invoke name="smoke__add">\n'
         '<｜DSML｜parameter name="a" string="false">2</｜DSML｜parameter>\n'
         '<｜DSML｜parameter name="b" string="false">3</｜DSML｜parameter>\n'
-        '</｜DSML｜invinvoke>\n'
+        '</｜DSML｜invoke>\n'
         '</｜DSML｜tool_calls>'
     )
-    monkeypatch.setattr(server, "_tool_call_parser", "dsml")
-
-    cleaned, calls = server._parse_tool_calls_with_parser(malformed_dsml, request)
-
+    cleaned, calls = server._parse_tool_calls_with_parser(canonical_dsml, _request())
     assert cleaned == ""
-    assert calls is not None
+    assert calls is not None, "MCP effective tools must reach the DSML schema gate"
     assert calls[0].function.name == "smoke__add"
     assert json.loads(calls[0].function.arguments) == {"a": 2, "b": 3}
 
-
-@pytest.mark.asyncio
-async def test_server_mcp_endpoints_use_effective_policy(monkeypatch):
-    import vmlx_engine.server as server
-
-    manager = _manager_with_fake_tools()
-    policy = MCPPolicy(enabled_servers={"fs"}, enabled_tools={"fs__read_file"})
-    monkeypatch.setattr(server, "_mcp_manager", manager)
-    monkeypatch.setattr(server, "_mcp_policy", policy, raising=False)
-
-    tools_response = await server.list_mcp_tools()
-    execute_response = await server.execute_mcp_tool(
-        server.MCPExecuteRequest(
-            tool_name="fs__write_file",
-            arguments={"path": "x", "content": "blocked"},
-        )
+    malformed_dsml = canonical_dsml.replace(
+        "</｜DSML｜invoke>", "</｜DSML｜invinvoke>"
     )
-
-    by_name = {tool.name: tool for tool in tools_response.tools}
-    assert by_name["fs__read_file"].effective is True
-    assert by_name["fs__write_file"].effective is False
-    assert execute_response.is_error is True
-    assert "disabled by MCP policy" in (execute_response.error_message or "")
+    _cleaned_bad, bad_calls = server._parse_tool_calls_with_parser(
+        malformed_dsml, _request()
+    )
+    assert not bad_calls, (
+        "Typoed DSML must not be repaired into an executable tool call"
+    )

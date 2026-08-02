@@ -4871,12 +4871,10 @@ export function registerChatHandlers(
     const entry = activeRequests.get(chatId);
     if (entry) {
       console.log(`[CHAT] Aborting generation for chat ${chatId}`);
-      // 1. Abort the SSE fetch stream
-      try {
-        entry.controller.abort();
-      } catch (_) {}
-
-      // 2. Tell the server to cancel inference (frees GPU immediately)
+      // Tell the server to cancel inference before closing the SSE stream.
+      // Closing the stream first lets the disconnect cleanup remove engine
+      // bookkeeping before this explicit cancellation arrives, producing a
+      // misleading 404 and leaving no deterministic cancellation receipt.
       if (entry.responseId && (entry.endpoint || entry.baseUrl)) {
         try {
           // Route to correct cancel endpoint based on response ID prefix
@@ -4900,13 +4898,17 @@ export function registerChatHandlers(
           );
         }
       } else if (!entry.responseId) {
-        // Abort during prefill: responseId not assigned yet. The fetch abort (step 1)
+        // Abort during prefill: responseId not assigned yet. The fetch abort
         // closes the connection; the server will detect disconnect via is_disconnected()
         // on the next token yield. No explicit cancel needed — prefill is typically <2s.
         console.log(
           `[CHAT] Abort during prefill (no responseId yet) — connection closed, server will detect disconnect`,
         );
       }
+
+      try {
+        entry.controller.abort();
+      } catch (_) {}
 
       activeRequests.delete(chatId);
       return { success: true };
@@ -4923,11 +4925,8 @@ export function registerChatHandlers(
   ipcMain.handle("chat:clearAllLocks", async () => {
     const count = activeRequests.size;
     for (const [chatId, entry] of activeRequests) {
-      // 1. Abort the SSE fetch stream
-      try {
-        entry.controller.abort();
-      } catch (_) {}
-      // 2. Send server-side cancel to free GPU (same logic as chat:abort)
+      // Start server-side cancellation before closing the local stream, for
+      // the same lifecycle ordering used by chat:abort.
       if (entry.responseId && (entry.endpoint || entry.baseUrl)) {
         try {
           const cancelPath = entry.responseId.startsWith("resp_")
@@ -4946,6 +4945,9 @@ export function registerChatHandlers(
           );
         } catch (_) {}
       }
+      try {
+        entry.controller.abort();
+      } catch (_) {}
     }
     activeRequests.clear();
     return { cleared: count };

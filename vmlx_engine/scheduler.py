@@ -5904,9 +5904,14 @@ class Scheduler:
             logger.debug(f"Processed deferred abort for {request_id}")
 
     def has_requests(self) -> bool:
-        """Check for generation work or a queued hybrid SSM idle task.
+        """Check for generation work, deferred abort cleanup, or idle work.
 
         The async engine loop only calls ``step()`` while this returns true.
+        A last-request abort removes the request from ``running`` but defers
+        BatchGenerator removal until the next safe scheduler step.  Treat that
+        cleanup as work or the loop goes idle with the generator UID and its
+        native cache still retained indefinitely.
+
         Excluding the rederive queue left clean prompt-only SSM snapshots
         permanently queued after terminal cleanup, so later requests could
         restore KV pages but repeatedly fall back to a much shorter companion.
@@ -5915,7 +5920,12 @@ class Scheduler:
             getattr(self, "_is_hybrid", False)
             and getattr(self, "_ssm_rederive_queue", None)
         )
-        return bool(self.waiting or self.running or rederive_pending)
+        return bool(
+            self.waiting
+            or self.running
+            or self._pending_aborts
+            or rederive_pending
+        )
 
     def get_num_waiting(self) -> int:
         """Get number of waiting requests."""

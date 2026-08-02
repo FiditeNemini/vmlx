@@ -3618,6 +3618,24 @@ describe("Issue #6: clearAllLocks must send server cancel for all active request
     expect(handlerBody).toContain('method: "POST"');
     // Must still abort the local controller
     expect(handlerBody).toContain("entry.controller.abort()");
+    expect(handlerBody.indexOf('method: "POST"')).toBeLessThan(
+      handlerBody.indexOf("entry.controller.abort()"),
+    );
+  });
+
+  it("chat:abort sends server cancel before closing the SSE stream", () => {
+    const fs = require("fs");
+    const source = fs.readFileSync("src/main/ipc/chat.ts", "utf-8");
+    const abortIdx = source.indexOf('ipcMain.handle("chat:abort"');
+    const abortEnd = source.indexOf(
+      'ipcMain.handle("chat:isStreaming"',
+      abortIdx,
+    );
+    const handlerBody = source.substring(abortIdx, abortEnd);
+
+    expect(handlerBody.indexOf('method: "POST"')).toBeGreaterThan(-1);
+    expect(handlerBody.indexOf("entry.controller.abort()"))
+      .toBeGreaterThan(handlerBody.indexOf('method: "POST"'));
   });
 
   it("abortByEndpoint also sends server cancel (consistency check)", () => {

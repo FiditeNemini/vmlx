@@ -800,6 +800,41 @@ class TestSchedulerBasic:
         result = scheduler.abort_request("nonexistent")
         assert result is False
 
+    def test_last_abort_keeps_loop_live_until_generator_cache_is_released(
+        self, mock_model, mock_tokenizer, monkeypatch
+    ):
+        """The final aborted request must receive its deferred cleanup step."""
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        monkeypatch.setattr(
+            "vmlx_engine.scheduler.clear_mlx_memory_cache",
+            lambda **_kwargs: True,
+        )
+        generator = MagicMock()
+        scheduler.batch_generator = generator
+
+        request = Request(
+            request_id="dsv4-last-abort",
+            prompt="x",
+            sampling_params=SamplingParams(),
+        )
+        request.status = RequestStatus.RUNNING
+        scheduler.requests[request.request_id] = request
+        scheduler.running[request.request_id] = request
+        scheduler.request_id_to_uid[request.request_id] = 73
+        scheduler.uid_to_request_id[73] = request.request_id
+
+        assert scheduler.abort_request(request.request_id) is True
+        assert scheduler.running == {}
+        assert scheduler.has_requests() is True
+
+        scheduler.step()
+
+        generator.remove.assert_called_once_with([73])
+        assert scheduler._pending_aborts == set()
+        assert scheduler.request_id_to_uid == {}
+        assert scheduler.uid_to_request_id == {}
+        assert scheduler.has_requests() is False
+
     def test_get_stats(self, mock_model, mock_tokenizer):
         """Test getting scheduler stats."""
         scheduler = Scheduler(

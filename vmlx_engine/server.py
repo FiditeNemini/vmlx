@@ -22846,6 +22846,37 @@ async def stream_chat_completion(
                     ],
                 )
                 yield f"data: {_dump_chat_chunk(warning_finish_chunk)}\n\n"
+                # A reasoning-only turn that ran into max_tokens still did real
+                # work: it read a prompt — often a fully reused prefix — and
+                # spent completion tokens. Returning here skipped both the
+                # terminal usage chunk and [DONE], so every client saw the turn
+                # as zero tokens, and the Anthropic non-streaming route (which
+                # rebuilds usage by collecting this very stream) reported
+                # usage {input_tokens: 0, output_tokens: 0} with no
+                # cache_read_input_tokens on a fully cached prefix.
+                if include_usage:
+                    _len_usage = Usage(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=prompt_tokens + completion_tokens,
+                    )
+                    if cached_tokens > 0 or cache_detail:
+                        _len_usage.prompt_tokens_details = PromptTokensDetails(
+                            cached_tokens=cached_tokens, cache_detail=cache_detail
+                        )
+                    len_usage_chunk = ChatCompletionChunk(
+                        id=response_id,
+                        created=_created_ts,
+                        model=request.model,
+                        choices=[],
+                        usage=_len_usage,
+                    )
+                    yield (
+                        "data: "
+                        f"{_dump_chat_chunk(len_usage_chunk, terminal_usage=True)}"
+                        "\n\n"
+                    )
+                yield "data: [DONE]\n\n"
                 return
             yield (
                 "data: "

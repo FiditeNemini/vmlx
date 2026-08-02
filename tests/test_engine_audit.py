@@ -17203,3 +17203,54 @@ class TestHuggingFaceDownloadRegression:
         assert "retrying ${baseUrl} without auth" in source
         assert "HuggingFace mirror failed" in source
         assert "fetchHfPath(`/api/models?${params}`" in source
+
+
+def test_length_terminated_stream_still_emits_terminal_usage_and_done():
+    """A stream that stops at max_tokens must still report its token usage.
+
+    The reasoning-only branch used to `return` straight after yielding the
+    finish_reason="length" chunk, skipping both the terminal usage chunk and
+    `[DONE]`. Live effect: `/v1/chat/completions` streaming emitted 0 of 19
+    usage chunks, and `/v1/messages` — which rebuilds usage by collecting that
+    same stream — reported `{"input_tokens": 0, "output_tokens": 0}` with no
+    `cache_read_input_tokens` for a prompt the engine had served 2304 cached
+    tokens for.
+
+    The adapter-level guards in test_anthropic_adapter.py passed throughout,
+    because the usage never reached the adapter. Pin the emission itself.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "vmlx_engine" / "server.py"
+    tree = ast.parse(source.read_text())
+
+    def _branch_for_length(node):
+        """The `if _warning_finish_reason == "length":` early-return branch."""
+        if not isinstance(node, ast.If):
+            return False
+        test = node.test
+        return (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "_warning_finish_reason"
+            and any(
+                isinstance(c, ast.Constant) and c.value == "length"
+                for c in test.comparators
+            )
+        )
+
+    branches = [n for n in ast.walk(tree) if _branch_for_length(n)]
+    assert branches, "length early-return branch not found in server.py"
+
+    for branch in branches:
+        body = ast.dump(ast.Module(body=branch.body, type_ignores=[]))
+        assert "terminal_usage" in body, (
+            "length-terminated stream must yield the terminal usage chunk "
+            "before returning; without it every client reads the turn as "
+            "zero tokens"
+        )
+        assert "[DONE]" in body, (
+            "length-terminated stream must still terminate the SSE stream "
+            "with [DONE]"
+        )

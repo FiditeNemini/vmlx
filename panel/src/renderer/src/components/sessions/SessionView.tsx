@@ -251,7 +251,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
         </button>
         <div className="w-px h-4 bg-border flex-shrink-0" />
 
-        <div className="flex items-center gap-2 flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-1 min-w-[12rem] overflow-hidden">
           <span className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />
           <span className="font-medium text-sm truncate" title={session.modelPath}>
             {shortName}
@@ -264,7 +264,10 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
             </span>
           )}
           {jangLabel && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 font-medium flex-shrink-0">
+            <span
+              className="min-w-0 max-w-64 truncate text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 font-medium"
+              title={jangLabel}
+            >
               {jangLabel}
             </span>
           )}
@@ -278,7 +281,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
           )}
         </div>
 
-        <div className="flex flex-wrap items-center justify-end gap-2 flex-shrink-0 max-[800px]:basis-full">
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 max-[800px]:basis-full">
           {!isImage && (
             <>
               <button

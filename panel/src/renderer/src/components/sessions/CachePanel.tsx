@@ -6,6 +6,16 @@ export interface CachePanelRequestToken {
   requestGeneration: number
 }
 
+export function formatCacheStorageBytes(rawBytes: unknown): string {
+  const bytes = typeof rawBytes === 'number' && Number.isFinite(rawBytes)
+    ? Math.max(0, rawBytes)
+    : 0
+  if (bytes < 1024) return `${Math.round(bytes)} B`
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+}
+
 /**
  * Keeps cache-panel async work scoped to the current session lifecycle and
  * makes cache-stat refreshes last-request-wins.
@@ -348,7 +358,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
             {schedulerCache.utilization != null && (
               <StatCard label="Utilization" value={`${(schedulerCache.utilization * 100).toFixed(1)}%`} />
             )}
-            {schedulerCache.disk_hits != null && (schedulerCache.disk_hits > 0 || schedulerCache.disk_misses > 0) && (
+            {!blockDiskCache && schedulerCache.disk_hits != null && (schedulerCache.disk_hits > 0 || schedulerCache.disk_misses > 0) && (
               <StatCard label="L2 Disk Hits" value={`${schedulerCache.disk_hits} / ${schedulerCache.disk_misses} miss`} />
             )}
             {schedulerCache.cow_copies != null && schedulerCache.cow_copies > 0 && (
@@ -740,11 +750,18 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           <p className="mb-2 text-xs text-muted-foreground">
             Namespace values describe this model/configuration. Managed-root
             values include every block-cache namespace and typed companion under
-            the same SSD root.
+            the same SSD root. Namespace occupancy and block-read counts persist
+            across restarts; this-engine reads, writes, and evictions reset when
+            the model server starts.
           </p>
           <div className="grid grid-cols-2 gap-2 text-sm">
             <StatCard label="Namespace Blocks" value={String(blockDiskCache.blocks_on_disk ?? 0)} />
-            <StatCard label="Namespace Size" value={`${(blockDiskCache.disk_size_gb ?? 0).toFixed(2)} GB`} />
+            <StatCard
+              label="Namespace Size"
+              value={blockDiskCache.disk_size_bytes != null
+                ? formatCacheStorageBytes(blockDiskCache.disk_size_bytes)
+                : `${(blockDiskCache.disk_size_gb ?? 0).toFixed(2)} GB`}
+            />
             {globalBlockDiskBudget && (
               <StatCard
                 label="Managed Root Size"
@@ -772,10 +789,28 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
               />
             )}
             {blockDiskCache.total_tokens_on_disk != null && <StatCard label="Namespace Tokens" value={(blockDiskCache.total_tokens_on_disk || 0).toLocaleString()} />}
-            <StatCard label="Disk Hits / Misses" value={`${blockDiskCache.disk_hits ?? 0} / ${blockDiskCache.disk_misses ?? 0}`} />
-            <StatCard label="Disk Writes" value={String(blockDiskCache.disk_writes ?? 0)} />
-            {(blockDiskCache.disk_evictions ?? 0) > 0 && <StatCard label="Process Evictions" value={String(blockDiskCache.disk_evictions)} />}
-            {(globalBlockDiskBudget?.evicted_entries ?? 0) > 0 && <StatCard label="Last Global Eviction" value={String(globalBlockDiskBudget.evicted_entries)} />}
+            <StatCard label="Persisted Block Reads" value={String(blockDiskCache.total_accesses ?? 0)} />
+            <StatCard label="This Engine Reads H / M" value={`${blockDiskCache.disk_hits ?? 0} / ${blockDiskCache.disk_misses ?? 0}`} />
+            <StatCard label="This Engine Writes" value={String(blockDiskCache.disk_writes ?? 0)} />
+            <StatCard label="This Engine Evictions" value={String(blockDiskCache.disk_evictions ?? 0)} />
+            {blockDiskCache.write_pipeline && (
+              <StatCard
+                label="Writer Pending / In Flight"
+                value={`${blockDiskCache.write_pipeline.pending_items ?? 0} / ${blockDiskCache.write_pipeline.inflight ?? 0}`}
+              />
+            )}
+            {blockDiskCache.write_pipeline && (
+              <StatCard
+                label="Off-thread Writes Q / C / F"
+                value={`${blockDiskCache.write_pipeline.offthread_serializations_queued ?? 0} / ${blockDiskCache.write_pipeline.offthread_serializations_completed ?? 0} / ${blockDiskCache.write_pipeline.offthread_serialization_failures ?? 0}`}
+              />
+            )}
+            {globalBlockDiskBudget && (
+              <StatCard
+                label="Last Local Reconciliation Trim"
+                value={`${globalBlockDiskBudget.evicted_entries ?? 0} entries / ${((globalBlockDiskBudget.evicted_bytes ?? 0) / 1024 ** 3).toFixed(2)} GB`}
+              />
+            )}
           </div>
         </div>
       )}

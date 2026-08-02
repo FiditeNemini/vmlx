@@ -459,6 +459,11 @@ describe('SessionView chat list overlay', () => {
     expect(sessionViewSource).toContain('flex flex-wrap items-center gap-3')
     expect(sessionViewSource).toContain('overflow-x-hidden')
     expect(sessionViewSource).toContain('max-[800px]:basis-full')
+    expect(sessionViewSource).toContain('min-w-[12rem] overflow-hidden')
+    expect(sessionViewSource).toContain('max-w-64 truncate')
+    expect(sessionViewSource).not.toContain(
+      'flex flex-wrap items-center justify-end gap-2 flex-shrink-0',
+    )
   })
 })
 

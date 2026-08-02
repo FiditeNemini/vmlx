@@ -13621,6 +13621,9 @@ class TestTurboQuantKVTelemetry:
         cache_panel_source = Path(
             "./panel/src/renderer/src/components/sessions/CachePanel.tsx"
         ).read_text()
+        session_view_source = Path(
+            "./panel/src/renderer/src/components/sessions/SessionView.tsx"
+        ).read_text()
 
         assert "Tokens on Disk" in cache_panel_source
         assert "Cache Totals" in cache_panel_source
@@ -13632,6 +13635,19 @@ class TestTurboQuantKVTelemetry:
         assert "SSM Evictions" in cache_panel_source
         assert "L2 Tokens on Disk" in cache_panel_source
         assert "SSM L2 Tokens" in cache_panel_source
+        assert "Persisted Block Reads" in cache_panel_source
+        assert "This Engine Reads H / M" in cache_panel_source
+        assert "This Engine Writes" in cache_panel_source
+        assert "This Engine Evictions" in cache_panel_source
+        assert "Writer Pending / In Flight" in cache_panel_source
+        assert "Off-thread Writes Q / C / F" in cache_panel_source
+        assert "Last Local Reconciliation Trim" in cache_panel_source
+        assert "blockDiskCache.disk_size_bytes" in cache_panel_source
+        assert "!blockDiskCache && schedulerCache.disk_hits" in cache_panel_source
+        assert "reset when" in cache_panel_source
+        assert "min-w-[12rem] overflow-hidden" in session_view_source
+        assert "max-w-64 truncate" in session_view_source
+        assert "flex-shrink-0 max-[800px]:basis-full" not in session_view_source
 
     def test_performance_panel_displays_jangtq_sidecar_layout(self):
         performance_panel_source = Path(

@@ -5852,14 +5852,52 @@ class BlockAwarePrefixCache:
                             raise ValueError(
                                 f"unsupported DSV4 delta cache class {class_name!r}"
                             )
+                        restore_records = [
+                            _copy_mlx_tree(entry[1])
+                            for entry in dsv4_delta_entries
+                        ]
+                        # Restore geometry is a property of the chain, not of
+                        # this call site. Each record already carries the
+                        # block_size and anchor_interval_blocks its writer
+                        # used, and the record validator reads them back from
+                        # there. Hardcoding them here silently pinned the
+                        # writer to one interval: any other spacing still
+                        # produced valid records, but restore would then
+                        # validate periodic anchors against the wrong modulus
+                        # and reject the whole chain. Derive instead, so the
+                        # interval stays tunable against a cache budget.
+                        geometry = {
+                            (
+                                int(record.get("block_size") or 0),
+                                int(record.get("anchor_interval_blocks") or 0),
+                            )
+                            for record in restore_records
+                            if isinstance(record, dict)
+                        }
+                        geometry.discard((0, 0))
+                        if len(geometry) > 1:
+                            raise ValueError(
+                                "DSV4 delta chain mixes block geometries: "
+                                f"{sorted(geometry)}"
+                            )
+                        from vmlx_engine.utils.dsv4_batch_generator import (
+                            DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS,
+                            DSV4_NATIVE_BLOCK_SIZE,
+                        )
+
+                        restore_block_size = DSV4_NATIVE_BLOCK_SIZE
+                        restore_anchor_blocks = DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS
+                        if geometry:
+                            recorded_block, recorded_anchor = next(iter(geometry))
+                            if recorded_block > 0:
+                                restore_block_size = recorded_block
+                            if recorded_anchor > 0:
+                                restore_anchor_blocks = recorded_anchor
                         restored = cache_cls.restore_anchor_from_deltas(
-                            [
-                                _copy_mlx_tree(entry[1])
-                                for entry in dsv4_delta_entries
-                            ],
+                            restore_records,
                             target_tokens=int(block_table.num_tokens),
-                            block_size=256,
-                            anchor_interval_blocks=8,
+                            block_size=restore_block_size,
+                            anchor_interval_blocks=restore_anchor_blocks,
                         )
                         if (
                             int(restored.checkpoint_tokens)

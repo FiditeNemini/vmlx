@@ -327,7 +327,7 @@ def estimate_dsv4_delta_transport_bytes_from_config(
     *,
     pool_quant_enabled: Optional[bool] = None,
     block_size: int = 256,
-    anchor_interval_blocks: int = 8,
+    anchor_interval_blocks: Optional[int] = None,
 ) -> Optional[int]:
     """Conservatively size a native DSV4 block-delta donation before capture.
 
@@ -343,6 +343,14 @@ def estimate_dsv4_delta_transport_bytes_from_config(
     start = max(0, int(start_token or 0))
     end = max(start, int(end_token or 0))
     block = max(1, int(block_size or 1))
+    if anchor_interval_blocks is None:
+        # Same source of truth as the writer and the restore path. Resolving
+        # None to 1 here (the old `or 1` fallback) would silently model an
+        # anchor at every block and inflate the estimate ~4.7x at 32k, which
+        # this admission gate would then read as a donation to reject.
+        from .dsv4_batch_generator import DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS
+
+        anchor_interval_blocks = DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS
     anchor_blocks = max(1, int(anchor_interval_blocks or 1))
     if end <= start:
         return 0

@@ -13456,6 +13456,10 @@ async def create_anthropic_message(
         AnthropicStreamAdapter,
         to_chat_completion,
     )
+    from .api.anthropic_adapter import (
+        _anthropic_usage as _anthropic_usage_block,
+        _cached_prompt_tokens as _anthropic_cached_prompt_tokens,
+    )
 
     from starlette.responses import JSONResponse
 
@@ -13796,6 +13800,7 @@ async def create_anthropic_message(
         tool_calls = []
         prompt_tokens = 0
         completion_tokens = 0
+        cached_prompt_tokens = 0
         finish_reason = "stop"
 
         async for chunk_str in stream_chat_completion(
@@ -13876,6 +13881,9 @@ async def create_anthropic_message(
             if usage:
                 prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
                 completion_tokens = usage.get("completion_tokens", completion_tokens)
+                cached_prompt_tokens = (
+                    _anthropic_cached_prompt_tokens(usage) or cached_prompt_tokens
+                )
 
         # Build Anthropic response
         content = []
@@ -13918,10 +13926,15 @@ async def create_anthropic_message(
             "model": resolved_name,
             "stop_reason": stop_reason,
             "stop_sequence": None,
-            "usage": {
-                "input_tokens": prompt_tokens,
-                "output_tokens": completion_tokens,
-            },
+            "usage": _anthropic_usage_block(
+                {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "prompt_tokens_details": {
+                        "cached_tokens": cached_prompt_tokens
+                    },
+                }
+            ),
         }
 
 

@@ -112,12 +112,44 @@ function truncateResult(content: string, maxChars?: number): string {
 
 // ─── Main Entry ──────────────────────────────────────────────────────────────
 
+/**
+ * Explain an unusable working directory once, in the tool result.
+ *
+ * Without this, every tool fails deep inside `resolvePath` with a raw
+ * `ENOENT: ... lstat '<path>'`. The chat surfaces only "failed" per row, so the
+ * model cannot tell the directory is missing from a genuine tool error: it
+ * burns its whole tool-iteration budget on mkdir/pwd/ls recovery and then ends
+ * the turn with no visible answer. Naming the cause lets it stop and say so.
+ */
+function describeUnusableWorkingDir(workingDir: string): string | null {
+  if (!workingDir || !workingDir.trim()) {
+    return 'No working directory is configured for this chat. Set one in Chat Settings → Built-in Coding Tools → Working Directory.'
+  }
+  let stats: ReturnType<typeof statSync>
+  try {
+    stats = statSync(workingDir)
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') {
+      return `The configured working directory does not exist: ${workingDir}. Set an existing folder in Chat Settings → Built-in Coding Tools → Working Directory. Do not retry other tools until it is fixed.`
+    }
+    return `The configured working directory is not accessible: ${workingDir} (${err?.code || err?.message || 'unknown error'}).`
+  }
+  if (!stats.isDirectory()) {
+    return `The configured working directory is not a directory: ${workingDir}.`
+  }
+  return null
+}
+
 export async function executeBuiltinTool(
   toolName: string,
   args: Record<string, any>,
   workingDir: string,
   maxResultChars?: number
 ): Promise<ToolResult> {
+  const workingDirProblem = describeUnusableWorkingDir(workingDir)
+  if (workingDirProblem) {
+    return { content: workingDirProblem, is_error: true }
+  }
   try {
     let result: ToolResult
     switch (toolName) {
